@@ -4,11 +4,18 @@ AI-driven autonomous fix loop for the [Mumei](https://github.com/mumei-lang/mume
 proof-driven programming language. Combines LLM (Qwen/Ollama/OpenAI) with Z3 formal
 verification to automatically detect and fix code issues.
 
+## Background
+
+This repository was extracted from the [mumei](https://github.com/mumei-lang/mumei)
+compiler repository. The self-healing agent and Streamlit visualizer were originally
+developed in-tree and moved here as a standalone project
+(see [mumei-lang/mumei#90](https://github.com/mumei-lang/mumei/pull/90)).
+
 ## Architecture
 
 ```
 mumei CLI (Z3 verification)
-  ^ subprocess: mumei verify --json --report-dir <dir>
+  ^ subprocess: mumei build / mumei verify --json
   |
 agent/self_healing.py (orchestration loop)
   ^ OpenAI-compatible API
