@@ -75,6 +75,88 @@ python -m agent.self_healing examples/sword_test.mm
 python -m agent.self_healing examples/effect_test.mm
 ```
 
+## E2E Demo
+
+<!-- TODO: Replace with actual recording after running scripts/demo_e2e.sh -->
+<!-- asciinema rec demo.cast -c "bash scripts/demo_e2e.sh" -->
+<!-- agg demo.cast docs/demo.gif -->
+<!-- ![E2E Demo](docs/demo.gif) -->
+
+The self-healing loop follows this interaction flow:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Input: examples/sword_test.mm (buggy)                      │
+│                                                             │
+│  atom safe_divide(a: Nat, b: Nat) -> Nat                    │
+│      requires: a >= 0;          ← Missing: b != 0           │
+│      ensures: result >= 0;                                  │
+│      body: a / b;               ← Division by zero possible │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Step 1: mumei build → ❌ Verification Failed                │
+│                                                              │
+│  report.json:                                                │
+│  {                                                           │
+│    "status": "failed",                                       │
+│    "atom": "safe_divide",                                    │
+│    "reason": "Division by zero possible",                    │
+│    "counterexample": { "a": "0", "b": "0" }                 │
+│  }                                                           │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Step 2: LLM Fix (Ollama/Qwen)                              │
+│                                                              │
+│  Prompt: "The atom 'safe_divide' failed verification.        │
+│   Counter-example: a=0, b=0. Fix the requires clause."       │
+│                                                              │
+│  LLM Response:                                               │
+│  ```mumei                                                    │
+│  atom safe_divide(a: Nat, b: Nat) -> Nat                     │
+│      requires: a >= 0 && b != 0;    ← Fixed!                 │
+│      ensures: result >= 0;                                   │
+│      body: a / b;                                            │
+│  ```                                                         │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Step 3: mumei build → ✅ Verification Passed                │
+│                                                              │
+│  "Success! Blade is flawless (Attempt 2)."                   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Expected console output:**
+
+```
+$ python -m agent.self_healing examples/sword_test.mm --max-retries 3
+Mumei Self-Healing Loop Start...
+Original source backed up to examples/sword_test.mm.bak
+Attempt 1: Flaw detected. Consulting AI...
+Code updated. Retrying...
+Success! Blade is flawless (Attempt 2).
+```
+
+### Recording a demo
+
+An E2E demo script is provided for recording with [asciinema](https://asciinema.org/):
+
+```bash
+# Run the demo interactively
+bash scripts/demo_e2e.sh
+
+# Or record as an asciinema cast
+asciinema rec docs/demo.cast -c "bash scripts/demo_e2e.sh"
+
+# Convert to GIF (requires agg: cargo install --git https://github.com/asciinema/agg)
+agg docs/demo.cast docs/demo.gif
+```
+
 ## LLM Provider Support
 
 | Provider | Config Pattern | Cost |
