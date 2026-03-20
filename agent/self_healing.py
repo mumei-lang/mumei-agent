@@ -99,7 +99,7 @@ def main() -> None:
         Path(source_file).parent / REPORT_FILE,
     ]
 
-    for attempt in range(max_retries):
+    for attempt in range(max_retries + 1):
         result = mumei.build(source_file)
 
         # Find the report file (shared by success and failure paths)
@@ -138,6 +138,10 @@ def main() -> None:
                 sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
         except Exception:
             pass
+
+        # On the last iteration, don't generate a fix — all retries exhausted
+        if attempt >= max_retries:
+            break
 
         with open(source_file, "r") as f:
             source = f.read()
