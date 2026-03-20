@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+visualizer/report.json
+visualizer/report_history.json
+visualizer/.report_history.lock
+*.mm.bak
+*.cast
+.agents/

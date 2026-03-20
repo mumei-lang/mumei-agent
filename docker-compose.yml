@@ -1,0 +1,44 @@
+# Ollama containerization for Mumei Agent
+#
+# Usage:
+#   1. docker compose up -d
+#   2. docker exec mumei-ollama ollama pull qwen3.5
+#      (or lightweight: docker exec mumei-ollama ollama pull qwen3.5:small)
+#   3. Configure .env (Pattern 1 is pre-configured)
+#   4. Run: python -m agent.self_healing
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mumei-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    # Uncomment below for GPU support (requires nvidia-container-toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Future: agent container
+  # agent:
+  #   build: .
+  #   depends_on:
+  #     ollama:
+  #       condition: service_healthy
+  #   environment:
+  #     - LLM_BASE_URL=http://ollama:11434/v1
+  #     - MUMEI_BIN=mumei
+
+volumes:
+  ollama_models:
