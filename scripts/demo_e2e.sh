@@ -68,25 +68,36 @@ echo "━━━ Step 4: Self-Healing Loop ━━━"
 echo ""
 echo "\$ python -m agent.self_healing $DEMO_DIR/sword_test.mm --max-retries 3"
 echo ""
-python -m agent.self_healing "$DEMO_DIR/sword_test.mm" --max-retries 3
+HEAL_EXIT=0
+python -m agent.self_healing "$DEMO_DIR/sword_test.mm" --max-retries 3 || HEAL_EXIT=$?
 echo ""
 sleep 1
 
-# --- Step 5: Show the fixed source ---
-echo "━━━ Step 5: Fixed source file ━━━"
-echo ""
-cat "$DEMO_DIR/sword_test.mm"
-echo ""
+# --- Step 5: Show the result ---
+if [ "$HEAL_EXIT" -eq 0 ]; then
+    echo "━━━ Step 5: Fixed source file ━━━"
+    echo ""
+    cat "$DEMO_DIR/sword_test.mm"
+    echo ""
 
-# --- Step 6: Show diff ---
-echo "━━━ Step 6: Diff (original → fixed) ━━━"
-echo ""
-diff --color=always "$DEMO_DIR/sword_test.mm.bak" "$DEMO_DIR/sword_test.mm" || true
-echo ""
+    # --- Step 6: Show diff ---
+    echo "━━━ Step 6: Diff (original → fixed) ━━━"
+    echo ""
+    diff --color=always "$DEMO_DIR/sword_test.mm.bak" "$DEMO_DIR/sword_test.mm" || true
+    echo ""
 
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║  ✅  Self-healing complete! The blade is reforged.      ║"
-echo "╚══════════════════════════════════════════════════════════╝"
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║  ✅  Self-healing complete! The blade is reforged.      ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+else
+    echo "━━━ Step 5: Healing failed ━━━"
+    echo ""
+    echo "All retries exhausted. Original source was auto-restored."
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║  ❌  Self-healing failed. The blade remains broken.     ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+fi
 
 # Cleanup
 rm -rf "$DEMO_DIR"

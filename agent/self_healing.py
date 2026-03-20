@@ -94,77 +94,87 @@ def main() -> None:
     shutil.copy2(source_file, backup_file)
     print(f"Original source backed up to {backup_file}")
 
-    # Candidate paths where mumei may write report.json
+    # Candidate paths where mumei may write report.json.
+    # Note: we check existence but not freshness — if mumei build does not
+    # overwrite report.json on success, a stale failure report may be read.
+    # This is acceptable because mumei build is expected to always produce
+    # report.json; if that assumption changes, add mtime or content checks.
     report_candidates = [
         Path(REPORT_FILE),
         Path(source_file).parent / REPORT_FILE,
     ]
 
-    for attempt in range(max_retries + 1):
-        result = mumei.build(source_file)
+    try:
+        for attempt in range(max_retries + 1):
+            result = mumei.build(source_file)
 
-        # Find the report file (shared by success and failure paths)
-        found_report_path = None
-        for candidate in report_candidates:
-            if candidate.exists():
-                found_report_path = str(candidate)
-                break
+            # Find the report file (shared by success and failure paths)
+            found_report_path = None
+            for candidate in report_candidates:
+                if candidate.exists():
+                    found_report_path = str(candidate)
+                    break
 
-        if result["success"]:
-            print(f"Success! Blade is flawless (Attempt {attempt + 1}).")
+            if result["success"]:
+                print(f"Success! Blade is flawless (Attempt {attempt + 1}).")
+                try:
+                    if found_report_path:
+                        sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
+                except Exception:
+                    pass
+                return
+
+            print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
+            logs = result["stdout"] + result["stderr"]
+
+            # Read the latest verification report
+            report = None
+            if found_report_path:
+                try:
+                    report = json.loads(Path(found_report_path).read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    pass
+            if report is None:
+                print("Warning: report.json not found. Using stub report.")
+                report = {"status": "error", "reason": "Report not found"}
+
+            # Visualizer sync
             try:
                 if found_report_path:
                     sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
             except Exception:
                 pass
-            return
 
-        print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
-        logs = result["stdout"] + result["stderr"]
+            # On the last iteration, don't generate a fix — all retries exhausted
+            if attempt >= max_retries:
+                break
 
-        # Read the latest verification report
-        report = None
-        if found_report_path:
-            try:
-                report = json.loads(Path(found_report_path).read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
-        if report is None:
-            print("Warning: report.json not found. Using stub report.")
-            report = {"status": "error", "reason": "Report not found"}
+            with open(source_file, "r") as f:
+                source = f.read()
 
-        # Visualizer sync
-        try:
-            if found_report_path:
-                sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
-        except Exception:
-            pass
+            # Get fix from AI
+            fixed_code = get_fix(client, config.model, source, logs, report)
 
-        # On the last iteration, don't generate a fix — all retries exhausted
-        if attempt >= max_retries:
-            break
+            # Validate before overwriting
+            if not fixed_code:
+                print("Warning: AI returned empty fix. Skipping overwrite.")
+                continue
 
-        with open(source_file, "r") as f:
-            source = f.read()
+            # Overwrite source file
+            with open(source_file, "w") as f:
+                f.write(fixed_code)
 
-        # Get fix from AI
-        fixed_code = get_fix(client, config.model, source, logs, report)
+            print("Code updated. Retrying...")
+            time.sleep(2)
 
-        # Validate before overwriting
-        if not fixed_code:
-            print("Warning: AI returned empty fix. Skipping overwrite.")
-            continue
+    except Exception as exc:
+        print(f"Error during healing: {exc}")
 
-        # Overwrite source file
-        with open(source_file, "w") as f:
-            f.write(fixed_code)
-
-        print("Code updated. Retrying...")
-        time.sleep(2)
-
-    # Restore original source on failure so the user isn't left with broken code
+    # Restore original source on failure so the user isn't left with broken code.
+    # On success, the function returns early inside the loop above.
     shutil.copy2(backup_file, source_file)
     print(f"Healing failed. Original source restored from {backup_file}")
+    sys.exit(1)
 
 
 if __name__ == "__main__":

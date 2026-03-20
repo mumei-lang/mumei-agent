@@ -39,7 +39,13 @@ class MumeiClient:
         }
 
     def build(self, source_path: str, output: str = "katana") -> dict:
-        """Run mumei build and return result."""
+        """Run mumei build and return result.
+
+        The self-healing loop uses this method because ``mumei build``
+        triggers verification as a side effect and writes ``report.json``.
+        A future refactor may switch to verify() → build() two-step flow;
+        see verify() docstring for details.
+        """
         cmd = [*self._cmd_prefix, "build", source_path, "-o", output]
         result = subprocess.run(cmd, capture_output=True, text=True)
         return {
