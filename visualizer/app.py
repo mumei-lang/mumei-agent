@@ -33,7 +33,7 @@ if view_mode == "Latest Report":
         st.stop()
 
     try:
-        with open(report_path, "r") as f:
+        with open(report_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         st.error(f"Failed to read report.json: {e}")
@@ -142,7 +142,7 @@ elif view_mode == "Self-Healing History":
         st.stop()
 
     try:
-        with open(history_path, "r") as f:
+        with open(history_path, "r", encoding="utf-8") as f:
             history = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         st.error(f"Failed to read report_history.json: {e}")

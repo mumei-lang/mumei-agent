@@ -44,7 +44,7 @@ def sync_to_visualizer(report_path: str, *, enabled: bool = True) -> None:
 
     lock_file = HISTORY_FILE.parent / ".report_history.lock"
     lock_file.parent.mkdir(exist_ok=True)
-    with open(lock_file, "w") as lf:
+    with open(lock_file, "w", encoding="utf-8") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             history = []

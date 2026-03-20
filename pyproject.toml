@@ -13,5 +13,8 @@ dependencies = [
     "streamlit>=1.30",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [project.scripts]
 mumei-heal = "agent.self_healing:main"
