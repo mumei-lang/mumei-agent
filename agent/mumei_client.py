@@ -12,7 +12,13 @@ class MumeiClient:
         self._cmd_prefix = mumei_bin.split()
 
     def verify(self, source_path: str, report_dir: str | None = None) -> dict:
-        """Run mumei verify --json and return parsed result."""
+        """Run mumei verify --json and return parsed result.
+
+        Note: The self-healing loop currently uses build() instead, which
+        triggers verification as a side effect.  This method is provided for
+        direct verification use-cases and may replace the build-then-read-file
+        pattern in a future refactor.
+        """
         cmd = [*self._cmd_prefix, "verify", "--json"]
         if report_dir:
             cmd.extend(["--report-dir", report_dir])

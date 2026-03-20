@@ -88,6 +88,11 @@ def main() -> None:
 
     print("Mumei Self-Healing Loop Start...")
 
+    # Back up original source before any modifications
+    backup_file = source_file + ".bak"
+    shutil.copy2(source_file, backup_file)
+    print(f"Original source backed up to {backup_file}")
+
     for attempt in range(max_retries):
         result = mumei.build(source_file)
 
@@ -102,11 +107,20 @@ def main() -> None:
         print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
         logs = result["stdout"] + result["stderr"]
 
-        # Read the latest verification report
-        try:
-            with open(REPORT_FILE, "r") as f:
-                report = json.load(f)
-        except Exception:
+        # Read the latest verification report (check CWD and source file directory)
+        report = None
+        for candidate in [
+            Path(REPORT_FILE),
+            Path(source_file).parent / REPORT_FILE,
+        ]:
+            if candidate.exists():
+                try:
+                    report = json.loads(candidate.read_text(encoding="utf-8"))
+                    break
+                except (json.JSONDecodeError, OSError):
+                    continue
+        if report is None:
+            print("Warning: report.json not found. Using stub report.")
             report = {"status": "error", "reason": "Report not found"}
 
         # Visualizer sync
@@ -120,6 +134,11 @@ def main() -> None:
 
         # Get fix from AI
         fixed_code = get_fix(client, config.model, source, logs, report)
+
+        # Validate before overwriting
+        if not fixed_code:
+            print("Warning: AI returned empty fix. Skipping overwrite.")
+            continue
 
         # Overwrite source file
         with open(source_file, "w") as f:
