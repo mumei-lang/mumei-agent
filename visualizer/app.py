@@ -122,7 +122,7 @@ if view_mode == "Latest Report":
             f"✅ Atom '{data.get('atom', 'unknown')}' is mathematically pure."
         )
         st.json(data)
-    else:
+    elif data.get("status") != "failed":
         st.warning(f"Unknown status: {data.get('status')}")
         st.json(data)
 

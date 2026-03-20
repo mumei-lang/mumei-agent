@@ -1,7 +1,7 @@
 """Mumei Self-Healing Loop: AI-driven autonomous fix loop.
 
-Reads source code, runs mumei verify, and uses LLM to fix verification
-failures iteratively.
+Reads source code, runs mumei build (which triggers verification), and
+uses LLM to fix verification failures iteratively.
 """
 import argparse
 import json

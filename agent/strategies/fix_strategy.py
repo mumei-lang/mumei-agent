@@ -32,7 +32,7 @@ def get_fix(client: OpenAI, model: str, source_code: str, error_log: str, report
     content = response.choices[0].message.content or ""
     # Extract code block (handles various LLM fence labels)
     code_match = re.search(
-        r'```(?:rust|rs|Rust|RS|mumei|mm|Mumei)?\s*\n(.*?)```',
+        r'```\w*\s*\n(.*?)```',
         content,
         re.DOTALL,
     )
