@@ -104,6 +104,7 @@ def main() -> None:
         Path(source_file).parent / REPORT_FILE,
     ]
 
+    success = False
     try:
         for attempt in range(max_retries + 1):
             result = mumei.build(source_file)
@@ -122,6 +123,7 @@ def main() -> None:
                         sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
                 except Exception:
                     pass
+                success = True
                 return
 
             print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
@@ -169,12 +171,16 @@ def main() -> None:
 
     except Exception as exc:
         print(f"Error during healing: {exc}")
-
-    # Restore original source on failure so the user isn't left with broken code.
-    # On success, the function returns early inside the loop above.
-    shutil.copy2(backup_file, source_file)
-    print(f"Healing failed. Original source restored from {backup_file}")
-    sys.exit(1)
+    finally:
+        # Restore original source on failure so the user isn't left with
+        # broken code.  This runs on retries exhausted, exceptions (including
+        # KeyboardInterrupt via the finally block), and any other non-success
+        # exit.  On success, `return` executes the finally block but the
+        # guard skips restoration.
+        if not success:
+            shutil.copy2(backup_file, source_file)
+            print(f"Healing failed. Original source restored from {backup_file}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
