@@ -6,6 +6,7 @@ uses LLM to fix verification failures iteratively.
 import argparse
 import json
 import shutil
+import sys
 import time
 import datetime
 import fcntl
