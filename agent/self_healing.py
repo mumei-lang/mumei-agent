@@ -93,13 +93,27 @@ def main() -> None:
     shutil.copy2(source_file, backup_file)
     print(f"Original source backed up to {backup_file}")
 
+    # Candidate paths where mumei may write report.json
+    report_candidates = [
+        Path(REPORT_FILE),
+        Path(source_file).parent / REPORT_FILE,
+    ]
+
     for attempt in range(max_retries):
         result = mumei.build(source_file)
+
+        # Find the report file (shared by success and failure paths)
+        found_report_path = None
+        for candidate in report_candidates:
+            if candidate.exists():
+                found_report_path = str(candidate)
+                break
 
         if result["success"]:
             print(f"Success! Blade is flawless (Attempt {attempt + 1}).")
             try:
-                sync_to_visualizer(REPORT_FILE, enabled=config.visualizer_sync)
+                if found_report_path:
+                    sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
             except Exception:
                 pass
             return
@@ -107,25 +121,21 @@ def main() -> None:
         print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
         logs = result["stdout"] + result["stderr"]
 
-        # Read the latest verification report (check CWD and source file directory)
+        # Read the latest verification report
         report = None
-        for candidate in [
-            Path(REPORT_FILE),
-            Path(source_file).parent / REPORT_FILE,
-        ]:
-            if candidate.exists():
-                try:
-                    report = json.loads(candidate.read_text(encoding="utf-8"))
-                    break
-                except (json.JSONDecodeError, OSError):
-                    continue
+        if found_report_path:
+            try:
+                report = json.loads(Path(found_report_path).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
         if report is None:
             print("Warning: report.json not found. Using stub report.")
             report = {"status": "error", "reason": "Report not found"}
 
         # Visualizer sync
         try:
-            sync_to_visualizer(REPORT_FILE, enabled=config.visualizer_sync)
+            if found_report_path:
+                sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
         except Exception:
             pass
 
@@ -147,7 +157,9 @@ def main() -> None:
         print("Code updated. Retrying...")
         time.sleep(2)
 
-    print("Healing failed. The blade remains broken.")
+    # Restore original source on failure so the user isn't left with broken code
+    shutil.copy2(backup_file, source_file)
+    print(f"Healing failed. Original source restored from {backup_file}")
 
 
 if __name__ == "__main__":

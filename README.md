@@ -131,7 +131,7 @@ The self-healing loop follows this interaction flow:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Expected console output:**
+**Expected console output (success):**
 
 ```
 $ python -m agent.self_healing examples/sword_test.mm --max-retries 3
@@ -140,6 +140,14 @@ Original source backed up to examples/sword_test.mm.bak
 Attempt 1: Flaw detected. Consulting AI...
 Code updated. Retrying...
 Success! Blade is flawless (Attempt 2).
+```
+
+**If all retries are exhausted**, the original source is automatically restored:
+
+```
+Attempt 3: Flaw detected. Consulting AI...
+Code updated. Retrying...
+Healing failed. Original source restored from examples/sword_test.mm.bak
 ```
 
 ### Recording a demo
