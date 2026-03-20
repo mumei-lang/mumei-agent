@@ -68,8 +68,8 @@ def main() -> None:
     parser.add_argument(
         "source_file",
         nargs="?",
-        default="sword_test.mm",
-        help="Path to the .mm source file to heal (default: sword_test.mm)",
+        default="examples/sword_test.mm",
+        help="Path to the .mm source file to heal (default: examples/sword_test.mm)",
     )
     parser.add_argument(
         "--max-retries",

@@ -47,11 +47,32 @@ cp .env.example .env
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run self-healing loop
+# 4. Run self-healing loop (uses examples/sword_test.mm by default)
 python -m agent.self_healing
+
+# Or specify a file explicitly:
+python -m agent.self_healing examples/effect_test.mm
 
 # 5. (Optional) Start Streamlit visualizer
 streamlit run visualizer/app.py
+```
+
+## Examples
+
+The `examples/` directory contains sample `.mm` files with known verification
+failures for testing the self-healing loop:
+
+| File | Violation Type | Description |
+|---|---|---|
+| `examples/sword_test.mm` | Precondition | Division without `b != 0` guard |
+| `examples/effect_test.mm` | Effect mismatch | Uses `FileWrite` but only declares `[Log]` |
+
+```bash
+# Demo: precondition fix
+python -m agent.self_healing examples/sword_test.mm
+
+# Demo: effect mismatch fix
+python -m agent.self_healing examples/effect_test.mm
 ```
 
 ## LLM Provider Support
