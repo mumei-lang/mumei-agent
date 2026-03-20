@@ -1,6 +1,5 @@
 import streamlit as st
 import json
-import os
 from pathlib import Path
 
 st.set_page_config(page_title="Mumei Visualizer", page_icon="🗡️", layout="wide")
@@ -50,7 +49,7 @@ if view_mode == "Latest Report":
         if "counterexample" in data and data["counterexample"]:
             st.subheader("Z3 Counter-example (Details)")
             ce = data["counterexample"]
-            cols = st.columns(min(len(ce), 4))
+            cols = st.columns(max(min(len(ce), 4), 1))
             for i, (var_name, var_value) in enumerate(ce.items()):
                 with cols[i % len(cols)]:
                     st.metric(f"Counter-example: {var_name}", var_value)

@@ -151,7 +151,7 @@ def main() -> None:
             if attempt >= max_retries:
                 break
 
-            with open(source_file, "r") as f:
+            with open(source_file, "r", encoding="utf-8") as f:
                 source = f.read()
 
             # Get fix from AI
@@ -163,7 +163,7 @@ def main() -> None:
                 continue
 
             # Overwrite source file
-            with open(source_file, "w") as f:
+            with open(source_file, "w", encoding="utf-8") as f:
                 f.write(fixed_code)
 
             print("Code updated. Retrying...")
