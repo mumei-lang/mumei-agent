@@ -77,7 +77,7 @@ python -m agent.self_healing examples/effect_test.mm
 
 ## E2E Demo
 
-https://app.devin.ai/attachments/e91a161a-6e32-4bae-bbaf-878fd29cbeaf/e2e_demo.mp4
+https://github.com/user-attachments/assets/908ae828-d249-4967-b9b0-55d56dd3d95e
 
 The self-healing loop follows this interaction flow:
 
