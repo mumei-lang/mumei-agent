@@ -36,6 +36,20 @@ class MumeiClient:
             "stderr": result.stderr,
         }
 
+    def check(self, source_path: str) -> dict:
+        """Run mumei check to verify parsing succeeds.
+
+        Returns:
+            Dict with keys: success (bool), stdout (str), stderr (str).
+        """
+        cmd = [*self._cmd_prefix, "check", source_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
     def build(self, source_path: str, output: str = "katana") -> dict:
         """Run mumei build and return result.
 
