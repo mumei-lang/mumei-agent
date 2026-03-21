@@ -1,6 +1,6 @@
 """Prompt template for linearity_violated failures."""
 from agent.prompts.report_formatter import format_span, format_suggestion
-from agent.prompts.examples.precondition_examples import EXAMPLES
+from agent.prompts.examples.linearity_examples import EXAMPLES
 from agent.prompts.examples.formatter import format_examples
 
 
