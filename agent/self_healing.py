@@ -79,9 +79,18 @@ def main() -> None:
         default=None,
         help="Maximum number of fix attempts (default: from config or 5)",
     )
+    parser.add_argument(
+        "--strategy",
+        choices=["single", "multi-stage"],
+        default=None,
+        help="Fix strategy: 'single' (one-shot) or 'multi-stage' (diagnose→fix→validate). "
+             "Default: from AGENT_STRATEGY env var or 'single'.",
+    )
     args = parser.parse_args()
 
     config = AgentConfig()
+    if args.strategy is not None:
+        config.strategy = args.strategy
     client = config.create_client()
     mumei = MumeiClient(config.mumei_bin)
 
@@ -131,7 +140,12 @@ def main() -> None:
                 source = f.read()
 
             # Get fix from AI
-            fixed_code = get_fix(client, config.model, source, logs, report)
+            fixed_code = get_fix(
+                client, config.model, source, logs, report,
+                strategy=config.strategy,
+                mumei_client=mumei,
+                source_path=source_file,
+            )
 
             # Validate before overwriting
             if not fixed_code:

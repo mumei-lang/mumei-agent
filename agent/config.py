@@ -15,6 +15,7 @@ class AgentConfig:
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o"))
     mumei_bin: str = field(default_factory=lambda: os.getenv("MUMEI_BIN", "mumei"))
     max_retries: int = 5
+    strategy: str = field(default_factory=lambda: os.getenv("AGENT_STRATEGY", "single"))
     visualizer_sync: bool = field(default_factory=lambda: os.getenv("ENABLE_VISUALIZER_SYNC", "false").lower() == "true")
 
     def __post_init__(self):

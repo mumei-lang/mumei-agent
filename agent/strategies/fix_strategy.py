@@ -22,20 +22,52 @@ _FAILURE_TYPE_MAP = {
 }
 
 
-def get_fix(client: OpenAI, model: str, source_code: str, error_log: str, report_data: dict) -> str:
-    """Generate a fix using the appropriate prompt template."""
+def _build_prompt_for_report(source_code: str, error_log: str, report_data: dict) -> str:
+    """Select the appropriate prompt template and build the prompt string."""
     violation_type = report_data.get("violation_type", "")
     failure_type = report_data.get("failure_type", "")
 
     if violation_type == "effect_mismatch":
-        prompt = effect_mismatch.build_prompt(source_code, error_log, report_data)
+        return effect_mismatch.build_prompt(source_code, error_log, report_data)
     elif violation_type == "effect_propagation":
-        prompt = effect_propagation.build_prompt(source_code, error_log, report_data)
+        return effect_propagation.build_prompt(source_code, error_log, report_data)
     elif failure_type in _FAILURE_TYPE_MAP:
-        prompt = _FAILURE_TYPE_MAP[failure_type].build_prompt(source_code, error_log, report_data)
+        return _FAILURE_TYPE_MAP[failure_type].build_prompt(source_code, error_log, report_data)
     else:
-        # Fallback to precondition template
-        prompt = precondition.build_prompt(source_code, error_log, report_data)
+        return precondition.build_prompt(source_code, error_log, report_data)
+
+
+def get_fix(
+    client: OpenAI,
+    model: str,
+    source_code: str,
+    error_log: str,
+    report_data: dict,
+    *,
+    strategy: str = "single",
+    mumei_client: "MumeiClient | None" = None,
+    source_path: str | None = None,
+) -> str:
+    """Generate a fix using the appropriate prompt template.
+
+    Args:
+        client: OpenAI-compatible client.
+        model: Model name.
+        source_code: Current source code.
+        error_log: Verification error output.
+        report_data: Structured verification report.
+        strategy: "single" (default) for one-shot, "multi-stage" for 3-stage pipeline.
+        mumei_client: MumeiClient instance (required for multi-stage).
+        source_path: Path to source file (required for multi-stage).
+    """
+    if strategy == "multi-stage" and mumei_client is not None and source_path is not None:
+        from agent.strategies.multi_stage_strategy import get_fix_multi_stage
+        return get_fix_multi_stage(
+            client, model, source_code, error_log, report_data,
+            mumei_client, source_path,
+        )
+
+    prompt = _build_prompt_for_report(source_code, error_log, report_data)
 
     response = client.chat.completions.create(
         model=model,

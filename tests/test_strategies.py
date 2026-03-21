@@ -1,6 +1,7 @@
 """Tests for fix_strategy module."""
-from unittest.mock import MagicMock, patch
-from agent.strategies.fix_strategy import get_fix
+from unittest.mock import MagicMock, patch, call
+from agent.strategies.fix_strategy import get_fix, _build_prompt_for_report
+from agent.strategies.multi_stage_strategy import _parse_diagnosis, _extract_code
 
 
 def _mock_client(response_text: str) -> MagicMock:
@@ -174,3 +175,112 @@ def test_unknown_failure_type_falls_back_to_precondition():
     prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert "requires" in prompt.lower()
     assert "formal verification" in prompt
+
+
+# --- P4: Multi-stage strategy tests ---
+
+def test_build_prompt_for_report_returns_string():
+    """Test that _build_prompt_for_report returns a non-empty string."""
+    result = _build_prompt_for_report("source", "error", {"status": "failed"})
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_parse_diagnosis_valid_json():
+    """Test parsing a valid JSON diagnosis."""
+    raw = '{"root_cause": "division by zero", "fix_approach": "add requires", "target_section": "requires"}'
+    result = _parse_diagnosis(raw)
+    assert result["root_cause"] == "division by zero"
+    assert result["fix_approach"] == "add requires"
+    assert result["target_section"] == "requires"
+
+
+def test_parse_diagnosis_fenced_json():
+    """Test parsing JSON inside markdown fences."""
+    raw = '```json\n{"root_cause": "bad postcondition", "fix_approach": "fix body", "target_section": "body"}\n```'
+    result = _parse_diagnosis(raw)
+    assert result["root_cause"] == "bad postcondition"
+    assert result["target_section"] == "body"
+
+
+def test_parse_diagnosis_invalid_json_fallback():
+    """Test that invalid JSON returns sensible defaults."""
+    result = _parse_diagnosis("This is not JSON at all")
+    assert result["root_cause"] == "unknown"
+    assert result["target_section"] == "requires"
+
+
+def test_extract_code_from_fences():
+    """Test extracting code from markdown fences."""
+    content = "Here's the fix:\n```mumei\natom safe() body: 1;\n```\nDone."
+    assert _extract_code(content) == "atom safe() body: 1;"
+
+
+def test_extract_code_raw():
+    """Test that raw content is returned when no fences found."""
+    assert _extract_code("atom raw() body: 1;") == "atom raw() body: 1;"
+
+
+def test_get_fix_strategy_single_default():
+    """Test that strategy='single' (default) uses one-shot LLM call."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    result = get_fix(client, "m", "src", "err", {}, strategy="single")
+    assert "atom fixed()" in result
+    # Should be exactly one LLM call for single strategy
+    assert client.chat.completions.create.call_count == 1
+
+
+def test_get_fix_strategy_multi_stage_delegates():
+    """Test that strategy='multi-stage' delegates to multi_stage_strategy."""
+    # Create a client that returns diagnosis JSON first, then fix code
+    client = MagicMock()
+    responses = [
+        # Stage 1: Diagnosis
+        _make_response('{"root_cause": "div zero", "fix_approach": "add requires", "target_section": "requires"}'),
+        # Stage 2: Fix
+        _make_response("```mumei\natom fixed() requires: b != 0; body: a / b;\n```"),
+    ]
+    client.chat.completions.create.side_effect = responses
+
+    mumei_client = MagicMock()
+    mumei_client.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "",
+        "stderr": "",
+    }
+
+    result = get_fix(
+        client, "m", "src", "err", {"status": "failed"},
+        strategy="multi-stage",
+        mumei_client=mumei_client,
+        source_path="test.mm",
+    )
+    assert "atom fixed()" in result
+    # Should have at least 2 LLM calls (diagnose + fix)
+    assert client.chat.completions.create.call_count >= 2
+
+
+def test_get_fix_multi_stage_without_mumei_client_falls_back():
+    """Test that multi-stage without mumei_client falls back to single."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    result = get_fix(
+        client, "m", "src", "err", {},
+        strategy="multi-stage",
+        mumei_client=None,
+        source_path=None,
+    )
+    assert "atom fixed()" in result
+    # Falls back to single: exactly one LLM call
+    assert client.chat.completions.create.call_count == 1
+
+
+def _make_response(text: str) -> MagicMock:
+    """Create a mock completion response."""
+    message = MagicMock()
+    message.content = text
+    choice = MagicMock()
+    choice.message = message
+    response = MagicMock()
+    response.choices = [choice]
+    return response
