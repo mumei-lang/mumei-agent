@@ -1,21 +1,21 @@
-"""Prompt template for precondition/postcondition and other non-effect violations."""
+"""Prompt template for postcondition_violated failures."""
 from agent.prompts.report_formatter import (
     format_counterexample,
     format_violated_constraints,
-    format_suggestion,
     format_span,
+    format_suggestion,
 )
-from agent.prompts.examples.precondition_examples import EXAMPLES
+from agent.prompts.examples.postcondition_examples import EXAMPLES
 from agent.prompts.examples.formatter import format_examples
 
 
 def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
-    """Build a prompt for fixing precondition/postcondition violations."""
+    """Build a prompt for fixing postcondition violations."""
     sections: list[str] = []
 
     sections.append(
-        "You are an expert in the Mumei language. The following code failed formal verification.\n"
-        "Please fix the 'requires' (precondition) to resolve the mathematical contradiction."
+        "You are an expert in the Mumei language. The following code has a postcondition violation.\n"
+        "The `ensures` condition is not satisfied by the function body's return value."
     )
 
     sections.append(f"# Source code:\n{source_code}")
@@ -37,7 +37,13 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
     if sug:
         sections.append(f"# {sug}")
 
-    ex = format_examples(EXAMPLES)
+    sections.append(
+        "# Fix guidance:\n"
+        "Either fix the body so that its return value satisfies the `ensures` clause,\n"
+        "or adjust the `ensures` clause to match the actual behaviour of the body."
+    )
+
+    ex = format_examples(EXAMPLES, max_examples=1)
     if ex:
         sections.append(ex)
 
