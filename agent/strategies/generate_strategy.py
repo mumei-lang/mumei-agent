@@ -45,7 +45,7 @@ def generate_code(
     config_max_retries: int = 5,
     mumei_client: MumeiClient | None = None,
     metrics: Metrics | None = None,
-) -> str:
+) -> tuple[str, bool]:
     """Generate Mumei code from a specification, verify, and fix if needed.
 
     Pipeline:
@@ -64,7 +64,9 @@ def generate_code(
         metrics: Optional Metrics instance for tracking.
 
     Returns:
-        The generated (and potentially fixed) .mm source code.
+        A tuple of (code, verified) where *code* is the generated (and
+        potentially fixed) .mm source and *verified* indicates whether
+        the code passed ``mumei verify``.
     """
     if metrics is None:
         metrics = Metrics()
@@ -93,11 +95,11 @@ def generate_code(
     generated_code = _extract_code(response.choices[0].message.content or "")
     if not generated_code:
         _logger.warning("LLM returned empty generation result")
-        return ""
+        return "", False
 
     if mumei_client is None:
         metrics.record_success("generation")
-        return generated_code
+        return generated_code, True
 
     # Stage 2+3: Check, verify, and fix loop
     current_code = generated_code
@@ -118,20 +120,19 @@ def generate_code(
                     attempt + 1,
                     check_result["stderr"],
                 )
+                metrics.record_attempt("parse_error")
                 error_log = check_result["stdout"] + check_result["stderr"]
                 current_code = _attempt_fix(
                     client, model, spec_json, current_code, error_log, {},
                     prompt_module, metrics,
                 )
-                if current_code:
-                    continue
-                break
+                continue
 
             # Full verification
             verify_result = mumei_client.verify(tmp_path)
             if verify_result["success"]:
                 metrics.record_success("generation")
-                return current_code
+                return current_code, True
 
             _logger.info(
                 "Verification failed on attempt %d", attempt + 1,
@@ -154,6 +155,7 @@ def generate_code(
                 pass
 
     # Final check after all retries
+    verified = False
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -164,6 +166,7 @@ def generate_code(
         verify_result = mumei_client.verify(tmp_path)
         if verify_result["success"]:
             metrics.record_success("generation")
+            verified = True
     finally:
         try:
             if tmp_path:
@@ -171,7 +174,7 @@ def generate_code(
         except Exception:
             pass
 
-    return current_code
+    return current_code, verified
 
 
 def _attempt_fix(

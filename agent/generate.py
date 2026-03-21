@@ -103,7 +103,7 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     print(f"Mumei Generate Mode: generating '{spec.get('name', 'unknown')}'...")
 
-    generated_code = generate_code(
+    generated_code, verified = generate_code(
         client=client,
         model=config.model,
         spec=spec,
@@ -121,7 +121,18 @@ def main(args: argparse.Namespace | None = None) -> None:
     # Write output
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(generated_code)
-    print(f"Generated code written to {args.output}")
+
+    if verified:
+        print(f"Generated verified code written to {args.output}")
+    else:
+        print(
+            f"Warning: Generated code written to {args.output} "
+            "but verification failed — output is NOT verified.",
+            file=sys.stderr,
+        )
 
     if args.metrics:
         print(metrics.to_json())
+
+    if not verified:
+        sys.exit(1)

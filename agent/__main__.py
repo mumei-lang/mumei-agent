@@ -40,7 +40,7 @@ def main() -> None:
     from agent.generate import build_parser as build_generate_parser
     build_generate_parser(subparsers)
 
-    args = parser.parse_args()
+    args, remaining = parser.parse_known_args()
 
     if args.command == "generate":
         from agent.generate import main as generate_main
@@ -53,7 +53,9 @@ def main() -> None:
         heal_main()
     else:
         # Backward compatibility: no subcommand means heal mode
+        # (e.g. `python -m agent examples/sword_test.mm`)
         from agent.self_healing import main as heal_main
+        sys.argv = [sys.argv[0]] + remaining
         heal_main()
 
 

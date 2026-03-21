@@ -156,8 +156,9 @@ def test_generate_code_without_mumei_client():
     """Test generation without mumei_client (no verification)."""
     client = _mock_client("```mumei\natom test() body: 1;\n```")
     spec = {"name": "test", "params": []}
-    result = generate_code(client, "test-model", spec, mumei_client=None)
+    result, verified = generate_code(client, "test-model", spec, mumei_client=None)
     assert "atom test()" in result
+    assert verified is True
     assert client.chat.completions.create.call_count == 1
 
 
@@ -175,11 +176,12 @@ def test_generate_code_success_on_first_try():
 
     spec = {"name": "test", "params": []}
     metrics = Metrics()
-    result = generate_code(
+    result, verified = generate_code(
         client, "test-model", spec,
         mumei_client=mumei, metrics=metrics,
     )
     assert "atom test()" in result
+    assert verified is True
     assert metrics.successes == 1
 
 
@@ -207,8 +209,9 @@ def test_generate_code_fix_after_check_failure():
     }
 
     spec = {"name": "fixed", "params": []}
-    result = generate_code(client, "test-model", spec, mumei_client=mumei)
+    result, verified = generate_code(client, "test-model", spec, mumei_client=mumei)
     assert "atom fixed()" in result
+    assert verified is True
 
 
 def test_generate_code_fix_after_verify_failure():
@@ -241,11 +244,12 @@ def test_generate_code_fix_after_verify_failure():
 
     spec = {"name": "test", "params": []}
     metrics = Metrics()
-    result = generate_code(
+    result, verified = generate_code(
         client, "test-model", spec,
         mumei_client=mumei, metrics=metrics,
     )
     assert "atom test()" in result
+    assert verified is True
 
 
 # --- Metrics tests ---
