@@ -1,12 +1,13 @@
 """Mumei Self-Healing Loop: AI-driven autonomous fix loop.
 
-Reads source code, runs mumei build (which triggers verification), and
+Reads source code, runs mumei verify --json, and
 uses LLM to fix verification failures iteratively.
 """
 import argparse
 import json
 import shutil
 import sys
+import tempfile
 import time
 import datetime
 import fcntl
@@ -16,30 +17,30 @@ from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient
 from agent.strategies.fix_strategy import get_fix
 
-REPORT_FILE = "report.json"
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
 
 
-def sync_to_visualizer(report_path: str, *, enabled: bool = True) -> None:
-    """Copy report.json to visualizer/ and append to history.
+def sync_to_visualizer(report_data: dict, *, enabled: bool = True) -> None:
+    """Write report data to visualizer/ and append to history.
 
     Args:
-        report_path: Path to the report.json file.
+        report_data: The report dict (from mumei verify --json).
         enabled: Whether visualizer sync is enabled.
     """
     if not enabled:
         return
-    report_file = Path(report_path)
-    if not report_file.exists():
+    if not report_data:
         return
 
     vis_dir = ROOT_DIR / "visualizer"
     vis_dir.mkdir(exist_ok=True)
-    shutil.copy(report_file, vis_dir / "report.json")
+    (vis_dir / "report.json").write_text(
+        json.dumps(report_data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     # Append to history (with file lock to prevent corruption)
-    entry = json.loads(report_file.read_text(encoding="utf-8"))
+    entry = dict(report_data)
     entry["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     lock_file = HISTORY_FILE.parent / ".report_history.lock"
@@ -94,33 +95,16 @@ def main() -> None:
     shutil.copy2(source_file, backup_file)
     print(f"Original source backed up to {backup_file}")
 
-    # Candidate paths where mumei may write report.json.
-    # Note: we check existence but not freshness — if mumei build does not
-    # overwrite report.json on success, a stale failure report may be read.
-    # This is acceptable because mumei build is expected to always produce
-    # report.json; if that assumption changes, add mtime or content checks.
-    report_candidates = [
-        Path(REPORT_FILE),
-        Path(source_file).parent / REPORT_FILE,
-    ]
-
     success = False
     try:
         for attempt in range(max_retries + 1):
-            result = mumei.build(source_file)
-
-            # Find the report file (shared by success and failure paths)
-            found_report_path = None
-            for candidate in report_candidates:
-                if candidate.exists():
-                    found_report_path = str(candidate)
-                    break
+            result = mumei.verify(source_file)
+            report = result["report"] or {}
 
             if result["success"]:
                 print(f"Success! Blade is flawless (Attempt {attempt + 1}).")
                 try:
-                    if found_report_path:
-                        sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
+                    sync_to_visualizer(report, enabled=config.visualizer_sync)
                 except Exception:
                     pass
                 success = True
@@ -129,21 +113,13 @@ def main() -> None:
             print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
             logs = result["stdout"] + result["stderr"]
 
-            # Read the latest verification report
-            report = None
-            if found_report_path:
-                try:
-                    report = json.loads(Path(found_report_path).read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    pass
-            if report is None:
+            if not report:
                 print("Warning: report.json not found. Using stub report.")
                 report = {"status": "error", "reason": "Report not found"}
 
             # Visualizer sync
             try:
-                if found_report_path:
-                    sync_to_visualizer(found_report_path, enabled=config.visualizer_sync)
+                sync_to_visualizer(report, enabled=config.visualizer_sync)
             except Exception:
                 pass
 
