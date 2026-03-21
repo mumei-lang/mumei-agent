@@ -83,6 +83,86 @@ def format_span(report: dict) -> str:
     return f"Location: {f}:{line}:{col}"
 
 
+def format_error_diff(prev_report: dict, curr_report: dict) -> str:
+    """Compare two verification reports and produce a structured diff string.
+
+    Compares: failure_type, violation_type, counterexample, violated_constraints,
+    and suggestion fields.  Returns a human-readable diff.
+    """
+    lines: list[str] = []
+
+    # --- failure_type ---
+    prev_ft = prev_report.get("failure_type", "unknown")
+    curr_ft = curr_report.get("failure_type", "unknown")
+    if prev_ft == curr_ft:
+        lines.append(f"- failure_type: UNCHANGED ({curr_ft})")
+    else:
+        lines.append(f"- failure_type: CHANGED ({prev_ft} -> {curr_ft})")
+
+    # --- violation_type ---
+    prev_vt = prev_report.get("violation_type", "")
+    curr_vt = curr_report.get("violation_type", "")
+    if prev_vt or curr_vt:
+        if prev_vt == curr_vt:
+            lines.append(f"- violation_type: UNCHANGED ({curr_vt})")
+        else:
+            lines.append(
+                f"- violation_type: CHANGED ({prev_vt or 'none'} -> {curr_vt or 'none'})"
+            )
+
+    # --- counterexample ---
+    prev_ce = prev_report.get("counterexample") or {}
+    curr_ce = curr_report.get("counterexample") or {}
+    prev_ce_str = ", ".join(f"{k}={v}" for k, v in prev_ce.items()) if prev_ce else "none"
+    curr_ce_str = ", ".join(f"{k}={v}" for k, v in curr_ce.items()) if curr_ce else "none"
+    if prev_ce == curr_ce:
+        lines.append(f"- counterexample: UNCHANGED ({curr_ce_str})")
+    else:
+        lines.append(f"- counterexample: CHANGED ({prev_ce_str} -> {curr_ce_str})")
+
+    # --- violated_constraints ---
+    prev_vc = _extract_constraint_set(prev_report)
+    curr_vc = _extract_constraint_set(curr_report)
+    resolved = prev_vc - curr_vc
+    new_vc = curr_vc - prev_vc
+    if resolved or new_vc:
+        lines.append(
+            f"- violated_constraints: {len(resolved)} resolved, {len(new_vc)} new"
+        )
+        for c in sorted(resolved):
+            lines.append(f"  - RESOLVED: {c}")
+        for c in sorted(new_vc):
+            lines.append(f"  - NEW: {c}")
+    elif curr_vc:
+        lines.append("- violated_constraints: UNCHANGED")
+
+    # --- suggestion ---
+    prev_sug = prev_report.get("suggestion", "")
+    curr_sug = curr_report.get("suggestion", "")
+    if prev_sug != curr_sug and (prev_sug or curr_sug):
+        lines.append(f"- suggestion: CHANGED")
+        if curr_sug:
+            lines.append(f"  Now: {curr_sug}")
+
+    return "\n".join(lines)
+
+
+def _extract_constraint_set(report: dict) -> set[str]:
+    """Extract a set of constraint description strings from a report."""
+    sf = report.get("semantic_feedback")
+    if not sf or not isinstance(sf, dict):
+        return set()
+    constraints = sf.get("violated_constraints")
+    if not constraints or not isinstance(constraints, list):
+        return set()
+    result: set[str] = set()
+    for vc in constraints:
+        param = vc.get("param", "?")
+        constraint = vc.get("constraint", "?")
+        result.add(f"param '{param}' constraint `{constraint}`")
+    return result
+
+
 def format_data_flow(report: dict) -> str:
     """Format semantic_feedback.data_flow trace."""
     sf = report.get("semantic_feedback")
