@@ -3,6 +3,7 @@
 Uses few-shot examples based on patterns from mumei's std/file.mm and
 std/http.mm to guide the LLM in generating verified atoms with effects.
 """
+import json
 
 _STDLIB_EXAMPLES = """\
 ## Example 1 — std/file.mm: read_file
@@ -70,7 +71,6 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
         sections.append(f"# Previous attempt error:\n{error_log}")
 
     if report_data:
-        import json
         sections.append(
             f"# Verification report:\n{json.dumps(report_data, indent=2, ensure_ascii=False)}"
         )

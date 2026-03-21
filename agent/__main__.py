@@ -36,13 +36,6 @@ def main() -> None:
         help="Fix strategy: 'single' (one-shot) or 'multi-stage' (diagnose->fix->validate). "
              "Default: from AGENT_STRATEGY env var or 'single'.",
     )
-    heal_parser.add_argument(
-        "--metrics",
-        action="store_true",
-        default=False,
-        help="Output JSON metrics summary at the end",
-    )
-
     # --- generate subcommand ---
     from agent.generate import build_parser as build_generate_parser
     build_generate_parser(subparsers)
@@ -54,10 +47,12 @@ def main() -> None:
         generate_main(args)
     elif args.command == "heal":
         from agent.self_healing import main as heal_main
+        # Strip the 'heal' subcommand from sys.argv so self_healing
+        # sees only its own arguments (e.g. ['agent', 'file.mm'])
+        sys.argv = [sys.argv[0]] + sys.argv[2:]
         heal_main()
     else:
         # Backward compatibility: no subcommand means heal mode
-        # Re-parse as the old self_healing CLI
         from agent.self_healing import main as heal_main
         heal_main()
 

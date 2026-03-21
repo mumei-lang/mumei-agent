@@ -1,4 +1,5 @@
 """Prompt template for generic atom generation from a spec JSON."""
+import json
 
 
 def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
@@ -41,7 +42,6 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
         )
 
     if report_data:
-        import json
         sections.append(
             f"# Verification report from previous attempt:\n"
             f"{json.dumps(report_data, indent=2, ensure_ascii=False)}"

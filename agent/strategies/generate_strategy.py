@@ -123,7 +123,9 @@ def generate_code(
                     client, model, spec_json, current_code, error_log, {},
                     prompt_module, metrics,
                 )
-                continue
+                if current_code:
+                    continue
+                break
 
             # Full verification
             verify_result = mumei_client.verify(tmp_path)
@@ -183,7 +185,13 @@ def _attempt_fix(
     metrics: Metrics,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
-    fix_prompt = prompt_module.build_prompt(spec_json, error_log, report)
+    # Include both the spec and the current (broken) code so the LLM
+    # can see what it generated and what went wrong.
+    combined_source = (
+        f"# Original specification:\n{spec_json}\n\n"
+        f"# Current generated code (needs fixing):\n{current_code}"
+    )
+    fix_prompt = prompt_module.build_prompt(combined_source, error_log, report)
 
     fix_response = client.chat.completions.create(
         model=model,
