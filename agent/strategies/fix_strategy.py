@@ -1,6 +1,9 @@
 """Fix strategy: select prompt template based on violation type and call LLM."""
+from __future__ import annotations
+
 import re
 from openai import OpenAI
+from agent.mumei_client import MumeiClient
 from agent.prompts import (
     effect_mismatch,
     effect_propagation,
@@ -11,6 +14,7 @@ from agent.prompts import (
     postcondition,
     temporal_effect,
 )
+from agent.strategies.retry_history import RetryHistory
 
 # Mapping from failure_type to prompt module
 _FAILURE_TYPE_MAP = {
@@ -45,8 +49,9 @@ def get_fix(
     report_data: dict,
     *,
     strategy: str = "single",
-    mumei_client: "MumeiClient | None" = None,
+    mumei_client: MumeiClient | None = None,
     source_path: str | None = None,
+    retry_history: RetryHistory | None = None,
 ) -> str:
     """Generate a fix using the appropriate prompt template.
 
@@ -59,6 +64,7 @@ def get_fix(
         strategy: "single" (default) for one-shot, "multi-stage" for 3-stage pipeline.
         mumei_client: MumeiClient instance (required for multi-stage).
         source_path: Path to source file (required for multi-stage).
+        retry_history: Optional retry history for context across attempts.
     """
     if strategy == "multi-stage":
         if mumei_client is not None and source_path is not None:
@@ -66,6 +72,7 @@ def get_fix(
             return get_fix_multi_stage(
                 client, model, source_code, error_log, report_data,
                 mumei_client, source_path,
+                retry_history=retry_history,
             )
         import logging
         logging.getLogger(__name__).warning(

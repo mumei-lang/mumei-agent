@@ -15,6 +15,7 @@ from pathlib import Path
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient
 from agent.strategies.fix_strategy import get_fix
+from agent.strategies.retry_history import RetryAttempt, RetryHistory
 
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
@@ -104,6 +105,7 @@ def main() -> None:
     print(f"Original source backed up to {backup_file}")
 
     success = False
+    outer_history = RetryHistory()
     try:
         for attempt in range(max_retries + 1):
             result = mumei.verify(source_file)
@@ -138,12 +140,26 @@ def main() -> None:
             with open(source_file, "r", encoding="utf-8") as f:
                 source = f.read()
 
+            # Record the failed attempt in outer history (skip first since
+            # there is no prior diagnosis yet on the very first outer iteration).
+            if attempt > 0:
+                outer_history.add(
+                    RetryAttempt(
+                        attempt_number=len(outer_history.attempts) + 1,
+                        source_code=source,
+                        error_log=logs,
+                        report_data=report,
+                        diagnosis={},  # outer loop has no standalone diagnosis
+                    )
+                )
+
             # Get fix from AI
             fixed_code = get_fix(
                 client, config.model, source, logs, report,
                 strategy=config.strategy,
                 mumei_client=mumei,
                 source_path=source_file,
+                retry_history=outer_history,
             )
 
             # Validate before overwriting
