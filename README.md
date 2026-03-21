@@ -206,6 +206,12 @@ This agent consumes the `report.json` output from `mumei verify --json`.
 See [REPORT_SCHEMA.md](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md)
 for the full schema documentation.
 
+## Roadmap
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the agent-specific roadmap, and
+[mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md)
+for the cross-project roadmap covering both the compiler and agent.
+
 ## License
 
 [Apache-2.0 license](LICENSE)
