@@ -96,3 +96,81 @@ def test_no_code_block_returns_raw():
     client = _mock_client("Just plain text fix suggestion")
     result = get_fix(client, "m", "src", "err", {})
     assert result == "Just plain text fix suggestion"
+
+
+# --- P2: failure_type routing tests ---
+
+def test_division_by_zero_routes_correctly():
+    """Test that failure_type division_by_zero uses the division_by_zero prompt."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {"failure_type": "division_by_zero"}
+    result = get_fix(client, "test-model", "source", "error", report)
+    assert "atom fixed()" in result
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "division-by-zero" in prompt
+
+
+def test_linearity_violated_routes_correctly():
+    """Test that failure_type linearity_violated uses the linearity prompt."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {"failure_type": "linearity_violated"}
+    get_fix(client, "test-model", "source", "error", report)
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "linearity" in prompt.lower()
+
+
+def test_invariant_violated_routes_correctly():
+    """Test that failure_type invariant_violated uses the invariant prompt."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {"failure_type": "invariant_violated"}
+    get_fix(client, "test-model", "source", "error", report)
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "invariant" in prompt.lower()
+
+
+def test_postcondition_violated_routes_correctly():
+    """Test that failure_type postcondition_violated uses the postcondition prompt."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {"failure_type": "postcondition_violated"}
+    get_fix(client, "test-model", "source", "error", report)
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "postcondition" in prompt.lower()
+
+
+def test_temporal_effect_routes_correctly():
+    """Test that failure_type temporal_effect_violated uses the temporal prompt."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {"failure_type": "temporal_effect_violated"}
+    get_fix(client, "test-model", "source", "error", report)
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "temporal" in prompt.lower()
+
+
+def test_violation_type_takes_precedence_over_failure_type():
+    """Test that violation_type (effect) takes precedence over failure_type."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {
+        "violation_type": "effect_mismatch",
+        "failure_type": "division_by_zero",
+        "atom": "test",
+        "effect_violation": {
+            "declared_effects": [],
+            "required_effect": "Log",
+            "source_operation": "Log.write",
+            "resolution_paths": [],
+        },
+    }
+    get_fix(client, "test-model", "source", "error", report)
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "effect violation" in prompt
+    assert "division-by-zero" not in prompt
+
+
+def test_unknown_failure_type_falls_back_to_precondition():
+    """Test that unknown failure_type falls back to precondition prompt."""
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {"failure_type": "unknown_type"}
+    get_fix(client, "test-model", "source", "error", report)
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "requires" in prompt.lower()
+    assert "formal verification" in prompt

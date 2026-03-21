@@ -1,5 +1,14 @@
 """Tests for prompt template builders."""
-from agent.prompts import effect_mismatch, effect_propagation, precondition
+from agent.prompts import (
+    effect_mismatch,
+    effect_propagation,
+    precondition,
+    division_by_zero,
+    linearity,
+    invariant,
+    postcondition,
+    temporal_effect,
+)
 from agent.prompts.report_formatter import (
     format_counterexample,
     format_violated_constraints,
@@ -207,3 +216,72 @@ def test_format_data_flow():
     result = format_data_flow(report)
     assert "a + b" in result
     assert "result" in result
+
+
+# --- P2: New violation type prompt tests ---
+
+def test_division_by_zero_prompt():
+    report = {
+        "failure_type": "division_by_zero",
+        "atom": "safe_divide",
+        "semantic_feedback": {
+            "counter_example": {"dividend": "10", "divisor": "0"},
+        },
+        "counterexample": {"a": "10", "b": "0"},
+    }
+    result = division_by_zero.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "division-by-zero" in result
+    assert "divisor" in result
+    assert "requires" in result.lower()
+
+
+def test_linearity_prompt():
+    report = {
+        "failure_type": "linearity_violated",
+        "atom": "use_twice",
+        "semantic_feedback": {
+            "violations": [
+                {"description": "Variable 'x' used after move"},
+            ],
+        },
+    }
+    result = linearity.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "linearity" in result.lower()
+    assert "clone" in result.lower() or "restructure" in result.lower()
+
+
+def test_invariant_prompt():
+    report = {
+        "failure_type": "invariant_violated",
+        "atom": "check_bounds",
+        "semantic_feedback": {
+            "conflicting_constraints": ["x > 10", "x < 5"],
+            "raw_unsat_core": ["(> x 10)", "(< x 5)"],
+        },
+    }
+    result = invariant.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "invariant" in result.lower()
+    assert "x > 10" in result
+    assert "x < 5" in result
+
+
+def test_postcondition_prompt():
+    report = {
+        "failure_type": "postcondition_violated",
+        "atom": "add_positive",
+        "counterexample": {"x": "0"},
+    }
+    result = postcondition.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "postcondition" in result.lower()
+    assert "ensures" in result.lower()
+
+
+def test_temporal_effect_prompt():
+    report = {
+        "failure_type": "temporal_effect_violated",
+        "atom": "bad_file_usage",
+    }
+    result = temporal_effect.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "temporal" in result.lower()
+    assert "open" in result.lower()
+    assert "close" in result.lower()
