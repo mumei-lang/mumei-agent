@@ -5,6 +5,8 @@ from agent.prompts.report_formatter import (
     format_suggestion,
     format_span,
 )
+from agent.prompts.examples.precondition_examples import EXAMPLES
+from agent.prompts.examples.formatter import format_examples
 
 
 def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
@@ -34,6 +36,10 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
     sug = format_suggestion(report_data)
     if sug:
         sections.append(f"# {sug}")
+
+    ex = format_examples(EXAMPLES)
+    if ex:
+        sections.append(ex)
 
     sections.append("Output only the fixed code in ```mumei ... ``` format.")
 

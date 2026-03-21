@@ -17,6 +17,7 @@ from agent.prompts.report_formatter import (
     format_span,
     format_data_flow,
 )
+from agent.prompts.examples.formatter import format_examples
 
 
 SAMPLE_SOURCE = """
@@ -285,3 +286,79 @@ def test_temporal_effect_prompt():
     assert "temporal" in result.lower()
     assert "open" in result.lower()
     assert "close" in result.lower()
+
+
+# --- P3: Few-shot example tests ---
+
+def test_format_examples_basic():
+    examples = [
+        {"before": "old code", "after": "new code", "explanation": "why"},
+    ]
+    result = format_examples(examples)
+    assert "# Example fix 1:" in result
+    assert "## Before:" in result
+    assert "old code" in result
+    assert "## After:" in result
+    assert "new code" in result
+    assert "## Explanation:" in result
+    assert "why" in result
+
+
+def test_format_examples_max_limit():
+    examples = [
+        {"before": f"code{i}", "after": f"fixed{i}", "explanation": f"reason{i}"}
+        for i in range(5)
+    ]
+    result = format_examples(examples, max_examples=2)
+    assert "# Example fix 1:" in result
+    assert "# Example fix 2:" in result
+    assert "code2" not in result  # third example should be excluded
+
+
+def test_format_examples_empty():
+    assert format_examples([]) == ""
+
+
+def test_precondition_prompt_contains_examples():
+    report = {"status": "failed", "atom": "test"}
+    result = precondition.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "# Example fix" in result
+    assert "requires: b != 0" in result
+
+
+def test_effect_mismatch_prompt_contains_examples():
+    report = {
+        "atom": "write_log",
+        "violation_type": "effect_mismatch",
+        "effect_violation": {
+            "declared_effects": ["Log"],
+            "required_effect": "FileWrite",
+            "source_operation": "FileWrite.write",
+            "resolution_paths": [],
+        },
+    }
+    result = effect_mismatch.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "# Example fix" in result
+
+
+def test_division_by_zero_prompt_contains_examples():
+    report = {
+        "failure_type": "division_by_zero",
+        "semantic_feedback": {"counter_example": {"dividend": "1", "divisor": "0"}},
+    }
+    result = division_by_zero.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "# Example fix" in result
+
+
+def test_postcondition_prompt_contains_examples():
+    report = {"failure_type": "postcondition_violated", "atom": "f"}
+    result = postcondition.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "# Example fix" in result
+    assert "ensures: result > 0" in result
+
+
+def test_temporal_effect_prompt_contains_examples():
+    report = {"failure_type": "temporal_effect_violated", "atom": "f"}
+    result = temporal_effect.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "# Example fix" in result
+    assert "File.open" in result

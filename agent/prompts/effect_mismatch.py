@@ -1,5 +1,7 @@
 """Prompt template for effect_mismatch violations."""
 from agent.prompts.report_formatter import format_span, format_suggestion
+from agent.prompts.examples.effect_examples import EXAMPLES
+from agent.prompts.examples.formatter import format_examples
 
 
 def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
@@ -37,6 +39,10 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
         f"{opt_b}\n"
         f"Replace the effectful operation with a pure computation."
     )
+
+    ex = format_examples(EXAMPLES, max_examples=1)
+    if ex:
+        sections.append(ex)
 
     sections.append(
         "Output only the fixed code in ```mumei ... ``` format.\n"

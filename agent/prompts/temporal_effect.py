@@ -1,5 +1,7 @@
 """Prompt template for temporal effect violations."""
 from agent.prompts.report_formatter import format_span, format_suggestion
+from agent.prompts.examples.temporal_examples import EXAMPLES
+from agent.prompts.examples.formatter import format_examples
 
 
 def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
@@ -28,6 +30,10 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
         "For example, a File effect requires: open → write/read → close.\n"
         "Ensure that each `perform` call transitions from a valid pre-state to its post-state."
     )
+
+    ex = format_examples(EXAMPLES, max_examples=1)
+    if ex:
+        sections.append(ex)
 
     sections.append("Output only the fixed code in ```mumei ... ``` format.")
 
