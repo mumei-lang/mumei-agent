@@ -26,6 +26,33 @@ Ollama + Qwen (LLM inference)
 docker-compose.yml
 ```
 
+## Relationship with MCP Server / Other AI Agents
+
+**mumei-agent** is a turnkey solution — it integrates LLM calls, `mumei verify`, and retry logic into a single autonomous fix loop. It invokes the mumei CLI directly via subprocess (no MCP required).
+
+The [mumei](https://github.com/mumei-lang/mumei) compiler repository also ships an **MCP Server** (`mcp_server.py`, implemented as FastMCP("Mumei-Forge")), which allows any MCP-compatible AI agent (Claude Code, Devin, Codex, Qwen, etc.) to access mumei's verification capabilities directly over the Model Context Protocol.
+
+```mermaid
+graph TD
+    subgraph "Turnkey Solution"
+        MA["mumei-agent"] -->|"subprocess"| CLI["mumei CLI"]
+        MA -->|"OpenAI-compatible API"| LLM["LLM (Ollama/OpenAI/etc.)"]
+    end
+    subgraph "MCP Integration"
+        D1["Claude Code"] -->|"MCP"| MCP["mcp_server.py (Mumei-Forge)"]
+        D2["Devin"] -->|"MCP"| MCP
+        D3["Other MCP Agents"] -->|"MCP"| MCP
+        MCP -->|"subprocess"| CLI2["mumei CLI"]
+    end
+```
+
+### When to Use Which
+
+- **mumei-agent**: Run `python -m agent file.mm` for a fully automated fix loop. LLM provider is configured via `.env` (Ollama, OpenAI, DashScope, etc.). Best when you want a single-command experience.
+- **MCP Server**: Start `python mcp_server.py` in the [mumei repository](https://github.com/mumei-lang/mumei) and connect from any MCP-compatible agent. The agent calls tools like `validate_logic`, `forge_blade`, and `get_inferred_effects`, and uses its own LLM to decide how to fix issues. Best when you already use an MCP-capable agent and want to integrate mumei verification into your existing workflow.
+
+Both approaches are **complementary** — choose based on your use case, or combine them as needed.
+
 ## Prerequisites
 
 - [Mumei](https://github.com/mumei-lang/mumei) installed and available in PATH
