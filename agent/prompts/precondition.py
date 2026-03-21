@@ -1,21 +1,40 @@
 """Prompt template for precondition/postcondition and other non-effect violations."""
-import json
+from agent.prompts.report_formatter import (
+    format_counterexample,
+    format_violated_constraints,
+    format_suggestion,
+    format_span,
+)
 
 
 def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
     """Build a prompt for fixing precondition/postcondition violations."""
-    return f"""
-You are an expert in the Mumei language. The following code failed formal verification.
-Please fix the 'requires' (precondition) to resolve the mathematical contradiction.
+    sections: list[str] = []
 
-# Source code:
-{source_code}
+    sections.append(
+        "You are an expert in the Mumei language. The following code failed formal verification.\n"
+        "Please fix the 'requires' (precondition) to resolve the mathematical contradiction."
+    )
 
-# Error log:
-{error_log}
+    sections.append(f"# Source code:\n{source_code}")
+    sections.append(f"# Error log:\n{error_log}")
 
-# Verification report (counter-example data):
-{json.dumps(report_data, indent=2)}
+    ce = format_counterexample(report_data)
+    if ce:
+        sections.append(f"# Counter-example:\n{ce}")
 
-Output only the fixed code in ```mumei ... ``` format.
-"""
+    vc = format_violated_constraints(report_data)
+    if vc:
+        sections.append(f"# Violated constraints:\n{vc}")
+
+    span = format_span(report_data)
+    if span:
+        sections.append(f"# {span}")
+
+    sug = format_suggestion(report_data)
+    if sug:
+        sections.append(f"# {sug}")
+
+    sections.append("Output only the fixed code in ```mumei ... ``` format.")
+
+    return "\n\n".join(sections)
