@@ -15,15 +15,32 @@ developed in-tree and moved here as a standalone project
 
 ```
 mumei CLI (Z3 verification)
-  ^ subprocess: mumei build / mumei verify --json
+  ^ subprocess: mumei check / mumei verify --json
   |
-agent/self_healing.py (orchestration loop)
-  ^ OpenAI-compatible API
+agent/self_healing.py (heal mode)     agent/generate.py (generate mode)
+  ^ OpenAI-compatible API               ^ OpenAI-compatible API
+  |                                      |
+Ollama + Qwen (LLM inference)          Ollama + Qwen (LLM inference)
+  ^ Docker Compose                       ^ Docker Compose
+  |                                      |
+docker-compose.yml                     docker-compose.yml
+```
+
+### Generate Flow
+
+```
+spec.json (atom specification)
   |
-Ollama + Qwen (LLM inference)
-  ^ Docker Compose
+agent/generate.py (CLI entry point)
   |
-docker-compose.yml
+agent/strategies/generate_strategy.py
+  |  1. LLM generates .mm code from spec
+  |  2. mumei check (parse validation)
+  |  3. mumei verify --json (formal verification)
+  |  4. If failed: LLM fixes code, goto 2
+  |  5. Repeat up to max_retries
+  |
+output.mm (generated Mumei code, exit 0 if verified)
 ```
 
 ## Relationship with MCP Server / Other AI Agents
@@ -75,12 +92,15 @@ cp .env.example .env
 pip install -r requirements.txt
 
 # 4. Run self-healing loop (uses examples/sword_test.mm by default)
-python -m agent.self_healing
+python -m agent heal
 
 # Or specify a file explicitly:
-python -m agent.self_healing examples/effect_test.mm
+python -m agent heal examples/effect_test.mm
 
-# 5. (Optional) Start Streamlit visualizer
+# 5. Generate new code from a specification
+python -m agent generate --spec-file examples/spec.json --output out.mm
+
+# 6. (Optional) Start Streamlit visualizer
 streamlit run visualizer/app.py
 ```
 
@@ -96,10 +116,60 @@ failures for testing the self-healing loop:
 
 ```bash
 # Demo: precondition fix
-python -m agent.self_healing examples/sword_test.mm
+python -m agent heal examples/sword_test.mm
 
 # Demo: effect mismatch fix
-python -m agent.self_healing examples/effect_test.mm
+python -m agent heal examples/effect_test.mm
+
+# Backward compatible (no subcommand = heal mode)
+python -m agent examples/sword_test.mm
+```
+
+## Generate Mode
+
+The `generate` subcommand creates new Mumei code from a JSON specification.
+It uses an LLM to generate code, then verifies it with `mumei check` and
+`mumei verify --json`, auto-fixing any issues.
+
+### Spec JSON Format
+
+```json
+{
+  "name": "safe_read",
+  "params": [{"name": "path", "type": "Str"}],
+  "effects": ["SafeFileRead(path)"],
+  "requires": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+  "ensures": "result >= 0",
+  "description": "Read a file safely with path traversal prevention"
+}
+```
+
+### Usage
+
+```bash
+# From a spec file
+python -m agent generate --spec-file spec.json --output out.mm
+
+# From inline JSON
+python -m agent generate --spec '{"name": "add", "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}], "requires": "true", "ensures": "result == a + b"}' --output add.mm
+
+# With metrics output
+python -m agent generate --spec-file spec.json --output out.mm --metrics
+```
+
+### Metrics
+
+Use the `--metrics` flag to output a JSON summary of generation/fix statistics:
+
+```json
+{
+  "total_attempts": 3,
+  "successes": 1,
+  "by_violation_type": {
+    "generation": {"attempts": 1, "successes": 1},
+    "effect_mismatch": {"attempts": 2, "successes": 0}
+  }
+}
 ```
 
 ## E2E Demo
@@ -122,6 +192,13 @@ The self-healing loop follows this interaction flow:
 | OpenAI | Pattern 4 | Pay-per-use |
 
 See `.env.example` for configuration details.
+
+## Subcommands
+
+| Command | Description | Example |
+|---|---|---|
+| `heal` (default) | Self-healing loop for existing .mm files | `python -m agent heal examples/sword_test.mm` |
+| `generate` | Generate new .mm code from spec JSON | `python -m agent generate --spec-file spec.json --output out.mm` |
 
 ## report.json Schema
 
