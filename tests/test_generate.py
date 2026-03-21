@@ -1,9 +1,9 @@
 """Tests for the generate mode."""
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from agent.generate import _load_spec
-from agent.metrics import Metrics, ViolationMetrics
+from agent.metrics import Metrics
 from agent.prompts import generate_atom, generate_stdlib
 from agent.strategies.generate_strategy import (
     generate_code,
@@ -250,6 +250,37 @@ def test_generate_code_fix_after_verify_failure():
     )
     assert "atom test()" in result
     assert verified is True
+
+
+def test_generate_code_all_retries_exhausted():
+    """Test that generate_code returns verified=False when all retries fail."""
+    client = MagicMock()
+    # Initial generation + fix attempts (max_retries=2 means 2 loop iterations)
+    client.chat.completions.create.side_effect = [
+        _make_response("```mumei\natom bad() body: ;\n```"),
+        _make_response("```mumei\natom still_bad() body: ;\n```"),
+        _make_response("```mumei\natom still_bad2() body: ;\n```"),
+    ]
+
+    mumei = MagicMock()
+    mumei.check.return_value = {"success": True, "stdout": "", "stderr": ""}
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {"violation_type": "postcondition_violated"},
+        "stdout": "Error",
+        "stderr": "",
+    }
+
+    spec = {"name": "bad", "params": []}
+    metrics = Metrics()
+    result, verified = generate_code(
+        client, "test-model", spec,
+        config_max_retries=2,
+        mumei_client=mumei, metrics=metrics,
+    )
+    assert verified is False
+    assert result != ""
+    assert metrics.successes == 0
 
 
 # --- Metrics tests ---

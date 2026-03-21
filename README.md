@@ -40,7 +40,7 @@ agent/strategies/generate_strategy.py
   |  4. If failed: LLM fixes code, goto 2
   |  5. Repeat up to max_retries
   |
-output.mm (verified Mumei code)
+output.mm (generated Mumei code, exit 0 if verified)
 ```
 
 ## Relationship with MCP Server / Other AI Agents
@@ -100,7 +100,7 @@ python -m agent heal examples/effect_test.mm
 # 5. Generate new code from a specification
 python -m agent generate --spec-file examples/spec.json --output out.mm
 
-# 5. (Optional) Start Streamlit visualizer
+# 6. (Optional) Start Streamlit visualizer
 streamlit run visualizer/app.py
 ```
 
