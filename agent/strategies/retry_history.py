@@ -37,7 +37,7 @@ class RetryHistory:
             return ""
 
         lines: list[str] = []
-        for att in self.attempts:
+        for idx, att in enumerate(self.attempts):
             root_cause = att.diagnosis.get("root_cause", "unknown")
             fix_approach = att.diagnosis.get("fix_approach", "unknown")
             target_section = att.diagnosis.get("target_section", "unknown")
@@ -50,8 +50,8 @@ class RetryHistory:
                 f"- Result failure_type: {failure_type}"
             )
             # Annotate repeated errors
-            if att.attempt_number > 1:
-                prev = self.attempts[att.attempt_number - 2]  # 0-indexed
+            if idx > 0:
+                prev = self.attempts[idx - 1]
                 if _same_error(prev.report_data, att.report_data):
                     lines.append("- **SAME ERROR REPEATED**")
 
