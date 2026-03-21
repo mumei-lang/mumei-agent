@@ -103,6 +103,7 @@ def generate_code(
 
     # Stage 2+3: Check, verify, and fix loop
     current_code = generated_code
+    last_violation_type = "generation"
     for attempt in range(config_max_retries):
         tmp_path = None
         try:
@@ -120,6 +121,7 @@ def generate_code(
                     attempt + 1,
                     check_result["stderr"],
                 )
+                last_violation_type = "parse_error"
                 metrics.record_attempt("parse_error")
                 error_log = check_result["stdout"] + check_result["stderr"]
                 current_code = _attempt_fix(
@@ -131,7 +133,7 @@ def generate_code(
             # Full verification
             verify_result = mumei_client.verify(tmp_path)
             if verify_result["success"]:
-                metrics.record_success("generation")
+                metrics.record_success(last_violation_type)
                 return current_code, True
 
             _logger.info(
@@ -140,6 +142,7 @@ def generate_code(
             error_log = verify_result["stdout"] + verify_result["stderr"]
             report = verify_result["report"] or {}
             violation_type = report.get("violation_type", report.get("failure_type", "unknown"))
+            last_violation_type = violation_type
             metrics.record_attempt(violation_type)
 
             current_code = _attempt_fix(
@@ -165,7 +168,7 @@ def generate_code(
             tmp.write(current_code)
         verify_result = mumei_client.verify(tmp_path)
         if verify_result["success"]:
-            metrics.record_success("generation")
+            metrics.record_success(last_violation_type)
             verified = True
     finally:
         try:

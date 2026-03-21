@@ -15,13 +15,13 @@ from agent.strategies.generate_strategy import generate_code
 
 def _load_spec(args: argparse.Namespace) -> dict:
     """Load specification from --spec (inline JSON) or --spec-file (path)."""
-    if args.spec:
+    if args.spec is not None:
         try:
             return json.loads(args.spec)
         except json.JSONDecodeError as e:
             print(f"Error: Invalid JSON in --spec: {e}", file=sys.stderr)
             sys.exit(1)
-    elif args.spec_file:
+    elif args.spec_file is not None:
         try:
             with open(args.spec_file, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -33,17 +33,25 @@ def _load_spec(args: argparse.Namespace) -> dict:
         sys.exit(1)
 
 
-def build_parser(subparsers: argparse._SubParsersAction | None = None) -> argparse.ArgumentParser:
+def build_parser(
+    subparsers: argparse._SubParsersAction | None = None,
+    *,
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
     """Build the argument parser for the generate subcommand.
 
     Args:
-        subparsers: Optional subparsers action to add to. If None, creates
-            a standalone parser.
+        subparsers: Optional subparsers action to add to.
+        parser: Optional pre-created parser to add arguments to.
+            If neither *subparsers* nor *parser* is given, creates a
+            standalone parser.
 
     Returns:
         The configured ArgumentParser.
     """
-    if subparsers is not None:
+    if parser is not None:
+        pass  # use the provided parser as-is
+    elif subparsers is not None:
         parser = subparsers.add_parser(
             "generate",
             help="Generate Mumei code from a specification",
