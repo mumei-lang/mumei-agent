@@ -60,11 +60,17 @@ def get_fix(
         mumei_client: MumeiClient instance (required for multi-stage).
         source_path: Path to source file (required for multi-stage).
     """
-    if strategy == "multi-stage" and mumei_client is not None and source_path is not None:
-        from agent.strategies.multi_stage_strategy import get_fix_multi_stage
-        return get_fix_multi_stage(
-            client, model, source_code, error_log, report_data,
-            mumei_client, source_path,
+    if strategy == "multi-stage":
+        if mumei_client is not None and source_path is not None:
+            from agent.strategies.multi_stage_strategy import get_fix_multi_stage
+            return get_fix_multi_stage(
+                client, model, source_code, error_log, report_data,
+                mumei_client, source_path,
+            )
+        import logging
+        logging.getLogger(__name__).warning(
+            "multi-stage strategy requested but mumei_client or source_path is None; "
+            "falling back to single-shot strategy."
         )
 
     prompt = _build_prompt_for_report(source_code, error_log, report_data)

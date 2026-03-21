@@ -146,6 +146,7 @@ def get_fix_multi_stage(
         best_fix = fixed_code
 
         # --- Stage 3: Validate ---
+        tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".mm", delete=False, encoding="utf-8"
@@ -167,7 +168,8 @@ def get_fix_multi_stage(
             pass  # Validation infrastructure failure; return best effort
         finally:
             try:
-                Path(tmp_path).unlink(missing_ok=True)
+                if tmp_path:
+                    Path(tmp_path).unlink(missing_ok=True)
             except Exception:
                 pass
 

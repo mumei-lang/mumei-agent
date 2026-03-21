@@ -7,7 +7,6 @@ import argparse
 import json
 import shutil
 import sys
-import tempfile
 import time
 import datetime
 import fcntl
