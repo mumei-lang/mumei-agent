@@ -140,18 +140,17 @@ def main() -> None:
             with open(source_file, "r", encoding="utf-8") as f:
                 source = f.read()
 
-            # Record the failed attempt in outer history (skip first since
-            # there is no prior diagnosis yet on the very first outer iteration).
-            if attempt > 0:
-                outer_history.add(
-                    RetryAttempt(
-                        attempt_number=len(outer_history.attempts) + 1,
-                        source_code=source,
-                        error_log=logs,
-                        report_data=report,
-                        diagnosis={},  # outer loop has no standalone diagnosis
-                    )
+            # Record the failed attempt in outer history so that subsequent
+            # iterations (and the inner multi-stage loop) have full context.
+            outer_history.add(
+                RetryAttempt(
+                    attempt_number=len(outer_history.attempts) + 1,
+                    source_code=source,
+                    error_log=logs,
+                    report_data=report,
+                    diagnosis={},  # outer loop has no standalone diagnosis
                 )
+            )
 
             # Get fix from AI
             fixed_code = get_fix(

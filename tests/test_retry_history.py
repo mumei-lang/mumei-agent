@@ -1,5 +1,7 @@
 """Tests for RetryHistory and format_error_diff."""
-from agent.strategies.retry_history import RetryAttempt, RetryHistory
+import pytest
+
+from agent.strategies.retry_history import RetryAttempt, RetryHistory, _same_error
 from agent.prompts.report_formatter import format_error_diff
 
 
@@ -247,3 +249,58 @@ class TestFormatErrorDiff:
         curr = {"failure_type": "x"}
         diff = format_error_diff(prev, curr)
         assert "violation_type" not in diff
+
+
+# ---------- Non-sequential attempt_number (regression) ----------
+
+
+class TestNonSequentialAttemptNumbers:
+    """Ensure format_for_prompt works when attempt_number != list index + 1."""
+
+    def test_non_sequential_does_not_raise(self):
+        h = RetryHistory()
+        h.add(_make_attempt(1, failure_type="x", counterexample={"a": 0}))
+        h.add(_make_attempt(5, failure_type="x", counterexample={"a": 0}))
+        # Should not raise IndexError
+        text = h.format_for_prompt()
+        assert "Attempt 1" in text
+        assert "Attempt 5" in text
+        assert "SAME ERROR REPEATED" in text
+
+    def test_non_sequential_different_errors(self):
+        h = RetryHistory()
+        h.add(_make_attempt(10, failure_type="x"))
+        h.add(_make_attempt(20, failure_type="y"))
+        text = h.format_for_prompt()
+        assert "SAME ERROR REPEATED" not in text
+
+
+# ---------- _repeat_threshold is not settable via constructor ----------
+
+
+class TestRepeatThresholdNotInit:
+    def test_cannot_set_via_constructor(self):
+        with pytest.raises(TypeError):
+            RetryHistory(_repeat_threshold=3)
+
+
+# ---------- _same_error type normalization ----------
+
+
+class TestSameErrorTypeNormalization:
+    """Counterexample values differing only by type should match."""
+
+    def test_int_vs_string_counterexample(self):
+        a = {"failure_type": "x", "counterexample": {"a": 0}}
+        b = {"failure_type": "x", "counterexample": {"a": "0"}}
+        assert _same_error(a, b) is True
+
+    def test_both_none_counterexample(self):
+        a = {"failure_type": "x"}
+        b = {"failure_type": "x", "counterexample": None}
+        assert _same_error(a, b) is True
+
+    def test_empty_vs_none_counterexample(self):
+        a = {"failure_type": "x", "counterexample": {}}
+        b = {"failure_type": "x"}
+        assert _same_error(a, b) is True

@@ -22,7 +22,7 @@ class RetryHistory:
     attempts: list[RetryAttempt] = field(default_factory=list)
 
     # Number of consecutive identical errors before triggering approach switch
-    _repeat_threshold: int = 2
+    _repeat_threshold: int = field(default=2, init=False, repr=False)
 
     def add(self, attempt: RetryAttempt) -> None:
         """Append an attempt to the history."""
@@ -86,10 +86,21 @@ class RetryHistory:
 
 
 def _same_error(a: dict, b: dict) -> bool:
-    """Check whether two reports represent the same error."""
+    """Check whether two reports represent the same error.
+
+    Compares ``failure_type`` and ``counterexample`` fields.  Counterexample
+    values are coerced to strings before comparison so that ``0`` and ``"0"``
+    are treated as equivalent (JSON parse may vary).
+    """
     if a.get("failure_type") != b.get("failure_type"):
         return False
-    # Compare counterexample values (order-independent)
-    ce_a = a.get("counterexample") or {}
-    ce_b = b.get("counterexample") or {}
+    ce_a = _normalize_counterexample(a.get("counterexample"))
+    ce_b = _normalize_counterexample(b.get("counterexample"))
     return ce_a == ce_b
+
+
+def _normalize_counterexample(ce: dict | list | None) -> dict[str, str]:
+    """Normalize counterexample values to strings for stable comparison."""
+    if not ce or not isinstance(ce, dict):
+        return {}
+    return {str(k): str(v) for k, v in ce.items()}

@@ -144,8 +144,6 @@ def format_error_diff(prev_report: dict, curr_report: dict) -> str:
         if curr_sug:
             lines.append(f"  Now: {curr_sug}")
 
-    if not lines:
-        return ""
     return "\n".join(lines)
 
 

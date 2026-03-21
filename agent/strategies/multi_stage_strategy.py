@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -12,6 +13,7 @@ from agent.mumei_client import MumeiClient
 from agent.strategies.fix_strategy import _build_prompt_for_report
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 
+_logger = logging.getLogger(__name__)
 
 _DIAGNOSE_SYSTEM = (
     "You are a formal verification expert specializing in the Mumei language. "
@@ -255,7 +257,12 @@ def get_fix_multi_stage(
             error_log = new_error_log
             report_data = new_report
         except Exception:
-            pass  # Validation infrastructure failure; return best effort
+            _logger.warning(
+                "Validation infrastructure failure on retry %d; "
+                "skipping history record",
+                retry,
+                exc_info=True,
+            )
         finally:
             try:
                 if tmp_path:
