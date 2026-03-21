@@ -150,8 +150,8 @@ def get_fix_multi_stage(
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".mm", delete=False, encoding="utf-8"
             ) as tmp:
-                tmp.write(fixed_code)
                 tmp_path = tmp.name
+                tmp.write(fixed_code)
 
             validation = mumei_client.verify(tmp_path)
             if validation["success"]:
