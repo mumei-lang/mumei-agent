@@ -5,6 +5,12 @@ std/http.mm to guide the LLM in generating verified atoms with effects.
 """
 import json
 
+from agent.prompts.report_formatter import (
+    format_actionable_fix_hint,
+    format_structured_unsat_core,
+    format_data_flow,
+)
+
 _STDLIB_EXAMPLES = """\
 ## Example 1 — std/file.mm: read_file
 ```mumei
@@ -71,6 +77,22 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
         sections.append(f"# Previous attempt error:\n{error_log}")
 
     if report_data:
+        # Actionable fix hint (human-readable)
+        hint = format_actionable_fix_hint(report_data)
+        if hint:
+            sections.append(f"# Actionable fix instructions:\n{hint}")
+
+        # Structured unsat core
+        suc = format_structured_unsat_core(report_data)
+        if suc:
+            sections.append(f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}")
+
+        # Data flow trace
+        df = format_data_flow(report_data)
+        if df:
+            sections.append(f"# {df}")
+
+        # Full report as fallback context
         sections.append(
             f"# Verification report:\n{json.dumps(report_data, indent=2, ensure_ascii=False)}"
         )

@@ -11,12 +11,7 @@ from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
-from agent.prompts.report_formatter import (
-    format_actionable_fix_hint,
-    format_structured_unsat_core,
-    format_data_flow,
-    format_error_diff,
-)
+from agent.prompts.report_formatter import format_error_diff
 
 _logger = logging.getLogger(__name__)
 
@@ -48,7 +43,8 @@ def _build_skeleton(spec: dict) -> str:
     """Build an atom skeleton from a spec for the LLM to fill in."""
     name = spec.get("name", "unnamed")
     params = ", ".join(
-        f"{p['name']}: {p.get('type', 'i64')}" for p in spec.get("params", [])
+        f"{p['name']}: {p.get('type', 'i64')}"
+        for p in spec.get("inputs", spec.get("params", []))
     )
     effects = spec.get("effects", [])
     effects_str = f"    effects: [{', '.join(effects)}]\n" if effects else ""
@@ -233,9 +229,10 @@ def _build_retry_prompt(
 ) -> str:
     """Build an optimal retry prompt from a verification failure.
 
-    Combines the spec, current code, error log, actionable fix hints,
-    structured unsat core, data flow trace, and error diff into a single
-    prompt that gives the LLM maximum context for fixing the issue.
+    The base prompt is built by the prompt module (``generate_atom`` or
+    ``generate_stdlib``), which already includes actionable fix hints,
+    structured unsat core, and data flow trace when ``report`` is non-empty.
+    This function adds only the cross-attempt error diff on top.
     """
     combined_source = (
         f"# Original specification:\n{spec_json}\n\n"
@@ -247,22 +244,11 @@ def _build_retry_prompt(
         combined_source, error_log, report, inferred_context=inferred_context,
     )
 
-    # Enrich with structured error information
+    # Enrich with error diff (cross-attempt context only).
+    # NOTE: actionable fix hints, structured unsat core, and data flow trace
+    # are already appended by each prompt module's build_prompt(), so we only
+    # add the error diff here to avoid duplicate sections.
     extra_sections: list[str] = []
-
-    hint = format_actionable_fix_hint(report)
-    if hint:
-        extra_sections.append(f"# Actionable fix instructions:\n{hint}")
-
-    suc = format_structured_unsat_core(report)
-    if suc:
-        extra_sections.append(
-            f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}"
-        )
-
-    df = format_data_flow(report)
-    if df:
-        extra_sections.append(f"# {df}")
 
     if prev_report:
         diff = format_error_diff(prev_report, report)
