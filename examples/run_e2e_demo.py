@@ -18,9 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from openai import OpenAI
-
-from agent.config import load_config
+from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 from agent.strategies.generate_strategy import generate_code
@@ -42,16 +40,15 @@ def main(spec_path: str | None = None) -> None:
     print()
 
     # Load config
-    config = load_config()
-    client = OpenAI(api_key=config.get("openai_api_key", ""))
-    model = config.get("model", "gpt-4")
+    config = AgentConfig()
+    client = config.create_client()
+    model = config.model
 
     # Optional: MumeiClient for real verification
-    mumei_bin = config.get("mumei_binary_path")
     mumei_client: MumeiClient | None = None
-    if mumei_bin:
-        mumei_client = MumeiClient(mumei_bin)
-        print(f"Using mumei binary: {mumei_bin}")
+    if config.mumei_bin:
+        mumei_client = MumeiClient(config.mumei_bin)
+        print(f"Using mumei binary: {config.mumei_bin}")
     else:
         print("No mumei binary configured — running in generation-only mode")
     print()
@@ -80,7 +77,7 @@ def main(spec_path: str | None = None) -> None:
     print(code)
     print("-" * 40)
     print()
-    print(f"Metrics: {metrics.summary()}")
+    print(f"Metrics: {metrics.to_json()}")
 
 
 if __name__ == "__main__":

@@ -300,6 +300,11 @@ def format_actionable_fix_hint(report: dict) -> str:
                 f"Caller `{caller}` calls `{callee}` which requires effects "
                 f"{missing} that are not declared. Add them to `{caller}`'s effects list."
             )
+        else:
+            lines.append(
+                f"Caller `{caller}` calls `{callee}` but does not propagate all "
+                "required effects. Check that all callee effects are declared in the caller."
+            )
 
     # --- precondition (generic fallback) ---
     elif failure_type == "precondition_violated" or not lines:
