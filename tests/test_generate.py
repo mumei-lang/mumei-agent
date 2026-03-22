@@ -10,6 +10,7 @@ from agent.strategies.generate_strategy import (
     _extract_code,
     _has_effects,
     _select_prompt_module,
+    _build_skeleton,
 )
 
 
@@ -335,3 +336,139 @@ def test_metrics_multiple_violation_types():
     assert len(d["by_violation_type"]) == 2
     assert d["by_violation_type"]["effect_mismatch"]["successes"] == 0
     assert d["by_violation_type"]["precondition_violated"]["successes"] == 1
+
+
+# --- _build_skeleton tests ---
+
+
+def test_build_skeleton_basic():
+    """Test skeleton generation with basic spec."""
+    spec = {
+        "name": "add",
+        "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+    }
+    result = _build_skeleton(spec)
+    assert "atom add(a: i64, b: i64)" in result
+    assert "requires: ___;" in result
+    assert "ensures: ___;" in result
+    assert "body: { ___ }" in result
+    assert "effects:" not in result
+
+
+def test_build_skeleton_with_effects():
+    """Test skeleton generation with effects."""
+    spec = {
+        "name": "read_file",
+        "params": [{"name": "path", "type": "Str"}],
+        "effects": ["FileRead", "Log"],
+    }
+    result = _build_skeleton(spec)
+    assert "atom read_file(path: Str)" in result
+    assert "effects: [FileRead, Log]" in result
+    assert "requires: ___;" in result
+
+
+def test_build_skeleton_no_params():
+    """Test skeleton generation with no params."""
+    spec = {"name": "noop", "params": []}
+    result = _build_skeleton(spec)
+    assert "atom noop()" in result
+
+
+def test_build_skeleton_default_type():
+    """Test skeleton generation uses i64 as default type."""
+    spec = {"name": "inc", "params": [{"name": "x"}]}
+    result = _build_skeleton(spec)
+    assert "atom inc(x: i64)" in result
+
+
+# --- inferred_context prompt tests ---
+
+
+def test_generate_atom_prompt_with_inferred_context():
+    """Test that generate_atom.build_prompt includes inferred context."""
+    spec_json = '{"name": "test"}'
+    ctx = {
+        "effects": {"inferred": ["FileRead"]},
+        "contracts": {"requires": "x > 0"},
+    }
+    result = generate_atom.build_prompt(spec_json, "", {}, inferred_context=ctx)
+    assert "Inferred effects" in result
+    assert "FileRead" in result
+    assert "Inferred contracts" in result
+    assert "x > 0" in result
+
+
+def test_generate_atom_prompt_without_inferred_context():
+    """Test that generate_atom.build_prompt works without inferred context."""
+    spec_json = '{"name": "test"}'
+    result = generate_atom.build_prompt(spec_json, "", {})
+    assert "Inferred effects" not in result
+    assert "Inferred contracts" not in result
+
+
+def test_generate_stdlib_prompt_with_inferred_context():
+    """Test that generate_stdlib.build_prompt includes inferred context."""
+    spec_json = '{"name": "test"}'
+    ctx = {
+        "effects": {"inferred": ["HttpGet"]},
+        "contracts": {"ensures": "result >= 0"},
+    }
+    result = generate_stdlib.build_prompt(spec_json, "", {}, inferred_context=ctx)
+    assert "Inferred effects" in result
+    assert "HttpGet" in result
+    assert "Inferred contracts" in result
+    assert "result >= 0" in result
+
+
+# --- generate_code with inferred_context tests ---
+
+
+def test_generate_code_with_context_file():
+    """Test generate_code calls infer_effects/infer_contracts when context_file is set."""
+    client = _mock_client("```mumei\natom test() body: 1;\n```")
+    mumei = MagicMock()
+    mumei.check.return_value = {"success": True, "stdout": "", "stderr": ""}
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "",
+        "stderr": "",
+    }
+    mumei.infer_effects.return_value = {
+        "success": True,
+        "analysis": {"effects": ["FileRead"]},
+    }
+    mumei.infer_contracts.return_value = {
+        "success": True,
+        "analysis": {"requires": "x > 0"},
+    }
+
+    spec = {"name": "test", "params": [], "context_file": "/tmp/ctx.mm"}
+    result, verified = generate_code(
+        client, "test-model", spec, mumei_client=mumei,
+    )
+    assert verified is True
+    mumei.infer_effects.assert_called_once_with("/tmp/ctx.mm")
+    mumei.infer_contracts.assert_called_once_with("/tmp/ctx.mm")
+
+
+def test_generate_code_without_context_file():
+    """Test generate_code does not call infer methods without context_file."""
+    client = _mock_client("```mumei\natom test() body: 1;\n```")
+    mumei = MagicMock()
+    mumei.check.return_value = {"success": True, "stdout": "", "stderr": ""}
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "",
+        "stderr": "",
+    }
+
+    spec = {"name": "test", "params": []}
+    result, verified = generate_code(
+        client, "test-model", spec, mumei_client=mumei,
+    )
+    assert verified is True
+    mumei.infer_effects.assert_not_called()
+    mumei.infer_contracts.assert_not_called()

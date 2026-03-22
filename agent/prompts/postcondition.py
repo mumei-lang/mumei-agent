@@ -2,6 +2,7 @@
 from agent.prompts.report_formatter import (
     format_counterexample,
     format_violated_constraints,
+    format_structured_unsat_core,
     format_span,
     format_suggestion,
 )
@@ -36,6 +37,10 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
     sug = format_suggestion(report_data)
     if sug:
         sections.append(f"# {sug}")
+
+    suc = format_structured_unsat_core(report_data)
+    if suc:
+        sections.append(f"# Structured Unsat Core (conflicting constraints identified by Z3):\n{suc}")
 
     sections.append(
         "# Fix guidance:\n"
