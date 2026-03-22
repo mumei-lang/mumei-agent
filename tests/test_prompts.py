@@ -17,6 +17,8 @@ from agent.prompts.report_formatter import (
     format_suggestion,
     format_span,
     format_data_flow,
+    format_actionable_fix_hint,
+    format_for_initial_generate,
 )
 from agent.prompts.examples.formatter import format_examples
 
@@ -503,3 +505,172 @@ def test_division_by_zero_prompt_with_structured_unsat_core():
     result = division_by_zero.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
     assert "Structured Unsat Core" in result
     assert "[requires]" in result
+
+
+# --- format_actionable_fix_hint tests ---
+
+def test_actionable_fix_hint_division_by_zero():
+    report = {
+        "failure_type": "division_by_zero",
+        "semantic_feedback": {
+            "counter_example": {"dividend": "10", "divisor": "0"},
+        },
+    }
+    result = format_actionable_fix_hint(report)
+    assert "divisor" in result
+    assert "zero" in result
+    assert "requires" in result
+
+
+def test_actionable_fix_hint_linearity_violated():
+    report = {
+        "failure_type": "linearity_violated",
+        "semantic_feedback": {
+            "violations": [
+                {"description": "Variable 'x' used after move"},
+            ],
+        },
+    }
+    result = format_actionable_fix_hint(report)
+    assert "Variable 'x' used after move" in result
+    assert "clone" in result.lower() or "restructure" in result.lower()
+
+
+def test_actionable_fix_hint_invariant_violated():
+    report = {
+        "failure_type": "invariant_violated",
+        "semantic_feedback": {
+            "conflicting_constraints": ["x > 10", "x < 5"],
+        },
+    }
+    result = format_actionable_fix_hint(report)
+    assert "`x > 10`" in result
+    assert "`x < 5`" in result
+    assert "contradictory" in result
+
+
+def test_actionable_fix_hint_postcondition_violated():
+    report = {
+        "failure_type": "postcondition_violated",
+        "counterexample": {"x": "0"},
+    }
+    result = format_actionable_fix_hint(report)
+    assert "ensures" in result.lower()
+    assert "x=0" in result
+
+
+def test_actionable_fix_hint_temporal_effect():
+    report = {"failure_type": "temporal_effect_violated"}
+    result = format_actionable_fix_hint(report)
+    assert "state" in result.lower()
+    assert "order" in result.lower()
+
+
+def test_actionable_fix_hint_effect_mismatch():
+    report = {
+        "violation_type": "effect_mismatch",
+        "effect_violation": {
+            "declared_effects": ["Log"],
+            "required_effect": "FileWrite",
+        },
+    }
+    result = format_actionable_fix_hint(report)
+    assert "FileWrite" in result
+    assert "declared" in result.lower()
+
+
+def test_actionable_fix_hint_effect_propagation():
+    report = {
+        "violation_type": "effect_propagation",
+        "effect_violation": {
+            "caller": "main_handler",
+            "callee": "write_log",
+            "missing_effects": ["FileWrite"],
+        },
+    }
+    result = format_actionable_fix_hint(report)
+    assert "main_handler" in result
+    assert "FileWrite" in result
+
+
+def test_actionable_fix_hint_fallback():
+    report = {}
+    result = format_actionable_fix_hint(report)
+    assert len(result) > 0  # should produce some output even with empty report
+
+
+def test_actionable_fix_hint_with_suggestion():
+    report = {"suggestion": "Add requires: b != 0"}
+    result = format_actionable_fix_hint(report)
+    assert "b != 0" in result
+
+
+# --- format_for_initial_generate tests ---
+
+def test_format_for_initial_generate_basic():
+    spec = {
+        "name": "fetch_data",
+        "constraints": {"requires": "len(url) > 0", "ensures": "len(result) >= 0"},
+        "effects": ["SecureHttpGet"],
+        "inputs": [{"name": "url", "type": "String"}],
+    }
+    result = format_for_initial_generate(spec)
+    assert "len(url) > 0" in result
+    assert "len(result) >= 0" in result
+    assert "SecureHttpGet" in result
+    assert "url" in result
+    assert "String" in result
+    assert "requires" in result
+    assert "ensures" in result
+
+
+def test_format_for_initial_generate_no_constraints():
+    spec = {"name": "simple_add", "params": [{"name": "a", "type": "i64"}]}
+    result = format_for_initial_generate(spec)
+    assert "Param `a`" in result
+    assert "requires" in result  # general checklist item
+
+
+# --- generate_atom prompt enhancement tests ---
+
+def test_generate_atom_prompt_contains_common_mistakes():
+    from agent.prompts import generate_atom
+    result = generate_atom.build_prompt("{}", "", {})
+    assert "Common mistakes" in result
+    assert "Division by zero" in result
+    assert "Linearity" in result
+
+
+def test_generate_atom_prompt_includes_actionable_hints_on_retry():
+    from agent.prompts import generate_atom
+    report = {
+        "failure_type": "division_by_zero",
+        "semantic_feedback": {"counter_example": {"dividend": "1", "divisor": "0"}},
+    }
+    result = generate_atom.build_prompt("spec", "error", report)
+    assert "Actionable fix instructions" in result
+
+
+# --- division_by_zero and invariant examples tests ---
+
+def test_division_by_zero_uses_own_examples():
+    report = {
+        "failure_type": "division_by_zero",
+        "semantic_feedback": {"counter_example": {"dividend": "1", "divisor": "0"}},
+    }
+    result = division_by_zero.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "# Example fix" in result
+    assert "average" in result or "safe_divide" in result
+
+
+def test_invariant_uses_own_examples():
+    report = {
+        "failure_type": "invariant_violated",
+        "semantic_feedback": {
+            "conflicting_constraints": ["x > 10", "x < 5"],
+            "raw_unsat_core": ["(> x 10)", "(< x 5)"],
+        },
+    }
+    result = invariant.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "# Example fix" in result
+    assert "check_range" in result or "bounded_increment" in result

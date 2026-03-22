@@ -11,6 +11,12 @@ from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
+from agent.prompts.report_formatter import (
+    format_actionable_fix_hint,
+    format_structured_unsat_core,
+    format_data_flow,
+    format_error_diff,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -136,6 +142,7 @@ def generate_code(
     # Stage 2+3: Check, verify, and fix loop
     current_code = generated_code
     last_violation_type = "generation"
+    prev_report: dict | None = None
     for attempt in range(config_max_retries):
         tmp_path = None
         try:
@@ -159,6 +166,7 @@ def generate_code(
                 current_code = _attempt_fix(
                     client, model, spec_json, current_code, error_log, {},
                     prompt_module, metrics, inferred_context=inferred_context,
+                    prev_report=prev_report,
                 )
                 continue
 
@@ -180,7 +188,9 @@ def generate_code(
             current_code = _attempt_fix(
                 client, model, spec_json, current_code, error_log, report,
                 prompt_module, metrics, inferred_context=inferred_context,
+                prev_report=prev_report,
             )
+            prev_report = report
 
         finally:
             try:
@@ -212,6 +222,58 @@ def generate_code(
     return current_code, verified
 
 
+def _build_retry_prompt(
+    spec_json: str,
+    current_code: str,
+    error_log: str,
+    report: dict,
+    prompt_module,
+    inferred_context: dict | None = None,
+    prev_report: dict | None = None,
+) -> str:
+    """Build an optimal retry prompt from a verification failure.
+
+    Combines the spec, current code, error log, actionable fix hints,
+    structured unsat core, data flow trace, and error diff into a single
+    prompt that gives the LLM maximum context for fixing the issue.
+    """
+    combined_source = (
+        f"# Original specification:\n{spec_json}\n\n"
+        f"# Current generated code (needs fixing):\n{current_code}"
+    )
+
+    # Start with the base prompt from the appropriate module
+    base_prompt = prompt_module.build_prompt(
+        combined_source, error_log, report, inferred_context=inferred_context,
+    )
+
+    # Enrich with structured error information
+    extra_sections: list[str] = []
+
+    hint = format_actionable_fix_hint(report)
+    if hint:
+        extra_sections.append(f"# Actionable fix instructions:\n{hint}")
+
+    suc = format_structured_unsat_core(report)
+    if suc:
+        extra_sections.append(
+            f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}"
+        )
+
+    df = format_data_flow(report)
+    if df:
+        extra_sections.append(f"# {df}")
+
+    if prev_report:
+        diff = format_error_diff(prev_report, report)
+        if diff:
+            extra_sections.append(f"# Error diff from previous attempt:\n{diff}")
+
+    if extra_sections:
+        return base_prompt + "\n\n" + "\n\n".join(extra_sections)
+    return base_prompt
+
+
 def _attempt_fix(
     client: OpenAI,
     model: str,
@@ -222,15 +284,13 @@ def _attempt_fix(
     prompt_module,
     metrics: Metrics,
     inferred_context: dict | None = None,
+    prev_report: dict | None = None,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
-    # Include both the spec and the current (broken) code so the LLM
-    # can see what it generated and what went wrong.
-    combined_source = (
-        f"# Original specification:\n{spec_json}\n\n"
-        f"# Current generated code (needs fixing):\n{current_code}"
+    fix_prompt = _build_retry_prompt(
+        spec_json, current_code, error_log, report, prompt_module,
+        inferred_context=inferred_context, prev_report=prev_report,
     )
-    fix_prompt = prompt_module.build_prompt(combined_source, error_log, report, inferred_context=inferred_context)
 
     fix_response = client.chat.completions.create(
         model=model,

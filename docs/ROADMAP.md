@@ -12,31 +12,23 @@
 
 ---
 
-## P1-A: Generate Mode の強化 (最高優先度)
+## P1-A: Generate Mode の強化 (最高優先度) ✅ Complete
 
-現在の `generate_code` は基本的なコード生成のみ。以下を追加:
-
-- **仕様からの atom 生成**: 自然言語で `requires`/`ensures` を記述 → LLMが `atom` を生成 → `mumei verify --json` で検証 → 失敗時は self-healing ループへ
-- **`mumei infer-contracts`/`mumei infer-effects` との統合**: 生成前にエフェクト推論を実行し、LLMプロンプトに注入
-- **テンプレートベースの生成**: `atom` のスケルトン（requires/ensures/body）をLLMに埋めさせる形式で、hallucination を抑制
-
-### 対象ファイル
-- `agent/strategies/` — 新規 generate strategy
-- `agent/prompts/` — generate 用プロンプトテンプレート
-- `agent/self_healing.py` — generate → verify → fix ループの統合
+- ✅ 仕様からの atom 生成: spec JSON → generate_code() → mumei verify → self-healing loop
+- ✅ `mumei infer-contracts`/`mumei infer-effects` 統合済み
+- ✅ テンプレートベースの生成: skeleton + fill-in-the-blanks 形式
+- ✅ Common mistakes checklist injected into all generation prompts
+- ✅ Pre-generation checklist extracted from spec constraints
 
 ---
 
-## P1-B: structured_unsat_core の活用 (最高優先度)
+## P1-B: structured_unsat_core の活用 (最高優先度) ✅ Complete
 
-mumei側で追加された `structured_unsat_core`（mumei PR #97）をagent側で消費する:
-
-- `report.json` の `structured_unsat_core` フィールドをパースし、LLMプロンプトに「どの制約が矛盾しているか」を具体的に伝える
-- 現在のプロンプトテンプレート群（`agent/prompts/`）を拡張し、unsat core 情報を活用
-
-### 対象ファイル
-- `agent/strategies/fix_strategy.py` — unsat core パース追加
-- `agent/prompts/` — unsat core 情報を含むプロンプトテンプレート
+- ✅ `structured_unsat_core` parsed and formatted in `report_formatter.py`
+- ✅ All prompt templates (`precondition`, `postcondition`, `invariant`, `division_by_zero`) include structured unsat core
+- ✅ `format_actionable_fix_hint()` translates failures into concrete instructions
+- ✅ `format_for_initial_generate()` extracts spec constraints as pre-warnings
+- ✅ `_build_retry_prompt()` combines actionable hints + unsat core + data flow + error diff
 
 ---
 
@@ -53,7 +45,7 @@ mumei側で追加された `structured_unsat_core`（mumei PR #97）をagent側�
 
 ---
 
-## P3-B: 「仕様 → 検証済みAPIクライアント」E2Eデモ (中優先度)
+## P3-B: 「仕様 → 検証済みAPIクライアント」E2Eデモ (中優先度) 🚧 Foundation Ready
 
 mumeiの思想の究極的な体現:
 
@@ -64,8 +56,12 @@ mumeiの思想の究極的な体現:
 5. 検証通過後、Rust/Go/TypeScript にトランスパイル
 
 ### 前提条件
-- P1-A (Generate Mode 強化) 完了
-- mumei 側の P2-A (Cross-atom composition) 完了
+- ✅ P1-A (Generate Mode 強化) 完了
+- ✅ mumei 側の P2-A (Cross-atom composition) 完了
+
+### 実装済み
+- ✅ `examples/e2e_demo_spec.json` — デモ仕様ファイル (fetch_github_user)
+- ✅ `examples/run_e2e_demo.py` — デモ実行スクリプト (spec → generate → verify → report)
 
 ---
 
