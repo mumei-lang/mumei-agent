@@ -372,6 +372,8 @@ def format_for_initial_generate(spec: dict) -> str:
     lines: list[str] = ["# Pre-generation checklist from spec:"]
 
     constraints = spec.get("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
     requires = constraints.get("requires", "")
     ensures = constraints.get("ensures", "")
     if requires:

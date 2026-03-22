@@ -66,10 +66,12 @@ def main(spec_path: str | None = None) -> None:
 
     # Report
     print("=" * 60)
-    if verified:
+    if mumei_client is None:
+        print("RESULT: GENERATED (no verifier — verification skipped)")
+    elif verified:
         print("RESULT: VERIFIED")
     else:
-        print("RESULT: NOT VERIFIED (generation-only or failed verification)")
+        print("RESULT: NOT VERIFIED (failed verification)")
     print("=" * 60)
     print()
     print("Generated code:")
