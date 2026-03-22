@@ -101,10 +101,12 @@ def main() -> None:
         type=str,
         default=None,
         metavar="OUTPUT_FILE",
-        help="Output file for generated code (used with --generate). "
-             "Defaults to the source_file argument.",
+        help="Output file for generated code (required with --generate).",
     )
     args = parser.parse_args()
+
+    if args.generate is not None and args.output is None:
+        parser.error("--output is required when using --generate")
 
     config = AgentConfig()
     if args.strategy is not None:
@@ -119,7 +121,7 @@ def main() -> None:
     if args.generate is not None:
         _run_generate_mode(
             client, config.model, args.generate,
-            output_file=args.output or source_file,
+            output_file=args.output,
             max_retries=max_retries,
             mumei_client=mumei,
         )
