@@ -158,7 +158,7 @@ def generate_code(
                 error_log = check_result["stdout"] + check_result["stderr"]
                 current_code = _attempt_fix(
                     client, model, spec_json, current_code, error_log, {},
-                    prompt_module, metrics,
+                    prompt_module, metrics, inferred_context=inferred_context,
                 )
                 continue
 
@@ -179,7 +179,7 @@ def generate_code(
 
             current_code = _attempt_fix(
                 client, model, spec_json, current_code, error_log, report,
-                prompt_module, metrics,
+                prompt_module, metrics, inferred_context=inferred_context,
             )
 
         finally:
@@ -221,6 +221,7 @@ def _attempt_fix(
     report: dict,
     prompt_module,
     metrics: Metrics,
+    inferred_context: dict | None = None,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
     # Include both the spec and the current (broken) code so the LLM
@@ -229,7 +230,7 @@ def _attempt_fix(
         f"# Original specification:\n{spec_json}\n\n"
         f"# Current generated code (needs fixing):\n{current_code}"
     )
-    fix_prompt = prompt_module.build_prompt(combined_source, error_log, report)
+    fix_prompt = prompt_module.build_prompt(combined_source, error_log, report, inferred_context=inferred_context)
 
     fix_response = client.chat.completions.create(
         model=model,
