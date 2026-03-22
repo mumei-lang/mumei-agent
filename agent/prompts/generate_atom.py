@@ -1,6 +1,32 @@
 """Prompt template for generic atom generation from a spec JSON."""
 import json
 
+from agent.prompts.report_formatter import (
+    format_actionable_fix_hint,
+    format_for_initial_generate,
+    format_structured_unsat_core,
+    format_data_flow,
+)
+
+# Common mistakes checklist injected into all generation prompts.
+# Shared with generate_stdlib via import.
+COMMON_MISTAKES = (
+    "# Common mistakes to avoid:\n"
+    "1. **Division by zero**: If dividing, add `requires: divisor != 0`\n"
+    "2. **Linearity**: If a parameter is `linear`, it can only be used once. "
+    "Clone before reuse.\n"
+    "3. **Temporal effects**: Effect operations must follow the state machine "
+    "(e.g., File: open -> read/write -> close)\n"
+    "4. **Postcondition mismatch**: Ensure the body's return value satisfies "
+    "the `ensures` clause for ALL inputs satisfying `requires`\n"
+    "5. **Missing effects**: Every `perform` call requires the effect to be "
+    "listed in the `effects:` clause\n"
+    "6. **Effect propagation**: If you call another atom with effects, your "
+    "atom must declare those effects too\n"
+    "7. **Consumed params**: Parameters listed in `consumed_params` are linear "
+    "and must not be used after being passed to a consuming operation"
+)
+
 
 def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferred_context: dict | None = None) -> str:
     """Build a prompt for generating a Mumei atom from a specification.
@@ -34,6 +60,18 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
         "- The body expression's result is the atom's return value"
     )
 
+    sections.append(COMMON_MISTAKES)
+
+    # Pre-generation checklist if spec is parseable as JSON
+    try:
+        spec_dict = json.loads(source_code) if isinstance(source_code, str) else source_code
+        if isinstance(spec_dict, dict):
+            checklist = format_for_initial_generate(spec_dict)
+            if checklist:
+                sections.append(checklist)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
     sections.append(f"# Specification:\n{source_code}")
 
     if error_log:
@@ -42,6 +80,22 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
         )
 
     if report_data:
+        # Actionable fix hint (human-readable)
+        hint = format_actionable_fix_hint(report_data)
+        if hint:
+            sections.append(f"# Actionable fix instructions:\n{hint}")
+
+        # Structured unsat core
+        suc = format_structured_unsat_core(report_data)
+        if suc:
+            sections.append(f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}")
+
+        # Data flow trace
+        df = format_data_flow(report_data)
+        if df:
+            sections.append(f"# {df}")
+
+        # Full report as fallback context
         sections.append(
             f"# Verification report from previous attempt:\n"
             f"{json.dumps(report_data, indent=2, ensure_ascii=False)}"

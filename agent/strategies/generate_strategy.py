@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
+from agent.prompts.report_formatter import format_error_diff
 
 _logger = logging.getLogger(__name__)
 
@@ -41,8 +42,12 @@ def _select_prompt_module(spec: dict):
 def _build_skeleton(spec: dict) -> str:
     """Build an atom skeleton from a spec for the LLM to fill in."""
     name = spec.get("name", "unnamed")
+    raw_params = spec.get("inputs", spec.get("params", []))
+    if not isinstance(raw_params, list):
+        raw_params = []
     params = ", ".join(
-        f"{p['name']}: {p.get('type', 'i64')}" for p in spec.get("params", [])
+        f"{p['name']}: {p.get('type', 'i64')}"
+        for p in raw_params
     )
     effects = spec.get("effects", [])
     effects_str = f"    effects: [{', '.join(effects)}]\n" if effects else ""
@@ -136,6 +141,7 @@ def generate_code(
     # Stage 2+3: Check, verify, and fix loop
     current_code = generated_code
     last_violation_type = "generation"
+    prev_report: dict | None = None
     for attempt in range(config_max_retries):
         tmp_path = None
         try:
@@ -159,6 +165,7 @@ def generate_code(
                 current_code = _attempt_fix(
                     client, model, spec_json, current_code, error_log, {},
                     prompt_module, metrics, inferred_context=inferred_context,
+                    prev_report=prev_report,
                 )
                 continue
 
@@ -180,7 +187,9 @@ def generate_code(
             current_code = _attempt_fix(
                 client, model, spec_json, current_code, error_log, report,
                 prompt_module, metrics, inferred_context=inferred_context,
+                prev_report=prev_report,
             )
+            prev_report = report
 
         finally:
             try:
@@ -212,6 +221,48 @@ def generate_code(
     return current_code, verified
 
 
+def _build_retry_prompt(
+    spec_json: str,
+    current_code: str,
+    error_log: str,
+    report: dict,
+    prompt_module,
+    inferred_context: dict | None = None,
+    prev_report: dict | None = None,
+) -> str:
+    """Build an optimal retry prompt from a verification failure.
+
+    The base prompt is built by the prompt module (``generate_atom`` or
+    ``generate_stdlib``), which already includes actionable fix hints,
+    structured unsat core, and data flow trace when ``report`` is non-empty.
+    This function adds only the cross-attempt error diff on top.
+    """
+    combined_source = (
+        f"# Original specification:\n{spec_json}\n\n"
+        f"# Current generated code (needs fixing):\n{current_code}"
+    )
+
+    # Start with the base prompt from the appropriate module
+    base_prompt = prompt_module.build_prompt(
+        combined_source, error_log, report, inferred_context=inferred_context,
+    )
+
+    # Enrich with error diff (cross-attempt context only).
+    # NOTE: actionable fix hints, structured unsat core, and data flow trace
+    # are already appended by each prompt module's build_prompt(), so we only
+    # add the error diff here to avoid duplicate sections.
+    extra_sections: list[str] = []
+
+    if prev_report:
+        diff = format_error_diff(prev_report, report)
+        if diff:
+            extra_sections.append(f"# Error diff from previous attempt:\n{diff}")
+
+    if extra_sections:
+        return base_prompt + "\n\n" + "\n\n".join(extra_sections)
+    return base_prompt
+
+
 def _attempt_fix(
     client: OpenAI,
     model: str,
@@ -222,15 +273,13 @@ def _attempt_fix(
     prompt_module,
     metrics: Metrics,
     inferred_context: dict | None = None,
+    prev_report: dict | None = None,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
-    # Include both the spec and the current (broken) code so the LLM
-    # can see what it generated and what went wrong.
-    combined_source = (
-        f"# Original specification:\n{spec_json}\n\n"
-        f"# Current generated code (needs fixing):\n{current_code}"
+    fix_prompt = _build_retry_prompt(
+        spec_json, current_code, error_log, report, prompt_module,
+        inferred_context=inferred_context, prev_report=prev_report,
     )
-    fix_prompt = prompt_module.build_prompt(combined_source, error_log, report, inferred_context=inferred_context)
 
     fix_response = client.chat.completions.create(
         model=model,

@@ -15,6 +15,7 @@ from agent.prompts import (
     temporal_effect,
 )
 from agent.strategies.retry_history import RetryHistory
+from agent.prompts.report_formatter import format_actionable_fix_hint
 
 # Mapping from failure_type to prompt module
 _FAILURE_TYPE_MAP = {
@@ -81,6 +82,11 @@ def get_fix(
         )
 
     prompt = _build_prompt_for_report(source_code, error_log, report_data)
+
+    # Enrich with actionable fix hint
+    hint = format_actionable_fix_hint(report_data)
+    if hint:
+        prompt += f"\n\n# Actionable fix instructions:\n{hint}"
 
     response = client.chat.completions.create(
         model=model,

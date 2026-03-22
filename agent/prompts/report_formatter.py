@@ -201,6 +201,206 @@ def format_structured_unsat_core(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _safe_sf(report: dict) -> dict:
+    """Return ``semantic_feedback`` as a dict, defaulting to ``{}`` on null/missing."""
+    sf = report.get("semantic_feedback")
+    if not sf or not isinstance(sf, dict):
+        return {}
+    return sf
+
+
+def _safe_dict(report: dict, key: str) -> dict:
+    """Return *key* from *report* as a dict, defaulting to ``{}`` on null/missing."""
+    val = report.get(key)
+    if not val or not isinstance(val, dict):
+        return {}
+    return val
+
+
+def format_actionable_fix_hint(report: dict) -> str:
+    """Translate a structured verification failure into concrete fix instructions.
+
+    Produces one or more actionable sentences telling the LLM exactly what to
+    change and why, derived from the report's failure_type, violation_type,
+    semantic_feedback, and counterexample fields.
+    """
+    lines: list[str] = []
+    failure_type = report.get("failure_type", "")
+    violation_type = report.get("violation_type", "")
+
+    # --- division_by_zero ---
+    if failure_type == "division_by_zero":
+        sf = _safe_sf(report)
+        ce = sf.get("counter_example") or {}
+        if not isinstance(ce, dict):
+            ce = {}
+        divisor = ce.get("divisor", "the divisor")
+        lines.append(
+            f"The divisor `{divisor}` can be zero. "
+            "Add `requires: <divisor_param> != 0` to the atom's precondition."
+        )
+
+    # --- linearity_violated ---
+    elif failure_type == "linearity_violated":
+        sf = _safe_sf(report)
+        violations = sf.get("violations") or []
+        if not isinstance(violations, list):
+            violations = []
+        for v in violations:
+            desc = v.get("description", str(v)) if isinstance(v, dict) else str(v)
+            lines.append(
+                f"Linear resource violation: {desc}. "
+                "Either clone the resource before the second use, or restructure "
+                "the code so each linear value is consumed exactly once."
+            )
+        if not violations:
+            lines.append(
+                "A linear resource is used more than once. "
+                "Clone before the second use or restructure to consume each value once."
+            )
+
+    # --- invariant_violated ---
+    elif failure_type == "invariant_violated":
+        sf = _safe_sf(report)
+        cc = sf.get("conflicting_constraints") or []
+        if not isinstance(cc, list):
+            cc = []
+        if cc:
+            constraints_str = ", ".join(f"`{c}`" for c in cc[:4])
+            lines.append(
+                f"The constraints {constraints_str} are contradictory. "
+                "Relax one or more constraints so they can be simultaneously satisfied."
+            )
+        else:
+            lines.append(
+                "The constraints are contradictory — the verifier found an unsatisfiable core. "
+                "Relax one or more of the conflicting constraints."
+            )
+
+    # --- postcondition_violated ---
+    elif failure_type == "postcondition_violated":
+        ce = _safe_dict(report, "counterexample")
+        if ce:
+            ce_str = ", ".join(f"{k}={v}" for k, v in ce.items())
+            lines.append(
+                f"The `ensures` clause is not satisfied for inputs: {ce_str}. "
+                "Fix the body to satisfy `ensures`, or adjust `ensures` to match actual behaviour."
+            )
+        else:
+            lines.append(
+                "The `ensures` clause is not satisfied by the function body's return value. "
+                "Fix the body or adjust `ensures`."
+            )
+
+    # --- temporal_effect_violated ---
+    elif failure_type == "temporal_effect_violated":
+        lines.append(
+            "The effect state transitions are in the wrong order. "
+            "Reorder `perform` calls to follow the correct state machine "
+            "(e.g., File: open -> write/read -> close)."
+        )
+
+    # --- effect_mismatch ---
+    elif violation_type == "effect_mismatch":
+        ev = _safe_dict(report, "effect_violation")
+        required = ev.get("required_effect", "?")
+        declared = ev.get("declared_effects", [])
+        lines.append(
+            f"Effect `{required}` is used in the body but not declared in "
+            f"the effects list (currently: {declared}). "
+            f"Add `{required}` to the effects list."
+        )
+
+    # --- effect_propagation ---
+    elif violation_type == "effect_propagation":
+        ev = _safe_dict(report, "effect_violation")
+        missing = ev.get("missing_effects", [])
+        caller = ev.get("caller", "the caller")
+        callee = ev.get("callee", "the callee")
+        if missing:
+            lines.append(
+                f"Caller `{caller}` calls `{callee}` which requires effects "
+                f"{missing} that are not declared. Add them to `{caller}`'s effects list."
+            )
+        else:
+            lines.append(
+                f"Caller `{caller}` calls `{callee}` but does not propagate all "
+                "required effects. Check that all callee effects are declared in the caller."
+            )
+
+    # --- precondition (generic fallback) ---
+    elif failure_type == "precondition_violated" or not lines:
+        sf = _safe_sf(report)
+        vc = sf.get("violated_constraints") or []
+        if not isinstance(vc, list):
+            vc = []
+        for c in vc[:3]:
+            param = c.get("param", "?") if isinstance(c, dict) else "?"
+            constraint = c.get("constraint", "?") if isinstance(c, dict) else "?"
+            lines.append(
+                f"The requires clause `{constraint}` was not satisfied for param `{param}`. "
+                "Ensure the caller provides a value that meets this constraint."
+            )
+
+    # --- structured_unsat_core enrichment ---
+    sf = _safe_sf(report)
+    suc = sf.get("structured_unsat_core") or []
+    if not isinstance(suc, list):
+        suc = []
+    if suc and not lines:
+        for entry in suc[:3]:
+            desc = entry.get("description", "") if isinstance(entry, dict) else ""
+            if desc:
+                lines.append(f"Constraint conflict: {desc}")
+
+    if not lines:
+        sug = report.get("suggestion", "")
+        if sug:
+            lines.append(f"Verifier suggestion: {sug}")
+        else:
+            lines.append("Verification failed. Review the error log and fix the code.")
+
+    return "\n".join(lines)
+
+
+def format_for_initial_generate(spec: dict) -> str:
+    """Extract relevant constraints from a spec to pre-warn the LLM.
+
+    Produces a checklist of things the LLM should keep in mind when generating
+    code from the specification.
+    """
+    lines: list[str] = ["# Pre-generation checklist from spec:"]
+
+    constraints = spec.get("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+    requires = constraints.get("requires", "")
+    ensures = constraints.get("ensures", "")
+    if requires:
+        lines.append(f"- The `requires` clause must be: `{requires}`")
+    if ensures:
+        lines.append(f"- The `ensures` clause must be: `{ensures}`")
+
+    effects = spec.get("effects", [])
+    if effects:
+        lines.append(f"- Declared effects: {effects}")
+        lines.append("- Use `perform <Effect>.<operation>(args)` for each side effect")
+
+    inputs = spec.get("inputs", spec.get("params", []))
+    if not isinstance(inputs, list):
+        inputs = []
+    for inp in inputs:
+        name = inp.get("name", "?")
+        typ = inp.get("type", "i64")
+        lines.append(f"- Param `{name}`: type `{typ}`")
+
+    lines.append("- Every atom MUST have requires, ensures, and body clauses")
+    lines.append("- The body must satisfy the ensures clause for all inputs satisfying requires")
+    lines.append("- Do NOT use effects that are not declared in the effects list")
+
+    return "\n".join(lines)
+
+
 def format_data_flow(report: dict) -> str:
     """Format semantic_feedback.data_flow trace."""
     sf = report.get("semantic_feedback")
