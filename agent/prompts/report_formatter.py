@@ -387,6 +387,8 @@ def format_for_initial_generate(spec: dict) -> str:
         lines.append("- Use `perform <Effect>.<operation>(args)` for each side effect")
 
     inputs = spec.get("inputs", spec.get("params", []))
+    if not isinstance(inputs, list):
+        inputs = []
     for inp in inputs:
         name = inp.get("name", "?")
         typ = inp.get("type", "i64")

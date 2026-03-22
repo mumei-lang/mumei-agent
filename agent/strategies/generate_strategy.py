@@ -42,9 +42,12 @@ def _select_prompt_module(spec: dict):
 def _build_skeleton(spec: dict) -> str:
     """Build an atom skeleton from a spec for the LLM to fill in."""
     name = spec.get("name", "unnamed")
+    raw_params = spec.get("inputs", spec.get("params", []))
+    if not isinstance(raw_params, list):
+        raw_params = []
     params = ", ".join(
         f"{p['name']}: {p.get('type', 'i64')}"
-        for p in spec.get("inputs", spec.get("params", []))
+        for p in raw_params
     )
     effects = spec.get("effects", [])
     effects_str = f"    effects: [{', '.join(effects)}]\n" if effects else ""
