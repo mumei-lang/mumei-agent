@@ -41,6 +41,12 @@ agent/strategies/generate_strategy.py
   |  5. Repeat up to max_retries
   |
 output.mm (generated Mumei code, exit 0 if verified)
+  |
+mumei build output.mm --emit <target>
+  Emitter Plugin Architecture により複数ターゲットへ出力可能:
+    --emit llvm-ir   → LLVM IR (default, native binary)
+    --emit c-header  → C header (.h) for FFI interop
+  See: mumei docs/CROSS_PROJECT_ROADMAP.md "Emitter Plugin Architecture"
 ```
 
 ## Relationship with MCP Server / Other AI Agents
