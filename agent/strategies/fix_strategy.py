@@ -15,7 +15,10 @@ from agent.prompts import (
     temporal_effect,
 )
 from agent.strategies.retry_history import RetryHistory
-from agent.prompts.report_formatter import format_actionable_fix_hint
+from agent.prompts.report_formatter import (
+    format_actionable_fix_hint,
+    format_structured_unsat_core,
+)
 
 # Mapping from failure_type to prompt module
 _FAILURE_TYPE_MAP = {
@@ -82,6 +85,15 @@ def get_fix(
         )
 
     prompt = _build_prompt_for_report(source_code, error_log, report_data)
+
+    # Enrich with structured unsat core (P1-B)
+    suc = format_structured_unsat_core(report_data)
+    if suc:
+        prompt += (
+            "\n\n# Structured Unsat Core (conflicting constraints from Z3):\n"
+            "The following constraints were found to be unsatisfiable together:\n"
+            f"{suc}"
+        )
 
     # Enrich with actionable fix hint
     hint = format_actionable_fix_hint(report_data)

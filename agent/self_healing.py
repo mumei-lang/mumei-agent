@@ -15,7 +15,9 @@ from pathlib import Path
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient
 from agent.strategies.fix_strategy import get_fix
+from agent.strategies.generate_strategy import generate_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
+from agent.metrics import Metrics
 
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
@@ -86,6 +88,22 @@ def main() -> None:
         help="Fix strategy: 'single' (one-shot) or 'multi-stage' (diagnose→fix→validate). "
              "Default: from AGENT_STRATEGY env var or 'single'.",
     )
+    parser.add_argument(
+        "--generate",
+        type=str,
+        default=None,
+        metavar="SPEC_JSON",
+        help="Generate mode: path to a JSON spec file describing the atom to generate. "
+             "Runs generate → verify → fix loop instead of the normal heal loop.",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        metavar="OUTPUT_FILE",
+        help="Output file for generated code (used with --generate). "
+             "Defaults to the source_file argument.",
+    )
     args = parser.parse_args()
 
     config = AgentConfig()
@@ -96,6 +114,16 @@ def main() -> None:
 
     source_file = args.source_file
     max_retries = args.max_retries if args.max_retries is not None else config.max_retries
+
+    # --- Generate mode (P1-A): generate → verify → fix loop ---
+    if args.generate is not None:
+        _run_generate_mode(
+            client, config.model, args.generate,
+            output_file=args.output or source_file,
+            max_retries=max_retries,
+            mumei_client=mumei,
+        )
+        return
 
     print("Mumei Self-Healing Loop Start...")
 
@@ -185,6 +213,48 @@ def main() -> None:
             shutil.copy2(backup_file, source_file)
             print(f"Healing failed. Original source restored from {backup_file}")
             sys.exit(1)
+
+
+def _run_generate_mode(
+    client,
+    model: str,
+    spec_path: str,
+    output_file: str,
+    max_retries: int,
+    mumei_client,
+) -> None:
+    """Run the generate → verify → fix loop (P1-A).
+
+    Reads a JSON specification file, generates Mumei code from it,
+    then verifies and iteratively fixes the generated code.
+    """
+    print("Mumei Generate Mode Start...")
+
+    spec_data = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    metrics = Metrics()
+
+    code, verified = generate_code(
+        client,
+        model,
+        spec_data,
+        config_max_retries=max_retries,
+        mumei_client=mumei_client,
+        metrics=metrics,
+    )
+
+    if not code:
+        print("Error: Generation produced no code.")
+        sys.exit(1)
+
+    Path(output_file).write_text(code, encoding="utf-8")
+
+    if verified:
+        print(f"Success! Generated and verified code written to {output_file}")
+        print(f"Metrics: {metrics.to_json()}")
+    else:
+        print(f"Warning: Generated code written to {output_file} but verification failed.")
+        print(f"Metrics: {metrics.to_json()}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
