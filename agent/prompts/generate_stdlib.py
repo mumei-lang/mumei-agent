@@ -7,6 +7,7 @@ import json
 
 from agent.prompts.report_formatter import (
     format_actionable_fix_hint,
+    format_for_initial_generate,
     format_structured_unsat_core,
     format_data_flow,
 )
@@ -68,6 +69,16 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
         "implementing the atom described below. Follow the standard library patterns "
         "shown in the examples."
     )
+
+    # Pre-generation checklist if spec is parseable as JSON
+    try:
+        spec_dict = json.loads(source_code) if isinstance(source_code, str) else source_code
+        if isinstance(spec_dict, dict):
+            checklist = format_for_initial_generate(spec_dict)
+            if checklist:
+                sections.append(checklist)
+    except (json.JSONDecodeError, TypeError):
+        pass
 
     sections.append(f"# Specification:\n{source_code}")
 

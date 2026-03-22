@@ -201,6 +201,22 @@ def format_structured_unsat_core(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _safe_sf(report: dict) -> dict:
+    """Return ``semantic_feedback`` as a dict, defaulting to ``{}`` on null/missing."""
+    sf = report.get("semantic_feedback")
+    if not sf or not isinstance(sf, dict):
+        return {}
+    return sf
+
+
+def _safe_dict(report: dict, key: str) -> dict:
+    """Return *key* from *report* as a dict, defaulting to ``{}`` on null/missing."""
+    val = report.get(key)
+    if not val or not isinstance(val, dict):
+        return {}
+    return val
+
+
 def format_actionable_fix_hint(report: dict) -> str:
     """Translate a structured verification failure into concrete fix instructions.
 
@@ -214,8 +230,10 @@ def format_actionable_fix_hint(report: dict) -> str:
 
     # --- division_by_zero ---
     if failure_type == "division_by_zero":
-        sf = report.get("semantic_feedback", {})
-        ce = sf.get("counter_example", {})
+        sf = _safe_sf(report)
+        ce = sf.get("counter_example") or {}
+        if not isinstance(ce, dict):
+            ce = {}
         divisor = ce.get("divisor", "the divisor")
         lines.append(
             f"The divisor `{divisor}` can be zero. "
@@ -224,8 +242,10 @@ def format_actionable_fix_hint(report: dict) -> str:
 
     # --- linearity_violated ---
     elif failure_type == "linearity_violated":
-        sf = report.get("semantic_feedback", {})
-        violations = sf.get("violations", [])
+        sf = _safe_sf(report)
+        violations = sf.get("violations") or []
+        if not isinstance(violations, list):
+            violations = []
         for v in violations:
             desc = v.get("description", str(v)) if isinstance(v, dict) else str(v)
             lines.append(
@@ -241,8 +261,10 @@ def format_actionable_fix_hint(report: dict) -> str:
 
     # --- invariant_violated ---
     elif failure_type == "invariant_violated":
-        sf = report.get("semantic_feedback", {})
-        cc = sf.get("conflicting_constraints", [])
+        sf = _safe_sf(report)
+        cc = sf.get("conflicting_constraints") or []
+        if not isinstance(cc, list):
+            cc = []
         if cc:
             constraints_str = ", ".join(f"`{c}`" for c in cc[:4])
             lines.append(
@@ -257,7 +279,7 @@ def format_actionable_fix_hint(report: dict) -> str:
 
     # --- postcondition_violated ---
     elif failure_type == "postcondition_violated":
-        ce = report.get("counterexample", {})
+        ce = _safe_dict(report, "counterexample")
         if ce:
             ce_str = ", ".join(f"{k}={v}" for k, v in ce.items())
             lines.append(
@@ -280,7 +302,7 @@ def format_actionable_fix_hint(report: dict) -> str:
 
     # --- effect_mismatch ---
     elif violation_type == "effect_mismatch":
-        ev = report.get("effect_violation", {})
+        ev = _safe_dict(report, "effect_violation")
         required = ev.get("required_effect", "?")
         declared = ev.get("declared_effects", [])
         lines.append(
@@ -291,7 +313,7 @@ def format_actionable_fix_hint(report: dict) -> str:
 
     # --- effect_propagation ---
     elif violation_type == "effect_propagation":
-        ev = report.get("effect_violation", {})
+        ev = _safe_dict(report, "effect_violation")
         missing = ev.get("missing_effects", [])
         caller = ev.get("caller", "the caller")
         callee = ev.get("callee", "the callee")
@@ -308,22 +330,26 @@ def format_actionable_fix_hint(report: dict) -> str:
 
     # --- precondition (generic fallback) ---
     elif failure_type == "precondition_violated" or not lines:
-        sf = report.get("semantic_feedback", {})
-        vc = sf.get("violated_constraints", [])
+        sf = _safe_sf(report)
+        vc = sf.get("violated_constraints") or []
+        if not isinstance(vc, list):
+            vc = []
         for c in vc[:3]:
-            param = c.get("param", "?")
-            constraint = c.get("constraint", "?")
+            param = c.get("param", "?") if isinstance(c, dict) else "?"
+            constraint = c.get("constraint", "?") if isinstance(c, dict) else "?"
             lines.append(
                 f"The requires clause `{constraint}` was not satisfied for param `{param}`. "
                 "Ensure the caller provides a value that meets this constraint."
             )
 
     # --- structured_unsat_core enrichment ---
-    sf = report.get("semantic_feedback", {})
-    suc = sf.get("structured_unsat_core", [])
+    sf = _safe_sf(report)
+    suc = sf.get("structured_unsat_core") or []
+    if not isinstance(suc, list):
+        suc = []
     if suc and not lines:
         for entry in suc[:3]:
-            desc = entry.get("description", "")
+            desc = entry.get("description", "") if isinstance(entry, dict) else ""
             if desc:
                 lines.append(f"Constraint conflict: {desc}")
 

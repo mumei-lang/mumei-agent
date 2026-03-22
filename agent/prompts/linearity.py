@@ -8,8 +8,12 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
     """Build a prompt for fixing linearity violations."""
     sections: list[str] = []
 
-    sf = report_data.get("semantic_feedback", {})
-    violations = sf.get("violations", [])
+    sf = report_data.get("semantic_feedback")
+    if not sf or not isinstance(sf, dict):
+        sf = {}
+    violations = sf.get("violations") or []
+    if not isinstance(violations, list):
+        violations = []
 
     sections.append(
         "You are an expert in the Mumei language. The following code has a linearity violation.\n"

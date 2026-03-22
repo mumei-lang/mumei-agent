@@ -13,8 +13,12 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
     """Build a prompt for fixing division-by-zero violations."""
     sections: list[str] = []
 
-    sf = report_data.get("semantic_feedback", {})
-    ce = sf.get("counter_example", {})
+    sf = report_data.get("semantic_feedback")
+    if not sf or not isinstance(sf, dict):
+        sf = {}
+    ce = sf.get("counter_example")
+    if not ce or not isinstance(ce, dict):
+        ce = {}
     dividend = ce.get("dividend", "?")
     divisor = ce.get("divisor", "?")
 
