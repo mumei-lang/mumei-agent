@@ -5,6 +5,7 @@ std/http.mm to guide the LLM in generating verified atoms with effects.
 """
 import json
 
+from agent.prompts.generate_atom import COMMON_MISTAKES
 from agent.prompts.report_formatter import (
     format_actionable_fix_hint,
     format_for_initial_generate,
@@ -69,6 +70,8 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
         "implementing the atom described below. Follow the standard library patterns "
         "shown in the examples."
     )
+
+    sections.append(COMMON_MISTAKES)
 
     # Pre-generation checklist if spec is parseable as JSON
     try:

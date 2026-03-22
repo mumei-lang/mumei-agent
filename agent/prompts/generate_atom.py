@@ -8,8 +8,9 @@ from agent.prompts.report_formatter import (
     format_data_flow,
 )
 
-# Common mistakes checklist injected into all generation prompts
-_COMMON_MISTAKES = (
+# Common mistakes checklist injected into all generation prompts.
+# Shared with generate_stdlib via import.
+COMMON_MISTAKES = (
     "# Common mistakes to avoid:\n"
     "1. **Division by zero**: If dividing, add `requires: divisor != 0`\n"
     "2. **Linearity**: If a parameter is `linear`, it can only be used once. "
@@ -59,7 +60,7 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
         "- The body expression's result is the atom's return value"
     )
 
-    sections.append(_COMMON_MISTAKES)
+    sections.append(COMMON_MISTAKES)
 
     # Pre-generation checklist if spec is parseable as JSON
     try:
