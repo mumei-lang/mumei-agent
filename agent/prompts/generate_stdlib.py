@@ -44,7 +44,7 @@ atom safe_read_file(path: Str)
 """
 
 
-def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
+def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferred_context: dict | None = None) -> str:
     """Build a prompt for generating stdlib-style atoms.
 
     Args:
@@ -73,6 +73,16 @@ def build_prompt(source_code: str, error_log: str, report_data: dict) -> str:
     if report_data:
         sections.append(
             f"# Verification report:\n{json.dumps(report_data, indent=2, ensure_ascii=False)}"
+        )
+
+    if inferred_context is not None:
+        sections.append(
+            f"# Inferred effects (from mumei infer-effects):\n"
+            f"{json.dumps(inferred_context.get('effects', {}), indent=2)}"
+        )
+        sections.append(
+            f"# Inferred contracts (from mumei infer-contracts):\n"
+            f"{json.dumps(inferred_context.get('contracts', {}), indent=2)}"
         )
 
     sections.append(

@@ -13,6 +13,7 @@ from agent.prompts.report_formatter import (
     format_counterexample,
     format_violated_constraints,
     format_unsat_core,
+    format_structured_unsat_core,
     format_suggestion,
     format_span,
     format_data_flow,
@@ -362,3 +363,143 @@ def test_temporal_effect_prompt_contains_examples():
     result = temporal_effect.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
     assert "# Example fix" in result
     assert "File.open" in result
+
+
+# --- structured_unsat_core tests ---
+
+def test_format_structured_unsat_core():
+    report = {
+        "semantic_feedback": {
+            "structured_unsat_core": [
+                {
+                    "constraint_type": "requires",
+                    "param": None,
+                    "type_name": None,
+                    "field": None,
+                    "description": "Precondition (requires)",
+                },
+                {
+                    "constraint_type": "refined_type",
+                    "param": "n",
+                    "type_name": "Nat",
+                    "field": None,
+                    "description": "n must be non-negative",
+                },
+                {
+                    "constraint_type": "struct_field",
+                    "param": None,
+                    "type_name": "Point",
+                    "field": "x",
+                    "description": "x must be in range",
+                },
+            ],
+        },
+    }
+    result = format_structured_unsat_core(report)
+    assert "- [requires]" in result
+    assert "Precondition (requires)" in result
+    assert "- [refined_type] param 'n', type Nat:" in result
+    assert "n must be non-negative" in result
+    assert "- [struct_field] type Point, field 'x':" in result
+    assert "x must be in range" in result
+
+
+def test_format_structured_unsat_core_empty():
+    assert format_structured_unsat_core({}) == ""
+    assert format_structured_unsat_core({"semantic_feedback": {}}) == ""
+    assert format_structured_unsat_core({"semantic_feedback": {"structured_unsat_core": []}}) == ""
+
+
+def test_invariant_prompt_with_structured_unsat_core():
+    report = {
+        "failure_type": "invariant_violated",
+        "atom": "check_bounds",
+        "semantic_feedback": {
+            "conflicting_constraints": ["x > 10", "x < 5"],
+            "raw_unsat_core": ["(> x 10)", "(< x 5)"],
+            "structured_unsat_core": [
+                {
+                    "constraint_type": "requires",
+                    "param": None,
+                    "type_name": None,
+                    "field": None,
+                    "description": "Precondition (requires)",
+                },
+                {
+                    "constraint_type": "refined_type",
+                    "param": "x",
+                    "type_name": "Nat",
+                    "field": None,
+                    "description": "x >= 0",
+                },
+            ],
+        },
+    }
+    result = invariant.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "Structured Unsat Core" in result
+    assert "[requires]" in result
+    assert "[refined_type]" in result
+    assert "param 'x'" in result
+
+
+def test_precondition_prompt_with_structured_unsat_core():
+    report = {
+        "status": "failed",
+        "atom": "test",
+        "semantic_feedback": {
+            "structured_unsat_core": [
+                {
+                    "constraint_type": "u64_nonneg",
+                    "param": "n",
+                    "type_name": None,
+                    "field": None,
+                    "description": "n >= 0 by type",
+                },
+            ],
+        },
+    }
+    result = precondition.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "Structured Unsat Core" in result
+    assert "[u64_nonneg]" in result
+
+
+def test_postcondition_prompt_with_structured_unsat_core():
+    report = {
+        "failure_type": "postcondition_violated",
+        "atom": "f",
+        "semantic_feedback": {
+            "structured_unsat_core": [
+                {
+                    "constraint_type": "quantifier",
+                    "param": None,
+                    "type_name": None,
+                    "field": None,
+                    "description": "forall x. x > 0",
+                },
+            ],
+        },
+    }
+    result = postcondition.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "Structured Unsat Core" in result
+    assert "[quantifier]" in result
+
+
+def test_division_by_zero_prompt_with_structured_unsat_core():
+    report = {
+        "failure_type": "division_by_zero",
+        "semantic_feedback": {
+            "counter_example": {"dividend": "1", "divisor": "0"},
+            "structured_unsat_core": [
+                {
+                    "constraint_type": "requires",
+                    "param": "b",
+                    "type_name": None,
+                    "field": None,
+                    "description": "b != 0",
+                },
+            ],
+        },
+    }
+    result = division_by_zero.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+    assert "Structured Unsat Core" in result
+    assert "[requires]" in result

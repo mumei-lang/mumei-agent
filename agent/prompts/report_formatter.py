@@ -163,6 +163,44 @@ def _extract_constraint_set(report: dict) -> set[str]:
     return result
 
 
+def format_structured_unsat_core(report: dict) -> str:
+    """Format semantic_feedback.structured_unsat_core into human-readable text.
+
+    Each element has the shape:
+        {"constraint_type": "requires"|"refined_type"|"struct_field"|"quantifier"|"u64_nonneg",
+         "param": str|null, "type_name": str|null, "field": str|null,
+         "description": str}
+    """
+    sf = report.get("semantic_feedback")
+    if not sf or not isinstance(sf, dict):
+        return ""
+    suc = sf.get("structured_unsat_core")
+    if not suc or not isinstance(suc, list):
+        return ""
+
+    lines: list[str] = []
+    for entry in suc:
+        ctype = entry.get("constraint_type", "unknown")
+        desc = entry.get("description", "")
+        param = entry.get("param")
+        type_name = entry.get("type_name")
+        field = entry.get("field")
+
+        detail_parts: list[str] = []
+        if param:
+            detail_parts.append(f"param '{param}'")
+        if type_name:
+            detail_parts.append(f"type {type_name}")
+        if field:
+            detail_parts.append(f"field '{field}'")
+
+        detail = f" {', '.join(detail_parts)}:" if detail_parts else ""
+        suffix = f" {desc}" if desc else ""
+        lines.append(f"- [{ctype}]{detail}{suffix}")
+
+    return "\n".join(lines)
+
+
 def format_data_flow(report: dict) -> str:
     """Format semantic_feedback.data_flow trace."""
     sf = report.get("semantic_feedback")

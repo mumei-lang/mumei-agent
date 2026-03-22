@@ -86,3 +86,86 @@ def test_verify_invalid_json():
         result = client.verify("test.mm")
         assert result["success"] is False
         assert result["report"] == {}
+
+
+# --- infer_effects / infer_contracts tests ---
+
+
+def test_infer_effects_success():
+    """Test infer_effects with successful JSON output."""
+    client = MumeiClient()
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"effects": ["FileRead", "Log"]}',
+            stderr="",
+        )
+        result = client.infer_effects("test.mm")
+        call_args = mock_run.call_args[0][0]
+        assert call_args == ["mumei", "infer-effects", "test.mm"]
+        assert result["success"] is True
+        assert result["analysis"]["effects"] == ["FileRead", "Log"]
+
+
+def test_infer_effects_failure():
+    """Test infer_effects when command fails."""
+    client = MumeiClient()
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="Error"
+        )
+        result = client.infer_effects("test.mm")
+        assert result["success"] is False
+        assert result["analysis"] == {}
+
+
+def test_infer_effects_invalid_json():
+    """Test infer_effects with non-JSON output."""
+    client = MumeiClient()
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="not json", stderr=""
+        )
+        result = client.infer_effects("test.mm")
+        assert result["success"] is False
+        assert result["analysis"] == {}
+
+
+def test_infer_contracts_success():
+    """Test infer_contracts with successful JSON output."""
+    client = MumeiClient()
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"contracts": [{"name": "add", "requires": "a > 0"}]}',
+            stderr="",
+        )
+        result = client.infer_contracts("test.mm")
+        call_args = mock_run.call_args[0][0]
+        assert call_args == ["mumei", "infer-contracts", "test.mm"]
+        assert result["success"] is True
+        assert result["analysis"]["contracts"][0]["name"] == "add"
+
+
+def test_infer_contracts_failure():
+    """Test infer_contracts when command fails."""
+    client = MumeiClient()
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="Error"
+        )
+        result = client.infer_contracts("test.mm")
+        assert result["success"] is False
+        assert result["analysis"] == {}
+
+
+def test_infer_contracts_cargo_run():
+    """Test infer_contracts with cargo run style invocation."""
+    client = MumeiClient("cargo run --")
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='{}', stderr=""
+        )
+        client.infer_contracts("test.mm")
+        call_args = mock_run.call_args[0][0]
+        assert call_args == ["cargo", "run", "--", "infer-contracts", "test.mm"]

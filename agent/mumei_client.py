@@ -50,6 +50,28 @@ class MumeiClient:
             "stderr": result.stderr,
         }
 
+    def infer_effects(self, source_path: str) -> dict:
+        """Run mumei infer-effects and return parsed JSON result."""
+        cmd = [*self._cmd_prefix, "infer-effects", source_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                return {"success": True, "analysis": json.loads(result.stdout)}
+            except json.JSONDecodeError:
+                pass
+        return {"success": False, "analysis": {}}
+
+    def infer_contracts(self, source_path: str) -> dict:
+        """Run mumei infer-contracts and return parsed JSON result."""
+        cmd = [*self._cmd_prefix, "infer-contracts", source_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                return {"success": True, "analysis": json.loads(result.stdout)}
+            except json.JSONDecodeError:
+                pass
+        return {"success": False, "analysis": {}}
+
     def build(self, source_path: str, output: str = "katana") -> dict:
         """Run mumei build and return result.
 

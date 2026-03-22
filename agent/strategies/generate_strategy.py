@@ -38,6 +38,23 @@ def _select_prompt_module(spec: dict):
     return generate_atom
 
 
+def _build_skeleton(spec: dict) -> str:
+    """Build an atom skeleton from a spec for the LLM to fill in."""
+    name = spec.get("name", "unnamed")
+    params = ", ".join(
+        f"{p['name']}: {p.get('type', 'i64')}" for p in spec.get("params", [])
+    )
+    effects = spec.get("effects", [])
+    effects_str = f"    effects: [{', '.join(effects)}]\n" if effects else ""
+    return (
+        f"atom {name}({params})\n"
+        f"{effects_str}"
+        f"    requires: ___;\n"
+        f"    ensures: ___;\n"
+        f"    body: {{ ___ }}\n"
+    )
+
+
 def generate_code(
     client: OpenAI,
     model: str,
@@ -74,9 +91,24 @@ def generate_code(
     prompt_module = _select_prompt_module(spec)
     spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
 
+    # Infer effects and contracts if context_file is provided
+    inferred_context: dict | None = None
+    context_file = spec.get("context_file")
+    if context_file and mumei_client is not None:
+        effects_result = mumei_client.infer_effects(context_file)
+        contracts_result = mumei_client.infer_contracts(context_file)
+        inferred_context = {
+            "effects": effects_result.get("analysis", {}),
+            "contracts": contracts_result.get("analysis", {}),
+        }
+
+    # Build skeleton
+    skeleton = _build_skeleton(spec)
+
     # Stage 1: Initial generation
     metrics.record_attempt("generation")
-    prompt = prompt_module.build_prompt(spec_json, "", {})
+    prompt = prompt_module.build_prompt(spec_json, "", {}, inferred_context=inferred_context)
+    prompt += f"\n\n# Skeleton (fill in ___ placeholders):\n```mumei\n{skeleton}```"
 
     response = client.chat.completions.create(
         model=model,
@@ -126,7 +158,7 @@ def generate_code(
                 error_log = check_result["stdout"] + check_result["stderr"]
                 current_code = _attempt_fix(
                     client, model, spec_json, current_code, error_log, {},
-                    prompt_module, metrics,
+                    prompt_module, metrics, inferred_context=inferred_context,
                 )
                 continue
 
@@ -147,7 +179,7 @@ def generate_code(
 
             current_code = _attempt_fix(
                 client, model, spec_json, current_code, error_log, report,
-                prompt_module, metrics,
+                prompt_module, metrics, inferred_context=inferred_context,
             )
 
         finally:
@@ -189,6 +221,7 @@ def _attempt_fix(
     report: dict,
     prompt_module,
     metrics: Metrics,
+    inferred_context: dict | None = None,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
     # Include both the spec and the current (broken) code so the LLM
@@ -197,7 +230,7 @@ def _attempt_fix(
         f"# Original specification:\n{spec_json}\n\n"
         f"# Current generated code (needs fixing):\n{current_code}"
     )
-    fix_prompt = prompt_module.build_prompt(combined_source, error_log, report)
+    fix_prompt = prompt_module.build_prompt(combined_source, error_log, report, inferred_context=inferred_context)
 
     fix_response = client.chat.completions.create(
         model=model,
