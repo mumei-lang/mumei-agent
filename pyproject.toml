@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mumei-agent"
 version = "0.1.0"
 description = "AI-driven autonomous fix loop for the Mumei programming language"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "openai>=1.0",
     "python-dotenv>=1.0",
@@ -19,5 +19,14 @@ test = [
     "pytest-cov>=4.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["agent*"]
+
 [project.scripts]
 mumei-heal = "agent.self_healing:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests requiring mumei binary (deselect with '-m \"not integration\"')",
+]
