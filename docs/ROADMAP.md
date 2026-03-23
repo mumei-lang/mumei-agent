@@ -45,7 +45,7 @@
 
 ---
 
-## P3-B: 「仕様 → 検証済みAPIクライアント」E2Eデモ (中優先度) 🚧 Foundation Ready
+## P3-B: 「仕様 → 検証済みAPIクライアント」E2Eデモ (中優先度) ✅ Complete
 
 mumeiの思想の究極的な体現:
 
@@ -61,7 +61,10 @@ mumeiの思想の究極的な体現:
 
 ### 実装済み
 - ✅ `examples/e2e_demo_spec.json` — デモ仕様ファイル (fetch_github_user)
-- ✅ `examples/run_e2e_demo.py` — デモ実行スクリプト (spec → generate → verify → report)
+- ✅ `examples/simple_add_spec.json` — 最小デモ仕様ファイル (mumei バイナリなしでもテスト可能)
+- ✅ `examples/run_e2e_demo.py` — デモ実行スクリプト (spec → generate → verify → report, `--dry-run` 対応)
+- ✅ `tests/test_e2e_demo.py` — E2E デモのバリデーション・モックテスト
+- ✅ Contextual suggestion の活用強化 (`format_actionable_fix_hint()` / `_build_retry_prompt()`)
 
 ---
 

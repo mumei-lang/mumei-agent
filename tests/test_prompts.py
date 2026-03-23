@@ -19,6 +19,7 @@ from agent.prompts.report_formatter import (
     format_data_flow,
     format_actionable_fix_hint,
     format_for_initial_generate,
+    is_contextual_suggestion,
 )
 from agent.prompts.examples.formatter import format_examples
 
@@ -674,3 +675,81 @@ def test_invariant_uses_own_examples():
     result = invariant.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
     assert "# Example fix" in result
     assert "check_range" in result or "bounded_increment" in result
+
+
+# --- contextual suggestion tests ---
+
+def test_is_contextual_suggestion_with_counterexample():
+    assert is_contextual_suggestion("When counterexample a=0, b=0 the requires fails")
+
+
+def test_is_contextual_suggestion_with_value_keyword():
+    assert is_contextual_suggestion("The value of x must be positive")
+
+
+def test_is_contextual_suggestion_with_equals():
+    assert is_contextual_suggestion("Add requires: b=0 guard")
+
+
+def test_is_contextual_suggestion_with_because():
+    assert is_contextual_suggestion("because the divisor can be zero")
+
+
+def test_is_contextual_suggestion_with_when():
+    assert is_contextual_suggestion("when x is negative the ensures fails")
+
+
+def test_is_contextual_suggestion_with_specific():
+    assert is_contextual_suggestion("The specific constraint a >= 0 is violated")
+
+
+def test_is_contextual_suggestion_with_eg():
+    assert is_contextual_suggestion("e.g. add requires: b != 0")
+
+
+def test_is_contextual_suggestion_generic_template():
+    # Generic template suggestions should NOT be contextual
+    assert not is_contextual_suggestion("Add a requires clause")
+
+
+def test_is_contextual_suggestion_empty():
+    assert not is_contextual_suggestion("")
+
+
+def test_is_contextual_suggestion_none():
+    assert not is_contextual_suggestion("")
+
+
+def test_actionable_fix_hint_contextual_suggestion_alongside_hints():
+    """Contextual suggestion appears alongside other hints, not only as fallback."""
+    report = {
+        "failure_type": "postcondition_violated",
+        "counterexample": {"x": "0"},
+        "suggestion": "When counterexample x=0, the ensures clause result > 0 fails",
+    }
+    result = format_actionable_fix_hint(report)
+    # Should contain both the postcondition hint AND the contextual suggestion
+    assert "ensures" in result.lower()
+    assert "contextual" in result.lower()
+    assert "x=0" in result
+
+
+def test_actionable_fix_hint_generic_suggestion_only_as_fallback():
+    """Generic suggestion is only used when no other hints are available."""
+    report = {
+        "failure_type": "postcondition_violated",
+        "counterexample": {"x": "0"},
+        "suggestion": "Fix the postcondition",
+    }
+    result = format_actionable_fix_hint(report)
+    # The postcondition-specific hint should be present
+    assert "ensures" in result.lower()
+    # The generic suggestion should NOT appear alongside (it's not contextual)
+    assert "Fix the postcondition" not in result
+
+
+def test_actionable_fix_hint_generic_suggestion_as_fallback_when_no_hints():
+    """Generic suggestion is used as fallback when no other hints fire."""
+    report = {"suggestion": "Fix the code"}
+    result = format_actionable_fix_hint(report)
+    assert "Fix the code" in result

@@ -11,7 +11,7 @@ from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
-from agent.prompts.report_formatter import format_error_diff
+from agent.prompts.report_formatter import format_error_diff, is_contextual_suggestion
 
 _logger = logging.getLogger(__name__)
 
@@ -257,6 +257,17 @@ def _build_retry_prompt(
         diff = format_error_diff(prev_report, report)
         if diff:
             extra_sections.append(f"# Error diff from previous attempt:\n{diff}")
+
+        # Track suggestion evolution: when the suggestion has changed between
+        # attempts and the new one is contextual (dynamically generated with
+        # concrete counterexample data), highlight it so the LLM pays attention.
+        prev_sug = prev_report.get("suggestion", "")
+        curr_sug = report.get("suggestion", "")
+        if curr_sug and curr_sug != prev_sug and is_contextual_suggestion(curr_sug):
+            extra_sections.append(
+                "# Updated verifier suggestion (contextual, high priority):\n"
+                f"{curr_sug}"
+            )
 
     if extra_sections:
         return base_prompt + "\n\n" + "\n\n".join(extra_sections)

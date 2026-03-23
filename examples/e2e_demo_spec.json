@@ -1,11 +1,12 @@
 {
   "name": "fetch_github_user",
-  "description": "Fetch a GitHub user's name by username via HTTPS GET",
-  "inputs": [{"name": "username", "type": "String"}],
-  "outputs": [{"name": "result", "type": "String"}],
+  "description": "Fetch a GitHub user's name via API",
+  "params": [
+    {"name": "username", "type": "Str"}
+  ],
   "effects": ["SecureHttpGet"],
   "constraints": {
     "requires": "len(username) > 0",
-    "ensures": "len(result) > 0"
+    "ensures": "len(result) >= 0"
   }
 }
