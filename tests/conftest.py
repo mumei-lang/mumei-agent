@@ -1,10 +1,22 @@
 """Shared test fixtures for mumei-agent integration tests."""
 from __future__ import annotations
 
+import os
+import shutil
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+
+from agent.mumei_client import MumeiClient
+
+
+# ---------------------------------------------------------------------------
+# Directory containing .mm fixture files
+# ---------------------------------------------------------------------------
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +239,11 @@ def mock_mumei_client():
             "stdout": "",
             "stderr": "" if check_success else "Parse error",
         }
+        client.build.return_value = {
+            "success": True,
+            "stdout": "",
+            "stderr": "",
+        }
         client.infer_effects.return_value = {"analysis": {}}
         client.infer_contracts.return_value = {"analysis": {}}
         return client
@@ -242,3 +259,46 @@ def sample_source() -> str:
         "    ensures: result == a / b;\n"
         "    body: a / b;\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Real mumei binary fixtures (used by integration tests)
+# ---------------------------------------------------------------------------
+
+def _resolve_mumei_bin() -> str | None:
+    """Return the mumei binary path, or *None* if unavailable.
+
+    Resolution order:
+      1. ``MUMEI_BIN`` environment variable (supports compound commands like
+         ``cargo run --manifest-path … --``).
+      2. Plain ``mumei`` looked up on ``$PATH``.
+    """
+    env_bin = os.environ.get("MUMEI_BIN", "").strip()
+    if env_bin:
+        first_token = env_bin.split()[0]
+        if shutil.which(first_token):
+            return env_bin
+    if shutil.which("mumei"):
+        return "mumei"
+    return None
+
+
+@pytest.fixture()
+def mumei_bin() -> str:
+    """Return the resolved mumei binary path or skip the test."""
+    path = _resolve_mumei_bin()
+    if path is None:
+        pytest.skip("mumei binary not found (set MUMEI_BIN or install mumei)")
+    return path
+
+
+@pytest.fixture()
+def real_mumei_client(mumei_bin: str) -> MumeiClient:
+    """Provide a *real* MumeiClient backed by the mumei binary."""
+    return MumeiClient(mumei_bin)
+
+
+@pytest.fixture()
+def fixtures_dir() -> Path:
+    """Return the path to the tests/fixtures/ directory."""
+    return FIXTURES_DIR

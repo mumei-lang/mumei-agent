@@ -6,7 +6,8 @@ This script demonstrates the full mumei-agent pipeline:
   2. Call generate_code() to produce .mm source via LLM
   3. Write generated code to a temporary file
   4. Verify the generated code with mumei verify --json
-  5. Report results with success/failure summary
+  5. On verification success, build LLVM IR via mumei build
+  6. Report results with a step-by-step summary
 
 Usage:
     python -m examples.run_e2e_demo [spec_path] [--dry-run]
@@ -76,8 +77,10 @@ def run_e2e(spec_path: str | None = None, dry_run: bool = False) -> dict:
         "spec": spec,
         "code": "",
         "verified": False,
+        "built": False,
         "dry_run": dry_run,
         "errors": [],
+        "steps": {},
     }
 
     print(f"=== E2E Demo: {spec.get('name', 'unnamed')} ===")
@@ -95,6 +98,7 @@ def run_e2e(spec_path: str | None = None, dry_run: bool = False) -> dict:
         return result
 
     print("Spec validation: OK")
+    result["steps"]["spec_validation"] = True
 
     if dry_run:
         print()
@@ -136,26 +140,63 @@ def run_e2e(spec_path: str | None = None, dry_run: bool = False) -> dict:
 
     result["code"] = code
     result["verified"] = verified
+    result["steps"]["generate"] = bool(code)
+    result["steps"]["verify"] = verified
 
     # Write generated code to temp file for inspection
+    output_file_path: str | None = None
     if code:
         tmp_dir = Path(tempfile.mkdtemp(prefix="mumei_e2e_"))
         output_file = tmp_dir / f"{spec.get('name', 'output')}.mm"
         output_file.write_text(code, encoding="utf-8")
+        output_file_path = str(output_file)
         print(f"Generated code written to: {output_file}")
-        result["output_file"] = str(output_file)
+        result["output_file"] = output_file_path
 
-    # Report
+    # Stage 4: Build LLVM IR if verification succeeded
+    built = False
+    if verified and mumei_client is not None and output_file_path is not None:
+        print()
+        print("Building LLVM IR ...")
+        build_result = mumei_client.build(output_file_path)
+        built = build_result["success"]
+        if built:
+            print("Build: OK")
+        else:
+            print(f"Build failed: {build_result['stderr']}")
+    result["built"] = built
+    result["steps"]["build"] = built
+
+    # Summary
     print()
     print("=" * 60)
+    print("Pipeline Summary")
+    print("=" * 60)
+    step_labels = [
+        ("spec_validation", "Spec Validation"),
+        ("generate", "Code Generation"),
+        ("verify", "Verification"),
+        ("build", "Build (LLVM IR)"),
+    ]
+    for key, label in step_labels:
+        status_flag = result["steps"].get(key)
+        if status_flag is None:
+            mark = "SKIP"
+        elif status_flag:
+            mark = "OK"
+        else:
+            mark = "FAIL"
+        print(f"  {label:<25s} {mark}")
+    print("=" * 60)
+    print()
+
     if mumei_client is None:
         status = "GENERATED (no verifier -- verification skipped)"
     elif verified:
-        status = "VERIFIED"
+        status = "VERIFIED" + (" + BUILT" if built else " (build skipped)")
     else:
         status = "NOT VERIFIED (failed verification)"
     print(f"RESULT: {status}")
-    print("=" * 60)
     print()
     print("Generated code:")
     print("-" * 40)

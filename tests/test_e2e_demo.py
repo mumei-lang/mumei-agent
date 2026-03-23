@@ -91,7 +91,7 @@ class TestValidateSpec:
 class TestSpecFiles:
     """Verify the shipped spec JSON files are well-formed."""
 
-    @pytest.fixture(params=["e2e_demo_spec.json", "simple_add_spec.json"])
+    @pytest.fixture(params=["e2e_demo_spec.json", "simple_add_spec.json", "simple_e2e_spec.json"])
     def spec_file(self, request):
         return Path(__file__).parent.parent / "examples" / request.param
 
@@ -112,6 +112,12 @@ class TestSpecFiles:
         assert "effects" in spec
         assert "SecureHttpGet" in spec["effects"]
 
+    def test_e2e_demo_spec_has_return_type(self):
+        path = Path(__file__).parent.parent / "examples" / "e2e_demo_spec.json"
+        with open(path, encoding="utf-8") as f:
+            spec = json.load(f)
+        assert spec.get("return_type") == "Str"
+
     def test_simple_add_spec_has_no_effects(self):
         path = Path(__file__).parent.parent / "examples" / "simple_add_spec.json"
         with open(path, encoding="utf-8") as f:
@@ -125,6 +131,15 @@ class TestSpecFiles:
         constraints = spec.get("constraints", {})
         assert "requires" in constraints
         assert "ensures" in constraints
+
+    def test_simple_e2e_spec_is_pure_arithmetic(self):
+        path = Path(__file__).parent.parent / "examples" / "simple_e2e_spec.json"
+        with open(path, encoding="utf-8") as f:
+            spec = json.load(f)
+        assert spec["name"] == "safe_div"
+        assert spec.get("effects", []) == []
+        assert spec.get("return_type") == "i64"
+        assert "b != 0" in spec.get("requires", "")
 
 
 # ---------------------------------------------------------------------------
@@ -218,4 +233,6 @@ class TestRunE2EMocked:
 
         assert result["errors"] == []
         assert result["verified"] is True
+        assert result["built"] is True
         assert result["code"] != ""
+        assert result["steps"]["build"] is True

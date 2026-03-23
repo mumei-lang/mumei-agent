@@ -39,12 +39,19 @@
 - ✅ CI では `-m "not integration"` で integration テストを除外
 - ✅ `format_error_diff` のユニットテスト追加（UNCHANGED / CHANGED / RESOLVED）
 - ✅ カバレッジレポート出力（`--cov=agent`, XML artifact アップロード）
-- mumei バイナリのモック or 実バイナリを使ったインテグレーションテスト
-- 各 violation type（precondition, effect_mismatch, temporal_effect 等）に対する修正成功率の回帰テスト
+- ✅ mumei 実バイナリを使ったインテグレーションテスト (`tests/test_binary_integration.py`)
+  - 各 violation fixture (`tests/fixtures/*.mm`) に対して `mumei verify --json` を実行し `violation_type` を検証
+  - `valid.mm` の検証成功テスト
+  - Self-healing ループ統合テスト（LLM は Mock、mumei バイナリは実物）
+  - `mumei check` パーステスト
+- ✅ 各 violation type に対する修正成功率の回帰テスト (`tests/test_regression.py`)
 
 ### 対象ファイル
 - `.github/workflows/ci.yml` — CI ワークフロー
 - `tests/test_prompts.py` — `format_error_diff` テスト追加
+- `tests/test_binary_integration.py` — mumei バイナリ統合テスト
+- `tests/conftest.py` — `real_mumei_client` / `fixtures_dir` fixture 追加
+- `tests/fixtures/*.mm` — 各 violation type のサンプルファイル
 - `pyproject.toml` — pytest 設定・テスト依存
 
 ---
@@ -64,10 +71,11 @@ mumeiの思想の究極的な体現:
 - ✅ mumei 側の P2-A (Cross-atom composition) 完了
 
 ### 実装済み
-- ✅ `examples/e2e_demo_spec.json` — デモ仕様ファイル (fetch_github_user)
+- ✅ `examples/e2e_demo_spec.json` — デモ仕様ファイル (fetch_github_user, `inputs`/`requires`/`ensures`/`return_type` 対応)
 - ✅ `examples/simple_add_spec.json` — 最小デモ仕様ファイル (mumei バイナリなしでもテスト可能)
-- ✅ `examples/run_e2e_demo.py` — デモ実行スクリプト (spec → generate → verify → report, `--dry-run` 対応)
-- ✅ `tests/test_e2e_demo.py` — E2E デモのバリデーション・モックテスト
+- ✅ `examples/simple_e2e_spec.json` — 純粋算術 `safe_div` デモ (エフェクトなし、LLM 不要でフロー確認可能)
+- ✅ `examples/run_e2e_demo.py` — デモ実行スクリプト (spec → generate → verify → build → summary, `--dry-run` 対応)
+- ✅ `tests/test_e2e_demo.py` — E2E デモのバリデーション・モックテスト (`simple_e2e_spec.json` テスト含む)
 - ✅ Contextual suggestion の活用強化 (`format_actionable_fix_hint()` / `_build_retry_prompt()`)
 
 ---
