@@ -239,6 +239,11 @@ def mock_mumei_client():
             "stdout": "",
             "stderr": "" if check_success else "Parse error",
         }
+        client.build.return_value = {
+            "success": True,
+            "stdout": "",
+            "stderr": "",
+        }
         client.infer_effects.return_value = {"analysis": {}}
         client.infer_contracts.return_value = {"analysis": {}}
         return client

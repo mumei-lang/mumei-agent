@@ -233,4 +233,6 @@ class TestRunE2EMocked:
 
         assert result["errors"] == []
         assert result["verified"] is True
+        assert result["built"] is True
         assert result["code"] != ""
+        assert result["steps"]["build"] is True
