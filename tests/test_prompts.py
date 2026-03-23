@@ -20,6 +20,7 @@ from agent.prompts.report_formatter import (
     format_actionable_fix_hint,
     format_for_initial_generate,
     is_contextual_suggestion,
+    format_error_diff,
 )
 from agent.prompts.examples.formatter import format_examples
 
@@ -753,3 +754,72 @@ def test_actionable_fix_hint_generic_suggestion_as_fallback_when_no_hints():
     report = {"suggestion": "Fix the code"}
     result = format_actionable_fix_hint(report)
     assert "Fix the code" in result
+
+
+# --- format_error_diff tests ---
+
+
+def test_format_error_diff_unchanged():
+    """Passing the same report for both prev and curr yields all UNCHANGED."""
+    report = {
+        "failure_type": "precondition_violated",
+        "counterexample": {"a": "10", "b": "0"},
+        "suggestion": "Add requires: b != 0",
+        "semantic_feedback": {
+            "violated_constraints": [
+                {"param": "b", "constraint": "b != 0"},
+            ],
+        },
+    }
+    diff = format_error_diff(report, report)
+    assert "UNCHANGED" in diff
+    # No field should report a change
+    for line in diff.splitlines():
+        assert "CHANGED" not in line or "UNCHANGED" in line
+
+
+def test_format_error_diff_changed():
+    """Differing failure_type, counterexample, and suggestion produce CHANGED."""
+    prev = {
+        "failure_type": "precondition_violated",
+        "counterexample": {"a": "10", "b": "0"},
+        "suggestion": "Add requires: b != 0",
+    }
+    curr = {
+        "failure_type": "postcondition_violated",
+        "counterexample": {"x": "5"},
+        "suggestion": "Fix ensures clause",
+    }
+    diff = format_error_diff(prev, curr)
+    assert "failure_type: CHANGED" in diff
+    assert "precondition_violated" in diff
+    assert "postcondition_violated" in diff
+    assert "counterexample: CHANGED" in diff
+    assert "suggestion: CHANGED" in diff
+    assert "Fix ensures clause" in diff
+
+
+def test_format_error_diff_resolved_constraints():
+    """Resolved violated_constraints appear as RESOLVED in the diff."""
+    prev = {
+        "failure_type": "precondition_violated",
+        "semantic_feedback": {
+            "violated_constraints": [
+                {"param": "a", "constraint": "a > 0"},
+                {"param": "b", "constraint": "b != 0"},
+            ],
+        },
+    }
+    curr = {
+        "failure_type": "precondition_violated",
+        "semantic_feedback": {
+            "violated_constraints": [
+                {"param": "b", "constraint": "b != 0"},
+            ],
+        },
+    }
+    diff = format_error_diff(prev, curr)
+    assert "RESOLVED" in diff
+    assert "a > 0" in diff
+    # b != 0 is still violated, so it should not appear as RESOLVED or NEW
+    assert "NEW" not in diff

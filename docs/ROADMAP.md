@@ -32,16 +32,20 @@
 
 ---
 
-## P1-C: E2E テスト・CI の整備 (高優先度)
+## P1-C: E2E テスト・CI の整備 (高優先度) ✅ Complete
 
-- GitHub Actions で `pytest` を実行するCI（`.github/workflows/ci.yml` を新規作成）
+- ✅ GitHub Actions で `pytest` を実行するCI（`.github/workflows/ci.yml`）
+- ✅ `pyproject.toml` に `[tool.pytest.ini_options]` と `integration` マーカー定義
+- ✅ CI では `-m "not integration"` で integration テストを除外
+- ✅ `format_error_diff` のユニットテスト追加（UNCHANGED / CHANGED / RESOLVED）
+- ✅ カバレッジレポート出力（`--cov=agent`, XML artifact アップロード）
 - mumei バイナリのモック or 実バイナリを使ったインテグレーションテスト
 - 各 violation type（precondition, effect_mismatch, temporal_effect 等）に対する修正成功率の回帰テスト
 
 ### 対象ファイル
-- `.github/workflows/ci.yml` — 新規作成
-- `tests/` — テストケース追加
-- `requirements-dev.txt` or `pyproject.toml` — テスト依存追加
+- `.github/workflows/ci.yml` — CI ワークフロー
+- `tests/test_prompts.py` — `format_error_diff` テスト追加
+- `pyproject.toml` — pytest 設定・テスト依存
 
 ---
 
