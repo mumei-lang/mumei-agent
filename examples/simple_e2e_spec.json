@@ -1,0 +1,15 @@
+{
+  "name": "safe_div",
+  "description": "Divide two integers safely with a non-zero divisor guard",
+  "inputs": [
+    {"name": "a", "type": "i64"},
+    {"name": "b", "type": "i64"}
+  ],
+  "requires": "b != 0",
+  "ensures": "result == a / b",
+  "return_type": "i64",
+  "constraints": {
+    "requires": "b != 0",
+    "ensures": "result == a / b"
+  }
+}
