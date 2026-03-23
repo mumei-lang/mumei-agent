@@ -689,7 +689,7 @@ def test_is_contextual_suggestion_with_value_keyword():
 
 
 def test_is_contextual_suggestion_with_equals():
-    assert is_contextual_suggestion("Add requires: b=0 guard")
+    assert is_contextual_suggestion("The constraint x = 0 is violated")
 
 
 def test_is_contextual_suggestion_with_because():

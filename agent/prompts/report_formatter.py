@@ -12,7 +12,7 @@ _CONTEXTUAL_MARKERS = (
     "when ",
     "because ",
     "specific",
-    "=",
+    " = ",
 )
 
 
