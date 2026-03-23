@@ -24,9 +24,14 @@ import tempfile
 from pathlib import Path
 
 
-def _mumei_available() -> bool:
-    """Check whether the mumei binary is available on PATH."""
-    return shutil.which("mumei") is not None
+def _mumei_available(mumei_bin: str = "mumei") -> bool:
+    """Check whether the mumei binary is available.
+
+    Handles both simple binary names (looked up on PATH) and compound
+    commands like ``cargo run --manifest-path ... --``.
+    """
+    first_token = mumei_bin.split()[0] if mumei_bin else "mumei"
+    return shutil.which(first_token) is not None
 
 
 def validate_spec(spec: dict) -> list[str]:
@@ -111,7 +116,7 @@ def run_e2e(spec_path: str | None = None, dry_run: bool = False) -> dict:
 
     # Optional: MumeiClient for real verification
     mumei_client: MumeiClient | None = None
-    if config.mumei_bin and _mumei_available():
+    if config.mumei_bin and _mumei_available(config.mumei_bin):
         mumei_client = MumeiClient(config.mumei_bin)
         print(f"Using mumei binary: {config.mumei_bin}")
     else:
@@ -181,11 +186,11 @@ def main() -> None:
     args = parser.parse_args()
     result = run_e2e(spec_path=args.spec_path, dry_run=args.dry_run)
 
-    # Exit code: 0 if verified or dry-run, 1 otherwise
-    if result["dry_run"] or result["verified"]:
-        sys.exit(0)
-    elif result["errors"]:
+    # Exit code: 2 for errors, 0 for success/dry-run, 1 otherwise
+    if result["errors"]:
         sys.exit(2)
+    elif result["dry_run"] or result["verified"]:
+        sys.exit(0)
     else:
         sys.exit(1)
 
