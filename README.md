@@ -188,6 +188,28 @@ The self-healing loop follows this interaction flow:
 2. **LLM fix**: The agent sends the Z3 counter-example to the LLM, which generates a corrected `requires` clause
 3. **Re-verification**: `mumei build` confirms the fix passes formal verification
 
+### Spec-to-Verified-Code E2E Demo
+
+The `examples/run_e2e_demo.py` script demonstrates the full pipeline: specification
+JSON -> LLM code generation -> mumei verify -> self-healing loop -> verified output.
+
+```bash
+# Dry-run mode (validate spec only, no LLM or mumei required)
+python -m examples.run_e2e_demo --dry-run
+python -m examples.run_e2e_demo examples/simple_add_spec.json --dry-run
+
+# Full pipeline (requires LLM API key and optionally mumei binary)
+python -m examples.run_e2e_demo                                # uses e2e_demo_spec.json
+python -m examples.run_e2e_demo examples/simple_add_spec.json  # minimal example
+```
+
+Available spec files:
+
+| File | Description | Effects |
+|---|---|---|
+| `examples/e2e_demo_spec.json` | Fetch GitHub user via HTTPS | `SecureHttpGet` |
+| `examples/simple_add_spec.json` | Add two non-negative numbers | None |
+
 ## LLM Provider Support
 
 | Provider | Config Pattern | Cost |

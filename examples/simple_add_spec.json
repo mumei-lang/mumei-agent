@@ -1,0 +1,12 @@
+{
+  "name": "safe_add",
+  "description": "Add two non-negative numbers",
+  "params": [
+    {"name": "a", "type": "i64"},
+    {"name": "b", "type": "i64"}
+  ],
+  "constraints": {
+    "requires": "a >= 0 && b >= 0",
+    "ensures": "result == a + b"
+  }
+}

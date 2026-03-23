@@ -1,4 +1,19 @@
 """Common formatting helpers for report.json structured fields."""
+from __future__ import annotations
+
+# Keywords that indicate a suggestion was dynamically generated from
+# counterexample data rather than being a generic template fallback.
+_CONTEXTUAL_MARKERS = (
+    "counterexample",
+    "counter-example",
+    "e.g.",
+    "for example",
+    "value",
+    "when ",
+    "because ",
+    "specific",
+    " = ",
+)
 
 
 def format_counterexample(report: dict) -> str:
@@ -62,6 +77,22 @@ def format_unsat_core(report: dict) -> str:
             parts.append(f"  - {r}")
 
     return "\n".join(parts)
+
+
+def is_contextual_suggestion(suggestion: str) -> bool:
+    """Determine whether *suggestion* was dynamically generated.
+
+    A contextual suggestion is one produced by ``build_contextual_suggestion()``
+    on the mumei side.  It typically references concrete counterexample values,
+    specific variable names, or conditional language ("when", "because").
+
+    Generic template suggestions (from ``suggestion_for_failure_type()``) tend
+    to be short, imperative sentences without concrete data.
+    """
+    if not suggestion:
+        return False
+    lower = suggestion.lower()
+    return any(marker in lower for marker in _CONTEXTUAL_MARKERS)
 
 
 def format_suggestion(report: dict) -> str:
@@ -353,8 +384,15 @@ def format_actionable_fix_hint(report: dict) -> str:
             if desc:
                 lines.append(f"Constraint conflict: {desc}")
 
-    if not lines:
-        sug = report.get("suggestion", "")
+    # --- contextual suggestion enrichment ---
+    # If the suggestion is contextual (dynamically generated with concrete
+    # counterexample data), surface it alongside existing hints for maximum
+    # precision.  Generic template suggestions are only used as a last-resort
+    # fallback when no other hints are available.
+    sug = report.get("suggestion", "")
+    if sug and lines and is_contextual_suggestion(sug):
+        lines.append(f"Verifier suggestion (contextual): {sug}")
+    elif not lines:
         if sug:
             lines.append(f"Verifier suggestion: {sug}")
         else:
