@@ -43,6 +43,11 @@ def _is_fixed(source: str) -> bool:
 
     This checks generic markers first, then applies violation-specific
     heuristics for effect/temporal fixes that need more context.
+
+    .. warning::
+        These heuristics are tightly coupled to the current fixture files.
+        When adding new ``.mm`` fixtures, verify that the markers and
+        structural checks below still produce the correct results.
     """
     # Generic markers — any of these means the source is fixed.
     if any(marker in source for marker in _FIXED_MARKERS):
@@ -65,10 +70,12 @@ def _is_fixed(source: str) -> bool:
     ):
         return True
 
-    # Temporal effect fix: write appears BEFORE close (correct ordering).
+    # Temporal effect fix: the *last* write appears BEFORE the *last* close
+    # (correct ordering).  Using rfind instead of index so that fixtures with
+    # multiple FileWrite.write / FileWrite.close pairs are handled correctly.
     if "FileWrite.write" in source and "FileWrite.close" in source:
-        write_pos = source.index("FileWrite.write")
-        close_pos = source.index("FileWrite.close")
+        write_pos = source.rfind("FileWrite.write")
+        close_pos = source.rfind("FileWrite.close")
         if write_pos < close_pos:
             return True
 
@@ -76,16 +83,29 @@ def _is_fixed(source: str) -> bool:
 
 
 def _detect_violation_type(source: str) -> str | None:
-    """Detect which violation type a fixture source represents."""
+    """Detect which violation type a fixture source represents.
+
+    Detection uses two complementary strategies for each type:
+
+    1. **Comment-based** — match human-readable keywords in the (lowered)
+       source (e.g. ``"effect propagation"``).  This is the primary path and
+       works as long as fixture files keep the ``// Fixture: …`` header.
+    2. **Structural** — fall back to code-level heuristics when comments are
+       absent or ambiguous.
+
+    Order matters: more specific checks come first so that, for example,
+    ``effect_propagation`` is detected before the more general
+    ``effect_mismatch``.
+    """
     lower = source.lower()
     # Order matters: more specific checks first.
-    if "effect_propagation" in lower or (
+    if "effect propagation" in lower or (
         "effects: [Log]" in source
         and "write_log" in source
         and "main_handler" in source
     ):
         return "effect_propagation"
-    if "effect_mismatch" in lower or (
+    if "effect mismatch" in lower or (
         "effects: [Log]" in source and "FileWrite.write" in source
     ):
         return "effect_mismatch"
@@ -101,7 +121,7 @@ def _detect_violation_type(source: str) -> str | None:
         "ensures: result > 0" in source and "body: x;" in source
     ):
         return "postcondition_violated"
-    if "division_by_zero" in lower or (
+    if "division by zero" in lower or (
         "a / b" in source and "requires:" not in source
     ):
         return "division_by_zero"
