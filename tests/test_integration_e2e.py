@@ -12,7 +12,6 @@ that CI can exclude them with ``-m "not integration"``.  Run locally with::
 """
 from __future__ import annotations
 
-import shutil
 import tempfile
 from pathlib import Path
 
