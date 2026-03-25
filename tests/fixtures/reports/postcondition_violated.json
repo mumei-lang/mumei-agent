@@ -1,0 +1,18 @@
+{
+  "status": "failed",
+  "failure_type": "postcondition_violated",
+  "atom": "add_positive",
+  "counterexample": {"x": "0"},
+  "semantic_feedback": {
+    "violated_constraints": [
+      {
+        "param": "x",
+        "type": "i64",
+        "constraint": "result > 0",
+        "explanation": "Result must be positive"
+      }
+    ]
+  },
+  "span": {"file": "postcondition_violated.mm", "line": 10, "col": 1},
+  "suggestion": "Ensure body returns a positive value"
+}

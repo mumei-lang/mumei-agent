@@ -1,0 +1,14 @@
+{
+  "status": "failed",
+  "violation_type": "effect_mismatch",
+  "atom": "write_log",
+  "effect_violation": {
+    "declared_effects": ["Log"],
+    "required_effect": "FileWrite",
+    "source_operation": "FileWrite.write",
+    "resolution_paths": [
+      {"strategy": "propagation", "description": "Add FileWrite to effects list"},
+      {"strategy": "isolation", "description": "Remove the write call"}
+    ]
+  }
+}

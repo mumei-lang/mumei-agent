@@ -1,0 +1,25 @@
+{
+  "status": "failed",
+  "failure_type": "invariant_violated",
+  "atom": "check_bounds",
+  "semantic_feedback": {
+    "conflicting_constraints": ["x > 10", "x < 5"],
+    "raw_unsat_core": ["(> x 10)", "(< x 5)"],
+    "structured_unsat_core": [
+      {
+        "constraint_type": "requires",
+        "param": null,
+        "type_name": null,
+        "field": null,
+        "description": "Precondition (requires)"
+      },
+      {
+        "constraint_type": "refined_type",
+        "param": "x",
+        "type_name": "Nat",
+        "field": null,
+        "description": "x >= 0"
+      }
+    ]
+  }
+}

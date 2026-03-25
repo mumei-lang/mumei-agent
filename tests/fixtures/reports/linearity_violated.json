@@ -1,0 +1,10 @@
+{
+  "status": "failed",
+  "failure_type": "linearity_violated",
+  "atom": "use_twice",
+  "semantic_feedback": {
+    "violations": [
+      {"description": "Variable 'x' used after move"}
+    ]
+  }
+}

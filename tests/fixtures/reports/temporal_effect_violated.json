@@ -1,0 +1,15 @@
+{
+  "status": "failed",
+  "failure_type": "temporal_effect_violated",
+  "atom": "bad_file_usage",
+  "semantic_feedback": {
+    "temporal_violations": [
+      {
+        "effect": "File",
+        "expected_state": "Open",
+        "actual_state": "Closed",
+        "operation": "write"
+      }
+    ]
+  }
+}
