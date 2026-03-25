@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -317,4 +318,4 @@ def mumei_mock_bin() -> str:
 @pytest.fixture()
 def mumei_mock_e2e_client(mumei_mock_bin: str) -> MumeiClient:
     """Provide a MumeiClient backed by the mock mumei script."""
-    return MumeiClient(f"python {mumei_mock_bin}")
+    return MumeiClient(f"{sys.executable} {mumei_mock_bin}")

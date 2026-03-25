@@ -169,15 +169,19 @@ _REGRESSION_VIOLATION_TYPES: list[str] = [
     "effect_propagation",
 ]
 
-# Varied mock LLM responses — all are valid mumei code that the mock binary
-# would recognise as "fixed".  We cycle through these across runs to simulate
-# non-deterministic LLM output while keeping a high success rate.
+# Varied mock LLM responses — most are valid mumei code wrapped in a fenced
+# code block that ``get_fix()`` can extract.  One response deliberately omits
+# the code fence to simulate an LLM failure, keeping the expected success rate
+# at 80 % (4/5) so the threshold assertion is a meaningful guard.
 _VARIED_RESPONSES: list[str] = [
     "```mumei\natom fixed(x: i64) requires: x >= 0; ensures: result >= 0; body: x;\n```",
     "```mumei\natom fixed(a: i64, b: i64) requires: b != 0; ensures: result == a / b; body: a / b;\n```",
     "```mumei\natom fixed(x: i64) requires: x > 0; ensures: result > 0; body: x;\n```",
     "```mumei\natom fixed(x: i64) requires: x >= 1; ensures: result >= 0; body: x;\n```",
-    "```mumei\natom fixed(x: i64) ensures: result >= 0; body: x;\n```",
+    # No code fence — get_fix() will return the raw text, but _run_fix_pipeline
+    # still counts it as success because len(result) > 0.  To properly simulate
+    # a failure we return an empty string so the pipeline produces no output.
+    "",
 ]
 
 # Minimum acceptable success rate threshold (80%).
