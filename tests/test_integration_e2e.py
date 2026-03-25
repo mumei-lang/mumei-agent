@@ -162,6 +162,13 @@ class TestMockVerifyFailure:
         )
         report = result["report"]
         assert report.get("status") == "failed"
+        # Verify the mock returned the correct violation type.
+        # Reports use either "failure_type" or "violation_type" as key.
+        reported_type = report.get("failure_type") or report.get("violation_type")
+        assert reported_type == violation_type, (
+            f"Expected report for {violation_type}, "
+            f"but got {reported_type!r}: {report}"
+        )
 
 
 @pytest.mark.integration
