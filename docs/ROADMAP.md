@@ -44,14 +44,26 @@
   - `valid.mm` の検証成功テスト
   - Self-healing ループ統合テスト（LLM は Mock、mumei バイナリは実物）
   - `mumei check` パーステスト
+- ✅ mumei バイナリのモック or 実バイナリを使ったインテグレーションテスト (`tests/test_integration_e2e.py`)
+  - `tests/fixtures/mock_mumei.py` — mumei CLI のモックスクリプト（`verify --json` / `check` 対応）
+  - `tests/fixtures/reports/*.json` — 各 violation type のレポート JSON
+  - 各 violation type に対する verify → fix → re-verify ループの E2E テスト
+  - `@pytest.mark.integration` マーカーで CI から除外可能
 - ✅ 各 violation type に対する修正成功率の回帰テスト (`tests/test_regression.py`)
+  - `Metrics.success_rate()` / `Metrics.overall_success_rate` メソッド追加
+  - `TestRegressionSuccessRate`: 各 violation type で N=5 回の fix pipeline 実行、成功率 ≥ 80% を検証
+  - `TestMetricsSuccessRate`: success_rate / overall_success_rate のユニットテスト
 
 ### 対象ファイル
 - `.github/workflows/ci.yml` — CI ワークフロー
 - `tests/test_prompts.py` — `format_error_diff` テスト追加
 - `tests/test_binary_integration.py` — mumei バイナリ統合テスト
-- `tests/conftest.py` — `real_mumei_client` / `fixtures_dir` fixture 追加
+- `tests/test_integration_e2e.py` — モック mumei バイナリ E2E 統合テスト
+- `tests/conftest.py` — `real_mumei_client` / `fixtures_dir` / `mumei_mock_bin` / `mumei_mock_e2e_client` fixture 追加
+- `tests/fixtures/mock_mumei.py` — mumei CLI モックスクリプト
+- `tests/fixtures/reports/*.json` — 各 violation type のレポート JSON
 - `tests/fixtures/*.mm` — 各 violation type のサンプルファイル
+- `agent/metrics.py` — `success_rate()` / `overall_success_rate` メソッド追加
 - `pyproject.toml` — pytest 設定・テスト依存
 
 ---

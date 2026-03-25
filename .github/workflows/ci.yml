@@ -22,6 +22,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
 
+      # NOTE: Integration tests (marked @pytest.mark.integration) are excluded
+      # from CI. Run them locally with: pytest -m integration
       - name: Run tests with coverage
         run: pytest tests/ -v --tb=short -m "not integration" --cov=agent --cov-report=term-missing --cov-report=xml:coverage.xml
 

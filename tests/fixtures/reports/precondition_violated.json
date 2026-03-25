@@ -1,0 +1,23 @@
+{
+  "status": "failed",
+  "failure_type": "precondition_violated",
+  "atom": "safe_divide",
+  "reason": "Division by zero possible",
+  "counterexample": {"a": "10", "b": "0"},
+  "semantic_feedback": {
+    "violated_constraints": [
+      {
+        "param": "b",
+        "type": "i64",
+        "constraint": "b != 0",
+        "explanation": "Divisor must not be zero",
+        "sub_constraints": [
+          {"constraint": "b >= 0", "satisfied": true},
+          {"constraint": "b != 0", "satisfied": false}
+        ]
+      }
+    ]
+  },
+  "span": {"file": "precondition_violated.mm", "line": 3, "col": 1},
+  "suggestion": "Add requires: b != 0"
+}

@@ -35,6 +35,20 @@ class Metrics:
             self.by_violation_type[violation_type] = ViolationMetrics()
         self.by_violation_type[violation_type].successes += 1
 
+    def success_rate(self, violation_type: str) -> float:
+        """Return the success rate for *violation_type* (0.0 if no attempts)."""
+        vm = self.by_violation_type.get(violation_type)
+        if vm is None or vm.attempts == 0:
+            return 0.0
+        return vm.successes / vm.attempts
+
+    @property
+    def overall_success_rate(self) -> float:
+        """Return the overall success rate across all violation types."""
+        if self.total_attempts == 0:
+            return 0.0
+        return self.successes / self.total_attempts
+
     def to_dict(self) -> dict:
         """Convert metrics to a JSON-serializable dict."""
         return {

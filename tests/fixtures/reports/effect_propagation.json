@@ -1,0 +1,12 @@
+{
+  "status": "failed",
+  "violation_type": "effect_propagation",
+  "effect_violation": {
+    "caller": "main_handler",
+    "callee": "write_log",
+    "caller_effects": ["Log"],
+    "callee_effects": ["Log", "FileWrite"],
+    "missing_effects": ["FileWrite"],
+    "resolution_paths": []
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "status": "failed",
+  "failure_type": "division_by_zero",
+  "atom": "unsafe_div",
+  "semantic_feedback": {
+    "counter_example": {"dividend": "10", "divisor": "0"}
+  },
+  "counterexample": {"a": "10", "b": "0"}
+}

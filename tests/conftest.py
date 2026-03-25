@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -302,3 +303,19 @@ def real_mumei_client(mumei_bin: str) -> MumeiClient:
 def fixtures_dir() -> Path:
     """Return the path to the tests/fixtures/ directory."""
     return FIXTURES_DIR
+
+
+# ---------------------------------------------------------------------------
+# Mock mumei binary fixtures (used by integration E2E tests)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def mumei_mock_bin() -> str:
+    """Return the path to the mock mumei script."""
+    return str(FIXTURES_DIR / "mock_mumei.py")
+
+
+@pytest.fixture()
+def mumei_mock_e2e_client(mumei_mock_bin: str) -> MumeiClient:
+    """Provide a MumeiClient backed by the mock mumei script."""
+    return MumeiClient(f"{sys.executable} {mumei_mock_bin}")
