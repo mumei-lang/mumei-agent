@@ -8,6 +8,7 @@ from pathlib import Path
 
 from openai import OpenAI
 from agent.mumei_client import MumeiClient
+from agent.pattern_library import PatternLibrary
 from agent.prompts import (
     effect_mismatch,
     effect_propagation,
@@ -60,6 +61,7 @@ def get_fix(
     source_path: str | None = None,
     retry_history: RetryHistory | None = None,
     metrics: Metrics | None = None,
+    pattern_library: PatternLibrary | None = None,
 ) -> str:
     """Generate a fix using the appropriate prompt template.
 
@@ -74,6 +76,7 @@ def get_fix(
         source_path: Path to source file (required for multi-stage).
         retry_history: Optional retry history for context across attempts.
         metrics: Optional Metrics instance for tracking rule-based vs LLM fixes.
+        pattern_library: Optional PatternLibrary for few-shot examples.
     """
     # Phase 1: Try rule-based fix (no LLM, deterministic)
     vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
@@ -93,6 +96,12 @@ def get_fix(
                 if validation["success"]:
                     if metrics is not None:
                         metrics.record_rule_based_success(vt)
+                    _record_pattern(
+                        pattern_library, vt,
+                        report_data.get("failure_type", ""),
+                        source_code, rule_fix, report_data,
+                        fix_method="rule_based",
+                    )
                     return rule_fix
             except Exception:
                 # Infrastructure failure (binary not found, OS error, etc.)
@@ -116,6 +125,12 @@ def get_fix(
             # No mumei_client to validate — return the rule-based fix as-is
             if metrics is not None:
                 metrics.record_rule_based_success(vt)
+            _record_pattern(
+                pattern_library, vt,
+                report_data.get("failure_type", ""),
+                source_code, rule_fix, report_data,
+                fix_method="rule_based",
+            )
             return rule_fix
 
     # Phase 2: LLM-based fix (existing logic)
@@ -127,6 +142,7 @@ def get_fix(
                 mumei_client, source_path,
                 retry_history=retry_history,
                 metrics=metrics,
+                pattern_library=pattern_library,
             )
         logging.getLogger(__name__).warning(
             "multi-stage strategy requested but mumei_client or source_path is None; "
@@ -139,6 +155,12 @@ def get_fix(
     hint = format_actionable_fix_hint(report_data)
     if hint:
         prompt += f"\n\n# Actionable fix instructions:\n{hint}"
+
+    # Enrich with few-shot examples from pattern library
+    if pattern_library is not None:
+        few_shot = pattern_library.format_few_shot(vt)
+        if few_shot:
+            prompt += f"\n\n{few_shot}"
 
     response = client.chat.completions.create(
         model=model,
@@ -164,3 +186,32 @@ def get_fix(
     if code_match:
         return code_match.group(1).strip()
     return content.strip()
+
+
+def _record_pattern(
+    pattern_library: PatternLibrary | None,
+    violation_type: str,
+    failure_type: str,
+    source_before: str,
+    source_after: str,
+    report: dict,
+    *,
+    fix_method: str = "llm",
+) -> None:
+    """Record a successful fix pattern if a pattern library is provided."""
+    if pattern_library is None:
+        return
+    try:
+        pattern_library.record(
+            violation_type=violation_type,
+            failure_type=failure_type,
+            source_before=source_before,
+            source_after=source_after,
+            report=report,
+            fix_method=fix_method,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Failed to record pattern to library",
+            exc_info=True,
+        )

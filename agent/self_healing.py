@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient
+from agent.pattern_library import PatternLibrary
 from agent.strategies.fix_strategy import get_fix
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
@@ -136,6 +137,7 @@ def main() -> None:
 
     success = False
     outer_history = RetryHistory()
+    pattern_lib = PatternLibrary()
     try:
         for attempt in range(max_retries + 1):
             result = mumei.verify(source_file)
@@ -147,6 +149,26 @@ def main() -> None:
                     sync_to_visualizer(report, enabled=config.visualizer_sync)
                 except Exception:
                     pass
+                # Record the successful fix in the pattern library so that
+                # single-shot LLM fixes (which are not validated inside
+                # get_fix) are captured for future few-shot examples.
+                if attempt > 0 and outer_history.attempts:
+                    last = outer_history.attempts[-1]
+                    try:
+                        with open(source_file, "r", encoding="utf-8") as f:
+                            fixed_source = f.read()
+                        vt = (last.report_data.get("violation_type")
+                              or last.report_data.get("failure_type", "unknown"))
+                        pattern_lib.record(
+                            violation_type=vt,
+                            failure_type=last.report_data.get("failure_type", ""),
+                            source_before=last.source_code,
+                            source_after=fixed_source,
+                            report=last.report_data,
+                            fix_method="llm",
+                        )
+                    except Exception:
+                        pass
                 success = True
                 return
 
@@ -189,6 +211,7 @@ def main() -> None:
                 mumei_client=mumei,
                 source_path=source_file,
                 retry_history=outer_history,
+                pattern_library=pattern_lib,
             )
 
             # Validate before overwriting
