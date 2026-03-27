@@ -18,12 +18,15 @@ def try_rule_based_fix(source_code: str, report: dict) -> str | None:
     failure_type = report.get("failure_type", "")
     violation_type = report.get("violation_type", "")
 
-    if failure_type == "division_by_zero":
-        return _fix_division_by_zero(source_code, report)
-    elif violation_type == "effect_mismatch":
+    # Check violation_type first to match the priority used by
+    # _build_prompt_for_report in fix_strategy.py (and tested by
+    # test_violation_type_takes_precedence_over_failure_type).
+    if violation_type == "effect_mismatch":
         return _fix_effect_mismatch(source_code, report)
     elif violation_type == "effect_propagation":
         return _fix_effect_propagation(source_code, report)
+    elif failure_type == "division_by_zero":
+        return _fix_division_by_zero(source_code, report)
     elif failure_type == "precondition_violated":
         return _fix_precondition(source_code, report)
     return None

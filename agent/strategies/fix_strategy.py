@@ -84,12 +84,11 @@ def get_fix(
         if mumei_client is not None:
             tmp_path: str | None = None
             try:
-                tmp = tempfile.NamedTemporaryFile(
+                with tempfile.NamedTemporaryFile(
                     mode="w", suffix=".mm", delete=False, encoding="utf-8",
-                )
-                tmp_path = tmp.name
-                tmp.write(rule_fix)
-                tmp.close()
+                ) as tmp:
+                    tmp_path = tmp.name
+                    tmp.write(rule_fix)
                 validation = mumei_client.verify(tmp_path)
                 if validation["success"]:
                     if metrics is not None:
