@@ -1,0 +1,276 @@
+"""Rule-based deterministic fixes for common verification failures.
+
+These fixes modify Mumei source code directly based on structured
+verification report data, without calling an LLM. Each fix function
+returns the modified source code on success, or None if the rule
+cannot be applied.
+"""
+from __future__ import annotations
+
+import re
+
+
+def try_rule_based_fix(source_code: str, report: dict) -> str | None:
+    """Attempt a deterministic fix based on the verification report.
+
+    Returns modified source code if a rule applies, None otherwise.
+    """
+    failure_type = report.get("failure_type", "")
+    violation_type = report.get("violation_type", "")
+
+    if failure_type == "division_by_zero":
+        return _fix_division_by_zero(source_code, report)
+    elif violation_type == "effect_mismatch":
+        return _fix_effect_mismatch(source_code, report)
+    elif violation_type == "effect_propagation":
+        return _fix_effect_propagation(source_code, report)
+    elif failure_type == "precondition_violated":
+        return _fix_precondition(source_code, report)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+def _find_atom_requires(source: str, atom_name: str) -> tuple[int, int, str] | None:
+    """Find the start/end position and current value of the requires clause.
+
+    Returns ``(start, end, value)`` where *value* is the text after
+    ``requires:`` (e.g. ``"true"`` or ``"a > 0"``).  Returns ``None``
+    when the atom or its requires clause cannot be located.
+    """
+    # Match the atom declaration line
+    atom_pattern = re.compile(
+        rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
+        re.DOTALL,
+    )
+    atom_match = atom_pattern.search(source)
+    if atom_match is None:
+        return None
+
+    # Search for `requires:` after the atom declaration
+    rest = source[atom_match.end():]
+    req_match = re.search(r'requires\s*:\s*(.+?)\s*;', rest)
+    if req_match is None:
+        return None
+
+    start = atom_match.end() + req_match.start(1)
+    end = atom_match.end() + req_match.end(1)
+    value = req_match.group(1).strip()
+    return start, end, value
+
+
+def _append_to_requires(source: str, atom_name: str, new_constraint: str) -> str | None:
+    """Add a constraint to an atom's requires clause.
+
+    If ``requires: true``, replaces it with the new constraint.
+    Otherwise appends ``&& <new_constraint>``.
+    Returns ``None`` if the requires clause cannot be found.
+    """
+    result = _find_atom_requires(source, atom_name)
+    if result is None:
+        return None
+    start, end, value = result
+
+    if value == "true":
+        new_value = new_constraint
+    else:
+        new_value = f"{value} && {new_constraint}"
+    return source[:start] + new_value + source[end:]
+
+
+def _find_atom_effects(source: str, atom_name: str) -> tuple[int, int, list[str]] | None:
+    """Find the effects declaration for a given atom.
+
+    Returns ``(start, end, effects_list)`` where *start*/*end* mark the
+    full ``effects: [...]`` token (including brackets) and *effects_list*
+    contains the individual effect names.  Returns ``None`` when the
+    atom or its effects clause cannot be located.
+    """
+    atom_pattern = re.compile(
+        rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
+        re.DOTALL,
+    )
+    atom_match = atom_pattern.search(source)
+    if atom_match is None:
+        return None
+
+    rest = source[atom_match.end():]
+    eff_match = re.search(r'effects\s*:\s*\[([^\]]*)\]', rest)
+    if eff_match is None:
+        return None
+
+    start = atom_match.end() + eff_match.start()
+    end = atom_match.end() + eff_match.end()
+    effects_str = eff_match.group(1).strip()
+    effects_list = [e.strip() for e in effects_str.split(",") if e.strip()]
+    return start, end, effects_list
+
+
+def _find_atom_declaration_end(source: str, atom_name: str) -> int | None:
+    """Return the position right after the atom's closing parenthesis."""
+    atom_pattern = re.compile(
+        rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
+        re.DOTALL,
+    )
+    atom_match = atom_pattern.search(source)
+    if atom_match is None:
+        return None
+    return atom_match.end()
+
+
+# ---------------------------------------------------------------------------
+# Fix implementations
+# ---------------------------------------------------------------------------
+
+def _fix_division_by_zero(source_code: str, report: dict) -> str | None:
+    """Add a ``!= 0`` precondition for the divisor parameter."""
+    atom_name = report.get("atom", "")
+    if not atom_name:
+        return None
+
+    # Determine the divisor parameter name.
+    # Prefer the top-level ``counterexample`` because its keys are the
+    # actual atom parameter names.  The nested
+    # ``semantic_feedback.counter_example`` uses semantic role names
+    # (e.g. "divisor") which may differ from the real parameter name.
+    divisor_param: str | None = None
+
+    # 1. Top-level counterexample (actual param names)
+    top_ce = report.get("counterexample", {})
+    for key, val in top_ce.items():
+        if str(val) == "0":
+            divisor_param = key
+            break
+
+    # 2. Fallback: semantic_feedback.counter_example
+    if divisor_param is None:
+        semantic = report.get("semantic_feedback", {})
+        counter_example = semantic.get("counter_example", {})
+        for key, val in counter_example.items():
+            if str(val) == "0":
+                divisor_param = key
+                break
+
+    if divisor_param is None:
+        return None
+
+    constraint = f"{divisor_param} != 0"
+
+    # Check if requires clause exists
+    result = _find_atom_requires(source_code, atom_name)
+    if result is None:
+        return None
+
+    return _append_to_requires(source_code, atom_name, constraint)
+
+
+def _fix_effect_mismatch(source_code: str, report: dict) -> str | None:
+    """Add a missing effect to an atom's effects list."""
+    effect_violation = report.get("effect_violation", {})
+    required_effect = effect_violation.get("required_effect", "")
+    if not required_effect:
+        return None
+
+    atom_name = report.get("atom", "")
+    if not atom_name:
+        return None
+
+    eff_result = _find_atom_effects(source_code, atom_name)
+    if eff_result is not None:
+        start, end, effects_list = eff_result
+        if required_effect in effects_list:
+            return None  # already declared
+        effects_list.append(required_effect)
+        new_effects = f"effects: [{', '.join(effects_list)}]"
+        return source_code[:start] + new_effects + source_code[end:]
+
+    # No effects line exists — insert one after the atom declaration
+    decl_end = _find_atom_declaration_end(source_code, atom_name)
+    if decl_end is None:
+        return None
+
+    # Detect indentation from the next line
+    rest = source_code[decl_end:]
+    indent_match = re.match(r'\n(\s+)', rest)
+    indent = indent_match.group(1) if indent_match else "    "
+
+    insertion = f"\n{indent}effects: [{required_effect}]"
+    return source_code[:decl_end] + insertion + source_code[decl_end:]
+
+
+def _fix_effect_propagation(source_code: str, report: dict) -> str | None:
+    """Add missing effects to a caller atom's effects list."""
+    effect_violation = report.get("effect_violation", {})
+    missing_effects = effect_violation.get("missing_effects", [])
+    caller = effect_violation.get("caller", "")
+    if not missing_effects or not caller:
+        return None
+
+    eff_result = _find_atom_effects(source_code, caller)
+    if eff_result is not None:
+        start, end, effects_list = eff_result
+        added = False
+        for eff in missing_effects:
+            if eff not in effects_list:
+                effects_list.append(eff)
+                added = True
+        if not added:
+            return None  # all effects already present
+        new_effects = f"effects: [{', '.join(effects_list)}]"
+        return source_code[:start] + new_effects + source_code[end:]
+
+    # No effects line exists — insert one after the caller's declaration
+    decl_end = _find_atom_declaration_end(source_code, caller)
+    if decl_end is None:
+        return None
+
+    rest = source_code[decl_end:]
+    indent_match = re.match(r'\n(\s+)', rest)
+    indent = indent_match.group(1) if indent_match else "    "
+
+    insertion = f"\n{indent}effects: [{', '.join(missing_effects)}]"
+    return source_code[:decl_end] + insertion + source_code[decl_end:]
+
+
+def _fix_precondition(source_code: str, report: dict) -> str | None:
+    """Add violated constraints to the atom's requires clause.
+
+    Only applies when each constraint is a simple comparison
+    (``\\w+ [<>=!]+ \\w+``).
+    """
+    atom_name = report.get("atom", "")
+    if not atom_name:
+        return None
+
+    semantic = report.get("semantic_feedback", {})
+    violated = semantic.get("violated_constraints", [])
+    if not violated:
+        return None
+
+    simple_cmp = re.compile(r'^\w+\s*[<>=!]+\s*\w+$')
+
+    modified = source_code
+    for entry in violated:
+        constraint = entry.get("constraint", "")
+        if not constraint or not simple_cmp.match(constraint):
+            continue
+
+        # Check if constraint is already in the requires clause
+        req = _find_atom_requires(modified, atom_name)
+        if req is None:
+            return None
+        _start, _end, current_value = req
+        if constraint in current_value:
+            continue
+
+        result = _append_to_requires(modified, atom_name, constraint)
+        if result is None:
+            return None
+        modified = result
+
+    # Only return if we actually changed something
+    if modified == source_code:
+        return None
+    return modified

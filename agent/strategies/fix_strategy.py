@@ -14,7 +14,9 @@ from agent.prompts import (
     postcondition,
     temporal_effect,
 )
+from agent.metrics import Metrics
 from agent.strategies.retry_history import RetryHistory
+from agent.strategies.rule_based_fix import try_rule_based_fix
 from agent.prompts.report_formatter import format_actionable_fix_hint
 
 # Mapping from failure_type to prompt module
@@ -53,6 +55,7 @@ def get_fix(
     mumei_client: MumeiClient | None = None,
     source_path: str | None = None,
     retry_history: RetryHistory | None = None,
+    metrics: Metrics | None = None,
 ) -> str:
     """Generate a fix using the appropriate prompt template.
 
@@ -66,7 +69,37 @@ def get_fix(
         mumei_client: MumeiClient instance (required for multi-stage).
         source_path: Path to source file (required for multi-stage).
         retry_history: Optional retry history for context across attempts.
+        metrics: Optional Metrics instance for tracking rule-based vs LLM fixes.
     """
+    # Phase 1: Try rule-based fix (no LLM, deterministic)
+    vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
+    rule_fix = try_rule_based_fix(source_code, report_data)
+    if rule_fix is not None:
+        if metrics is not None:
+            metrics.record_rule_based_attempt(vt)
+        if mumei_client is not None:
+            import tempfile
+            import os
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".mm", delete=False, encoding="utf-8",
+            )
+            try:
+                tmp.write(rule_fix)
+                tmp.close()
+                validation = mumei_client.verify(tmp.name)
+                if validation["success"]:
+                    if metrics is not None:
+                        metrics.record_rule_based_success(vt)
+                    return rule_fix
+            finally:
+                os.unlink(tmp.name)
+        else:
+            # No mumei_client to validate — return the rule-based fix as-is
+            if metrics is not None:
+                metrics.record_rule_based_success(vt)
+            return rule_fix
+
+    # Phase 2: LLM-based fix (existing logic)
     if strategy == "multi-stage":
         if mumei_client is not None and source_path is not None:
             from agent.strategies.multi_stage_strategy import get_fix_multi_stage
@@ -74,6 +107,7 @@ def get_fix(
                 client, model, source_code, error_log, report_data,
                 mumei_client, source_path,
                 retry_history=retry_history,
+                metrics=metrics,
             )
         import logging
         logging.getLogger(__name__).warning(

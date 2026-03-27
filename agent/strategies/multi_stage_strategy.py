@@ -169,6 +169,7 @@ def get_fix_multi_stage(
     mumei_client: MumeiClient,
     source_path: str,
     retry_history: RetryHistory | None = None,
+    metrics: object | None = None,
 ) -> str:
     """Generate a fix using a multi-stage LLM pipeline.
 
