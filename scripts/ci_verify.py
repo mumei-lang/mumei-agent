@@ -34,7 +34,16 @@ def discover_mm_files(root: Path) -> list[Path]:
 def run_verify(mumei_bin: str, file_path: Path) -> dict:
     """Run mumei verify --json on a single file."""
     cmd = mumei_bin.split() + ["verify", "--json", str(file_path)]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return {
+            "file": str(file_path),
+            "success": False,
+            "report": {},
+            "stdout": "",
+            "stderr": f"mumei binary not found: {mumei_bin}",
+        }
     report = {}
     if result.stdout.strip():
         try:
@@ -57,7 +66,10 @@ def run_proof_cert(mumei_bin: str, file_path: Path, output_dir: Path) -> Path | 
     cmd = mumei_bin.split() + [
         "verify", "--proof-cert", "--output", str(cert_path), str(file_path)
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return None
     if result.returncode == 0 and cert_path.exists():
         return cert_path
     return None
