@@ -61,8 +61,14 @@ def run_verify(mumei_bin: str, file_path: Path) -> dict:
 
 def run_proof_cert(mumei_bin: str, file_path: Path, output_dir: Path) -> Path | None:
     """Run mumei verify --proof-cert and return the certificate path."""
-    stem = file_path.stem
-    cert_path = output_dir / f"{stem}.proof.json"
+    try:
+        rel = file_path.resolve().relative_to(Path.cwd().resolve())
+        safe_name = str(rel).replace(os.sep, "_").replace("/", "_")
+    except ValueError:
+        safe_name = file_path.stem
+    if safe_name.endswith(".mm"):
+        safe_name = safe_name[:-3]
+    cert_path = output_dir / f"{safe_name}.proof.json"
     cmd = mumei_bin.split() + [
         "verify", "--proof-cert", "--output", str(cert_path), str(file_path)
     ]

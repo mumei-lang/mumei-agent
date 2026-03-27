@@ -29,8 +29,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install mumei
+        env:
+          VERSION: ${{ inputs.mumei-version }}
         run: |
-          VERSION="${{ inputs.mumei-version }}"
           if [ "$VERSION" = "latest" ]; then
             curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
           else
@@ -52,12 +53,15 @@ jobs:
 
       - name: Run verification
         id: verify
+        env:
+          FILES: ${{ inputs.files }}
+          PROOF_CERT: ${{ inputs.proof-cert }}
         run: |
           ARGS=""
-          if [ -n "${{ inputs.files }}" ]; then
-            ARGS="${{ inputs.files }}"
+          if [ -n "$FILES" ]; then
+            ARGS="$FILES"
           fi
-          if [ "${{ inputs.proof-cert }}" = "true" ]; then
+          if [ "$PROOF_CERT" = "true" ]; then
             ARGS="$ARGS --proof-cert --cert-dir proof-certs"
           fi
           set +e
