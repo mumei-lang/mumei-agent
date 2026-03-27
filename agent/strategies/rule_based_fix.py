@@ -54,6 +54,9 @@ def _find_atom_requires(source: str, atom_name: str) -> tuple[int, int, str] | N
     Returns ``(start, end, value)`` where *value* is the text after
     ``requires:`` (e.g. ``"true"`` or ``"a > 0"``).  Returns ``None``
     when the atom or its requires clause cannot be located.
+
+    See :func:`_find_atom_declaration_end` for a note on the nested
+    parentheses limitation of the atom declaration regex.
     """
     # Match the atom declaration line
     atom_pattern = re.compile(
@@ -102,6 +105,9 @@ def _find_atom_effects(source: str, atom_name: str) -> tuple[int, int, list[str]
     full ``effects: [...]`` token (including brackets) and *effects_list*
     contains the individual effect names.  Returns ``None`` when the
     atom or its effects clause cannot be located.
+
+    See :func:`_find_atom_declaration_end` for a note on the nested
+    parentheses limitation of the atom declaration regex.
     """
     atom_pattern = re.compile(
         rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
@@ -152,27 +158,52 @@ def _fix_division_by_zero(source_code: str, report: dict) -> str | None:
         return None
 
     # Determine the divisor parameter name.
-    # Prefer the top-level ``counterexample`` because its keys are the
-    # actual atom parameter names.  The nested
-    # ``semantic_feedback.counter_example`` uses semantic role names
-    # (e.g. "divisor") which may differ from the real parameter name.
+    #
+    # Strategy:
+    #   1. If semantic_feedback.counter_example has a "divisor" key with
+    #      value "0", use its corresponding actual parameter name from the
+    #      top-level counterexample (matched by position) or fall back to
+    #      the semantic key itself.
+    #   2. From the top-level counterexample, collect all params whose
+    #      value is "0".  If exactly one is zero, use it.  If multiple
+    #      are zero, pick the *last* one — in ``a / b`` style expressions
+    #      the divisor is typically the last parameter.
+    #   3. If the top-level counterexample is absent, apply the same
+    #      logic to semantic_feedback.counter_example.
     divisor_param: str | None = None
 
-    # 1. Top-level counterexample (actual param names)
+    semantic = report.get("semantic_feedback", {})
+    sem_ce = semantic.get("counter_example", {})
     top_ce = report.get("counterexample", {})
-    for key, val in top_ce.items():
-        if str(val) == "0":
-            divisor_param = key
-            break
 
-    # 2. Fallback: semantic_feedback.counter_example
+    # 1. Explicit "divisor" key in semantic feedback
+    if "divisor" in sem_ce and str(sem_ce["divisor"]) == "0":
+        # Try to map back to the actual parameter name via top-level CE
+        # (semantic CE keys are role names, not param names).
+        zero_params = [k for k, v in top_ce.items() if str(v) == "0"]
+        if len(zero_params) == 1:
+            divisor_param = zero_params[0]
+        elif zero_params:
+            divisor_param = zero_params[-1]
+        else:
+            divisor_param = "divisor"  # use semantic key as last resort
+
+    # 2. Top-level counterexample (actual param names)
+    if divisor_param is None and top_ce:
+        zero_params = [k for k, v in top_ce.items() if str(v) == "0"]
+        if len(zero_params) == 1:
+            divisor_param = zero_params[0]
+        elif zero_params:
+            # Multiple zeros — pick the last param (likely the divisor)
+            divisor_param = zero_params[-1]
+
+    # 3. Fallback: semantic_feedback.counter_example
     if divisor_param is None:
-        semantic = report.get("semantic_feedback", {})
-        counter_example = semantic.get("counter_example", {})
-        for key, val in counter_example.items():
-            if str(val) == "0":
-                divisor_param = key
-                break
+        zero_params = [k for k, v in sem_ce.items() if str(v) == "0"]
+        if len(zero_params) == 1:
+            divisor_param = zero_params[0]
+        elif zero_params:
+            divisor_param = zero_params[-1]
 
     if divisor_param is None:
         return None

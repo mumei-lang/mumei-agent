@@ -38,6 +38,13 @@ class Metrics:
 
         Also records a general attempt + success so that
         ``total_attempts`` and ``successes`` stay consistent.
+
+        .. warning::
+
+            This method calls :meth:`record_attempt` and
+            :meth:`record_success` internally.  Callers must **not** call
+            those methods separately for the same fix event, or the
+            counts will be double-incremented.
         """
         self.rule_based_successes += 1
         self.record_attempt(violation_type)

@@ -1,9 +1,11 @@
 """Fix strategy: select prompt template based on violation type and call LLM."""
 from __future__ import annotations
 
-import os
+import logging
 import re
 import tempfile
+from pathlib import Path
+
 from openai import OpenAI
 from agent.mumei_client import MumeiClient
 from agent.prompts import (
@@ -80,19 +82,33 @@ def get_fix(
         if metrics is not None:
             metrics.record_rule_based_attempt(vt)
         if mumei_client is not None:
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".mm", delete=False, encoding="utf-8",
-            )
+            tmp_path: str | None = None
             try:
+                tmp = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".mm", delete=False, encoding="utf-8",
+                )
+                tmp_path = tmp.name
                 tmp.write(rule_fix)
                 tmp.close()
-                validation = mumei_client.verify(tmp.name)
+                validation = mumei_client.verify(tmp_path)
                 if validation["success"]:
                     if metrics is not None:
                         metrics.record_rule_based_success(vt)
                     return rule_fix
+            except Exception:
+                # Infrastructure failure (binary not found, OS error, etc.)
+                # — fall through to LLM-based Phase 2.
+                logging.getLogger(__name__).warning(
+                    "Rule-based fix validation failed due to infrastructure error; "
+                    "falling through to LLM.",
+                    exc_info=True,
+                )
             finally:
-                os.unlink(tmp.name)
+                try:
+                    if tmp_path:
+                        Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
             # Rule-based fix failed validation — fall through to LLM.
             # record_rule_based_attempt only incremented rule_based_attempts
             # (not total_attempts), so the LLM path's own metrics tracking
@@ -113,7 +129,6 @@ def get_fix(
                 retry_history=retry_history,
                 metrics=metrics,
             )
-        import logging
         logging.getLogger(__name__).warning(
             "multi-stage strategy requested but mumei_client or source_path is None; "
             "falling back to single-shot strategy."

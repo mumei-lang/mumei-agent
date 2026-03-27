@@ -182,6 +182,11 @@ def get_fix_multi_stage(
     Stage 3 (Validate): Verify the fix with mumei; retry Stage 1+2+3 up to
         ``_MAX_INTERNAL_RETRIES`` times on failure.
 
+    Args:
+        metrics: Accepted for interface consistency with :func:`get_fix`
+            but not yet used inside the multi-stage loop.  Future work
+            should wire this into the internal retry accounting.
+
     Returns the fixed source code (best effort).
     """
     if retry_history is None:
