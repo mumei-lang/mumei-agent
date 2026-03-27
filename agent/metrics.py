@@ -24,13 +24,23 @@ class Metrics:
     by_violation_type: dict[str, ViolationMetrics] = field(default_factory=dict)
 
     def record_rule_based_attempt(self, violation_type: str = "unknown") -> None:
-        """Record a rule-based fix attempt."""
+        """Record a rule-based fix attempt.
+
+        Only increments ``rule_based_attempts``.  The caller is responsible
+        for calling :meth:`record_attempt` / :meth:`record_success` at the
+        appropriate point so that ``total_attempts`` accurately reflects
+        whether the overall fix attempt (rule-based or LLM) succeeded.
+        """
         self.rule_based_attempts += 1
-        self.record_attempt(violation_type)
 
     def record_rule_based_success(self, violation_type: str = "unknown") -> None:
-        """Record a successful rule-based fix."""
+        """Record a successful rule-based fix.
+
+        Also records a general attempt + success so that
+        ``total_attempts`` and ``successes`` stay consistent.
+        """
         self.rule_based_successes += 1
+        self.record_attempt(violation_type)
         self.record_success(violation_type)
 
     @property

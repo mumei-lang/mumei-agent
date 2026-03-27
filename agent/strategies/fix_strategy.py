@@ -93,6 +93,10 @@ def get_fix(
                     return rule_fix
             finally:
                 os.unlink(tmp.name)
+            # Rule-based fix failed validation — fall through to LLM.
+            # record_rule_based_attempt only incremented rule_based_attempts
+            # (not total_attempts), so the LLM path's own metrics tracking
+            # remains unaffected.
         else:
             # No mumei_client to validate — return the rule-based fix as-is
             if metrics is not None:

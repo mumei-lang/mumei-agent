@@ -291,6 +291,88 @@ atom safe_divide(a: i64, b: i64)
 # Fallback / edge case tests
 # ---------------------------------------------------------------------------
 
+class TestMultiAtomBoundary:
+    """Tests for multi-atom files where the target atom lacks a clause."""
+
+    def test_effect_mismatch_does_not_modify_other_atom(self) -> None:
+        """When target atom has no effects but a later atom does, insert — don't modify the other."""
+        source = """\
+atom foo(x: i64)
+    requires: true;
+    body: x;
+
+atom bar(x: i64)
+    effects: [Log]
+    requires: true;
+    body: x;
+"""
+        report = {
+            "violation_type": "effect_mismatch",
+            "atom": "foo",
+            "effect_violation": {"required_effect": "IO"},
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        # foo should get a new effects line
+        assert "effects: [IO]" in result
+        # bar's effects should be unchanged
+        bar_section = result[result.index("atom bar"):]
+        assert "effects: [Log]" in bar_section
+
+    def test_requires_does_not_cross_atom_boundary(self) -> None:
+        """When target atom has no requires but a later atom does, return None."""
+        source = """\
+atom foo(x: i64)
+    body: x;
+
+atom bar(x: i64)
+    requires: true;
+    body: x;
+"""
+        report = {
+            "failure_type": "division_by_zero",
+            "atom": "foo",
+            "counterexample": {"x": "0"},
+        }
+        result = try_rule_based_fix(source, report)
+        # foo has no requires clause within its block → should return None
+        assert result is None
+
+    def test_effect_propagation_targets_correct_caller(self) -> None:
+        """Effect propagation should modify the caller, not a later atom's effects."""
+        source = """\
+atom callee(x: i64)
+    effects: [IO]
+    requires: true;
+    body: x;
+
+atom caller(x: i64)
+    requires: true;
+    body: { callee(x) }
+
+atom bystander(x: i64)
+    effects: [Log]
+    requires: true;
+    body: x;
+"""
+        report = {
+            "violation_type": "effect_propagation",
+            "effect_violation": {
+                "caller": "caller",
+                "callee": "callee",
+                "missing_effects": ["IO"],
+            },
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        # caller should get a new effects line
+        caller_section = result[result.index("atom caller"):result.index("atom bystander")]
+        assert "effects: [IO]" in caller_section
+        # bystander should be unchanged
+        bystander_section = result[result.index("atom bystander"):]
+        assert "effects: [Log]" in bystander_section
+
+
 class TestEdgeCases:
     """Edge cases and fallback behavior."""
 

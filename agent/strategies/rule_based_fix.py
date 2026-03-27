@@ -33,6 +33,21 @@ def try_rule_based_fix(source_code: str, report: dict) -> str | None:
 # Helper functions
 # ---------------------------------------------------------------------------
 
+def _scoped_block(source: str, start: int) -> str:
+    """Return the slice of *source* from *start* up to the next atom boundary.
+
+    This prevents regex helpers from accidentally matching clauses that
+    belong to a subsequent atom in multi-atom files.
+    """
+    rest = source[start:]
+    # Look for the next top-level ``atom`` keyword (preceded by a newline
+    # to avoid matching the word inside identifiers or strings).
+    next_atom = re.search(r'\natom\s', rest)
+    if next_atom is not None:
+        return rest[:next_atom.start()]
+    return rest
+
+
 def _find_atom_requires(source: str, atom_name: str) -> tuple[int, int, str] | None:
     """Find the start/end position and current value of the requires clause.
 
@@ -49,8 +64,8 @@ def _find_atom_requires(source: str, atom_name: str) -> tuple[int, int, str] | N
     if atom_match is None:
         return None
 
-    # Search for `requires:` after the atom declaration
-    rest = source[atom_match.end():]
+    # Search for `requires:` after the atom declaration, scoped to this atom
+    rest = _scoped_block(source, atom_match.end())
     req_match = re.search(r'requires\s*:\s*(.+?)\s*;', rest)
     if req_match is None:
         return None
@@ -96,7 +111,7 @@ def _find_atom_effects(source: str, atom_name: str) -> tuple[int, int, list[str]
     if atom_match is None:
         return None
 
-    rest = source[atom_match.end():]
+    rest = _scoped_block(source, atom_match.end())
     eff_match = re.search(r'effects\s*:\s*\[([^\]]*)\]', rest)
     if eff_match is None:
         return None
@@ -109,7 +124,13 @@ def _find_atom_effects(source: str, atom_name: str) -> tuple[int, int, list[str]
 
 
 def _find_atom_declaration_end(source: str, atom_name: str) -> int | None:
-    """Return the position right after the atom's closing parenthesis."""
+    """Return the position right after the atom's closing parenthesis.
+
+    Note: the ``\\(.*?\\)`` pattern uses a non-greedy match that stops at
+    the first ``)``.  This works for Mumei's current simple type syntax
+    (e.g. ``i64``, ``Str``) but would break if nested parentheses were
+    introduced in parameter types (e.g. ``Pair(i64, i64)``).
+    """
     atom_pattern = re.compile(
         rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
         re.DOTALL,
