@@ -142,6 +142,7 @@ def get_fix(
                 mumei_client, source_path,
                 retry_history=retry_history,
                 metrics=metrics,
+                pattern_library=pattern_library,
             )
         logging.getLogger(__name__).warning(
             "multi-stage strategy requested but mumei_client or source_path is None; "

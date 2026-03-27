@@ -39,6 +39,10 @@ class PatternLibrary:
     patterns: dict[str, list[dict]] = field(default_factory=dict)  # violation_type -> list of pattern dicts
     storage_path: Path = DEFAULT_PATTERN_FILE
 
+    def __post_init__(self) -> None:
+        """Automatically load existing patterns from disk on creation."""
+        self.load()
+
     def load(self) -> None:
         """Load patterns from disk."""
         if self.storage_path.exists():

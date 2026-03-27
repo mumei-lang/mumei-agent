@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
+from agent.pattern_library import PatternLibrary
 from agent.strategies.fix_strategy import _build_prompt_for_report
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 
@@ -174,6 +175,7 @@ def get_fix_multi_stage(
     source_path: str,
     retry_history: RetryHistory | None = None,
     metrics: Metrics | None = None,  # noqa: ARG001 — reserved for future use
+    pattern_library: PatternLibrary | None = None,
 ) -> str:
     """Generate a fix using a multi-stage LLM pipeline.
 
@@ -186,6 +188,8 @@ def get_fix_multi_stage(
         metrics: Accepted for interface consistency with :func:`get_fix`
             but not yet used inside the multi-stage loop.  Future work
             should wire this into the internal retry accounting.
+        pattern_library: Optional PatternLibrary for few-shot examples and
+            recording successful fixes.
 
     Returns the fixed source code (best effort).
     """
@@ -211,6 +215,14 @@ def get_fix_multi_stage(
 
         # --- Stage 2: Fix ---
         base_prompt = _build_prompt_for_report(source_code, error_log, report_data)
+
+        # Enrich with few-shot examples from pattern library
+        vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
+        if pattern_library is not None:
+            few_shot = pattern_library.format_few_shot(vt)
+            if few_shot:
+                base_prompt += f"\n\n{few_shot}"
+
         retry_context = _build_retry_context(retry_history)
 
         fix_prompt = _FIX_USER_TEMPLATE.format(
@@ -246,6 +258,22 @@ def get_fix_multi_stage(
 
             validation = mumei_client.verify(tmp_path)
             if validation["success"]:
+                # Record successful fix in pattern library
+                if pattern_library is not None:
+                    try:
+                        pattern_library.record(
+                            violation_type=vt,
+                            failure_type=report_data.get("failure_type", ""),
+                            source_before=source_code,
+                            source_after=fixed_code,
+                            report=report_data,
+                            fix_method="llm",
+                        )
+                    except Exception:
+                        _logger.warning(
+                            "Failed to record pattern to library",
+                            exc_info=True,
+                        )
                 return fixed_code  # Verified successfully!
 
             # Record the failed attempt

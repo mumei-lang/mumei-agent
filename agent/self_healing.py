@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient
+from agent.pattern_library import PatternLibrary
 from agent.strategies.fix_strategy import get_fix
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
@@ -136,6 +137,7 @@ def main() -> None:
 
     success = False
     outer_history = RetryHistory()
+    pattern_lib = PatternLibrary()
     try:
         for attempt in range(max_retries + 1):
             result = mumei.verify(source_file)
@@ -189,6 +191,7 @@ def main() -> None:
                 mumei_client=mumei,
                 source_path=source_file,
                 retry_history=outer_history,
+                pattern_library=pattern_lib,
             )
 
             # Validate before overwriting
