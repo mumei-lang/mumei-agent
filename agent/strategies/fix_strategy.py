@@ -1,7 +1,9 @@
 """Fix strategy: select prompt template based on violation type and call LLM."""
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from openai import OpenAI
 from agent.mumei_client import MumeiClient
 from agent.prompts import (
@@ -78,8 +80,6 @@ def get_fix(
         if metrics is not None:
             metrics.record_rule_based_attempt(vt)
         if mumei_client is not None:
-            import tempfile
-            import os
             tmp = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".mm", delete=False, encoding="utf-8",
             )

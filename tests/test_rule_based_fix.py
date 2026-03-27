@@ -1,8 +1,6 @@
 """Unit tests for agent.strategies.rule_based_fix."""
 from __future__ import annotations
 
-import pytest
-
 from agent.strategies.rule_based_fix import try_rule_based_fix
 
 
