@@ -92,9 +92,29 @@ mumeiの思想の究極的な体現:
 
 ---
 
+## P3-C: CI Verification Gate (中優先度) ✅ Phase 1 Complete
+
+PR 上の `.mm` ファイルを自動検証し、結果をコメントとして投稿するパイプライン。
+
+### Phase 1 — 実装済み
+- ✅ `scripts/ci_verify.py` — `.mm` ファイルの自動発見・検証・Markdown レポート生成
+- ✅ `.github/workflows/mumei-verify.yml` — 再利用可能な検証ワークフロー (`workflow_call`)
+- ✅ `.github/workflows/verify-examples.yml` — `examples/*.mm` の自動検証
+- ✅ `tests/test_ci_verify.py` — ファイル発見・Markdown フォーマットのユニットテスト
+- ✅ Proof certificate 生成・アーティファクトアップロード対応
+- ✅ PR コメントへの検証結果自動投稿 (`marocchino/sticky-pull-request-comment`)
+
+### 対象ファイル
+- `scripts/ci_verify.py` — CI 検証ゲートスクリプト
+- `.github/workflows/mumei-verify.yml` — 再利用可能ワークフロー
+- `.github/workflows/verify-examples.yml` — examples 検証ワークフロー
+- `tests/test_ci_verify.py` — ユニットテスト
+
+---
+
 ## 推奨実行順序
 
-P1-C (CI整備) → P1-B (unsat core活用) → P1-A (Generate Mode強化) → P3-B (E2Eデモ)
+P1-C (CI整備) → P1-B (unsat core活用) → P1-A (Generate Mode強化) → P3-B (E2Eデモ) → P3-C (CI Verification Gate)
 
 ---
 

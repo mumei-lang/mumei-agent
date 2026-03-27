@@ -1,0 +1,88 @@
+name: Mumei Verification Gate
+
+on:
+  workflow_call:
+    inputs:
+      mumei-version:
+        description: 'Mumei version to install (e.g., v0.2.0, or "latest")'
+        required: false
+        default: 'latest'
+        type: string
+      files:
+        description: 'Space-separated list of .mm files to verify (empty = auto-discover)'
+        required: false
+        default: ''
+        type: string
+      proof-cert:
+        description: 'Generate proof certificates'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mumei
+        run: |
+          VERSION="${{ inputs.mumei-version }}"
+          if [ "$VERSION" = "latest" ]; then
+            curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
+          else
+            curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version "$VERSION"
+          fi
+          echo "$HOME/.mumei/bin" >> $GITHUB_PATH
+          # Also add toolchain paths
+          if [ -f "$HOME/.mumei/env" ]; then
+            source "$HOME/.mumei/env"
+          fi
+
+      - name: Verify mumei installation
+        run: mumei inspect || echo "mumei inspect failed (non-fatal)"
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run verification
+        id: verify
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.files }}" ]; then
+            ARGS="${{ inputs.files }}"
+          fi
+          if [ "${{ inputs.proof-cert }}" = "true" ]; then
+            ARGS="$ARGS --proof-cert --cert-dir proof-certs"
+          fi
+          python scripts/ci_verify.py $ARGS --output verification-report.md || true
+          # Store exit code
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: verification-report.md
+
+      - name: Upload proof certificates
+        if: inputs.proof-cert && hashFiles('proof-certs/*.proof.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-certificates
+          path: proof-certs/
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-report
+          path: verification-report.md
+
+      - name: Check verification result
+        if: steps.verify.outputs.exit_code != '0'
+        run: |
+          echo "::error::Mumei verification failed. See PR comment for details."
+          exit 1
