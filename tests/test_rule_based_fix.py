@@ -114,6 +114,41 @@ atom my_div(x: i64, y: i64)
         assert result is not None
         assert "y != 0" in result
 
+    def test_picks_last_zero_param_when_multiple_are_zero(self) -> None:
+        """When both params are 0, pick the last one (likely the divisor)."""
+        report = {
+            "failure_type": "division_by_zero",
+            "atom": "unsafe_div",
+            "semantic_feedback": {
+                "counter_example": {"dividend": "0", "divisor": "0"},
+            },
+            "counterexample": {"a": "0", "b": "0"},
+        }
+        result = try_rule_based_fix(_DIV_SOURCE_TRUE, report)
+        assert result is not None
+        assert "b != 0" in result
+
+    def test_uses_explicit_divisor_key(self) -> None:
+        """When semantic CE has explicit 'divisor' key, prefer it."""
+        source = """\
+atom my_div(x: i64, y: i64)
+    requires: true;
+    ensures: result == x / y;
+    body: x / y;
+"""
+        report = {
+            "failure_type": "division_by_zero",
+            "atom": "my_div",
+            "semantic_feedback": {
+                "counter_example": {"dividend": "0", "divisor": "0"},
+            },
+            "counterexample": {"x": "0", "y": "0"},
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        # Both x and y are 0, but semantic has "divisor" key → picks last zero = y
+        assert "y != 0" in result
+
     def test_returns_none_when_no_atom(self) -> None:
         """Missing atom name in report → None."""
         report = {
