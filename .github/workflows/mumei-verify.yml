@@ -19,6 +19,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  pull-requests: write
+
 jobs:
   verify:
     runs-on: ubuntu-latest

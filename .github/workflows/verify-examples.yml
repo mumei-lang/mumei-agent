@@ -12,6 +12,9 @@ on:
       - 'examples/*.mm'
       - 'scripts/ci_verify.py'
 
+permissions:
+  pull-requests: write
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -25,24 +28,27 @@ jobs:
 
       - name: Install mumei (if available)
         id: install-mumei
-        continue-on-error: true
         run: |
-          curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
-          echo "$HOME/.mumei/bin" >> $GITHUB_PATH
+          if curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash; then
+            echo "$HOME/.mumei/bin" >> $GITHUB_PATH
+            echo "installed=true" >> $GITHUB_OUTPUT
+          else
+            echo "installed=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Run verification on examples
-        if: steps.install-mumei.outcome == 'success'
+        if: steps.install-mumei.outputs.installed == 'true'
         run: |
           python scripts/ci_verify.py examples/*.mm --output verification-report.md || true
           cat verification-report.md
 
       - name: Post PR comment
-        if: github.event_name == 'pull_request' && steps.install-mumei.outcome == 'success'
+        if: github.event_name == 'pull_request' && steps.install-mumei.outputs.installed == 'true'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
           header: mumei-verify
           path: verification-report.md
 
       - name: Skip notice
-        if: steps.install-mumei.outcome != 'success'
+        if: steps.install-mumei.outputs.installed != 'true'
         run: echo "::notice::mumei binary not available; verification skipped"
