@@ -19,7 +19,43 @@ class Metrics:
 
     total_attempts: int = 0
     successes: int = 0
+    rule_based_attempts: int = 0
+    rule_based_successes: int = 0
     by_violation_type: dict[str, ViolationMetrics] = field(default_factory=dict)
+
+    def record_rule_based_attempt(self, violation_type: str = "unknown") -> None:
+        """Record a rule-based fix attempt.
+
+        Only increments ``rule_based_attempts``.  The caller is responsible
+        for calling :meth:`record_attempt` / :meth:`record_success` at the
+        appropriate point so that ``total_attempts`` accurately reflects
+        whether the overall fix attempt (rule-based or LLM) succeeded.
+        """
+        self.rule_based_attempts += 1
+
+    def record_rule_based_success(self, violation_type: str = "unknown") -> None:
+        """Record a successful rule-based fix.
+
+        Also records a general attempt + success so that
+        ``total_attempts`` and ``successes`` stay consistent.
+
+        .. warning::
+
+            This method calls :meth:`record_attempt` and
+            :meth:`record_success` internally.  Callers must **not** call
+            those methods separately for the same fix event, or the
+            counts will be double-incremented.
+        """
+        self.rule_based_successes += 1
+        self.record_attempt(violation_type)
+        self.record_success(violation_type)
+
+    @property
+    def rule_based_success_rate(self) -> float:
+        """Return the success rate for rule-based fixes."""
+        if self.rule_based_attempts == 0:
+            return 0.0
+        return self.rule_based_successes / self.rule_based_attempts
 
     def record_attempt(self, violation_type: str = "unknown") -> None:
         """Record a fix or generation attempt."""
@@ -54,6 +90,8 @@ class Metrics:
         return {
             "total_attempts": self.total_attempts,
             "successes": self.successes,
+            "rule_based_attempts": self.rule_based_attempts,
+            "rule_based_successes": self.rule_based_successes,
             "by_violation_type": {
                 vtype: {"attempts": m.attempts, "successes": m.successes}
                 for vtype, m in self.by_violation_type.items()

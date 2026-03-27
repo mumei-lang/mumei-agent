@@ -6,12 +6,16 @@ import logging
 import re
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.strategies.fix_strategy import _build_prompt_for_report
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
+
+if TYPE_CHECKING:
+    from agent.metrics import Metrics
 
 _logger = logging.getLogger(__name__)
 
@@ -169,6 +173,7 @@ def get_fix_multi_stage(
     mumei_client: MumeiClient,
     source_path: str,
     retry_history: RetryHistory | None = None,
+    metrics: Metrics | None = None,  # noqa: ARG001 — reserved for future use
 ) -> str:
     """Generate a fix using a multi-stage LLM pipeline.
 
@@ -176,6 +181,11 @@ def get_fix_multi_stage(
     Stage 2 (Fix): Generate fixed code using the diagnosis + prompt template.
     Stage 3 (Validate): Verify the fix with mumei; retry Stage 1+2+3 up to
         ``_MAX_INTERNAL_RETRIES`` times on failure.
+
+    Args:
+        metrics: Accepted for interface consistency with :func:`get_fix`
+            but not yet used inside the multi-stage loop.  Future work
+            should wire this into the internal retry accounting.
 
     Returns the fixed source code (best effort).
     """
