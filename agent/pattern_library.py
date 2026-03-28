@@ -167,7 +167,6 @@ class PatternLibrary:
         Returns the fixed code on success, or ``None`` if no pattern
         produced a verified fix.
         """
-        import difflib
         import tempfile
 
         candidates = self.lookup(violation_type, max_results=MAX_PATTERNS_PER_TYPE)
@@ -197,11 +196,10 @@ class PatternLibrary:
             if not ce_match and not sug_match:
                 continue
 
-            # Build an analogous transformation using unified diff
+            # Skip patterns where before and after are identical (no transformation)
             before_lines = pattern.get("source_before", "").splitlines(keepends=True)
             after_lines = pattern.get("source_after", "").splitlines(keepends=True)
-            diff = list(difflib.unified_diff(before_lines, after_lines, n=0))
-            if not diff:
+            if before_lines == after_lines:
                 continue
 
             # Try to apply the diff to current source_code
