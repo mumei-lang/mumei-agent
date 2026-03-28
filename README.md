@@ -234,6 +234,30 @@ This agent consumes the `report.json` output from `mumei verify --json`.
 See [REPORT_SCHEMA.md](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md)
 for the full schema documentation.
 
+## CI Verification Gate
+
+mumei-agent includes a CI verification pipeline that automatically verifies `.mm` files in pull requests.
+
+### Usage in your project
+
+Add to your `.github/workflows/verify.yml`:
+
+```yaml
+name: Mumei Verify
+on: [pull_request]
+jobs:
+  verify:
+    uses: mumei-lang/mumei-agent/.github/workflows/mumei-verify.yml@develop
+    with:
+      proof-cert: true
+```
+
+Or use the standalone script:
+
+```bash
+python scripts/ci_verify.py src/*.mm --proof-cert
+```
+
 ## Roadmap
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the agent-specific roadmap, and
