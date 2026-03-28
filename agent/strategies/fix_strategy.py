@@ -133,6 +133,23 @@ def get_fix(
             )
             return rule_fix
 
+    # Phase 1.5: Try pattern-based fix
+    if pattern_library is not None and mumei_client is not None:
+        # Only record an attempt when there are actual candidates for
+        # this violation type.  Without this guard, every call through
+        # get_fix() with an empty pattern library would inflate
+        # pattern_attempts with phantom attempts that never had a
+        # chance of succeeding.
+        has_candidates = bool(pattern_library.lookup(vt, max_results=1))
+        if has_candidates:
+            if metrics is not None:
+                metrics.record_pattern_attempt(vt)
+            pattern_fix = pattern_library.try_pattern_fix(vt, source_code, report_data, mumei_client)
+            if pattern_fix is not None:
+                if metrics is not None:
+                    metrics.record_pattern_success(vt)
+                return pattern_fix
+
     # Phase 2: LLM-based fix (existing logic)
     if strategy == "multi-stage":
         if mumei_client is not None and source_path is not None:

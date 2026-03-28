@@ -1,0 +1,35 @@
+{
+  "module_name": "math_utils",
+  "atoms": [
+    {
+      "name": "safe_div",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "requires": "b != 0",
+      "ensures": "result * b == a",
+      "effects": []
+    },
+    {
+      "name": "safe_sqrt",
+      "inputs": [
+        {"name": "x", "type": "i64"}
+      ],
+      "requires": "x >= 0",
+      "ensures": "result >= 0",
+      "effects": []
+    },
+    {
+      "name": "safe_div_sqrt",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "requires": "b != 0 && a >= 0",
+      "ensures": "result >= 0",
+      "effects": [],
+      "description": "Divide a by b, then take safe_sqrt of the result. Depends on safe_div and safe_sqrt."
+    }
+  ]
+}

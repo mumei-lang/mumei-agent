@@ -13,24 +13,62 @@ from agent.metrics import Metrics
 from agent.strategies.generate_strategy import generate_code
 
 
+def _validate_spec(spec: dict) -> None:
+    """Validate a spec dict (single-atom or multi-atom format).
+
+    Single-atom format requires a ``name`` key.
+    Multi-atom format requires ``atoms`` (list of atom dicts, each with ``name``).
+
+    Raises:
+        SystemExit: If the spec is invalid.
+    """
+    if "atoms" in spec:
+        # Multi-atom format
+        atoms = spec["atoms"]
+        if not isinstance(atoms, list) or len(atoms) == 0:
+            print(
+                "Error: Multi-atom spec 'atoms' must be a non-empty list.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for i, atom in enumerate(atoms):
+            if not isinstance(atom, dict) or "name" not in atom:
+                print(
+                    f"Error: atoms[{i}] must be a dict with a 'name' key.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+    else:
+        # Single-atom format
+        if "name" not in spec:
+            print(
+                "Error: Single-atom spec must have a 'name' key.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
 def _load_spec(args: argparse.Namespace) -> dict:
     """Load specification from --spec (inline JSON) or --spec-file (path)."""
     if args.spec is not None:
         try:
-            return json.loads(args.spec)
+            spec = json.loads(args.spec)
         except json.JSONDecodeError as e:
             print(f"Error: Invalid JSON in --spec: {e}", file=sys.stderr)
             sys.exit(1)
     elif args.spec_file is not None:
         try:
             with open(args.spec_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                spec = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             print(f"Error: Failed to load spec file: {e}", file=sys.stderr)
             sys.exit(1)
     else:
         print("Error: Either --spec or --spec-file is required.", file=sys.stderr)
         sys.exit(1)
+
+    _validate_spec(spec)
+    return spec
 
 
 def build_parser(
@@ -109,7 +147,15 @@ def main(args: argparse.Namespace | None = None) -> None:
     max_retries = args.max_retries if args.max_retries is not None else config.max_retries
     metrics = Metrics()
 
-    print(f"Mumei Generate Mode: generating '{spec.get('name', 'unknown')}'...")
+    if spec.get("atoms"):
+        module_name = spec.get("module_name", "module")
+        atom_names = [a["name"] for a in spec["atoms"]]
+        print(
+            f"Mumei Generate Mode: generating module '{module_name}' "
+            f"({len(atom_names)} atoms: {', '.join(atom_names)})..."
+        )
+    else:
+        print(f"Mumei Generate Mode: generating '{spec.get('name', 'unknown')}'...")
 
     generated_code, verified = generate_code(
         client=client,

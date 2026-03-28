@@ -60,6 +60,303 @@ def _build_skeleton(spec: dict) -> str:
     )
 
 
+def _detect_dependencies(atoms: list[dict]) -> dict[str, list[str]]:
+    """Detect inter-atom dependencies within a multi-atom spec.
+
+    Returns a mapping from atom name to a list of atom names it depends on
+    (i.e. other atoms in the spec whose names appear in this atom's
+    requires/ensures/description fields).
+
+    Uses word-boundary matching to avoid false positives (e.g. atom
+    ``div`` should not match the word ``division``).
+    """
+    atom_names = {a["name"] for a in atoms}
+    deps: dict[str, list[str]] = {}
+    for atom in atoms:
+        name = atom["name"]
+        # Collect text fields where references might appear
+        searchable = " ".join(
+            str(atom.get(k, ""))
+            for k in ("requires", "ensures", "description")
+        )
+        deps[name] = [
+            other for other in atom_names
+            if other != name
+            and re.search(r'\b' + re.escape(other) + r'\b', searchable)
+        ]
+    return deps
+
+
+def _build_multi_atom_prompt(
+    atoms: list[dict],
+    deps: dict[str, list[str]],
+) -> str:
+    """Build a combined skeleton prompt for multiple atoms.
+
+    If atom B depends on atom A, A's contract is included as context
+    in B's skeleton section.
+    """
+    sections: list[str] = []
+    # Build a lookup for quick access to atom specs by name
+    by_name = {a["name"]: a for a in atoms}
+
+    for atom in atoms:
+        name = atom["name"]
+        skeleton = _build_skeleton(atom)
+
+        dep_context = ""
+        for dep_name in deps.get(name, []):
+            dep_atom = by_name[dep_name]
+            dep_context += (
+                f"// Dependency: {dep_name} — "
+                f"requires: {dep_atom.get('requires', 'true')}, "
+                f"ensures: {dep_atom.get('ensures', 'true')}\n"
+            )
+
+        section = ""
+        if dep_context:
+            section += f"# Context for {name}:\n{dep_context}\n"
+        section += f"# Atom: {name}\n{skeleton}"
+        sections.append(section)
+
+    return "\n\n".join(sections)
+
+
+def _identify_failing_atoms(
+    report: dict,
+    atom_names: list[str],
+) -> list[str]:
+    """Identify which atoms failed from a verification report.
+
+    Falls back to returning all atom names if the failing atom cannot be
+    determined from the report.
+    """
+    failing: list[str] = []
+    # The report may contain a single "atom" field or a list of "atoms"
+    report_atom = report.get("atom", "")
+    report_atoms = report.get("atoms", [])
+
+    if report_atom and report_atom in atom_names:
+        failing.append(report_atom)
+    for ra in report_atoms:
+        name = ra if isinstance(ra, str) else ra.get("name", "")
+        if name in atom_names:
+            failing.append(name)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for f in failing:
+        if f not in seen:
+            seen.add(f)
+            unique.append(f)
+
+    return unique if unique else list(atom_names)
+
+
+def generate_multi_atom(
+    client: OpenAI,
+    model: str,
+    spec: dict,
+    config_max_retries: int = 5,
+    mumei_client: MumeiClient | None = None,
+    metrics: Metrics | None = None,
+) -> tuple[str, bool]:
+    """Generate a multi-atom Mumei module from a specification.
+
+    Accepts a spec with an ``atoms`` array, generates skeletons for each
+    atom (with dependency context), sends them to the LLM as a single
+    generation request, then verifies and iteratively fixes.
+
+    Args:
+        client: OpenAI-compatible client.
+        model: Model name.
+        spec: Specification dict with ``module_name`` and ``atoms`` array.
+        config_max_retries: Maximum number of fix attempts.
+        mumei_client: MumeiClient for running check/verify.
+        metrics: Optional Metrics instance for tracking.
+
+    Returns:
+        A tuple of (code, verified).
+    """
+    if metrics is None:
+        metrics = Metrics()
+
+    atoms = spec["atoms"]
+    module_name = spec.get("module_name", "module")
+    atom_names = [a["name"] for a in atoms]
+    deps = _detect_dependencies(atoms)
+
+    # Build combined skeleton prompt
+    combined_skeleton = _build_multi_atom_prompt(atoms, deps)
+    spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
+
+    # Stage 1: Initial generation
+    metrics.record_attempt("generation")
+    from agent.prompts import generate_atom as prompt_module
+
+    prompt = prompt_module.build_prompt(spec_json, "", {})
+    prompt += (
+        f"\n\n# Multi-atom module '{module_name}' — generate ALL atoms in a single .mm file:\n"
+        f"```mumei\n{combined_skeleton}```\n"
+        f"\nGenerate a complete .mm file containing all {len(atoms)} atoms. "
+        f"Fill in the ___ placeholders with correct logic."
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful programming assistant specializing "
+                    "in the Mumei language with its effect system and Z3 formal verification. "
+                    "Generate a complete module with multiple atoms."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    generated_code = _extract_code(response.choices[0].message.content or "")
+    if not generated_code:
+        _logger.warning("LLM returned empty multi-atom generation result")
+        return "", False
+
+    if mumei_client is None:
+        metrics.record_success("generation")
+        return generated_code, True
+
+    # Stage 2+3: Check, verify, and targeted fix loop
+    current_code = generated_code
+    last_violation_type = "generation"
+    for attempt in range(config_max_retries):
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".mm", delete=False, encoding="utf-8"
+            ) as tmp:
+                tmp_path = tmp.name
+                tmp.write(current_code)
+
+            # Parse check
+            check_result = mumei_client.check(tmp_path)
+            if not check_result["success"]:
+                _logger.info(
+                    "Multi-atom parse check failed on attempt %d: %s",
+                    attempt + 1,
+                    check_result["stderr"],
+                )
+                last_violation_type = "parse_error"
+                metrics.record_attempt("parse_error")
+                error_log = check_result["stdout"] + check_result["stderr"]
+                current_code = _attempt_multi_atom_fix(
+                    client, model, spec_json, current_code, error_log, {},
+                    atom_names, metrics,
+                )
+                continue
+
+            # Full verification
+            verify_result = mumei_client.verify(tmp_path)
+            if verify_result["success"]:
+                metrics.record_success(last_violation_type)
+                return current_code, True
+
+            _logger.info(
+                "Multi-atom verification failed on attempt %d", attempt + 1,
+            )
+            error_log = verify_result["stdout"] + verify_result["stderr"]
+            report = verify_result["report"] or {}
+            violation_type = report.get(
+                "violation_type", report.get("failure_type", "unknown"),
+            )
+            last_violation_type = violation_type
+            metrics.record_attempt(violation_type)
+
+            # Identify which atoms failed and build targeted fix prompt
+            failing = _identify_failing_atoms(report, atom_names)
+            current_code = _attempt_multi_atom_fix(
+                client, model, spec_json, current_code, error_log, report,
+                failing, metrics,
+            )
+
+        finally:
+            try:
+                if tmp_path:
+                    Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    # Final check after all retries
+    verified = False
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".mm", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp_path = tmp.name
+            tmp.write(current_code)
+        verify_result = mumei_client.verify(tmp_path)
+        if verify_result["success"]:
+            metrics.record_success(last_violation_type)
+            verified = True
+    finally:
+        try:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    return current_code, verified
+
+
+def _attempt_multi_atom_fix(
+    client: OpenAI,
+    model: str,
+    spec_json: str,
+    current_code: str,
+    error_log: str,
+    report: dict,
+    failing_atoms: list[str],
+    metrics: Metrics,
+) -> str:
+    """Attempt to fix specific failing atoms in a multi-atom module."""
+    failing_str = ", ".join(failing_atoms)
+    fix_prompt = (
+        f"# Original multi-atom specification:\n{spec_json}\n\n"
+        f"# Current generated code (needs fixing):\n```mumei\n{current_code}\n```\n\n"
+        f"# Verification error:\n{error_log}\n\n"
+    )
+    if report:
+        fix_prompt += f"# Structured report:\n{json.dumps(report, indent=2)}\n\n"
+    fix_prompt += (
+        f"# Failing atom(s): {failing_str}\n"
+        f"Fix ONLY the failing atom(s) listed above. "
+        f"Keep all other atoms unchanged. "
+        f"Return the COMPLETE .mm file with all atoms."
+    )
+
+    fix_response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful programming assistant specializing "
+                    "in the Mumei language with its effect system and Z3 formal verification. "
+                    "Fix only the failing atoms in this multi-atom module."
+                ),
+            },
+            {"role": "user", "content": fix_prompt},
+        ],
+    )
+
+    fixed_code = _extract_code(fix_response.choices[0].message.content or "")
+    if not fixed_code:
+        return current_code
+    return fixed_code
+
+
 def generate_code(
     client: OpenAI,
     model: str,
@@ -77,6 +374,9 @@ def generate_code(
         4. If verification fails, use existing fix_strategy to attempt repair
         5. Re-verify up to config_max_retries times
 
+    Supports both single-atom specs and multi-atom specs (with ``atoms``
+    array).  Multi-atom specs are delegated to :func:`generate_multi_atom`.
+
     Args:
         client: OpenAI-compatible client.
         model: Model name.
@@ -90,6 +390,15 @@ def generate_code(
         potentially fixed) .mm source and *verified* indicates whether
         the code passed ``mumei verify``.
     """
+    # Dispatch to multi-atom generation if spec contains atoms array
+    if spec.get("atoms"):
+        return generate_multi_atom(
+            client, model, spec,
+            config_max_retries=config_max_retries,
+            mumei_client=mumei_client,
+            metrics=metrics,
+        )
+
     if metrics is None:
         metrics = Metrics()
 

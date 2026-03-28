@@ -21,6 +21,8 @@ class Metrics:
     successes: int = 0
     rule_based_attempts: int = 0
     rule_based_successes: int = 0
+    pattern_attempts: int = 0
+    pattern_successes: int = 0
     by_violation_type: dict[str, ViolationMetrics] = field(default_factory=dict)
 
     def record_rule_based_attempt(self, violation_type: str = "unknown") -> None:
@@ -49,6 +51,38 @@ class Metrics:
         self.rule_based_successes += 1
         self.record_attempt(violation_type)
         self.record_success(violation_type)
+
+    def record_pattern_attempt(self, violation_type: str = "unknown") -> None:
+        """Record a pattern-based fix attempt.
+
+        Must be called **before** the outcome is known (i.e. before
+        ``try_pattern_fix``), so that ``pattern_attempts`` always
+        includes both successes and failures.
+        """
+        self.pattern_attempts += 1
+
+    def record_pattern_success(self, violation_type: str = "unknown") -> None:
+        """Record a successful pattern-based fix.
+
+        Also records a general attempt + success so that
+        ``total_attempts`` and ``successes`` stay consistent.
+
+        .. note::
+
+            The caller must have already called
+            :meth:`record_pattern_attempt` for this event, so
+            ``pattern_attempts`` is **not** incremented here.
+        """
+        self.pattern_successes += 1
+        self.record_attempt(violation_type)
+        self.record_success(violation_type)
+
+    @property
+    def pattern_success_rate(self) -> float:
+        """Return the success rate for pattern-based fixes."""
+        if self.pattern_attempts == 0:
+            return 0.0
+        return self.pattern_successes / self.pattern_attempts
 
     @property
     def rule_based_success_rate(self) -> float:
@@ -92,6 +126,8 @@ class Metrics:
             "successes": self.successes,
             "rule_based_attempts": self.rule_based_attempts,
             "rule_based_successes": self.rule_based_successes,
+            "pattern_attempts": self.pattern_attempts,
+            "pattern_successes": self.pattern_successes,
             "by_violation_type": {
                 vtype: {"attempts": m.attempts, "successes": m.successes}
                 for vtype, m in self.by_violation_type.items()
