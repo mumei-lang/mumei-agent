@@ -44,6 +44,14 @@ def run_verify(mumei_bin: str, file_path: Path) -> dict:
             "stdout": "",
             "stderr": f"mumei binary not found: {mumei_bin}",
         }
+    except subprocess.TimeoutExpired:
+        return {
+            "file": str(file_path),
+            "success": False,
+            "report": {},
+            "stdout": "",
+            "stderr": f"Verification timed out after 120s: {file_path}",
+        }
     report = {}
     if result.stdout.strip():
         try:
@@ -74,7 +82,7 @@ def run_proof_cert(mumei_bin: str, file_path: Path, output_dir: Path) -> Path | 
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     if result.returncode == 0 and cert_path.exists():
         return cert_path
@@ -129,6 +137,8 @@ def format_markdown_summary(results: list[dict], proof_certs: list[Path]) -> str
                 if skipped:
                     details += f", {skipped} cached"
 
+        # Escape pipe characters to avoid breaking the Markdown table
+        details = details.replace("|", "\\|")
         lines.append(f"| `{file_name}` | :{icon}: {status} | {details} |")
 
     # Failure details
@@ -236,7 +246,7 @@ def main():
     else:
         print(markdown)
 
-    # Also write structured JSON for programmatic consumption
+    # Write structured JSON for programmatic consumption
     json_output = {
         "total": len(results),
         "passed": sum(1 for r in results if r["success"]),
@@ -244,6 +254,10 @@ def main():
         "results": results,
         "proof_certificates": [str(p) for p in proof_certs],
     }
+
+    json_path = Path(args.output).with_suffix(".json") if args.output else None
+    if json_path:
+        json_path.write_text(json.dumps(json_output, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Set GitHub Actions output if running in CI
     github_output = os.environ.get("GITHUB_OUTPUT")

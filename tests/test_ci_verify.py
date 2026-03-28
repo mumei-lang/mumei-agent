@@ -1,6 +1,8 @@
 """Tests for the CI verification gate script."""
+import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 # Import the module under test
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
@@ -70,3 +72,54 @@ class TestFormatMarkdownSummary:
         md = format_markdown_summary(results, certs)
         assert "Proof Certificates" in md
         assert "1 proof certificate(s)" in md
+
+    def test_pipe_in_details_escaped(self):
+        from ci_verify import format_markdown_summary
+        results = [
+            {
+                "file": "pipe.mm",
+                "success": False,
+                "report": {
+                    "failure_type": "a | b constraint",
+                },
+                "stderr": "",
+            },
+        ]
+        md = format_markdown_summary(results, [])
+        # Pipe should be escaped in the table row
+        assert "a \\| b constraint" in md
+
+
+class TestRunVerify:
+    """Test run_verify subprocess handling."""
+
+    def test_timeout_returns_error_dict(self):
+        from ci_verify import run_verify
+        with patch("ci_verify.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="mumei", timeout=120)):
+            result = run_verify("mumei", Path("test.mm"))
+        assert result["success"] is False
+        assert "timed out" in result["stderr"]
+        assert result["file"] == "test.mm"
+
+    def test_file_not_found_returns_error_dict(self):
+        from ci_verify import run_verify
+        with patch("ci_verify.subprocess.run", side_effect=FileNotFoundError):
+            result = run_verify("mumei", Path("test.mm"))
+        assert result["success"] is False
+        assert "not found" in result["stderr"]
+
+
+class TestRunProofCert:
+    """Test run_proof_cert subprocess handling."""
+
+    def test_timeout_returns_none(self):
+        from ci_verify import run_proof_cert
+        with patch("ci_verify.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="mumei", timeout=120)):
+            result = run_proof_cert("mumei", Path("test.mm"), Path("/tmp"))
+        assert result is None
+
+    def test_file_not_found_returns_none(self):
+        from ci_verify import run_proof_cert
+        with patch("ci_verify.subprocess.run", side_effect=FileNotFoundError):
+            result = run_proof_cert("mumei", Path("test.mm"), Path("/tmp"))
+        assert result is None

@@ -38,9 +38,10 @@ jobs:
             curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version "$VERSION"
           fi
           echo "$HOME/.mumei/bin" >> $GITHUB_PATH
-          # Also add toolchain paths
+          # Persist toolchain env vars for subsequent steps
           if [ -f "$HOME/.mumei/env" ]; then
-            source "$HOME/.mumei/env"
+            # Extract export statements and append to GITHUB_ENV
+            grep -E '^export ' "$HOME/.mumei/env" | sed 's/^export //' >> "$GITHUB_ENV" || true
           fi
 
       - name: Verify mumei installation
