@@ -130,6 +130,13 @@ def run_refinement_loop(
             When the third element is provided it is used as the
             verification report for spec refinement; otherwise an empty
             report is used.
+
+            .. note::
+
+                The standard ``generate_code()`` returns a 2-tuple, so
+                ``refine_spec()`` will receive an empty report.  To get
+                full refinement quality, wrap ``generate_code`` so it
+                returns ``(code, verified, last_report)``.
         max_refinements: Maximum number of spec refinements to attempt.
         config_max_retries: Max fix retries per generation attempt.
         mumei_client: MumeiClient instance.
