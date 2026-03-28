@@ -132,6 +132,25 @@ def test_no_self_dependency():
     assert deps["foo"] == []
 
 
+def test_no_false_positive_substring_dependency():
+    """Test that substring matches do not create false dependencies.
+
+    Atom 'div' should NOT match the word 'division' in another atom's
+    description.
+    """
+    atoms = [
+        {"name": "div", "requires": "b != 0", "ensures": "true"},
+        {
+            "name": "explain",
+            "description": "Performs integer division and returns the quotient.",
+        },
+    ]
+    deps = _detect_dependencies(atoms)
+    # 'explain' mentions "division" but NOT the atom name "div" as a word
+    assert deps["explain"] == []
+    assert deps["div"] == []
+
+
 # ---------------------------------------------------------------------------
 # Identify failing atoms tests
 # ---------------------------------------------------------------------------

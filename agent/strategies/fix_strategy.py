@@ -135,13 +135,13 @@ def get_fix(
 
     # Phase 1.5: Try pattern-based fix
     if pattern_library is not None and mumei_client is not None:
+        if metrics is not None:
+            metrics.record_pattern_attempt(vt)
         pattern_fix = pattern_library.try_pattern_fix(vt, source_code, report_data, mumei_client)
         if pattern_fix is not None:
             if metrics is not None:
                 metrics.record_pattern_success(vt)
             return pattern_fix
-        if metrics is not None:
-            metrics.record_pattern_attempt(vt)
 
     # Phase 2: LLM-based fix (existing logic)
     if strategy == "multi-stage":

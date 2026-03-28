@@ -353,22 +353,39 @@ def test_metrics_pattern_success():
 def test_metrics_pattern_in_to_dict():
     """Test that pattern metrics appear in to_dict output."""
     m = Metrics()
+    # Attempt 1 — failure
+    m.record_pattern_attempt("x")
+    # Attempt 2 — success (attempt recorded before outcome)
     m.record_pattern_attempt("x")
     m.record_pattern_success("x")
     d = m.to_dict()
-    assert d["pattern_attempts"] == 1
+    assert d["pattern_attempts"] == 2
     assert d["pattern_successes"] == 1
 
 
 def test_metrics_pattern_success_rate():
-    """Test pattern success rate calculation."""
+    """Test pattern success rate calculation.
+
+    record_pattern_attempt is called *before* the outcome is known for
+    every pattern fix attempt.  record_pattern_success is called only
+    on success (after the attempt was already recorded).
+
+    Scenario: 3 attempts total, 1 success → rate = 1/3 ≈ 0.333.
+    """
     m = Metrics()
     assert m.pattern_success_rate == 0.0
+
+    # Attempt 1 — failure
     m.record_pattern_attempt("x")
+
+    # Attempt 2 — failure
+    m.record_pattern_attempt("x")
+
+    # Attempt 3 — success
     m.record_pattern_attempt("x")
     m.record_pattern_success("x")
-    # 1 success out of 2+1=3 attempts? No — pattern_attempts tracks
-    # failed attempts only via record_pattern_attempt, and
-    # record_pattern_success also increments total pattern_successes.
-    # pattern_attempts=2, pattern_successes=1 → rate = 0.5
-    assert m.pattern_success_rate == 0.5
+
+    # pattern_attempts=3, pattern_successes=1 → rate = 1/3
+    assert m.pattern_attempts == 3
+    assert m.pattern_successes == 1
+    assert abs(m.pattern_success_rate - 1 / 3) < 1e-9

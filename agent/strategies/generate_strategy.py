@@ -66,6 +66,9 @@ def _detect_dependencies(atoms: list[dict]) -> dict[str, list[str]]:
     Returns a mapping from atom name to a list of atom names it depends on
     (i.e. other atoms in the spec whose names appear in this atom's
     requires/ensures/description fields).
+
+    Uses word-boundary matching to avoid false positives (e.g. atom
+    ``div`` should not match the word ``division``).
     """
     atom_names = {a["name"] for a in atoms}
     deps: dict[str, list[str]] = {}
@@ -78,7 +81,8 @@ def _detect_dependencies(atoms: list[dict]) -> dict[str, list[str]]:
         )
         deps[name] = [
             other for other in atom_names
-            if other != name and other in searchable
+            if other != name
+            and re.search(r'\b' + re.escape(other) + r'\b', searchable)
         ]
     return deps
 

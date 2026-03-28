@@ -124,8 +124,12 @@ def run_refinement_loop(
         client: OpenAI-compatible client.
         model: Model name.
         spec: The original specification dict.
-        generate_fn: The ``generate_code`` callable
-            ``(client, model, spec, config_max_retries, mumei_client, metrics) -> (code, verified)``.
+        generate_fn: A callable with signature
+            ``(client, model, spec, config_max_retries, mumei_client, metrics)``
+            returning ``(code, verified)`` or ``(code, verified, report)``.
+            When the third element is provided it is used as the
+            verification report for spec refinement; otherwise an empty
+            report is used.
         max_refinements: Maximum number of spec refinements to attempt.
         config_max_retries: Max fix retries per generation attempt.
         mumei_client: MumeiClient instance.
@@ -140,7 +144,6 @@ def run_refinement_loop(
 
     current_spec = spec
     last_code = ""
-    last_report: dict = {}
 
     for refinement in range(max_refinements + 1):
         if refinement > 0:
@@ -148,7 +151,7 @@ def run_refinement_loop(
                 "Spec refinement attempt %d/%d", refinement, max_refinements,
             )
 
-        code, verified = generate_fn(
+        result = generate_fn(
             client,
             model,
             current_spec,
@@ -156,6 +159,13 @@ def run_refinement_loop(
             mumei_client=mumei_client,
             metrics=metrics,
         )
+
+        # generate_fn may return (code, verified) or (code, verified, report)
+        if len(result) >= 3:
+            code, verified, last_report = result[0], result[1], result[2]
+        else:
+            code, verified = result[0], result[1]
+            last_report = {}
 
         if verified:
             return code, True, current_spec
@@ -166,12 +176,7 @@ def run_refinement_loop(
         if refinement >= max_refinements:
             break
 
-        # Extract the last report from metrics context for refinement.
-        # The report is not directly available here, so we pass an empty
-        # report and rely on the error_log embedded in the spec refinement.
-        last_report = {}
-
-        # Refine the spec
+        # Refine the spec using the last verification report
         refined = refine_spec(
             client, model, current_spec, last_report,
         )

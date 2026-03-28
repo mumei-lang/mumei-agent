@@ -166,6 +166,41 @@ def test_refinement_loop_exhausts_refinements():
     assert verified is False
 
 
+def test_refinement_loop_uses_report_from_generate_fn():
+    """Test that the loop forwards the report from generate_fn to refine_spec."""
+    failure_report = {
+        "status": "failed",
+        "failure_type": "postcondition_violated",
+        "counterexample": {"a": "50", "b": "60"},
+    }
+    refined_spec = dict(ORIGINAL_SPEC, requires="a >= 0 && b >= 0 && a + b < 100")
+    client = _mock_client(json.dumps(refined_spec))
+
+    call_count = 0
+
+    def mock_generate(c, m, spec, config_max_retries=5, mumei_client=None, metrics=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Return 3-tuple with report
+            return "bad code", False, failure_report
+        return "good code", True, {}
+
+    code, verified, final_spec = run_refinement_loop(
+        client, "m", ORIGINAL_SPEC, mock_generate,
+        max_refinements=3,
+    )
+
+    assert verified is True
+    assert code == "good code"
+
+    # Verify that the report was passed to refine_spec (appears in the LLM prompt)
+    refine_call = client.chat.completions.create.call_args
+    prompt = refine_call.kwargs["messages"][1]["content"]
+    assert "postcondition_violated" in prompt
+    assert "50" in prompt  # counterexample value
+
+
 def test_refinement_loop_stops_when_spec_unchanged():
     """Test that the loop stops early if refinement produces no changes."""
     # LLM returns the exact same spec

@@ -53,7 +53,12 @@ class Metrics:
         self.record_success(violation_type)
 
     def record_pattern_attempt(self, violation_type: str = "unknown") -> None:
-        """Record a pattern-based fix attempt (no match or failed verification)."""
+        """Record a pattern-based fix attempt.
+
+        Must be called **before** the outcome is known (i.e. before
+        ``try_pattern_fix``), so that ``pattern_attempts`` always
+        includes both successes and failures.
+        """
         self.pattern_attempts += 1
 
     def record_pattern_success(self, violation_type: str = "unknown") -> None:
@@ -61,6 +66,12 @@ class Metrics:
 
         Also records a general attempt + success so that
         ``total_attempts`` and ``successes`` stay consistent.
+
+        .. note::
+
+            The caller must have already called
+            :meth:`record_pattern_attempt` for this event, so
+            ``pattern_attempts`` is **not** incremented here.
         """
         self.pattern_successes += 1
         self.record_attempt(violation_type)
