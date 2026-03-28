@@ -248,10 +248,12 @@ def _run_generate_mode(
     max_retries: int,
     mumei_client,
 ) -> None:
-    """Run the generate → verify → fix loop (P1-A).
+    """Run the generate → verify → fix loop.
 
-    Reads a JSON specification file, generates Mumei code from it,
-    then verifies and iteratively fixes the generated code.
+    Reads a JSON specification file (single-atom or multi-atom),
+    generates Mumei code from it, then verifies and iteratively
+    fixes the generated code.  Multi-atom specs are handled
+    transparently by ``generate_code()``'s internal dispatch.
     """
     print("Mumei Generate Mode Start...")
 
