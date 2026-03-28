@@ -1,6 +1,6 @@
 """Tests for P6-C: Specification Refinement Loop."""
 import json
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 from agent.metrics import Metrics
 from agent.strategies.spec_refinement import refine_spec, run_refinement_loop
