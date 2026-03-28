@@ -112,14 +112,65 @@ PR 上の `.mm` ファイルを自動検証し、結果をコメントとして�
 
 ---
 
+## P6-A: Multi-atom / Multi-file 生成 ✅ Complete
+
+- ✅ Multi-atom spec JSON フォーマット (`atoms: [...]` 配列)
+- ✅ `generate_multi_atom()`: 依存関係検出・ソート・一括生成・atom 単位 retry
+- ✅ 既存 single-atom spec との後方互換性維持
+
+## P6-B: Pattern Library の学習型拡張 ✅ Complete
+
+- ✅ `FixPattern` に `applied_count` / `success_count` フィールド追加
+- ✅ `try_pattern_fix()`: 成功率ベースのパターン自動適用（LLM バイパス）
+- ✅ `lookup()` の成功率ランキング
+- ✅ `Metrics` に `pattern_attempts` / `pattern_successes` 追加
+
+## P6-C: Specification Refinement Loop ✅ Complete
+
+- ✅ `spec_refinement.py`: 検証失敗時に仕様（requires/ensures）自体の修正を提案
+- ✅ `RetryHistory.is_same_error_repeating()` トリガーで仕様洗練モードに切り替え
+- ✅ `mumei infer-contracts` 結果を活用した仕様推論
+
+---
+
+## Strategic Initiatives（次期戦略）
+
+mumei エコシステム全体の戦略的イニシアチブ。詳細は [mumei-lang/mumei の docs/CROSS_PROJECT_ROADMAP.md](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) を参照。
+
+### SI-1: Zero-Human Challenge — 📋 Next
+
+mumei-agent に難易度の高い課題（100% 安全なキュー、Verified JSON validator 等）を与え、人間が一切介入せずに検証をパスするまでのログを公開する。
+
+**mumei-agent 側の作業**:
+- `examples/challenges/` に課題 spec JSON を作成
+- generate mode で実行し、全ログを記録
+- 成功/失敗の分析ドキュメントを作成
+
+**前提条件**: P6-A (Multi-atom 生成) ✅ 完了済み
+
+### SI-3: Autonomous Delivery Flow — 📋 After SI-1/SI-2
+
+mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパーを自動生成 → PR を出す。
+
+**mumei-agent 側の作業**:
+- `--publish` モードの追加（生成 → 検証 → ラッパー生成 → git commit → PR）
+- GitHub API 連携
+
+**前提条件**: SI-1, SI-2 (Verified FFI Boundary, mumei 側), Rust/Python Wrapper Emitter (mumei 側)
+
+---
+
 ## 推奨実行順序
 
-P1-C (CI整備) → P1-B (unsat core活用) → P1-A (Generate Mode強化) → P3-B (E2Eデモ) → P3-C (CI Verification Gate)
+```
+P1-C → P1-B → P1-A → P3-B → P6-A/B/C → SI-1 (Zero-Human Challenge) → SI-3 (Autonomous Delivery Flow)
+                                  ✅ All Complete          📋 Next              📋 After SI-1/SI-2
+```
 
 ---
 
 ## Related Documents
 
-- [mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap
+- [mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap (incl. Strategic Initiatives)
 - [mumei-lang/mumei `docs/ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/ROADMAP.md) — Compiler strategic roadmap
 - [mumei-lang/mumei `docs/REPORT_SCHEMA.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md) — report.json schema (consumed by agent)
