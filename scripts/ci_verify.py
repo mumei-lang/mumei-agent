@@ -255,7 +255,7 @@ def main():
         "proof_certificates": [str(p) for p in proof_certs],
     }
 
-    json_path = Path(args.output).with_suffix(".json") if args.output else None
+    json_path = Path(args.output).with_suffix(".json") if args.output and not args.output.endswith(".json") else None
     if json_path:
         json_path.write_text(json.dumps(json_output, indent=2, ensure_ascii=False), encoding="utf-8")
 
