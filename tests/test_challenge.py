@@ -19,8 +19,6 @@ CHALLENGES_DIR = Path(__file__).parent.parent / "examples" / "challenges"
 # ---------------------------------------------------------------------------
 
 from examples.challenges.run_challenge import (
-    DEFAULT_RESULTS_DIR,
-    CHALLENGES_DIR as RUNNER_CHALLENGES_DIR,
     discover_specs,
     validate_spec,
 )
