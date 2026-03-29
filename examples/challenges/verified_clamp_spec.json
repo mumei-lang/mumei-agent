@@ -1,0 +1,11 @@
+{
+  "name": "clamp",
+  "description": "Clamp a value to a given range [min_val, max_val]",
+  "params": [
+    {"name": "value", "type": "i64"},
+    {"name": "min_val", "type": "i64"},
+    {"name": "max_val", "type": "i64"}
+  ],
+  "requires": "min_val <= max_val",
+  "ensures": "result >= min_val && result <= max_val && (value >= min_val && value <= max_val => result == value)"
+}
