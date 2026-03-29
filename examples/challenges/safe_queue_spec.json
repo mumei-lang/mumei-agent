@@ -1,0 +1,44 @@
+{
+  "module_name": "safe_queue",
+  "description": "100% safe queue operations with overflow/underflow prevention. All operations are formally verified to maintain queue invariants.",
+  "atoms": [
+    {
+      "name": "enqueue",
+      "description": "Add an element to the bounded queue, returning the new length. Prevents overflow by requiring len < cap.",
+      "params": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "requires": "len >= 0 && cap > 0 && len < cap",
+      "ensures": "result == len + 1 && result <= cap"
+    },
+    {
+      "name": "dequeue",
+      "description": "Remove an element from the bounded queue, returning the new length. Prevents underflow by requiring len > 0.",
+      "params": [
+        {"name": "len", "type": "i64"}
+      ],
+      "requires": "len > 0",
+      "ensures": "result == len - 1 && result >= 0"
+    },
+    {
+      "name": "is_empty",
+      "description": "Check whether the queue is empty (returns 1 if empty, 0 otherwise).",
+      "params": [
+        {"name": "len", "type": "i64"}
+      ],
+      "requires": "len >= 0",
+      "ensures": "result >= 0 && result <= 1 && (len == 0 => result == 1) && (len > 0 => result == 0)"
+    },
+    {
+      "name": "is_full",
+      "description": "Check whether the queue is at capacity (returns 1 if full, 0 otherwise).",
+      "params": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "requires": "len >= 0 && cap > 0 && len <= cap",
+      "ensures": "result >= 0 && result <= 1 && (len == cap => result == 1) && (len < cap => result == 0)"
+    }
+  ]
+}

@@ -5,13 +5,13 @@ Run mumei-agent's generate pipeline against challenge specifications
 and record full logs of each attempt.
 
 Usage:
-    python -m examples.challenges.run_challenge --spec examples/challenges/bounded_queue_spec.json
-    python -m examples.challenges.run_challenge --all
-    python -m examples.challenges.run_challenge --spec examples/challenges/bounded_queue_spec.json --dry-run
+    python -m examples.challenges.run_challenge <spec_path> [--log-dir DIR] [--dry-run]
+    python -m examples.challenges.run_challenge --all [--log-dir DIR] [--dry-run]
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import shutil
 import sys
@@ -24,6 +24,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 CHALLENGES_DIR = Path(__file__).parent
+DEFAULT_RESULTS_DIR = CHALLENGES_DIR / "results"
 
 
 def discover_specs() -> list[Path]:
@@ -225,25 +226,114 @@ def run_challenge(spec_path: str, dry_run: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Log writer
+# Results writer
 # ---------------------------------------------------------------------------
 
 
-def _write_log(result: dict) -> Path | None:
-    """Write challenge log to examples/challenges/logs/<name>.json."""
+def _write_results(result: dict, log_dir: Path | None = None) -> Path | None:
+    """Write challenge results to ``<log_dir>/<challenge_name>/``.
+
+    Creates four files:
+    - ``log.jsonl``    -- full step log in JSON Lines format
+    - ``output.mm``    -- final generated Mumei code
+    - ``metrics.json`` -- Metrics.to_dict() output
+    - ``summary.md``   -- human-readable Markdown summary
+
+    Args:
+        result: The result dict from :func:`run_challenge`.
+        log_dir: Base directory for results.  Defaults to
+                 ``examples/challenges/results/``.
+
+    Returns:
+        Path to the challenge results directory, or None on skip.
+    """
     log_data = result.get("log")
     if not log_data:
         return None
+
     challenge_name = result.get("challenge_name", "unnamed")
-    log_dir = CHALLENGES_DIR / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{challenge_name}.json"
-    log_path.write_text(
-        json.dumps(log_data, indent=2, ensure_ascii=False),
+    base_dir = log_dir or DEFAULT_RESULTS_DIR
+    results_dir = base_dir / challenge_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    now_iso = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+
+    # log.jsonl -- each step as a JSON Lines entry
+    log_path = results_dir / "log.jsonl"
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "step": "spec",
+            "timestamp": now_iso,
+            "challenge_name": challenge_name,
+            "spec": log_data.get("spec"),
+        }, ensure_ascii=False) + "\n")
+        f.write(json.dumps({
+            "step": "generate",
+            "timestamp": now_iso,
+            "verified": log_data.get("verified", False),
+            "elapsed_seconds": log_data.get("elapsed_seconds"),
+            "metrics": log_data.get("metrics"),
+        }, ensure_ascii=False) + "\n")
+
+    # output.mm -- final generated code
+    code = result.get("code", "")
+    output_path = results_dir / "output.mm"
+    output_path.write_text(code, encoding="utf-8")
+
+    # metrics.json -- Metrics.to_dict()
+    metrics_data = log_data.get("metrics", {})
+    metrics_path = results_dir / "metrics.json"
+    metrics_path.write_text(
+        json.dumps(metrics_data, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(f"  Log written to: {log_path}")
-    return log_path
+
+    # summary.md -- human-readable summary
+    summary_path = results_dir / "summary.md"
+    verified = log_data.get("verified", False)
+    elapsed = log_data.get("elapsed_seconds", 0)
+    status_str = "PASSED" if verified else "FAILED"
+    spec = log_data.get("spec", {})
+
+    atoms_section = ""
+    if "atoms" in spec:
+        atom_names = [a.get("name", "<unnamed>") for a in spec["atoms"]]
+        atoms_section = f"- **Atoms**: {', '.join(atom_names)}\n"
+
+    total_attempts = metrics_data.get("total_attempts", 0)
+    successes = metrics_data.get("successes", 0)
+
+    summary_md = (
+        f"# {challenge_name} \u2014 Zero-Human Challenge Result\n"
+        f"\n"
+        f"- **Status**: {status_str}\n"
+        f"- **Elapsed**: {elapsed:.1f}s\n"
+        f"{atoms_section}"
+        f"- **Total attempts**: {total_attempts}\n"
+        f"- **Successes**: {successes}\n"
+        f"\n"
+        f"## Spec\n"
+        f"\n"
+        f"```json\n"
+        f"{json.dumps(spec, indent=2, ensure_ascii=False)}\n"
+        f"```\n"
+        f"\n"
+        f"## Generated Code\n"
+        f"\n"
+        f"```mumei\n"
+        f"{code}\n"
+        f"```\n"
+        f"\n"
+        f"## Metrics\n"
+        f"\n"
+        f"```json\n"
+        f"{json.dumps(metrics_data, indent=2, ensure_ascii=False)}\n"
+        f"```\n"
+    )
+    summary_path.write_text(summary_md, encoding="utf-8")
+
+    print(f"  Results written to: {results_dir}/")
+    return results_dir
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +348,9 @@ def main() -> None:
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
-        "--spec",
-        type=str,
+        "spec_path",
+        nargs="?",
+        default=None,
         help="Path to a single challenge spec JSON",
     )
     group.add_argument(
@@ -268,11 +359,19 @@ def main() -> None:
         help="Run all challenge specs in examples/challenges/",
     )
     parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=None,
+        help="Directory for result output (default: examples/challenges/results/)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate specs only without LLM generation or mumei verification",
     )
     args = parser.parse_args()
+
+    log_dir = Path(args.log_dir) if args.log_dir else None
 
     specs: list[str] = []
     if args.all:
@@ -286,13 +385,13 @@ def main() -> None:
             print(f"  - {s}")
         print()
     else:
-        specs = [args.spec]
+        specs = [args.spec_path]
 
     results: list[dict] = []
     for spec_path in specs:
         result = run_challenge(spec_path, dry_run=args.dry_run)
         if not args.dry_run:
-            _write_log(result)
+            _write_results(result, log_dir=log_dir)
         results.append(result)
         print()
 

@@ -1,0 +1,10 @@
+{
+  "name": "validate_json_file",
+  "description": "Verified JSON file validator with capability security. Uses SafeFileRead effect to read files only from /tmp/ with path traversal prevention.",
+  "params": [
+    {"name": "path", "type": "Str"}
+  ],
+  "effects": ["SafeFileRead(path)"],
+  "requires": "starts_with(path, \"/tmp/\") && not_contains(path, \"..\")",
+  "ensures": "result >= 0 && result <= 1"
+}
