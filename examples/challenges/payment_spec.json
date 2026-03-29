@@ -1,0 +1,37 @@
+{
+  "module_name": "payment",
+  "description": "Verified payment calculation module with overflow-safe arithmetic",
+  "atoms": [
+    {
+      "name": "calc_subtotal",
+      "description": "Calculate subtotal as price * quantity with overflow prevention",
+      "params": [
+        {"name": "price", "type": "i64"},
+        {"name": "quantity", "type": "i64"}
+      ],
+      "requires": "price >= 0 && quantity >= 0 && quantity <= 10000 && price <= 1000000",
+      "ensures": "result == price * quantity && result >= 0"
+    },
+    {
+      "name": "calc_tax",
+      "description": "Calculate tax amount from subtotal and tax rate percentage",
+      "params": [
+        {"name": "amount", "type": "i64"},
+        {"name": "tax_rate_pct", "type": "i64"}
+      ],
+      "requires": "amount >= 0 && tax_rate_pct >= 0 && tax_rate_pct <= 100",
+      "ensures": "result >= 0 && result == amount * tax_rate_pct / 100"
+    },
+    {
+      "name": "calc_total",
+      "description": "Calculate total including tax from price, quantity, and tax rate",
+      "params": [
+        {"name": "price", "type": "i64"},
+        {"name": "quantity", "type": "i64"},
+        {"name": "tax_rate_pct", "type": "i64"}
+      ],
+      "requires": "price >= 0 && quantity >= 0 && quantity <= 10000 && price <= 1000000 && tax_rate_pct >= 0 && tax_rate_pct <= 100",
+      "ensures": "result >= 0"
+    }
+  ]
+}
