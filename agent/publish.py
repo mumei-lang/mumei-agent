@@ -66,12 +66,24 @@ def _validate_spec(spec: dict) -> str | None:
 def _sanitize_module_name(raw: str) -> str:
     """Sanitize a module name for use in file paths and branch names.
 
-    Raises ``ValueError`` if the name is empty or contains unsafe characters.
+    Raises ``ValueError`` if the name is empty, contains unsafe characters,
+    includes ``..`` (invalid in git ref names), or ends with ``.lock``
+    (rejected by git).
     """
     if not raw or not _SAFE_NAME_RE.match(raw):
         raise ValueError(
             f"Unsafe module name {raw!r}. "
             "Only alphanumeric characters, hyphens, underscores, and dots are allowed."
+        )
+    if ".." in raw:
+        raise ValueError(
+            f"Unsafe module name {raw!r}. "
+            "Consecutive dots ('..') are not allowed (invalid in git branch names)."
+        )
+    if raw.endswith(".lock"):
+        raise ValueError(
+            f"Unsafe module name {raw!r}. "
+            "Names ending with '.lock' are not allowed (invalid in git branch names)."
         )
     return raw
 

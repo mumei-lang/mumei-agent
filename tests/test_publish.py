@@ -37,6 +37,14 @@ class TestSanitizeModuleName:
         with pytest.raises(ValueError, match="Unsafe module name"):
             _sanitize_module_name("--help")
 
+    def test_rejects_consecutive_dots(self):
+        with pytest.raises(ValueError, match="Consecutive dots"):
+            _sanitize_module_name("foo..bar")
+
+    def test_rejects_dot_lock_suffix(self):
+        with pytest.raises(ValueError, match=r"\.lock"):
+            _sanitize_module_name("module.lock")
+
 
 # --- _validate_spec tests ---
 
