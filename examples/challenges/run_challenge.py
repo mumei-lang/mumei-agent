@@ -114,7 +114,7 @@ def run_challenge(spec_path: str, dry_run: bool = False) -> dict:
     print(f"=== Zero-Human Challenge: {challenge_name} ===")
     print(f"Spec: {spec_path}")
     if "atoms" in spec:
-        atom_names = [a["name"] for a in spec["atoms"]]
+        atom_names = [a.get("name", "<unnamed>") for a in spec["atoms"]]
         print(f"Atoms: {', '.join(atom_names)}")
     print()
 
