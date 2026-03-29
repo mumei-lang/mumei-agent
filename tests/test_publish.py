@@ -199,7 +199,7 @@ class TestPublishGitOperations:
             _cp(1, err="nothing to commit"), _cp(0),
         ])
         assert r["success"] is False
-        assert mg.call_args_list[-1] == call(["checkout", "develop"], cwd=str(tmp_path))
+        assert mg.call_args_list[-1] == call(["checkout", "develop"], cwd=tmp_path)
 
     def test_push_failure_restores_branch(self, tmp_path):
         r, mg = self._run(tmp_path, [
@@ -207,7 +207,7 @@ class TestPublishGitOperations:
             _cp(0), _cp(1, err="rejected"), _cp(0),
         ])
         assert r["success"] is False
-        assert mg.call_args_list[-1] == call(["checkout", "main"], cwd=str(tmp_path))
+        assert mg.call_args_list[-1] == call(["checkout", "main"], cwd=tmp_path)
 
     def test_add_uses_double_dash(self, tmp_path):
         r, mg = self._run(
