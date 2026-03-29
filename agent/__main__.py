@@ -1,7 +1,7 @@
 """Allow running as `python -m agent` with subcommands."""
 import sys
 
-_SUBCOMMANDS = {"heal", "generate"}
+_SUBCOMMANDS = {"heal", "generate", "publish"}
 
 
 def main() -> None:
@@ -13,7 +13,18 @@ def main() -> None:
     argv = sys.argv[1:]
     command = argv[0] if argv and argv[0] in _SUBCOMMANDS else None
 
-    if command == "generate":
+    if command == "publish":
+        import argparse
+        from agent.publish import build_parser, main as publish_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent publish",
+            description="Autonomous delivery: generate → verify → emit wrappers → PR",
+        )
+        build_parser(parser=parser)
+        args = parser.parse_args(argv[1:])
+        publish_main(args)
+    elif command == "generate":
         import argparse
         from agent.generate import build_parser, main as generate_main
 

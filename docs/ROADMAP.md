@@ -137,7 +137,7 @@ PR 上の `.mm` ファイルを自動検証し、結果をコメントとして�
 
 mumei エコシステム全体の戦略的イニシアチブ。詳細は [mumei-lang/mumei の docs/CROSS_PROJECT_ROADMAP.md](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) を参照。
 
-### SI-1: Zero-Human Challenge — 📋 Next
+### SI-1: Zero-Human Challenge — 🔧 In Progress
 
 mumei-agent に難易度の高い課題（100% 安全なキュー、Verified JSON validator 等）を与え、人間が一切介入せずに検証をパスするまでのログを公開する。
 
@@ -148,7 +148,7 @@ mumei-agent に難易度の高い課題（100% 安全なキュー、Verified JSO
 
 **前提条件**: P6-A (Multi-atom 生成) ✅ 完了済み
 
-### SI-3: Autonomous Delivery Flow — 📋 After SI-1/SI-2
+### SI-3: Autonomous Delivery Flow — 🔧 In Progress
 
 mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパーを自動生成 → PR を出す。
 
