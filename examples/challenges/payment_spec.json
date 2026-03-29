@@ -24,7 +24,7 @@
     },
     {
       "name": "calc_total",
-      "description": "Calculate total including tax from price, quantity, and tax rate",
+      "description": "Calculate total including tax from price, quantity, and tax rate. Uses calc_subtotal and calc_tax.",
       "params": [
         {"name": "price", "type": "i64"},
         {"name": "quantity", "type": "i64"},
