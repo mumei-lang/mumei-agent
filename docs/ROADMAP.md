@@ -164,7 +164,7 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 
 ```
 P1-C → P1-B → P1-A → P3-B → P6-A/B/C → SI-1 (Zero-Human Challenge) → SI-3 (Autonomous Delivery Flow)
-                                  ✅ All Complete          📋 Next              📋 After SI-1/SI-2
+                                  ✅ All Complete        🔧 In Progress          🔧 In Progress
 ```
 
 ---

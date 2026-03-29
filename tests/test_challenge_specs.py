@@ -127,7 +127,7 @@ class TestRunChallengeDryRun:
         result = subprocess.run(
             [
                 sys.executable, "-m", "examples.challenges.run_challenge",
-                "--spec", str(spec_path),
+                str(spec_path),
                 "--dry-run",
             ],
             capture_output=True,

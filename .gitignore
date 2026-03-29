@@ -10,3 +10,4 @@ visualizer/.report_history.lock
 *.mm.bak
 *.cast
 .agents/
+examples/challenges/results/*/

@@ -1,0 +1,48 @@
+{
+  "module_name": "deadlock_free_pc",
+  "description": "Deadlock-free producer-consumer module with resource hierarchy. Uses priority ordering on buffer and mutex resources to guarantee deadlock freedom.",
+  "resources": ["buffer", "mutex"],
+  "atoms": [
+    {
+      "name": "produce",
+      "description": "Produce an item into the buffer. Acquires mutex (priority 1) before buffer (priority 2) to prevent deadlock. Returns new buffer length.",
+      "params": [
+        {"name": "buf_len", "type": "i64"},
+        {"name": "buf_cap", "type": "i64"},
+        {"name": "mutex_held", "type": "i64"}
+      ],
+      "requires": "buf_len >= 0 && buf_cap > 0 && buf_len < buf_cap && mutex_held == 0",
+      "ensures": "result == buf_len + 1 && result <= buf_cap && result >= 0"
+    },
+    {
+      "name": "consume",
+      "description": "Consume an item from the buffer. Acquires mutex (priority 1) before buffer (priority 2) to prevent deadlock. Returns new buffer length.",
+      "params": [
+        {"name": "buf_len", "type": "i64"},
+        {"name": "buf_cap", "type": "i64"},
+        {"name": "mutex_held", "type": "i64"}
+      ],
+      "requires": "buf_len > 0 && buf_cap > 0 && buf_len <= buf_cap && mutex_held == 0",
+      "ensures": "result == buf_len - 1 && result >= 0 && result < buf_cap"
+    },
+    {
+      "name": "buffer_available",
+      "description": "Check if space is available in the buffer for production (returns 1 if available, 0 otherwise).",
+      "params": [
+        {"name": "buf_len", "type": "i64"},
+        {"name": "buf_cap", "type": "i64"}
+      ],
+      "requires": "buf_len >= 0 && buf_cap > 0 && buf_len <= buf_cap",
+      "ensures": "result >= 0 && result <= 1 && (buf_len < buf_cap => result == 1) && (buf_len == buf_cap => result == 0)"
+    },
+    {
+      "name": "buffer_has_items",
+      "description": "Check if the buffer has items available for consumption (returns 1 if non-empty, 0 otherwise).",
+      "params": [
+        {"name": "buf_len", "type": "i64"}
+      ],
+      "requires": "buf_len >= 0",
+      "ensures": "result >= 0 && result <= 1 && (buf_len > 0 => result == 1) && (buf_len == 0 => result == 0)"
+    }
+  ]
+}
