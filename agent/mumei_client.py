@@ -72,6 +72,22 @@ class MumeiClient:
                 pass
         return {"success": False, "analysis": {}}
 
+    def build_with_emit(self, source_path: str, emit: str, output: str = "katana") -> dict:
+        """Run mumei build with a specific --emit target.
+
+        The emit targets generate FFI glue code (not transpiled code):
+        - c-header: generates .h files
+        - rust-wrapper: generates Rust extern "C" bindings + safe wrappers
+        - python-wrapper: generates ctypes-based Python wrappers
+        """
+        cmd = [*self._cmd_prefix, "build", source_path, "-o", output, "--emit", emit]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
     def build(self, source_path: str, output: str = "katana") -> dict:
         """Run mumei build and return result.
 

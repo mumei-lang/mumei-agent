@@ -148,7 +148,7 @@ mumei-agent に難易度の高い課題（100% 安全なキュー、Verified JSO
 
 **前提条件**: P6-A (Multi-atom 生成) ✅ 完了済み
 
-### SI-3: Autonomous Delivery Flow — 📋 After SI-1/SI-2
+### SI-3: Autonomous Delivery Flow — 🔧 In Progress
 
 mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパーを自動生成 → PR を出す。
 
