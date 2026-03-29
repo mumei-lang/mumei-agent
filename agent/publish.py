@@ -80,6 +80,12 @@ def _sanitize_module_name(raw: str) -> str:
             f"Unsafe module name {raw!r}. "
             "Consecutive dots ('..') are not allowed (invalid in git branch names)."
         )
+    if raw.startswith(".") or raw.endswith("."):
+        raise ValueError(
+            f"Unsafe module name {raw!r}. "
+            "Names starting or ending with a dot are not allowed "
+            "(invalid in git branch names)."
+        )
     if raw.endswith(".lock"):
         raise ValueError(
             f"Unsafe module name {raw!r}. "
