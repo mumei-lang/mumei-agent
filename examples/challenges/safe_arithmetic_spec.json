@@ -1,0 +1,36 @@
+{
+  "module_name": "safe_arithmetic",
+  "description": "Overflow/underflow-safe arithmetic operations with bounded inputs",
+  "atoms": [
+    {
+      "name": "safe_add",
+      "description": "Overflow-safe addition of two non-negative bounded integers",
+      "params": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "requires": "a >= 0 && b >= 0 && a + b <= 1000000",
+      "ensures": "result == a + b && result >= 0"
+    },
+    {
+      "name": "safe_sub",
+      "description": "Underflow-safe subtraction ensuring non-negative result",
+      "params": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "requires": "a >= 0 && b >= 0 && a >= b",
+      "ensures": "result == a - b && result >= 0"
+    },
+    {
+      "name": "safe_mul",
+      "description": "Overflow-safe multiplication of two non-negative bounded integers",
+      "params": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "requires": "a >= 0 && b >= 0 && a <= 1000 && b <= 1000",
+      "ensures": "result == a * b && result >= 0"
+    }
+  ]
+}
