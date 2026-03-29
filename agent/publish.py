@@ -131,16 +131,26 @@ def publish(
     # 2. Generate code
     config = AgentConfig()
     client = MumeiClient(mumei_bin)
+    openai_client = config.create_client()
 
-    gen_result = generate_code(spec, config, client)
-    if not gen_result.get("success"):
-        logger.error("Code generation failed")
-        result["generation_error"] = gen_result
+    code, verified = generate_code(
+        client=openai_client,
+        model=config.model,
+        spec=spec,
+        config_max_retries=config.max_retries,
+        mumei_client=client,
+    )
+    if not code:
+        logger.error("Code generation failed — no code produced")
+        result["generation_error"] = "empty code"
         return result
 
-    generated_file = gen_result.get("output_path", f"{module_name}.mm")
+    generated_file = f"{module_name}.mm"
+    with open(generated_file, "w", encoding="utf-8") as f:
+        f.write(code)
     result["generated_file"] = generated_file
-    logger.info("Generated: %s", generated_file)
+    result["verified_at_generation"] = verified
+    logger.info("Generated: %s (verified=%s)", generated_file, verified)
 
     # 3. Verify
     verify_result = client.verify(generated_file)
@@ -230,8 +240,9 @@ def publish(
         )
         result["pr_url"] = pr.get("html_url")
         logger.info("PR created: %s", result["pr_url"])
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to create PR")
+        result["pr_error"] = str(exc)
 
     result["success"] = True
     return result
