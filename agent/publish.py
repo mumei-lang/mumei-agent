@@ -39,7 +39,28 @@ logger = logging.getLogger(__name__)
 _EMIT_TARGETS = ("c-header", "rust-wrapper", "python-wrapper")
 
 # Only allow alphanumeric, hyphen, underscore, and dot in module names.
-_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]+$")
+# The first character must NOT be a hyphen to prevent filenames like "-A.mm"
+# from being misinterpreted as command-line flags by git or other tools.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_\.][A-Za-z0-9_\-\.]*$")
+
+
+def _validate_spec(spec: dict) -> str | None:
+    """Validate a spec dict, returning an error message or None if valid.
+
+    Mirrors the checks in ``agent.generate._validate_spec`` but returns
+    an error string instead of calling ``sys.exit``.
+    """
+    if "atoms" in spec:
+        atoms = spec["atoms"]
+        if not isinstance(atoms, list) or len(atoms) == 0:
+            return "Multi-atom spec 'atoms' must be a non-empty list."
+        for i, atom in enumerate(atoms):
+            if not isinstance(atom, dict) or "name" not in atom:
+                return f"atoms[{i}] must be a dict with a 'name' key."
+    else:
+        if "name" not in spec:
+            return "Single-atom spec must have a 'name' key."
+    return None
 
 
 def _sanitize_module_name(raw: str) -> str:
@@ -144,6 +165,12 @@ def publish(
     with open(spec_path) as f:
         spec = json.load(f)
 
+    spec_error = _validate_spec(spec)
+    if spec_error:
+        logger.error("Invalid spec: %s", spec_error)
+        result["generation_error"] = spec_error
+        return result
+
     raw_name = spec.get("module_name", spec.get("name", "module"))
     try:
         module_name = _sanitize_module_name(raw_name)
@@ -220,15 +247,23 @@ def publish(
     # 5. Git operations
     branch_name = f"auto/{module_name}"
 
+    # Remember original branch so we can restore it on failure.
+    orig_branch_result = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+    orig_branch = orig_branch_result.stdout.strip() if orig_branch_result.returncode == 0 else None
+
     checkout = _git(["checkout", "-b", branch_name], cwd=cwd)
     if checkout.returncode != 0:
         logger.error("git checkout -b failed: %s", checkout.stderr)
         result["git_error"] = checkout.stderr
         return result
 
-    _git(["add", generated_file], cwd=cwd)
+    add_gen = _git(["add", "--", generated_file], cwd=cwd)
+    if add_gen.returncode != 0:
+        logger.warning("git add %s failed: %s", generated_file, add_gen.stderr)
     # Add any output artifacts
-    _git(["add", output_dir], cwd=cwd)
+    add_out = _git(["add", "--", output_dir], cwd=cwd)
+    if add_out.returncode != 0:
+        logger.warning("git add %s failed: %s", output_dir, add_out.stderr)
 
     commit_msg = (
         f"feat: auto-generated verified module `{module_name}`\n\n"
@@ -240,12 +275,16 @@ def publish(
     if commit.returncode != 0:
         logger.error("git commit failed: %s", commit.stderr)
         result["git_error"] = commit.stderr
+        if orig_branch:
+            _git(["checkout", orig_branch], cwd=cwd)
         return result
 
     push = _git(["push", "origin", branch_name], cwd=cwd)
     if push.returncode != 0:
         logger.error("git push failed: %s", push.stderr)
         result["git_error"] = push.stderr
+        if orig_branch:
+            _git(["checkout", orig_branch], cwd=cwd)
         return result
 
     # 6. Create PR
