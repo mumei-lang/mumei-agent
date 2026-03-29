@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,22 @@ from agent.strategies.generate_strategy import generate_code
 logger = logging.getLogger(__name__)
 
 _EMIT_TARGETS = ("c-header", "rust-wrapper", "python-wrapper")
+
+# Only allow alphanumeric, hyphen, underscore, and dot in module names.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.]+$")
+
+
+def _sanitize_module_name(raw: str) -> str:
+    """Sanitize a module name for use in file paths and branch names.
+
+    Raises ``ValueError`` if the name is empty or contains unsafe characters.
+    """
+    if not raw or not _SAFE_NAME_RE.match(raw):
+        raise ValueError(
+            f"Unsafe module name {raw!r}. "
+            "Only alphanumeric characters, hyphens, underscores, and dots are allowed."
+        )
+    return raw
 
 
 def _git(args: list[str], cwd: str | Path) -> subprocess.CompletedProcess[str]:
@@ -81,7 +98,7 @@ def _create_github_pr(
 def publish(
     spec_path: str,
     *,
-    mumei_bin: str = "mumei",
+    mumei_bin: str | None = None,
     output_dir: str = "katana",
     repo_dir: str | None = None,
     base_branch: str = "develop",
@@ -96,7 +113,9 @@ def publish(
     spec_path:
         Path to the spec JSON file.
     mumei_bin:
-        Path or command for the mumei binary.
+        Path or command for the mumei binary.  Falls back to the
+        ``MUMEI_BIN`` environment variable (via ``AgentConfig``) when
+        ``None``.
     output_dir:
         Output directory for build artifacts.
     repo_dir:
@@ -125,12 +144,24 @@ def publish(
     with open(spec_path) as f:
         spec = json.load(f)
 
-    module_name = spec.get("module_name", spec.get("name", "module"))
+    raw_name = spec.get("module_name", spec.get("name", "module"))
+    try:
+        module_name = _sanitize_module_name(raw_name)
+    except ValueError as exc:
+        logger.error("Invalid module name: %s", exc)
+        result["generation_error"] = str(exc)
+        return result
     logger.info("Publishing module: %s", module_name)
+
+    # Resolve working directory — all generated files are written here so
+    # that git operations (which also run in this directory) can find them.
+    cwd = Path(repo_dir).resolve() if repo_dir else Path.cwd()
 
     # 2. Generate code
     config = AgentConfig()
-    client = MumeiClient(mumei_bin)
+    # Respect MUMEI_BIN env var via config when no explicit --mumei-bin is given.
+    effective_mumei_bin = mumei_bin or config.mumei_bin
+    client = MumeiClient(effective_mumei_bin)
     openai_client = config.create_client()
 
     code, verified = generate_code(
@@ -146,14 +177,15 @@ def publish(
         return result
 
     generated_file = f"{module_name}.mm"
-    with open(generated_file, "w", encoding="utf-8") as f:
+    generated_path = cwd / generated_file
+    with open(generated_path, "w", encoding="utf-8") as f:
         f.write(code)
     result["generated_file"] = generated_file
     result["verified_at_generation"] = verified
-    logger.info("Generated: %s (verified=%s)", generated_file, verified)
+    logger.info("Generated: %s (verified=%s)", generated_path, verified)
 
     # 3. Verify
-    verify_result = client.verify(generated_file)
+    verify_result = client.verify(str(generated_path))
     if not verify_result["success"]:
         logger.error("Verification failed: %s", verify_result.get("stderr", ""))
         result["verify_error"] = verify_result
@@ -162,9 +194,12 @@ def publish(
     logger.info("Verification passed")
 
     # 4. Build with each emit target
+    output_path = str(cwd / output_dir)
     artifacts = []
     for target in _EMIT_TARGETS:
-        emit_result = client.build_with_emit(generated_file, target, output_dir)
+        emit_result = client.build_with_emit(
+            str(generated_path), target, output_path,
+        )
         artifacts.append({
             "target": target,
             "success": emit_result["success"],
@@ -183,10 +218,14 @@ def publish(
         return result
 
     # 5. Git operations
-    cwd = Path(repo_dir) if repo_dir else Path.cwd()
     branch_name = f"auto/{module_name}"
 
-    _git(["checkout", "-b", branch_name], cwd=cwd)
+    checkout = _git(["checkout", "-b", branch_name], cwd=cwd)
+    if checkout.returncode != 0:
+        logger.error("git checkout -b failed: %s", checkout.stderr)
+        result["git_error"] = checkout.stderr
+        return result
+
     _git(["add", generated_file], cwd=cwd)
     # Add any output artifacts
     _git(["add", output_dir], cwd=cwd)
@@ -197,8 +236,17 @@ def publish(
         f"Source spec: {spec_path}\n"
         f"Emit targets: {', '.join(_EMIT_TARGETS)}"
     )
-    _git(["commit", "-m", commit_msg], cwd=cwd)
-    _git(["push", "origin", branch_name], cwd=cwd)
+    commit = _git(["commit", "-m", commit_msg], cwd=cwd)
+    if commit.returncode != 0:
+        logger.error("git commit failed: %s", commit.stderr)
+        result["git_error"] = commit.stderr
+        return result
+
+    push = _git(["push", "origin", branch_name], cwd=cwd)
+    if push.returncode != 0:
+        logger.error("git push failed: %s", push.stderr)
+        result["git_error"] = push.stderr
+        return result
 
     # 6. Create PR
     github_token = os.environ.get("GITHUB_TOKEN", "")
@@ -239,11 +287,16 @@ def publish(
             token=github_token,
         )
         result["pr_url"] = pr.get("html_url")
+        result["pr_created"] = True
         logger.info("PR created: %s", result["pr_url"])
     except Exception as exc:
         logger.exception("Failed to create PR")
         result["pr_error"] = str(exc)
+        result["pr_created"] = False
 
+    # success=True means generation, verification, and git push all
+    # succeeded.  Check pr_created / pr_error to determine whether the
+    # GitHub PR was also created.
     result["success"] = True
     return result
 
@@ -259,8 +312,8 @@ def build_parser(parser: "argparse.ArgumentParser") -> None:
     )
     parser.add_argument(
         "--mumei-bin",
-        default="mumei",
-        help="Path to the mumei binary (default: mumei)",
+        default=None,
+        help="Path to the mumei binary (default: MUMEI_BIN env or 'mumei')",
     )
     parser.add_argument(
         "--output",
@@ -313,6 +366,10 @@ def main(args: "argparse.Namespace") -> None:
         print(f"\n✅ Publish pipeline completed for: {result['generated_file']}")
         if result.get("pr_url"):
             print(f"   PR: {result['pr_url']}")
+        if result.get("pr_error"):
+            print(f"   ⚠️  PR creation failed: {result['pr_error']}", file=sys.stderr)
     else:
         print("\n❌ Publish pipeline failed", file=sys.stderr)
+        if result.get("git_error"):
+            print(f"   Git error: {result['git_error']}", file=sys.stderr)
         sys.exit(1)
