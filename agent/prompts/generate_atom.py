@@ -24,7 +24,13 @@ COMMON_MISTAKES = (
     "6. **Effect propagation**: If you call another atom with effects, your "
     "atom must declare those effects too\n"
     "7. **Consumed params**: Parameters listed in `consumed_params` are linear "
-    "and must not be used after being passed to a consuming operation"
+    "and must not be used after being passed to a consuming operation\n"
+    "8. **Reuse std contracts**: Before writing custom validation, check if "
+    "std/contracts.mm already provides the type or atom you need "
+    "(e.g., Port, Percentage, clamp, safe_divide). "
+    "Use `import \"std/contracts\" as contracts;` and call `contracts::clamp(val, min, max)`\n"
+    "9. **Fixed-point arithmetic**: For financial calculations, use "
+    "std/math/fixed_point.mm instead of raw i64 division to prevent precision loss"
 )
 
 

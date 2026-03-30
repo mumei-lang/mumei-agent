@@ -49,6 +49,46 @@ atom safe_read_file(path: Str)
         1
     }
 ```
+
+## Example 4 — std/contracts.mm: clamp (pure computation, no effects)
+```mumei
+atom clamp(val: i64, min_val: i64, max_val: i64)
+    requires: min_val <= max_val;
+    ensures: result >= min_val && result <= max_val;
+    body: { if val < min_val { min_val } else { if val > max_val { max_val } else { val } } }
+```
+
+## Example 5 — std/math/fixed_point.mm: fp_add (overflow-safe arithmetic)
+```mumei
+atom fp_add(a: i64, b: i64)
+    requires: a >= -999999999999 && a <= 999999999999
+           && b >= -999999999999 && b <= 999999999999
+           && a + b >= -999999999999 && a + b <= 999999999999;
+    ensures: result == a + b;
+    body: a + b;
+```
+
+## Example 6 — std/container/safe_queue.mm: enqueue (bounded data structure)
+```mumei
+atom enqueue(q_len: i64, q_cap: i64)
+    requires: q_len >= 0 && q_cap > 0 && q_len < q_cap;
+    ensures: result == q_len + 1 && result <= q_cap;
+    body: q_len + 1;
+```
+
+## Example 7 — std/http_secure.mm: secure_get (HTTPS-only with parameterized effect)
+```mumei
+effect SecureHttpGet(url: Str) where starts_with(url, "https://");
+
+atom secure_get(url: Str)
+    effects: [SecureHttpGet(url)]
+    requires: starts_with(url, "https://");
+    ensures: result >= 0;
+    body: {
+        perform SecureHttpGet.request(url);
+        http_get(url)
+    }
+```
 """
 
 
