@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.metrics import Metrics, ViolationMetrics
+from agent.metrics import Metrics
 
 
 class TestMetricsNewFields:
