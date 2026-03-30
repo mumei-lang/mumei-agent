@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -23,6 +24,8 @@ class Metrics:
     rule_based_successes: int = 0
     pattern_attempts: int = 0
     pattern_successes: int = 0
+    elapsed_seconds: float = 0.0
+    challenge_name: str = ""
     by_violation_type: dict[str, ViolationMetrics] = field(default_factory=dict)
 
     def record_rule_based_attempt(self, violation_type: str = "unknown") -> None:
@@ -128,11 +131,44 @@ class Metrics:
             "rule_based_successes": self.rule_based_successes,
             "pattern_attempts": self.pattern_attempts,
             "pattern_successes": self.pattern_successes,
+            "elapsed_seconds": self.elapsed_seconds,
+            "challenge_name": self.challenge_name,
             "by_violation_type": {
                 vtype: {"attempts": m.attempts, "successes": m.successes}
                 for vtype, m in self.by_violation_type.items()
             },
         }
+
+    @classmethod
+    def from_file(cls, path: Path) -> Metrics:
+        """Load metrics from a JSON file.
+
+        Args:
+            path: Path to a ``metrics.json`` file produced by
+                  :meth:`to_dict` / :meth:`to_json`.
+
+        Returns:
+            A :class:`Metrics` instance populated from the file.
+        """
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        by_vtype: dict[str, ViolationMetrics] = {}
+        for vtype, vdata in data.get("by_violation_type", {}).items():
+            by_vtype[vtype] = ViolationMetrics(
+                attempts=vdata.get("attempts", 0),
+                successes=vdata.get("successes", 0),
+            )
+        return cls(
+            total_attempts=data.get("total_attempts", 0),
+            successes=data.get("successes", 0),
+            rule_based_attempts=data.get("rule_based_attempts", 0),
+            rule_based_successes=data.get("rule_based_successes", 0),
+            pattern_attempts=data.get("pattern_attempts", 0),
+            pattern_successes=data.get("pattern_successes", 0),
+            elapsed_seconds=data.get("elapsed_seconds", 0.0),
+            challenge_name=data.get("challenge_name", ""),
+            by_violation_type=by_vtype,
+        )
 
     def to_json(self) -> str:
         """Return metrics as a formatted JSON string."""

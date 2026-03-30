@@ -170,6 +170,8 @@ def run_challenge(spec_path: str, dry_run: bool = False) -> dict:
         metrics=metrics,
     )
     elapsed = time.time() - start_time
+    metrics.elapsed_seconds = round(elapsed, 2)
+    metrics.challenge_name = challenge_name
 
     result["code"] = code
     result["verified"] = verified

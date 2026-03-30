@@ -172,6 +172,30 @@ Results are saved per challenge to `examples/challenges/results/<challenge_name>
 
 > _To be filled after execution._
 
+## Benchmark
+
+After running challenges, use the benchmark summary generator to aggregate results into a Markdown table:
+
+```bash
+# Generate summary from default results directory
+python -m examples.challenges.benchmark
+
+# Specify a custom results directory
+python -m examples.challenges.benchmark --results-dir /path/to/results
+
+# Write output to a file instead of stdout
+python -m examples.challenges.benchmark --output benchmark_summary.md
+```
+
+The generator scans `examples/challenges/results/*/metrics.json` for completed challenge results and produces a summary table with:
+- Challenge name
+- Status (PASSED / FAILED)
+- Total attempts
+- Elapsed time
+- Success rate
+
+The output can be pasted directly into the [Results](#results) section above.
+
 ## Related Documents
 
 - [mumei-agent Roadmap](ROADMAP.md) — SI-1 status
