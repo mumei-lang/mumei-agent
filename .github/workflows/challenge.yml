@@ -60,8 +60,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          LOG_DIR: ${{ github.event.inputs.log_dir }}
         run: |
-          python -m examples.challenges.run_challenge --all --log-dir ${{ github.event.inputs.log_dir }}
+          python -m examples.challenges.run_challenge --all --log-dir "$LOG_DIR"
 
       - name: Upload results
         if: always()
@@ -72,9 +73,10 @@ jobs:
 
       - name: Generate benchmark summary
         if: always()
+        env:
+          LOG_DIR: ${{ github.event.inputs.log_dir }}
         run: |
-          python -m examples.challenges.benchmark --results-dir ${{ github.event.inputs.log_dir }} --output benchmark_summary.md
-          echo "## Benchmark Summary" >> $GITHUB_STEP_SUMMARY
+          python -m examples.challenges.benchmark --results-dir "$LOG_DIR" --output benchmark_summary.md
           cat benchmark_summary.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload benchmark summary
