@@ -1,0 +1,85 @@
+name: Zero-Human Challenge
+
+on:
+  workflow_dispatch:
+    inputs:
+      log_dir:
+        description: "Directory for challenge results"
+        required: false
+        default: "results/"
+
+jobs:
+  challenge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Install mumei binary
+        run: |
+          # Attempt to install from latest GitHub release
+          RELEASE_URL=$(curl -s https://api.github.com/repos/mumei-lang/mumei/releases/latest \
+            | python3 -c "
+          import json, sys, platform
+          data = json.load(sys.stdin)
+          arch = 'x86_64' if platform.machine() == 'x86_64' else 'aarch64'
+          target = f'{arch}-unknown-linux-gnu'
+          for asset in data.get('assets', []):
+              if target in asset['name'] and asset['name'].endswith('.tar.gz'):
+                  print(asset['browser_download_url'])
+                  break
+          ")
+          if [ -n "$RELEASE_URL" ]; then
+            echo "Downloading mumei from: $RELEASE_URL"
+            curl -sL "$RELEASE_URL" | tar xz -C /usr/local/bin/
+            chmod +x /usr/local/bin/mumei
+          else
+            echo "::warning::No pre-built mumei binary found for this platform. Building from source..."
+            # Fall back to building from source
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source "$HOME/.cargo/env"
+            git clone --depth 1 https://github.com/mumei-lang/mumei.git /tmp/mumei-build
+            cd /tmp/mumei-build && cargo build --release
+            cp target/release/mumei /usr/local/bin/mumei
+          fi
+          mumei --version || echo "::warning::mumei binary not available"
+
+      - name: Run all challenges
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: |
+          python -m examples.challenges.run_challenge --all --log-dir ${{ github.event.inputs.log_dir }}
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: challenge-results
+          path: ${{ github.event.inputs.log_dir }}
+
+      - name: Generate benchmark summary
+        if: always()
+        run: |
+          python -m examples.challenges.benchmark --results-dir ${{ github.event.inputs.log_dir }} --output benchmark_summary.md
+          echo "## Benchmark Summary" >> $GITHUB_STEP_SUMMARY
+          cat benchmark_summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-summary
+          path: benchmark_summary.md
