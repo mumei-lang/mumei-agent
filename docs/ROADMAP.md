@@ -152,13 +152,22 @@ mumei-agent に難易度の高い課題（100% 安全なキュー、Verified JSO
 
 **前提条件**: P6-A (Multi-atom 生成) ✅ 完了済み
 
-### SI-3: Autonomous Delivery Flow — 🔧 In Progress
+### SI-3: Autonomous Delivery Flow — ✅ Complete
 
 mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパーを自動生成 → PR を出す。
 
 **mumei-agent 側の作業**:
-- `--publish` モードの追加（生成 → 検証 → ラッパー生成 → git commit → PR）
-- GitHub API 連携
+- ✅ `--publish` モードの追加（生成 → 検証 → ラッパー生成 → git commit → PR）
+- ✅ GitHub API 連携
+- ✅ GitHub Actions CI テスト（`.github/workflows/verify-publish.yml`）
+  - PR 内の `.mm` ファイルを自動検出
+  - `mumei verify --json` で検証
+  - `--emit c-header` / `rust-wrapper` / `python-wrapper` の生成・コンパイル確認
+  - `rustc` によるRustラッパーコンパイルチェック
+  - Python `ast.parse` による構文チェック
+  - 結果を PR コメントとして投稿（`marocchino/sticky-pull-request-comment`）
+- ✅ `examples/publish_demo/` — デモ spec + ドキュメント
+- ✅ `tests/test_publish.py` — パイプライン全体のユニットテスト（dry-run, emit targets, verification failure, branch naming）
 
 **前提条件**: SI-1, SI-2 (Verified FFI Boundary, mumei 側), Rust/Python Wrapper Emitter (mumei 側)
 
@@ -168,7 +177,7 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 
 ```
 P1-C → P1-B → P1-A → P3-B → P6-A/B/C → SI-1 (Zero-Human Challenge) → SI-3 (Autonomous Delivery Flow)
-                                  ✅ All Complete        🔧 In Progress          🔧 In Progress
+                                  ✅ All Complete        🔧 In Progress          ✅ Complete
 ```
 
 ---

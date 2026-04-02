@@ -1,0 +1,35 @@
+{
+  "module_name": "payment",
+  "atoms": [
+    {
+      "name": "calc_subtotal",
+      "params": [
+        { "name": "quantity", "type": "i64" },
+        { "name": "price", "type": "i64" }
+      ],
+      "requires": "quantity > 0 && price > 0",
+      "ensures": "result > 0",
+      "description": "Calculate subtotal from quantity and unit price"
+    },
+    {
+      "name": "calc_tax",
+      "params": [
+        { "name": "amount", "type": "i64" },
+        { "name": "rate", "type": "i64" }
+      ],
+      "requires": "amount > 0 && rate >= 0 && rate <= 100",
+      "ensures": "result >= 0",
+      "description": "Calculate tax amount given a base amount and tax rate (0-100)"
+    },
+    {
+      "name": "calc_total",
+      "params": [
+        { "name": "subtotal", "type": "i64" },
+        { "name": "tax", "type": "i64" }
+      ],
+      "requires": "subtotal > 0 && tax >= 0",
+      "ensures": "result >= subtotal",
+      "description": "Calculate total by adding subtotal and tax"
+    }
+  ]
+}
