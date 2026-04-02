@@ -560,6 +560,135 @@ atom use_buf(buf: Buffer)
         assert result is None
 
 
+class TestFixLinearityViolatedViaFailureType:
+    """Ensure linearity_violated is reachable via failure_type (not just violation_type)."""
+
+    def test_failure_type_linearity_violated(self) -> None:
+        """Reports with failure_type (not violation_type) should still trigger the fix."""
+        source = """\
+atom use_resource(conn: Connection)
+    requires: true;
+    ensures: true;
+    body: {
+        send(conn);
+        close(conn);
+    };
+"""
+        report = {
+            "failure_type": "linearity_violated",
+            "atom": "use_resource",
+            "semantic_feedback": {
+                "resource": "conn",
+            },
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        assert "// " in result
+        assert "linearity fix" in result
+
+
+class TestFixPostconditionViolatedViaViolationType:
+    """Ensure postcondition_violated is reachable via violation_type."""
+
+    def test_violation_type_postcondition_violated(self) -> None:
+        """Reports with violation_type (not failure_type) should still trigger the fix."""
+        source = """\
+atom bad_sub(a: i64, b: i64)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        a - b
+    };
+"""
+        report = {
+            "violation_type": "postcondition_violated",
+            "atom": "bad_sub",
+            "counterexample": {"a": "3", "b": "10"},
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        assert "__tmp" in result
+        assert ">= 0" in result
+
+
+class TestInvariantViolatedMultiAtom:
+    """Ensure _fix_invariant_violated scopes to the target atom."""
+
+    def test_does_not_modify_other_atom(self) -> None:
+        """Assignment in a different atom with same field name is not modified."""
+        source = """\
+atom other(count: i64, delta: i64)
+    requires: true;
+    ensures: true;
+    body: {
+        count = count + delta;
+    };
+
+atom update_count(count: i64, delta: i64)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        count = count + delta;
+    };
+"""
+        report = {
+            "violation_type": "invariant_violated",
+            "atom": "update_count",
+            "semantic_feedback": {
+                "violated_constraints": [
+                    {"field": "count", "constraint": "count >= 0"},
+                ],
+            },
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        # The first atom's assignment should be untouched
+        other_section = result[:result.index("atom update_count")]
+        assert "if" not in other_section
+        # The target atom's assignment should be wrapped
+        target_section = result[result.index("atom update_count"):]
+        assert "if" in target_section
+        assert ">= 0" in target_section
+
+
+class TestLinearityViolatedMultiAtom:
+    """Ensure _fix_linearity_violated scopes to the target atom."""
+
+    def test_does_not_comment_out_other_atom(self) -> None:
+        """Usage in a different atom should not be commented out."""
+        source = """\
+atom other(conn: Connection)
+    requires: true;
+    ensures: true;
+    body: {
+        send(conn);
+    };
+
+atom use_resource(conn: Connection)
+    requires: true;
+    ensures: true;
+    body: {
+        send(conn);
+        close(conn);
+    };
+"""
+        report = {
+            "violation_type": "linearity_violated",
+            "atom": "use_resource",
+            "semantic_feedback": {
+                "resource": "conn",
+            },
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        # The first atom should be untouched
+        other_section = result[:result.index("atom use_resource")]
+        assert "//" not in other_section
+        # The target atom should have a comment
+        target_section = result[result.index("atom use_resource"):]
+        assert "linearity fix" in target_section
+
+
 class TestEdgeCases:
     """Edge cases and fallback behavior."""
 

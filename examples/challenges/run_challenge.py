@@ -201,7 +201,7 @@ def run_challenge(spec_path: str, dry_run: bool = False) -> dict:
             pattern_lib.record(
                 violation_type="generation",
                 failure_type="generation",
-                source_before="",
+                source_before=f"challenge:{challenge_name}",
                 source_after=code,
                 report={"atom": challenge_name, "spec": spec},
                 fix_method="llm",

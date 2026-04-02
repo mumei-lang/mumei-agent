@@ -27,9 +27,9 @@ def try_rule_based_fix(source_code: str, report: dict) -> str | None:
         return _fix_effect_propagation(source_code, report)
     elif failure_type == "division_by_zero":
         return _fix_division_by_zero(source_code, report)
-    elif violation_type == "linearity_violated":
+    elif failure_type == "linearity_violated" or violation_type == "linearity_violated":
         return _fix_linearity_violated(source_code, report)
-    elif failure_type == "postcondition_violated":
+    elif failure_type == "postcondition_violated" or violation_type == "postcondition_violated":
         return _fix_postcondition_violated(source_code, report)
     elif failure_type == "invariant_violated" or violation_type == "invariant_violated":
         return _fix_invariant_violated(source_code, report)
@@ -360,6 +360,17 @@ def _fix_invariant_violated(source_code: str, report: dict) -> str | None:
     if not violated:
         return None
 
+    # Scope the search to the target atom's body
+    atom_pattern = re.compile(
+        rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
+        re.DOTALL,
+    )
+    atom_match = atom_pattern.search(source_code)
+    if atom_match is None:
+        return None
+
+    rest = _scoped_block(source_code, atom_match.end())
+
     for entry in violated:
         field_name = entry.get("field", entry.get("param", ""))
         constraint = entry.get("constraint", "")
@@ -370,18 +381,20 @@ def _fix_invariant_violated(source_code: str, report: dict) -> str | None:
         lower_match = re.match(rf'{re.escape(field_name)}\s*>=\s*(\w+)', constraint)
         if lower_match:
             bound = lower_match.group(1)
-            # Find assignment to the field in the body
+            # Find assignment to the field within the scoped atom body
             assign_pattern = re.compile(
                 rf'({re.escape(field_name)}\s*=\s*)([^;]+)(;)',
             )
-            assign_match = assign_pattern.search(source_code)
+            assign_match = assign_pattern.search(rest)
             if assign_match:
                 expr = assign_match.group(2).strip()
                 new_expr = f"if {expr} >= {bound} {{ {expr} }} else {{ {bound} }}"
+                abs_start = atom_match.end() + assign_match.start(2)
+                abs_end = atom_match.end() + assign_match.end(2)
                 return (
-                    source_code[:assign_match.start(2)]
+                    source_code[:abs_start]
                     + new_expr
-                    + source_code[assign_match.end(2):]
+                    + source_code[abs_end:]
                 )
 
     return None
@@ -394,6 +407,7 @@ def _fix_linearity_violated(source_code: str, report: dict) -> str | None:
     name from the report's semantic_feedback and comment out or remove the
     second usage of the linear resource.
     """
+    atom_name = report.get("atom", "")
     semantic = report.get("semantic_feedback", {})
     resource_name = semantic.get("resource", "")
     if not resource_name:
@@ -408,19 +422,35 @@ def _fix_linearity_violated(source_code: str, report: dict) -> str | None:
     if not resource_name:
         return None
 
-    # Find all usages of the resource in the source code body sections
+    # Scope the search to the target atom's body when atom_name is available
+    offset = 0
+    search_text = source_code
+    if atom_name:
+        atom_pattern = re.compile(
+            rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
+            re.DOTALL,
+        )
+        atom_match = atom_pattern.search(source_code)
+        if atom_match is not None:
+            offset = atom_match.end()
+            search_text = _scoped_block(source_code, offset)
+
+    # Find all usages of the resource in the scoped text
     usage_pattern = re.compile(
         rf'\b{re.escape(resource_name)}\b',
     )
-    matches = list(usage_pattern.finditer(source_code))
+    matches = list(usage_pattern.finditer(search_text))
     if len(matches) < 2:
         return None
 
     # Comment out the last usage line
     last_match = matches[-1]
+    # Translate back to absolute positions in source_code
+    abs_start_match = offset + last_match.start()
+    abs_end_match = offset + last_match.end()
     # Find the line containing the last match
-    line_start = source_code.rfind('\n', 0, last_match.start()) + 1
-    line_end = source_code.find('\n', last_match.end())
+    line_start = source_code.rfind('\n', 0, abs_start_match) + 1
+    line_end = source_code.find('\n', abs_end_match)
     if line_end == -1:
         line_end = len(source_code)
 
