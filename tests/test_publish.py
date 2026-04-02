@@ -122,6 +122,7 @@ class TestPublishDryRun:
         assert r["generated_file"] == "test_mod.mm"
         assert r["verified_at_generation"] is True
         assert len(r["artifacts"]) == 3
+        assert all(a["success"] is True for a in r["artifacts"])
         assert (tmp_path / "test_mod.mm").exists()
 
     def test_generation_failure(self, tmp_path):
@@ -283,26 +284,11 @@ class TestPublishGitHubPR:
         assert r["pr_url"] == "https://pr/1"
 
 
-# --- MUMEI_BIN fallback test ---
-
-
 # --- Full pipeline dry-run tests ---
 
 
 class TestPublishDryRunFullPipeline:
     """Test the complete dry-run pipeline with all emit targets."""
-
-    def test_publish_dry_run_full_pipeline(self, tmp_path):
-        """Mock all stages and verify full pipeline success."""
-        sp = _spec_file(tmp_path)
-        with patch("agent.publish.AgentConfig", return_value=_cfg()), \
-             patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC:
-            _ok_client(MC)
-            r = publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=True)
-        assert r["success"] is True
-        assert len(r["artifacts"]) == 3
-        assert all(a["success"] is True for a in r["artifacts"])
 
     def test_publish_emit_targets_called(self, tmp_path):
         """Verify build_with_emit is called exactly 3 times with correct targets."""
@@ -349,7 +335,7 @@ class TestPublishDryRunFullPipeline:
         assert checkout_calls[0][0][0][2] == "auto/test_mod"
 
 
-# --- MUMEI_BIN fallback test ---
+# --- MUMEI_BIN fallback tests ---
 
 
 class TestMumeiBinFallback:

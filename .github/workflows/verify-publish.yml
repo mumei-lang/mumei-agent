@@ -3,6 +3,8 @@ name: Verify Auto-Generated Publish PRs
 on:
   pull_request:
     branches: [develop]
+    paths:
+      - '**/*.mm'
 
 permissions:
   pull-requests: write
@@ -17,8 +19,10 @@ jobs:
 
       - name: Check for .mm files in PR
         id: check_mm
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          MM_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.mm' || true)
+          MM_FILES=$(git diff --name-only origin/"$BASE_REF"...HEAD -- '*.mm' || true)
           if [ -z "$MM_FILES" ]; then
             echo "has_mm=false" >> $GITHUB_OUTPUT
             echo "No .mm files found in this PR — skipping verification."
