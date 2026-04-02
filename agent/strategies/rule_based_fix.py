@@ -33,7 +33,7 @@ def try_rule_based_fix(source_code: str, report: dict) -> str | None:
         return _fix_postcondition_violated(source_code, report)
     elif failure_type == "invariant_violated" or violation_type == "invariant_violated":
         return _fix_invariant_violated(source_code, report)
-    elif failure_type == "precondition_violated":
+    elif failure_type == "precondition_violated" or violation_type == "precondition_violated":
         return _fix_precondition(source_code, report)
     return None
 
@@ -382,8 +382,9 @@ def _fix_invariant_violated(source_code: str, report: dict) -> str | None:
         if lower_match:
             bound = lower_match.group(1)
             # Find assignment to the field within the scoped atom body
+            # Use =(?!=) to avoid matching == comparisons
             assign_pattern = re.compile(
-                rf'({re.escape(field_name)}\s*=\s*)([^;]+)(;)',
+                rf'({re.escape(field_name)}\s*=(?!=)\s*)([^;]+)(;)',
             )
             assign_match = assign_pattern.search(rest)
             if assign_match:
@@ -432,10 +433,18 @@ def _fix_linearity_violated(source_code: str, report: dict) -> str | None:
         )
         atom_match = atom_pattern.search(source_code)
         if atom_match is not None:
-            offset = atom_match.end()
-            search_text = _scoped_block(source_code, offset)
+            scoped = _scoped_block(source_code, atom_match.end())
+            # Narrow further to just the body block so that references in
+            # requires:/ensures:/effects: clauses are not counted as usages.
+            body_start = re.search(r'body\s*:', scoped)
+            if body_start is not None:
+                offset = atom_match.end() + body_start.start()
+                search_text = scoped[body_start.start():]
+            else:
+                offset = atom_match.end()
+                search_text = scoped
 
-    # Find all usages of the resource in the scoped text
+    # Find all usages of the resource in the body text
     usage_pattern = re.compile(
         rf'\b{re.escape(resource_name)}\b',
     )

@@ -490,6 +490,33 @@ atom update_count(count: i64, delta: i64)
         assert "if" in result
         assert ">= 0" in result
 
+    def test_does_not_match_equality_comparison(self) -> None:
+        """Regex must not match ``==`` as an assignment."""
+        source = """\
+atom update_count(count: i64, delta: i64)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        if count == 0 { return delta; };
+        count = count + delta;
+    };
+"""
+        report = {
+            "violation_type": "invariant_violated",
+            "atom": "update_count",
+            "semantic_feedback": {
+                "violated_constraints": [
+                    {"field": "count", "constraint": "count >= 0"},
+                ],
+            },
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        # The == comparison line must be untouched
+        assert "if count == 0 { return delta; };" in result
+        # The assignment should be wrapped
+        assert "if count + delta >= 0" in result
+
     def test_returns_none_when_no_constraints(self) -> None:
         """No violated_constraints → None."""
         report = {
@@ -549,6 +576,27 @@ atom use_buf(buf: Buffer)
         result = try_rule_based_fix(source, report)
         assert result is not None
         assert "// " in result
+
+    def test_does_not_count_requires_clause_reference(self) -> None:
+        """Resource in requires clause must not be counted as a body usage."""
+        source = """\
+atom use_conn(conn: Connection)
+    requires: conn != null;
+    ensures: true;
+    body: {
+        send(conn);
+    };
+"""
+        report = {
+            "violation_type": "linearity_violated",
+            "atom": "use_conn",
+            "semantic_feedback": {
+                "resource": "conn",
+            },
+        }
+        # Only one body usage — should return None (no duplicate to comment out)
+        result = try_rule_based_fix(source, report)
+        assert result is None
 
     def test_returns_none_when_no_resource_name(self) -> None:
         """No resource name extractable → None."""

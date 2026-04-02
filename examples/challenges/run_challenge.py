@@ -194,14 +194,18 @@ def run_challenge(spec_path: str, dry_run: bool = False) -> dict:
 
     if verified:
         print("  [4/4] Verification: PASSED")
-        # Record successful generation pattern for future reuse
+        # Record successful generation pattern for future reuse.
+        # Use the spec JSON as source_before so that format_few_shot()
+        # shows meaningful context and each challenge gets a unique
+        # content_hash for deduplication.
         try:
             from agent.pattern_library import PatternLibrary
             pattern_lib = PatternLibrary()
+            spec_text = json.dumps(spec, indent=2, ensure_ascii=False)
             pattern_lib.record(
                 violation_type="generation",
                 failure_type="generation",
-                source_before=f"challenge:{challenge_name}",
+                source_before=spec_text,
                 source_after=code,
                 report={"atom": challenge_name, "spec": spec},
                 fix_method="llm",
