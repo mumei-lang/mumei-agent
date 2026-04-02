@@ -52,6 +52,49 @@ class TestMetricsNewFields:
         assert parsed["challenge_name"] == "payment"
 
 
+class TestMetricsLlmTokens:
+    """Test llm_tokens_used field and record_tokens method."""
+
+    def test_default_llm_tokens(self) -> None:
+        """llm_tokens_used defaults to 0."""
+        m = Metrics()
+        assert m.llm_tokens_used == 0
+
+    def test_record_tokens(self) -> None:
+        """record_tokens() accumulates token count."""
+        m = Metrics()
+        m.record_tokens(100)
+        m.record_tokens(50)
+        assert m.llm_tokens_used == 150
+
+    def test_to_dict_includes_llm_tokens(self) -> None:
+        """to_dict() includes llm_tokens_used."""
+        m = Metrics(llm_tokens_used=500)
+        d = m.to_dict()
+        assert d["llm_tokens_used"] == 500
+
+    def test_to_json_includes_llm_tokens(self) -> None:
+        """to_json() includes llm_tokens_used."""
+        m = Metrics(llm_tokens_used=250)
+        parsed = json.loads(m.to_json())
+        assert parsed["llm_tokens_used"] == 250
+
+    def test_from_file_roundtrip_llm_tokens(self, tmp_path: Path) -> None:
+        """from_file() preserves llm_tokens_used."""
+        m = Metrics(llm_tokens_used=1234)
+        path = tmp_path / "metrics.json"
+        path.write_text(m.to_json(), encoding="utf-8")
+        loaded = Metrics.from_file(path)
+        assert loaded.llm_tokens_used == 1234
+
+    def test_from_file_missing_llm_tokens_defaults(self, tmp_path: Path) -> None:
+        """from_file() defaults llm_tokens_used to 0 when missing."""
+        path = tmp_path / "metrics.json"
+        path.write_text("{}", encoding="utf-8")
+        loaded = Metrics.from_file(path)
+        assert loaded.llm_tokens_used == 0
+
+
 class TestMetricsFromFile:
     """Test Metrics.from_file() classmethod."""
 

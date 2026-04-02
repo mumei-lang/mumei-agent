@@ -406,6 +406,160 @@ atom bystander(x: i64)
         assert "effects: [Log]" in bystander_section
 
 
+# ---------------------------------------------------------------------------
+# Postcondition violated tests
+# ---------------------------------------------------------------------------
+
+class TestFixPostconditionViolated:
+    """Tests for the postcondition_violated rule-based fix."""
+
+    def test_wraps_body_with_guard(self) -> None:
+        """Body expression is wrapped with ``if expr >= 0`` guard."""
+        source = """\
+atom bad_sub(a: i64, b: i64)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        a - b
+    };
+"""
+        report = {
+            "failure_type": "postcondition_violated",
+            "atom": "bad_sub",
+            "counterexample": {"a": "3", "b": "10"},
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        assert "__tmp" in result
+        assert ">= 0" in result
+
+    def test_returns_none_when_ensures_not_result_ge_0(self) -> None:
+        """If ensures doesn't contain ``result >= 0``, return None."""
+        source = """\
+atom foo(a: i64)
+    requires: true;
+    ensures: result == a;
+    body: {
+        a
+    };
+"""
+        report = {
+            "failure_type": "postcondition_violated",
+            "atom": "foo",
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is None
+
+    def test_returns_none_when_atom_missing(self) -> None:
+        """Missing atom name in report → None."""
+        report = {
+            "failure_type": "postcondition_violated",
+        }
+        result = try_rule_based_fix("atom x() body: 1;", report)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Invariant violated tests
+# ---------------------------------------------------------------------------
+
+class TestFixInvariantViolated:
+    """Tests for the invariant_violated rule-based fix."""
+
+    def test_adds_bounds_check(self) -> None:
+        """Adds bounds check for field constraint violation."""
+        source = """\
+atom update_count(count: i64, delta: i64)
+    requires: true;
+    ensures: result >= 0;
+    body: {
+        count = count + delta;
+    };
+"""
+        report = {
+            "violation_type": "invariant_violated",
+            "atom": "update_count",
+            "semantic_feedback": {
+                "violated_constraints": [
+                    {"field": "count", "constraint": "count >= 0"},
+                ],
+            },
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        assert "if" in result
+        assert ">= 0" in result
+
+    def test_returns_none_when_no_constraints(self) -> None:
+        """No violated_constraints → None."""
+        report = {
+            "violation_type": "invariant_violated",
+            "atom": "foo",
+            "semantic_feedback": {},
+        }
+        result = try_rule_based_fix("atom foo() body: 1;", report)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Linearity violated tests
+# ---------------------------------------------------------------------------
+
+class TestFixLinearityViolated:
+    """Tests for the linearity_violated rule-based fix."""
+
+    def test_comments_out_duplicate_use(self) -> None:
+        """Second usage of linear resource is commented out."""
+        source = """\
+atom use_resource(conn: Connection)
+    requires: true;
+    ensures: true;
+    body: {
+        send(conn);
+        close(conn);
+    };
+"""
+        report = {
+            "violation_type": "linearity_violated",
+            "semantic_feedback": {
+                "resource": "conn",
+            },
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        assert "// " in result
+        assert "linearity fix" in result
+
+    def test_extracts_resource_from_message(self) -> None:
+        """Resource name extracted from message if not in semantic_feedback."""
+        source = """\
+atom use_buf(buf: Buffer)
+    requires: true;
+    ensures: true;
+    body: {
+        read(buf);
+        write(buf);
+    };
+"""
+        report = {
+            "violation_type": "linearity_violated",
+            "message": "linear resource 'buf' used more than once",
+            "semantic_feedback": {},
+        }
+        result = try_rule_based_fix(source, report)
+        assert result is not None
+        assert "// " in result
+
+    def test_returns_none_when_no_resource_name(self) -> None:
+        """No resource name extractable → None."""
+        report = {
+            "violation_type": "linearity_violated",
+            "semantic_feedback": {},
+        }
+        result = try_rule_based_fix("atom foo() body: 1;", report)
+        assert result is None
+
+
 class TestEdgeCases:
     """Edge cases and fallback behavior."""
 

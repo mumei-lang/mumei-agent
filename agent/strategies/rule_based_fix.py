@@ -27,6 +27,12 @@ def try_rule_based_fix(source_code: str, report: dict) -> str | None:
         return _fix_effect_propagation(source_code, report)
     elif failure_type == "division_by_zero":
         return _fix_division_by_zero(source_code, report)
+    elif violation_type == "linearity_violated":
+        return _fix_linearity_violated(source_code, report)
+    elif failure_type == "postcondition_violated":
+        return _fix_postcondition_violated(source_code, report)
+    elif failure_type == "invariant_violated" or violation_type == "invariant_violated":
+        return _fix_invariant_violated(source_code, report)
     elif failure_type == "precondition_violated":
         return _fix_precondition(source_code, report)
     return None
@@ -287,6 +293,145 @@ def _fix_effect_propagation(source_code: str, report: dict) -> str | None:
 
     insertion = f"\n{indent}effects: [{', '.join(missing_effects)}]"
     return source_code[:decl_end] + insertion + source_code[decl_end:]
+
+
+def _fix_postcondition_violated(source_code: str, report: dict) -> str | None:
+    """Wrap body expression in a guard when ensures constraint is violated.
+
+    When ``failure_type == "postcondition_violated"`` and the ensures clause
+    contains ``result >= 0``, wrap the body expression in
+    ``if expr >= 0 { expr } else { 0 }`` to satisfy the postcondition.
+    """
+    atom_name = report.get("atom", "")
+    if not atom_name:
+        return None
+
+    # Check if ensures contains "result >= 0"
+    atom_pattern = re.compile(
+        rf'atom\s+{re.escape(atom_name)}\s*\(.*?\)',
+        re.DOTALL,
+    )
+    atom_match = atom_pattern.search(source_code)
+    if atom_match is None:
+        return None
+
+    rest = _scoped_block(source_code, atom_match.end())
+    ensures_match = re.search(r'ensures\s*:\s*(.+?)\s*;', rest)
+    if ensures_match is None:
+        return None
+
+    ensures_value = ensures_match.group(1).strip()
+    if "result >= 0" not in ensures_value:
+        return None
+
+    # Find the body expression
+    body_match = re.search(r'body\s*:\s*\{([^}]+)\}', rest)
+    if body_match is None:
+        # Try single-expression body: body: <expr>;
+        body_match = re.search(r'body\s*:\s*(.+?)\s*;', rest)
+        if body_match is None:
+            return None
+        expr = body_match.group(1).strip()
+        abs_start = atom_match.end() + body_match.start(1)
+        abs_end = atom_match.end() + body_match.end(1)
+        new_expr = f"{{ let __tmp = {expr}; if __tmp >= 0 {{ __tmp }} else {{ 0 }} }}"
+        return source_code[:abs_start] + new_expr + source_code[abs_end:]
+
+    expr = body_match.group(1).strip()
+    abs_start = atom_match.end() + body_match.start(1)
+    abs_end = atom_match.end() + body_match.end(1)
+    new_expr = f"\n        let __tmp = {expr};\n        if __tmp >= 0 {{ __tmp }} else {{ 0 }}\n    "
+    return source_code[:abs_start] + new_expr + source_code[abs_end:]
+
+
+def _fix_invariant_violated(source_code: str, report: dict) -> str | None:
+    """Add bounds check for struct field invariant violations.
+
+    When ``violation_type == "invariant_violated"``, extract the struct field
+    and constraint from the report and add a bounds check before the
+    violating assignment.
+    """
+    atom_name = report.get("atom", "")
+    if not atom_name:
+        return None
+
+    semantic = report.get("semantic_feedback", {})
+    violated = semantic.get("violated_constraints", [])
+    if not violated:
+        return None
+
+    for entry in violated:
+        field_name = entry.get("field", entry.get("param", ""))
+        constraint = entry.get("constraint", "")
+        if not field_name or not constraint:
+            continue
+
+        # Try to add a guard: clamp to bounds if constraint is "field >= N"
+        lower_match = re.match(rf'{re.escape(field_name)}\s*>=\s*(\w+)', constraint)
+        if lower_match:
+            bound = lower_match.group(1)
+            # Find assignment to the field in the body
+            assign_pattern = re.compile(
+                rf'({re.escape(field_name)}\s*=\s*)([^;]+)(;)',
+            )
+            assign_match = assign_pattern.search(source_code)
+            if assign_match:
+                expr = assign_match.group(2).strip()
+                new_expr = f"if {expr} >= {bound} {{ {expr} }} else {{ {bound} }}"
+                return (
+                    source_code[:assign_match.start(2)]
+                    + new_expr
+                    + source_code[assign_match.end(2):]
+                )
+
+    return None
+
+
+def _fix_linearity_violated(source_code: str, report: dict) -> str | None:
+    """Comment out the second usage of a linear resource.
+
+    When ``violation_type == "linearity_violated"``, extract the resource
+    name from the report's semantic_feedback and comment out or remove the
+    second usage of the linear resource.
+    """
+    semantic = report.get("semantic_feedback", {})
+    resource_name = semantic.get("resource", "")
+    if not resource_name:
+        # Try to extract from violated_constraints or message
+        msg = report.get("message", semantic.get("message", ""))
+        resource_match = re.search(r"resource '(\w+)'", msg)
+        if resource_match:
+            resource_name = resource_match.group(1)
+        else:
+            # Try extracting variable name from the report
+            resource_name = semantic.get("variable", "")
+    if not resource_name:
+        return None
+
+    # Find all usages of the resource in the source code body sections
+    usage_pattern = re.compile(
+        rf'\b{re.escape(resource_name)}\b',
+    )
+    matches = list(usage_pattern.finditer(source_code))
+    if len(matches) < 2:
+        return None
+
+    # Comment out the last usage line
+    last_match = matches[-1]
+    # Find the line containing the last match
+    line_start = source_code.rfind('\n', 0, last_match.start()) + 1
+    line_end = source_code.find('\n', last_match.end())
+    if line_end == -1:
+        line_end = len(source_code)
+
+    line = source_code[line_start:line_end]
+    # Skip if this is the declaration or requires/ensures line
+    stripped = line.strip()
+    if stripped.startswith(('atom ', 'requires:', 'ensures:', 'type ', 'struct ')):
+        return None
+
+    commented_line = line.replace(stripped, f"// {stripped} // linearity fix: removed duplicate use")
+    return source_code[:line_start] + commented_line + source_code[line_end:]
 
 
 def _fix_precondition(source_code: str, report: dict) -> str | None:

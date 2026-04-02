@@ -194,6 +194,21 @@ def run_challenge(spec_path: str, dry_run: bool = False) -> dict:
 
     if verified:
         print("  [4/4] Verification: PASSED")
+        # Record successful generation pattern for future reuse
+        try:
+            from agent.pattern_library import PatternLibrary
+            pattern_lib = PatternLibrary()
+            pattern_lib.record(
+                violation_type="generation",
+                failure_type="generation",
+                source_before="",
+                source_after=code,
+                report={"atom": challenge_name, "spec": spec},
+                fix_method="llm",
+            )
+            print("  Pattern recorded for future reuse.")
+        except Exception as exc:
+            print(f"  (Pattern recording skipped: {exc})")
     else:
         print("  [4/4] Verification: FAILED")
 
