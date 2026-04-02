@@ -57,6 +57,8 @@ jobs:
       - name: Run verification and emit checks
         if: steps.check_mm.outputs.has_mm == 'true'
         id: verify
+        env:
+          MM_FILES: ${{ steps.check_mm.outputs.mm_files }}
         run: |
           REPORT="## Publish Verification Report\n\n"
           OVERALL_SUCCESS=true
@@ -84,6 +86,7 @@ jobs:
             fi
 
             # 2. Emit c-header
+            rm -rf katana/
             echo "::group::Emit c-header for $mm_file"
             set +e
             mumei build "$mm_file" -o katana --emit c-header 2>&1
@@ -99,6 +102,7 @@ jobs:
             fi
 
             # 3. Emit rust-wrapper
+            rm -rf katana/
             echo "::group::Emit rust-wrapper for $mm_file"
             set +e
             mumei build "$mm_file" -o katana --emit rust-wrapper 2>&1
@@ -111,8 +115,14 @@ jobs:
               # Compile Rust wrapper
               echo "::group::Compile Rust wrapper"
               set +e
-              RUSTC_OUTPUT=$(rustc --edition 2021 --crate-type lib katana/*.rs 2>&1)
-              RUSTC_RC=$?
+              RUSTC_OUTPUT=""
+              RUSTC_RC=0
+              for rsfile in katana/*.rs; do
+                OUT=$(rustc --edition 2021 --crate-type lib "$rsfile" 2>&1)
+                RC=$?
+                RUSTC_OUTPUT+="$OUT"$'\n'
+                if [ $RC -ne 0 ]; then RUSTC_RC=$RC; fi
+              done
               set -e
               echo "$RUSTC_OUTPUT"
               echo "::endgroup::"
@@ -130,6 +140,7 @@ jobs:
             fi
 
             # 4. Emit python-wrapper
+            rm -rf katana/
             echo "::group::Emit python-wrapper for $mm_file"
             set +e
             mumei build "$mm_file" -o katana --emit python-wrapper 2>&1
@@ -163,7 +174,7 @@ jobs:
             # Clean up for next file
             rm -rf katana/
             REPORT+="\n"
-          done <<< "${{ steps.check_mm.outputs.mm_files }}"
+          done <<< "$MM_FILES"
 
           if [ "$OVERALL_SUCCESS" = "true" ]; then
             REPORT+="\n---\n:white_check_mark: **All verification and emit checks passed.**\n"
