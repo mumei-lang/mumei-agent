@@ -1,0 +1,219 @@
+name: Verify Auto-Generated Publish PRs
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - '**/*.mm'
+
+permissions:
+  pull-requests: write
+
+jobs:
+  verify-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for .mm files in PR
+        id: check_mm
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          MM_FILES=$(git diff --name-only origin/"$BASE_REF"...HEAD -- '*.mm' || true)
+          if [ -z "$MM_FILES" ]; then
+            echo "has_mm=false" >> $GITHUB_OUTPUT
+            echo "No .mm files found in this PR — skipping verification."
+          else
+            echo "has_mm=true" >> $GITHUB_OUTPUT
+            echo "mm_files<<EOF" >> $GITHUB_OUTPUT
+            echo "$MM_FILES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "Found .mm files:"
+            echo "$MM_FILES"
+          fi
+
+      - name: Install mumei
+        if: steps.check_mm.outputs.has_mm == 'true'
+        run: |
+          curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
+          echo "$HOME/.mumei/bin" >> $GITHUB_PATH
+          if [ -f "$HOME/.mumei/env" ]; then
+            grep -E '^export ' "$HOME/.mumei/env" | sed 's/^export //' >> "$GITHUB_ENV" || true
+          fi
+
+      - name: Verify mumei installation
+        if: steps.check_mm.outputs.has_mm == 'true'
+        run: mumei inspect || echo "mumei inspect failed (non-fatal)"
+
+      - name: Set up Python 3.11
+        if: steps.check_mm.outputs.has_mm == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust toolchain
+        if: steps.check_mm.outputs.has_mm == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run verification and emit checks
+        if: steps.check_mm.outputs.has_mm == 'true'
+        id: verify
+        env:
+          MM_FILES: ${{ steps.check_mm.outputs.mm_files }}
+        run: |
+          REPORT="## Publish Verification Report\n\n"
+          OVERALL_SUCCESS=true
+
+          while IFS= read -r mm_file; do
+            [ -z "$mm_file" ] && continue
+            BASENAME=$(basename "$mm_file" .mm)
+            REPORT+="### \`$mm_file\`\n\n"
+
+            # 1. Verify
+            echo "::group::Verifying $mm_file"
+            set +e
+            VERIFY_OUTPUT=$(mumei verify --json "$mm_file" 2>&1)
+            VERIFY_RC=$?
+            set -e
+            echo "$VERIFY_OUTPUT"
+            echo "::endgroup::"
+
+            if [ $VERIFY_RC -eq 0 ]; then
+              REPORT+="- :white_check_mark: **verify** — passed\n"
+            else
+              REPORT+="- :x: **verify** — failed (exit code $VERIFY_RC)\n"
+              REPORT+="\`\`\`\n$VERIFY_OUTPUT\n\`\`\`\n"
+              OVERALL_SUCCESS=false
+            fi
+
+            # 2. Emit c-header
+            rm -rf katana/
+            echo "::group::Emit c-header for $mm_file"
+            set +e
+            mumei build "$mm_file" -o katana --emit c-header 2>&1
+            CH_RC=$?
+            set -e
+            echo "::endgroup::"
+
+            if [ $CH_RC -eq 0 ] && ls katana/*.h 1>/dev/null 2>&1; then
+              REPORT+="- :white_check_mark: **c-header** — .h file generated\n"
+            else
+              REPORT+="- :x: **c-header** — failed (exit code $CH_RC)\n"
+              OVERALL_SUCCESS=false
+            fi
+
+            # 3. Emit rust-wrapper
+            rm -rf katana/
+            echo "::group::Emit rust-wrapper for $mm_file"
+            set +e
+            mumei build "$mm_file" -o katana --emit rust-wrapper 2>&1
+            RW_RC=$?
+            set -e
+            echo "::endgroup::"
+
+            if [ $RW_RC -eq 0 ] && ls katana/*.rs 1>/dev/null 2>&1; then
+              REPORT+="- :white_check_mark: **rust-wrapper** — .rs file generated\n"
+              # Compile Rust wrapper
+              echo "::group::Compile Rust wrapper"
+              set +e
+              RUSTC_OUTPUT=""
+              RUSTC_RC=0
+              for rsfile in katana/*.rs; do
+                OUT=$(rustc --edition 2021 --crate-type lib "$rsfile" 2>&1)
+                RC=$?
+                RUSTC_OUTPUT+="$OUT"$'\n'
+                if [ $RC -ne 0 ]; then RUSTC_RC=$RC; fi
+              done
+              set -e
+              echo "$RUSTC_OUTPUT"
+              echo "::endgroup::"
+
+              if [ $RUSTC_RC -eq 0 ]; then
+                REPORT+="  - :white_check_mark: **rustc** — compiles successfully\n"
+              else
+                REPORT+="  - :x: **rustc** — compilation failed\n"
+                REPORT+="\`\`\`\n$RUSTC_OUTPUT\n\`\`\`\n"
+                OVERALL_SUCCESS=false
+              fi
+            else
+              REPORT+="- :x: **rust-wrapper** — failed (exit code $RW_RC)\n"
+              OVERALL_SUCCESS=false
+            fi
+
+            # 4. Emit python-wrapper
+            rm -rf katana/
+            echo "::group::Emit python-wrapper for $mm_file"
+            set +e
+            mumei build "$mm_file" -o katana --emit python-wrapper 2>&1
+            PW_RC=$?
+            set -e
+            echo "::endgroup::"
+
+            if [ $PW_RC -eq 0 ] && ls katana/*.py 1>/dev/null 2>&1; then
+              REPORT+="- :white_check_mark: **python-wrapper** — .py file generated\n"
+              # Validate Python syntax
+              echo "::group::Validate Python syntax"
+              set +e
+              for pyfile in katana/*.py; do
+                PY_OUTPUT=$(python -c "import ast; ast.parse(open('$pyfile').read())" 2>&1)
+                PY_RC=$?
+                if [ $PY_RC -ne 0 ]; then
+                  REPORT+="  - :x: **python syntax** ($pyfile) — invalid\n"
+                  REPORT+="\`\`\`\n$PY_OUTPUT\n\`\`\`\n"
+                  OVERALL_SUCCESS=false
+                else
+                  REPORT+="  - :white_check_mark: **python syntax** ($pyfile) — valid\n"
+                fi
+              done
+              set -e
+              echo "::endgroup::"
+            else
+              REPORT+="- :x: **python-wrapper** — failed (exit code $PW_RC)\n"
+              OVERALL_SUCCESS=false
+            fi
+
+            # Clean up for next file
+            rm -rf katana/
+            REPORT+="\n"
+          done <<< "$MM_FILES"
+
+          if [ "$OVERALL_SUCCESS" = "true" ]; then
+            REPORT+="\n---\n:white_check_mark: **All verification and emit checks passed.**\n"
+          else
+            REPORT+="\n---\n:x: **Some checks failed.** See details above.\n"
+          fi
+
+          echo -e "$REPORT" > publish-verification-report.md
+
+          if [ "$OVERALL_SUCCESS" != "true" ]; then
+            echo "overall_success=false" >> $GITHUB_OUTPUT
+          else
+            echo "overall_success=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post PR comment
+        if: steps.check_mm.outputs.has_mm == 'true' && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: publish-verification
+          path: publish-verification-report.md
+
+      - name: Upload verification report
+        if: steps.check_mm.outputs.has_mm == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-verification-report
+          path: publish-verification-report.md
+
+      - name: Check overall result
+        if: steps.check_mm.outputs.has_mm == 'true' && steps.verify.outputs.overall_success != 'true'
+        run: |
+          echo "::error::Publish verification failed. See PR comment for details."
+          exit 1
+
+      - name: Skip message
+        if: steps.check_mm.outputs.has_mm != 'true'
+        run: echo "No .mm files in PR — verification skipped."

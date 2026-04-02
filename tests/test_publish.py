@@ -122,6 +122,7 @@ class TestPublishDryRun:
         assert r["generated_file"] == "test_mod.mm"
         assert r["verified_at_generation"] is True
         assert len(r["artifacts"]) == 3
+        assert all(a["success"] is True for a in r["artifacts"])
         assert (tmp_path / "test_mod.mm").exists()
 
     def test_generation_failure(self, tmp_path):
@@ -283,7 +284,58 @@ class TestPublishGitHubPR:
         assert r["pr_url"] == "https://pr/1"
 
 
-# --- MUMEI_BIN fallback test ---
+# --- Full pipeline dry-run tests ---
+
+
+class TestPublishDryRunFullPipeline:
+    """Test the complete dry-run pipeline with all emit targets."""
+
+    def test_publish_emit_targets_called(self, tmp_path):
+        """Verify build_with_emit is called exactly 3 times with correct targets."""
+        sp = _spec_file(tmp_path)
+        with patch("agent.publish.AgentConfig", return_value=_cfg()), \
+             patch("agent.publish.generate_code", return_value=(_CODE, True)), \
+             patch("agent.publish.MumeiClient") as MC:
+            inst = _ok_client(MC)
+            publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=True)
+        assert inst.build_with_emit.call_count == 3
+        called_targets = [c[0][1] for c in inst.build_with_emit.call_args_list]
+        assert called_targets == ["c-header", "rust-wrapper", "python-wrapper"]
+
+    def test_publish_verification_failure_aborts(self, tmp_path):
+        """Verify that a verification failure aborts the pipeline."""
+        sp = _spec_file(tmp_path)
+        with patch("agent.publish.AgentConfig", return_value=_cfg()), \
+             patch("agent.publish.generate_code", return_value=(_CODE, False)), \
+             patch("agent.publish.MumeiClient") as MC:
+            MC.return_value.verify.return_value = {
+                "success": False, "report": {}, "stdout": "", "stderr": "proof failed",
+            }
+            r = publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=True)
+        assert r["success"] is False
+        assert r.get("verify_error") is not None
+
+    def test_publish_git_branch_naming(self, tmp_path):
+        """Verify the branch name follows auto/<module_name> convention."""
+        sp = _spec_file(tmp_path)
+        with patch("agent.publish.AgentConfig", return_value=_cfg()), \
+             patch("agent.publish.generate_code", return_value=(_CODE, True)), \
+             patch("agent.publish.MumeiClient") as MC, \
+             patch("agent.publish._git") as mg, \
+             patch.dict("os.environ", {"GITHUB_TOKEN": "", "GITHUB_OWNER": "", "GITHUB_REPO": ""}, clear=False):
+            _ok_client(MC)
+            mg.side_effect = [_cp(0, out="develop")] + [_cp(0)] * 5
+            publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=False)
+        # Find the checkout -b call and verify branch name
+        checkout_calls = [
+            c for c in mg.call_args_list
+            if len(c[0][0]) >= 3 and c[0][0][0] == "checkout" and c[0][0][1] == "-b"
+        ]
+        assert len(checkout_calls) == 1
+        assert checkout_calls[0][0][0][2] == "auto/test_mod"
+
+
+# --- MUMEI_BIN fallback tests ---
 
 
 class TestMumeiBinFallback:
