@@ -26,7 +26,12 @@ class Metrics:
     pattern_successes: int = 0
     elapsed_seconds: float = 0.0
     challenge_name: str = ""
+    llm_tokens_used: int = 0
     by_violation_type: dict[str, ViolationMetrics] = field(default_factory=dict)
+
+    def record_tokens(self, count: int) -> None:
+        """Record LLM tokens consumed."""
+        self.llm_tokens_used += count
 
     def record_rule_based_attempt(self, violation_type: str = "unknown") -> None:
         """Record a rule-based fix attempt.
@@ -133,6 +138,7 @@ class Metrics:
             "pattern_successes": self.pattern_successes,
             "elapsed_seconds": self.elapsed_seconds,
             "challenge_name": self.challenge_name,
+            "llm_tokens_used": self.llm_tokens_used,
             "by_violation_type": {
                 vtype: {"attempts": m.attempts, "successes": m.successes}
                 for vtype, m in self.by_violation_type.items()
@@ -167,6 +173,7 @@ class Metrics:
             pattern_successes=data.get("pattern_successes", 0),
             elapsed_seconds=data.get("elapsed_seconds", 0.0),
             challenge_name=data.get("challenge_name", ""),
+            llm_tokens_used=data.get("llm_tokens_used", 0),
             by_violation_type=by_vtype,
         )
 
