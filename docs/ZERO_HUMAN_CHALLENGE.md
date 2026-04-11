@@ -151,6 +151,8 @@ Results are saved per challenge to `examples/challenges/results/<challenge_name>
 - `metrics.json` — `Metrics.to_dict()` output
 - `summary.md` — human-readable Markdown summary
 
+> **Note**: 現在、結果テンプレートは代表的な 3 課題（`safe_queue`, `validate_json_file`, `deadlock_free_pc`）のみ配置済み。残り 4 課題のディレクトリは `workflow_dispatch` によるフル実行時に自動生成される。
+
 ## 結果サマリ
 
 ### Dry-run 検証結果
