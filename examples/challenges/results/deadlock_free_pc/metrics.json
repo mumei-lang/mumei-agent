@@ -1,0 +1,13 @@
+{
+  "total_attempts": 0,
+  "successes": 0,
+  "rule_based_attempts": 0,
+  "rule_based_successes": 0,
+  "pattern_attempts": 0,
+  "pattern_successes": 0,
+  "elapsed_seconds": 0.0,
+  "challenge_name": "deadlock_free_pc",
+  "llm_tokens_used": 0,
+  "by_violation_type": {},
+  "_note": "Placeholder metrics — run `workflow_dispatch` on challenge.yml to populate with real execution data."
+}
