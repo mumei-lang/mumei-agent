@@ -6,7 +6,7 @@ on:
       log_dir:
         description: "Directory for challenge results"
         required: false
-        default: "results/"
+        default: "examples/challenges/results/"
 
 jobs:
   challenge:
