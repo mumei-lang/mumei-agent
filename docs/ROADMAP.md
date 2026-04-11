@@ -154,7 +154,7 @@ mumei-agent に難易度の高い課題（100% 安全なキュー、Verified JSO
 
 **前提条件**: P6-A (Multi-atom 生成) ✅ 完了済み
 
-### SI-3: Autonomous Delivery Flow — ✅ Complete
+### SI-3: Autonomous Delivery Flow — ✅ Complete (実地検証完了)
 
 mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパーを自動生成 → PR を出す。
 
@@ -170,6 +170,20 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
   - 結果を PR コメントとして投稿（`marocchino/sticky-pull-request-comment`）
 - ✅ `examples/publish_demo/` — デモ spec + ドキュメント
 - ✅ `tests/test_publish.py` — パイプライン全体のユニットテスト（dry-run, emit targets, verification failure, branch naming）
+
+**実地検証（E2E テスト・CI 連携確認）**:
+- ✅ `tests/test_publish_e2e.py` — E2E インテグレーションテスト
+  - 既存 spec（`simple_add_spec.json`, `simple_e2e_spec.json`, `payment_spec.json`）を使った dry-run パイプラインテスト
+  - mock mumei バイナリ（`tests/fixtures/mock_mumei.py`）を使った完全パイプラインテスト
+  - 生成ファイル（`.mm`）の存在・内容検証
+  - `@pytest.mark.integration` マーカー付与
+- ✅ `tests/test_wrapper_validation.py` — FFI ラッパー静的検証テスト
+  - C ヘッダー: `#ifndef` ガード、`stdint.h` インクルード、関数宣言、Doxygen `@pre`/`@post`
+  - Rust ラッパー: `extern "C"` ブロック、安全ラッパー（`_checked`）、`Option<T>` 戻り値
+  - Python ラッパー: `ctypes` インポート、`argtypes`/`restype` 定義、型ヒント、`ast.parse` 検証
+  - クロスラッパー一貫性: 関数名・パラメータ数・マルチ atom 対応の整合性チェック
+- ✅ `.github/workflows/verify-examples.yml` — publish dry-run テストジョブ追加
+- ✅ `docs/AUTONOMOUS_DELIVERY.md` — パイプライン全体フロー図（mermaid）、使い方、環境変数、CI 連携、FFI glue code の説明
 
 **前提条件**: SI-1, SI-2 (Verified FFI Boundary, mumei 側), Rust/Python Wrapper Emitter (mumei 側)
 
