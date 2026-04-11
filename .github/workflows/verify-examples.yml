@@ -62,3 +62,21 @@ jobs:
         if: steps.install-mumei.outputs.installed == 'true' && steps.verify.outputs.exit_code != '0'
         run: |
           echo "::warning::Mumei verification failed for examples. See PR comment for details."
+
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run publish pipeline tests (dry-run, mocked)
+        run: pytest tests/test_publish.py tests/test_publish_e2e.py tests/test_wrapper_validation.py -v --tb=short -m "not integration"
