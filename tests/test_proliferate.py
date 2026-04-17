@@ -78,6 +78,19 @@ class TestAnalyzeGaps:
         result = proliferate.analyze_gaps(std)
         assert any("TODO" in t["text"].upper() for t in result["todo_comments"])
 
+    def test_trusted_atom_reason_takes_nearest_comment(self, tmp_path: Path) -> None:
+        std = tmp_path / "std"
+        _write_mm(
+            std / "core.mm",
+            "// line A: general context\n"
+            "// line B: actual reason\n"
+            "trusted atom size_lift(x: u64) ensures: true; body: {}\n",
+        )
+        result = proliferate.analyze_gaps(std)
+        ta = [t for t in result["trusted_atoms"] if t["atom"] == "size_lift"]
+        assert len(ta) == 1
+        assert "line B" in ta[0]["reason"]
+
     def test_existing_core_does_not_propose_core(self, tmp_path: Path) -> None:
         std = tmp_path / "std"
         _write_mm(
@@ -234,6 +247,60 @@ class TestAttemptHeal:
                 max_retries=2,
             )
         assert result is False
+
+    def test_partial_heal_restores_originals(
+        self, tmp_path: Path
+    ) -> None:
+        """When healing fails partway, already-healed files are restored."""
+        f1 = tmp_path / "a.mm"
+        f2 = tmp_path / "b.mm"
+        f1.write_text("original_a\n", encoding="utf-8")
+        f2.write_text("original_b\n", encoding="utf-8")
+
+        mumei_client = MagicMock()
+        # f1 heals successfully (fail → fix → pass), f2 never heals.
+        mumei_client.verify.side_effect = [
+            # attempt_heal for f1: fail, then pass after fix
+            {"success": False, "report": {}, "stdout": "", "stderr": "err"},
+            {"success": True, "report": {}, "stdout": "", "stderr": ""},
+            {"success": True, "report": {}, "stdout": "", "stderr": ""},
+            # attempt_heal for f2: always fail
+            {"success": False, "report": {}, "stdout": "", "stderr": "err"},
+            {"success": False, "report": {}, "stdout": "", "stderr": "err"},
+            {"success": False, "report": {}, "stdout": "", "stderr": "err"},
+            {"success": False, "report": {}, "stdout": "", "stderr": "err"},
+        ]
+
+        fix_calls = [0]
+        def fake_get_fix(**kwargs):
+            fix_calls[0] += 1
+            src = kwargs.get("source_code", "")
+            if "a.mm" in kwargs.get("source_path", ""):
+                return "healed_a\n"
+            # For b.mm, return same content (no progress).
+            return src
+
+        with patch("agent.strategies.fix_strategy.get_fix", side_effect=fake_get_fix):
+            # Heal f1 — succeeds
+            r1 = proliferate.attempt_heal(
+                client=MagicMock(),
+                model="gpt-4",
+                broken_info={"file": str(f1), "error": ""},
+                mumei_client=mumei_client,
+                max_retries=3,
+            )
+            assert r1 is True
+            assert f1.read_text(encoding="utf-8") == "healed_a\n"
+
+            # Heal f2 — fails
+            r2 = proliferate.attempt_heal(
+                client=MagicMock(),
+                model="gpt-4",
+                broken_info={"file": str(f2), "error": ""},
+                mumei_client=mumei_client,
+                max_retries=3,
+            )
+            assert r2 is False
 
     def test_heals_after_one_fix(
         self, tmp_path: Path

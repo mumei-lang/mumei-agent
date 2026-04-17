@@ -146,9 +146,8 @@ def _collect_trusted_atoms(std_dir: Path) -> list[dict[str, Any]]:
             atom_name = m.group(1)
             reason = ""
             look = idx - 1
-            while look >= 0 and lines[look].strip().startswith("//"):
+            if look >= 0 and lines[look].strip().startswith("//"):
                 reason = lines[look].strip().lstrip("/ ").strip()
-                look -= 1
             if not reason:
                 end = min(idx + 10, len(lines))
                 body_text = " ".join(l.strip() for l in lines[idx + 1 : end])
@@ -544,6 +543,15 @@ def proliferate(
             new_file_path.parent.mkdir(parents=True, exist_ok=True)
             new_file_path.write_text(code, encoding="utf-8")
 
+            # Snapshot originals so we can restore on partial-heal failure
+            originals: dict[str, str] = {}
+            for broken in blast["broken_files"]:
+                bp = Path(broken["file"])
+                try:
+                    originals[broken["file"]] = bp.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+
             all_healed = True
             for broken in blast["broken_files"]:
                 healed = attempt_heal(
@@ -562,7 +570,12 @@ def proliferate(
                     break
 
             if not all_healed:
-                # Rollback: remove the new file
+                # Rollback: restore modified existing files, then remove new
+                for fpath, content in originals.items():
+                    try:
+                        Path(fpath).write_text(content, encoding="utf-8")
+                    except OSError:
+                        logger.warning("Could not restore %s during rollback", fpath)
                 if new_file_path.exists():
                     new_file_path.unlink()
                 spec_result["reason"] = "blast_radius_heal_failed"
