@@ -14,7 +14,6 @@ import argparse
 import json
 import logging
 import re
-import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -582,7 +581,10 @@ def proliferate(
             results.append(spec_result)
             continue
 
-        # Write spec to a temp file for publish()
+        # Write spec to a temp file for publish().  Initialise the path
+        # to ``None`` up-front so the ``finally`` cleanup stays safe even
+        # when ``NamedTemporaryFile()`` itself raises before assignment.
+        tmp_spec_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w",
@@ -607,10 +609,11 @@ def proliferate(
             logger.error("Publish failed for %s: %s", target_file, exc)
             spec_result["reason"] = f"publish_error: {exc}"
         finally:
-            try:
-                Path(tmp_spec_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            if tmp_spec_path is not None:
+                try:
+                    Path(tmp_spec_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         results.append(spec_result)
 
