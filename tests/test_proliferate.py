@@ -314,10 +314,10 @@ class TestAttemptHeal:
         f.write_text("broken\n", encoding="utf-8")
 
         mumei_client = MagicMock()
-        # First verify fails, fix is applied, second verify succeeds.
+        # iter 0: verify fails → get_fix writes fixed code
+        # iter 1: verify succeeds → return True  (2 calls total)
         mumei_client.verify.side_effect = [
             {"success": False, "report": {"failure_type": "x"}, "stdout": "", "stderr": "err"},
-            {"success": True, "report": {}, "stdout": "", "stderr": ""},
             {"success": True, "report": {}, "stdout": "", "stderr": ""},
         ]
         with patch(

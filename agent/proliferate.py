@@ -37,8 +37,6 @@ _TODO_MARKER_RE = re.compile(
     r"//.*?\b(TODO|FIXME|XXX|HACK|Phase\s+[A-Z0-9]+)\b[^\n]*",
     re.IGNORECASE,
 )
-_ATOM_RE = re.compile(r"^\s*(?:trusted\s+|async\s+)?atom\s+(\w+)")
-
 # Hard-coded gap rules (same as mumei's mcp_server.py _STD_GAP_RULES).
 _STD_GAP_RULES: list[dict[str, Any]] = [
     {
