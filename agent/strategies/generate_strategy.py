@@ -182,6 +182,11 @@ def generate_multi_atom(
     if metrics is None:
         metrics = Metrics()
 
+    # Extract cross_file_context before JSON-serialising the spec so it
+    # appears as readable markdown in the prompt rather than a JSON-escaped
+    # string with literal ``\n`` sequences.
+    cross_file_context = spec.pop("cross_file_context", None)
+
     atoms = spec["atoms"]
     module_name = spec.get("module_name", "module")
     atom_names = [a["name"] for a in atoms]
@@ -196,6 +201,8 @@ def generate_multi_atom(
     from agent.prompts import generate_atom as prompt_module
 
     prompt = prompt_module.build_prompt(spec_json, "", {})
+    if cross_file_context:
+        prompt += f"\n\n{cross_file_context}"
     prompt += (
         f"\n\n# Multi-atom module '{module_name}' — generate ALL atoms in a single .mm file:\n"
         f"```mumei\n{combined_skeleton}```\n"
@@ -402,6 +409,11 @@ def generate_code(
     if metrics is None:
         metrics = Metrics()
 
+    # Extract cross_file_context before JSON-serialising the spec so it
+    # appears as readable markdown in the prompt rather than a JSON-escaped
+    # string with literal ``\n`` sequences.
+    cross_file_context = spec.pop("cross_file_context", None)
+
     prompt_module = _select_prompt_module(spec)
     spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
 
@@ -422,6 +434,8 @@ def generate_code(
     # Stage 1: Initial generation
     metrics.record_attempt("generation")
     prompt = prompt_module.build_prompt(spec_json, "", {}, inferred_context=inferred_context)
+    if cross_file_context:
+        prompt += f"\n\n{cross_file_context}"
     prompt += f"\n\n# Skeleton (fill in ___ placeholders):\n```mumei\n{skeleton}```"
 
     response = client.chat.completions.create(

@@ -32,6 +32,37 @@ FORGE_SYSTEM_PROMPT = (
     "   the surrounding file already uses.\n"
 )
 
+# ---------------------------------------------------------------------------
+# Logical Repair Protocol (論理修復プロトコル)
+# ---------------------------------------------------------------------------
+# Appended to the base system prompt so that every forge retry benefits from
+# the same structured reasoning chain.  Keeping it as an appended block (vs.
+# rewriting FORGE_SYSTEM_PROMPT inline) ensures the rest of the codebase can
+# still import the base prompt as a simple constant.
+FORGE_SYSTEM_PROMPT += (
+    "\n\n"
+    "# Logical Repair Protocol (論理修復プロトコル)\n"
+    "When a verification error is reported, follow this exact reasoning chain:\n\n"
+    "Step 1 — Counterexample Extraction:\n"
+    "  Identify which variable takes which value when the assert or "
+    "precondition becomes false.  Quote the counterexample verbatim.\n\n"
+    "Step 2 — Unsat Core Analysis:\n"
+    "  Identify the minimal set of logical formulae that are contradictory.  "
+    "These are the constraints that Z3 cannot satisfy simultaneously.\n\n"
+    "Step 3 — Repair Strategy Selection (choose exactly one):\n"
+    "  (a) Strengthen Precondition: add a `requires` clause to exclude "
+    "      the counterexample input space.\n"
+    "  (b) Weaken Postcondition: relax an `ensures` clause that promises "
+    "      more than the body can deliver.\n"
+    "  (c) Fix Body Logic: the contracts are correct but the computation "
+    "      is wrong — fix the body expression.\n"
+    "  (d) Invariant Adjustment: a loop invariant does not capture the "
+    "      state transition correctly — strengthen or weaken it.\n\n"
+    "Step 4 — Code Transformation:\n"
+    "  Apply the chosen strategy and re-emit ONLY the affected atom(s).\n"
+    "  Do NOT change atoms that are already passing verification.\n"
+)
+
 
 def build_reference_context(existing_source: str, reference_patterns: list[str]) -> str:
     """Extract the code of specified atoms from *existing_source*.

@@ -189,11 +189,12 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 
 ---
 
-## P9: Autonomous Forge Mode — 🚧 In Progress
+## P9: Autonomous Forge Mode — ✅ Infrastructure Complete / 🔧 Expansion In Progress
 
 `forge` モードは、mumei-agent が自律的に std ライブラリを拡張・検証・コミットする新しい運用モード。既存の generate + self-healing + publish パイプラインを再利用し、「タスク発見」と「オーケストレーション」のレイヤーを追加する。
 
-### 実装
+### P9-A: Forge Infrastructure ✅ Complete (PR #31)
+
 - ✅ `forge_tasks/` — タスク spec JSON 配置ディレクトリ (`vstd_safe_add.json`, `vstd_safe_multiply.json`, `README.md`)
 - ✅ `agent/forge_discovery.py` — `discover_tasks()` / `scan_std_todos()` / `filter_completed_tasks()`
 - ✅ `agent/forge.py` — `MumeiForge` オーケストレーター（`append` / `create` / `replace` モード、`forge_log.json` ロギング、`fcntl.flock` による排他制御）
@@ -201,6 +202,26 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ `python -m agent forge` CLI サブコマンド（`--tasks-dir` / `--mumei-repo` / `--max-tasks` / `--task` / `--dry-run` / `--auto-commit` / `--max-retries` / `--log-path`）
 - ✅ `tests/test_forge_discovery.py`, `tests/test_forge.py`, `tests/test_forge_e2e.py`（最後は `@pytest.mark.integration`）
 - ✅ `.github/workflows/forge.yml` — 手動 workflow_dispatch 実行用（schedule はコメントアウト）
+- ✅ ファイル復元機構（post-write verify 失敗時のロールバック）
+- ✅ `forge_log.json` によるタスク完了追跡
+
+### P9-B: Z3 Logical Repair Protocol ✅ Integrated
+
+- ✅ `FORGE_SYSTEM_PROMPT` に論理修復プロトコル（Counterexample Extraction → Unsat Core Analysis → Repair Strategy Selection → Code Transformation）を組み込み
+- ✅ `build_append_prompt` のリトライセクションを Logical Repair Analysis 指示文に書き換え
+- ✅ `_forge_append` の verify 失敗時に `report_formatter` の `format_actionable_fix_hint` / `format_counterexample` / `format_structured_unsat_core` を再利用し、LLM に構造化された修復ヒントを注入
+
+### P9-C: Cross-file Context Loading ✅ Integrated
+
+- ✅ タスク spec の `context_files` フィールドで関連モジュールを LLM コンテキストに注入（`MumeiForge._load_context_files` + `build_append_prompt(cross_file_context=...)`）
+- ✅ 複数 std ファイルをまたいだスタイル / 契約パターンの参照基盤
+- ✅ `create` / `replace` モードでも `_task_to_generate_spec` が spec に `cross_file_context` を付与
+
+### P9-D: vStd Autonomous Expansion 📋 Planned
+
+- 📋 `forge_tasks/vstd_safe_list.json` — SafeList の無人鍛造（初回鍛造ターゲット）
+- 📋 `forge_tasks/vstd_fixed_point.json` — 固定小数点演算モジュール
+- 📋 vStd ロードマップ全項目の forge タスク化
 
 ### タスク spec フォーマット
 `forge_tasks/README.md` を参照。主なフィールド:
