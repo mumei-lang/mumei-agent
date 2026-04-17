@@ -1,0 +1,113 @@
+name: Forge
+
+# Autonomous forge mode: discover task specs in forge_tasks/, run
+# generate + verify + self-heal pipelines against a checkout of the
+# mumei compiler, and open a PR with the resulting std/ changes.
+#
+# Triggered manually via workflow_dispatch.  A schedule trigger is
+# included but commented out - uncomment once the workflow has been
+# exercised manually a few times and the cost profile is well understood.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_tasks:
+        description: "Maximum number of forge tasks to run this invocation"
+        required: false
+        default: "1"
+      tasks_dir:
+        description: "Directory containing task spec JSONs"
+        required: false
+        default: "forge_tasks/"
+      dry_run:
+        description: "Print the plan without executing"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+  # schedule:
+  #   # Every day at 03:00 UTC.  Uncomment once manual runs are stable.
+  #   - cron: "0 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mumei-agent
+        uses: actions/checkout@v4
+        with:
+          path: mumei-agent
+
+      - name: Checkout mumei compiler
+        uses: actions/checkout@v4
+        with:
+          repository: mumei-lang/mumei
+          ref: develop
+          path: mumei
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install agent dependencies
+        working-directory: mumei-agent
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Build mumei compiler
+        working-directory: mumei
+        run: |
+          # Placeholder build step - adjust to mumei's actual build system.
+          # The forge orchestrator only needs a `mumei` binary on PATH.
+          if [ -f Makefile ]; then
+            make || true
+          fi
+
+      - name: Run forge
+        id: forge
+        working-directory: mumei-agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MUMEI_BIN: ${{ github.workspace }}/mumei/target/release/mumei
+        run: |
+          DRY_RUN_FLAG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          python -m agent forge \
+            --tasks-dir "${{ github.event.inputs.tasks_dir }}" \
+            --mumei-repo "${{ github.workspace }}/mumei" \
+            --max-tasks "${{ github.event.inputs.max_tasks }}" \
+            --log-path "${{ github.workspace }}/mumei-agent/forge_log.json" \
+            $DRY_RUN_FLAG
+
+      - name: Upload forge log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-log
+          path: mumei-agent/forge_log.json
+          if-no-files-found: ignore
+
+      - name: Create Pull Request on mumei
+        if: github.event.inputs.dry_run != 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: mumei
+          token: ${{ secrets.MUMEI_PAT || secrets.GITHUB_TOKEN }}
+          branch: forge/auto-${{ github.run_id }}
+          commit-message: "feat(vStd): autonomous forge pass ${{ github.run_id }}"
+          title: "feat(vStd): autonomous forge pass ${{ github.run_id }}"
+          body: |
+            Autonomous forge run ${{ github.run_id }}.
+
+            See the `forge-log` artifact on the agent workflow run for task-level outcomes.
+          labels: |
+            forge
+            autonomous

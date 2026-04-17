@@ -189,11 +189,37 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 
 ---
 
+## P9: Autonomous Forge Mode — 🚧 In Progress
+
+`forge` モードは、mumei-agent が自律的に std ライブラリを拡張・検証・コミットする新しい運用モード。既存の generate + self-healing + publish パイプラインを再利用し、「タスク発見」と「オーケストレーション」のレイヤーを追加する。
+
+### 実装
+- ✅ `forge_tasks/` — タスク spec JSON 配置ディレクトリ (`vstd_safe_add.json`, `vstd_safe_multiply.json`, `README.md`)
+- ✅ `agent/forge_discovery.py` — `discover_tasks()` / `scan_std_todos()` / `filter_completed_tasks()`
+- ✅ `agent/forge.py` — `MumeiForge` オーケストレーター（`append` / `create` / `replace` モード、`forge_log.json` ロギング、`fcntl.flock` による排他制御）
+- ✅ `agent/prompts/forge/` — 鍛冶職人（Master Blacksmith）システムプロンプト + append mode プロンプト（`reference_patterns` で指定された既存 atom のコードを style context として注入）
+- ✅ `python -m agent forge` CLI サブコマンド（`--tasks-dir` / `--mumei-repo` / `--max-tasks` / `--task` / `--dry-run` / `--auto-commit` / `--max-retries` / `--log-path`）
+- ✅ `tests/test_forge_discovery.py`, `tests/test_forge.py`, `tests/test_forge_e2e.py`（最後は `@pytest.mark.integration`）
+- ✅ `.github/workflows/forge.yml` — 手動 workflow_dispatch 実行用（schedule はコメントアウト）
+
+### タスク spec フォーマット
+`forge_tasks/README.md` を参照。主なフィールド:
+- `task_id` — 完了重複排除の識別子
+- `target_file` — mumei リポジトリ root 相対パス（例: `std/contracts.mm`）
+- `mode` — `append` / `create` / `replace`
+- `atoms` — 1 つ以上の atom spec（`reference_patterns` で既存 atom を style context として指定可能）
+- `auto_commit` — 成功時に git commit を自動実行するか
+
+### 関連 (mumei 側)
+- [`docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の vStd セクション (vStd-1〜4, vStd-MCP) と連携
+
+---
+
 ## 推奨実行順序
 
 ```
-P1-C → P1-B → P1-A → P3-B → P6-A/B/C → SI-1 (Zero-Human Challenge) → SI-3 (Autonomous Delivery Flow)
-                                  ✅ All Complete        ✅ Complete              ✅ Complete
+P1-C → P1-B → P1-A → P3-B → P6-A/B/C → SI-1 (Zero-Human Challenge) → SI-3 (Autonomous Delivery Flow) → P9 (Forge Mode)
+                                  ✅ All Complete        ✅ Complete              ✅ Complete                🚧 In Progress
 ```
 
 ---

@@ -1,7 +1,7 @@
 """Allow running as `python -m agent` with subcommands."""
 import sys
 
-_SUBCOMMANDS = {"heal", "generate", "publish"}
+_SUBCOMMANDS = {"heal", "generate", "publish", "forge"}
 
 
 def main() -> None:
@@ -13,7 +13,19 @@ def main() -> None:
     argv = sys.argv[1:]
     command = argv[0] if argv and argv[0] in _SUBCOMMANDS else None
 
-    if command == "publish":
+    if command == "forge":
+        import argparse
+        from agent.forge import build_parser as forge_build_parser, main as forge_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent forge",
+            description="Autonomous forge mode: extend the mumei std library "
+                        "with verified atoms from task specs.",
+        )
+        forge_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        forge_main(args)
+    elif command == "publish":
         import argparse
         from agent.publish import build_parser, main as publish_main
 
