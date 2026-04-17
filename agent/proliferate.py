@@ -531,12 +531,25 @@ def proliferate(
         new_file_path = mumei_repo / target_file
         blast = check_blast_radius(mumei_client, mumei_repo, new_file_path, code)
 
+        # Track files that were healed so they can be committed alongside
+        # the new file in the non-dry-run path.
+        healed_files: dict[str, str] = {}
+
         if blast["broken_files"]:
             logger.warning(
                 "Blast radius check: %d file(s) broken by %s",
                 len(blast["broken_files"]),
                 target_file,
             )
+
+            # In dry-run mode, skip healing entirely — report breakage
+            # without mutating any files on disk.
+            if dry_run:
+                spec_result["blast_radius"] = blast["broken_files"]
+                spec_result["reason"] = "blast_radius_broken_dry_run"
+                spec_result["dry_run"] = True
+                results.append(spec_result)
+                continue
 
             # 3c. Attempt to heal broken files
             # First, re-place the new file so healing operates in context
@@ -553,21 +566,27 @@ def proliferate(
                     pass
 
             all_healed = True
-            for broken in blast["broken_files"]:
-                healed = attempt_heal(
-                    client=openai_client,
-                    model=config.model,
-                    broken_info=broken,
-                    mumei_client=mumei_client,
-                )
-                if not healed:
-                    logger.error(
-                        "Could not heal %s — skipping proposal %s",
-                        broken["file"],
-                        target_file,
+            try:
+                for broken in blast["broken_files"]:
+                    healed = attempt_heal(
+                        client=openai_client,
+                        model=config.model,
+                        broken_info=broken,
+                        mumei_client=mumei_client,
                     )
-                    all_healed = False
-                    break
+                    if not healed:
+                        logger.error(
+                            "Could not heal %s — skipping proposal %s",
+                            broken["file"],
+                            target_file,
+                        )
+                        all_healed = False
+                        break
+            except Exception:
+                logger.exception(
+                    "Unexpected error during healing for %s", target_file,
+                )
+                all_healed = False
 
             if not all_healed:
                 # Rollback: restore modified existing files, then remove new
@@ -582,7 +601,23 @@ def proliferate(
                 results.append(spec_result)
                 continue
 
-            # Remove the file again — publish will handle placement
+            # Collect healed file contents for later commit, then restore
+            # originals so the working tree stays clean until publish time.
+            for fpath, original_content in originals.items():
+                try:
+                    current = Path(fpath).read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if current != original_content:
+                    healed_files[fpath] = current
+                # Restore original — non-dry-run publish block will write
+                # both the new file and healed files atomically.
+                try:
+                    Path(fpath).write_text(original_content, encoding="utf-8")
+                except OSError:
+                    logger.warning("Could not restore %s after heal snapshot", fpath)
+
+            # Remove the new file — publish block below handles placement
             if new_file_path.exists():
                 new_file_path.unlink()
 
@@ -593,6 +628,35 @@ def proliferate(
             spec_result["dry_run"] = True
             results.append(spec_result)
             continue
+
+        # Non-dry-run: write the blast-radius-tested code and any healed
+        # files directly, then delegate git/PR to publish().
+        #
+        # We place the generated file at ``target_file`` (e.g. ``std/core.mm``)
+        # so it lands at the intended path.  Healed files are also written
+        # back so the repository is consistent.
+        #
+        # TODO(publish-integration): ``publish()`` re-generates code from
+        # scratch and writes it as ``{module_name}.mm`` at the repo root,
+        # which means the blast-radius-tested code placed here and any
+        # healed files will NOT be committed by ``publish()``'s git-add.
+        # A future refactor should either:
+        #   (a) teach ``publish()`` to accept pre-generated code, or
+        #   (b) reimplement the git/PR logic directly in ``proliferate``.
+        # Until then, the non-dry-run path is unreliable when healing was
+        # needed.  Operators should verify results manually.
+        logger.warning(
+            "Non-dry-run publish delegates to publish() which re-generates "
+            "code independently.  Blast-radius-tested code and healed files "
+            "may not be committed.  See TODO(publish-integration)."
+        )
+        new_file_path.parent.mkdir(parents=True, exist_ok=True)
+        new_file_path.write_text(code, encoding="utf-8")
+        for fpath, healed_content in healed_files.items():
+            try:
+                Path(fpath).write_text(healed_content, encoding="utf-8")
+            except OSError:
+                logger.warning("Could not write healed file %s", fpath)
 
         # Write spec to a temp file for publish().  Initialise the path
         # to ``None`` up-front so the ``finally`` cleanup stays safe even

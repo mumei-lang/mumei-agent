@@ -397,6 +397,58 @@ class TestProliferateDryRun:
         assert results[0].get("dry_run") is True
         assert results[0]["code"] == fake_code
 
+    def test_dry_run_with_broken_blast_radius_does_not_mutate(
+        self, tmp_path: Path
+    ) -> None:
+        """Dry-run must not call attempt_heal or modify existing files."""
+        std = tmp_path / "std"
+        _write_mm(
+            std / "existing.mm",
+            "atom existing(x: i64) ensures: true; body: x;\n",
+        )
+        original_content = (std / "existing.mm").read_text(encoding="utf-8")
+
+        fake_code = "atom new_ok(x: i64) ensures: true; body: x;\n"
+
+        with patch("agent.proliferate.generate_code") as gen_mock, patch(
+            "agent.proliferate.AgentConfig"
+        ) as cfg_mock, patch(
+            "agent.proliferate.MumeiClient"
+        ) as client_mock, patch(
+            "agent.proliferate.attempt_heal"
+        ) as heal_mock:
+            gen_mock.return_value = (fake_code, True)
+            cfg_instance = MagicMock()
+            cfg_instance.mumei_bin = "mumei"
+            cfg_instance.model = "gpt-test"
+            cfg_instance.max_retries = 2
+            cfg_instance.create_client.return_value = MagicMock()
+            cfg_mock.return_value = cfg_instance
+
+            # Blast-radius check: verify fails for existing file.
+            verify_client = MagicMock()
+            verify_client.verify.return_value = {
+                "success": False,
+                "report": {},
+                "stdout": "",
+                "stderr": "broken",
+            }
+            client_mock.return_value = verify_client
+
+            results = proliferate.proliferate(
+                tmp_path, dry_run=True, max_proposals=1
+            )
+
+        # attempt_heal must never be called in dry-run mode.
+        heal_mock.assert_not_called()
+        # Existing file must be unchanged.
+        assert (std / "existing.mm").read_text(encoding="utf-8") == original_content
+        # The new file must not linger.
+        assert not (std / "core.mm").exists()
+        assert len(results) >= 1
+        assert results[0].get("dry_run") is True
+        assert results[0].get("reason") == "blast_radius_broken_dry_run"
+
 
 # ---------------------------------------------------------------------------
 # CLI parser
