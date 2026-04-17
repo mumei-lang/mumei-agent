@@ -279,10 +279,15 @@ class MumeiForge:
 
         original_source = target_path.read_text(encoding="utf-8")
         attempts = 0
+        last_error: str | None = None
+        last_snippet: str | None = None
 
         for attempt in range(1, max_retries + 1):
             attempts = attempt
-            snippet = self._generate_append_snippet(task, original_source)
+            snippet = self._generate_append_snippet(
+                task, original_source,
+                last_error=last_error, last_snippet=last_snippet,
+            )
             if not snippet:
                 continue
 
@@ -291,6 +296,8 @@ class MumeiForge:
 
             check = self.mumei.check(str(target_path))
             if not check["success"]:
+                last_error = (check.get("stdout", "") + check.get("stderr", "")).strip()
+                last_snippet = snippet
                 _logger.info(
                     "forge-append: parse check failed on attempt %d", attempt,
                 )
@@ -300,6 +307,8 @@ class MumeiForge:
             if verify["success"]:
                 return combined, attempts
 
+            last_error = (verify.get("stdout", "") + verify.get("stderr", "")).strip()
+            last_snippet = snippet
             _logger.info(
                 "forge-append: verify failed on attempt %d: %s",
                 attempt, (verify.get("stderr") or "")[:120],
@@ -355,11 +364,17 @@ class MumeiForge:
         self,
         task: dict[str, Any],
         existing_source: str,
+        *,
+        last_error: str | None = None,
+        last_snippet: str | None = None,
     ) -> str:
         """Ask the LLM to generate just the new atom(s) for append mode."""
         client = self._ensure_openai_client()
 
-        prompt = build_append_prompt(task, existing_source)
+        prompt = build_append_prompt(
+            task, existing_source,
+            last_error=last_error, last_snippet=last_snippet,
+        )
         try:
             response = client.chat.completions.create(
                 model=self.config.model,

@@ -215,6 +215,36 @@ class TestForgeOneAppend:
         assert result.status == "success"
         assert result.attempts == 2
 
+    def test_error_feedback_passed_to_llm_on_retry(self, tmp_path):
+        """Verify/check errors should be fed back to the LLM on the next attempt."""
+        mumei = _make_mumei()
+        mumei.check.side_effect = [
+            {"success": True, "stdout": "", "stderr": ""},
+            {"success": True, "stdout": "", "stderr": ""},
+        ]
+        mumei.verify.side_effect = [
+            {"success": False, "report": {}, "stdout": "", "stderr": "ensures violated: result >= 0"},
+            {"success": True, "report": {}, "stdout": "", "stderr": ""},
+            # post-write verify
+            {"success": True, "report": {}, "stdout": "", "stderr": ""},
+        ]
+        client = _make_openai_response(f"```mumei\n{_APPEND_SNIPPET}```")
+        forge = _make_forge(tmp_path, mumei=mumei, client=client)
+        self._setup_target(forge)
+
+        task = self._task()
+        task["max_retries"] = 3
+        result = forge.forge_one(task)
+        assert result.status == "success"
+        assert result.attempts == 2
+
+        # The second LLM call should contain the error from the first attempt.
+        calls = client.chat.completions.create.call_args_list
+        assert len(calls) == 2
+        second_prompt = calls[1].kwargs["messages"][1]["content"]
+        assert "ensures violated" in second_prompt
+        assert "Previous attempt" in second_prompt or "previous attempt" in second_prompt
+
     def test_auto_commit_invokes_git(self, tmp_path):
         mumei = _make_mumei(verify_success=True, check_success=True)
         client = _make_openai_response(f"```mumei\n{_APPEND_SNIPPET}```")
