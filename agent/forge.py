@@ -174,6 +174,32 @@ class MumeiForge:
 
         _logger.info("Forging task %s -> %s (mode=%s)", task_id, target_rel, mode)
 
+        # Snapshot the pre-forge file state so we can restore it on any
+        # failure path below (including a post-write verify failure).
+        # This prevents:
+        #   - create mode tasks becoming permanently stuck because the
+        #     file now exists on retry;
+        #   - replace mode losing the original file contents;
+        #   - append mode duplicating atoms on retry when the outer
+        #     verify passes inside _forge_append but the final sanity
+        #     check at this layer fails.
+        target_existed_before = target_path.exists()
+        original_bytes: bytes | None = (
+            target_path.read_bytes() if target_existed_before else None
+        )
+
+        def _restore_target() -> None:
+            try:
+                if target_existed_before and original_bytes is not None:
+                    target_path.write_bytes(original_bytes)
+                elif target_path.exists():
+                    target_path.unlink()
+            except OSError as restore_exc:
+                _logger.warning(
+                    "Failed to restore %s after forge failure: %s",
+                    target_path, restore_exc,
+                )
+
         try:
             if mode == "append":
                 new_code, attempts = self._forge_append(task, target_path, max_retries)
@@ -186,12 +212,16 @@ class MumeiForge:
                 )
         except Exception as exc:
             _logger.exception("Forge task %s raised", task_id)
+            _restore_target()
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
                 error=f"{type(exc).__name__}: {exc}",
             )
 
         if not new_code:
+            # _forge_append already restores on its own retry exhaustion,
+            # but _forge_module may have left a partial write behind.
+            _restore_target()
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
                 attempts=attempts,
@@ -205,6 +235,7 @@ class MumeiForge:
                 "Post-write verification failed for %s: %s",
                 target_path, verify_result.get("stderr", "")[:200],
             )
+            _restore_target()
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
                 attempts=attempts, atoms_added=[a.get("name", "") for a in atoms],

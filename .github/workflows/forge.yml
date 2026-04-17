@@ -72,19 +72,28 @@ jobs:
       - name: Run forge
         id: forge
         working-directory: mumei-agent
+        # IMPORTANT: workflow_dispatch inputs are passed via environment
+        # variables instead of being interpolated into the script body,
+        # to prevent shell injection via crafted input values.
+        # See: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           MUMEI_BIN: ${{ github.workspace }}/mumei/target/release/mumei
+          TASKS_DIR: ${{ github.event.inputs.tasks_dir }}
+          MAX_TASKS: ${{ github.event.inputs.max_tasks }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MUMEI_REPO_DIR: ${{ github.workspace }}/mumei
+          FORGE_LOG_PATH: ${{ github.workspace }}/mumei-agent/forge_log.json
         run: |
           DRY_RUN_FLAG=""
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+          if [ "$DRY_RUN" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
           python -m agent forge \
-            --tasks-dir "${{ github.event.inputs.tasks_dir }}" \
-            --mumei-repo "${{ github.workspace }}/mumei" \
-            --max-tasks "${{ github.event.inputs.max_tasks }}" \
-            --log-path "${{ github.workspace }}/mumei-agent/forge_log.json" \
+            --tasks-dir "$TASKS_DIR" \
+            --mumei-repo "$MUMEI_REPO_DIR" \
+            --max-tasks "$MAX_TASKS" \
+            --log-path "$FORGE_LOG_PATH" \
             $DRY_RUN_FLAG
 
       - name: Upload forge log
