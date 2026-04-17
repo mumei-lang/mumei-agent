@@ -1,0 +1,23 @@
+{
+  "task_id": "vstd-contracts-safe-multiply",
+  "target_file": "std/contracts.mm",
+  "mode": "append",
+  "priority": 2,
+  "description": "Add safe_multiply (overflow-prevented multiplication of bounded non-negative integers) to std/contracts.mm",
+  "atoms": [
+    {
+      "name": "safe_multiply",
+      "description": "Overflow-safe multiplication of two bounded non-negative integers",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && a <= 1000000 && b <= 1000000",
+      "ensures": "result == a * b && result >= 0",
+      "reference_patterns": ["safe_divide", "safe_subtract", "bounded_increment"]
+    }
+  ],
+  "max_retries": 10,
+  "auto_commit": true
+}

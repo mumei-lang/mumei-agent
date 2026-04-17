@@ -227,6 +227,33 @@ See `.env.example` for configuration details.
 |---|---|---|
 | `heal` (default) | Self-healing loop for existing .mm files | `python -m agent heal examples/sword_test.mm` |
 | `generate` | Generate new .mm code from spec JSON | `python -m agent generate --spec-file spec.json --output out.mm` |
+| `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `python -m agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
+| `forge` | Autonomously extend the mumei std library with verified atoms | `python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
+
+## Forge Mode
+
+`forge` extends the mumei [standard library](https://github.com/mumei-lang/mumei/tree/develop/std) with new verified atoms described in task spec JSON files.
+
+```bash
+# Preview the execution plan without running anything
+python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+
+# Run a single spec (path is looked up relative to --tasks-dir)
+python -m agent forge --mumei-repo ../mumei --task vstd_safe_add.json
+
+# Run the whole queue, capped at 5 tasks per invocation
+python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 5
+```
+
+Each task spec declares a `target_file` inside the mumei repo, a `mode`
+(`append`, `create`, or `replace`), and one or more `atoms`.  The orchestrator
+drives `generate_code()` + `mumei verify --json` + self-healing, appends
+(or creates/replaces) the target `.mm` file, optionally git-commits the
+change, and records the outcome to `forge_log.json`.  Already-completed
+`task_id`s are automatically skipped on subsequent runs.
+
+See [`forge_tasks/README.md`](forge_tasks/README.md) for the full task
+spec schema.
 
 ## report.json Schema
 
