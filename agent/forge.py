@@ -332,7 +332,13 @@ class MumeiForge:
             config_max_retries=max_retries,
             mumei_client=self.mumei,
         )
-        attempts = max(1, max_retries if not verified else 1)
+        # ``generate_code`` does not expose its internal retry count, so
+        # we can only report a lower bound (≥ 1 LLM call was made).
+        # Reporting ``max_retries`` on failure would be wildly wrong when
+        # the function exits early (e.g. empty LLM response).  The
+        # append-mode path does expose its real attempt count via the
+        # outer retry loop in ``_forge_append``.
+        attempts = 1
 
         if not code or not verified:
             return "", attempts
