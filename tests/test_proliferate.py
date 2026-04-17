@@ -258,13 +258,18 @@ class TestAttemptHeal:
         f2.write_text("original_b\n", encoding="utf-8")
 
         mumei_client = MagicMock()
-        # f1 heals successfully (fail → fix → pass), f2 never heals.
+        # f1 heals successfully (fail → fix → pass on next iter), f2 never heals.
+        # attempt_heal calls verify at the *start* of each loop iteration and
+        # returns True as soon as it succeeds, so f1 consumes exactly 2 calls:
+        #   iter 0: fail → get_fix writes healed code
+        #   iter 1: pass → return True
+        # f2 returns the same source from get_fix (no progress), so all 3
+        # loop iterations fail + 1 final check = 4 calls.
         mumei_client.verify.side_effect = [
-            # attempt_heal for f1: fail, then pass after fix
+            # attempt_heal for f1 (2 calls)
             {"success": False, "report": {}, "stdout": "", "stderr": "err"},
             {"success": True, "report": {}, "stdout": "", "stderr": ""},
-            {"success": True, "report": {}, "stdout": "", "stderr": ""},
-            # attempt_heal for f2: always fail
+            # attempt_heal for f2 (3 loop + 1 final = 4 calls)
             {"success": False, "report": {}, "stdout": "", "stderr": "err"},
             {"success": False, "report": {}, "stdout": "", "stderr": "err"},
             {"success": False, "report": {}, "stdout": "", "stderr": "err"},
