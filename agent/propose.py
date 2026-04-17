@@ -222,7 +222,13 @@ def build_specs_from_gaps(gaps: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         # When the proposal lacks an explicit priority, fall back to its
         # position in the list so that forge ordering remains stable.
-        spec = build_spec_from_proposal(proposal, priority=proposal.get("priority") or idx)
+        # Use ``is None`` so an explicit ``priority: 0`` (highest) is
+        # preserved instead of being coerced into ``idx`` by ``or``.
+        raw_priority = proposal.get("priority")
+        spec = build_spec_from_proposal(
+            proposal,
+            priority=raw_priority if raw_priority is not None else idx,
+        )
         specs.append(spec)
     return specs
 

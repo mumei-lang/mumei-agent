@@ -189,6 +189,32 @@ class TestBuildSpecsFromGaps:
         with pytest.raises(ValueError):
             propose.build_specs_from_gaps({"proposals": "oops"})
 
+    def test_explicit_priority_zero_preserved(self) -> None:
+        """priority=0 (highest) must not be coerced into the list index."""
+        gaps = {
+            "proposals": [
+                {
+                    "name": "std/alpha.mm",
+                    "reason": "",
+                    "depends_on": [],
+                    "difficulty": "low",
+                    "priority": 0,
+                },
+                {
+                    "name": "std/beta.mm",
+                    "reason": "",
+                    "depends_on": [],
+                    "difficulty": "low",
+                },
+            ],
+        }
+        specs = propose.build_specs_from_gaps(gaps)
+        by_target = {s["target_file"]: s for s in specs}
+        assert by_target["std/alpha.mm"]["priority"] == 0
+        # Second proposal has no explicit priority — falls back to its
+        # 1-based position (idx=2).
+        assert by_target["std/beta.mm"]["priority"] == 2
+
 
 # ---------------------------------------------------------------------------
 # Disk output + CLI integration
