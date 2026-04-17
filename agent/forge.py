@@ -426,15 +426,21 @@ class MumeiForge:
             spec.setdefault("name", task.get("task_id", "forge_atom"))
             if cross_ctx:
                 spec["cross_file_context"] = cross_ctx
-            return spec
+        else:
+            spec = {
+                "module_name": task.get("task_id", "forge_module"),
+                "atoms": normalized,
+            }
+            if cross_ctx:
+                spec["cross_file_context"] = cross_ctx
 
-        out: dict[str, Any] = {
-            "module_name": task.get("task_id", "forge_module"),
-            "atoms": normalized,
-        }
-        if cross_ctx:
-            out["cross_file_context"] = cross_ctx
-        return out
+        # Propagate target_file so downstream helpers (e.g.
+        # _is_std_module in generate_strategy) can detect std/ modules.
+        target_file = task.get("target_file")
+        if target_file:
+            spec["target_file"] = target_file
+
+        return spec
 
     def _load_context_files(self, task: dict[str, Any]) -> str:
         """Load contents of ``context_files`` specified in the task spec.

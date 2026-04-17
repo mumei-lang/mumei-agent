@@ -322,3 +322,91 @@ class TestPromptInjectionMultiAtom:
         call_args = client.chat.completions.create.call_args
         prompt_text = call_args.kwargs["messages"][1]["content"]
         assert generate_strategy._CORE_AXIOM_HEADER not in prompt_text
+
+
+# ---------------------------------------------------------------------------
+# Forge pipeline: _task_to_generate_spec propagates target_file
+# ---------------------------------------------------------------------------
+
+
+class TestForgeSpecPropagatesTargetFile:
+    """Verify that MumeiForge._task_to_generate_spec includes target_file
+    so that _is_std_module can detect std/ modules in the forge pipeline."""
+
+    def _make_forge(self, tmp_path: Path) -> "MumeiForge":
+        from agent.config import AgentConfig
+        from agent.forge import MumeiForge
+
+        config = AgentConfig.__new__(AgentConfig)
+        config.model = "test"
+        mumei = MagicMock()
+        return MumeiForge(
+            config=config,
+            mumei_client=mumei,
+            mumei_repo_dir=tmp_path,
+            forge_tasks_dir=tmp_path,
+        )
+
+    def test_single_atom_task_propagates_target_file(self, tmp_path: Path) -> None:
+        forge = self._make_forge(tmp_path)
+        task = {
+            "task_id": "vstd-iter",
+            "target_file": "std/iter.mm",
+            "atoms": [
+                {
+                    "name": "iter_placeholder",
+                    "inputs": [{"name": "x", "type": "i64"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "result >= 0",
+                },
+            ],
+        }
+        spec = forge._task_to_generate_spec(task)
+        assert spec.get("target_file") == "std/iter.mm"
+        assert generate_strategy._is_std_module(spec) is True
+
+    def test_multi_atom_task_propagates_target_file(self, tmp_path: Path) -> None:
+        forge = self._make_forge(tmp_path)
+        task = {
+            "task_id": "vstd-iter",
+            "target_file": "std/iter.mm",
+            "atoms": [
+                {
+                    "name": "head",
+                    "inputs": [{"name": "xs", "type": "List"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "result >= 0",
+                },
+                {
+                    "name": "tail_len",
+                    "inputs": [{"name": "xs", "type": "List"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "result >= 0",
+                },
+            ],
+        }
+        spec = forge._task_to_generate_spec(task)
+        assert spec.get("target_file") == "std/iter.mm"
+        assert generate_strategy._is_std_module(spec) is True
+
+    def test_non_std_task_detected_as_non_std(self, tmp_path: Path) -> None:
+        forge = self._make_forge(tmp_path)
+        task = {
+            "task_id": "custom-task",
+            "target_file": "examples/foo.mm",
+            "atoms": [
+                {
+                    "name": "foo",
+                    "inputs": [{"name": "x", "type": "i64"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "result >= 0",
+                },
+            ],
+        }
+        spec = forge._task_to_generate_spec(task)
+        assert spec.get("target_file") == "examples/foo.mm"
+        assert generate_strategy._is_std_module(spec) is False
