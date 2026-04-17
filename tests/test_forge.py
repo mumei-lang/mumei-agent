@@ -416,6 +416,46 @@ class TestRun:
         results = forge.run(dry_run=True)
         assert [r.task_id for r in results] == ["new"]
 
+    def test_dry_run_works_without_api_key(self, tmp_path, monkeypatch, capsys):
+        """`python -m agent forge --dry-run` must not require OPENAI_API_KEY.
+
+        The README advertises --dry-run as a no-dependency preview, and
+        `AgentConfig.__post_init__` raises ValueError when neither
+        LLM_API_KEY nor OPENAI_API_KEY is set.  Regression guard for
+        https://github.com/mumei-lang/mumei-agent/pull/31 review feedback.
+        """
+        from agent.forge import main as forge_main
+
+        # Simulate an environment with no LLM credentials configured.
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        tasks_dir = tmp_path / "forge_tasks"
+        tasks_dir.mkdir()
+        (tasks_dir / "a.json").write_text(json.dumps({
+            "task_id": "dry-run-probe",
+            "target_file": "std/a.mm",
+            "priority": 1,
+            "atoms": [{"name": "a"}],
+        }), encoding="utf-8")
+
+        args = MagicMock()
+        args.tasks_dir = str(tasks_dir)
+        args.mumei_repo = str(tmp_path)
+        args.max_tasks = None
+        args.task = None
+        args.dry_run = True
+        args.auto_commit = None
+        args.max_retries = None
+        args.log_path = str(tmp_path / "forge_log.json")
+
+        # Must not raise.
+        forge_main(args)
+
+        out = capsys.readouterr().out
+        assert "Forge plan" in out
+        assert "dry-run-probe" in out
+
     def test_auto_commit_override(self, tmp_path):
         """auto_commit_override should force the flag regardless of spec."""
         tasks_dir = tmp_path / "forge_tasks"

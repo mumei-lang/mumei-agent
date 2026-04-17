@@ -68,7 +68,7 @@ class MumeiForge:
 
     def __init__(
         self,
-        config: AgentConfig,
+        config: AgentConfig | None,
         mumei_client: MumeiClient,
         mumei_repo_dir: Path,
         forge_tasks_dir: Path,
@@ -76,6 +76,10 @@ class MumeiForge:
         log_path: Path | None = None,
         openai_client: OpenAI | None = None,
     ) -> None:
+        # ``config`` may be ``None`` for dry-run usage, where the forge
+        # only discovers/prints tasks and never calls the LLM or
+        # commits.  Methods that actually need the config will raise
+        # via :meth:`_ensure_openai_client` / :meth:`_commit_change`.
         self.config = config
         self.mumei = mumei_client
         self.mumei_repo_dir = Path(mumei_repo_dir).resolve()
@@ -421,6 +425,12 @@ class MumeiForge:
 
     def _ensure_openai_client(self) -> OpenAI:
         if self._client is None:
+            if self.config is None:
+                raise RuntimeError(
+                    "MumeiForge was constructed without an AgentConfig; "
+                    "cannot create an OpenAI client. This path is only "
+                    "reachable outside of --dry-run mode."
+                )
             self._client = self.config.create_client()
         return self._client
 
@@ -597,8 +607,14 @@ def main(args) -> None:  # type: ignore[no-untyped-def]
         else Path(os.environ.get("MUMEI_REPO", ".")).resolve()
     )
 
-    config = AgentConfig()
-    mumei = MumeiClient(config.mumei_bin)
+    # --dry-run never reaches the LLM or calls mumei, so we skip the
+    # ``AgentConfig()`` construction which raises ``ValueError`` when
+    # ``LLM_API_KEY`` / ``OPENAI_API_KEY`` is unset.  The README
+    # advertises dry-run as a no-dependency preview, so it must work
+    # without an API key configured.
+    config: AgentConfig | None = None if args.dry_run else AgentConfig()
+    mumei_bin = config.mumei_bin if config else os.environ.get("MUMEI_BIN", "mumei")
+    mumei = MumeiClient(mumei_bin)
 
     log_path = Path(args.log_path).resolve() if args.log_path else tasks_dir.parent / "forge_log.json"
 
