@@ -1,7 +1,7 @@
 """Allow running as `python -m agent` with subcommands."""
 import sys
 
-_SUBCOMMANDS = {"heal", "generate", "publish", "forge", "propose"}
+_SUBCOMMANDS = {"heal", "generate", "publish", "forge", "propose", "proliferate", "health"}
 
 
 def main() -> None:
@@ -62,6 +62,34 @@ def main() -> None:
         build_parser(parser=parser)
         args = parser.parse_args(argv[1:])
         generate_main(args)
+    elif command == "proliferate":
+        import argparse
+        from agent.proliferate import build_parser as prolif_build_parser, main as prolif_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent proliferate",
+            description=(
+                "Autonomous proliferation loop: analyze gaps → spec → "
+                "generate → blast-radius check → heal → PR (SI-5 Phase 2-C)."
+            ),
+        )
+        prolif_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        prolif_main(args)
+    elif command == "health":
+        import argparse
+        from agent.std_health import build_parser as health_build_parser, main as health_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent health",
+            description=(
+                "Measure proof health metrics for the mumei std library "
+                "(SI-5 Phase 3-A)."
+            ),
+        )
+        health_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        health_main(args)
     elif command == "heal":
         from agent.self_healing import main as heal_main
         # Strip the 'heal' subcommand so self_healing's own argparse

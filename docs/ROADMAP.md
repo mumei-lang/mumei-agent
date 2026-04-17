@@ -255,8 +255,53 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `AgentConfig.inject_core_axioms` — `INJECT_CORE_AXIOMS` 環境変数（default: `true`）
 - ✅ `tests/test_core_axiom_injection.py` — std vs non-std の振る舞い、フラグ OFF 時の挙動、環境変数経路、単一/複数 atom の両経路でのプロンプト注入を検証
 
+### SI-5 Phase 2-C: Self-Healing + Forge 統合ループ ✅ Implemented
+
+- ✅ `agent/proliferate.py` — 自律増殖ループ: 欠落発見 → spec 生成 → コード鍛造 → 既存 std 影響検査 → 修復 → PR
+  - `analyze_gaps(std_dir)` — `mcp_server.py` の `analyze_std_gaps` と同等のロジックをローカル実装（MCP 起動不要）
+    - 依存グラフ、trusted atom、TODO/FIXME、提案リストを返す
+    - 提案は difficulty + 未充足依存数でランキングし先頭 3 件に priority を付与
+  - `generate_specs_from_gaps(gaps, max_count)` — `propose.build_spec_from_proposal` を再利用して forge 互換 spec を生成
+  - `check_blast_radius(mumei_client, repo_dir, new_file_path, code)` — 新規 `.mm` を `std/` に仮配置 → 既存 `std/*.mm` を全検証 → 仮ファイルを自動除去（例外時も cleanup）
+  - `attempt_heal(client, model, broken_info, mumei_client, max_retries=3)` — 既存 `fix_strategy.get_fix` を再利用し、壊れた既存ファイルを自動修復
+  - `proliferate(mumei_repo_dir, max_proposals=3, dry_run=False)` — 全体オーケストレーター
+    - 各提案を独立処理（1 件の失敗が他をブロックしない）
+    - blast radius で壊れたファイルが生じた場合、rollback or heal を自動選択
+    - ループの前後で `measure_health` を呼び出し、健全度の delta をログ出力
+- ✅ `python -m agent proliferate` CLI サブコマンド
+  - `--mumei-repo <path>` — mumei ローカルクローンへの絶対/相対パス
+  - `--max-proposals N` — 一度に処理する提案数（default: 3）
+  - `--mumei-bin <path>` — mumei バイナリのオーバーライド
+  - `--dry-run` — git/PR 操作と生成ファイルの永続化をスキップ
+- ✅ `tests/test_proliferate.py` — 26 ケース
+  - `analyze_gaps` の依存グラフ、trusted atom、TODO 検出、ランキング
+  - `generate_specs_from_gaps` の `max_count` リスペクト + forge 互換性
+  - `check_blast_radius` の broken_files 報告、例外時 cleanup
+  - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
+  - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
+
+### SI-5 Phase 3-A: Proof Health Metrics ✅ Implemented
+
+- ✅ `agent/std_health.py` — `std/` 全体の証明健全度を定量測定
+  - `measure_health(mumei_client, std_dir)` — 各 `.mm` を `mumei verify` で検証 + atom/trusted/TODO を集計
+    - 返却フィールド: `total_files` / `verified_files` / `failed_files` / `total_atoms` / `verified_atoms` / `trusted_atoms` / `health_score` / `todo_count` / `details[]`
+  - `compute_health_score(total, verified, trusted, todo)` — 0.0〜1.0 クランプされたスコア
+    - base = `(verified_atoms - trusted_atoms) / total_atoms`
+    - TODO ペナルティは 1 件あたり 0.01、累積上限 0.2
+    - trusted atom は「信仰による証明」として差し引く設計
+  - `_format_table(report)` — 人間向けテーブルレンダラー
+- ✅ `python -m agent health` CLI サブコマンド
+  - `--mumei-repo <path>` — 対象 mumei リポジトリ
+  - `--format json|table` — 出力形式（default: json）
+  - 失敗ファイルが 1 つでもあれば exit code 2（CI ゲート用）
+- ✅ `proliferate.py` からの統合 — ループ前後で `measure_health` を呼び出し、delta をログ表示
+- ✅ `tests/test_std_health.py` — 13 ケース
+  - `compute_health_score` のエッジケース（0 atoms / 全 trusted / TODO キャップ / クランプ）
+  - `measure_health` の missing dir、empty、all-verified、trusted 混在、mixed pass/fail、TODO カウント、details 生成
+  - CLI パーサーと table フォーマッター
+
 ### 関連 (mumei 側)
-- [`mcp_server.py`](https://github.com/mumei-lang/mumei/blob/develop/mcp_server.py) の `analyze_std_gaps` — Phase 2-A 入力源
+- [`mcp_server.py`](https://github.com/mumei-lang/mumei/blob/develop/mcp_server.py) の `analyze_std_gaps` — Phase 2-A 入力源 / Phase 2-C ローカル実装の参照元
 - [`std/core.mm`](https://github.com/mumei-lang/mumei/blob/develop/std/core.mm) — Phase 2-B 注入源
 - [`docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の SI-5 セクションと連携
 
