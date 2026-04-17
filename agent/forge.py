@@ -33,6 +33,11 @@ from agent.mumei_client import MumeiClient
 from agent.forge_discovery import discover_tasks, filter_completed_tasks
 from agent.prompts.forge.forge_append import build_append_prompt
 from agent.prompts.forge.forge_system import FORGE_SYSTEM_PROMPT
+from agent.prompts.report_formatter import (
+    format_actionable_fix_hint,
+    format_counterexample,
+    format_structured_unsat_core,
+)
 from agent.publish import _git
 from agent.strategies.generate_strategy import (
     _extract_code,  # type: ignore[attr-defined]
@@ -307,7 +312,10 @@ class MumeiForge:
             if verify["success"]:
                 return combined, attempts
 
-            last_error = (verify.get("stdout", "") + verify.get("stderr", "")).strip()
+            last_error = _enrich_error_with_report(
+                (verify.get("stdout", "") + verify.get("stderr", "")).strip(),
+                verify.get("report"),
+            )
             last_snippet = snippet
             _logger.info(
                 "forge-append: verify failed on attempt %d: %s",
@@ -371,9 +379,11 @@ class MumeiForge:
         """Ask the LLM to generate just the new atom(s) for append mode."""
         client = self._ensure_openai_client()
 
+        cross_file_context = self._load_context_files(task)
         prompt = build_append_prompt(
             task, existing_source,
             last_error=last_error, last_snippet=last_snippet,
+            cross_file_context=cross_file_context or None,
         )
         try:
             response = client.chat.completions.create(
@@ -409,15 +419,69 @@ class MumeiForge:
                 a["params"] = a.pop("inputs")
             normalized.append(a)
 
+        cross_ctx = self._load_context_files(task)
+
         if len(normalized) == 1:
             spec = dict(normalized[0])
             spec.setdefault("name", task.get("task_id", "forge_atom"))
+            if cross_ctx:
+                spec["cross_file_context"] = cross_ctx
             return spec
 
-        return {
+        out: dict[str, Any] = {
             "module_name": task.get("task_id", "forge_module"),
             "atoms": normalized,
         }
+        if cross_ctx:
+            out["cross_file_context"] = cross_ctx
+        return out
+
+    def _load_context_files(self, task: dict[str, Any]) -> str:
+        """Load contents of ``context_files`` specified in the task spec.
+
+        Returns a formatted string with the contents of each file,
+        suitable for injection into the LLM prompt.  Returns ``""``
+        when no ``context_files`` are declared or none can be read.
+
+        Security: every path is resolved and verified to live inside
+        ``self.mumei_repo_dir`` — tasks cannot exfiltrate arbitrary
+        host files by supplying a traversal-escaping relative path.
+        """
+        context_files = task.get("context_files") or []
+        if not isinstance(context_files, list) or not context_files:
+            return ""
+
+        sections: list[str] = []
+        for rel_path in context_files:
+            if not isinstance(rel_path, str) or not rel_path:
+                continue
+            full_path = (self.mumei_repo_dir / rel_path).resolve()
+            try:
+                full_path.relative_to(self.mumei_repo_dir)
+            except ValueError:
+                _logger.warning("context_file escapes repo root: %s", rel_path)
+                continue
+            if not full_path.exists() or not full_path.is_file():
+                _logger.warning("context_file not found: %s", rel_path)
+                continue
+            try:
+                content = full_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                _logger.warning("Failed to read context_file %s: %s", rel_path, exc)
+                continue
+            sections.append(
+                f"# Context file: `{rel_path}`\n"
+                f"```mumei\n{content.strip()}\n```"
+            )
+
+        if not sections:
+            return ""
+        return (
+            "# Cross-file context — related std modules.\n"
+            "# Use these contracts and types as style references.  Do NOT "
+            "re-emit them.\n\n"
+            + "\n\n".join(sections)
+        )
 
     def _ensure_openai_client(self) -> OpenAI:
         if self._client is None:
@@ -522,6 +586,55 @@ class MumeiForge:
                 )
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+# ---------------------------------------------------------------------------
+# Structured-error enrichment
+# ---------------------------------------------------------------------------
+
+def _enrich_error_with_report(
+    raw_error: str,
+    report: dict[str, Any] | None,
+) -> str:
+    """Augment a raw verifier error log with structured fix hints.
+
+    Re-uses the existing ``report_formatter`` helpers so forge retries
+    receive the same counterexample / unsat-core / actionable-fix-hint
+    information that the heal and generate strategies already rely on.
+    """
+    if not report or not isinstance(report, dict):
+        return raw_error
+
+    structured_parts: list[str] = []
+    try:
+        hint = format_actionable_fix_hint(report)
+        if hint:
+            structured_parts.append(f"Actionable fix hint: {hint}")
+    except Exception as exc:  # noqa: BLE001 — formatter must not break retry
+        _logger.debug("format_actionable_fix_hint failed: %s", exc)
+
+    try:
+        ce = format_counterexample(report)
+        if ce:
+            structured_parts.append(ce)
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("format_counterexample failed: %s", exc)
+
+    try:
+        suc = format_structured_unsat_core(report)
+        if suc:
+            structured_parts.append(f"Structured unsat core:\n{suc}")
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("format_structured_unsat_core failed: %s", exc)
+
+    if not structured_parts:
+        return raw_error
+
+    return (
+        raw_error.rstrip()
+        + "\n\n# Structured Analysis:\n"
+        + "\n".join(structured_parts)
+    )
 
 
 # ---------------------------------------------------------------------------

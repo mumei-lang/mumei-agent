@@ -17,6 +17,7 @@ def build_append_prompt(
     *,
     last_error: str | None = None,
     last_snippet: str | None = None,
+    cross_file_context: str | None = None,
 ) -> str:
     """Build the user message for an ``append``-mode forge task.
 
@@ -34,6 +35,10 @@ def build_append_prompt(
     last_snippet:
         The code snippet that was generated on the previous (failed)
         attempt, so the LLM can see exactly what went wrong.
+    cross_file_context:
+        Optional pre-formatted cross-file context block (produced by
+        ``MumeiForge._load_context_files``) listing related std modules
+        that the LLM should consult for style/contract consistency.
     """
     atoms = task.get("atoms") or []
     reference_patterns = _collect_reference_patterns(atoms)
@@ -60,6 +65,9 @@ def build_append_prompt(
     if ref_block:
         sections.append(ref_block)
 
+    if cross_file_context:
+        sections.append(cross_file_context)
+
     sections.append(
         "# Atom specification(s) to forge:\n"
         f"```json\n{json.dumps(atoms, indent=2, ensure_ascii=False)}\n```"
@@ -70,14 +78,24 @@ def build_append_prompt(
             "# Previous attempt (FAILED — do NOT repeat the same mistake).\n"
             f"```mumei\n{last_snippet.strip()}\n```\n\n"
             "# Verifier / parser error from the previous attempt:\n"
-            f"```\n{last_error.strip()[:1000]}\n```\n\n"
-            "Analyse the error above and produce a corrected version."
+            f"```\n{last_error.strip()[:1500]}\n```\n\n"
+            "# Logical Repair Analysis:\n"
+            "Follow the Logical Repair Protocol defined in the system prompt:\n"
+            "1. Extract the counterexample values from the error above.\n"
+            "2. Identify the unsat core (conflicting constraints).\n"
+            "3. Choose exactly one repair strategy: (a) Strengthen "
+            "`requires`, (b) Weaken `ensures`, (c) Fix body logic, or "
+            "(d) Adjust invariant.\n"
+            "4. Apply the fix and emit corrected atom(s) only."
         )
     elif last_error:
         sections.append(
             "# Verifier / parser error from the previous attempt:\n"
-            f"```\n{last_error.strip()[:1000]}\n```\n\n"
-            "Analyse the error above and avoid the same mistake."
+            f"```\n{last_error.strip()[:1500]}\n```\n\n"
+            "# Logical Repair Analysis:\n"
+            "Follow the Logical Repair Protocol: counterexample extraction "
+            "→ unsat core analysis → repair strategy selection → code "
+            "transformation.  Avoid the same mistake."
         )
 
     sections.append(
