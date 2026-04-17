@@ -182,10 +182,11 @@ def generate_multi_atom(
     if metrics is None:
         metrics = Metrics()
 
-    # Extract cross_file_context before JSON-serialising the spec so it
-    # appears as readable markdown in the prompt rather than a JSON-escaped
-    # string with literal ``\n`` sequences.
-    cross_file_context = spec.pop("cross_file_context", None)
+    # Extract cross_file_context without mutating the caller's spec dict —
+    # ``run_refinement_loop`` (and any other caller) may reuse the same
+    # spec for subsequent generate/refine iterations, and losing the
+    # context after the first attempt would silently degrade retries.
+    cross_file_context = spec.get("cross_file_context")
 
     atoms = spec["atoms"]
     module_name = spec.get("module_name", "module")
@@ -194,7 +195,10 @@ def generate_multi_atom(
 
     # Build combined skeleton prompt
     combined_skeleton = _build_multi_atom_prompt(atoms, deps)
-    spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
+    # Exclude cross_file_context from the JSON payload so it renders as
+    # readable markdown later in the prompt rather than JSON-escaped text.
+    spec_for_json = {k: v for k, v in spec.items() if k != "cross_file_context"}
+    spec_json = json.dumps(spec_for_json, indent=2, ensure_ascii=False)
 
     # Stage 1: Initial generation
     metrics.record_attempt("generation")
@@ -409,13 +413,17 @@ def generate_code(
     if metrics is None:
         metrics = Metrics()
 
-    # Extract cross_file_context before JSON-serialising the spec so it
-    # appears as readable markdown in the prompt rather than a JSON-escaped
-    # string with literal ``\n`` sequences.
-    cross_file_context = spec.pop("cross_file_context", None)
+    # Extract cross_file_context without mutating the caller's spec dict —
+    # ``run_refinement_loop`` (and any other caller) may reuse the same
+    # spec for subsequent generate/refine iterations, and losing the
+    # context after the first attempt would silently degrade retries.
+    cross_file_context = spec.get("cross_file_context")
 
     prompt_module = _select_prompt_module(spec)
-    spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
+    # Exclude cross_file_context from the JSON payload so it renders as
+    # readable markdown later in the prompt rather than JSON-escaped text.
+    spec_for_json = {k: v for k, v in spec.items() if k != "cross_file_context"}
+    spec_json = json.dumps(spec_for_json, indent=2, ensure_ascii=False)
 
     # Infer effects and contracts if context_file is provided
     inferred_context: dict | None = None

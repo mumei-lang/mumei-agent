@@ -300,6 +300,93 @@ class TestTaskToGenerateSpecCrossFileContext:
 
 
 # ---------------------------------------------------------------------------
+# generate_strategy cross_file_context handling (PR #33 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateStrategyCrossFileContext:
+    """Ensure generate_code / generate_multi_atom do NOT mutate the caller's
+    spec — ``run_refinement_loop`` reuses the same dict across iterations
+    and must not silently lose ``cross_file_context`` after the first call.
+    """
+
+    def _fake_client_returning(self, content):
+        from types import SimpleNamespace
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=content)
+            )]
+        )
+        return client
+
+    def test_generate_code_does_not_pop_cross_file_context(self):
+        from agent.strategies.generate_strategy import generate_code
+        spec = {
+            "name": "f",
+            "params": [{"name": "x", "type": "i64"}],
+            "return_type": "i64",
+            "requires": "x > 0",
+            "ensures": "result == x",
+            "cross_file_context": "# Context file: std/a.mm\nmarker_abc",
+        }
+        client = self._fake_client_returning(
+            "```mumei\natom f(x: i64) -> i64 { body: x }\n```"
+        )
+        code, verified = generate_code(
+            client, "test-model", spec,
+            config_max_retries=0, mumei_client=None,
+        )
+        # Spec must still contain cross_file_context after the call.
+        assert spec.get("cross_file_context") == (
+            "# Context file: std/a.mm\nmarker_abc"
+        )
+        # The LLM prompt should include the markdown context, not JSON-escaped.
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        assert "marker_abc" in prompt
+        # And the spec JSON embedded in the prompt must NOT leak the
+        # cross_file_context field.
+        assert "\"cross_file_context\"" not in prompt
+
+    def test_generate_multi_atom_does_not_pop_cross_file_context(self):
+        from agent.strategies.generate_strategy import generate_multi_atom
+        spec = {
+            "module_name": "m",
+            "atoms": [
+                {
+                    "name": "a",
+                    "params": [{"name": "x", "type": "i64"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "true",
+                },
+                {
+                    "name": "b",
+                    "params": [{"name": "x", "type": "i64"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "true",
+                },
+            ],
+            "cross_file_context": "# Context file: std/b.mm\nsentinel_xyz",
+        }
+        client = self._fake_client_returning(
+            "```mumei\natom a(x: i64) -> i64 { body: x }\n"
+            "atom b(x: i64) -> i64 { body: x }\n```"
+        )
+        generate_multi_atom(
+            client, "test-model", spec,
+            config_max_retries=0, mumei_client=None,
+        )
+        assert spec.get("cross_file_context") == (
+            "# Context file: std/b.mm\nsentinel_xyz"
+        )
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        assert "sentinel_xyz" in prompt
+        assert "\"cross_file_context\"" not in prompt
+
+
+# ---------------------------------------------------------------------------
 # dry-run plan for SafeList
 # ---------------------------------------------------------------------------
 
