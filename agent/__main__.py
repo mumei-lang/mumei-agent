@@ -1,7 +1,7 @@
 """Allow running as `python -m agent` with subcommands."""
 import sys
 
-_SUBCOMMANDS = {"heal", "generate", "publish", "forge"}
+_SUBCOMMANDS = {"heal", "generate", "publish", "forge", "propose"}
 
 
 def main() -> None:
@@ -25,6 +25,20 @@ def main() -> None:
         forge_build_parser(parser)
         args = parser.parse_args(argv[1:])
         forge_main(args)
+    elif command == "propose":
+        import argparse
+        from agent.propose import build_parser as propose_build_parser, main as propose_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent propose",
+            description=(
+                "Generate forge task specs from analyze_std_gaps output "
+                "(SI-5 Phase 2-A)."
+            ),
+        )
+        propose_build_parser(parser=parser)
+        args = parser.parse_args(argv[1:])
+        propose_main(args)
     elif command == "publish":
         import argparse
         from agent.publish import build_parser, main as publish_main

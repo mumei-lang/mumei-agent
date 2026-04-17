@@ -1,0 +1,31 @@
+{
+  "coverage_summary": {
+    "existing_modules": [
+      "std/core.mm",
+      "std/prelude.mm"
+    ]
+  },
+  "proposals": [
+    {
+      "name": "std/iter.mm",
+      "reason": "コレクション走査の共通インターフェース。map/filter/fold を verified に提供する。",
+      "depends_on": ["std/prelude.mm"],
+      "difficulty": "medium",
+      "priority": 1
+    },
+    {
+      "name": "std/ring_buffer.mm",
+      "reason": "Fixed-capacity ring buffer with bounded-index access for deterministic real-time workloads.",
+      "depends_on": ["std/core.mm", "std/prelude.mm"],
+      "difficulty": "high",
+      "priority": 2
+    },
+    {
+      "name": "std/bitset.mm",
+      "reason": "Compact bit-set over i64 words with contracted popcount / rank / select.",
+      "depends_on": ["std/core.mm"],
+      "difficulty": "low",
+      "priority": 3
+    }
+  ]
+}

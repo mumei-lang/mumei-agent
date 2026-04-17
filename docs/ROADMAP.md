@@ -223,6 +223,43 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - 📋 `forge_tasks/vstd_fixed_point.json` — 固定小数点演算モジュール
 - 📋 vStd ロードマップ全項目の forge タスク化
 
+---
+
+## SI-5: Self-Improving Standard Library (Phase 2) — ✅ Implemented
+
+mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mumei-agent 側の forge パイプラインを直接接続し、`std/core.mm` の公理型を新規 std モジュール生成プロンプトに常時注入することで、std の自己拡張ループをクローズする。
+
+### SI-5 Phase 2-A: Forge Task Auto-Proposal ✅ Implemented
+
+- ✅ `agent/propose.py` — `analyze_std_gaps` の JSON 出力から forge task spec (`forge_tasks/vstd_*.json`) を自動生成
+  - `depends_on` → `import "<path>" as <alias>;` プレアンブル自動構築
+  - `difficulty` に応じて `max_retries` をスケール（low=3 / medium=5 / high=8）
+  - 既存 `forge_discovery._load_task` と互換な spec フォーマット
+- ✅ `python -m agent propose` CLI サブコマンド
+  - `--gaps-json <path>` — ファイル入力モード
+  - `--auto` — mumei MCP サーバーの `analyze_std_gaps` をインプロセス呼び出し
+  - `--output-dir` / `--overwrite` / `--dry-run`
+  - 各提案の概要（task_id / target / difficulty / depends_on / reason）を stdout に表示
+- ✅ `tests/test_propose.py` — 全 fixture 駆動の互換性テスト（difficulty → retries 変換、import プレアンブル生成、`forge_discovery` ラウンドトリップ、CLI エントリポイント）
+- ✅ `tests/fixtures/sample_gaps.json` — `analyze_std_gaps` の代表的な JSON 出力を fixture として固定化
+
+### SI-5 Phase 2-B: Core Axiom Injection ✅ Implemented
+
+- ✅ `agent/strategies/generate_strategy.py` — `std/` 配下モジュール生成時に `std/core.mm` の公理（型定義 + atom シグネチャ）をプロンプトへ常時注入
+  - `_is_std_module(spec)` — `target_file` / `module_name` / `output_path` / `name` の先頭 `std/` を検出
+  - `_summarise_core_axioms(source)` — `type ...;` と `atom ... requires/ensures;` のみを抽出（`body: {...};` はトークン節約のため除去）
+  - `_load_core_axiom_context(path)` — `(path, mtime)` でキャッシュし、プロンプトブロック（マークダウン + コードブロック）を返却
+  - 単一 atom (`generate_code`) と複数 atom (`generate_multi_atom`) 両方に接続
+- ✅ `agent/config.py`
+  - `AgentConfig.core_axiom_path` — `CORE_AXIOM_PATH` 環境変数、または隣接 `../mumei/std/core.mm` を自動検出
+  - `AgentConfig.inject_core_axioms` — `INJECT_CORE_AXIOMS` 環境変数（default: `true`）
+- ✅ `tests/test_core_axiom_injection.py` — std vs non-std の振る舞い、フラグ OFF 時の挙動、環境変数経路、単一/複数 atom の両経路でのプロンプト注入を検証
+
+### 関連 (mumei 側)
+- [`mcp_server.py`](https://github.com/mumei-lang/mumei/blob/develop/mcp_server.py) の `analyze_std_gaps` — Phase 2-A 入力源
+- [`std/core.mm`](https://github.com/mumei-lang/mumei/blob/develop/std/core.mm) — Phase 2-B 注入源
+- [`docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の SI-5 セクションと連携
+
 ### タスク spec フォーマット
 `forge_tasks/README.md` を参照。主なフィールド:
 - `task_id` — 完了重複排除の識別子

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -14,6 +15,149 @@ from agent.metrics import Metrics
 from agent.prompts.report_formatter import format_error_diff, is_contextual_suggestion
 
 _logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Phase 2-B — std/core.mm core-axiom injection for std/ module generation
+# ---------------------------------------------------------------------------
+
+# Sentinel used by prompt assemblers to recognise a previously-injected
+# core-axiom block and avoid duplicating it.
+_CORE_AXIOM_HEADER = "# Available Core Axioms (from std/core.mm)"
+
+# Regex that captures ``type ... ;`` and ``atom NAME(...) requires: ...;
+# ensures: ...;`` signatures.  Bodies (``body: { ... };``) are
+# intentionally stripped so the prompt stays token-efficient.
+_TYPE_DEFINITION_RE = re.compile(
+    r"^\s*type\s+[A-Za-z_][A-Za-z0-9_]*\s*=.*?;\s*$",
+    re.MULTILINE,
+)
+_ATOM_SIGNATURE_RE = re.compile(
+    r"^atom\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\).*?"
+    r"ensures\s*:[^;]*;",
+    re.DOTALL | re.MULTILINE,
+)
+
+# Cache the rendered axiom summary keyed by ``(path, mtime)`` so
+# repeated generations do not re-read disk.
+_CORE_AXIOM_CACHE: dict[tuple[str, float], str] = {}
+
+
+def _is_std_module(spec: dict) -> bool:
+    """Return ``True`` when the spec targets a ``std/`` module.
+
+    Looks at any of ``output_path``, ``target_file``, ``module_name``,
+    or ``name`` for a leading ``std/`` segment.  Module names like
+    ``std/iter`` also qualify.
+    """
+    candidates: list[str] = []
+    for key in ("output_path", "target_file", "module_name", "name"):
+        value = spec.get(key)
+        if isinstance(value, str) and value:
+            candidates.append(value)
+    for cand in candidates:
+        normalised = cand.replace("\\", "/").lstrip("./")
+        if normalised.startswith("std/"):
+            return True
+    return False
+
+
+def _summarise_core_axioms(source: str) -> str:
+    """Extract core axiom types + atom signatures from ``std/core.mm``.
+
+    Strips ``body: { ... };`` blocks to keep the injected prompt small.
+    """
+    sections: list[str] = []
+
+    types = [match.group(0).strip() for match in _TYPE_DEFINITION_RE.finditer(source)]
+    if types:
+        sections.append("\n".join(types))
+
+    signatures: list[str] = []
+    for match in _ATOM_SIGNATURE_RE.finditer(source):
+        sig = re.sub(r"\s+", " ", match.group(0)).strip()
+        # Close the signature cleanly (``...;`` already present from
+        # the trailing ``ensures: ... ;`` capture).
+        signatures.append(sig)
+    if signatures:
+        sections.append("\n".join(signatures))
+
+    return "\n\n".join(sections).strip()
+
+
+def _load_core_axiom_context(path: str | os.PathLike | None) -> str:
+    """Return the rendered core-axiom prompt block, or ``""`` on failure.
+
+    Silent fallback: when the path is missing or unreadable we return an
+    empty string so generation continues without the extra context.
+    """
+    if not path:
+        return ""
+    try:
+        file_path = Path(path).expanduser()
+    except (TypeError, ValueError):
+        return ""
+    try:
+        stat = file_path.stat()
+    except OSError:
+        _logger.info("core.mm not available at %s (skipping axiom injection)", path)
+        return ""
+
+    cache_key = (str(file_path), stat.st_mtime)
+    cached = _CORE_AXIOM_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        source = file_path.read_text(encoding="utf-8")
+    except OSError:
+        _logger.warning("Failed to read %s for core-axiom injection", file_path)
+        return ""
+
+    summary = _summarise_core_axioms(source)
+    if not summary:
+        return ""
+
+    rendered = (
+        f"{_CORE_AXIOM_HEADER}\n"
+        "# You SHOULD use these types and atoms instead of defining your own.\n"
+        "# Import with: `import \"std/core\" as core;`\n"
+        "```mumei\n"
+        f"{summary}\n"
+        "```"
+    )
+    _CORE_AXIOM_CACHE[cache_key] = rendered
+    return rendered
+
+
+def _build_core_axiom_context(spec: dict) -> str:
+    """Return the core-axiom block for *spec*, or ``""`` if not applicable.
+
+    Honors the ``inject_core_axioms`` flag and ``core_axiom_path`` on the
+    provided ``AgentConfig`` instance (or falls back to env vars when
+    no config is threaded through).  The block is only returned for
+    ``std/``-targeted specs so non-stdlib generations stay untouched.
+    """
+    if not _is_std_module(spec):
+        return ""
+
+    # Late import to avoid a circular import: config imports dotenv/openai
+    # at module load, which is otherwise heavy for unit tests.
+    try:
+        from agent.config import AgentConfig, _default_core_axiom_path
+    except ImportError:  # pragma: no cover - defensive
+        return ""
+
+    config = spec.get("_agent_config")
+    if isinstance(config, AgentConfig):
+        if not config.inject_core_axioms:
+            return ""
+        path = config.core_axiom_path
+    else:
+        if os.getenv("INJECT_CORE_AXIOMS", "true").lower() in {"false", "0", "no", "off"}:
+            return ""
+        path = _default_core_axiom_path()
+
+    return _load_core_axiom_context(path)
 
 
 def _extract_code(content: str) -> str:
@@ -187,6 +331,15 @@ def generate_multi_atom(
     # string with literal ``\n`` sequences.
     cross_file_context = spec.pop("cross_file_context", None)
 
+    # Phase 2-B — always inject std/core.mm axioms when targeting a
+    # std/ module so generated atoms reuse Size/Index/NonZero and the
+    # safe conversion atoms instead of redefining them.
+    core_axiom_context = _build_core_axiom_context(spec)
+
+    # Remove the scratch ``_agent_config`` pointer (if any) before the
+    # spec is JSON-serialised into the prompt.
+    spec.pop("_agent_config", None)
+
     atoms = spec["atoms"]
     module_name = spec.get("module_name", "module")
     atom_names = [a["name"] for a in atoms]
@@ -201,6 +354,8 @@ def generate_multi_atom(
     from agent.prompts import generate_atom as prompt_module
 
     prompt = prompt_module.build_prompt(spec_json, "", {})
+    if core_axiom_context:
+        prompt += f"\n\n{core_axiom_context}"
     if cross_file_context:
         prompt += f"\n\n{cross_file_context}"
     prompt += (
@@ -414,6 +569,12 @@ def generate_code(
     # string with literal ``\n`` sequences.
     cross_file_context = spec.pop("cross_file_context", None)
 
+    # Phase 2-B — inject std/core.mm axioms for std/ module generation.
+    core_axiom_context = _build_core_axiom_context(spec)
+
+    # Drop the scratch config pointer (if present) before JSON-serialising.
+    spec.pop("_agent_config", None)
+
     prompt_module = _select_prompt_module(spec)
     spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
 
@@ -434,6 +595,8 @@ def generate_code(
     # Stage 1: Initial generation
     metrics.record_attempt("generation")
     prompt = prompt_module.build_prompt(spec_json, "", {}, inferred_context=inferred_context)
+    if core_axiom_context:
+        prompt += f"\n\n{core_axiom_context}"
     if cross_file_context:
         prompt += f"\n\n{cross_file_context}"
     prompt += f"\n\n# Skeleton (fill in ___ placeholders):\n```mumei\n{skeleton}```"
