@@ -108,8 +108,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libclang-dev libz3-dev z3 libzstd-dev
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
+          # Detect the Ubuntu codename so the LLVM repo stays correct
+          # when GitHub updates ubuntu-latest beyond Jammy (22.04).
+          CODENAME="$(lsb_release -cs)"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] \
+            http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-17 main" \
             | sudo tee /etc/apt/sources.list.d/llvm-17.list
           sudo apt-get update
           sudo apt-get install -y llvm-17-dev libpolly-17-dev
@@ -190,24 +195,31 @@ jobs:
 
       - name: Resolve LLM environment
         id: llm_env
+        env:
+          _LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          _OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          _LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          _LLM_MODEL: ${{ secrets.LLM_MODEL }}
         run: |
           if [ "${LLM_PROFILE}" = "ollama-local" ]; then
             echo "api_key=ollama" >> "$GITHUB_OUTPUT"
             echo "base_url=http://localhost:11434/v1" >> "$GITHUB_OUTPUT"
             echo "model=${LLM_MODEL_INPUT}" >> "$GITHUB_OUTPUT"
           else
-            # Remote profile: read secrets, but never echo them.
-            REMOTE_KEY="${{ secrets.LLM_API_KEY }}"
+            # Remote profile: read secrets via env vars (never inline
+            # ${{ secrets.* }} in the script body — values containing $
+            # or backticks would be corrupted by shell expansion).
+            REMOTE_KEY="${_LLM_API_KEY}"
             if [ -z "${REMOTE_KEY}" ]; then
               # Legacy fallback for existing deployments.
-              REMOTE_KEY="${{ secrets.OPENAI_API_KEY }}"
+              REMOTE_KEY="${_OPENAI_API_KEY}"
             fi
             if [ -z "${REMOTE_KEY}" ]; then
               echo "::error::llm_profile=remote but neither LLM_API_KEY nor OPENAI_API_KEY is set"
               exit 1
             fi
-            REMOTE_BASE="${{ secrets.LLM_BASE_URL }}"
-            REMOTE_MODEL="${{ secrets.LLM_MODEL }}"
+            REMOTE_BASE="${_LLM_BASE_URL}"
+            REMOTE_MODEL="${_LLM_MODEL}"
             if [ -z "${REMOTE_MODEL}" ]; then
               REMOTE_MODEL="${LLM_MODEL_INPUT}"
             fi
