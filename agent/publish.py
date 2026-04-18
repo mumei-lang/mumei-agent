@@ -146,6 +146,7 @@ def publish(
     dry_run: bool = False,
     pr_title_prefix: str | None = None,
     pr_body_extra: str | None = None,
+    pre_generated_code: str | None = None,
 ) -> dict:
     """Run the full publish pipeline.
 
@@ -177,6 +178,10 @@ def publish(
         Optional Markdown string prepended (above a ``---`` separator)
         to the auto-generated PR body.  Used by ``proliferate()`` to
         include proposal context and health metrics.
+    pre_generated_code:
+        When provided, skip LLM code generation and use this code
+        directly.  Used by ``proliferate()`` to commit the exact
+        blast-radius-tested code instead of re-generating from scratch.
 
     Returns
     -------
@@ -212,20 +217,25 @@ def publish(
     # that git operations (which also run in this directory) can find them.
     cwd = Path(repo_dir).resolve() if repo_dir else Path.cwd()
 
-    # 2. Generate code
+    # 2. Generate code (or use pre-generated code from the caller)
     config = AgentConfig()
     # Respect MUMEI_BIN env var via config when no explicit --mumei-bin is given.
     effective_mumei_bin = mumei_bin or config.mumei_bin
     client = MumeiClient(effective_mumei_bin)
-    openai_client = config.create_client()
 
-    code, verified = generate_code(
-        client=openai_client,
-        model=config.model,
-        spec=spec,
-        config_max_retries=config.max_retries,
-        mumei_client=client,
-    )
+    if pre_generated_code is not None:
+        code = pre_generated_code
+        verified = True  # caller is responsible for prior verification
+        logger.info("Using pre-generated code (skipping LLM generation)")
+    else:
+        openai_client = config.create_client()
+        code, verified = generate_code(
+            client=openai_client,
+            model=config.model,
+            spec=spec,
+            config_max_retries=config.max_retries,
+            mumei_client=client,
+        )
     if not code:
         logger.error("Code generation failed — no code produced")
         result["generation_error"] = "empty code"

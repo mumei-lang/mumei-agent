@@ -777,32 +777,20 @@ def proliferate(
             results.append(spec_result)
             continue
 
-        # Non-dry-run: write the blast-radius-tested code and any healed
-        # files directly, then delegate git/PR to publish().
+        # Non-dry-run: pass the blast-radius-tested code to publish()
+        # via ``pre_generated_code`` so it commits the exact verified
+        # artifact instead of re-generating from scratch.
         #
-        # We place the generated file at ``target_file`` (e.g. ``std/core.mm``)
-        # so it lands at the intended path.  Healed files are also written
-        # back so the repository is consistent.
+        # NOTE: healed files (if any) are written to disk before
+        # publish() runs, but publish()'s git-add only stages the
+        # generated ``.mm`` file and the ``katana/`` output directory.
+        # A future improvement could extend publish() to accept
+        # additional files to stage.
         #
-        # TODO(publish-integration): ``publish()`` re-generates code from
-        # scratch and writes it as ``{module_name}.mm`` at the repo root,
-        # which means the blast-radius-tested code placed here and any
-        # healed files will NOT be committed by ``publish()``'s git-add.
-        # A future refactor should either:
-        #   (a) teach ``publish()`` to accept pre-generated code, or
-        #   (b) reimplement the git/PR logic directly in ``proliferate``.
-        # Until then, the non-dry-run path is unreliable when healing was
-        # needed.  Operators should verify results manually.
-        #
-        # Additionally, ``_build_pr_body_extra()`` receives
-        # ``health_after=None`` because post-health is only measured
-        # after all proposals complete.  The PR description will show
-        # the pre-run baseline instead of a delta.
-        logger.warning(
-            "Non-dry-run publish delegates to publish() which re-generates "
-            "code independently.  Blast-radius-tested code and healed files "
-            "may not be committed.  See TODO(publish-integration)."
-        )
+        # ``_build_pr_body_extra()`` receives ``health_after=None``
+        # because post-health is only measured after all proposals
+        # complete.  The PR description will show the pre-run baseline
+        # instead of a delta.
         new_file_path.parent.mkdir(parents=True, exist_ok=True)
         new_file_path.write_text(code, encoding="utf-8")
         for fpath, healed_content in healed_files.items():
@@ -838,6 +826,7 @@ def proliferate(
                     health_before=health_before,
                     health_after=None,
                 ),
+                pre_generated_code=code,
             )
             spec_result["publish_result"] = pub_result
             spec_result["success"] = pub_result.get("success", False)
