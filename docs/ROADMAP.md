@@ -280,6 +280,37 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
   - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
 
+### SI-5 Phase 3-B: Scheduled Autonomous Runs ✅ Implemented
+
+週次の GitHub Actions で「欠落発見 → spec 生成 → コード鍛造 → 検証 → PR」を人間の介入なしで回し続ける定常ループ。`mumei-lang/mumei` 側の `verify-std.yml` と組み合わせて、自動生成 PR のマージ前に std 全体を再検証する安全柵も追加。
+
+- ✅ `.github/workflows/proliferate.yml` — SI-5 Autonomous Proliferation workflow
+  - `cron: '0 0 * * 1'`（毎週月曜 00:00 UTC = JST 09:00）+ `workflow_dispatch` による手動トリガー
+  - `workflow_dispatch` 入力: `max_proposals`（default: 3）、`dry_run`（default: true）
+  - `schedule` 起動時 / `dry_run=true` では `--dry-run` を必ず付与し、初期は PR を作らずにパイプラインだけを検証
+  - mumei-agent と mumei の両リポジトリを checkout → mumei コンパイラを `cargo build --release` → `PATH` に追加
+  - `python -m agent health` で pre/post-flight のヘルス JSON を取得
+  - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json`
+  - 生成物: `pre_health.json` / `post_health.json` / `proliferate.log` / `summary.json` を `proliferate-logs` artifact として保存
+  - 必要なシークレット（操作者が手動で設定）:
+    - `MUMEI_REPO_TOKEN` — mumei-lang/mumei への cross-repo write / PR 作成権限を持つ PAT or GitHub App token
+    - `OPENAI_API_KEY` — LLM によるコード生成に使用
+- ✅ `agent/proliferate.py` の CI 対応強化
+  - `[PROLIFERATE] Step N/4: ...` 形式のステップログで CI 出力を人間が追跡しやすく
+  - `_log_step()` / `_log_info()` ヘルパーで一貫したプレフィックス付きログを出力
+  - `--output-json <path>` オプションで構造化サマリを書き出し（`timestamp` / `dry_run` / `pre_health` / `post_health` / `proposals_processed` / `proposals_succeeded` / `proposals_failed` / `details[]`）
+  - `_jsonify_result()` で巨大な生成コード本体を `code_length` に圧縮して JSON artifact サイズを抑制
+  - `_build_pr_body_extra()` で PR description を構築: 提案（target / reason / difficulty / depends_on / priority）+ 健全度 delta + 検証サマリ
+  - `publish()` に `pr_title_prefix` / `pr_body_extra` を追加し、PR タイトルに `[SI-5 Autonomous Proliferation]` を付与
+- ✅ `mumei-lang/mumei` `.github/workflows/verify-std.yml` — std/ 変更 PR に対する自動検証ゲート（cross-repo 安全柵）
+
+### 検証手順
+1. mumei-lang/mumei-agent の Settings → Secrets and variables → Actions で `MUMEI_REPO_TOKEN` と `OPENAI_API_KEY` を登録する（手動）。
+2. 初回は Actions タブから "SI-5 Autonomous Proliferation" を `workflow_dispatch` + `dry_run=true` で起動し、`proliferate-logs` artifact の `summary.json` / `proliferate.log` を確認する。
+3. 問題がなければ `dry_run=false` に切り替え、cron スケジュールを有効化する。
+
+---
+
 ### SI-5 Phase 3-A: Proof Health Metrics ✅ Implemented
 
 - ✅ `agent/std_health.py` — `std/` 全体の証明健全度を定量測定

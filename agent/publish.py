@@ -144,6 +144,8 @@ def publish(
     github_owner: str | None = None,
     github_repo: str | None = None,
     dry_run: bool = False,
+    pr_title_prefix: str | None = None,
+    pr_body_extra: str | None = None,
 ) -> dict:
     """Run the full publish pipeline.
 
@@ -332,12 +334,18 @@ def publish(
         f"**FFI glue code**, not transpiled source. They produce `extern \"C\"` "
         f"bindings / ctypes wrappers for calling the compiled mumei binary."
     )
+    if pr_body_extra:
+        pr_body = f"{pr_body_extra.rstrip()}\n\n---\n\n{pr_body}"
+
+    pr_title = f"feat: verified module `{module_name}` (auto-generated)"
+    if pr_title_prefix:
+        pr_title = f"{pr_title_prefix} {pr_title}"
 
     try:
         pr = _create_github_pr(
             owner=owner,
             repo=repo,
-            title=f"feat: verified module `{module_name}` (auto-generated)",
+            title=pr_title,
             head=branch_name,
             base=base_branch,
             body=pr_body,

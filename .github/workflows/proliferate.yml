@@ -1,0 +1,174 @@
+name: SI-5 Autonomous Proliferation
+
+# SI-5 Phase 3-B — weekly scheduled self-improvement loop.
+#
+# Workflow:
+#   1. Check out mumei-agent (this repo) and mumei (cross-repo).
+#   2. Build the mumei compiler from source so `python -m agent ...` has a
+#      real binary to invoke for verification.
+#   3. Install agent dependencies.
+#   4. Record a pre-flight proof-health snapshot of `mumei/std/`.
+#   5. Run `python -m agent proliferate` which:
+#        analyze gaps -> generate spec -> forge code -> blast-radius check ->
+#        optionally open PR(s) against mumei-lang/mumei.
+#   6. Record a post-flight proof-health snapshot.
+#   7. Upload all health snapshots + proliferate log + structured JSON summary
+#      as a single CI artifact for after-the-fact inspection.
+#
+# Required repository secrets (set these in
+# Settings -> Secrets and variables -> Actions for mumei-lang/mumei-agent):
+#   - MUMEI_REPO_TOKEN : PAT or GitHub App token with `contents:write` +
+#                        `pull-requests:write` on mumei-lang/mumei.  Used to
+#                        check out mumei, push branches, and open PRs.
+#   - OPENAI_API_KEY   : OpenAI key used for LLM-driven code generation.
+#
+# The first operator run should use `workflow_dispatch` with
+# `dry_run=true` to exercise the pipeline without creating PRs.
+
+on:
+  schedule:
+    # Every Monday 00:00 UTC (Monday 09:00 JST).
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      max_proposals:
+        description: 'Maximum number of proposals to process'
+        default: '3'
+        type: string
+      dry_run:
+        description: 'Dry run (skip git/PR operations)'
+        default: 'true'
+        type: boolean
+
+jobs:
+  proliferate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out mumei-agent
+        uses: actions/checkout@v4
+        with:
+          repository: mumei-lang/mumei-agent
+          ref: develop
+          path: mumei-agent
+
+      - name: Check out mumei
+        uses: actions/checkout@v4
+        with:
+          repository: mumei-lang/mumei
+          ref: develop
+          path: mumei
+          token: ${{ secrets.MUMEI_REPO_TOKEN }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install mumei system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libz3-dev z3 libzstd-dev
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libpolly-17-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mumei/target
+          key: cargo-mumei-${{ hashFiles('mumei/Cargo.lock') }}
+          restore-keys: |
+            cargo-mumei-
+
+      - name: Build mumei compiler
+        working-directory: mumei
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: |
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      - name: Verify mumei binary is on PATH
+        run: |
+          which mumei
+          mumei --version || true
+
+      - name: Install agent dependencies
+        working-directory: mumei-agent
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Pre-flight health check
+        id: pre_health
+        working-directory: mumei-agent
+        env:
+          MUMEI_BIN: mumei
+        run: |
+          mkdir -p /tmp/proliferate
+          python -m agent health \
+            --mumei-repo ../mumei \
+            --format json \
+            > /tmp/proliferate/pre_health.json
+          cat /tmp/proliferate/pre_health.json
+
+      - name: Run proliferate
+        id: proliferate
+        working-directory: mumei-agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MUMEI_BIN: mumei
+          GITHUB_TOKEN: ${{ secrets.MUMEI_REPO_TOKEN }}
+          GITHUB_OWNER: mumei-lang
+          GITHUB_REPO: mumei
+        run: |
+          MAX_PROPOSALS="${{ github.event.inputs.max_proposals || '3' }}"
+          DRY_RUN_INPUT="${{ github.event.inputs.dry_run }}"
+          DRY_RUN_FLAG=""
+          # Default to dry_run=true when the workflow fires on its weekly
+          # schedule until an operator has explicitly opted into creating
+          # PRs by running `workflow_dispatch` with `dry_run=false`.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          elif [ "$DRY_RUN_INPUT" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          set -o pipefail
+          python -m agent proliferate \
+            --mumei-repo ../mumei \
+            --max-proposals "$MAX_PROPOSALS" \
+            --output-json /tmp/proliferate/summary.json \
+            $DRY_RUN_FLAG \
+            2>&1 | tee /tmp/proliferate/proliferate.log
+
+      - name: Post-flight health check
+        if: always()
+        working-directory: mumei-agent
+        env:
+          MUMEI_BIN: mumei
+        run: |
+          mkdir -p /tmp/proliferate
+          python -m agent health \
+            --mumei-repo ../mumei \
+            --format json \
+            > /tmp/proliferate/post_health.json || true
+          cat /tmp/proliferate/post_health.json || true
+
+      - name: Upload proliferate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proliferate-logs
+          path: |
+            /tmp/proliferate/pre_health.json
+            /tmp/proliferate/post_health.json
+            /tmp/proliferate/proliferate.log
+            /tmp/proliferate/summary.json

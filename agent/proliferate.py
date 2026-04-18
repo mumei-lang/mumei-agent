@@ -11,6 +11,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import logging
 import re
@@ -409,12 +410,99 @@ def attempt_heal(
 # ---------------------------------------------------------------------------
 
 
+def _log_step(step: int, total: int, message: str) -> None:
+    """Emit a ``[PROLIFERATE]`` step log line readable in CI output.
+
+    The prefix makes each step easy to locate in GitHub Actions logs,
+    where many subsystems share stdout.
+    """
+    logger.info("[PROLIFERATE] Step %d/%d: %s", step, total, message)
+
+
+def _log_info(message: str) -> None:
+    """Emit a ``[PROLIFERATE]`` info line without a step counter."""
+    logger.info("[PROLIFERATE] %s", message)
+
+
+def _build_pr_body_extra(
+    spec: dict[str, Any],
+    proposal: dict[str, Any] | None,
+    health_before: dict[str, Any] | None,
+    health_after: dict[str, Any] | None,
+) -> str:
+    """Return the extra PR description prepended to :func:`publish`'s body.
+
+    Includes the source proposal, health delta, and a marker tag so the
+    PR is easy to filter by humans reviewing autonomous runs.
+    """
+    lines: list[str] = [
+        "## [SI-5 Autonomous Proliferation]",
+        "",
+        "This pull request was opened automatically by the SI-5 Phase 3-B "
+        "scheduled proliferation workflow. See "
+        "[`docs/ROADMAP.md`](../blob/develop/docs/ROADMAP.md) for context.",
+        "",
+    ]
+
+    # Proposal context
+    lines.append("### Source proposal")
+    target = spec.get("target_file") or spec.get("module_name") or "?"
+    lines.append(f"- **target_file**: `{target}`")
+    if proposal:
+        if proposal.get("reason"):
+            lines.append(f"- **reason**: {proposal['reason']}")
+        if proposal.get("difficulty"):
+            lines.append(f"- **difficulty**: `{proposal['difficulty']}`")
+        depends = proposal.get("depends_on") or []
+        if depends:
+            joined = ", ".join(f"`{d}`" for d in depends)
+            lines.append(f"- **depends_on**: {joined}")
+        if proposal.get("priority") is not None:
+            lines.append(f"- **priority**: {proposal['priority']}")
+    lines.append("")
+
+    # Health delta
+    if health_before is not None and health_after is not None:
+        before = health_before.get("health_score", 0.0)
+        after = health_after.get("health_score", 0.0)
+        delta = after - before
+        lines.append("### Proof health")
+        lines.append(
+            f"- health_score: **{before:.3f} → {after:.3f}** ({delta:+.3f})"
+        )
+        lines.append(
+            f"- files verified: {health_before.get('verified_files', 0)}/"
+            f"{health_before.get('total_files', 0)} → "
+            f"{health_after.get('verified_files', 0)}/"
+            f"{health_after.get('total_files', 0)}"
+        )
+        lines.append(
+            f"- trusted atoms: {health_before.get('trusted_atoms', 0)} → "
+            f"{health_after.get('trusted_atoms', 0)}"
+        )
+        lines.append("")
+
+    lines.append("### Verification summary")
+    lines.append(
+        "- Generated code passed `mumei verify --json` before blast-radius "
+        "check."
+    )
+    lines.append(
+        "- `check_blast_radius` verified every existing `std/*.mm` file "
+        "with the candidate in place."
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def proliferate(
     mumei_repo_dir: str | Path,
     *,
     max_proposals: int = 3,
     dry_run: bool = False,
     mumei_bin: str | None = None,
+    output_json: str | Path | None = None,
 ) -> list[dict[str, Any]]:
     """Run the autonomous proliferation loop.
 
@@ -432,53 +520,92 @@ def proliferate(
         If True, skip git/PR operations and do not persist generated files.
     mumei_bin:
         Path or command for the mumei binary.
+    output_json:
+        Optional path to write a structured run summary as JSON.
+        Consumed by the SI-5 Phase 3-B scheduled workflow so operators
+        can review pre/post health and per-proposal outcomes as a CI
+        artifact.
 
     Returns
     -------
     List of result dicts, one per proposal.
     """
+    started_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds"
+    )
     mumei_repo = Path(mumei_repo_dir).resolve()
     std_dir = mumei_repo / "std"
 
     if not std_dir.exists():
         logger.error("std/ directory not found at %s", std_dir)
-        return [{"success": False, "reason": "std_dir_not_found"}]
+        results = [{"success": False, "reason": "std_dir_not_found"}]
+        _write_output_json(
+            output_json,
+            started_at=started_at,
+            pre_health=None,
+            post_health=None,
+            results=results,
+            dry_run=dry_run,
+        )
+        return results
 
     # Optional: measure initial health
-    health_before = None
+    health_before: dict[str, Any] | None = None
+    health_client: MumeiClient | None = None
     try:
         from agent.std_health import measure_health as _measure_health
 
         config_for_health = AgentConfig()
         health_client = MumeiClient(mumei_bin or config_for_health.mumei_bin)
         health_before = _measure_health(health_client, std_dir)
-        logger.info(
-            "Initial health score: %.2f (%d/%d files verified)",
-            health_before["health_score"],
-            health_before["verified_files"],
-            health_before["total_files"],
+        _log_info(
+            f"Initial health score: {health_before['health_score']:.2f} "
+            f"({health_before['verified_files']}/"
+            f"{health_before['total_files']} files verified)"
         )
     except Exception:
         logger.debug("Could not measure initial health", exc_info=True)
 
     # Step 1: Gap analysis
-    logger.info("Step 1: Analyzing gaps in %s", std_dir)
+    _log_step(1, 4, f"Analyzing gaps in {std_dir}")
     gaps = analyze_gaps(std_dir)
     if not gaps["proposals"]:
-        logger.info("No proposals found — std/ is complete or no gaps detected")
-        return [{"success": True, "reason": "no_proposals"}]
+        _log_info("No proposals found — std/ is complete or no gaps detected")
+        results = [{"success": True, "reason": "no_proposals"}]
+        _write_output_json(
+            output_json,
+            started_at=started_at,
+            pre_health=health_before,
+            post_health=health_before,
+            results=results,
+            dry_run=dry_run,
+        )
+        return results
 
-    logger.info(
-        "Found %d proposal(s): %s",
-        len(gaps["proposals"]),
-        ", ".join(p["name"] for p in gaps["proposals"]),
+    _log_info(
+        f"Found {len(gaps['proposals'])} proposal(s): "
+        + ", ".join(p["name"] for p in gaps["proposals"])
     )
 
     # Step 2: Generate specs
-    logger.info("Step 2: Generating forge task specs")
+    _log_step(2, 4, "Generating forge task specs")
     specs = generate_specs_from_gaps(gaps, max_count=max_proposals)
     if not specs:
-        return [{"success": True, "reason": "no_specs_generated"}]
+        results = [{"success": True, "reason": "no_specs_generated"}]
+        _write_output_json(
+            output_json,
+            started_at=started_at,
+            pre_health=health_before,
+            post_health=health_before,
+            results=results,
+            dry_run=dry_run,
+        )
+        return results
+
+    # Cache proposals by target for PR description enrichment.
+    proposals_by_target: dict[str, dict[str, Any]] = {
+        p["name"]: p for p in gaps["proposals"] if isinstance(p, dict)
+    }
 
     # Step 3: Process each spec
     config = AgentConfig()
@@ -487,13 +614,13 @@ def proliferate(
     openai_client = config.create_client()
 
     results: list[dict[str, Any]] = []
-    for spec in specs:
+    for idx, spec in enumerate(specs, start=1):
         spec_result: dict[str, Any] = {
             "spec": spec,
             "success": False,
         }
         target_file = spec.get("target_file", "unknown.mm")
-        logger.info("Processing: %s", target_file)
+        _log_step(3, 4, f"Forging proposal {idx}/{len(specs)}: {target_file}")
 
         # 3a. Generate code
         try:
@@ -522,12 +649,19 @@ def proliferate(
             results.append(spec_result)
             continue
 
+        _log_info(f"Forged {target_file}: verified=True")
         spec_result["code"] = code
         spec_result["verified"] = verified
 
         # 3b. Blast radius check
+        _log_step(4, 4, f"Blast-radius check for {target_file}")
         new_file_path = mumei_repo / target_file
         blast = check_blast_radius(mumei_client, mumei_repo, new_file_path, code)
+        _log_info(
+            f"Blast-radius result for {target_file}: "
+            f"all_passed={blast['all_passed']}, "
+            f"broken={len(blast['broken_files'])}"
+        )
 
         # Track files that were healed so they can be committed alongside
         # the new file in the non-dry-run path.
@@ -670,11 +804,19 @@ def proliferate(
                 json.dump(spec, tmp, indent=2, ensure_ascii=False)
                 tmp_spec_path = tmp.name
 
+            proposal_meta = proposals_by_target.get(target_file)
             pub_result = publish(
                 spec_path=tmp_spec_path,
                 mumei_bin=effective_mumei_bin,
                 repo_dir=str(mumei_repo),
                 dry_run=False,
+                pr_title_prefix="[SI-5 Autonomous Proliferation]",
+                pr_body_extra=_build_pr_body_extra(
+                    spec=spec,
+                    proposal=proposal_meta,
+                    health_before=health_before,
+                    health_after=None,
+                ),
             )
             spec_result["publish_result"] = pub_result
             spec_result["success"] = pub_result.get("success", False)
@@ -693,19 +835,99 @@ def proliferate(
         results.append(spec_result)
 
     # Optional: measure final health
-    if health_before is not None:
+    health_after: dict[str, Any] | None = None
+    if health_before is not None and health_client is not None:
         try:
             health_after = _measure_health(health_client, std_dir)
-            logger.info(
-                "Final health score: %.2f (was %.2f, delta %+.2f)",
-                health_after["health_score"],
-                health_before["health_score"],
-                health_after["health_score"] - health_before["health_score"],
+            delta = health_after["health_score"] - health_before["health_score"]
+            succeeded_count = sum(1 for r in results if r.get("success"))
+            _log_info(
+                f"Result: {succeeded_count}/{len(results)} proposals "
+                f"succeeded, health_score: "
+                f"{health_before['health_score']:.2f} → "
+                f"{health_after['health_score']:.2f} ({delta:+.2f})"
             )
         except Exception:
             logger.debug("Could not measure final health", exc_info=True)
 
+    _write_output_json(
+        output_json,
+        started_at=started_at,
+        pre_health=health_before,
+        post_health=health_after,
+        results=results,
+        dry_run=dry_run,
+    )
+
     return results
+
+
+def _write_output_json(
+    output_json: str | Path | None,
+    *,
+    started_at: str,
+    pre_health: dict[str, Any] | None,
+    post_health: dict[str, Any] | None,
+    results: list[dict[str, Any]],
+    dry_run: bool,
+) -> None:
+    """Write a structured summary of the run to *output_json* (if set).
+
+    The summary is consumed by the SI-5 Phase 3-B scheduled workflow as
+    a CI artifact so operators can diff health before/after each run
+    without re-reading unstructured logs.
+    """
+    if output_json is None:
+        return
+    succeeded = sum(1 for r in results if r.get("success"))
+    processed = len(results)
+    payload: dict[str, Any] = {
+        "timestamp": started_at,
+        "dry_run": bool(dry_run),
+        "pre_health": pre_health,
+        "post_health": post_health,
+        "proposals_processed": processed,
+        "proposals_succeeded": succeeded,
+        "proposals_failed": processed - succeeded,
+        "details": [_jsonify_result(r) for r in results],
+    }
+    path = Path(output_json)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        _log_info(f"Wrote run summary to {path}")
+    except OSError as exc:
+        logger.warning("Could not write output JSON %s: %s", path, exc)
+
+
+def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Strip non-JSON-serialisable fields from a proliferate result.
+
+    Generated code can be large and is already committed (or discarded
+    in dry-run mode), so we only keep short summary-friendly fields.
+    """
+    out: dict[str, Any] = {}
+    for key, value in result.items():
+        if key == "code":
+            out["code_length"] = len(value) if isinstance(value, str) else 0
+        elif key == "spec":
+            out["spec"] = {
+                k: value.get(k)
+                for k in (
+                    "task_id",
+                    "target_file",
+                    "mode",
+                    "module_name",
+                    "name",
+                )
+                if isinstance(value, dict) and k in value
+            }
+        else:
+            out[key] = value
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +958,14 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip git/PR operations and do not persist generated files",
     )
+    parser.add_argument(
+        "--output-json",
+        default=None,
+        help=(
+            "Optional path to write a structured run summary as JSON "
+            "(used by the SI-5 Phase 3-B scheduled workflow)."
+        ),
+    )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -747,6 +977,7 @@ def main(args: argparse.Namespace) -> None:
         max_proposals=args.max_proposals,
         dry_run=args.dry_run,
         mumei_bin=args.mumei_bin,
+        output_json=args.output_json,
     )
 
     succeeded = sum(1 for r in results if r.get("success"))

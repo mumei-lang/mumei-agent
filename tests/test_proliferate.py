@@ -465,6 +465,7 @@ class TestBuildParser:
         assert args.mumei_repo == "/tmp/m"
         assert args.max_proposals == 3
         assert args.dry_run is False
+        assert args.output_json is None
 
     def test_dry_run_flag(self) -> None:
         import argparse
@@ -476,3 +477,143 @@ class TestBuildParser:
         )
         assert args.max_proposals == 5
         assert args.dry_run is True
+
+    def test_output_json_flag(self) -> None:
+        import argparse
+
+        parser = argparse.ArgumentParser()
+        proliferate.build_parser(parser)
+        args = parser.parse_args(
+            ["--mumei-repo", "/tmp/m", "--output-json", "/tmp/summary.json"]
+        )
+        assert args.output_json == "/tmp/summary.json"
+
+
+# ---------------------------------------------------------------------------
+# SI-5 Phase 3-B: PR body helper + JSON run summary
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPrBodyExtra:
+    def test_includes_marker_and_proposal(self) -> None:
+        spec = {"target_file": "std/iter.mm"}
+        proposal = {
+            "name": "std/iter.mm",
+            "reason": "Collection traversal common interface.",
+            "difficulty": "medium",
+            "depends_on": ["std/prelude.mm"],
+            "priority": 1,
+        }
+        body = proliferate._build_pr_body_extra(
+            spec=spec, proposal=proposal, health_before=None, health_after=None
+        )
+        assert "[SI-5 Autonomous Proliferation]" in body
+        assert "std/iter.mm" in body
+        assert "Collection traversal" in body
+        assert "`medium`" in body
+        assert "`std/prelude.mm`" in body
+
+    def test_includes_health_delta_when_both_snapshots_given(self) -> None:
+        spec = {"target_file": "std/core.mm"}
+        health_before = {
+            "health_score": 0.80,
+            "verified_files": 3,
+            "total_files": 5,
+            "trusted_atoms": 4,
+        }
+        health_after = {
+            "health_score": 0.90,
+            "verified_files": 4,
+            "total_files": 5,
+            "trusted_atoms": 3,
+        }
+        body = proliferate._build_pr_body_extra(
+            spec=spec,
+            proposal=None,
+            health_before=health_before,
+            health_after=health_after,
+        )
+        assert "0.800" in body and "0.900" in body
+        assert "+0.100" in body
+        assert "3/5" in body and "4/5" in body
+
+    def test_omits_health_section_when_missing(self) -> None:
+        body = proliferate._build_pr_body_extra(
+            spec={"target_file": "std/core.mm"},
+            proposal=None,
+            health_before=None,
+            health_after=None,
+        )
+        assert "Proof health" not in body
+        # Verification summary is always included.
+        assert "Verification summary" in body
+
+
+class TestJsonifyResult:
+    def test_code_is_replaced_with_length(self) -> None:
+        result = {
+            "spec": {"task_id": "t1", "target_file": "std/x.mm", "mode": "create"},
+            "code": "atom x(y: i64) ensures: true; body: y;\n",
+            "success": True,
+        }
+        out = proliferate._jsonify_result(result)
+        assert "code" not in out
+        assert out["code_length"] == len(result["code"])
+        assert out["spec"] == {
+            "task_id": "t1",
+            "target_file": "std/x.mm",
+            "mode": "create",
+        }
+        assert out["success"] is True
+
+    def test_unknown_fields_are_preserved(self) -> None:
+        result = {"reason": "no_proposals", "success": True}
+        out = proliferate._jsonify_result(result)
+        assert out == {"reason": "no_proposals", "success": True}
+
+
+class TestOutputJson:
+    def test_no_std_writes_summary_json(self, tmp_path: Path) -> None:
+        out_path = tmp_path / "summary.json"
+        proliferate.proliferate(
+            tmp_path / "does-not-exist",
+            dry_run=True,
+            output_json=out_path,
+        )
+        import json as _json
+
+        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["proposals_processed"] == 1
+        assert data["proposals_succeeded"] == 0
+        assert data["dry_run"] is True
+        assert "timestamp" in data
+        assert data["details"][0]["reason"] == "std_dir_not_found"
+
+    def test_no_proposals_writes_summary_json(self, tmp_path: Path) -> None:
+        std = tmp_path / "std"
+        for rel in ("prelude.mm", "core.mm", "iter.mm", "hash.mm", "alloc.mm"):
+            _write_mm(std / rel, "atom ok(x: i64) ensures: true; body: x;\n")
+        _write_mm(
+            std / "trait" / "iterable.mm",
+            "atom ok(x: i64) ensures: true; body: x;\n",
+        )
+        out_path = tmp_path / "logs" / "summary.json"
+        proliferate.proliferate(
+            tmp_path,
+            dry_run=True,
+            output_json=out_path,
+        )
+        import json as _json
+
+        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["proposals_processed"] == 1
+        assert data["proposals_succeeded"] == 1
+        assert data["details"][0]["reason"] == "no_proposals"
+
+    def test_missing_output_json_is_noop(self, tmp_path: Path) -> None:
+        # Should not raise when output_json=None (default).
+        results = proliferate.proliferate(
+            tmp_path / "does-not-exist",
+            dry_run=True,
+        )
+        assert results[0]["reason"] == "std_dir_not_found"
