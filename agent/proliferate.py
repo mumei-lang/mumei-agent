@@ -563,7 +563,9 @@ def proliferate(
         )
         return results
 
-    # Optional: measure initial health
+    # Optional: measure initial health.  This may fail when the mumei
+    # binary is unavailable or std/ files cannot be verified; the
+    # try/except ensures the proliferation loop proceeds regardless.
     health_before: dict[str, Any] | None = None
     health_client: MumeiClient | None = None
     try:

@@ -420,7 +420,7 @@ class TestRun:
         """`python -m agent forge --dry-run` must not require OPENAI_API_KEY.
 
         The README advertises --dry-run as a no-dependency preview, and
-        `AgentConfig.__post_init__` raises ValueError when neither
+        `AgentConfig.create_client()` raises ValueError when neither
         LLM_API_KEY nor OPENAI_API_KEY is set.  Regression guard for
         https://github.com/mumei-lang/mumei-agent/pull/31 review feedback.
         """
