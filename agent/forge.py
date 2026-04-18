@@ -424,13 +424,13 @@ class MumeiForge:
         }
 
     def _ensure_openai_client(self) -> OpenAI:
+        if self.config is None:
+            raise RuntimeError(
+                "MumeiForge was constructed without an AgentConfig; "
+                "cannot create an OpenAI client. This path is only "
+                "reachable outside of --dry-run mode."
+            )
         if self._client is None:
-            if self.config is None:
-                raise RuntimeError(
-                    "MumeiForge was constructed without an AgentConfig; "
-                    "cannot create an OpenAI client. This path is only "
-                    "reachable outside of --dry-run mode."
-                )
             self._client = self.config.create_client()
         return self._client
 
