@@ -228,6 +228,10 @@ jobs:
       - name: Run proliferate
         id: proliferate
         working-directory: mumei-agent
+        # IMPORTANT: workflow_dispatch inputs are passed via environment
+        # variables instead of being interpolated into the script body,
+        # to prevent shell injection via crafted input values.
+        # See: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
         env:
           LLM_API_KEY: ${{ steps.llm_env.outputs.api_key }}
           LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
@@ -236,14 +240,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.MUMEI_REPO_TOKEN }}
           GITHUB_OWNER: mumei-lang
           GITHUB_REPO: mumei
+          MAX_PROPOSALS: ${{ github.event.inputs.max_proposals || '3' }}
+          DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          MAX_PROPOSALS="${{ github.event.inputs.max_proposals || '3' }}"
-          DRY_RUN_INPUT="${{ github.event.inputs.dry_run }}"
           DRY_RUN_FLAG=""
           # Default to dry_run=true when the workflow fires on its weekly
           # schedule until an operator has explicitly opted into creating
           # PRs by running `workflow_dispatch` with `dry_run=false`.
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "$EVENT_NAME" = "schedule" ]; then
             DRY_RUN_FLAG="--dry-run"
           elif [ "$DRY_RUN_INPUT" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
