@@ -6,13 +6,22 @@ name: SI-5 Autonomous Proliferation
 #   1. Check out mumei-agent (this repo) and mumei (cross-repo).
 #   2. Build the mumei compiler from source so `python -m agent ...` has a
 #      real binary to invoke for verification.
-#   3. Install agent dependencies.
-#   4. Record a pre-flight proof-health snapshot of `mumei/std/`.
-#   5. Run `python -m agent proliferate` which:
+#   3. Provision the LLM backend according to the selected `llm_profile`:
+#        - ollama-local : spin up an Ollama server on the runner and pull
+#                         a small qwen model (default qwen3.5:small).
+#                         Requires zero additional secrets.
+#        - remote       : use any OpenAI-compatible endpoint configured via
+#                         repository secrets (DashScope / vLLM / self-hosted
+#                         Ollama over tailscale / OpenAI). Requires
+#                         LLM_API_KEY (or legacy OPENAI_API_KEY) and
+#                         optionally LLM_BASE_URL / LLM_MODEL.
+#   4. Install agent dependencies.
+#   5. Record a pre-flight proof-health snapshot of `mumei/std/`.
+#   6. Run `python -m agent proliferate` which:
 #        analyze gaps -> generate spec -> forge code -> blast-radius check ->
 #        optionally open PR(s) against mumei-lang/mumei.
-#   6. Record a post-flight proof-health snapshot.
-#   7. Upload all health snapshots + proliferate log + structured JSON summary
+#   7. Record a post-flight proof-health snapshot.
+#   8. Upload all health snapshots + proliferate log + structured JSON summary
 #      as a single CI artifact for after-the-fact inspection.
 #
 # Required repository secrets (set these in
@@ -20,7 +29,13 @@ name: SI-5 Autonomous Proliferation
 #   - MUMEI_REPO_TOKEN : PAT or GitHub App token with `contents:write` +
 #                        `pull-requests:write` on mumei-lang/mumei.  Used to
 #                        check out mumei, push branches, and open PRs.
-#   - OPENAI_API_KEY   : OpenAI key used for LLM-driven code generation.
+#
+# Optional repository secrets (only consumed when llm_profile = remote):
+#   - LLM_API_KEY      : API key for the remote OpenAI-compatible endpoint.
+#   - LLM_BASE_URL     : Base URL (e.g. https://dashscope.aliyuncs.com/compatible-mode/v1).
+#   - LLM_MODEL        : Model name (e.g. qwen-plus). Falls back to the
+#                        workflow_dispatch `llm_model` input.
+#   - OPENAI_API_KEY   : Legacy alias for LLM_API_KEY; used only as fallback.
 #
 # The first operator run should use `workflow_dispatch` with
 # `dry_run=true` to exercise the pipeline without creating PRs.
@@ -39,6 +54,22 @@ on:
         description: 'Dry run (skip git/PR operations)'
         default: 'true'
         type: boolean
+      llm_profile:
+        description: 'LLM backend profile'
+        default: 'ollama-local'
+        type: choice
+        options:
+          - ollama-local
+          - remote
+      llm_model:
+        description: |
+          Model tag. For ollama-local, anything `ollama pull` accepts
+          (qwen3.5:small, qwen2.5-coder:1.5b, qwen2.5-coder:7b, or a
+          1bit-quantized backup like bonsai-1bit-qwen if pullable).
+          For remote, the model name your endpoint exposes (qwen-plus,
+          Qwen/Qwen3.5-7B, gpt-4o-mini, ...).
+        default: 'qwen3.5:small'
+        type: string
 
 jobs:
   proliferate:
@@ -46,6 +77,11 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      # Scheduled runs have no workflow_dispatch inputs, so default to the
+      # fully self-contained ollama-local profile with a small qwen model.
+      LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
+      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:small' }}
     steps:
       - name: Check out mumei-agent
         uses: actions/checkout@v4
@@ -107,6 +143,75 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
 
+      # ----- LLM provisioning: ollama-local -----
+
+      - name: Cache ollama models
+        if: env.LLM_PROFILE == 'ollama-local'
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-${{ env.LLM_MODEL_INPUT }}
+          restore-keys: |
+            ollama-
+
+      - name: Install and start Ollama
+        if: env.LLM_PROFILE == 'ollama-local'
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          # Run ollama serve in the background so later steps can talk to it.
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          # Wait for the HTTP API to become ready.
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
+              echo "ollama ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://localhost:11434/api/tags
+
+      - name: Pull ollama model
+        if: env.LLM_PROFILE == 'ollama-local'
+        run: |
+          echo "Pulling ${LLM_MODEL_INPUT}..."
+          ollama pull "${LLM_MODEL_INPUT}"
+          ollama list
+
+      # ----- LLM provisioning: remote -----
+      # No install step; the agent talks to the configured endpoint directly.
+
+      - name: Resolve LLM environment
+        id: llm_env
+        run: |
+          if [ "${LLM_PROFILE}" = "ollama-local" ]; then
+            echo "api_key=ollama" >> "$GITHUB_OUTPUT"
+            echo "base_url=http://localhost:11434/v1" >> "$GITHUB_OUTPUT"
+            echo "model=${LLM_MODEL_INPUT}" >> "$GITHUB_OUTPUT"
+          else
+            # Remote profile: read secrets, but never echo them.
+            REMOTE_KEY="${{ secrets.LLM_API_KEY }}"
+            if [ -z "${REMOTE_KEY}" ]; then
+              # Legacy fallback for existing deployments.
+              REMOTE_KEY="${{ secrets.OPENAI_API_KEY }}"
+            fi
+            if [ -z "${REMOTE_KEY}" ]; then
+              echo "::error::llm_profile=remote but neither LLM_API_KEY nor OPENAI_API_KEY is set"
+              exit 1
+            fi
+            REMOTE_BASE="${{ secrets.LLM_BASE_URL }}"
+            REMOTE_MODEL="${{ secrets.LLM_MODEL }}"
+            if [ -z "${REMOTE_MODEL}" ]; then
+              REMOTE_MODEL="${LLM_MODEL_INPUT}"
+            fi
+            {
+              echo "api_key<<__EOF__"
+              echo "${REMOTE_KEY}"
+              echo "__EOF__"
+              echo "base_url=${REMOTE_BASE}"
+              echo "model=${REMOTE_MODEL}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Pre-flight health check
         id: pre_health
         working-directory: mumei-agent
@@ -124,7 +229,9 @@ jobs:
         id: proliferate
         working-directory: mumei-agent
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_API_KEY: ${{ steps.llm_env.outputs.api_key }}
+          LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
+          LLM_MODEL: ${{ steps.llm_env.outputs.model }}
           MUMEI_BIN: mumei
           GITHUB_TOKEN: ${{ secrets.MUMEI_REPO_TOKEN }}
           GITHUB_OWNER: mumei-lang
@@ -141,6 +248,7 @@ jobs:
           elif [ "$DRY_RUN_INPUT" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
+          echo "[PROLIFERATE] profile=${LLM_PROFILE} model=${LLM_MODEL} base_url=${LLM_BASE_URL:-<openai-default>}"
           set -o pipefail
           python -m agent proliferate \
             --mumei-repo ../mumei \
