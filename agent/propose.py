@@ -182,6 +182,7 @@ def build_spec_from_proposal(
     spec: dict[str, Any] = {
         "task_id": _proposal_to_task_id(proposal),
         "target_file": name,
+        "module_name": module_name,
         "mode": "create",
         "priority": final_priority,
         "description": reason.strip()

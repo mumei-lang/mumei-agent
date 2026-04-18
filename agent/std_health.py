@@ -257,8 +257,8 @@ def main(args: argparse.Namespace) -> None:
     """Entry point for the health subcommand."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    # Lazy import to avoid config lookup during unit tests that don't need
-    # a real mumei binary.
+    # Resolve the mumei binary.  AgentConfig is used only for its
+    # mumei_bin default (MUMEI_BIN env) — no LLM API key is needed.
     from agent.config import AgentConfig
 
     config = AgentConfig()

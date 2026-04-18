@@ -144,6 +144,9 @@ def publish(
     github_owner: str | None = None,
     github_repo: str | None = None,
     dry_run: bool = False,
+    pr_title_prefix: str | None = None,
+    pr_body_extra: str | None = None,
+    pre_generated_code: str | None = None,
 ) -> dict:
     """Run the full publish pipeline.
 
@@ -167,6 +170,18 @@ def publish(
         GitHub repository name (for PR creation).
     dry_run:
         If True, skip git operations and PR creation.
+    pr_title_prefix:
+        Optional string prepended to the PR title (e.g.
+        ``"[SI-5 Autonomous Proliferation]"``).  When ``None`` the
+        title is left unchanged.
+    pr_body_extra:
+        Optional Markdown string prepended (above a ``---`` separator)
+        to the auto-generated PR body.  Used by ``proliferate()`` to
+        include proposal context and health metrics.
+    pre_generated_code:
+        When provided, skip LLM code generation and use this code
+        directly.  Used by ``proliferate()`` to commit the exact
+        blast-radius-tested code instead of re-generating from scratch.
 
     Returns
     -------
@@ -202,20 +217,25 @@ def publish(
     # that git operations (which also run in this directory) can find them.
     cwd = Path(repo_dir).resolve() if repo_dir else Path.cwd()
 
-    # 2. Generate code
+    # 2. Generate code (or use pre-generated code from the caller)
     config = AgentConfig()
     # Respect MUMEI_BIN env var via config when no explicit --mumei-bin is given.
     effective_mumei_bin = mumei_bin or config.mumei_bin
     client = MumeiClient(effective_mumei_bin)
-    openai_client = config.create_client()
 
-    code, verified = generate_code(
-        client=openai_client,
-        model=config.model,
-        spec=spec,
-        config_max_retries=config.max_retries,
-        mumei_client=client,
-    )
+    if pre_generated_code is not None:
+        code = pre_generated_code
+        verified = True  # caller is responsible for prior verification
+        logger.info("Using pre-generated code (skipping LLM generation)")
+    else:
+        openai_client = config.create_client()
+        code, verified = generate_code(
+            client=openai_client,
+            model=config.model,
+            spec=spec,
+            config_max_retries=config.max_retries,
+            mumei_client=client,
+        )
     if not code:
         logger.error("Code generation failed — no code produced")
         result["generation_error"] = "empty code"
@@ -332,12 +352,18 @@ def publish(
         f"**FFI glue code**, not transpiled source. They produce `extern \"C\"` "
         f"bindings / ctypes wrappers for calling the compiled mumei binary."
     )
+    if pr_body_extra:
+        pr_body = f"{pr_body_extra.rstrip()}\n\n---\n\n{pr_body}"
+
+    pr_title = f"feat: verified module `{module_name}` (auto-generated)"
+    if pr_title_prefix:
+        pr_title = f"{pr_title_prefix} {pr_title}"
 
     try:
         pr = _create_github_pr(
             owner=owner,
             repo=repo,
-            title=f"feat: verified module `{module_name}` (auto-generated)",
+            title=pr_title,
             head=branch_name,
             base=base_branch,
             body=pr_body,

@@ -52,14 +52,24 @@ class AgentConfig:
     )
 
     def __post_init__(self):
+        # API key validation is deferred to create_client() so that
+        # subcommands that never use the LLM (e.g. ``python -m agent
+        # health``) can construct AgentConfig without requiring a key.
+        pass
+
+    def create_client(self) -> OpenAI:
+        """Create an OpenAI-compatible client.
+
+        Raises
+        ------
+        ValueError
+            If ``api_key`` is empty (LLM_API_KEY / OPENAI_API_KEY not set).
+        """
         if not self.api_key:
             raise ValueError(
                 "LLM_API_KEY (or OPENAI_API_KEY) is not set. "
-                "Please check your .env file."
+                "Please check your .env file or environment variables."
             )
-
-    def create_client(self) -> OpenAI:
-        """Create an OpenAI-compatible client."""
         kwargs: dict = {"api_key": self.api_key}
         if self.base_url:
             kwargs["base_url"] = self.base_url

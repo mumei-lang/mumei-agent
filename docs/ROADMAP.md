@@ -280,6 +280,44 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
   - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
 
+### SI-5 Phase 3-B: Scheduled Autonomous Runs ✅ Implemented
+
+週次の GitHub Actions で「欠落発見 → spec 生成 → コード鍛造 → 検証 → PR」を人間の介入なしで回し続ける定常ループ。`mumei-lang/mumei` 側の `verify-std.yml` と組み合わせて、自動生成 PR のマージ前に std 全体を再検証する安全柵も追加。
+
+- ✅ `.github/workflows/proliferate.yml` — SI-5 Autonomous Proliferation workflow
+  - `cron: '0 0 * * 1'`（毎週月曜 00:00 UTC = JST 09:00）+ `workflow_dispatch` による手動トリガー
+  - `workflow_dispatch` 入力: `max_proposals`（default: 3）、`dry_run`（default: true）
+  - `schedule` 起動時 / `dry_run=true` では `--dry-run` を必ず付与し、初期は PR を作らずにパイプラインだけを検証
+  - mumei-agent と mumei の両リポジトリを checkout → mumei コンパイラを `cargo build --release` → `PATH` に追加
+  - `python -m agent health` で pre/post-flight のヘルス JSON を取得
+  - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json`
+  - 生成物: `pre_health.json` / `post_health.json` / `proliferate.log` / `summary.json` を `proliferate-logs` artifact として保存
+  - **ハイブリッド LLM プロファイル**（`workflow_dispatch` 入力 `llm_profile` / `llm_model` で切替。cron ではデフォルト `ollama-local` + `qwen3.5:0.8b` を使用し外部依存ゼロで動作）:
+    - `ollama-local`（default）: runner 内で `ollama serve` を起動 → `ollama pull ${llm_model}` → `LLM_BASE_URL=http://localhost:11434/v1` に接続。`~/.ollama/models` を `actions/cache@v4` で `llm_model` 毎にキャッシュ。既定モデルは軽量な `qwen3.5:0.8b`、品質優先なら `qwen3.5:4b` / `qwen2.5-coder:7b`、予備枠として 1bit 量子化系（例: `bonsai-1bit-qwen`）を `llm_model` 入力で指定可能
+    - `remote`: 任意の OpenAI 互換エンドポイント（DashScope / vLLM / tailscale 経由の自宅 Ollama / OpenAI）を secrets 経由で利用。優先順: `LLM_API_KEY` → legacy `OPENAI_API_KEY`。`LLM_BASE_URL` / `LLM_MODEL` は optional、後者は未設定なら `llm_model` 入力で上書き
+  - 必要なシークレット（操作者が手動で設定）:
+    - `MUMEI_REPO_TOKEN`（必須） — mumei-lang/mumei への cross-repo write / PR 作成権限を持つ PAT or GitHub App token
+    - `LLM_API_KEY`（`llm_profile=remote` 時に必須） — OpenAI 互換エンドポイントの API key
+    - `LLM_BASE_URL`（`remote` 時 optional） — 非 OpenAI エンドポイント URL
+    - `LLM_MODEL`（`remote` 時 optional） — `llm_model` 入力より優先
+    - `OPENAI_API_KEY`（optional） — `LLM_API_KEY` 未設定時の後方互換 fallback。`agent/config.py` の `LLM_API_KEY` → `OPENAI_API_KEY` fallback と整合
+- ✅ `agent/proliferate.py` の CI 対応強化
+  - `[PROLIFERATE] Step N/4: ...` 形式のステップログで CI 出力を人間が追跡しやすく
+  - `_log_step()` / `_log_info()` ヘルパーで一貫したプレフィックス付きログを出力
+  - `--output-json <path>` オプションで構造化サマリを書き出し（`timestamp` / `dry_run` / `pre_health` / `post_health` / `proposals_processed` / `proposals_succeeded` / `proposals_failed` / `details[]`）
+  - `_jsonify_result()` で巨大な生成コード本体を `code_length` に圧縮して JSON artifact サイズを抑制
+  - `_build_pr_body_extra()` で PR description を構築: 提案（target / reason / difficulty / depends_on / priority）+ 健全度 delta + 検証サマリ
+  - `publish()` に `pr_title_prefix` / `pr_body_extra` を追加し、PR タイトルに `[SI-5 Autonomous Proliferation]` を付与
+- ✅ `mumei-lang/mumei` `.github/workflows/verify-std.yml` — std/ 変更 PR に対する自動検証ゲート（cross-repo 安全柵）
+
+### 検証手順
+1. mumei-lang/mumei-agent の Settings → Secrets and variables → Actions で `MUMEI_REPO_TOKEN` を登録する（必須）。`remote` プロファイルを使いたい場合のみ `LLM_API_KEY`（+ 必要に応じて `LLM_BASE_URL` / `LLM_MODEL`）も登録する。`ollama-local` プロファイルでは追加 secret は不要。
+2. 初回は Actions タブから "SI-5 Autonomous Proliferation" を `workflow_dispatch` + `llm_profile=ollama-local` + `dry_run=true` で起動し、`proliferate-logs` artifact の `summary.json` / `proliferate.log` を確認する（runner 内で ollama 起動 → qwen3.5:0.8b を pull する 1 回目は数分かかる、2 回目以降はキャッシュが効く）。
+3. 問題がなければ `dry_run=false` に切り替えて実行し、生成される PR のタイトル・description・health delta を確認する。
+4. 最後に週次 cron（月曜 00:00 UTC = JST 09:00）の自動起動を待つ。cron は常に `ollama-local` + `dry_run=true` で起動するため、`dry_run=false` で恒常運用したい場合は `cron` 行を `on.workflow_dispatch` だけに縮退させるか、`Run proliferate` step の `DRY_RUN_FLAG` 分岐を調整する。
+
+---
+
 ### SI-5 Phase 3-A: Proof Health Metrics ✅ Implemented
 
 - ✅ `agent/std_health.py` — `std/` 全体の証明健全度を定量測定
