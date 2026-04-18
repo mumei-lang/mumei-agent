@@ -169,6 +169,14 @@ def publish(
         GitHub repository name (for PR creation).
     dry_run:
         If True, skip git operations and PR creation.
+    pr_title_prefix:
+        Optional string prepended to the PR title (e.g.
+        ``"[SI-5 Autonomous Proliferation]"``).  When ``None`` the
+        title is left unchanged.
+    pr_body_extra:
+        Optional Markdown string prepended (above a ``---`` separator)
+        to the auto-generated PR body.  Used by ``proliferate()`` to
+        include proposal context and health metrics.
 
     Returns
     -------

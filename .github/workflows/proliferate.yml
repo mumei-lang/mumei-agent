@@ -8,7 +8,7 @@ name: SI-5 Autonomous Proliferation
 #      real binary to invoke for verification.
 #   3. Provision the LLM backend according to the selected `llm_profile`:
 #        - ollama-local : spin up an Ollama server on the runner and pull
-#                         a small qwen model (default qwen3.5:small).
+#                         a small qwen model (default qwen3.5:0.8b).
 #                         Requires zero additional secrets.
 #        - remote       : use any OpenAI-compatible endpoint configured via
 #                         repository secrets (DashScope / vLLM / self-hosted
@@ -64,11 +64,12 @@ on:
       llm_model:
         description: |
           Model tag. For ollama-local, anything `ollama pull` accepts
-          (qwen3.5:small, qwen2.5-coder:1.5b, qwen2.5-coder:7b, or a
-          1bit-quantized backup like bonsai-1bit-qwen if pullable).
+          (qwen3.5:0.8b, qwen3.5:4b, qwen2.5-coder:1.5b,
+          qwen2.5-coder:7b, or a 1bit-quantized backup like
+          bonsai-1bit-qwen if pullable).
           For remote, the model name your endpoint exposes (qwen-plus,
           Qwen/Qwen3.5-7B, gpt-4o-mini, ...).
-        default: 'qwen3.5:small'
+        default: 'qwen3.5:0.8b'
         type: string
 
 jobs:
@@ -81,7 +82,7 @@ jobs:
       # Scheduled runs have no workflow_dispatch inputs, so default to the
       # fully self-contained ollama-local profile with a small qwen model.
       LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
-      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:small' }}
+      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:0.8b' }}
     steps:
       - name: Check out mumei-agent
         uses: actions/checkout@v4
@@ -160,14 +161,21 @@ jobs:
           curl -fsSL https://ollama.com/install.sh | sh
           # Run ollama serve in the background so later steps can talk to it.
           nohup ollama serve > /tmp/ollama.log 2>&1 &
-          # Wait for the HTTP API to become ready.
+          # Wait for the HTTP API to become ready (timeout after 30s).
+          OLLAMA_READY=false
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
               echo "ollama ready after ${i}s"
+              OLLAMA_READY=true
               break
             fi
             sleep 1
           done
+          if [ "$OLLAMA_READY" != "true" ]; then
+            echo "::error::ollama failed to start within 30 seconds"
+            cat /tmp/ollama.log || true
+            exit 1
+          fi
           curl -fsS http://localhost:11434/api/tags
 
       - name: Pull ollama model

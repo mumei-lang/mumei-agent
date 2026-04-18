@@ -548,6 +548,26 @@ class TestBuildPrBodyExtra:
         # Verification summary is always included.
         assert "Verification summary" in body
 
+    def test_shows_baseline_when_only_health_before(self) -> None:
+        health_before = {
+            "health_score": 0.75,
+            "verified_files": 3,
+            "total_files": 4,
+            "trusted_atoms": 2,
+        }
+        body = proliferate._build_pr_body_extra(
+            spec={"target_file": "std/core.mm"},
+            proposal=None,
+            health_before=health_before,
+            health_after=None,
+        )
+        assert "pre-run baseline" in body
+        assert "0.750" in body
+        assert "3/4" in body
+        assert "trusted atoms: 2" in body
+        # Should NOT contain delta arrow since post-health is absent.
+        assert "→" not in body
+
 
 class TestJsonifyResult:
     def test_code_is_replaced_with_length(self) -> None:

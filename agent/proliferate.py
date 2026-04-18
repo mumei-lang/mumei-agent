@@ -461,7 +461,7 @@ def _build_pr_body_extra(
             lines.append(f"- **priority**: {proposal['priority']}")
     lines.append("")
 
-    # Health delta
+    # Health delta (or baseline when post-health is not yet available)
     if health_before is not None and health_after is not None:
         before = health_before.get("health_score", 0.0)
         after = health_after.get("health_score", 0.0)
@@ -479,6 +479,20 @@ def _build_pr_body_extra(
         lines.append(
             f"- trusted atoms: {health_before.get('trusted_atoms', 0)} → "
             f"{health_after.get('trusted_atoms', 0)}"
+        )
+        lines.append("")
+    elif health_before is not None:
+        before = health_before.get("health_score", 0.0)
+        lines.append("### Proof health (pre-run baseline)")
+        lines.append(
+            f"- health_score: **{before:.3f}**"
+        )
+        lines.append(
+            f"- files verified: {health_before.get('verified_files', 0)}/"
+            f"{health_before.get('total_files', 0)}"
+        )
+        lines.append(
+            f"- trusted atoms: {health_before.get('trusted_atoms', 0)}"
         )
         lines.append("")
 
@@ -777,6 +791,11 @@ def proliferate(
         #   (b) reimplement the git/PR logic directly in ``proliferate``.
         # Until then, the non-dry-run path is unreliable when healing was
         # needed.  Operators should verify results manually.
+        #
+        # Additionally, ``_build_pr_body_extra()`` receives
+        # ``health_after=None`` because post-health is only measured
+        # after all proposals complete.  The PR description will show
+        # the pre-run baseline instead of a delta.
         logger.warning(
             "Non-dry-run publish delegates to publish() which re-generates "
             "code independently.  Blast-radius-tested code and healed files "
