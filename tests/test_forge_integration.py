@@ -20,7 +20,15 @@ from agent.prompts.forge.forge_system import FORGE_SYSTEM_PROMPT
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SAFE_LIST_SPEC = REPO_ROOT / "forge_tasks" / "vstd_safe_list.json"
+# Canonical SafeList reference spec used as a test fixture.  It used to
+# live under ``forge_tasks/`` but was retired from production once the
+# corresponding module landed on mumei-lang/mumei (commit e05fa0c), which
+# caused forge to crash on every run with FileExistsError.  The spec is
+# still valuable as a golden example of a well-formed create-mode task,
+# so it now ships with the tests instead of the runtime task queue.
+SAFE_LIST_SPEC = (
+    REPO_ROOT / "tests" / "fixtures" / "forge_specs" / "vstd_safe_list.json"
+)
 
 
 # ---------------------------------------------------------------------------
