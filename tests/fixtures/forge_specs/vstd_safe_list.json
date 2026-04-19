@@ -1,0 +1,110 @@
+{
+  "task_id": "vstd-container-safe-list",
+  "target_file": "std/container/safe_list.mm",
+  "mode": "create",
+  "priority": 1,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Verified SafeList: boundary-checked list with get/set/push/pop. All index accesses are proven safe via requires preconditions. Follows the same pattern as std/container/safe_queue.mm and std/container/bounded_array.mm. The generated file MUST begin with a header comment block (// =========) identifying the module as 'SafeList', followed by a struct declaration: `struct SafeList { len: i64 where v >= 0, cap: i64 where v > 0 }`. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in safe_queue.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what safe_queue.mm and bounded_array.mm already use.",
+  "context_files": [
+    "std/container/safe_queue.mm",
+    "std/container/bounded_array.mm",
+    "std/contracts.mm"
+  ],
+  "atoms": [
+    {
+      "name": "safe_get",
+      "description": "Get element at index. Requires 0 <= index < len (Out of Bounds prevention). Returns the index itself as a placeholder for the retrieved element value (consistent with safe_queue.mm style where atoms operate on length parameters, not on the underlying storage).",
+      "params": [
+        {"name": "list_len", "type": "i64"},
+        {"name": "index", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len > 0 && index >= 0 && index < list_len",
+      "ensures": "result >= 0 && result < list_len",
+      "reference_patterns": ["enqueue", "bounded_push"]
+    },
+    {
+      "name": "safe_set",
+      "description": "Set element at index. Requires 0 <= index < len (Out of Bounds prevention). Returns the list length (unchanged).",
+      "params": [
+        {"name": "list_len", "type": "i64"},
+        {"name": "index", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len > 0 && index >= 0 && index < list_len",
+      "ensures": "result == list_len",
+      "reference_patterns": ["enqueue"]
+    },
+    {
+      "name": "safe_push",
+      "description": "Append element to end of list. Requires len < cap (overflow prevention). Returns new length.",
+      "params": [
+        {"name": "list_len", "type": "i64"},
+        {"name": "list_cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len >= 0 && list_cap > 0 && list_len < list_cap",
+      "ensures": "result >= 0 && result <= list_cap && result == list_len + 1",
+      "reference_patterns": ["bounded_push", "enqueue"]
+    },
+    {
+      "name": "safe_pop",
+      "description": "Remove last element. Requires len > 0 (underflow prevention). Returns new length.",
+      "params": [
+        {"name": "list_len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len > 0",
+      "ensures": "result >= 0 && result == list_len - 1",
+      "reference_patterns": ["bounded_pop", "dequeue"]
+    },
+    {
+      "name": "safe_list_is_empty",
+      "description": "Check if list is empty. Returns 1 if empty, 0 otherwise.",
+      "params": [
+        {"name": "list_len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len >= 0",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_empty", "bounded_is_empty"]
+    },
+    {
+      "name": "safe_list_is_full",
+      "description": "Check if list is at capacity. Returns 1 if full, 0 otherwise.",
+      "params": [
+        {"name": "list_len", "type": "i64"},
+        {"name": "list_cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len >= 0 && list_cap > 0",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_full", "bounded_is_full"]
+    },
+    {
+      "name": "safe_list_remaining",
+      "description": "Return remaining capacity.",
+      "params": [
+        {"name": "list_len", "type": "i64"},
+        {"name": "list_cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len >= 0 && list_cap > 0 && list_len <= list_cap",
+      "ensures": "result >= 0 && result == list_cap - list_len",
+      "reference_patterns": ["queue_remaining"]
+    },
+    {
+      "name": "safe_get_checked",
+      "description": "Safe get variant: returns 0 (Ok) if index is valid, 1 (Err) if out of bounds. No panic.",
+      "params": [
+        {"name": "list_len", "type": "i64"},
+        {"name": "index", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "list_len >= 0",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["enqueue_safe", "dequeue_safe"]
+    }
+  ]
+}
