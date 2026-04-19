@@ -269,6 +269,15 @@ jobs:
           LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
           LLM_MODEL: ${{ steps.llm_env.outputs.model }}
           MUMEI_BIN: mumei
+          # The mumei compiler searches MUMEI_STD_PATH when resolving
+          # `import "std/..."` statements from source files that live
+          # outside the mumei repo tree (e.g. NamedTemporaryFile paths
+          # under /tmp that the agent uses for pre-publish parse checks).
+          # Without this, generated modules that import std/core fail at
+          # parse time with an unresolvable import and the self-heal loop
+          # cannot recover.  Points at the checkout from the previous
+          # `Checkout mumei compiler` step.
+          MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
           # Agent-internal token for pushing branches / opening PRs on
           # mumei-lang/mumei.  Must be a real PAT; the default GITHUB_TOKEN
           # cannot push across repositories, so no GITHUB_TOKEN fallback.
