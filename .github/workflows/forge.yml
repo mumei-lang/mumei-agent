@@ -4,9 +4,44 @@ name: Forge
 # generate + verify + self-heal pipelines against a checkout of the
 # mumei compiler, and open a PR with the resulting std/ changes.
 #
-# Triggered manually via workflow_dispatch.  A schedule trigger is
-# included but commented out - uncomment once the workflow has been
-# exercised manually a few times and the cost profile is well understood.
+# Workflow:
+#   1. Check out mumei-agent (this repo) and mumei (cross-repo).
+#   2. Build the mumei compiler from source so `python -m agent forge`
+#      has a real binary to invoke for verification.
+#   3. Provision the LLM backend according to the selected `llm_profile`:
+#        - ollama-local : spin up an Ollama server on the runner and pull
+#                         a small qwen model (default qwen3.5:0.8b).
+#                         Requires zero additional secrets.
+#        - remote       : use any OpenAI-compatible endpoint configured via
+#                         repository secrets (DashScope / vLLM / self-hosted
+#                         Ollama over tailscale / OpenAI). Requires
+#                         LLM_API_KEY (or legacy OPENAI_API_KEY) and
+#                         optionally LLM_BASE_URL / LLM_MODEL.
+#   4. Install agent dependencies.
+#   5. Run `python -m agent forge` against the selected task specs.
+#   6. Optionally open a PR against mumei-lang/mumei with the changes.
+#
+# Triggers:
+#   - workflow_dispatch : operator-driven runs. dry_run defaults to "false"
+#                         here so the `--dry-run` flag is opt-in.
+#   - schedule          : daily 03:00 UTC safety-railed runs. Schedule
+#                         events force `--dry-run` regardless of inputs
+#                         until an operator has verified the end-to-end
+#                         pipeline via workflow_dispatch with dry_run=false.
+#
+# Required repository secrets (set these in
+# Settings -> Secrets and variables -> Actions for mumei-lang/mumei-agent):
+#   - MUMEI_PAT        : (optional) PAT / GitHub App token with
+#                        `contents:write` + `pull-requests:write` on
+#                        mumei-lang/mumei. Falls back to the default
+#                        GITHUB_TOKEN when absent.
+#
+# Optional repository secrets (only consumed when llm_profile = remote):
+#   - LLM_API_KEY      : API key for the remote OpenAI-compatible endpoint.
+#   - LLM_BASE_URL     : Base URL (e.g. https://dashscope.aliyuncs.com/compatible-mode/v1).
+#   - LLM_MODEL        : Model name (e.g. qwen-plus). Falls back to the
+#                        workflow_dispatch `llm_model` input.
+#   - OPENAI_API_KEY   : Legacy alias for LLM_API_KEY; used only as fallback.
 
 on:
   workflow_dispatch:
@@ -25,9 +60,28 @@ on:
         default: "false"
         type: choice
         options: ["true", "false"]
-  # schedule:
-  #   # Every day at 03:00 UTC.  Uncomment once manual runs are stable.
-  #   - cron: "0 3 * * *"
+      llm_profile:
+        description: "LLM backend profile"
+        default: "ollama-local"
+        type: choice
+        options:
+          - ollama-local
+          - remote
+      llm_model:
+        description: |
+          Model tag. For ollama-local, anything `ollama pull` accepts
+          (qwen3.5:0.8b, qwen3.5:4b, qwen2.5-coder:1.5b,
+          qwen2.5-coder:7b, or a 1bit-quantized backup like
+          bonsai-1bit-qwen if pullable).
+          For remote, the model name your endpoint exposes (qwen-plus,
+          Qwen/Qwen3.5-7B, gpt-4o-mini, ...).
+        default: "qwen3.5:0.8b"
+        type: string
+  schedule:
+    # Every day at 03:00 UTC.  Schedule events always run with
+    # --dry-run (see the "Run forge" step) so re-enabling this cron
+    # is safe even if nobody has operator-verified the pipeline yet.
+    - cron: "0 3 * * *"
 
 permissions:
   contents: write
@@ -36,6 +90,11 @@ permissions:
 jobs:
   forge:
     runs-on: ubuntu-latest
+    env:
+      # Scheduled runs have no workflow_dispatch inputs, so default to the
+      # fully self-contained ollama-local profile with a small qwen model.
+      LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
+      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:0.8b' }}
     steps:
       - name: Checkout mumei-agent
         uses: actions/checkout@v4
@@ -48,11 +107,54 @@ jobs:
           repository: mumei-lang/mumei
           ref: develop
           path: mumei
+          # Prefer MUMEI_PAT (shared with proliferate.yml); fall back to
+          # the legacy MUMEI_REPO_TOKEN, then GITHUB_TOKEN for read-only
+          # checkouts of the public mumei repo.
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+
+      - name: Install mumei system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libz3-dev z3 libzstd-dev
+          # Detect the Ubuntu codename so the LLVM repo stays correct
+          # when GitHub updates ubuntu-latest beyond Jammy (22.04).
+          CODENAME="$(lsb_release -cs)"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] \
+            http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libpolly-17-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mumei/target
+          key: cargo-mumei-${{ hashFiles('mumei/Cargo.lock') }}
+          restore-keys: |
+            cargo-mumei-
+
+      - name: Build mumei compiler
+        working-directory: mumei
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: |
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      - name: Verify mumei binary is on PATH
+        run: |
+          which mumei
+          mumei --version || true
 
       - name: Install agent dependencies
         working-directory: mumei-agent
@@ -60,13 +162,89 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
 
-      - name: Build mumei compiler
-        working-directory: mumei
+      # ----- LLM provisioning: ollama-local -----
+
+      - name: Cache ollama models
+        if: env.LLM_PROFILE == 'ollama-local'
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-${{ env.LLM_MODEL_INPUT }}
+          restore-keys: |
+            ollama-
+
+      - name: Install and start Ollama
+        if: env.LLM_PROFILE == 'ollama-local'
         run: |
-          # Placeholder build step - adjust to mumei's actual build system.
-          # The forge orchestrator only needs a `mumei` binary on PATH.
-          if [ -f Makefile ]; then
-            make || true
+          curl -fsSL https://ollama.com/install.sh | sh
+          # Run ollama serve in the background so later steps can talk to it.
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          # Wait for the HTTP API to become ready (timeout after 30s).
+          OLLAMA_READY=false
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
+              echo "ollama ready after ${i}s"
+              OLLAMA_READY=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$OLLAMA_READY" != "true" ]; then
+            echo "::error::ollama failed to start within 30 seconds"
+            cat /tmp/ollama.log || true
+            exit 1
+          fi
+          curl -fsS http://localhost:11434/api/tags
+
+      - name: Pull ollama model
+        if: env.LLM_PROFILE == 'ollama-local'
+        run: |
+          echo "Pulling ${LLM_MODEL_INPUT}..."
+          ollama pull "${LLM_MODEL_INPUT}"
+          ollama list
+
+      # ----- LLM provisioning: remote -----
+      # No install step; the agent talks to the configured endpoint directly.
+
+      - name: Resolve LLM environment
+        id: llm_env
+        env:
+          _LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          _OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          _LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          _LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: |
+          if [ "${LLM_PROFILE}" = "ollama-local" ]; then
+            echo "api_key=ollama" >> "$GITHUB_OUTPUT"
+            echo "base_url=http://localhost:11434/v1" >> "$GITHUB_OUTPUT"
+            echo "model=${LLM_MODEL_INPUT}" >> "$GITHUB_OUTPUT"
+          else
+            # Remote profile: read secrets via env vars (never inline
+            # ${{ secrets.* }} in the script body — values containing $
+            # or backticks would be corrupted by shell expansion).
+            REMOTE_KEY="${_LLM_API_KEY}"
+            if [ -z "${REMOTE_KEY}" ]; then
+              # Legacy fallback for existing deployments.
+              REMOTE_KEY="${_OPENAI_API_KEY}"
+            fi
+            if [ -z "${REMOTE_KEY}" ]; then
+              echo "::error::llm_profile=remote but neither LLM_API_KEY nor OPENAI_API_KEY is set"
+              exit 1
+            fi
+            # Ensure the key is redacted from all subsequent log output.
+            echo "::add-mask::${REMOTE_KEY}"
+            REMOTE_BASE="${_LLM_BASE_URL}"
+            REMOTE_MODEL="${_LLM_MODEL}"
+            if [ -z "${REMOTE_MODEL}" ]; then
+              REMOTE_MODEL="${LLM_MODEL_INPUT}"
+            fi
+            {
+              echo "api_key<<__EOF__"
+              echo "${REMOTE_KEY}"
+              echo "__EOF__"
+              echo "base_url=${REMOTE_BASE}"
+              echo "model=${REMOTE_MODEL}"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run forge
@@ -77,8 +255,10 @@ jobs:
         # to prevent shell injection via crafted input values.
         # See: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          MUMEI_BIN: ${{ github.workspace }}/mumei/target/release/mumei
+          LLM_API_KEY: ${{ steps.llm_env.outputs.api_key }}
+          LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
+          LLM_MODEL: ${{ steps.llm_env.outputs.model }}
+          MUMEI_BIN: mumei
           # The mumei compiler searches MUMEI_STD_PATH when resolving
           # `import "std/..."` statements from source files that live
           # outside the mumei repo tree (e.g. NamedTemporaryFile paths
@@ -88,16 +268,24 @@ jobs:
           # cannot recover.  Points at the checkout from the previous
           # `Checkout mumei compiler` step.
           MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
-          TASKS_DIR: ${{ github.event.inputs.tasks_dir }}
-          MAX_TASKS: ${{ github.event.inputs.max_tasks }}
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          TASKS_DIR: ${{ github.event.inputs.tasks_dir || 'forge_tasks/' }}
+          MAX_TASKS: ${{ github.event.inputs.max_tasks || '1' }}
+          DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
+          EVENT_NAME: ${{ github.event_name }}
           MUMEI_REPO_DIR: ${{ github.workspace }}/mumei
           FORGE_LOG_PATH: ${{ github.workspace }}/mumei-agent/forge_log.json
         run: |
           DRY_RUN_FLAG=""
-          if [ "$DRY_RUN" = "true" ]; then
+          # Safety rail: scheduled runs always execute in dry-run mode
+          # until an operator has explicitly opted into creating PRs by
+          # running workflow_dispatch with dry_run=false. Remove this
+          # branch once the schedule has been verified end-to-end.
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          elif [ "$DRY_RUN_INPUT" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
+          echo "[FORGE] profile=${LLM_PROFILE} model=${LLM_MODEL} base_url=${LLM_BASE_URL:-<openai-default>}"
           python -m agent forge \
             --tasks-dir "$TASKS_DIR" \
             --mumei-repo "$MUMEI_REPO_DIR" \
@@ -114,7 +302,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Create Pull Request on mumei
-        if: github.event.inputs.dry_run != 'true'
+        if: github.event_name != 'schedule' && github.event.inputs.dry_run != 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           path: mumei
