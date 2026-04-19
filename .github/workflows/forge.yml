@@ -109,7 +109,13 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           path: mumei
-          token: ${{ secrets.MUMEI_PAT || secrets.GITHUB_TOKEN }}
+          # Prefer MUMEI_PAT; fall back to legacy MUMEI_REPO_TOKEN.  The
+          # final GITHUB_TOKEN is included only to avoid an "input required
+          # and not supplied" error at workflow-parse time; it is scoped to
+          # mumei-agent and cannot push to mumei-lang/mumei, so an
+          # under-configured run will fail clearly at PR-creation time
+          # instead of on an empty-token validation.
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
           branch: forge/auto-${{ github.run_id }}
           commit-message: "feat(vStd): autonomous forge pass ${{ github.run_id }}"
           title: "feat(vStd): autonomous forge pass ${{ github.run_id }}"
