@@ -241,8 +241,15 @@ def publish(
         result["generation_error"] = "empty code"
         return result
 
-    generated_file = f"{module_name}.mm"
+    # Use ``target_file`` from the spec when available so that
+    # subdirectory modules (e.g. ``std/math/abs.mm``) are written to
+    # the correct relative path.  Fall back to the flat
+    # ``{module_name}.mm`` for backward compatibility with specs that
+    # lack ``target_file``.
+    target_file_rel = spec.get("target_file") or f"{module_name}.mm"
+    generated_file = target_file_rel
     generated_path = cwd / generated_file
+    generated_path.parent.mkdir(parents=True, exist_ok=True)
     with open(generated_path, "w", encoding="utf-8") as f:
         f.write(code)
     result["generated_file"] = generated_file
