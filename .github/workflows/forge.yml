@@ -107,7 +107,10 @@ jobs:
           repository: mumei-lang/mumei
           ref: develop
           path: mumei
-          token: ${{ secrets.MUMEI_PAT || secrets.GITHUB_TOKEN }}
+          # Prefer MUMEI_PAT (shared with proliferate.yml); fall back to
+          # the legacy MUMEI_REPO_TOKEN, then GITHUB_TOKEN for read-only
+          # checkouts of the public mumei repo.
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -292,7 +295,9 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           path: mumei
-          token: ${{ secrets.MUMEI_PAT || secrets.GITHUB_TOKEN }}
+          # Prefer MUMEI_PAT; fall back to legacy MUMEI_REPO_TOKEN, then
+          # GITHUB_TOKEN for read-only checkouts of the public mumei repo.
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
           branch: forge/auto-${{ github.run_id }}
           commit-message: "feat(vStd): autonomous forge pass ${{ github.run_id }}"
           title: "feat(vStd): autonomous forge pass ${{ github.run_id }}"
