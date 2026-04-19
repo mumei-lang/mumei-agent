@@ -26,9 +26,13 @@ name: SI-5 Autonomous Proliferation
 #
 # Required repository secrets (set these in
 # Settings -> Secrets and variables -> Actions for mumei-lang/mumei-agent):
-#   - MUMEI_REPO_TOKEN : PAT or GitHub App token with `contents:write` +
+#   - MUMEI_PAT        : PAT or GitHub App token with `contents:write` +
 #                        `pull-requests:write` on mumei-lang/mumei.  Used to
 #                        check out mumei, push branches, and open PRs.
+#                        Shared with the Forge workflow.
+#   - MUMEI_REPO_TOKEN : Legacy alias for MUMEI_PAT; consulted as a fallback
+#                        when MUMEI_PAT is not set.  New deployments should
+#                        populate MUMEI_PAT instead.
 #
 # Optional repository secrets (only consumed when llm_profile = remote):
 #   - LLM_API_KEY      : API key for the remote OpenAI-compatible endpoint.
@@ -97,7 +101,13 @@ jobs:
           repository: mumei-lang/mumei
           ref: develop
           path: mumei
-          token: ${{ secrets.MUMEI_REPO_TOKEN }}
+          # Prefer MUMEI_PAT (shared with forge.yml); fall back to the
+          # legacy MUMEI_REPO_TOKEN secret, and finally to GITHUB_TOKEN so
+          # read-only checkouts of the public mumei repo still succeed
+          # when no PAT is configured.  Note: the downstream PR-creation
+          # step still requires a real PAT with write access to
+          # mumei-lang/mumei; GITHUB_TOKEN is scoped to this repo only.
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -257,7 +267,10 @@ jobs:
           LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
           LLM_MODEL: ${{ steps.llm_env.outputs.model }}
           MUMEI_BIN: mumei
-          GITHUB_TOKEN: ${{ secrets.MUMEI_REPO_TOKEN }}
+          # Agent-internal token for pushing branches / opening PRs on
+          # mumei-lang/mumei.  Must be a real PAT; the default GITHUB_TOKEN
+          # cannot push across repositories, so no GITHUB_TOKEN fallback.
+          GITHUB_TOKEN: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN }}
           GITHUB_OWNER: mumei-lang
           GITHUB_REPO: mumei
           MAX_PROPOSALS: ${{ github.event.inputs.max_proposals || '3' }}
