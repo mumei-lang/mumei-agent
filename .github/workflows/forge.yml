@@ -231,6 +231,8 @@ jobs:
               echo "::error::llm_profile=remote but neither LLM_API_KEY nor OPENAI_API_KEY is set"
               exit 1
             fi
+            # Ensure the key is redacted from all subsequent log output.
+            echo "::add-mask::${REMOTE_KEY}"
             REMOTE_BASE="${_LLM_BASE_URL}"
             REMOTE_MODEL="${_LLM_MODEL}"
             if [ -z "${REMOTE_MODEL}" ]; then
