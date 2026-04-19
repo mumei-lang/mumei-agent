@@ -1,37 +1,3 @@
 {
-  "task_id": "vstd-math-abs",
-  "target_file": "std/math/abs.mm",
-  "mode": "create",
-  "priority": 3,
-  "max_retries": 10,
-  "auto_commit": false,
-  "description": "Absolute value with i64::MIN overflow handling. Z3 integer theory can fully verify the edge case. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/abs — verified absolute value'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm already uses (checked_add, checked_sub, safe_narrow, conditional expressions).",
-  "context_files": [
-    "std/core.mm",
-    "std/contracts.mm"
-  ],
-  "atoms": [
-    {
-      "name": "abs_i64",
-      "description": "Absolute value of a 64-bit signed integer. i64::MIN is an unrepresentable magnitude, so the precondition excludes it. For non-negative inputs the value is returned unchanged; for strictly negative inputs the negation is returned.",
-      "inputs": [
-        {"name": "x", "type": "i64"}
-      ],
-      "return_type": "i64",
-      "requires": "x > -9223372036854775808",
-      "ensures": "result >= 0 && (result == x || result == -x)",
-      "reference_patterns": ["safe_to_non_negative", "safe_narrow", "checked_sub"]
-    },
-    {
-      "name": "abs_saturating",
-      "description": "Saturating absolute value. Safe for every i64 input: when x == i64::MIN the result saturates at i64::MAX instead of overflowing.",
-      "inputs": [
-        {"name": "x", "type": "i64"}
-      ],
-      "return_type": "i64",
-      "requires": "true",
-      "ensures": "result >= 0",
-      "reference_patterns": ["safe_to_non_negative", "checked_sub", "safe_narrow"]
-    }
-  ]
+  "_deprecated": "Moved to vstd_math_abs.json — delete this file."
 }
