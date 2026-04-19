@@ -265,11 +265,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           DRY_RUN_FLAG=""
-          # Default to dry_run=true when the workflow fires on its weekly
-          # schedule until an operator has explicitly opted into creating
-          # PRs by running `workflow_dispatch` with `dry_run=false`.
+          # Schedule runs now create real PRs after an operator has
+          # verified the pipeline end-to-end via workflow_dispatch with
+          # dry_run=false. Manual runs still respect the `dry_run` input.
           if [ "$EVENT_NAME" = "schedule" ]; then
-            DRY_RUN_FLAG="--dry-run"
+            DRY_RUN_FLAG=""  # Schedule runs now create real PRs
           elif [ "$DRY_RUN_INPUT" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
