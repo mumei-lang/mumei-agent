@@ -111,6 +111,106 @@ class TestAnalyzeGaps:
         for p in result["proposals"]:
             assert 1 <= p["priority"] <= 3
 
+    def test_math_abs_rule_triggers_when_missing(self, tmp_path: Path) -> None:
+        """std/math/abs.mm should be a candidate proposal when absent."""
+        std = tmp_path / "std"
+        std.mkdir()
+        abs_rule = next(
+            r for r in proliferate._STD_GAP_RULES if r["target"] == "std/math/abs.mm"
+        )
+        assert proliferate._evaluate_rule(abs_rule, set(), std) is True
+        # And once the file exists, the rule must no longer trigger.
+        _write_mm(
+            std / "math" / "abs.mm",
+            "atom abs_i64(x: i64) ensures: true; body: x;\n",
+        )
+        existing = {"std/math/abs.mm"}
+        assert proliferate._evaluate_rule(abs_rule, existing, std) is False
+
+    def test_math_pow_rule_requires_core_present(self, tmp_path: Path) -> None:
+        """std/math/pow.mm must only be proposed when std/core.mm exists."""
+        std = tmp_path / "std"
+        std.mkdir()
+        pow_rule = next(
+            r for r in proliferate._STD_GAP_RULES if r["target"] == "std/math/pow.mm"
+        )
+        # Without core.mm present, requires_present fails.
+        assert proliferate._evaluate_rule(pow_rule, set(), std) is False
+        # With core.mm present and pow.mm missing, the rule triggers.
+        assert (
+            proliferate._evaluate_rule(pow_rule, {"std/core.mm"}, std) is True
+        )
+        # With pow.mm already present, the rule no longer triggers.
+        assert (
+            proliferate._evaluate_rule(
+                pow_rule, {"std/core.mm", "std/math/pow.mm"}, std
+            )
+            is False
+        )
+
+    def test_binary_heap_rule_requires_bounded_array(self, tmp_path: Path) -> None:
+        """std/container/binary_heap.mm must wait for bounded_array.mm."""
+        std = tmp_path / "std"
+        std.mkdir()
+        heap_rule = next(
+            r
+            for r in proliferate._STD_GAP_RULES
+            if r["target"] == "std/container/binary_heap.mm"
+        )
+        assert proliferate._evaluate_rule(heap_rule, set(), std) is False
+        assert (
+            proliferate._evaluate_rule(
+                heap_rule, {"std/container/bounded_array.mm"}, std
+            )
+            is True
+        )
+
+    def test_low_difficulty_math_rules_rank_before_medium(
+        self, tmp_path: Path
+    ) -> None:
+        """Low-difficulty math gaps should outrank medium-difficulty ones.
+
+        With std/core.mm present, abs / safe_div / safe_mul (difficulty="low",
+        fully satisfied deps) should rank ahead of ring_buffer / hash
+        ("medium") and fill the top-3 cap.
+        """
+        std = tmp_path / "std"
+        _write_mm(
+            std / "core.mm",
+            "atom core_ok(x: i64) ensures: true; body: x;\n",
+        )
+        result = proliferate.analyze_gaps(std)
+        names = [p["name"] for p in result["proposals"]]
+        assert set(names) == {
+            "std/math/abs.mm",
+            "std/math/safe_div.mm",
+            "std/math/safe_mul.mm",
+        }
+        # All three winners must have difficulty "low".
+        assert all(p["difficulty"] == "low" for p in result["proposals"])
+        # Priorities assigned in order 1..3.
+        assert [p["priority"] for p in result["proposals"]] == [1, 2, 3]
+
+    def test_pow_surfaces_after_low_math_rules_are_filled(
+        self, tmp_path: Path
+    ) -> None:
+        """Once abs/safe_div/safe_mul exist, pow should become a proposal."""
+        std = tmp_path / "std"
+        for rel in (
+            "core.mm",
+            "math/abs.mm",
+            "math/safe_div.mm",
+            "math/safe_mul.mm",
+        ):
+            _write_mm(
+                std / rel,
+                f"atom placeholder_{rel.replace('/', '_').replace('.mm', '')}"
+                "(x: i64) ensures: true; body: x;\n",
+            )
+        result = proliferate.analyze_gaps(std)
+        names = {p["name"] for p in result["proposals"]}
+        assert "std/math/pow.mm" in names
+
 
 # ---------------------------------------------------------------------------
 # generate_specs_from_gaps
@@ -349,7 +449,20 @@ class TestProliferateDryRun:
     def test_no_proposals_when_std_is_complete(self, tmp_path: Path) -> None:
         std = tmp_path / "std"
         # Create every file that would otherwise be proposed.
-        for rel in ("prelude.mm", "core.mm", "iter.mm", "hash.mm", "alloc.mm"):
+        for rel in (
+            "prelude.mm",
+            "core.mm",
+            "iter.mm",
+            "hash.mm",
+            "alloc.mm",
+            "math/abs.mm",
+            "math/safe_div.mm",
+            "math/safe_mul.mm",
+            "math/pow.mm",
+            "container/ring_buffer.mm",
+            "container/binary_heap.mm",
+            "container/bounded_array.mm",
+        ):
             _write_mm(std / rel, "atom ok(x: i64) ensures: true; body: x;\n")
         _write_mm(
             std / "trait" / "iterable.mm",
@@ -611,7 +724,20 @@ class TestOutputJson:
 
     def test_no_proposals_writes_summary_json(self, tmp_path: Path) -> None:
         std = tmp_path / "std"
-        for rel in ("prelude.mm", "core.mm", "iter.mm", "hash.mm", "alloc.mm"):
+        for rel in (
+            "prelude.mm",
+            "core.mm",
+            "iter.mm",
+            "hash.mm",
+            "alloc.mm",
+            "math/abs.mm",
+            "math/safe_div.mm",
+            "math/safe_mul.mm",
+            "math/pow.mm",
+            "container/ring_buffer.mm",
+            "container/binary_heap.mm",
+            "container/bounded_array.mm",
+        ):
             _write_mm(std / rel, "atom ok(x: i64) ensures: true; body: x;\n")
         _write_mm(
             std / "trait" / "iterable.mm",

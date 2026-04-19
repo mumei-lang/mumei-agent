@@ -90,6 +90,74 @@ _STD_GAP_RULES: list[dict[str, Any]] = [
         "difficulty": "medium",
         "trigger": {"missing": "std/hash.mm"},
     },
+    # std/math 系（Z3 整数理論ネイティブ）
+    {
+        "target": "std/math/abs.mm",
+        "reason": (
+            "Absolute value with i64::MIN overflow handling. "
+            "Z3 integer theory can fully verify the edge case."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "low",
+        "trigger": {"missing": "std/math/abs.mm"},
+    },
+    {
+        "target": "std/math/safe_div.mm",
+        "reason": (
+            "Division with compile-time zero-divisor elimination "
+            "using NonZero type from core.mm."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "low",
+        "trigger": {"missing": "std/math/safe_div.mm"},
+    },
+    {
+        "target": "std/math/safe_mul.mm",
+        "reason": (
+            "Multiplication with full overflow prevention proof. "
+            "Extends checked_mul from core.mm with richer contracts."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "low",
+        "trigger": {"missing": "std/math/safe_mul.mm"},
+    },
+    {
+        "target": "std/math/pow.mm",
+        "reason": (
+            "Integer exponentiation with overflow bounds proof. "
+            "Z3 can verify base cases and inductive overflow limits."
+        ),
+        "depends_on": ["std/core.mm", "std/math/safe_mul.mm"],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/math/pow.mm",
+            "requires_present": ["std/core.mm"],
+        },
+    },
+    # std/container 系（Z3 配列理論）
+    {
+        "target": "std/container/ring_buffer.mm",
+        "reason": (
+            "Fixed-size ring buffer with head/tail pointer wraparound "
+            "safety proof. Z3 modular arithmetic."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "medium",
+        "trigger": {"missing": "std/container/ring_buffer.mm"},
+    },
+    {
+        "target": "std/container/binary_heap.mm",
+        "reason": (
+            "Binary heap with heap property maintenance proof after "
+            "insert/delete. Z3 array + integer theory."
+        ),
+        "depends_on": ["std/core.mm", "std/container/bounded_array.mm"],
+        "difficulty": "high",
+        "trigger": {
+            "missing": "std/container/binary_heap.mm",
+            "requires_present": ["std/container/bounded_array.mm"],
+        },
+    },
 ]
 
 

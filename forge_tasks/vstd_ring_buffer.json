@@ -1,0 +1,75 @@
+{
+  "task_id": "vstd-container-ring-buffer",
+  "target_file": "std/container/ring_buffer.mm",
+  "mode": "create",
+  "priority": 5,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Fixed-size ring buffer with head/tail pointer wraparound safety proof. Uses Z3 modular arithmetic. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/container/ring_buffer — verified circular buffer'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/container/safe_queue.mm and std/container/bounded_array.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm, safe_queue.mm, and bounded_array.mm already use.",
+  "context_files": [
+    "std/core.mm",
+    "std/container/safe_queue.mm",
+    "std/container/bounded_array.mm"
+  ],
+  "atoms": [
+    {
+      "name": "ring_advance",
+      "description": "Advance an index by one modulo the ring capacity. Proves the result is always within [0, cap) — the core wraparound invariant.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && idx >= 0 && idx < cap",
+      "ensures": "result >= 0 && result < cap",
+      "reference_patterns": ["enqueue", "bounded_push", "checked_add"]
+    },
+    {
+      "name": "ring_push",
+      "description": "Push an element onto a ring buffer that has spare room. Returns the new length. Requires the buffer to be non-full.",
+      "inputs": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && len >= 0 && len < cap",
+      "ensures": "result >= 1 && result <= cap && result == len + 1",
+      "reference_patterns": ["bounded_push", "enqueue"]
+    },
+    {
+      "name": "ring_pop",
+      "description": "Pop the oldest element from a non-empty ring buffer. Returns the new length.",
+      "inputs": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && len > 0 && len <= cap",
+      "ensures": "result >= 0 && result < cap && result == len - 1",
+      "reference_patterns": ["bounded_pop", "dequeue"]
+    },
+    {
+      "name": "ring_is_empty",
+      "description": "Return 1 when the ring buffer is empty, 0 otherwise.",
+      "inputs": [
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_empty", "bounded_is_empty"]
+    },
+    {
+      "name": "ring_is_full",
+      "description": "Return 1 when len == cap, 0 otherwise.",
+      "inputs": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && len >= 0 && len <= cap",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_full", "bounded_is_full"]
+    }
+  ]
+}
