@@ -47,9 +47,21 @@ _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
 
 
 def _module_to_slug(module_path: str) -> str:
-    """Turn ``std/iter.mm`` into the slug ``iter`` used in task ids."""
-    stem = Path(module_path).stem  # ``iter`` for ``std/iter.mm``
-    slug = _SLUG_RE.sub("-", stem.lower()).strip("-")
+    """Turn ``std/iter.mm`` → ``iter``, ``std/math/abs.mm`` → ``math-abs``.
+
+    Strips a leading ``std/`` prefix and the ``.mm`` extension, then
+    converts path separators to hyphens.  This keeps slugs unique even
+    when different sub-directories share the same filename (e.g.
+    ``std/abs.mm`` vs ``std/math/abs.mm``).
+    """
+    p = module_path
+    if p.startswith("std/"):
+        p = p[len("std/"):]
+    # Remove .mm extension
+    if p.endswith(".mm"):
+        p = p[:-3]
+    # Replace path separators and underscores with hyphens, then sanitise
+    slug = _SLUG_RE.sub("-", p.replace("/", "-").replace("_", "-").lower()).strip("-")
     return slug or "unknown"
 
 

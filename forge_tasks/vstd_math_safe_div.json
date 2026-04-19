@@ -1,0 +1,39 @@
+{
+  "task_id": "vstd-math-safe-div",
+  "target_file": "std/math/safe_div.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Division with compile-time zero-divisor elimination using NonZero semantics from std/core.mm. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/safe_div — verified integer division'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm already uses (checked_add, checked_sub, safe_narrow, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm"
+  ],
+  "atoms": [
+    {
+      "name": "safe_div",
+      "description": "Division of two non-negative i64 values where the divisor is statically proven non-zero via the `b != 0` precondition. Z3 integer theory fully verifies the contract.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b > 0",
+      "ensures": "result >= 0 && result <= a && result * b <= a",
+      "reference_patterns": ["checked_sub", "safe_narrow", "checked_add"]
+    },
+    {
+      "name": "safe_mod",
+      "description": "Modulo of two non-negative i64 values with statically proven non-zero divisor. Result is always in [0, b).",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b > 0",
+      "ensures": "result >= 0 && result < b",
+      "reference_patterns": ["checked_sub", "safe_narrow"]
+    }
+  ]
+}
