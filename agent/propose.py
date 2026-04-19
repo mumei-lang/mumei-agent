@@ -60,8 +60,8 @@ def _module_to_slug(module_path: str) -> str:
     # Remove .mm extension
     if p.endswith(".mm"):
         p = p[:-3]
-    # Replace path separators with hyphens, then sanitise
-    slug = _SLUG_RE.sub("-", p.replace("/", "-").lower()).strip("-")
+    # Replace path separators and underscores with hyphens, then sanitise
+    slug = _SLUG_RE.sub("-", p.replace("/", "-").replace("_", "-").lower()).strip("-")
     return slug or "unknown"
 
 
