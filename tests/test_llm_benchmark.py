@@ -11,13 +11,21 @@ default**.  Opt in explicitly with:
 
     pytest -m benchmark tests/test_llm_benchmark.py
 
-Because a real LLM endpoint is required, the test also auto-skips when no
-credentials are available in the environment (neither ``LLM_API_KEY`` nor
-``OPENAI_API_KEY``).  Set ``LLM_BENCHMARK_MODELS`` to a comma-separated
-list of models to benchmark (for example
-``gpt-4o-mini,qwen-plus,qwen2.5-coder:7b``), and optionally
-``LLM_BENCHMARK_TRIALS`` (default ``3``) to change how many trials each
-model gets.
+Because a real LLM endpoint and a real ``mumei`` binary are both
+required for a meaningful measurement, the test auto-skips when:
+  * no credentials are available (``LLM_API_KEY`` / ``OPENAI_API_KEY``);
+    or
+  * no ``mumei`` binary is resolvable (neither ``MUMEI_BIN`` nor a
+    ``mumei`` on ``PATH``).
+
+The mumei binary is required because ``generate_code`` short-circuits to
+``(code, True)`` whenever ``mumei_client`` is ``None``, which would make
+``success_rate`` always ~1.0.
+
+Set ``LLM_BENCHMARK_MODELS`` to a comma-separated list of models to
+benchmark (for example ``gpt-4o-mini,qwen-plus,qwen2.5-coder:7b``), and
+optionally ``LLM_BENCHMARK_TRIALS`` (default ``3``) to change how many
+trials each model gets.
 
 The companion ``.github/workflows/proliferate.yml`` documents recommended
 models and their quality/cost trade-offs for operators selecting a
@@ -27,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import statistics
 import time
 from pathlib import Path
@@ -35,6 +44,7 @@ from typing import Any
 import pytest
 
 from agent.forge_discovery import discover_tasks
+from agent.mumei_client import MumeiClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FORGE_TASKS_DIR = REPO_ROOT / "forge_tasks"
@@ -47,6 +57,28 @@ _API_KEY_ENV_VARS = ("LLM_API_KEY", "OPENAI_API_KEY")
 
 def _has_llm_credentials() -> bool:
     return any(os.environ.get(var) for var in _API_KEY_ENV_VARS)
+
+
+def _resolve_mumei_bin() -> str | None:
+    """Return an invocable mumei binary command, or ``None`` if absent.
+
+    Honours ``MUMEI_BIN`` (which may be a full "cargo run --" style
+    invocation) first, then falls back to ``mumei`` on ``PATH``.  The
+    benchmark needs a real binary because ``generate_code`` skips
+    verification when ``mumei_client`` is ``None``, which would make
+    ``success_rate`` meaningless.
+    """
+    env_bin = os.environ.get("MUMEI_BIN", "").strip()
+    if env_bin:
+        # ``MUMEI_BIN`` can legitimately be "cargo run --"; only probe
+        # the first token with shutil.which.
+        first = env_bin.split()[0]
+        if shutil.which(first):
+            return env_bin
+        return None
+    if shutil.which("mumei"):
+        return "mumei"
+    return None
 
 
 def _resolve_models() -> list[str]:
@@ -95,7 +127,9 @@ def _task_to_generate_spec(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _run_single_trial(model: str, spec: dict[str, Any]) -> dict[str, Any]:
+def _run_single_trial(
+    model: str, spec: dict[str, Any], mumei_client: MumeiClient
+) -> dict[str, Any]:
     """Run a single generate_code trial and report its outcome.
 
     Returns a dict with keys ``success`` (bool), ``code_length`` (int),
@@ -104,8 +138,11 @@ def _run_single_trial(model: str, spec: dict[str, Any]) -> dict[str, Any]:
     whole benchmark.
 
     ``generate_code`` returns a ``tuple[str, bool]`` of
-    ``(code, verified)``; retry count is not exposed by the public API
-    so we only report the success bit here.
+    ``(code, verified)``.  A real ``MumeiClient`` is required so that
+    ``verified`` reflects an actual ``mumei verify`` run; passing
+    ``mumei_client=None`` would cause ``generate_code`` to short-circuit
+    and return ``(code, True)`` unconditionally, making success_rate
+    meaningless.
     """
     from agent.config import AgentConfig
     from agent.strategies.generate_strategy import generate_code
@@ -126,7 +163,7 @@ def _run_single_trial(model: str, spec: dict[str, Any]) -> dict[str, Any]:
             model=cfg.model,
             spec=spec,
             config_max_retries=cfg.max_retries,
-            mumei_client=None,
+            mumei_client=mumei_client,
         )
         success = bool(verified)
         code_length = len(code or "")
@@ -172,6 +209,14 @@ def test_llm_model_benchmark(tmp_path: Path) -> None:
             f"({' or '.join(_API_KEY_ENV_VARS)}); benchmark requires a real endpoint"
         )
 
+    mumei_bin = _resolve_mumei_bin()
+    if mumei_bin is None:
+        pytest.skip(
+            "no mumei binary found on PATH (and MUMEI_BIN is unset); "
+            "benchmark requires a real mumei so generate_code actually verifies"
+        )
+    mumei_client = MumeiClient(mumei_bin)
+
     task = _load_reference_task()
     spec = _task_to_generate_spec(task)
     models = _resolve_models()
@@ -181,7 +226,7 @@ def test_llm_model_benchmark(tmp_path: Path) -> None:
     for model in models:
         per_model: list[dict[str, Any]] = []
         for _ in range(trials):
-            per_model.append(_run_single_trial(model, spec))
+            per_model.append(_run_single_trial(model, spec, mumei_client))
         results.append(_summarise(model, per_model))
 
     out_path = Path(os.environ.get("LLM_BENCHMARK_OUTPUT") or (tmp_path / "llm_benchmark.json"))
