@@ -1,0 +1,77 @@
+{
+  "task_id": "vstd-math-gcd",
+  "target_file": "std/math/gcd.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 8,
+  "auto_commit": false,
+  "description": "Greatest common divisor building blocks. Atoms implement single Euclidean-algorithm steps and base cases so Z3 integer theory can verify every post-condition without invoking recursive reasoning. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/gcd — verified GCD primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/math/abs.mm already use (checked_add, checked_sub, safe_narrow, modulo, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/math/abs.mm",
+    "std/contracts.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "gcd_base_zero",
+      "description": "Base case of the Euclidean algorithm: gcd(a, 0) == a for a >= 0. Needed as an explicit atom so downstream proofs can terminate.",
+      "inputs": [
+        {"name": "a", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0",
+      "ensures": "result >= 0 && result == a",
+      "reference_patterns": ["abs_val", "safe_narrow"]
+    },
+    {
+      "name": "gcd_step",
+      "description": "Single iteration of the Euclidean algorithm: gcd(a, b) reduces to gcd(b, a mod b). Returns the remainder r = a mod b which strictly decreases toward zero. Z3 integer theory proves 0 <= r < b directly from the modulo semantics.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b > 0",
+      "ensures": "result >= 0 && result < b",
+      "reference_patterns": ["checked_sub", "safe_narrow"]
+    },
+    {
+      "name": "gcd_of_equal",
+      "description": "Trivial case gcd(a, a) == a for a >= 0. Useful for unit-test style proofs and as a termination witness in loops.",
+      "inputs": [
+        {"name": "a", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0",
+      "ensures": "result >= 0 && result == a",
+      "reference_patterns": ["abs_val", "safe_narrow"]
+    },
+    {
+      "name": "gcd_bound",
+      "description": "Upper-bound witness: for positive a, b the GCD cannot exceed min(a, b). The atom returns min(a, b), which is a verified upper bound for any correct gcd implementation built on top of gcd_step.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a > 0 && b > 0",
+      "ensures": "result > 0 && result <= a && result <= b",
+      "reference_patterns": ["clamp", "is_within_range"]
+    },
+    {
+      "name": "lcm_from_gcd",
+      "description": "Compute lcm(a, b) given a precomputed gcd value g. Requires g > 0 and g divides both a and b (enforced via the quotient inputs qa, qb). Z3 verifies the product stays within a bounded range to avoid overflow.",
+      "inputs": [
+        {"name": "qa", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "qa >= 0 && qa <= 1000000 && b >= 0 && b <= 1000000",
+      "ensures": "result >= 0",
+      "reference_patterns": ["checked_mul", "safe_narrow"]
+    }
+  ]
+}

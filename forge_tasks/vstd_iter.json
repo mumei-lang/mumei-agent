@@ -1,0 +1,78 @@
+{
+  "task_id": "vstd-iter",
+  "target_file": "std/iter.mm",
+  "mode": "create",
+  "priority": 7,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Index-based iterator interface for bounded collections. Proves the core traversal invariants (0 <= idx <= len) using only Z3 integer theory, so that std/list.mm / std/alloc.mm containers can share a common traversal contract. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/iter — verified bounded iterator'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/container/safe_queue.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/container/safe_queue.mm already use (checked_add, checked_sub, conditional expressions, comparisons).",
+  "context_files": [
+    "std/core.mm",
+    "std/container/safe_queue.mm",
+    "std/alloc.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "iter_new",
+      "description": "Create a fresh iterator over a bounded collection of size len. The iterator position starts at 0. Requires len >= 0 so the collection is well-formed.",
+      "inputs": [
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0",
+      "ensures": "result == 0",
+      "reference_patterns": ["queue_is_empty", "bounded_is_empty"]
+    },
+    {
+      "name": "iter_has_next",
+      "description": "Return 1 when the iterator still has an element to yield (idx < len), 0 otherwise. This is the fundamental traversal guard used by for/while loops over collections.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0 && idx >= 0 && idx <= len",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_empty", "queue_is_full", "bounded_is_empty"]
+    },
+    {
+      "name": "iter_advance",
+      "description": "Advance the iterator by one step. Preserves the invariant 0 <= idx <= len so downstream atoms can rely on the bound.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0 && idx >= 0 && idx < len",
+      "ensures": "result >= 1 && result <= len && result == idx + 1",
+      "reference_patterns": ["enqueue", "bounded_push", "checked_add"]
+    },
+    {
+      "name": "iter_remaining",
+      "description": "Number of elements still to yield (len - idx). Used by bounded traversal optimisations and by size hints in collection adapters.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0 && idx >= 0 && idx <= len",
+      "ensures": "result >= 0 && result == len - idx",
+      "reference_patterns": ["queue_remaining", "checked_sub"]
+    },
+    {
+      "name": "iter_is_done",
+      "description": "Return 1 when the iterator has consumed every element (idx == len), 0 otherwise. Dual of iter_has_next, exposed as a separate atom so callers can avoid negation.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0 && idx >= 0 && idx <= len",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_empty", "bounded_is_empty"]
+    }
+  ]
+}

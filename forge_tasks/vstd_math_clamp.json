@@ -1,0 +1,70 @@
+{
+  "task_id": "vstd-math-clamp",
+  "target_file": "std/math/clamp.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 6,
+  "auto_commit": false,
+  "description": "Standalone clamp module promoting std/contracts.mm::clamp into an independent file with extra variants (non-negative clamp, symmetric clamp, saturating clamp). All atoms are fully verifiable with Z3 integer theory. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/clamp — verified clamping primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/contracts.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/contracts.mm already use (conditional expressions, comparisons, checked_sub).",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm",
+    "std/math/abs.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/contracts.mm"
+  ],
+  "atoms": [
+    {
+      "name": "clamp_i64",
+      "description": "Classic three-way clamp: return min_val when val < min_val, max_val when val > max_val, val otherwise. Mirrors std/contracts.mm::clamp but lives in its own module so downstream code can import only the clamp surface.",
+      "inputs": [
+        {"name": "val", "type": "i64"},
+        {"name": "min_val", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "min_val <= max_val",
+      "ensures": "result >= min_val && result <= max_val",
+      "reference_patterns": ["clamp", "is_within_range"]
+    },
+    {
+      "name": "clamp_nonneg",
+      "description": "Clamp a signed value into [0, max_val]. Negative inputs become 0; oversized inputs become max_val. Common building block for array indices and percent values.",
+      "inputs": [
+        {"name": "val", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "max_val >= 0",
+      "ensures": "result >= 0 && result <= max_val",
+      "reference_patterns": ["clamp", "abs_val"]
+    },
+    {
+      "name": "clamp_symmetric",
+      "description": "Clamp into the symmetric interval [-bound, bound]. Useful for saturating arithmetic in DSP-style code. Z3 proves the bound directly from two ordered comparisons.",
+      "inputs": [
+        {"name": "val", "type": "i64"},
+        {"name": "bound", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "bound >= 0",
+      "ensures": "result >= 0 - bound && result <= bound",
+      "reference_patterns": ["clamp", "abs_val"]
+    },
+    {
+      "name": "clamp_saturating",
+      "description": "Total variant of clamp that tolerates an ill-ordered interval: when min_val > max_val the atom returns min_val instead of rejecting the call. Total function, useful in defensive code paths.",
+      "inputs": [
+        {"name": "val", "type": "i64"},
+        {"name": "min_val", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "true",
+      "ensures": "true",
+      "reference_patterns": ["clamp", "is_within_range"]
+    }
+  ]
+}

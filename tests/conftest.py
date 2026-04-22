@@ -319,3 +319,24 @@ def mumei_mock_bin() -> str:
 def mumei_mock_e2e_client(mumei_mock_bin: str) -> MumeiClient:
     """Provide a MumeiClient backed by the mock mumei script."""
     return MumeiClient(f"{sys.executable} {mumei_mock_bin}")
+
+
+# ---------------------------------------------------------------------------
+# Benchmark tests: opt-in only
+# ---------------------------------------------------------------------------
+#
+# Tests marked ``@pytest.mark.benchmark`` call real LLM endpoints and are
+# expensive / non-deterministic.  Skip them automatically on a plain
+# ``pytest`` run; enable them with ``pytest -m benchmark`` (or by setting
+# ``LLM_BENCHMARK_RUN=1`` in the environment).
+
+def pytest_collection_modifyitems(config, items):
+    markexpr = config.getoption("markexpr") or ""
+    if "benchmark" in markexpr or os.environ.get("LLM_BENCHMARK_RUN"):
+        return
+    skip_marker = pytest.mark.skip(
+        reason="benchmark tests are opt-in; run with `pytest -m benchmark`"
+    )
+    for item in items:
+        if "benchmark" in item.keywords:
+            item.add_marker(skip_marker)
