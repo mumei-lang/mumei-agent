@@ -2,9 +2,9 @@
 
 This test exercises ``agent.strategies.generate_strategy.generate_code``
 against a low-difficulty reference task (``forge_tasks/vstd_math_abs.json``)
-and records per-model success rate, average retry count, and wall-clock
-time.  Results are written as JSON so multiple runs can be compared across
-different ``LLM_MODEL`` settings.
+and records per-model success rate, average generated-code length, and
+wall-clock time.  Results are written as JSON so multiple runs can be
+compared across different ``LLM_MODEL`` settings.
 
 The test is marked with ``@pytest.mark.benchmark`` and is **skipped by
 default**.  Opt in explicitly with:
@@ -98,42 +98,45 @@ def _task_to_generate_spec(task: dict[str, Any]) -> dict[str, Any]:
 def _run_single_trial(model: str, spec: dict[str, Any]) -> dict[str, Any]:
     """Run a single generate_code trial and report its outcome.
 
-    Returns a dict with keys ``success`` (bool), ``retries`` (int), and
-    ``duration_seconds`` (float).  Never raises — failures are captured
-    in the ``error`` field so a noisy model doesn't abort the whole
-    benchmark.
+    Returns a dict with keys ``success`` (bool), ``code_length`` (int),
+    and ``duration_seconds`` (float).  Never raises — failures are
+    captured in the ``error`` field so a noisy model doesn't abort the
+    whole benchmark.
+
+    ``generate_code`` returns a ``tuple[str, bool]`` of
+    ``(code, verified)``; retry count is not exposed by the public API
+    so we only report the success bit here.
     """
     from agent.config import AgentConfig
     from agent.strategies.generate_strategy import generate_code
 
     os.environ["LLM_MODEL"] = model
 
-    cfg = AgentConfig.from_env()
+    cfg = AgentConfig()
+    cfg.model = model
+    client = cfg.create_client()
 
     start = time.monotonic()
-    retries = 0
     success = False
+    code_length = 0
     error: str | None = None
     try:
-        result = generate_code(spec, cfg)
-        # ``generate_code`` returns a dict with at least ``code`` /
-        # ``verified`` fields in the modern API, or raises on failure.
-        if isinstance(result, dict):
-            success = bool(
-                result.get("verified")
-                or (result.get("status") == "success")
-                or result.get("code")
-            )
-            retries = int(result.get("retries", result.get("attempts", 0)) or 0)
-        else:
-            success = bool(result)
+        code, verified = generate_code(
+            client=client,
+            model=cfg.model,
+            spec=spec,
+            config_max_retries=cfg.max_retries,
+            mumei_client=None,
+        )
+        success = bool(verified)
+        code_length = len(code or "")
     except Exception as exc:  # noqa: BLE001 — benchmark should swallow all
         error = f"{type(exc).__name__}: {exc}"
     duration = time.monotonic() - start
 
     out: dict[str, Any] = {
         "success": success,
-        "retries": retries,
+        "code_length": code_length,
         "duration_seconds": round(duration, 3),
     }
     if error is not None:
@@ -144,12 +147,12 @@ def _run_single_trial(model: str, spec: dict[str, Any]) -> dict[str, Any]:
 def _summarise(model: str, trials: list[dict[str, Any]]) -> dict[str, Any]:
     successes = [t for t in trials if t["success"]]
     durations = [t["duration_seconds"] for t in trials]
-    retries = [t["retries"] for t in trials]
+    code_lengths = [t["code_length"] for t in trials]
     return {
         "model": model,
         "trials": len(trials),
         "success_rate": round(len(successes) / len(trials), 3) if trials else 0.0,
-        "avg_retries": round(statistics.mean(retries), 3) if retries else 0.0,
+        "avg_code_length": round(statistics.mean(code_lengths), 1) if code_lengths else 0.0,
         "avg_time_seconds": round(statistics.mean(durations), 3) if durations else 0.0,
         "details": trials,
     }

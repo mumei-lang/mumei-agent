@@ -99,7 +99,7 @@ on:
           Run ``pytest -m benchmark tests/test_llm_benchmark.py`` with
           ``LLM_BENCHMARK_MODELS`` set to compare several models
           side-by-side. Results are written as JSON with per-model
-          ``success_rate`` / ``avg_retries`` / ``avg_time_seconds``.
+          ``success_rate`` / ``avg_code_length`` / ``avg_time_seconds``.
         default: 'qwen3.5:0.8b'
         type: string
 
