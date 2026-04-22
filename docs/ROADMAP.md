@@ -217,10 +217,19 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ 複数 std ファイルをまたいだスタイル / 契約パターンの参照基盤
 - ✅ `create` / `replace` モードでも `_task_to_generate_spec` が spec に `cross_file_context` を付与
 
-### P9-D: vStd Autonomous Expansion 📋 Planned
+### P9-D: vStd Autonomous Expansion 🚧 In Progress
 
 - 📋 `forge_tasks/vstd_safe_list.json` — SafeList の無人鍛造（初回鍛造ターゲット）
 - 📋 `forge_tasks/vstd_fixed_point.json` — 固定小数点演算モジュール
+- ✅ `forge_tasks/vstd_iter.json` — `std/iter.mm` index-based iterator primitives（`analyze_std_gaps` の iter gap rule に対応）
+- ✅ `forge_tasks/vstd_hash.json` — `std/hash.mm` Hashable primitives（`analyze_std_gaps` の hash gap rule に対応）
+- ✅ `forge_tasks/vstd_math_gcd.json` — `std/math/gcd.mm` Euclidean-algorithm step atoms（Z3 整数理論で完全検証可能）
+- ✅ `forge_tasks/vstd_math_clamp.json` — `std/math/clamp.mm` clamp primitives（`std/contracts.mm` の `clamp` を独立モジュール化）
+- ✅ `forge_tasks/vstd_container_deque.json` — `std/container/deque.mm` 両端キュー（`safe_queue.mm` パターン拡張）
+- ✅ `tests/test_llm_benchmark.py` — LLM モデル別 forge 生成品質ベンチマーク基盤（`@pytest.mark.benchmark` で opt-in、`forge_tasks/vstd_math_abs.json` を基準タスクとする）
+  - `LLM_BENCHMARK_MODELS` / `LLM_BENCHMARK_TRIALS` / `LLM_BENCHMARK_OUTPUT` 環境変数でモデル・試行回数・出力先を制御
+  - `success_rate` / `avg_retries` / `avg_time_seconds` を JSON に記録
+  - `.github/workflows/proliferate.yml` の `llm_model` 入力説明に推奨モデルと品質トレードオフを追記
 - 📋 vStd ロードマップ全項目の forge タスク化
 
 ---

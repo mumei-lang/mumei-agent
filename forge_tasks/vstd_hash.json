@@ -1,0 +1,67 @@
+{
+  "task_id": "vstd-hash",
+  "target_file": "std/hash.mm",
+  "mode": "create",
+  "priority": 8,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Hashable primitives providing bounded, deterministic hash codes suitable for bucket-based collections. Z3 verifies post-condition bounds (result >= 0 and result < num_buckets for the bucket step), closing the gap left by prelude.mm which only defines Eq/Ord. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/hash — verified hashable primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm and std/contracts.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/contracts.mm already use (checked_add, checked_mul, safe_narrow, abs_val, modulo, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm",
+    "std/prelude.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "hash_bucket",
+      "description": "Map a non-negative hash code into a bucket index in [0, num_buckets) using modulo. This is the fundamental post-hashing step every open-addressing or chaining container needs.",
+      "inputs": [
+        {"name": "h", "type": "i64"},
+        {"name": "num_buckets", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "h >= 0 && num_buckets > 0",
+      "ensures": "result >= 0 && result < num_buckets",
+      "reference_patterns": ["clamp", "is_within_range"]
+    },
+    {
+      "name": "hash_combine",
+      "description": "Combine two hash codes into a single hash code using a bounded linear mix. Keeps the result within a safe range so that downstream hash_bucket has a non-negative input.",
+      "inputs": [
+        {"name": "h1", "type": "i64"},
+        {"name": "h2", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "h1 >= 0 && h1 <= 1000000 && h2 >= 0 && h2 <= 1000000",
+      "ensures": "result >= 0",
+      "reference_patterns": ["checked_add", "checked_mul", "safe_narrow"]
+    },
+    {
+      "name": "hash_i64_nonneg",
+      "description": "Deterministic hash of a non-negative i64 clamped into [0, max_hash]. Acts as the default Hashable implementation for sized integer keys.",
+      "inputs": [
+        {"name": "x", "type": "i64"},
+        {"name": "max_hash", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "x >= 0 && max_hash > 0",
+      "ensures": "result >= 0 && result <= max_hash",
+      "reference_patterns": ["clamp", "is_within_range"]
+    },
+    {
+      "name": "hash_eq_consistent",
+      "description": "Encoded Hashable law check: when the two inputs are equal the result MUST be 1 (hash_eq_consistent(x, x) == 1). Z3 proves the law by evaluating the equality predicate directly. This atom is the machine-checkable witness that `eq(a, b) => hash(a) == hash(b)` holds for the numeric hashes exposed by this module.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "true",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_empty", "is_within_range"]
+    }
+  ]
+}

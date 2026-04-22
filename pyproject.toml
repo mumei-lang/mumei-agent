@@ -29,4 +29,5 @@ mumei-heal = "agent.self_healing:main"
 testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring mumei binary (deselect with '-m \"not integration\"')",
+    "benchmark: marks LLM model-quality benchmarks (opt-in with '-m benchmark'; skipped by default because they call real LLM APIs)",
 ]
