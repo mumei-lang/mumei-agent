@@ -4,11 +4,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent.forge_discovery import (
+    _load_task,
     discover_tasks,
     filter_completed_tasks,
     scan_std_todos,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+FORGE_TASKS_DIR = REPO_ROOT / "forge_tasks"
 
 
 def _write_spec(dir_: Path, name: str, spec: dict) -> Path:
@@ -143,3 +149,43 @@ class TestScanStdTodos:
             encoding="utf-8",
         )
         assert scan_std_todos(std) == []
+
+
+class TestRealForgeSpecs:
+    """Validate that every JSON spec under forge_tasks/ loads correctly."""
+
+    @pytest.mark.parametrize(
+        "spec_name",
+        [
+            "vstd_safe_list.json",
+            "vstd_fixed_point.json",
+            "vstd_string_utils.json",
+            "vstd_math_min_max.json",
+        ],
+    )
+    def test_new_p9d_specs_load(self, spec_name):
+        path = FORGE_TASKS_DIR / spec_name
+        assert path.exists(), f"missing forge spec: {path}"
+        task = _load_task(path)
+        assert task is not None, f"_load_task returned None for {path}"
+        assert task["task_id"]
+        assert task["target_file"].startswith("std/")
+        assert task["mode"] == "create"
+        assert isinstance(task["atoms"], list) and task["atoms"]
+        for atom in task["atoms"]:
+            assert "name" in atom and atom["name"]
+            assert "inputs" in atom and isinstance(atom["inputs"], list)
+            assert "return_type" in atom
+            assert "requires" in atom
+            assert "ensures" in atom
+
+    def test_all_real_specs_discoverable(self):
+        tasks = discover_tasks(FORGE_TASKS_DIR)
+        ids = {t["task_id"] for t in tasks}
+        for required in {
+            "vstd-safe-list",
+            "vstd-fixed-point",
+            "vstd-string-utils",
+            "vstd-math-min-max",
+        }:
+            assert required in ids, f"{required} not found in {sorted(ids)}"

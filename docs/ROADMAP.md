@@ -219,8 +219,10 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 
 ### P9-D: vStd Autonomous Expansion 🚧 In Progress
 
-- 📋 `forge_tasks/vstd_safe_list.json` — SafeList の無人鍛造（初回鍛造ターゲット）
-- 📋 `forge_tasks/vstd_fixed_point.json` — 固定小数点演算モジュール
+- ✅ `forge_tasks/vstd_safe_list.json` — `std/container/safe_list.mm` の `safe_push` / `safe_pop` / `safe_peek` / `safe_len` 鍛造ターゲット（`safe_queue.mm` パターン拡張）
+- ✅ `forge_tasks/vstd_fixed_point.json` — `std/math/fixed_point.mm` 固定小数点演算モジュール（`fixed_from_int` / `fixed_to_int` / `fixed_add` / `fixed_mul`、`safe_mul.mm` を活用）
+- ✅ `forge_tasks/vstd_string_utils.json` — `std/string_utils.mm` 文字列ユーティリティ（`safe_truncate` / `is_ascii`、propose-driven gap task）
+- ✅ `forge_tasks/vstd_math_min_max.json` — `std/math/min_max.mm` min/max プリミティブ（`min2` / `max2` / `min3`、propose-driven gap task）
 - ✅ `forge_tasks/vstd_iter.json` — `std/iter.mm` index-based iterator primitives（`analyze_std_gaps` の iter gap rule に対応）
 - ✅ `forge_tasks/vstd_hash.json` — `std/hash.mm` Hashable primitives（`analyze_std_gaps` の hash gap rule に対応）
 - ✅ `forge_tasks/vstd_math_gcd.json` — `std/math/gcd.mm` Euclidean-algorithm step atoms（Z3 整数理論で完全検証可能）

@@ -1,0 +1,70 @@
+{
+  "task_id": "vstd-safe-list",
+  "target_file": "std/container/safe_list.mm",
+  "mode": "create",
+  "priority": 6,
+  "max_retries": 8,
+  "auto_commit": false,
+  "description": "Bounded list bookkeeping atoms with bounds-checked push/pop/peek/len, modelled as a direct extension of the safe_queue.mm pattern. Proves the len <= capacity invariant for push/pop using Z3 integer theory — no array theory required. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/container/safe_list — verified bounded list'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/container/safe_queue.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/container/safe_queue.mm already use (checked_add, checked_sub, conditional expressions). The `arr` parameter is an opaque i64 handle to the underlying buffer; bookkeeping is performed on `len` and `capacity` only.",
+  "context_files": [
+    "std/core.mm",
+    "std/list.mm",
+    "std/container/safe_queue.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/container/safe_queue.mm"
+  ],
+  "atoms": [
+    {
+      "name": "safe_push",
+      "description": "Bounded push with overflow check. Mirrors enqueue from safe_queue.mm but exposes the underlying buffer handle and pushed value as parameters so the caller can prove element-level invariants (val >= 0).",
+      "inputs": [
+        {"name": "arr", "type": "i64"},
+        {"name": "len", "type": "i64"},
+        {"name": "capacity", "type": "i64"},
+        {"name": "val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0 && len < capacity && capacity > 0 && val >= 0",
+      "ensures": "result == len + 1",
+      "reference_patterns": ["enqueue", "bounded_push"]
+    },
+    {
+      "name": "safe_pop",
+      "description": "Safe pop with underflow check. Mirrors dequeue from safe_queue.mm.",
+      "inputs": [
+        {"name": "arr", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len > 0",
+      "ensures": "result == len - 1 && result >= 0",
+      "reference_patterns": ["dequeue", "bounded_pop"]
+    },
+    {
+      "name": "safe_peek",
+      "description": "Bounds-checked element access. Returns a non-negative element value; the caller is responsible for ensuring elements were inserted with safe_push (val >= 0).",
+      "inputs": [
+        {"name": "arr", "type": "i64"},
+        {"name": "len", "type": "i64"},
+        {"name": "idx", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len > 0 && idx >= 0 && idx < len",
+      "ensures": "result >= 0",
+      "reference_patterns": ["safe_get", "queue_front"]
+    },
+    {
+      "name": "safe_len",
+      "description": "Identity length accessor. Exposes the bookkeeping length so external code can reason about list size without touching the buffer handle.",
+      "inputs": [
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0",
+      "ensures": "result == len",
+      "reference_patterns": ["queue_len", "bounded_len"]
+    }
+  ]
+}

@@ -65,6 +65,10 @@ on:
         options:
           - ollama-local
           - remote
+      run_benchmark:
+        description: 'Run LLM benchmark suite after proliferation'
+        default: false
+        type: boolean
       llm_model:
         description: |
           Model tag. For ollama-local, anything `ollama pull` accepts
@@ -346,6 +350,25 @@ jobs:
             > /tmp/proliferate/post_health.json || true
           cat /tmp/proliferate/post_health.json || true
 
+      - name: Run LLM benchmark (opt-in)
+        if: always() && github.event.inputs.run_benchmark == 'true'
+        working-directory: mumei-agent
+        env:
+          LLM_BENCHMARK_MODELS: ${{ steps.llm_env.outputs.model }}
+          LLM_BENCHMARK_TRIALS: '3'
+          LLM_BENCHMARK_OUTPUT: /tmp/proliferate/benchmark.json
+          LLM_API_KEY: ${{ steps.llm_env.outputs.api_key }}
+          LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
+          MUMEI_BIN: mumei
+          # Same rationale as the "Run proliferate" step: the benchmark
+          # invokes `mumei verify` on generated source files written to
+          # /tmp, which import `std/core` etc. Without MUMEI_STD_PATH the
+          # compiler cannot resolve those imports, producing artificially
+          # low success_rate values unrelated to model quality.
+          MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
+        run: |
+          pytest -m benchmark tests/test_llm_benchmark.py --tb=short || true
+
       - name: Upload proliferate artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -356,3 +379,4 @@ jobs:
             /tmp/proliferate/post_health.json
             /tmp/proliferate/proliferate.log
             /tmp/proliferate/summary.json
+            /tmp/proliferate/benchmark.json
