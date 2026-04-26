@@ -22,7 +22,7 @@
       ],
       "return_type": "i64",
       "requires": "max_len >= 0",
-      "ensures": "result >= 0",
+      "ensures": "result >= 0 && result <= max_len",
       "reference_patterns": ["safe_len", "checked_sub"]
     },
     {

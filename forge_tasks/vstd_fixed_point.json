@@ -23,7 +23,7 @@
         {"name": "scale", "type": "i64"}
       ],
       "return_type": "i64",
-      "requires": "val >= 0 && scale > 0 && scale <= 10000",
+      "requires": "val >= 0 && val <= 1000000000000 && scale > 0 && scale <= 10000",
       "ensures": "result == val * scale",
       "reference_patterns": ["checked_mul", "safe_mul"]
     },

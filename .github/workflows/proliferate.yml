@@ -351,7 +351,7 @@ jobs:
           cat /tmp/proliferate/post_health.json || true
 
       - name: Run LLM benchmark (opt-in)
-        if: github.event.inputs.run_benchmark == 'true'
+        if: always() && github.event.inputs.run_benchmark == 'true'
         working-directory: mumei-agent
         env:
           LLM_BENCHMARK_MODELS: ${{ steps.llm_env.outputs.model }}

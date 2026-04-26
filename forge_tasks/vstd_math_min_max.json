@@ -49,7 +49,7 @@
       ],
       "return_type": "i64",
       "requires": "true",
-      "ensures": "result <= a && result <= b && result <= c",
+      "ensures": "result <= a && result <= b && result <= c && (result == a || result == b || result == c)",
       "reference_patterns": ["clamp_i64", "min2"]
     }
   ]
