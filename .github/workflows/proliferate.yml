@@ -360,6 +360,12 @@ jobs:
           LLM_API_KEY: ${{ steps.llm_env.outputs.api_key }}
           LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
           MUMEI_BIN: mumei
+          # Same rationale as the "Run proliferate" step: the benchmark
+          # invokes `mumei verify` on generated source files written to
+          # /tmp, which import `std/core` etc. Without MUMEI_STD_PATH the
+          # compiler cannot resolve those imports, producing artificially
+          # low success_rate values unrelated to model quality.
+          MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
         run: |
           pytest -m benchmark tests/test_llm_benchmark.py --tb=short || true
 
