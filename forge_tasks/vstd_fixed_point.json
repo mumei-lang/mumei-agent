@@ -1,0 +1,70 @@
+{
+  "task_id": "vstd-fixed-point",
+  "target_file": "std/math/fixed_point.mm",
+  "mode": "create",
+  "priority": 4,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Fixed-point arithmetic primitives modelled on top of std/core.mm and std/math/safe_mul.mm. Conversions between integer and fixed-point representation, plus overflow-safe add and rescaling multiplication. Proven with Z3 integer theory only — no real arithmetic required. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/fixed_point — verified fixed-point arithmetic'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/math/safe_mul.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/math/safe_mul.mm already use (checked_add, checked_mul, safe_mul, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/math/safe_mul.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/math/safe_mul.mm"
+  ],
+  "atoms": [
+    {
+      "name": "fixed_from_int",
+      "description": "Convert a non-negative integer to fixed-point representation by multiplying by `scale`. The scale is bounded so the product fits comfortably within i64.",
+      "inputs": [
+        {"name": "val", "type": "i64"},
+        {"name": "scale", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "val >= 0 && scale > 0 && scale <= 10000",
+      "ensures": "result == val * scale",
+      "reference_patterns": ["checked_mul", "safe_mul"]
+    },
+    {
+      "name": "fixed_to_int",
+      "description": "Convert a fixed-point value back to an integer by dividing by `scale`. The contract proves the truncated result is non-negative and that result * scale never exceeds the original fixed value (i.e. truncation is monotone non-increasing).",
+      "inputs": [
+        {"name": "fixed_val", "type": "i64"},
+        {"name": "scale", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "fixed_val >= 0 && scale > 0",
+      "ensures": "result >= 0 && result * scale <= fixed_val",
+      "reference_patterns": ["checked_div", "safe_div"]
+    },
+    {
+      "name": "fixed_add",
+      "description": "Overflow-safe fixed-point addition. The caller supplies `max_val` as an upper bound that the result must respect.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && max_val > 0",
+      "ensures": "result >= 0 && result <= max_val",
+      "reference_patterns": ["checked_add", "saturating_add"]
+    },
+    {
+      "name": "fixed_mul",
+      "description": "Fixed-point multiplication with rescaling. The product is divided by `scale` to keep the result in fixed-point representation, and clamped at `max_val`.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"},
+        {"name": "scale", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && scale > 0 && max_val > 0",
+      "ensures": "result >= 0 && result <= max_val",
+      "reference_patterns": ["checked_mul", "safe_mul", "saturating_mul"]
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "task_id": "vstd-string-utils",
+  "target_file": "std/string_utils.mm",
+  "mode": "create",
+  "priority": 7,
+  "max_retries": 5,
+  "auto_commit": false,
+  "description": "Lightweight string utility atoms (truncate-to-length, ASCII check) that operate on the opaque Str type used elsewhere in std (see std/core.mm and std/effects.mm). Atoms return i64 (length / boolean) so the contracts can be discharged using Z3 integer theory without committing to a string theory. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/string_utils — verified string utilities'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm already uses.",
+  "context_files": [
+    "std/core.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "safe_truncate",
+      "description": "Return the truncated length of `s` capped at `max_len`. Output is a non-negative length, so callers can use it as a slice bound without further checks.",
+      "inputs": [
+        {"name": "s", "type": "Str"},
+        {"name": "max_len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "max_len >= 0",
+      "ensures": "result >= 0",
+      "reference_patterns": ["safe_len", "checked_sub"]
+    },
+    {
+      "name": "is_ascii",
+      "description": "Return 1 if `s` is ASCII-only, 0 otherwise. The boolean is encoded as i64 so the contract is provable with Z3 integer theory.",
+      "inputs": [
+        {"name": "s", "type": "Str"}
+      ],
+      "return_type": "i64",
+      "requires": "true",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["queue_is_empty", "is_within_range"]
+    }
+  ]
+}
