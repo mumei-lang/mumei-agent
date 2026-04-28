@@ -152,6 +152,15 @@ def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
             target_file=task.get("target_file"),
         )
 
+    # Mirror ``MumeiForge.run()`` (agent/forge.py:151-152) so MCP-driven
+    # tasks land in ``forge_log.json`` and ``filter_completed_tasks``
+    # deduplicates them on subsequent CLI / MCP runs.  Logging failures
+    # must not fail the tool call — the task itself already succeeded.
+    try:
+        forge.log_result(task, result)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("forge_task: log_result failed: %s", exc)
+
     code_length = 0
     target = result.target_file
     if target:
