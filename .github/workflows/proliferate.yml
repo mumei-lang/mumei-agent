@@ -309,6 +309,14 @@ jobs:
           # cannot recover.  Points at the checkout from the previous
           # `Checkout mumei compiler` step.
           MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
+          # P10 — prefer the authoritative gap rules from the mumei
+          # checkout instead of the offline copy in agent/gap_rules.py.
+          # Combined with PYTHONPATH below, this lets analyze_gaps
+          # delegate to mumei's mcp_server.analyze_std_gaps so the rule
+          # set always matches whatever ships in the mumei repo on this
+          # commit.  Falls back transparently when the import fails.
+          PREFER_MCP_GAPS: 'true'
+          PYTHONPATH: ${{ github.workspace }}/mumei
           # Agent-internal token for pushing branches / opening PRs on
           # mumei-lang/mumei.  Must be a real PAT; the default GITHUB_TOKEN
           # cannot push across repositories, so no GITHUB_TOKEN fallback.

@@ -58,14 +58,19 @@ The [mumei](https://github.com/mumei-lang/mumei) compiler repository also ships 
 ```mermaid
 graph TD
     subgraph "Turnkey Solution"
-        MA["mumei-agent"] -->|"subprocess"| CLI["mumei CLI"]
+        MA["mumei-agent"] -->|"subprocess (default)"| CLI["mumei CLI"]
         MA -->|"OpenAI-compatible API"| LLM["LLM (Ollama/OpenAI/etc.)"]
+        MA -.->|"USE_MCP_CLIENT=true (opt-in)"| MCPF["mcp_server.py (Mumei-Forge)"]
     end
     subgraph "MCP Integration"
-        D1["Claude Code"] -->|"MCP"| MCP["mcp_server.py (Mumei-Forge)"]
-        D2["Devin"] -->|"MCP"| MCP
-        D3["Other MCP Agents"] -->|"MCP"| MCP
-        MCP -->|"subprocess"| CLI2["mumei CLI"]
+        D1["Claude Code"] -->|"MCP"| MCPF
+        D2["Devin"] -->|"MCP"| MCPF
+        D3["Other MCP Agents"] -->|"MCP"| MCPF
+        D1 -.->|"MCP"| MCPA["agent/mcp_server.py (Mumei-Agent)"]
+        D2 -.->|"MCP"| MCPA
+        D3 -.->|"MCP"| MCPA
+        MCPF -->|"subprocess"| CLI2["mumei CLI"]
+        MCPA -->|"forge / heal / health"| MA
     end
 ```
 
@@ -229,6 +234,68 @@ See `.env.example` for configuration details.
 | `generate` | Generate new .mm code from spec JSON | `python -m agent generate --spec-file spec.json --output out.mm` |
 | `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `python -m agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
 | `forge` | Autonomously extend the mumei std library with verified atoms | `python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
+| `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `python -m agent mcp-server` |
+
+## MCP Server
+
+`python -m agent mcp-server` runs mumei-agent as a `FastMCP("Mumei-Agent")`
+server over stdio.  Any MCP-compatible client (Claude Code, Devin,
+Codex, ...) can drive the same forge loop that the CLI exposes.
+
+Exported tools:
+
+| Tool | Description |
+|---|---|
+| `forge_task(task_json, mumei_repo, dry_run=true)` | Run a single forge spec (drop-in `MumeiForge.forge_one`) |
+| `heal_file(source_code, error_report)` | Self-heal a `.mm` source via the existing fix-strategy pipeline |
+| `measure_std_health(mumei_repo)` | Delegate to `agent.std_health.measure_health` |
+| `propose_forge_tasks(mumei_repo, max_proposals=3)` | MCP-accessible `python -m agent propose --auto` |
+| `list_forge_log(log_path)` | Read `forge_log.json` |
+| `get_agent_status()` | Report LLM provider, mumei binary, available subcommands |
+
+Example `.mcp.json` snippet:
+
+```json
+{
+  "mcpServers": {
+    "mumei-forge": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "cwd": "/path/to/mumei"
+    },
+    "mumei-agent": {
+      "command": "python",
+      "args": ["-m", "agent", "mcp-server"],
+      "cwd": "/path/to/mumei-agent"
+    }
+  }
+}
+```
+
+### MCP-backed verification (opt-in)
+
+Set `USE_MCP_CLIENT=true` to make forge / heal / proliferate route their
+verification through `agent.mcp_client.MumeiMCPClient` instead of the
+raw `mumei verify --json` subprocess.  The MCP client returns the
+richer semantic feedback the mumei MCP server formats (`semantic_feedback`,
+`machine_readable`, `counter_example`, `effect_violation`).  Any failure
+falls back to the subprocess client so the agent always works.
+
+The client picks a transport automatically:
+
+- **In-process** when the mumei repo is on `PYTHONPATH` (default in CI).
+- **stdio subprocess** when `MUMEI_MCP_COMMAND` is set
+  (e.g. `MUMEI_MCP_COMMAND="python /path/to/mumei/mcp_server.py"`).
+
+### Unified gap analysis (`PREFER_MCP_GAPS`)
+
+`agent/gap_rules.py` is the offline copy of the gap-rule logic from the
+mumei MCP server's `analyze_std_gaps` tool.  Set `PREFER_MCP_GAPS=true`
+(and put the mumei repo on `PYTHONPATH`) to make
+`agent.proliferate.analyze_gaps` delegate to the authoritative
+implementation in the mumei repo.  `proliferate.yml` already does this
+in CI so the rule set is always in lockstep with whatever ships in
+mumei.
 
 ## Forge Mode
 
