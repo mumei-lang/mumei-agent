@@ -198,7 +198,7 @@ def heal_file(source_code: str, error_report: str = "") -> str:
 
     try:
         from agent.config import AgentConfig
-        from agent.mumei_client import MumeiClient
+        from agent.mumei_client import create_mumei_client
         from agent.strategies.fix_strategy import get_fix
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
@@ -227,7 +227,10 @@ def heal_file(source_code: str, error_report: str = "") -> str:
         # see an empty report.
         import tempfile
 
-        mumei = MumeiClient(config.mumei_bin)
+        # Honor ``USE_MCP_CLIENT`` for heal_file's initial verification so
+        # the prompt seed benefits from the same richer semantic feedback
+        # the CLI ``heal`` subcommand sees.
+        mumei = create_mumei_client(config.mumei_bin)
         # Initialize to None before the try block so the ``finally``
         # clause never hits ``UnboundLocalError`` when NamedTemporaryFile
         # or tmp.write raises — matching the pattern in

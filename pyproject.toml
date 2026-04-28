@@ -11,13 +11,23 @@ dependencies = [
     "openai>=1.0",
     "python-dotenv>=1.0",
     "streamlit>=1.30",
-    "mcp[cli]>=1.0",
 ]
 
 [project.optional-dependencies]
+# P10 — MCP integration is opt-in.  Install with
+# ``pip install mumei-agent[mcp]`` to enable the ``mcp-server``
+# subcommand and the ``USE_MCP_CLIENT=true`` verification path.  The
+# agent's heal / generate / forge / proliferate / publish flows do
+# not require this package.
+mcp = [
+    "mcp[cli]>=1.0",
+]
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    # MCP suite (tests/test_mcp_*) imports the SDK at module import
+    # time, so the test extra pulls it in transitively.
+    "mcp[cli]>=1.0",
 ]
 
 [tool.setuptools.packages.find]

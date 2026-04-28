@@ -103,7 +103,18 @@ def main() -> None:
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
         # stdio transport does not take CLI flags.
-        from agent.mcp_server import main as mcp_main
+        #
+        # ``mcp[cli]`` is an optional extra; surface a clear hint when
+        # the user hasn't installed it instead of a bare ImportError.
+        try:
+            from agent.mcp_server import main as mcp_main
+        except ImportError as exc:
+            print(
+                f"error: mcp-server requires the 'mcp' extra ({exc}).\n"
+                "Install with: pip install 'mumei-agent[mcp]'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         mcp_main()
     elif command == "heal":

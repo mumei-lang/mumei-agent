@@ -421,7 +421,15 @@ def _parse_validate_logic(raw: str) -> dict[str, Any]:
     the structured feedback fields directly so callers don't have to
     re-parse the prose.
     """
-    success = "Forge succeeded" in raw or "all_constraints_satisfied" in raw
+    # Match the *value* (``true``) rather than just the key name —
+    # otherwise ``"all_constraints_satisfied": false`` would still
+    # satisfy a substring check and produce a false-positive ``success``
+    # when the embedded JSON block fails to parse.
+    success = (
+        "Forge succeeded" in raw
+        or '"all_constraints_satisfied": true' in raw
+        or '"all_constraints_satisfied":true' in raw
+    )
     report: dict[str, Any] = {}
     marker = "### Verification Report"
     if marker in raw:
