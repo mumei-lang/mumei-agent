@@ -229,7 +229,7 @@ class MumeiMCPClient:
     def get_effects(self, source_code: str) -> dict[str, Any]:
         """Call the ``get_inferred_effects`` MCP tool."""
         if self._mode == "unavailable":
-            return self._fallback.infer_effects(_write_temp_mm(source_code))
+            return self._fallback_infer_effects(source_code)
         try:
             raw = self._call_tool(
                 "get_inferred_effects", source_code=source_code
@@ -240,7 +240,23 @@ class MumeiMCPClient:
                 "MumeiMCPClient: get_effects failed (%s); falling back",
                 exc,
             )
-            return self._fallback.infer_effects(_write_temp_mm(source_code))
+            return self._fallback_infer_effects(source_code)
+
+    def _fallback_infer_effects(self, source_code: str) -> dict[str, Any]:
+        """Run ``MumeiClient.infer_effects`` on a temp file and clean up.
+
+        Mirrors the cleanup pattern of :meth:`_fallback_validate` so the
+        ``.mm`` temp file is always unlinked, even when
+        ``infer_effects`` raises.
+        """
+        path = _write_temp_mm(source_code)
+        try:
+            return self._fallback.infer_effects(path)
+        finally:
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
 
     def visualize_graph(self, format: str = "mermaid") -> str:
         """Call the ``visualize_std_graph`` MCP tool."""

@@ -29,7 +29,7 @@ from typing import Any
 from openai import OpenAI
 
 from agent.config import AgentConfig
-from agent.mumei_client import MumeiClient
+from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.forge_discovery import discover_tasks, filter_completed_tasks
 from agent.prompts.forge.forge_append import build_append_prompt
 from agent.prompts.forge.forge_system import FORGE_SYSTEM_PROMPT
@@ -733,7 +733,10 @@ def main(args) -> None:  # type: ignore[no-untyped-def]
     # without an API key configured.
     config: AgentConfig | None = None if args.dry_run else AgentConfig()
     mumei_bin = config.mumei_bin if config else os.environ.get("MUMEI_BIN", "mumei")
-    mumei = MumeiClient(mumei_bin)
+    # Use the factory so ``USE_MCP_CLIENT=true`` routes forge verification
+    # through the mumei MCP server when available (falls back to the CLI
+    # client transparently).
+    mumei = create_mumei_client(mumei_bin)
 
     log_path = Path(args.log_path).resolve() if args.log_path else tasks_dir.parent / "forge_log.json"
 

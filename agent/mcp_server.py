@@ -97,7 +97,7 @@ def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
     try:
         from agent.config import AgentConfig
         from agent.forge import MumeiForge
-        from agent.mumei_client import MumeiClient
+        from agent.mumei_client import create_mumei_client
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
 
@@ -117,7 +117,9 @@ def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
     mumei_bin = (config.mumei_bin if config else None) or os.environ.get(
         "MUMEI_BIN", "mumei"
     )
-    mumei_client = MumeiClient(mumei_bin)
+    # Honor ``USE_MCP_CLIENT`` for forge_task so MCP-backed verification
+    # is available from both the CLI and the MCP entrypoint.
+    mumei_client = create_mumei_client(mumei_bin)
     forge_tasks_dir = repo.parent / "mumei-agent" / "forge_tasks"
     if not forge_tasks_dir.exists():
         forge_tasks_dir = repo / "forge_tasks"
@@ -226,12 +228,17 @@ def heal_file(source_code: str, error_report: str = "") -> str:
         import tempfile
 
         mumei = MumeiClient(config.mumei_bin)
+        # Initialize to None before the try block so the ``finally``
+        # clause never hits ``UnboundLocalError`` when NamedTemporaryFile
+        # or tmp.write raises — matching the pattern in
+        # ``agent/strategies/fix_strategy.py``.
+        tmp_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 "w", suffix=".mm", delete=False, encoding="utf-8"
             ) as tmp:
-                tmp.write(source_code)
                 tmp_path = tmp.name
+                tmp.write(source_code)
             verify = mumei.verify(tmp_path)
             report_data = verify.get("report") or {}
             error_log = verify.get("stderr") or verify.get("stdout") or ""
@@ -245,10 +252,11 @@ def heal_file(source_code: str, error_report: str = "") -> str:
                     }
                 )
         finally:
-            try:
-                Path(tmp_path).unlink()
-            except Exception:
-                pass
+            if tmp_path is not None:
+                try:
+                    Path(tmp_path).unlink()
+                except Exception:
+                    pass
 
     try:
         healed = get_fix(
@@ -290,7 +298,7 @@ def measure_std_health(mumei_repo: str) -> str:
 
     try:
         from agent.config import AgentConfig
-        from agent.mumei_client import MumeiClient
+        from agent.mumei_client import create_mumei_client
         from agent.std_health import measure_health
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
@@ -301,7 +309,7 @@ def measure_std_health(mumei_repo: str) -> str:
     except Exception:
         mumei_bin = os.environ.get("MUMEI_BIN", "mumei")
 
-    mumei_client = MumeiClient(mumei_bin)
+    mumei_client = create_mumei_client(mumei_bin)
     try:
         report = measure_health(mumei_client, std_dir)
     except Exception as exc:

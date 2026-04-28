@@ -13,7 +13,7 @@ import fcntl
 from pathlib import Path
 
 from agent.config import AgentConfig
-from agent.mumei_client import MumeiClient
+from agent.mumei_client import create_mumei_client
 from agent.pattern_library import PatternLibrary
 from agent.strategies.fix_strategy import get_fix
 from agent.strategies.generate_strategy import generate_code
@@ -113,7 +113,10 @@ def main() -> None:
     if args.strategy is not None:
         config.strategy = args.strategy
     client = config.create_client()
-    mumei = MumeiClient(config.mumei_bin)
+    # Use the factory so ``USE_MCP_CLIENT=true`` transparently routes
+    # verification through the mumei MCP server when it's reachable,
+    # while keeping the subprocess CLI as the default/fallback.
+    mumei = create_mumei_client(config.mumei_bin)
 
     source_file = args.source_file
     max_retries = args.max_retries if args.max_retries is not None else config.max_retries

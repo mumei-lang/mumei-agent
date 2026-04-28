@@ -32,7 +32,7 @@ from agent.gap_rules import (
     _scan_std_imports,
     analyze_gaps_local,
 )
-from agent.mumei_client import MumeiClient
+from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.propose import build_spec_from_proposal
 from agent.publish import publish
 from agent.strategies.generate_strategy import generate_code
@@ -414,7 +414,9 @@ def proliferate(
         from agent.std_health import measure_health as _measure_health
 
         config_for_health = AgentConfig()
-        health_client = MumeiClient(mumei_bin or config_for_health.mumei_bin)
+        health_client = create_mumei_client(
+            mumei_bin or config_for_health.mumei_bin
+        )
         health_before = _measure_health(health_client, std_dir)
         _log_info(
             f"Initial health score: {health_before['health_score']:.2f} "
@@ -468,7 +470,9 @@ def proliferate(
     # Step 3: Process each spec
     config = AgentConfig()
     effective_mumei_bin = mumei_bin or config.mumei_bin
-    mumei_client = MumeiClient(effective_mumei_bin)
+    # ``USE_MCP_CLIENT=true`` opts into richer MCP-backed verification
+    # for the proliferate loop; otherwise this is a plain MumeiClient.
+    mumei_client = create_mumei_client(effective_mumei_bin)
     openai_client = config.create_client()
 
     results: list[dict[str, Any]] = []
