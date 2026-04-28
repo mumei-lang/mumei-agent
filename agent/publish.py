@@ -31,7 +31,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from agent.config import AgentConfig
-from agent.mumei_client import MumeiClient
+from agent.mumei_client import create_mumei_client
 from agent.strategies.generate_strategy import generate_code
 
 logger = logging.getLogger(__name__)
@@ -221,7 +221,11 @@ def publish(
     config = AgentConfig()
     # Respect MUMEI_BIN env var via config when no explicit --mumei-bin is given.
     effective_mumei_bin = mumei_bin or config.mumei_bin
-    client = MumeiClient(effective_mumei_bin)
+    # ``USE_MCP_CLIENT=true`` opts into MCP-backed verification for the
+    # publish pipeline as well; ``MumeiMCPClient`` forwards
+    # ``build_with_emit`` and ``build`` to the CLI fallback so the FFI
+    # emit step keeps working unchanged.
+    client = create_mumei_client(effective_mumei_bin)
 
     if pre_generated_code is not None:
         code = pre_generated_code
