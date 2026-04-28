@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agent.mumei_client import MumeiClient
+from agent.mumei_client import MumeiClient, create_mumei_client
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +263,9 @@ def main(args: argparse.Namespace) -> None:
 
     config = AgentConfig()
     effective_mumei_bin = args.mumei_bin or config.mumei_bin
-    client = MumeiClient(effective_mumei_bin)
+    # Honor ``USE_MCP_CLIENT`` so the ``health`` subcommand can use the
+    # mumei MCP server's richer verifier when available.
+    client = create_mumei_client(effective_mumei_bin)
 
     std_dir = Path(args.mumei_repo) / "std"
     report = measure_health(client, std_dir)

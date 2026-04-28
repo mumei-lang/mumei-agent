@@ -1,7 +1,16 @@
 """Allow running as `python -m agent` with subcommands."""
 import sys
 
-_SUBCOMMANDS = {"heal", "generate", "publish", "forge", "propose", "proliferate", "health"}
+_SUBCOMMANDS = {
+    "heal",
+    "generate",
+    "publish",
+    "forge",
+    "propose",
+    "proliferate",
+    "health",
+    "mcp-server",
+}
 
 
 def main() -> None:
@@ -90,6 +99,24 @@ def main() -> None:
         health_build_parser(parser)
         args = parser.parse_args(argv[1:])
         health_main(args)
+    elif command == "mcp-server":
+        # P10 — expose forge / heal / health / propose as MCP tools.
+        # Any extra positional/optional args are ignored: FastMCP's
+        # stdio transport does not take CLI flags.
+        #
+        # ``mcp[cli]`` is an optional extra; surface a clear hint when
+        # the user hasn't installed it instead of a bare ImportError.
+        try:
+            from agent.mcp_server import main as mcp_main
+        except ImportError as exc:
+            print(
+                f"error: mcp-server requires the 'mcp' extra ({exc}).\n"
+                "Install with: pip install 'mumei-agent[mcp]'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        mcp_main()
     elif command == "heal":
         from agent.self_healing import main as heal_main
         # Strip the 'heal' subcommand so self_healing's own argparse

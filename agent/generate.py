@@ -8,7 +8,7 @@ import json
 import sys
 
 from agent.config import AgentConfig
-from agent.mumei_client import MumeiClient
+from agent.mumei_client import create_mumei_client
 from agent.metrics import Metrics
 from agent.strategies.generate_strategy import generate_code
 
@@ -143,7 +143,9 @@ def main(args: argparse.Namespace | None = None) -> None:
     spec = _load_spec(args)
     config = AgentConfig()
     client = config.create_client()
-    mumei = MumeiClient(config.mumei_bin)
+    # Honor ``USE_MCP_CLIENT`` so generate runs can pick up richer
+    # semantic feedback from the mumei MCP server when available.
+    mumei = create_mumei_client(config.mumei_bin)
     max_retries = args.max_retries if args.max_retries is not None else config.max_retries
     metrics = Metrics()
 

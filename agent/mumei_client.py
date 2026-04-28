@@ -1,6 +1,33 @@
 """Wrapper for mumei CLI commands."""
-import subprocess
+from __future__ import annotations
+
 import json
+import subprocess
+
+
+def create_mumei_client(mumei_bin: str = "mumei") -> "MumeiClient":
+    """Return a verifier client honoring the ``USE_MCP_CLIENT`` flag.
+
+    When ``USE_MCP_CLIENT=true`` (and the mumei MCP server is reachable
+    either in-process via ``PYTHONPATH`` or as a stdio subprocess via
+    ``MUMEI_MCP_COMMAND``), this returns a
+    :class:`agent.mcp_client.MumeiMCPClient` so callers benefit from
+    richer semantic feedback / counter-example details.  Otherwise it
+    returns a plain :class:`MumeiClient`.
+
+    The MCP client is API-compatible with :class:`MumeiClient` for the
+    methods used by the forge / heal / proliferate pipelines and falls
+    back to subprocess CLI calls automatically on any error.
+    """
+    try:
+        from agent.mcp_client import MumeiMCPClient, use_mcp_client_enabled
+    except Exception:
+        return MumeiClient(mumei_bin)
+    if use_mcp_client_enabled():
+        client = MumeiMCPClient(mumei_bin)
+        if client.mode != "unavailable":
+            return client  # type: ignore[return-value]
+    return MumeiClient(mumei_bin)
 
 
 class MumeiClient:

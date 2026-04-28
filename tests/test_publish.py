@@ -115,7 +115,7 @@ class TestPublishDryRun:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             r = publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=True)
         assert r["success"] is True
@@ -129,7 +129,7 @@ class TestPublishDryRun:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=("", False)), \
-             patch("agent.publish.MumeiClient"):
+             patch("agent.publish.create_mumei_client"):
             r = publish(spec_path=sp, dry_run=True)
         assert r["success"] is False
         assert r["generation_error"] == "empty code"
@@ -138,7 +138,7 @@ class TestPublishDryRun:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, False)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             MC.return_value.verify.return_value = {
                 "success": False, "report": {}, "stdout": "", "stderr": "fail",
             }
@@ -150,7 +150,7 @@ class TestPublishDryRun:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             inst = MC.return_value
             inst.verify.return_value = {"success": True, "report": {}, "stdout": "", "stderr": ""}
             inst.build_with_emit.side_effect = [
@@ -172,7 +172,7 @@ class TestPublishSpecValidation:
         sp = _spec_file(tmp_path, spec={"params": []})
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code") as mg, \
-             patch("agent.publish.MumeiClient"):
+             patch("agent.publish.create_mumei_client"):
             r = publish(spec_path=sp, dry_run=True)
         assert r["success"] is False
         mg.assert_not_called()
@@ -181,7 +181,7 @@ class TestPublishSpecValidation:
         sp = _spec_file(tmp_path, spec={"name": "../evil"})
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code") as mg, \
-             patch("agent.publish.MumeiClient"):
+             patch("agent.publish.create_mumei_client"):
             r = publish(spec_path=sp, dry_run=True)
         assert r["success"] is False
         mg.assert_not_called()
@@ -195,7 +195,7 @@ class TestPublishGitOperations:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC, \
+             patch("agent.publish.create_mumei_client") as MC, \
              patch("agent.publish._git") as mg, \
              patch.dict("os.environ", env or {}, clear=False):
             _ok_client(MC)
@@ -262,7 +262,7 @@ class TestPublishGitHubPR:
         env = {"GITHUB_TOKEN": "t", "GITHUB_OWNER": "o", "GITHUB_REPO": "r"}
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC, \
+             patch("agent.publish.create_mumei_client") as MC, \
              patch("agent.publish._git") as mg, \
              patch("agent.publish._create_github_pr", side_effect=RuntimeError("API")), \
              patch.dict("os.environ", env, clear=False):
@@ -278,7 +278,7 @@ class TestPublishGitHubPR:
         env = {"GITHUB_TOKEN": "t", "GITHUB_OWNER": "o", "GITHUB_REPO": "r"}
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC, \
+             patch("agent.publish.create_mumei_client") as MC, \
              patch("agent.publish._git") as mg, \
              patch("agent.publish._create_github_pr", return_value={"html_url": "https://pr/1"}), \
              patch.dict("os.environ", env, clear=False):
@@ -301,7 +301,7 @@ class TestPublishDryRunFullPipeline:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             inst = _ok_client(MC)
             publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=True)
         assert inst.build_with_emit.call_count == 3
@@ -313,7 +313,7 @@ class TestPublishDryRunFullPipeline:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, False)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             MC.return_value.verify.return_value = {
                 "success": False, "report": {}, "stdout": "", "stderr": "proof failed",
             }
@@ -326,7 +326,7 @@ class TestPublishDryRunFullPipeline:
         sp = _spec_file(tmp_path)
         with patch("agent.publish.AgentConfig", return_value=_cfg()), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC, \
+             patch("agent.publish.create_mumei_client") as MC, \
              patch("agent.publish._git") as mg, \
              patch.dict("os.environ", {"GITHUB_TOKEN": "", "GITHUB_OWNER": "", "GITHUB_REPO": ""}, clear=False):
             _ok_client(MC)
@@ -351,7 +351,7 @@ class TestMumeiBinFallback:
         cfg.mumei_bin = "/custom/mumei"
         with patch("agent.publish.AgentConfig", return_value=cfg), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             publish(spec_path=sp, mumei_bin=None, repo_dir=str(tmp_path), dry_run=True)
         MC.assert_called_once_with("/custom/mumei")
@@ -362,7 +362,7 @@ class TestMumeiBinFallback:
         cfg.mumei_bin = "/default/mumei"
         with patch("agent.publish.AgentConfig", return_value=cfg), \
              patch("agent.publish.generate_code", return_value=(_CODE, True)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             publish(spec_path=sp, mumei_bin="/explicit", repo_dir=str(tmp_path), dry_run=True)
         MC.assert_called_once_with("/explicit")

@@ -14,13 +14,25 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from agent.config import AgentConfig
-from agent.mumei_client import MumeiClient
+from agent.gap_rules import (
+    _IMPORT_RE,
+    _STD_GAP_RULES,
+    _TODO_MARKER_RE,
+    _TRUSTED_ATOM_RE,
+    _collect_todo_comments,
+    _collect_trusted_atoms,
+    _evaluate_rule,
+    _scan_std_imports,
+    analyze_gaps_local,
+)
+from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.propose import build_spec_from_proposal
 from agent.publish import publish
 from agent.strategies.generate_strategy import generate_code
@@ -30,303 +42,65 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Gap Analysis (local filesystem, no MCP required)
 # ---------------------------------------------------------------------------
+#
+# The actual rule list, regexes, and primitive helpers now live in
+# ``agent.gap_rules`` so the offline fallback path is clearly isolated
+# from the MCP-delegating wrapper below.  The names are re-exported via
+# the import block above so existing callers (and tests) that reference
+# ``proliferate._STD_GAP_RULES`` / ``_scan_std_imports`` etc. keep
+# working.
 
-# Regex patterns ported from mumei's mcp_server.py helper functions
-_IMPORT_RE = re.compile(r'^\s*import\s+"([^"]+)"\s*(?:as\s+\w+\s*)?;')
-_TRUSTED_ATOM_RE = re.compile(r"^\s*trusted\s+atom\s+(\w+)")
-_TODO_MARKER_RE = re.compile(
-    r"//.*?\b(TODO|FIXME|XXX|HACK|Phase\s+[A-Z0-9]+)\b[^\n]*",
-    re.IGNORECASE,
-)
-# Hard-coded gap rules (same as mumei's mcp_server.py _STD_GAP_RULES).
-_STD_GAP_RULES: list[dict[str, Any]] = [
-    {
-        "target": "std/iter.mm",
-        "reason": (
-            "Collection traversal common interface. "
-            "std/list.mm / std/alloc.mm containers lack iterators."
-        ),
-        "depends_on": ["std/prelude.mm"],
-        "difficulty": "medium",
-        "trigger": {
-            "has_container_without_iter": [
-                "std/container",
-                "std/list.mm",
-                "std/alloc.mm",
-            ],
-            "missing": "std/iter.mm",
-        },
-    },
-    {
-        "target": "std/core.mm",
-        "reason": (
-            "Type conversion safety proofs are scattered. "
-            "Consolidate Size/Index/NonZero axioms and checked_add/sub/mul."
-        ),
-        "depends_on": ["std/prelude.mm"],
-        "difficulty": "low",
-        "trigger": {"missing": "std/core.mm"},
-    },
-    {
-        "target": "std/trait/iterable.mm",
-        "reason": (
-            "Common interface for Vector/List/BoundedArray. "
-            "Connect Sequential trait with iterator."
-        ),
-        "depends_on": ["std/prelude.mm", "std/alloc.mm"],
-        "difficulty": "medium",
-        "trigger": {
-            "missing": "std/trait/iterable.mm",
-            "requires_present": ["std/alloc.mm"],
-        },
-    },
-    {
-        "target": "std/hash.mm",
-        "reason": (
-            "prelude.mm has Eq/Ord but Hash law is incomplete. "
-            "Provide Hashable trait implementation and collision resistance law."
-        ),
-        "depends_on": ["std/prelude.mm"],
-        "difficulty": "medium",
-        "trigger": {"missing": "std/hash.mm"},
-    },
-    # std/math 系（Z3 整数理論ネイティブ）
-    {
-        "target": "std/math/abs.mm",
-        "reason": (
-            "Absolute value with i64::MIN overflow handling. "
-            "Z3 integer theory can fully verify the edge case."
-        ),
-        "depends_on": ["std/core.mm"],
-        "difficulty": "low",
-        "trigger": {"missing": "std/math/abs.mm"},
-    },
-    {
-        "target": "std/math/safe_div.mm",
-        "reason": (
-            "Division with compile-time zero-divisor elimination "
-            "using NonZero type from core.mm."
-        ),
-        "depends_on": ["std/core.mm"],
-        "difficulty": "low",
-        "trigger": {"missing": "std/math/safe_div.mm"},
-    },
-    {
-        "target": "std/math/safe_mul.mm",
-        "reason": (
-            "Multiplication with full overflow prevention proof. "
-            "Extends checked_mul from core.mm with richer contracts."
-        ),
-        "depends_on": ["std/core.mm"],
-        "difficulty": "low",
-        "trigger": {"missing": "std/math/safe_mul.mm"},
-    },
-    {
-        "target": "std/math/pow.mm",
-        "reason": (
-            "Integer exponentiation with overflow bounds proof. "
-            "Z3 can verify base cases and inductive overflow limits."
-        ),
-        "depends_on": ["std/core.mm", "std/math/safe_mul.mm"],
-        "difficulty": "medium",
-        "trigger": {
-            "missing": "std/math/pow.mm",
-            "requires_present": ["std/core.mm"],
-        },
-    },
-    # std/container 系（Z3 配列理論）
-    {
-        "target": "std/container/ring_buffer.mm",
-        "reason": (
-            "Fixed-size ring buffer with head/tail pointer wraparound "
-            "safety proof. Z3 modular arithmetic."
-        ),
-        "depends_on": ["std/core.mm"],
-        "difficulty": "medium",
-        "trigger": {"missing": "std/container/ring_buffer.mm"},
-    },
-    {
-        "target": "std/container/binary_heap.mm",
-        "reason": (
-            "Binary heap with heap property maintenance proof after "
-            "insert/delete. Z3 array + integer theory."
-        ),
-        "depends_on": ["std/core.mm", "std/container/bounded_array.mm"],
-        "difficulty": "high",
-        "trigger": {
-            "missing": "std/container/binary_heap.mm",
-            "requires_present": ["std/container/bounded_array.mm"],
-        },
-    },
-]
-
-
-def _scan_std_imports(std_dir: Path) -> dict[str, list[str]]:
-    """Build a dependency graph of .mm files under *std_dir*.
-
-    Returns a dict mapping ``std/X.mm`` relative paths to their sorted
-    list of import targets.
-    """
-    if not std_dir.exists():
-        return {}
-
-    available: dict[str, str] = {}
-    for mm_file in std_dir.rglob("*.mm"):
-        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
-        import_path = rel[: -len(".mm")]
-        available[import_path] = rel
-
-    dependency_graph: dict[str, list[str]] = {}
-    for mm_file in sorted(std_dir.rglob("*.mm")):
-        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
-        try:
-            text = mm_file.read_text(encoding="utf-8")
-        except OSError:
-            dependency_graph[rel] = []
-            continue
-        deps: list[str] = []
-        for line in text.splitlines():
-            m = _IMPORT_RE.match(line)
-            if not m:
-                continue
-            target = m.group(1).strip()
-            resolved = available.get(target)
-            if resolved and resolved != rel and resolved not in deps:
-                deps.append(resolved)
-        dependency_graph[rel] = sorted(deps)
-    return dependency_graph
-
-
-def _collect_trusted_atoms(std_dir: Path) -> list[dict[str, Any]]:
-    """Return list of trusted atom entries found in *std_dir*."""
-    results: list[dict[str, Any]] = []
-    for mm_file in sorted(std_dir.rglob("*.mm")):
-        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
-        try:
-            lines = mm_file.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for idx, line in enumerate(lines):
-            m = _TRUSTED_ATOM_RE.match(line)
-            if not m:
-                continue
-            atom_name = m.group(1)
-            reason = ""
-            look = idx - 1
-            if look >= 0 and lines[look].strip().startswith("//"):
-                reason = lines[look].strip().lstrip("/ ").strip()
-            if not reason:
-                end = min(idx + 10, len(lines))
-                body_text = " ".join(l.strip() for l in lines[idx + 1 : end])
-                if re.search(r"body\s*:\s*\{\s*\}", body_text):
-                    reason = "body is stub"
-                else:
-                    reason = "trusted (proof hole)"
-            results.append(
-                {"file": rel, "atom": atom_name, "line": idx + 1, "reason": reason}
-            )
-    return results
-
-
-def _collect_todo_comments(std_dir: Path) -> list[dict[str, Any]]:
-    """Return list of TODO/FIXME/XXX/HACK comments in *std_dir*."""
-    results: list[dict[str, Any]] = []
-    for mm_file in sorted(std_dir.rglob("*.mm")):
-        rel = str(mm_file.relative_to(std_dir.parent)).replace("\\", "/")
-        try:
-            lines = mm_file.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for idx, line in enumerate(lines):
-            m = _TODO_MARKER_RE.search(line)
-            if not m:
-                continue
-            results.append(
-                {"file": rel, "line": idx + 1, "text": line.strip().lstrip("/ ").strip()}
-            )
-    return results
-
-
-def _evaluate_rule(
-    rule: dict[str, Any],
-    existing_paths: set[str],
-    std_dir: Path,
-) -> bool:
-    """Return True if the rule's trigger conditions apply."""
-    trigger = rule.get("trigger", {})
-    missing = trigger.get("missing")
-    if missing and missing in existing_paths:
-        return False
-    for required in trigger.get("requires_present", []):
-        if required not in existing_paths:
-            return False
-    container_check = trigger.get("has_container_without_iter")
-    if container_check:
-        has_container = any(
-            (std_dir.parent / path).exists()
-            or (path.endswith("/") and (std_dir.parent / path.rstrip("/")).exists())
-            for path in container_check
-        )
-        if not has_container:
-            return False
-    return True
+def _prefer_mcp_gaps_enabled() -> bool:
+    """Return True when ``PREFER_MCP_GAPS`` env var opts into MCP delegation."""
+    return os.environ.get("PREFER_MCP_GAPS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def analyze_gaps(std_dir: Path) -> dict[str, Any]:
     """Analyze the mumei std/ directory for missing components.
 
-    This is the local-filesystem equivalent of the ``analyze_std_gaps``
-    MCP tool in mumei's ``mcp_server.py``.
+    By default this runs the local-filesystem analyzer in
+    :mod:`agent.gap_rules`.  When ``PREFER_MCP_GAPS=true`` is set in the
+    environment **and** the mumei repo's ``mcp_server`` module is
+    importable, the analysis is delegated to the MCP-side
+    ``analyze_std_gaps`` tool instead so the rule set always matches
+    the compiler repo.  Any failure to reach the MCP path silently
+    falls back to the local analyzer.
 
     Returns a dict with keys:
         dependency_graph, trusted_atoms, todo_comments, proposals
     """
-    if not std_dir.exists():
-        return {
-            "dependency_graph": {},
-            "trusted_atoms": [],
-            "todo_comments": [],
-            "proposals": [],
-        }
+    if _prefer_mcp_gaps_enabled():
+        try:
+            from agent.propose import _load_gaps_from_mcp
 
-    dependency_graph = _scan_std_imports(std_dir)
-    trusted_atoms = _collect_trusted_atoms(std_dir)
-    todo_comments = _collect_todo_comments(std_dir)
+            mcp_gaps = _load_gaps_from_mcp()
+            if isinstance(mcp_gaps, dict) and "proposals" in mcp_gaps:
+                logger.info(
+                    "analyze_gaps: delegated to mumei MCP server (PREFER_MCP_GAPS=true)"
+                )
+                return mcp_gaps
+            logger.debug(
+                "analyze_gaps: MCP payload missing 'proposals'; using local fallback"
+            )
+        except SystemExit as exc:
+            # _load_gaps_from_mcp raises SystemExit when the mumei repo
+            # is not importable.  Treat that as a soft fallback.
+            logger.debug(
+                "analyze_gaps: MCP delegation unavailable (%s); falling back to local analysis",
+                exc,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "analyze_gaps: MCP delegation raised %s; falling back to local analysis",
+                exc,
+            )
 
-    existing_paths = set(dependency_graph.keys())
-
-    proposals: list[dict[str, Any]] = []
-    for rule in _STD_GAP_RULES:
-        if not _evaluate_rule(rule, existing_paths, std_dir):
-            continue
-        proposals.append(
-            {
-                "name": rule["target"],
-                "reason": rule["reason"],
-                "depends_on": rule["depends_on"],
-                "difficulty": rule["difficulty"],
-            }
-        )
-
-    # Rank proposals: lower difficulty and fewer unmet deps rank higher.
-    difficulty_weight = {"low": 0, "medium": 1, "high": 2}
-
-    def _rank_key(p: dict[str, Any]) -> tuple[int, int]:
-        diff = difficulty_weight.get(p["difficulty"], 3)
-        unmet = sum(1 for dep in p["depends_on"] if dep not in existing_paths)
-        return (diff, unmet)
-
-    proposals.sort(key=_rank_key)
-    for i, p in enumerate(proposals[:3], start=1):
-        p["priority"] = i
-    proposals = proposals[:3]
-
-    return {
-        "dependency_graph": dependency_graph,
-        "trusted_atoms": trusted_atoms,
-        "todo_comments": todo_comments,
-        "proposals": proposals,
-    }
+    return analyze_gaps_local(std_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -640,7 +414,9 @@ def proliferate(
         from agent.std_health import measure_health as _measure_health
 
         config_for_health = AgentConfig()
-        health_client = MumeiClient(mumei_bin or config_for_health.mumei_bin)
+        health_client = create_mumei_client(
+            mumei_bin or config_for_health.mumei_bin
+        )
         health_before = _measure_health(health_client, std_dir)
         _log_info(
             f"Initial health score: {health_before['health_score']:.2f} "
@@ -694,7 +470,9 @@ def proliferate(
     # Step 3: Process each spec
     config = AgentConfig()
     effective_mumei_bin = mumei_bin or config.mumei_bin
-    mumei_client = MumeiClient(effective_mumei_bin)
+    # ``USE_MCP_CLIENT=true`` opts into richer MCP-backed verification
+    # for the proliferate loop; otherwise this is a plain MumeiClient.
+    mumei_client = create_mumei_client(effective_mumei_bin)
     openai_client = config.create_client()
 
     results: list[dict[str, Any]] = []

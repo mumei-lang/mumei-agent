@@ -376,6 +376,73 @@ P1-C → P1-B → P1-A → P3-B → P6-A/B/C → SI-1 (Zero-Human Challenge) →
 
 ---
 
+## P10: MCP Integration Strengthening ✅Implemented
+
+mumei-agent と mumei MCP server の双方向 MCP 統合を強化。外部 MCP クライアント
+（Claude Code / Devin / Codex 等）からも forge / heal / health / propose を直接
+呼び出せるようになり、内部の検証パイプラインも opt-in で MCP server の richer
+feedback（`semantic_feedback` / `machine_readable` / `counter_example` /
+`effect_violation`）を消費できる。
+
+- ✅`agent/mcp_server.py` — `FastMCP("Mumei-Agent")` を起動し以下のツールを公開
+  - `forge_task(task_json, mumei_repo, dry_run=true)` — `MumeiForge.forge_one`
+    の MCP ラッパ
+  - `heal_file(source_code, error_report)` — `agent.strategies.fix_strategy.get_fix`
+    によるセルフヒール
+  - `measure_std_health(mumei_repo)` — `agent.std_health.measure_health` を委譲
+  - `propose_forge_tasks(mumei_repo, max_proposals)` — `analyze_gaps` →
+    `generate_specs_from_gaps` を MCP 経由で実行
+  - `list_forge_log(log_path)` — `forge_log.json` の読み出し
+  - `get_agent_status()` — LLM provider / mumei binary / 利用可能サブコマンド一覧
+- ✅`agent/__main__.py` に `mcp-server` サブコマンドを登録
+  （`python -m agent mcp-server`）
+- ✅`pyproject.toml` / `requirements.txt` に `mcp[cli]>=1.0` を追加
+- ✅`pyproject.toml` の `[project.scripts]` に `mumei-agent-mcp` エントリポイントを追加
+
+- ✅`agent/mcp_client.py` — `MumeiMCPClient`（drop-in `MumeiClient` 互換）
+  - `validate_logic` / `analyze_gaps` / `list_catalog` / `get_effects` /
+    `visualize_graph` を mumei MCP server に委譲
+  - 自動トランスポート選択: in-process（`PYTHONPATH` に mumei が乗っていれば直接
+    `import mcp_server`）/ stdio subprocess（`MUMEI_MCP_COMMAND` 設定時）
+  - `verify(source_path)` シムが `MumeiClient.verify` と同じシグネチャで
+    `validate_logic` を呼び richer な `report` を返す
+  - 失敗時は `MumeiClient` サブプロセス呼び出しに自動フォールバック
+- ✅`USE_MCP_CLIENT` 環境変数 — `agent.mumei_client.create_mumei_client` ファクトリ経由で
+  forge / heal / proliferate が `MumeiClient` か `MumeiMCPClient` かを切り替え
+
+- ✅`agent/gap_rules.py` — `_STD_GAP_RULES` / `_scan_std_imports` /
+  `_collect_trusted_atoms` / `_collect_todo_comments` / `_evaluate_rule` /
+  `analyze_gaps_local` をオフライン用フォールバックとして分離
+- ✅`agent/proliferate.py` — `_STD_GAP_RULES` 等を `agent.gap_rules` から再エクスポートし
+  in-file 重複を排除
+- ✅`PREFER_MCP_GAPS` 環境変数 — `true` のとき `proliferate.analyze_gaps` が mumei
+  リポの `mcp_server.analyze_std_gaps` に委譲（`_load_gaps_from_mcp` 経由）。
+  `SystemExit`（mumei 不在）の場合は静かにローカル分析にフォールバック
+- ✅`.github/workflows/proliferate.yml` — `PREFER_MCP_GAPS=true` と
+  `PYTHONPATH=${{ github.workspace }}/mumei` を設定し CI 上で常に mumei リポの
+  ルールセットを使用
+
+- ✅`tests/test_mcp_server.py` — 全 6 ツールを直接呼び出してアサーション
+  （`MumeiForge` / `AgentConfig` / `measure_health` / `get_fix` をモック）
+- ✅`tests/test_mcp_client.py` — `MumeiMCPClient` のモード判定 / fallback /
+  `verify` シム / `create_mumei_client` ファクトリ
+- ✅`tests/test_gap_rules.py` — `analyze_gaps_local` の純関数挙動 /
+  `PREFER_MCP_GAPS` ON-OFF / fake `mcp_server` モジュールでのデリゲーション
+
+### Cross-repo: mumei-side MCP tools (P10-D)
+
+mumei-lang/mumei 側 `mcp_server.py` に以下を追加して external agents が
+mumei-agent のインストールなしに proof health / proof certificate /
+documentation を取得できるようにする:
+
+- `measure_std_health()` — std/ 全体に対する health metric を JSON で返却
+- `get_proof_certificate(module_path)` — `std/certs/` または proof bundle から
+  proof certificate JSON を返却
+- `generate_doc(source_code, format="json")` — `mumei doc --format json` を起動し
+  構造化ドキュメントを返却
+
+---
+
 ## Related Documents
 
 - [mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap (incl. Strategic Initiatives)
