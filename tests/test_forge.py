@@ -254,12 +254,14 @@ class TestForgeOneAppend:
         task = self._task()
         task["auto_commit"] = True
 
-        with patch("agent.forge._git") as mg:
+        with patch("agent.forge._git") as mg, \
+             patch("agent.forge._ensure_git_identity") as mid:
             mg.side_effect = [_cp(0), _cp(0), _cp(0, out="abc123\n")]
             result = forge.forge_one(task)
 
         assert result.status == "success"
         assert result.commit_sha == "abc123"
+        mid.assert_called_once_with(forge.mumei_repo_dir)
         # add, commit, rev-parse
         assert mg.call_count == 3
         assert mg.call_args_list[0][0][0][0] == "add"
@@ -276,12 +278,14 @@ class TestForgeOneAppend:
         task["task_id"] = "evil;rm -rf /"
         task["auto_commit"] = True
 
-        with patch("agent.forge._git") as mg:
+        with patch("agent.forge._git") as mg, \
+             patch("agent.forge._ensure_git_identity") as mid:
             result = forge.forge_one(task)
 
         assert result.status == "success"
         assert result.commit_sha is None
         mg.assert_not_called()
+        mid.assert_not_called()
 
 
 # --- forge_one: create/replace modes ----------------------------------------
@@ -475,7 +479,8 @@ class TestRun:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(_TARGET_BEFORE, encoding="utf-8")
 
-        with patch("agent.forge._git") as mg:
+        with patch("agent.forge._git") as mg, \
+             patch("agent.forge._ensure_git_identity"):
             mg.side_effect = [_cp(0), _cp(0), _cp(0, out="sha\n")]
             results = forge.run(auto_commit_override=True)
 

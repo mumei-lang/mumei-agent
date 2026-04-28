@@ -100,6 +100,22 @@ def _git(args: list[str], cwd: str | Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd))
 
 
+def _ensure_git_identity(cwd: str | Path) -> None:
+    """Configure repo-local git ``user.name`` / ``user.email`` for commits.
+
+    CI runners (and other fresh environments) frequently lack a default git
+    identity, which causes ``git commit`` to fail with
+    ``Please tell me who you are``.  Setting the identity at the repo-local
+    scope is idempotent, affects only the working repo, and keeps the publish
+    / forge commit paths robust.
+    """
+    _git(["config", "user.name", "github-actions[bot]"], cwd=cwd)
+    _git(
+        ["config", "user.email", "github-actions[bot]@users.noreply.github.com"],
+        cwd=cwd,
+    )
+
+
 def _create_github_pr(
     owner: str,
     repo: str,
@@ -291,6 +307,10 @@ def publish(
 
     # 5. Git operations
     branch_name = f"auto/{module_name}"
+
+    # Ensure a git identity is configured before attempting any commit so
+    # that fresh CI runners without a default identity don't blow up.
+    _ensure_git_identity(cwd)
 
     # Remember original branch so we can restore it on failure.
     orig_branch_result = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
