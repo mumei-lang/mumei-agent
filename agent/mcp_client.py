@@ -309,6 +309,31 @@ class MumeiMCPClient:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
         return self._fallback.infer_effects(source_path)
 
+    def infer_contracts(self, source_path: str) -> dict[str, Any]:
+        """Forward to the CLI client (no MCP equivalent for path-based input).
+
+        Required by :func:`agent.strategies.generate_strategy.generate_code`
+        when a spec sets ``context_file``; without this shim the
+        ``USE_MCP_CLIENT=true`` path would raise ``AttributeError``.
+        """
+        return self._fallback.infer_contracts(source_path)
+
+    def build(self, source_path: str, output: str = "katana") -> dict[str, Any]:
+        """Forward to the CLI client (no MCP equivalent)."""
+        return self._fallback.build(source_path, output=output)
+
+    def build_with_emit(
+        self, source_path: str, emit: str, output: str = "katana"
+    ) -> dict[str, Any]:
+        """Forward to the CLI client (no MCP equivalent for FFI emit targets).
+
+        Kept so :class:`MumeiMCPClient` is a complete drop-in replacement
+        for :class:`MumeiClient` — including the ``publish`` pipeline
+        which calls ``build_with_emit`` for c-header / rust-wrapper /
+        python-wrapper generation.
+        """
+        return self._fallback.build_with_emit(source_path, emit, output=output)
+
     # ------------------------------------------------------------------
     # Internal fallback
     # ------------------------------------------------------------------
