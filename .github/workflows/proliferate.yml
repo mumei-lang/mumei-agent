@@ -91,10 +91,10 @@ on:
           - qwen2.5-coder:7b       — strongest ollama-local option. Needs
                                      ~8GB VRAM; success rate usually
                                      tracks gpt-4o-mini minus ~10 pp.
-          - qwen3.5:4b             — balanced ollama-local option. Runs
+          - qwen3.5:4b (default)   — balanced ollama-local option. Runs
                                      on CPU in <2 min/iter; success rate
                                      ~0.5-0.7 on low-difficulty tasks.
-          - qwen3.5:0.8b (default) — fastest local option for CI
+          - qwen3.5:0.8b           — fastest local option for CI
                                      smoke-tests and dry runs. Expect
                                      lower success rate (~0.3-0.5) and
                                      higher avg_retries; prefer the
@@ -104,7 +104,7 @@ on:
           ``LLM_BENCHMARK_MODELS`` set to compare several models
           side-by-side. Results are written as JSON with per-model
           ``success_rate`` / ``avg_code_length`` / ``avg_time_seconds``.
-        default: 'qwen3.5:0.8b'
+        default: 'qwen3.5:4b'
         type: string
 
 jobs:
@@ -115,9 +115,9 @@ jobs:
       pull-requests: write
     env:
       # Scheduled runs have no workflow_dispatch inputs, so default to the
-      # fully self-contained ollama-local profile with a small qwen model.
+      # fully self-contained ollama-local profile with the qwen3.5:4b model.
       LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
-      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:0.8b' }}
+      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:4b' }}
     steps:
       - name: Check out mumei-agent
         uses: actions/checkout@v4
