@@ -487,7 +487,7 @@ class TestProliferateDryRun:
         with patch("agent.proliferate.generate_code") as gen_mock, patch(
             "agent.proliferate.AgentConfig"
         ) as cfg_mock, patch(
-            "agent.proliferate.MumeiClient"
+            "agent.proliferate.create_mumei_client"
         ) as client_mock:
             gen_mock.return_value = (fake_code, True)
             cfg_instance = MagicMock()
@@ -526,7 +526,7 @@ class TestProliferateDryRun:
         with patch("agent.proliferate.generate_code") as gen_mock, patch(
             "agent.proliferate.AgentConfig"
         ) as cfg_mock, patch(
-            "agent.proliferate.MumeiClient"
+            "agent.proliferate.create_mumei_client"
         ) as client_mock, patch(
             "agent.proliferate.attempt_heal"
         ) as heal_mock:
