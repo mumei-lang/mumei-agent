@@ -38,7 +38,7 @@ from agent.prompts.report_formatter import (
     format_counterexample,
     format_structured_unsat_core,
 )
-from agent.publish import _git
+from agent.publish import _ensure_git_identity, _git
 from agent.strategies.generate_strategy import (
     _extract_code,  # type: ignore[attr-defined]
     generate_code,
@@ -545,6 +545,10 @@ class MumeiForge:
         if not _SAFE_TASK_ID_RE.match(task_id):
             _logger.warning("Refusing to commit — unsafe task_id: %r", task_id)
             return None
+
+        # Ensure a git identity is configured before attempting any commit so
+        # that fresh CI runners without a default identity don't blow up.
+        _ensure_git_identity(self.mumei_repo_dir)
 
         add = _git(["add", "--", target_rel], cwd=self.mumei_repo_dir)
         if add.returncode != 0:

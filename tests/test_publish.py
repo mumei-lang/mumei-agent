@@ -205,6 +205,7 @@ class TestPublishGitOperations:
 
     def test_checkout_failure(self, tmp_path):
         r, _ = self._run(tmp_path, [
+            _cp(0), _cp(0),  # _ensure_git_identity (config user.name / user.email)
             _cp(0, out="develop"), _cp(1, err="branch exists"),
         ])
         assert r["success"] is False
@@ -212,6 +213,7 @@ class TestPublishGitOperations:
 
     def test_commit_failure_restores_branch(self, tmp_path):
         r, mg = self._run(tmp_path, [
+            _cp(0), _cp(0),  # _ensure_git_identity
             _cp(0, out="develop"), _cp(0), _cp(0), _cp(0),
             _cp(1, err="nothing to commit"), _cp(0),
         ])
@@ -220,6 +222,7 @@ class TestPublishGitOperations:
 
     def test_push_failure_restores_branch(self, tmp_path):
         r, mg = self._run(tmp_path, [
+            _cp(0), _cp(0),  # _ensure_git_identity
             _cp(0, out="main"), _cp(0), _cp(0), _cp(0),
             _cp(0), _cp(1, err="rejected"), _cp(0),
         ])
@@ -229,18 +232,21 @@ class TestPublishGitOperations:
     def test_add_uses_double_dash(self, tmp_path):
         r, mg = self._run(
             tmp_path,
-            [_cp(0, out="dev")] + [_cp(0)] * 5,
+            [_cp(0)] * 2 + [_cp(0, out="dev")] + [_cp(0)] * 5,
             env={"GITHUB_TOKEN": "", "GITHUB_OWNER": "", "GITHUB_REPO": ""},
         )
         assert r["success"] is True
-        add_calls = [c for c in mg.call_args_list if "add" in c[0][0]]
+        add_calls = [
+            c for c in mg.call_args_list
+            if "add" in c[0][0] and "config" not in c[0][0]
+        ]
         for c in add_calls:
             assert "--" in c[0][0]
 
     def test_skips_pr_without_token(self, tmp_path):
         r, _ = self._run(
             tmp_path,
-            [_cp(0, out="dev")] + [_cp(0)] * 5,
+            [_cp(0)] * 2 + [_cp(0, out="dev")] + [_cp(0)] * 5,
             env={"GITHUB_TOKEN": "", "GITHUB_OWNER": "", "GITHUB_REPO": ""},
         )
         assert r["success"] is True
@@ -261,7 +267,7 @@ class TestPublishGitHubPR:
              patch("agent.publish._create_github_pr", side_effect=RuntimeError("API")), \
              patch.dict("os.environ", env, clear=False):
             _ok_client(MC)
-            mg.side_effect = [_cp(0, out="dev")] + [_cp(0)] * 5
+            mg.side_effect = [_cp(0)] * 2 + [_cp(0, out="dev")] + [_cp(0)] * 5
             r = publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=False)
         assert r["success"] is True
         assert r["pr_created"] is False
@@ -277,7 +283,7 @@ class TestPublishGitHubPR:
              patch("agent.publish._create_github_pr", return_value={"html_url": "https://pr/1"}), \
              patch.dict("os.environ", env, clear=False):
             _ok_client(MC)
-            mg.side_effect = [_cp(0, out="dev")] + [_cp(0)] * 5
+            mg.side_effect = [_cp(0)] * 2 + [_cp(0, out="dev")] + [_cp(0)] * 5
             r = publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=False)
         assert r["success"] is True
         assert r["pr_created"] is True
@@ -324,7 +330,7 @@ class TestPublishDryRunFullPipeline:
              patch("agent.publish._git") as mg, \
              patch.dict("os.environ", {"GITHUB_TOKEN": "", "GITHUB_OWNER": "", "GITHUB_REPO": ""}, clear=False):
             _ok_client(MC)
-            mg.side_effect = [_cp(0, out="develop")] + [_cp(0)] * 5
+            mg.side_effect = [_cp(0)] * 2 + [_cp(0, out="develop")] + [_cp(0)] * 5
             publish(spec_path=sp, repo_dir=str(tmp_path), dry_run=False)
         # Find the checkout -b call and verify branch name
         checkout_calls = [
