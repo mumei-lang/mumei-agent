@@ -1,0 +1,56 @@
+{
+  "task_id": "vstd-trait-iterable",
+  "target_file": "std/trait/iterable.mm",
+  "mode": "create",
+  "priority": 7,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Common Iterable trait surface for Vector / List / BoundedArray, connecting the existing Sequential trait with std/iter. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/trait/iterable — verified traversal interface'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/iter.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm, std/iter.mm, and std/alloc.mm already use (checked_add, checked_sub, conditional expressions, comparisons).",
+  "context_files": [
+    "std/prelude.mm",
+    "std/core.mm",
+    "std/iter.mm",
+    "std/alloc.mm"
+  ],
+  "depends_on": [
+    "std/prelude.mm",
+    "std/alloc.mm"
+  ],
+  "atoms": [
+    {
+      "name": "iterable_len_nonneg",
+      "description": "Length axiom for an iterable of size len. Establishes len >= 0 so downstream iterators can rely on the bound when computing positions.",
+      "inputs": [
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0",
+      "ensures": "result == len && result >= 0",
+      "reference_patterns": ["iter_new", "bounded_is_empty"]
+    },
+    {
+      "name": "iterable_in_bounds",
+      "description": "Bounds-check predicate for an Iterable's logical position. Returns 1 (inclusive) when 0 <= idx < len, 0 otherwise.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["iter_has_next", "queue_is_empty"]
+    },
+    {
+      "name": "iterable_advance",
+      "description": "Advance an Iterable's position by one, requiring 0 <= idx < len so the new position remains within or at the boundary.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0 && idx >= 0 && idx < len",
+      "ensures": "result == idx + 1 && result >= 1 && result <= len",
+      "reference_patterns": ["iter_next", "ring_advance"]
+    }
+  ]
+}

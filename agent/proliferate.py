@@ -266,6 +266,46 @@ def _log_info(message: str) -> None:
     logger.info("[PROLIFERATE] %s", message)
 
 
+def _close_pr_for_regression(pr_url: str, health_delta: float) -> bool:
+    """Best-effort close *pr_url* with a health-regression comment.
+
+    Used by :func:`proliferate` when the post-flight health snapshot
+    regresses relative to the pre-flight baseline.  We try ``gh pr
+    close`` first because the CI runner already has a configured
+    ``GITHUB_TOKEN``; a missing or non-functional ``gh`` is treated as
+    soft-fail so the surrounding loop keeps going.
+
+    Returns ``True`` when ``gh`` reports success, ``False`` otherwise.
+    """
+    import shutil
+    import subprocess
+
+    if not pr_url:
+        return False
+    if shutil.which("gh") is None:
+        logger.info(
+            "auto-close: gh CLI not available; leaving %s open for manual review",
+            pr_url,
+        )
+        return False
+    comment = (
+        f"Auto-closing: SI-5 proliferation detected proof-health regression "
+        f"(delta={health_delta:+.3f}). See workflow logs for details."
+    )
+    try:
+        subprocess.run(
+            ["gh", "pr", "close", pr_url, "--comment", comment],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logger.warning("auto-close failed for %s: %s", pr_url, exc)
+        return False
+    logger.info("auto-close: closed %s due to health regression", pr_url)
+    return True
+
+
 def _build_pr_body_extra(
     spec: dict[str, Any],
     proposal: dict[str, Any] | None,
@@ -352,6 +392,85 @@ def _build_pr_body_extra(
     return "\n".join(lines)
 
 
+def _run_lean_fallback(
+    results: list[dict[str, Any]],
+    *,
+    mumei_lean_repo: str | None,
+) -> None:
+    """Hand any ``unknown`` atoms in *results* to ``mumei-lean``.
+
+    Mutates each ``spec_result`` in place with a ``"lean_fallback"``
+    sub-dict that records what was attempted, so downstream consumers
+    (the summary JSON, operators reading the run log) can audit the
+    fallback without re-running the bridge.
+
+    The Lean fallback is best-effort: any failure short-circuits the
+    enrichment for that spec and leaves the rest of the run untouched.
+    """
+    from agent import lean_bridge
+
+    if not lean_bridge.lean_fallback_available(mumei_lean_repo):
+        logger.info(
+            "lean fallback: skipping — MUMEI_LEAN_REPO not set or invalid"
+        )
+        return
+
+    import tempfile
+
+    for spec_result in results:
+        publish_result = spec_result.get("publish_result") or {}
+        cert = (
+            publish_result.get("proof_certificate")
+            or publish_result.get("certificate")
+        )
+        if not isinstance(cert, dict):
+            continue
+        unknown_atoms = lean_bridge.extract_unknown_atoms(cert)
+        if not unknown_atoms:
+            continue
+
+        with tempfile.TemporaryDirectory(prefix="mumei-lean-") as tmpdir:
+            cert_path = Path(tmpdir) / "input.proof-cert.json"
+            cert_path.write_text(
+                json.dumps(cert, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            lean_cert_out = Path(tmpdir) / "output.lean-cert.json"
+            bridge_result = lean_bridge.run_lean_bridge(
+                cert_path=cert_path,
+                lean_cert_out=lean_cert_out,
+                mumei_lean_repo=mumei_lean_repo or "",
+            )
+            lean_cert = bridge_result.get("lean_cert")
+            if isinstance(lean_cert, dict):
+                upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
+                    cert, lean_cert
+                )
+                proved = sum(
+                    1
+                    for a in upgraded.get("atoms", []) or []
+                    if isinstance(a, dict)
+                    and a.get("z3_check_result") == "lean_verified"
+                )
+            else:
+                upgraded = cert
+                proved = 0
+
+            spec_result["lean_fallback"] = {
+                "attempted": True,
+                "unknown_count": len(unknown_atoms),
+                "proved": proved,
+                "success": bridge_result.get("success", False),
+                "returncode": bridge_result.get("returncode", -1),
+            }
+            logger.info(
+                "Lean fallback: %d/%d unknown atoms discharged",
+                proved,
+                len(unknown_atoms),
+            )
+            spec_result["upgraded_cert"] = upgraded
+
+
 def proliferate(
     mumei_repo_dir: str | Path,
     *,
@@ -359,6 +478,7 @@ def proliferate(
     dry_run: bool = False,
     mumei_bin: str | None = None,
     output_json: str | Path | None = None,
+    enable_lean_fallback: bool = False,
 ) -> list[dict[str, Any]]:
     """Run the autonomous proliferation loop.
 
@@ -647,6 +767,27 @@ def proliferate(
         # because post-health is only measured after all proposals
         # complete.  The PR description will show the pre-run baseline
         # instead of a delta.
+        # Task 2-A: skip PR creation if a previous step has marked this
+        # spec for auto-close (e.g. an incremental health regression
+        # gate populated ``should_close_pr`` during a future per-spec
+        # health check).  The post-loop regression handler also sets
+        # this flag retroactively for already-published PRs and closes
+        # them via the GitHub API.
+        #
+        # The check is placed *before* writing the new file and healed
+        # files to disk so a triggered skip leaves the working tree
+        # untouched, matching the cleanup invariant of the
+        # ``not all_healed`` rollback path above.
+        if spec_result.get("should_close_pr"):
+            logger.warning(
+                "Skipping PR for %s: health regression detected (delta=%+.3f)",
+                target_file,
+                spec_result.get("health_delta", float("nan")),
+            )
+            spec_result.setdefault("reason", "health_regression")
+            results.append(spec_result)
+            continue
+
         new_file_path.parent.mkdir(parents=True, exist_ok=True)
         new_file_path.write_text(code, encoding="utf-8")
         for fpath, healed_content in healed_files.items():
@@ -700,6 +841,27 @@ def proliferate(
 
         results.append(spec_result)
 
+    # Task 2-C — opt-in Lean fallback for unknown atoms.
+    #
+    # After the forge + verify pass, walk every spec_result and offer
+    # any ``z3_check_result == "unknown"`` atoms to ``mumei-lean``.
+    # This is purely additive: we never modify the original verify
+    # result on disk and never block the run if Lean is unavailable.
+    # The try/except enforces that contract — any unexpected error
+    # inside ``_run_lean_fallback`` (OSError from tempfile,
+    # TypeError from json.dumps, etc.) is logged and swallowed so
+    # the post-loop health measurement, auto-close logic, and JSON
+    # summary writing below still run.
+    if enable_lean_fallback and not dry_run:
+        try:
+            _run_lean_fallback(
+                results, mumei_lean_repo=config.mumei_lean_repo
+            )
+        except Exception:
+            logger.warning(
+                "Lean fallback failed unexpectedly", exc_info=True
+            )
+
     # Optional: measure final health
     health_after: dict[str, Any] | None = None
     health_delta: float | None = None
@@ -726,6 +888,23 @@ def proliferate(
                     health_after["health_score"],
                     health_delta,
                 )
+                # Task 2-A: auto-close PRs that were just created when
+                # the run regressed proof-health.  We mark every result
+                # ``should_close_pr=True`` so downstream consumers (the
+                # summary JSON, the publish skip-check above, any
+                # follow-up retry) can recognise the regression, and
+                # best-effort close already-published PRs via the
+                # GitHub API.
+                if not dry_run:
+                    for r in results:
+                        r["should_close_pr"] = True
+                        r["health_delta"] = health_delta
+                        pr_url = r.get("pr_url")
+                        if pr_url:
+                            close_ok = _close_pr_for_regression(
+                                pr_url, health_delta
+                            )
+                            r["pr_closed"] = bool(close_ok)
         except Exception:
             logger.debug("Could not measure final health", exc_info=True)
 
@@ -769,6 +948,14 @@ def _write_output_json(
     processed = len(results)
     payload: dict[str, Any] = {
         "timestamp": started_at,
+        # Task 2-A: record the LLM model used for this run so operators
+        # can correlate health/success metrics with model quality across
+        # historical artifacts.  We resolve via ``AgentConfig().model``
+        # (which honours ``LLM_MODEL`` and falls back to the same
+        # default — currently ``"gpt-4o"`` — that the actual LLM client
+        # uses) so the summary JSON never disagrees with the model that
+        # produced the results.
+        "model": AgentConfig().model,
         "dry_run": bool(dry_run),
         "pre_health": pre_health,
         "post_health": post_health,
@@ -795,6 +982,10 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
 
     Generated code can be large and is already committed (or discarded
     in dry-run mode), so we only keep short summary-friendly fields.
+    The Lean-upgraded proof certificate stored under ``upgraded_cert``
+    can also be sizeable (one entry per atom), so it is replaced with
+    an ``upgraded_cert_summary`` dict that records the atom count, the
+    number of Lean-verified atoms, and the ``all_verified`` flag.
     """
     out: dict[str, Any] = {}
     for key, value in result.items():
@@ -812,6 +1003,69 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
                 )
                 if isinstance(value, dict) and k in value
             }
+        elif key == "upgraded_cert":
+            atoms = value.get("atoms") if isinstance(value, dict) else None
+            atom_list = atoms if isinstance(atoms, list) else []
+            lean_verified = sum(
+                1
+                for a in atom_list
+                if isinstance(a, dict)
+                and a.get("z3_check_result") == "lean_verified"
+            )
+            out["upgraded_cert_summary"] = {
+                "atom_count": len(atom_list),
+                "lean_verified_count": lean_verified,
+                "all_verified": (
+                    value.get("all_verified")
+                    if isinstance(value, dict)
+                    else None
+                ),
+            }
+        elif key == "publish_result":
+            # ``publish()`` now returns the full ``proof_certificate``
+            # (parsed ``mumei verify --json`` report) so the Lean
+            # fallback can inspect per-atom ``z3_check_result`` values.
+            # That payload can be sizeable (one entry per atom) and we
+            # already store a trimmed view via ``upgraded_cert_summary``
+            # when the Lean fallback runs, so here we keep just the
+            # short fields plus a per-cert atom count.
+            if isinstance(value, dict):
+                short: dict[str, Any] = {
+                    k: value.get(k)
+                    for k in (
+                        "success",
+                        "generated_file",
+                        "pr_url",
+                        "pr_created",
+                        "pr_error",
+                        "git_error",
+                        "verify_error",
+                        "generation_error",
+                        "verified_at_generation",
+                    )
+                    if k in value
+                }
+                cert = value.get("proof_certificate")
+                if isinstance(cert, dict):
+                    cert_atoms = cert.get("atoms")
+                    short["proof_certificate_summary"] = {
+                        "atom_count": (
+                            len(cert_atoms)
+                            if isinstance(cert_atoms, list)
+                            else 0
+                        ),
+                        "all_verified": cert.get("all_verified"),
+                    }
+                artifacts = value.get("artifacts")
+                if isinstance(artifacts, list):
+                    short["artifact_targets"] = [
+                        a.get("target")
+                        for a in artifacts
+                        if isinstance(a, dict)
+                    ]
+                out["publish_result"] = short
+            else:
+                out["publish_result"] = value
         else:
             out[key] = value
     return out
@@ -853,6 +1107,15 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
             "(used by the SI-5 Phase 3-B scheduled workflow)."
         ),
     )
+    parser.add_argument(
+        "--enable-lean-fallback",
+        action="store_true",
+        help=(
+            "Task 2-C: after forge + verify, hand any ``unknown`` atoms "
+            "to mumei-lean's bridge.py for Lean 4 discharge.  Requires "
+            "MUMEI_LEAN_REPO to point at a mumei-lang/mumei-lean checkout."
+        ),
+    )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -865,6 +1128,7 @@ def main(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
         mumei_bin=args.mumei_bin,
         output_json=args.output_json,
+        enable_lean_fallback=getattr(args, "enable_lean_fallback", False),
     )
 
     succeeded = sum(1 for r in results if r.get("success"))
