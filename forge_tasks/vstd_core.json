@@ -1,0 +1,65 @@
+{
+  "task_id": "vstd-core",
+  "target_file": "std/core.mm",
+  "mode": "create",
+  "priority": 1,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Consolidated Size / Index / NonZero axioms and checked_add/sub/mul atoms. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/core — verified primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/prelude.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/prelude.mm already uses (basic comparisons, conditional expressions, arithmetic).",
+  "context_files": [
+    "std/prelude.mm",
+    "std/contracts.mm"
+  ],
+  "depends_on": [
+    "std/prelude.mm"
+  ],
+  "atoms": [
+    {
+      "name": "checked_add",
+      "description": "Bounded addition for non-negative i64 values. Proves the result fits in i64 by constraining each operand to <= max_val/2 so the sum cannot overflow.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && a <= 4611686018427387903 && b <= 4611686018427387903",
+      "ensures": "result == a + b && result >= 0",
+      "reference_patterns": ["safe_add", "bounded_increment"]
+    },
+    {
+      "name": "checked_sub",
+      "description": "Subtraction with the precondition that the minuend is at least as large as the subtrahend, so the result is always non-negative.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && a >= b",
+      "ensures": "result == a - b && result >= 0",
+      "reference_patterns": ["safe_subtract"]
+    },
+    {
+      "name": "checked_mul",
+      "description": "Bounded multiplication for non-negative i64 values. Each operand is constrained to a square-root-like bound so the product fits in i64.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && a <= 1000000 && b <= 1000000",
+      "ensures": "result == a * b && result >= 0",
+      "reference_patterns": ["checked_add", "checked_sub"]
+    },
+    {
+      "name": "safe_narrow",
+      "description": "Narrow an i64 to a non-negative i64 by asserting the precondition v >= 0. Used by callers that need a typed `Nat`-like value without changing the storage representation.",
+      "inputs": [
+        {"name": "v", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "v >= 0",
+      "ensures": "result == v && result >= 0",
+      "reference_patterns": ["checked_add", "checked_sub"]
+    }
+  ]
+}

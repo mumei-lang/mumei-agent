@@ -1,0 +1,41 @@
+{
+  "task_id": "vstd-math-factorial",
+  "target_file": "std/math/factorial.mm",
+  "mode": "create",
+  "priority": 4,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Factorial with overflow checking. Limited to n <= 20 because 21! exceeds i64. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/factorial — verified factorial'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm and std/math/safe_mul.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/math/safe_mul.mm already use (checked_add, checked_sub, checked_mul, safe_narrow, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/math/safe_mul.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "factorial_step",
+      "description": "Single inductive step of factorial: given the running product acc for n-1, multiply by n. Requires acc * n to fit in i64, expressed by bounding both operands.",
+      "inputs": [
+        {"name": "acc", "type": "i64"},
+        {"name": "n", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "acc >= 1 && n >= 1 && n <= 20 && acc <= 1000000",
+      "ensures": "result == acc * n && result >= 1",
+      "reference_patterns": ["checked_mul", "safe_mul"]
+    },
+    {
+      "name": "factorial_in_range",
+      "description": "Predicate that n is within the factorial-safe range [0, 20]. Returns 1 when n is representable, 0 otherwise.",
+      "inputs": [
+        {"name": "n", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "true",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["iterable_in_bounds"]
+    }
+  ]
+}

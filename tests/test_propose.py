@@ -342,3 +342,46 @@ class TestSpecSchemaCompatibility:
             assert task["target_file"].startswith("std/")
             assert task["mode"] in {"append", "create"}
             assert isinstance(task["atoms"], list) and task["atoms"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2-B — every gap rule must have a checked-in forge task spec
+# ---------------------------------------------------------------------------
+
+
+# Targets that intentionally have no forge_tasks/*.json yet.  Add a
+# ``target -> reason`` entry here when a gap rule is deferred so the
+# completeness test treats it as expected and emits the deferral
+# rationale in the assertion message.
+_DEFERRED_GAP_TARGETS: dict[str, str] = {}
+
+
+class TestForgeTaskCoverage:
+    def test_all_gap_rules_have_forge_tasks(self) -> None:
+        """Each entry in ``_STD_GAP_RULES`` must map to a forge task."""
+        from agent.gap_rules import _STD_GAP_RULES
+
+        forge_tasks_dir = Path(__file__).parent.parent / "forge_tasks"
+        targets_with_specs: set[str] = set()
+        for spec_path in forge_tasks_dir.glob("vstd_*.json"):
+            try:
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                pytest.fail(f"Malformed forge spec {spec_path.name}: {exc}")
+            target = spec.get("target_file")
+            if isinstance(target, str):
+                targets_with_specs.add(target)
+
+        missing: list[str] = []
+        for rule in _STD_GAP_RULES:
+            target = rule["target"]
+            if target in _DEFERRED_GAP_TARGETS:
+                continue
+            if target not in targets_with_specs:
+                missing.append(target)
+
+        assert not missing, (
+            "Gap rules without a corresponding forge_tasks/vstd_*.json: "
+            f"{sorted(missing)}. Either add a spec or list the target in "
+            "_DEFERRED_GAP_TARGETS with a rationale."
+        )

@@ -85,3 +85,38 @@ commits the change to git.
    consistent with the existing standard library.
 5. Run `python -m agent forge --task <your_task>.json --dry-run` to preview
    the execution plan.
+
+## Task inventory
+
+A snapshot of the forge tasks that ship with this repo, sorted by `priority`
+(lowest = forged first). The `Status` column distinguishes between tasks
+that exist as JSON specs (`created`), tasks whose generated `.mm` file has
+already been forged into `mumei-lang/mumei` (`forged`), and tasks whose
+forged output has been verified end-to-end via `mumei verify` and
+checked into the std-proof bundle (`verified`). Update this table when
+adding or promoting tasks.
+
+| Task ID                          | Target file                              | Difficulty | Atoms | Status   |
+|----------------------------------|------------------------------------------|------------|-------|----------|
+| `vstd-core`                      | `std/core.mm`                            | low        | 4     | created  |
+| `vstd-trait-iterable`            | `std/trait/iterable.mm`                  | medium     | 3     | created  |
+| `vstd-iter`                      | `std/iter.mm`                            | medium     | 5+    | forged   |
+| `vstd-hash`                      | `std/hash.mm`                            | medium     | 2+    | forged   |
+| `vstd-fixed-point`               | `std/math/fixed_point.mm`                | medium     | 2+    | forged   |
+| `vstd-safe-list`                 | `std/container/safe_list.mm`             | medium     | 2+    | forged   |
+| `vstd-string-utils`              | `std/string_utils.mm`                    | medium     | 2+    | forged   |
+| `vstd-math-abs`                  | `std/math/abs.mm`                        | low        | 2     | verified |
+| `vstd-math-clamp`                | `std/math/clamp.mm`                      | low        | 2+    | forged   |
+| `vstd-math-gcd`                  | `std/math/gcd.mm`                        | low        | 2+    | forged   |
+| `vstd-math-min-max`              | `std/math/min_max.mm`                    | low        | 2+    | forged   |
+| `vstd-math-pow`                  | `std/math/pow.mm`                        | medium     | 2+    | forged   |
+| `vstd-math-pow-nat`              | `std/math/pow_nat.mm`                    | medium     | 2+    | forged   |
+| `vstd-math-safe-div`             | `std/math/safe_div.mm`                   | low        | 2     | forged   |
+| `vstd-math-safe-mul`             | `std/math/safe_mul.mm`                   | low        | 2+    | forged   |
+| `vstd-math-factorial`            | `std/math/factorial.mm`                  | low        | 2     | created  |
+| `vstd-option-utils`              | `std/option.mm`                          | low        | 4     | created  |
+| `vstd-container-binary-heap`     | `std/container/binary_heap.mm`           | high       | 2+    | forged   |
+| `vstd-container-deque`           | `std/container/deque.mm`                 | medium     | 2+    | forged   |
+| `vstd-container-ring-buffer`     | `std/container/ring_buffer.mm`           | medium     | 2+    | forged   |
+| `vstd-container-stack`           | `std/container/stack.mm`                 | medium     | 4+    | forged   |
+| `vstd-container-sorted-list`     | `std/container/sorted_list.mm`           | medium     | 3     | created  |
