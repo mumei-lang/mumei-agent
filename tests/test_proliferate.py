@@ -763,3 +763,136 @@ class TestOutputJson:
             dry_run=True,
         )
         assert results[0]["reason"] == "std_dir_not_found"
+
+
+# ---------------------------------------------------------------------------
+# Task 2-A — auto-close on health regression + model field in summary JSON
+# ---------------------------------------------------------------------------
+
+
+class TestHealthRegressionAutoClose:
+    """Verify that proliferate marks PRs for auto-close when proof-health
+    regresses across the run, and that the summary JSON records the LLM
+    model used for traceability."""
+
+    def test_proliferate_skips_pr_on_health_regression(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: mock health_before > health_after so the post-loop
+        # gate flips ``should_close_pr=True`` on every result and any
+        # already-published PR is closed via gh.
+        std = tmp_path / "std"
+        std.mkdir()
+        fake_code = "atom core_ok(x: i64) ensures: true; body: x;\n"
+
+        health_before = {
+            "health_score": 0.90,
+            "verified_files": 9,
+            "total_files": 10,
+            "trusted_atoms": 0,
+        }
+        health_after = {
+            "health_score": 0.50,
+            "verified_files": 5,
+            "total_files": 10,
+            "trusted_atoms": 0,
+        }
+        health_calls: list[Path] = []
+
+        def _measure_health_stub(_client, std_dir: Path) -> dict[str, Any]:
+            health_calls.append(std_dir)
+            return health_before if len(health_calls) == 1 else health_after
+
+        # Insert a stub module so ``from agent.std_health import
+        # measure_health`` returns our fake without touching the real
+        # mumei binary.
+        import sys as _sys
+        import types as _types
+
+        stub = _types.ModuleType("agent.std_health")
+        stub.measure_health = _measure_health_stub  # type: ignore[attr-defined]
+        monkeypatch.setitem(_sys.modules, "agent.std_health", stub)
+
+        close_calls: list[tuple[str, float]] = []
+
+        def _close_stub(pr_url: str, delta: float) -> bool:
+            close_calls.append((pr_url, delta))
+            return True
+
+        monkeypatch.setattr(
+            proliferate, "_close_pr_for_regression", _close_stub
+        )
+
+        with patch("agent.proliferate.generate_code") as gen_mock, patch(
+            "agent.proliferate.AgentConfig"
+        ) as cfg_mock, patch(
+            "agent.proliferate.create_mumei_client"
+        ) as client_mock, patch(
+            "agent.proliferate.publish"
+        ) as publish_mock:
+            gen_mock.return_value = (fake_code, True)
+            cfg_instance = MagicMock()
+            cfg_instance.mumei_bin = "mumei"
+            cfg_instance.model = "gpt-test"
+            cfg_instance.max_retries = 2
+            cfg_instance.create_client.return_value = MagicMock()
+            cfg_mock.return_value = cfg_instance
+            verify_client = MagicMock()
+            verify_client.verify.return_value = {
+                "success": True,
+                "report": {},
+                "stdout": "",
+                "stderr": "",
+            }
+            client_mock.return_value = verify_client
+            publish_mock.return_value = {
+                "success": True,
+                "pr_url": "https://github.com/mumei-lang/mumei/pull/999",
+            }
+
+            results = proliferate.proliferate(
+                tmp_path, dry_run=False, max_proposals=1
+            )
+
+        # Assert: regression detection populates auto-close fields on
+        # the result and triggers the gh-backed close helper.
+        assert results, "expected at least one result"
+        first = results[0]
+        assert first.get("should_close_pr") is True
+        assert first.get("pr_closed") is True
+        assert first.get("health_delta") is not None
+        assert first["health_delta"] < 0
+        assert close_calls and close_calls[0][0].endswith("/pull/999")
+
+    def test_output_json_includes_model(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: LLM_MODEL must be reflected in summary JSON so
+        # operators can correlate per-run health/success metrics with
+        # the model that produced them.
+        monkeypatch.setenv("LLM_MODEL", "qwen3.5:4b")
+        out_path = tmp_path / "summary.json"
+        proliferate.proliferate(
+            tmp_path / "does-not-exist",
+            dry_run=True,
+            output_json=out_path,
+        )
+        import json as _json
+
+        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["model"] == "qwen3.5:4b"
+
+    def test_output_json_model_defaults_to_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("LLM_MODEL", raising=False)
+        out_path = tmp_path / "summary.json"
+        proliferate.proliferate(
+            tmp_path / "does-not-exist",
+            dry_run=True,
+            output_json=out_path,
+        )
+        import json as _json
+
+        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["model"] == "unknown"

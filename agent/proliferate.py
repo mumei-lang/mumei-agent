@@ -266,6 +266,46 @@ def _log_info(message: str) -> None:
     logger.info("[PROLIFERATE] %s", message)
 
 
+def _close_pr_for_regression(pr_url: str, health_delta: float) -> bool:
+    """Best-effort close *pr_url* with a health-regression comment.
+
+    Used by :func:`proliferate` when the post-flight health snapshot
+    regresses relative to the pre-flight baseline.  We try ``gh pr
+    close`` first because the CI runner already has a configured
+    ``GITHUB_TOKEN``; a missing or non-functional ``gh`` is treated as
+    soft-fail so the surrounding loop keeps going.
+
+    Returns ``True`` when ``gh`` reports success, ``False`` otherwise.
+    """
+    import shutil
+    import subprocess
+
+    if not pr_url:
+        return False
+    if shutil.which("gh") is None:
+        logger.info(
+            "auto-close: gh CLI not available; leaving %s open for manual review",
+            pr_url,
+        )
+        return False
+    comment = (
+        f"Auto-closing: SI-5 proliferation detected proof-health regression "
+        f"(delta={health_delta:+.3f}). See workflow logs for details."
+    )
+    try:
+        subprocess.run(
+            ["gh", "pr", "close", pr_url, "--comment", comment],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logger.warning("auto-close failed for %s: %s", pr_url, exc)
+        return False
+    logger.info("auto-close: closed %s due to health regression", pr_url)
+    return True
+
+
 def _build_pr_body_extra(
     spec: dict[str, Any],
     proposal: dict[str, Any] | None,
@@ -655,6 +695,22 @@ def proliferate(
             except OSError:
                 logger.warning("Could not write healed file %s", fpath)
 
+        # Task 2-A: skip PR creation if a previous step has marked this
+        # spec for auto-close (e.g. an incremental health regression
+        # gate populated ``should_close_pr`` during a future per-spec
+        # health check).  The post-loop regression handler also sets
+        # this flag retroactively for already-published PRs and closes
+        # them via the GitHub API.
+        if spec_result.get("should_close_pr"):
+            logger.warning(
+                "Skipping PR for %s: health regression detected (delta=%+.3f)",
+                target_file,
+                spec_result.get("health_delta", float("nan")),
+            )
+            spec_result.setdefault("reason", "health_regression")
+            results.append(spec_result)
+            continue
+
         # Write spec to a temp file for publish().  Initialise the path
         # to ``None`` up-front so the ``finally`` cleanup stays safe even
         # when ``NamedTemporaryFile()`` itself raises before assignment.
@@ -726,6 +782,23 @@ def proliferate(
                     health_after["health_score"],
                     health_delta,
                 )
+                # Task 2-A: auto-close PRs that were just created when
+                # the run regressed proof-health.  We mark every result
+                # ``should_close_pr=True`` so downstream consumers (the
+                # summary JSON, the publish skip-check above, any
+                # follow-up retry) can recognise the regression, and
+                # best-effort close already-published PRs via the
+                # GitHub API.
+                if not dry_run:
+                    for r in results:
+                        r["should_close_pr"] = True
+                        r["health_delta"] = health_delta
+                        pr_url = r.get("pr_url")
+                        if pr_url:
+                            close_ok = _close_pr_for_regression(
+                                pr_url, health_delta
+                            )
+                            r["pr_closed"] = bool(close_ok)
         except Exception:
             logger.debug("Could not measure final health", exc_info=True)
 
@@ -769,6 +842,11 @@ def _write_output_json(
     processed = len(results)
     payload: dict[str, Any] = {
         "timestamp": started_at,
+        # Task 2-A: record the LLM model used for this run so operators
+        # can correlate health/success metrics with model quality across
+        # historical artifacts.  Falls back to ``"unknown"`` when the
+        # workflow runs without LLM_MODEL exported.
+        "model": os.environ.get("LLM_MODEL", "unknown"),
         "dry_run": bool(dry_run),
         "pre_health": pre_health,
         "post_health": post_health,

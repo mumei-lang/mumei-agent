@@ -8,8 +8,9 @@ name: SI-5 Autonomous Proliferation
 #      real binary to invoke for verification.
 #   3. Provision the LLM backend according to the selected `llm_profile`:
 #        - ollama-local : spin up an Ollama server on the runner and pull
-#                         a small qwen model (default qwen3.5:0.8b).
-#                         Requires zero additional secrets.
+#                         a qwen model (default qwen3.5:4b; the 0.8b
+#                         variant remains available as a CI smoke-test
+#                         option). Requires zero additional secrets.
 #        - remote       : use any OpenAI-compatible endpoint configured via
 #                         repository secrets (DashScope / vLLM / self-hosted
 #                         Ollama over tailscale / OpenAI). Requires
@@ -359,6 +360,7 @@ jobs:
           cat /tmp/proliferate/post_health.json || true
 
       - name: Compare pre/post health (PR 4)
+        id: health_compare
         if: always()
         run: |
           # PR 4: emit a ::warning annotation when post-flight health
@@ -369,6 +371,7 @@ jobs:
           set -e
           if [ ! -s /tmp/proliferate/pre_health.json ] || [ ! -s /tmp/proliferate/post_health.json ]; then
             echo "skipping health-delta comparison: pre or post snapshot missing"
+            echo "health_regression=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # SECURITY: pass JSON-derived values via sys.argv rather than
@@ -386,7 +389,18 @@ jobs:
           IS_REGRESSION=$(python3 -c "import sys; print('1' if (float(sys.argv[1]) - float(sys.argv[2])) < -0.001 else '0')" "$POST_SCORE" "$PRE_SCORE")
           if [ "$IS_REGRESSION" = "1" ]; then
             echo "::warning::Proliferate health score regressed: pre=${PRE_SCORE} post=${POST_SCORE} delta=${DELTA}"
+            # Task 2-A: expose the regression flag as a step output so
+            # downstream steps can conditionally skip artifact uploads
+            # or surface a failure annotation without re-parsing JSON.
+            echo "health_regression=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "health_regression=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Annotate health regression (Task 2-A)
+        if: always() && steps.health_compare.outputs.health_regression == 'true'
+        run: |
+          echo "::error::Proliferate run regressed proof-health; downstream artifact uploads will still occur for forensics, but operators should treat this as a hard signal."
 
       - name: Run LLM benchmark (opt-in)
         if: always() && github.event.inputs.run_benchmark == 'true'
