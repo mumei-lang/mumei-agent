@@ -1,0 +1,42 @@
+{
+  "task_id": "vstd-math-pow-nat",
+  "target_file": "std/math/pow_nat.mm",
+  "mode": "create",
+  "priority": 4,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Small-domain natural-number power atoms (pow2 and pow_nat) provable in Z3's integer theory by explicit case-splits over the exponent. Complements std/math/pow.mm (pow_small / pow_saturating). The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/pow_nat — verified small-domain integer powers'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm already uses (checked_add, checked_mul, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/math/pow.mm",
+    "std/math/safe_mul.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "pow2",
+      "description": "Power of two for non-negative exponents in {0,..,30}. Explicit branch table keeps Z3's non-linear arithmetic tractable: each branch is a literal constant equal to 2^n. The cap of 30 ensures result fits in i64 with plenty of headroom.",
+      "inputs": [
+        {"name": "exp", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "exp >= 0 && exp <= 30",
+      "ensures": "result >= 1",
+      "reference_patterns": ["checked_mul", "pow_small"]
+    },
+    {
+      "name": "pow_nat",
+      "description": "Natural-number integer exponentiation for small bases (base in [0, 10]) and small exponents (exp in [0, 6]). Returns base^exp via explicit case-split over (base, exp); each case is a literal product Z3 can simplify directly.",
+      "inputs": [
+        {"name": "base", "type": "i64"},
+        {"name": "exp", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "base >= 0 && base <= 10 && exp >= 0 && exp <= 6",
+      "ensures": "result >= 0",
+      "reference_patterns": ["checked_mul", "pow_small"]
+    }
+  ]
+}

@@ -358,6 +358,28 @@ jobs:
             > /tmp/proliferate/post_health.json || true
           cat /tmp/proliferate/post_health.json || true
 
+      - name: Compare pre/post health (PR 4)
+        if: always()
+        run: |
+          # PR 4: emit a ::warning annotation when post-flight health
+          # regresses below pre-flight. The job still succeeds — the
+          # regression-diff verification gate in mumei is the hard
+          # blocker for PR creation; this step is an early-warning
+          # signal for the maintainer reading the workflow run.
+          set -e
+          if [ ! -s /tmp/proliferate/pre_health.json ] || [ ! -s /tmp/proliferate/post_health.json ]; then
+            echo "skipping health-delta comparison: pre or post snapshot missing"
+            exit 0
+          fi
+          PRE_SCORE=$(python3 -c "import json,sys; d=json.load(open('/tmp/proliferate/pre_health.json')); print(d.get('score', d.get('health_score', 0.0)))")
+          POST_SCORE=$(python3 -c "import json,sys; d=json.load(open('/tmp/proliferate/post_health.json')); print(d.get('score', d.get('health_score', 0.0)))")
+          DELTA=$(python3 -c "print(${POST_SCORE} - ${PRE_SCORE})")
+          echo "[proliferate] pre=${PRE_SCORE} post=${POST_SCORE} delta=${DELTA}"
+          IS_REGRESSION=$(python3 -c "print('1' if (${POST_SCORE} - ${PRE_SCORE}) < -0.001 else '0')")
+          if [ "$IS_REGRESSION" = "1" ]; then
+            echo "::warning::Proliferate health score regressed: pre=${PRE_SCORE} post=${POST_SCORE} delta=${DELTA}"
+          fi
+
       - name: Run LLM benchmark (opt-in)
         if: always() && github.event.inputs.run_benchmark == 'true'
         working-directory: mumei-agent
