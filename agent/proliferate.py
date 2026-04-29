@@ -767,20 +767,17 @@ def proliferate(
         # because post-health is only measured after all proposals
         # complete.  The PR description will show the pre-run baseline
         # instead of a delta.
-        new_file_path.parent.mkdir(parents=True, exist_ok=True)
-        new_file_path.write_text(code, encoding="utf-8")
-        for fpath, healed_content in healed_files.items():
-            try:
-                Path(fpath).write_text(healed_content, encoding="utf-8")
-            except OSError:
-                logger.warning("Could not write healed file %s", fpath)
-
         # Task 2-A: skip PR creation if a previous step has marked this
         # spec for auto-close (e.g. an incremental health regression
         # gate populated ``should_close_pr`` during a future per-spec
         # health check).  The post-loop regression handler also sets
         # this flag retroactively for already-published PRs and closes
         # them via the GitHub API.
+        #
+        # The check is placed *before* writing the new file and healed
+        # files to disk so a triggered skip leaves the working tree
+        # untouched, matching the cleanup invariant of the
+        # ``not all_healed`` rollback path above.
         if spec_result.get("should_close_pr"):
             logger.warning(
                 "Skipping PR for %s: health regression detected (delta=%+.3f)",
@@ -790,6 +787,14 @@ def proliferate(
             spec_result.setdefault("reason", "health_regression")
             results.append(spec_result)
             continue
+
+        new_file_path.parent.mkdir(parents=True, exist_ok=True)
+        new_file_path.write_text(code, encoding="utf-8")
+        for fpath, healed_content in healed_files.items():
+            try:
+                Path(fpath).write_text(healed_content, encoding="utf-8")
+            except OSError:
+                logger.warning("Could not write healed file %s", fpath)
 
         # Write spec to a temp file for publish().  Initialise the path
         # to ``None`` up-front so the ``finally`` cleanup stays safe even
@@ -962,6 +967,10 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
 
     Generated code can be large and is already committed (or discarded
     in dry-run mode), so we only keep short summary-friendly fields.
+    The Lean-upgraded proof certificate stored under ``upgraded_cert``
+    can also be sizeable (one entry per atom), so it is replaced with
+    an ``upgraded_cert_summary`` dict that records the atom count, the
+    number of Lean-verified atoms, and the ``all_verified`` flag.
     """
     out: dict[str, Any] = {}
     for key, value in result.items():
@@ -978,6 +987,24 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
                     "name",
                 )
                 if isinstance(value, dict) and k in value
+            }
+        elif key == "upgraded_cert":
+            atoms = value.get("atoms") if isinstance(value, dict) else None
+            atom_list = atoms if isinstance(atoms, list) else []
+            lean_verified = sum(
+                1
+                for a in atom_list
+                if isinstance(a, dict)
+                and a.get("z3_check_result") == "lean_verified"
+            )
+            out["upgraded_cert_summary"] = {
+                "atom_count": len(atom_list),
+                "lean_verified_count": lean_verified,
+                "all_verified": (
+                    value.get("all_verified")
+                    if isinstance(value, dict)
+                    else None
+                ),
             }
         else:
             out[key] = value

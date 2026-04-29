@@ -11,10 +11,10 @@ The integration is deliberately external:
   out every atom that Z3 returned ``unknown`` on, so callers can decide
   whether the run is worth handing off to Lean.
 * :func:`run_lean_bridge` invokes the Lean side by shelling out to
-  ``python -m scripts.bridge`` from the configured ``mumei-lean``
-  checkout.  Any failure (missing repo, missing toolchain, non-zero
-  exit) is reported as a structured dict instead of an exception so
-  the outer pipeline can degrade gracefully.
+  ``python <mumei-lean>/scripts/bridge.py`` from the configured
+  ``mumei-lean`` checkout.  Any failure (missing repo, missing
+  toolchain, non-zero exit) is reported as a structured dict instead
+  of an exception so the outer pipeline can degrade gracefully.
 * :func:`merge_lean_cert_into_proof_cert` upgrades the original mumei
   proof certificate with the Lean-discharged atoms — atoms whose
   ``z3_check_result`` is ``"lean_verified"`` after the merge are
@@ -134,10 +134,15 @@ def run_lean_bridge(
             "stderr": f"bridge.py not found at {bridge_script}",
         }
 
+    # Invoke bridge.py directly rather than via ``python -m
+    # scripts.bridge`` because ``mumei-lean``'s ``scripts/`` directory
+    # is not guaranteed to be a Python package (no ``__init__.py``).
+    # Running the file as a script avoids the package-import
+    # requirement while still honouring ``cwd=repo_path`` so
+    # bridge-relative imports continue to resolve.
     cmd: list[str] = [
         sys.executable,
-        "-m",
-        "scripts.bridge",
+        str(bridge_script),
         "--cert",
         str(cert_path),
         "--lean-cert-out",
