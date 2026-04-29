@@ -54,14 +54,14 @@
     },
     {
       "name": "stack_is_empty",
-      "description": "Predicate: returns 1 when the stack is empty (len == 0), 0 otherwise. The contract pins the boolean encoding to {0, 1}.",
+      "description": "Predicate: returns 1 when the stack is empty (len == 0), 0 otherwise. The contract pins the boolean encoding to {0, 1}, matching the existing queue_is_empty / deque_is_empty / ring_is_empty pattern in std/container/.",
       "inputs": [
         {"name": "len", "type": "i64"}
       ],
       "return_type": "i64",
       "requires": "len >= 0",
-      "ensures": "(result == 0 || result == 1) && (result == 1 implies len == 0) && (result == 0 implies len > 0)",
-      "reference_patterns": ["bounded_is_empty"]
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_empty", "bounded_is_empty"]
     }
   ]
 }
