@@ -51,6 +51,14 @@ class AgentConfig:
         not in {"false", "0", "no", "off"}
     )
 
+    # Task 2-C — optional path to a ``mumei-lang/mumei-lean`` checkout
+    # that ``agent.lean_bridge`` can shell out to when proliferate is
+    # invoked with ``--enable-lean-fallback``.  ``None`` (the default)
+    # disables the fallback so existing pipelines stay byte-identical.
+    mumei_lean_repo: str | None = field(
+        default_factory=lambda: os.getenv("MUMEI_LEAN_REPO") or None
+    )
+
     def __post_init__(self):
         # API key validation is deferred to create_client() so that
         # subcommands that never use the LLM (e.g. ``python -m agent

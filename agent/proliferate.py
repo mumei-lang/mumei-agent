@@ -392,6 +392,85 @@ def _build_pr_body_extra(
     return "\n".join(lines)
 
 
+def _run_lean_fallback(
+    results: list[dict[str, Any]],
+    *,
+    mumei_lean_repo: str | None,
+) -> None:
+    """Hand any ``unknown`` atoms in *results* to ``mumei-lean``.
+
+    Mutates each ``spec_result`` in place with a ``"lean_fallback"``
+    sub-dict that records what was attempted, so downstream consumers
+    (the summary JSON, operators reading the run log) can audit the
+    fallback without re-running the bridge.
+
+    The Lean fallback is best-effort: any failure short-circuits the
+    enrichment for that spec and leaves the rest of the run untouched.
+    """
+    from agent import lean_bridge
+
+    if not lean_bridge.lean_fallback_available(mumei_lean_repo):
+        logger.info(
+            "lean fallback: skipping — MUMEI_LEAN_REPO not set or invalid"
+        )
+        return
+
+    import tempfile
+
+    for spec_result in results:
+        publish_result = spec_result.get("publish_result") or {}
+        cert = (
+            publish_result.get("proof_certificate")
+            or publish_result.get("certificate")
+        )
+        if not isinstance(cert, dict):
+            continue
+        unknown_atoms = lean_bridge.extract_unknown_atoms(cert)
+        if not unknown_atoms:
+            continue
+
+        with tempfile.TemporaryDirectory(prefix="mumei-lean-") as tmpdir:
+            cert_path = Path(tmpdir) / "input.proof-cert.json"
+            cert_path.write_text(
+                json.dumps(cert, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            lean_cert_out = Path(tmpdir) / "output.lean-cert.json"
+            bridge_result = lean_bridge.run_lean_bridge(
+                cert_path=cert_path,
+                lean_cert_out=lean_cert_out,
+                mumei_lean_repo=mumei_lean_repo or "",
+            )
+            lean_cert = bridge_result.get("lean_cert")
+            if isinstance(lean_cert, dict):
+                upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
+                    cert, lean_cert
+                )
+                proved = sum(
+                    1
+                    for a in upgraded.get("atoms", []) or []
+                    if isinstance(a, dict)
+                    and a.get("z3_check_result") == "lean_verified"
+                )
+            else:
+                upgraded = cert
+                proved = 0
+
+            spec_result["lean_fallback"] = {
+                "attempted": True,
+                "unknown_count": len(unknown_atoms),
+                "proved": proved,
+                "success": bridge_result.get("success", False),
+                "returncode": bridge_result.get("returncode", -1),
+            }
+            logger.info(
+                "Lean fallback: %d/%d unknown atoms discharged",
+                proved,
+                len(unknown_atoms),
+            )
+            spec_result["upgraded_cert"] = upgraded
+
+
 def proliferate(
     mumei_repo_dir: str | Path,
     *,
@@ -399,6 +478,7 @@ def proliferate(
     dry_run: bool = False,
     mumei_bin: str | None = None,
     output_json: str | Path | None = None,
+    enable_lean_fallback: bool = False,
 ) -> list[dict[str, Any]]:
     """Run the autonomous proliferation loop.
 
@@ -756,6 +836,15 @@ def proliferate(
 
         results.append(spec_result)
 
+    # Task 2-C — opt-in Lean fallback for unknown atoms.
+    #
+    # After the forge + verify pass, walk every spec_result and offer
+    # any ``z3_check_result == "unknown"`` atoms to ``mumei-lean``.
+    # This is purely additive: we never modify the original verify
+    # result on disk and never block the run if Lean is unavailable.
+    if enable_lean_fallback and not dry_run:
+        _run_lean_fallback(results, mumei_lean_repo=config.mumei_lean_repo)
+
     # Optional: measure final health
     health_after: dict[str, Any] | None = None
     health_delta: float | None = None
@@ -931,6 +1020,15 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
             "(used by the SI-5 Phase 3-B scheduled workflow)."
         ),
     )
+    parser.add_argument(
+        "--enable-lean-fallback",
+        action="store_true",
+        help=(
+            "Task 2-C: after forge + verify, hand any ``unknown`` atoms "
+            "to mumei-lean's bridge.py for Lean 4 discharge.  Requires "
+            "MUMEI_LEAN_REPO to point at a mumei-lang/mumei-lean checkout."
+        ),
+    )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -943,6 +1041,7 @@ def main(args: argparse.Namespace) -> None:
         dry_run=args.dry_run,
         mumei_bin=args.mumei_bin,
         output_json=args.output_json,
+        enable_lean_fallback=getattr(args, "enable_lean_fallback", False),
     )
 
     succeeded = sum(1 for r in results if r.get("success"))

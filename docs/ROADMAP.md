@@ -450,6 +450,44 @@ documentation を取得できるようにする:
 
 ---
 
+## Task 2-C: mumei-lean integration pipeline (opt-in)
+
+mumei-agent の forge / verify サクル、`z3_check_result == "unknown"` の atom が残た合に[mumei-lang/mumei-lean](https://github.com/mumei-lang/mumei-lean)Lean 4 ロフバクド連携、人手の介在なし lean_verified 状態を昇格さるプライ。
+
+### 概
+
+- **オトイン導入** — 既存ローは byte-identical に動作し`--enable-lean-fallback` フグまた `MUMEI_LEAN_REPO` 環境変数を有効化したきの起。
+- **subprocess ベの薄連携** — `agent.lean_bridge.run_lean_bridge()` `mumei-lean` リの `scripts/bridge.py` を `python -m scripts.bridge --cert ... --lean-cert-out ...`使形動。Lean toolchain (`lake`) が無ても`bridge.py` が`lake_missing` を伝搬 fallback は best-effort 失敗。
+- **non-mutating merge** — `merge_lean_cert_into_proof_cert()` 元の proof certificate を deep-copy 上で`lean_verified` ル上書しない atom はそのま据え置く。bundle 体の `all_verified` `unsat` ま `lean_verified` の atom のみで構成さている合に True に。
+
+### Pipeline 概観
+
+1. `proliferate()` ロプ通常通生 → verify → publish を行
+2. `--enable-lean-fallback` が有効 ループ後 `_run_lean_fallback()` を起。
+3. 各 `spec_result.publish_result.proof_certificate` を走査 `unknown` atom を取出。
+4. Tempfile に proof-cert を書出し`scripts/bridge.py --cert ... --lean-cert-out ...` を呼出。
+5. 出力 `.lean-cert.json` を読込元の proof-cert と merge`spec_result["lean_fallback"]` `{"attempted": True, "unknown_count": N, "proved": K, "success": bool, "returncode": int}` を録。
+6. 健康度算出れの工程続。
+
+### 動作
+
+```
+export MUMEI_LEAN_REPO=/path/to/mumei-lang/mumei-lean
+python -m agent proliferate \
+    --mumei-repo /path/to/mumei-lang/mumei \
+    --enable-lean-fallback \
+    --output-json /tmp/proliferate-summary.json
+```
+
+`AgentConfig.mumei_lean_repo` プロパティ`MUMEI_LEAN_REPO` 環境変数か起かに値を取得しないば `None`。`None` の場 `lean_fallback_available()` `False` を返す`_run_lean_fallback()` no-op に。
+
+### 関連ドキメ
+
+- [mumei-lang/mumei-lean README](https://github.com/mumei-lang/mumei-lean/blob/main/README.md) — Lean 側の bridge / ingest_cert / export_cert の仕。
+- `agent/lean_bridge.py` — agent 側のルパ層`tests/test_lean_bridge.py` テスを照。
+
+---
+
 ## Related Documents
 
 - [mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap (incl. Strategic Initiatives)
