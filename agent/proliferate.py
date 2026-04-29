@@ -847,8 +847,20 @@ def proliferate(
     # any ``z3_check_result == "unknown"`` atoms to ``mumei-lean``.
     # This is purely additive: we never modify the original verify
     # result on disk and never block the run if Lean is unavailable.
+    # The try/except enforces that contract — any unexpected error
+    # inside ``_run_lean_fallback`` (OSError from tempfile,
+    # TypeError from json.dumps, etc.) is logged and swallowed so
+    # the post-loop health measurement, auto-close logic, and JSON
+    # summary writing below still run.
     if enable_lean_fallback and not dry_run:
-        _run_lean_fallback(results, mumei_lean_repo=config.mumei_lean_repo)
+        try:
+            _run_lean_fallback(
+                results, mumei_lean_repo=config.mumei_lean_repo
+            )
+        except Exception:
+            logger.warning(
+                "Lean fallback failed unexpectedly", exc_info=True
+            )
 
     # Optional: measure final health
     health_after: dict[str, Any] | None = None
