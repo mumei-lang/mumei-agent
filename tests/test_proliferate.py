@@ -882,9 +882,14 @@ class TestHealthRegressionAutoClose:
         data = _json.loads(out_path.read_text(encoding="utf-8"))
         assert data["model"] == "qwen3.5:4b"
 
-    def test_output_json_model_defaults_to_unknown(
+    def test_output_json_model_defaults_to_agent_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # When LLM_MODEL is unset, the summary JSON must record the
+        # actual default ``AgentConfig`` would use for LLM calls
+        # (currently ``"gpt-4o"``) rather than a misleading literal
+        # ``"unknown"`` — operators rely on this field as an audit
+        # trail of which model produced the run.
         monkeypatch.delenv("LLM_MODEL", raising=False)
         out_path = tmp_path / "summary.json"
         proliferate.proliferate(
@@ -894,5 +899,7 @@ class TestHealthRegressionAutoClose:
         )
         import json as _json
 
+        from agent.config import AgentConfig
+
         data = _json.loads(out_path.read_text(encoding="utf-8"))
-        assert data["model"] == "unknown"
+        assert data["model"] == AgentConfig().model

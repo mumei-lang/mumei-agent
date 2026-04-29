@@ -950,9 +950,12 @@ def _write_output_json(
         "timestamp": started_at,
         # Task 2-A: record the LLM model used for this run so operators
         # can correlate health/success metrics with model quality across
-        # historical artifacts.  Falls back to ``"unknown"`` when the
-        # workflow runs without LLM_MODEL exported.
-        "model": os.environ.get("LLM_MODEL", "unknown"),
+        # historical artifacts.  We resolve via ``AgentConfig().model``
+        # (which honours ``LLM_MODEL`` and falls back to the same
+        # default — currently ``"gpt-4o"`` — that the actual LLM client
+        # uses) so the summary JSON never disagrees with the model that
+        # produced the results.
+        "model": AgentConfig().model,
         "dry_run": bool(dry_run),
         "pre_health": pre_health,
         "post_health": post_health,
@@ -1018,6 +1021,51 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
                     else None
                 ),
             }
+        elif key == "publish_result":
+            # ``publish()`` now returns the full ``proof_certificate``
+            # (parsed ``mumei verify --json`` report) so the Lean
+            # fallback can inspect per-atom ``z3_check_result`` values.
+            # That payload can be sizeable (one entry per atom) and we
+            # already store a trimmed view via ``upgraded_cert_summary``
+            # when the Lean fallback runs, so here we keep just the
+            # short fields plus a per-cert atom count.
+            if isinstance(value, dict):
+                short: dict[str, Any] = {
+                    k: value.get(k)
+                    for k in (
+                        "success",
+                        "generated_file",
+                        "pr_url",
+                        "pr_created",
+                        "pr_error",
+                        "git_error",
+                        "verify_error",
+                        "generation_error",
+                        "verified_at_generation",
+                    )
+                    if k in value
+                }
+                cert = value.get("proof_certificate")
+                if isinstance(cert, dict):
+                    cert_atoms = cert.get("atoms")
+                    short["proof_certificate_summary"] = {
+                        "atom_count": (
+                            len(cert_atoms)
+                            if isinstance(cert_atoms, list)
+                            else 0
+                        ),
+                        "all_verified": cert.get("all_verified"),
+                    }
+                artifacts = value.get("artifacts")
+                if isinstance(artifacts, list):
+                    short["artifact_targets"] = [
+                        a.get("target")
+                        for a in artifacts
+                        if isinstance(a, dict)
+                    ]
+                out["publish_result"] = short
+            else:
+                out["publish_result"] = value
         else:
             out[key] = value
     return out
