@@ -432,11 +432,18 @@ def proliferate(
     if not gaps["proposals"]:
         _log_info("No proposals found — std/ is complete or no gaps detected")
         results = [{"success": True, "reason": "no_proposals"}]
+        # PR 4: in no-op early returns we reuse ``health_before`` as the
+        # post snapshot (no mutation occurred), so the delta is a
+        # well-defined 0.0 whenever the pre-flight measurement
+        # succeeded. Emitting ``None`` here would violate the
+        # _write_output_json contract that ``health_delta`` is a float
+        # whenever both snapshots are non-null.
         _write_output_json(
             output_json,
             started_at=started_at,
             pre_health=health_before,
             post_health=health_before,
+            health_delta=0.0 if health_before is not None else None,
             results=results,
             dry_run=dry_run,
         )
@@ -452,11 +459,14 @@ def proliferate(
     specs = generate_specs_from_gaps(gaps, max_count=max_proposals)
     if not specs:
         results = [{"success": True, "reason": "no_specs_generated"}]
+        # PR 4: same rationale as the ``no_proposals`` branch above —
+        # no mutation occurred, so the delta is 0.0 rather than None.
         _write_output_json(
             output_json,
             started_at=started_at,
             pre_health=health_before,
             post_health=health_before,
+            health_delta=0.0 if health_before is not None else None,
             results=results,
             dry_run=dry_run,
         )
@@ -692,17 +702,30 @@ def proliferate(
 
     # Optional: measure final health
     health_after: dict[str, Any] | None = None
+    health_delta: float | None = None
     if health_before is not None and health_client is not None:
         try:
             health_after = _measure_health(health_client, std_dir)
-            delta = health_after["health_score"] - health_before["health_score"]
+            health_delta = (
+                health_after["health_score"] - health_before["health_score"]
+            )
             succeeded_count = sum(1 for r in results if r.get("success"))
             _log_info(
                 f"Result: {succeeded_count}/{len(results)} proposals "
                 f"succeeded, health_score: "
                 f"{health_before['health_score']:.2f} → "
-                f"{health_after['health_score']:.2f} ({delta:+.2f})"
+                f"{health_after['health_score']:.2f} ({health_delta:+.2f})"
             )
+            # PR 4: surface a regression on the run logger as a warning
+            # so operators can grep `health regression` across CI logs
+            # without parsing the structured summary.
+            if health_delta < -0.001:
+                logger.warning(
+                    "health regression: pre=%.3f post=%.3f delta=%+.3f",
+                    health_before["health_score"],
+                    health_after["health_score"],
+                    health_delta,
+                )
         except Exception:
             logger.debug("Could not measure final health", exc_info=True)
 
@@ -711,6 +734,7 @@ def proliferate(
         started_at=started_at,
         pre_health=health_before,
         post_health=health_after,
+        health_delta=health_delta,
         results=results,
         dry_run=dry_run,
     )
@@ -726,12 +750,18 @@ def _write_output_json(
     post_health: dict[str, Any] | None,
     results: list[dict[str, Any]],
     dry_run: bool,
+    health_delta: float | None = None,
 ) -> None:
     """Write a structured summary of the run to *output_json* (if set).
 
     The summary is consumed by the SI-5 Phase 3-B scheduled workflow as
     a CI artifact so operators can diff health before/after each run
     without re-reading unstructured logs.
+
+    *health_delta* (PR 4) is the post − pre ``health_score`` value when
+    both snapshots are available, or ``None`` when one (or both) is
+    missing. Operators can read this field directly from the summary
+    JSON instead of recomputing it from ``pre_health`` / ``post_health``.
     """
     if output_json is None:
         return
@@ -742,6 +772,7 @@ def _write_output_json(
         "dry_run": bool(dry_run),
         "pre_health": pre_health,
         "post_health": post_health,
+        "health_delta": health_delta,
         "proposals_processed": processed,
         "proposals_succeeded": succeeded,
         "proposals_failed": processed - succeeded,

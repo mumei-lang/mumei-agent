@@ -327,6 +327,13 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
 3. 問題がなければ `dry_run=false` に切り替えて実行し、生成される PR のタイトル・description・health delta を確認する。
 4. 最後に週次 cron（月曜 00:00 UTC = JST 09:00）の自動起動を待つ。cron は常に `ollama-local` + `dry_run=true` で起動するため、`dry_run=false` で恒常運用したい場合は `cron` 行を `on.workflow_dispatch` だけに縮退させるか、`Run proliferate` step の `DRY_RUN_FLAG` 分岐を調整する。
 
+### 恒常運用の推奨設定（PR 4）
+
+- **モデル選択**: cron でのデフォルトは `qwen3.5:4b`（`LLM_MODEL_INPUT` のデフォルト値）。`qwen3.5:0.8b` は CI のスモークテスト用と割り切り、品質優先のラン（PR を本当に開くラン）では `4b` 以上を選ぶ。`qwen2.5-coder:7b` は精度が最も高いが ollama-local では runner キャッシュ容量を圧迫する点に注意。
+- **max_proposals**: デフォルトの `3` を維持。1 ラン = 最大 3 PR を上限とすることで、レビューキューが詰まらないバランスをとる。スパイク的な大量提案が必要な場合のみ `workflow_dispatch` で個別に上書きする。
+- **健全度ゲート**: `Compare pre/post health` ステップが post-flight `health_score` < pre-flight - 0.001 のときに `::warning` アノテーションを出すようになった。ジョブ自体は失敗させないが、運用ダッシュボードでこの警告を週次で集計し、3 週連続で警告が出る場合は `qwen3.5:4b` から `qwen2.5-coder:7b` への昇格、または `forge_tasks/` の難易度シフトを検討する。
+- **summary.json の `health_delta`**: `agent.proliferate._write_output_json()` が pre/post の `health_score` 差分を `health_delta` として出力する。負値が出たランは PR を作っていても本質的には red とみなして再走させる運用が安全。
+
 ---
 
 ### SI-5 Phase 3-A: Proof Health Metrics ✅ Implemented

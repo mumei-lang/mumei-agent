@@ -1,0 +1,67 @@
+{
+  "task_id": "vstd-container-stack",
+  "target_file": "std/container/stack.mm",
+  "mode": "create",
+  "priority": 6,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Bounded stack bookkeeping atoms — push / pop / peek / is_empty — proven against the len <= cap invariant using Z3 integer theory. Mirrors std/container/safe_queue.mm but with LIFO semantics. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/container/stack — verified bounded stack'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/container/safe_queue.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/container/safe_queue.mm already use (checked_add, checked_sub, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/container/safe_queue.mm",
+    "std/container/bounded_array.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/container/safe_queue.mm"
+  ],
+  "atoms": [
+    {
+      "name": "stack_push",
+      "description": "Push a new element onto a bounded stack. Requires len < cap so the invariant len <= cap is preserved. Returns len + 1.",
+      "inputs": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && len >= 0 && len < cap",
+      "ensures": "result >= 1 && result <= cap && result == len + 1",
+      "reference_patterns": ["enqueue", "bounded_push"]
+    },
+    {
+      "name": "stack_pop",
+      "description": "Pop the top element from a bounded stack. Requires len > 0 so the resulting len stays >= 0. Returns len - 1.",
+      "inputs": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && len > 0 && len <= cap",
+      "ensures": "result >= 0 && result < cap && result == len - 1",
+      "reference_patterns": ["dequeue", "bounded_pop"]
+    },
+    {
+      "name": "stack_peek",
+      "description": "Index of the top element. Requires len > 0; returns len - 1 which is in [0, cap). Pure bookkeeping; no array theory.",
+      "inputs": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && len > 0 && len <= cap",
+      "ensures": "result >= 0 && result < cap && result == len - 1",
+      "reference_patterns": ["bounded_pop"]
+    },
+    {
+      "name": "stack_is_empty",
+      "description": "Predicate: returns 1 when the stack is empty (len == 0), 0 otherwise. The contract pins the boolean encoding to {0, 1}, matching the existing queue_is_empty / deque_is_empty / ring_is_empty pattern in std/container/.",
+      "inputs": [
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0",
+      "ensures": "result >= 0 && result <= 1",
+      "reference_patterns": ["queue_is_empty", "bounded_is_empty"]
+    }
+  ]
+}
