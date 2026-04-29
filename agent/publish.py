@@ -201,13 +201,18 @@ def publish(
 
     Returns
     -------
-    dict with keys: success, generated_file, artifacts, pr_url
+    dict with keys: success, generated_file, artifacts, pr_url,
+    proof_certificate (the parsed ``mumei verify --json`` report when
+    verification succeeded; consumed by
+    :func:`agent.proliferate._run_lean_fallback` to identify
+    ``unknown`` atoms that warrant a Lean 4 discharge attempt).
     """
     result: dict = {
         "success": False,
         "generated_file": None,
         "artifacts": [],
         "pr_url": None,
+        "proof_certificate": None,
     }
 
     # 1. Load spec
@@ -282,6 +287,16 @@ def publish(
         logger.error("Verification failed: %s", verify_result.get("stderr", ""))
         result["verify_error"] = verify_result
         return result
+
+    # Surface the parsed proof certificate (``mumei verify --json``'s
+    # ``report`` payload) so downstream consumers — notably
+    # ``agent.proliferate._run_lean_fallback`` — can inspect per-atom
+    # ``z3_check_result`` values and hand any ``unknown`` atoms to the
+    # mumei-lean bridge.  Falls through as ``None`` when the verifier
+    # did not emit a structured report.
+    report = verify_result.get("report")
+    if isinstance(report, dict):
+        result["proof_certificate"] = report
 
     logger.info("Verification passed")
 
