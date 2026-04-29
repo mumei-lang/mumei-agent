@@ -432,11 +432,18 @@ def proliferate(
     if not gaps["proposals"]:
         _log_info("No proposals found — std/ is complete or no gaps detected")
         results = [{"success": True, "reason": "no_proposals"}]
+        # PR 4: in no-op early returns we reuse ``health_before`` as the
+        # post snapshot (no mutation occurred), so the delta is a
+        # well-defined 0.0 whenever the pre-flight measurement
+        # succeeded. Emitting ``None`` here would violate the
+        # _write_output_json contract that ``health_delta`` is a float
+        # whenever both snapshots are non-null.
         _write_output_json(
             output_json,
             started_at=started_at,
             pre_health=health_before,
             post_health=health_before,
+            health_delta=0.0 if health_before is not None else None,
             results=results,
             dry_run=dry_run,
         )
@@ -452,11 +459,14 @@ def proliferate(
     specs = generate_specs_from_gaps(gaps, max_count=max_proposals)
     if not specs:
         results = [{"success": True, "reason": "no_specs_generated"}]
+        # PR 4: same rationale as the ``no_proposals`` branch above —
+        # no mutation occurred, so the delta is 0.0 rather than None.
         _write_output_json(
             output_json,
             started_at=started_at,
             pre_health=health_before,
             post_health=health_before,
+            health_delta=0.0 if health_before is not None else None,
             results=results,
             dry_run=dry_run,
         )
