@@ -1,0 +1,94 @@
+{
+  "task_id": "vstd-ownership",
+  "target_file": "std/ownership.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Phase 1 Demo: Ownership Transfer Protocol. Generate a new standard-library module defining a stateful Ownership effect and five verified atoms. The generated file MUST follow the Stateful Effects documentation pattern from std/effects.mm and the exact state-machine syntax used by tests/test_order_state_machine.mm: `effect Ownership`, `states: [Idle, PendingTransfer, Transferred];`, `initial: Idle;`, and transitions `propose: Idle -> PendingTransfer`, `accept: PendingTransfer -> Transferred`, `cancel: PendingTransfer -> Idle`. Each atom MUST declare `effects: [Ownership];` plus explicit `effect_pre` and `effect_post` contracts. Atom bodies MUST use `perform Ownership.propose;`, `perform Ownership.accept;`, and `perform Ownership.cancel;` for primitive transitions. Cross-atom composition MUST strictly follow tests/test_modular_verification.mm: compose atoms by calling previous atoms in order and rely on their effect_pre/effect_post contracts. Do NOT invent new syntax; follow tests/test_order_state_machine.mm and tests/test_modular_verification.mm exactly.",
+  "context_files": [
+    "tests/test_order_state_machine.mm",
+    "tests/test_modular_verification.mm",
+    "std/effects.mm"
+  ],
+  "depends_on": [],
+  "atoms": [
+    {
+      "name": "propose_transfer",
+      "description": "Propose a transfer to a new owner. This primitive operation moves Ownership from Idle to PendingTransfer.",
+      "inputs": [
+        {"name": "new_owner", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "new_owner >= 0",
+      "ensures": "result == new_owner",
+      "effects": ["Ownership"],
+      "effect_pre": {"Ownership": "Idle"},
+      "effect_post": {"Ownership": "PendingTransfer"},
+      "body_pattern": "perform Ownership.propose; new_owner",
+      "reference_patterns": ["test_standard_fulfillment", "open_file"]
+    },
+    {
+      "name": "accept_transfer",
+      "description": "Accept a pending transfer. This primitive operation moves Ownership from PendingTransfer to Transferred.",
+      "inputs": [
+        {"name": "new_owner", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "new_owner >= 0",
+      "ensures": "result == new_owner",
+      "effects": ["Ownership"],
+      "effect_pre": {"Ownership": "PendingTransfer"},
+      "effect_post": {"Ownership": "Transferred"},
+      "body_pattern": "perform Ownership.accept; new_owner",
+      "reference_patterns": ["test_delivery", "write_and_close"]
+    },
+    {
+      "name": "cancel_transfer",
+      "description": "Cancel a pending transfer and return to the idle owner state.",
+      "inputs": [
+        {"name": "current_owner", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "current_owner >= 0",
+      "ensures": "result == current_owner",
+      "effects": ["Ownership"],
+      "effect_pre": {"Ownership": "PendingTransfer"},
+      "effect_post": {"Ownership": "Idle"},
+      "body_pattern": "perform Ownership.cancel; current_owner",
+      "reference_patterns": ["test_cancellation", "write_and_close"]
+    },
+    {
+      "name": "full_transfer",
+      "description": "Cross-atom composition of propose_transfer then accept_transfer. The sequence proves Idle -> PendingTransfer -> Transferred.",
+      "inputs": [
+        {"name": "new_owner", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "new_owner >= 0",
+      "ensures": "result == new_owner",
+      "effects": ["Ownership"],
+      "effect_pre": {"Ownership": "Idle"},
+      "effect_post": {"Ownership": "Transferred"},
+      "composition": ["propose_transfer(new_owner)", "accept_transfer(new_owner)"],
+      "reference_patterns": ["full_pipeline", "test_standard_fulfillment"]
+    },
+    {
+      "name": "propose_and_cancel",
+      "description": "Cross-atom composition of propose_transfer then cancel_transfer. The sequence proves Idle -> PendingTransfer -> Idle.",
+      "inputs": [
+        {"name": "owner", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "owner >= 0",
+      "ensures": "result == owner",
+      "effects": ["Ownership"],
+      "effect_pre": {"Ownership": "Idle"},
+      "effect_post": {"Ownership": "Idle"},
+      "composition": ["propose_transfer(owner)", "cancel_transfer(owner)"],
+      "reference_patterns": ["full_pipeline", "test_cancellation"]
+    }
+  ],
+  "source": "phase1-demo-ownership",
+  "difficulty": "medium"
+}
