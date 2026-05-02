@@ -75,9 +75,9 @@ atom calc_total(subtotal: i64, tax: i64) -> i64
 """
 
 
-def _ok_client(mc_class):
-    """Configure a MumeiClient mock to return success for verify and build_with_emit."""
-    inst = mc_class.return_value
+def _ok_client(create_client_mock):
+    """Configure a verifier client mock to return success for verify and build_with_emit."""
+    inst = create_client_mock.return_value
     inst.verify.return_value = {
         "success": True, "report": {"status": "ok"}, "stdout": "", "stderr": "",
     }
@@ -101,7 +101,7 @@ class TestPublishE2EWithSpecs:
         spec_path = str(EXAMPLES_DIR / "simple_add_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_SINGLE_ATOM_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             result = publish(
                 spec_path=spec_path,
@@ -127,7 +127,7 @@ class TestPublishE2EWithSpecs:
         spec_path = str(EXAMPLES_DIR / "simple_e2e_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_SAFE_DIV_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             result = publish(
                 spec_path=spec_path,
@@ -147,7 +147,7 @@ class TestPublishE2EWithSpecs:
         spec_path = str(EXAMPLES_DIR / "publish_demo" / "payment_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_PAYMENT_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             result = publish(
                 spec_path=spec_path,
@@ -172,7 +172,7 @@ class TestPublishE2EWithSpecs:
         spec_path = str(EXAMPLES_DIR / "simple_add_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_SINGLE_ATOM_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             inst = _ok_client(MC)
             publish(
                 spec_path=spec_path,
@@ -251,7 +251,7 @@ class TestPublishE2EMockBinary:
         spec_path = str(EXAMPLES_DIR / "simple_add_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_SINGLE_ATOM_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             result = publish(
                 spec_path=spec_path,
@@ -274,7 +274,7 @@ class TestPublishE2EMockBinary:
         spec_path = str(EXAMPLES_DIR / "simple_add_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", return_value=("", False)), \
-             patch("agent.publish.MumeiClient"):
+             patch("agent.publish.create_mumei_client"):
             result = publish(
                 spec_path=spec_path,
                 repo_dir=str(tmp_path),
@@ -290,7 +290,7 @@ class TestPublishE2EMockBinary:
         spec_path = str(EXAMPLES_DIR / "simple_add_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_SINGLE_ATOM_CODE, verified=False)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             MC.return_value.verify.return_value = {
                 "success": False,
                 "report": {"status": "failed", "failure_type": "postcondition_violated"},
@@ -321,7 +321,7 @@ class TestPublishE2EFileValidation:
         spec_path = str(EXAMPLES_DIR / "simple_add_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_SINGLE_ATOM_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             publish(spec_path=spec_path, repo_dir=str(tmp_path), dry_run=True)
 
@@ -338,7 +338,7 @@ class TestPublishE2EFileValidation:
         spec_path = str(EXAMPLES_DIR / "publish_demo" / "payment_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_PAYMENT_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             _ok_client(MC)
             publish(spec_path=spec_path, repo_dir=str(tmp_path), dry_run=True)
 
@@ -358,7 +358,7 @@ class TestPublishE2EFileValidation:
         spec_path = str(EXAMPLES_DIR / "simple_add_spec.json")
         with patch("agent.publish.AgentConfig", return_value=_mock_config()), \
              patch("agent.publish.generate_code", side_effect=_mock_generate_code(_SINGLE_ATOM_CODE)), \
-             patch("agent.publish.MumeiClient") as MC:
+             patch("agent.publish.create_mumei_client") as MC:
             inst = _ok_client(MC)
             publish(
                 spec_path=spec_path,
