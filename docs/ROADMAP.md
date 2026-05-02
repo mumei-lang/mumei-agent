@@ -284,12 +284,14 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `--max-proposals N` — 一度に処理する提案数（default: 3）
   - `--mumei-bin <path>` — mumei バイナリのオーバーライド
   - `--dry-run` — git/PR 操作と生成ファイルの永続化をスキップ
+  - `--enable-lean-fallback` — `MUMEI_LEAN_REPO` の mumei-lean bridge 経由で Z3 `unknown` atom の Lean 4 証明を追加試行
 - ✅ `tests/test_proliferate.py` — 26 ケース
   - `analyze_gaps` の依存グラフ、trusted atom、TODO 検出、ランキング
   - `generate_specs_from_gaps` の `max_count` リスペクト + forge 互換性
   - `check_blast_radius` の broken_files 報告、例外時 cleanup
   - `attempt_heal` の already-verified ショートサーキット、固定点検出、fix 適用後成功
   - `proliferate` の dry_run end-to-end（`generate_code` / `MumeiClient` をモック）
+  - Lean fallback CLI フラグ伝搬と `summary.json` 内 `lean_fallback` 監査フィールドの保持を検証
 
 ### SI-5 Phase 3-B: Scheduled Autonomous Runs ✅ Implemented
 
@@ -299,9 +301,10 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `cron: '0 0 * * 1'`（毎週月曜 00:00 UTC = JST 09:00）+ `workflow_dispatch` による手動トリガー
   - `workflow_dispatch` 入力: `max_proposals`（default: 3）、`dry_run`（default: true）
   - `schedule` 起動時 / `dry_run=true` では `--dry-run` を必ず付与し、初期は PR を作らずにパイプラインだけを検証
-  - mumei-agent と mumei の両リポジトリを checkout → mumei コンパイラを `cargo build --release` → `PATH` に追加
+  - mumei-agent / mumei / mumei-lean を checkout → mumei コンパイラを `cargo build --release` → `PATH` に追加
+  - Lean toolchain を best-effort で導入し、`MUMEI_LEAN_REPO=${{ github.workspace }}/mumei-lean` + `--enable-lean-fallback` で Z3 `unknown` atom の Lean 4 証明を CI 常時試行（Lean/lake 不在時は bridge 側で graceful degrade）
   - `python -m agent health` で pre/post-flight のヘルス JSON を取得
-  - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json`
+  - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json --enable-lean-fallback`
   - 生成物: `pre_health.json` / `post_health.json` / `proliferate.log` / `summary.json` を `proliferate-logs` artifact として保存
   - **ハイブリッド LLM プロファイル**（`workflow_dispatch` 入力 `llm_profile` / `llm_model` で切替。cron ではデフォルト `ollama-local` + `qwen3.5:0.8b` を使用し外部依存ゼロで動作）:
     - `ollama-local`（default）: runner 内で `ollama serve` を起動 → `ollama pull ${llm_model}` → `LLM_BASE_URL=http://localhost:11434/v1` に接続。`~/.ollama/models` を `actions/cache@v4` で `llm_model` 毎にキャッシュ。既定モデルは軽量な `qwen3.5:0.8b`、品質優先なら `qwen3.5:4b` / `qwen2.5-coder:7b`、予備枠として 1bit 量子化系（例: `bonsai-1bit-qwen`）を `llm_model` 入力で指定可能

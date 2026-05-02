@@ -141,10 +141,34 @@ jobs:
           # mumei-lang/mumei; GITHUB_TOKEN is scoped to this repo only.
           token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
 
+      - name: Check out mumei-lean
+        # Best-effort checkout: the Lean fallback is optional and the
+        # bridge degrades gracefully when the repo is unavailable (see
+        # agent/lean_bridge.py::lean_fallback_available).  A failure here
+        # must not abort the entire proliferation pipeline (gap analysis,
+        # forge, blast-radius, PR creation all run independently of Lean).
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: mumei-lang/mumei-lean
+          ref: develop
+          path: mumei-lean
+          # Mirror the token fallback chain used for the mumei checkout
+          # above so this keeps working if mumei-lean ever goes private.
+          # GITHUB_TOKEN alone is scoped to mumei-agent and cannot read
+          # sibling private repos in the mumei-lang org.
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Install Lean toolchain (best-effort)
+        continue-on-error: true
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.16.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
       - name: Install mumei system dependencies
         run: |
@@ -310,6 +334,10 @@ jobs:
           # cannot recover.  Points at the checkout from the previous
           # `Checkout mumei compiler` step.
           MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
+          # Lean fallback attempts to discharge Z3 ``unknown`` atoms via
+          # the mumei-lean bridge. The toolchain install is best-effort,
+          # and the bridge degrades gracefully if lake/Lean is unavailable.
+          MUMEI_LEAN_REPO: ${{ github.workspace }}/mumei-lean
           # P10 — prefer the authoritative gap rules from the mumei
           # checkout instead of the offline copy in agent/gap_rules.py.
           # Combined with PYTHONPATH below, this lets analyze_gaps
@@ -343,6 +371,7 @@ jobs:
             --mumei-repo ../mumei \
             --max-proposals "$MAX_PROPOSALS" \
             --output-json /tmp/proliferate/summary.json \
+            --enable-lean-fallback \
             $DRY_RUN_FLAG \
             2>&1 | tee /tmp/proliferate/proliferate.log
 
