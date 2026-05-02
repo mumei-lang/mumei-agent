@@ -431,8 +431,8 @@ jobs:
         run: |
           echo "::error::Proliferate run regressed proof-health; downstream artifact uploads will still occur for forensics, but operators should treat this as a hard signal."
 
-      - name: Run LLM benchmark (opt-in)
-        if: always() && github.event.inputs.run_benchmark == 'true'
+      - name: Run LLM benchmark (scheduled + opt-in)
+        if: always() && (github.event_name == 'schedule' || github.event.inputs.run_benchmark == 'true')
         working-directory: mumei-agent
         env:
           LLM_BENCHMARK_MODELS: ${{ steps.llm_env.outputs.model }}
@@ -449,6 +449,44 @@ jobs:
           MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
         run: |
           pytest -m benchmark tests/test_llm_benchmark.py --tb=short || true
+
+      - name: Update benchmark history
+        if: always()
+        working-directory: mumei-agent
+        run: |
+          if [ -s /tmp/proliferate/benchmark.json ]; then
+            python scripts/update_benchmark_history.py \
+              --benchmark /tmp/proliferate/benchmark.json \
+              --history docs/BENCHMARK_HISTORY.md
+          else
+            echo "benchmark.json missing or empty; skipping history update"
+          fi
+
+      - name: Commit benchmark history
+        if: always() && github.event_name == 'schedule'
+        working-directory: mumei-agent
+        run: |
+          if [ ! -s /tmp/proliferate/benchmark.json ]; then
+            echo "benchmark.json missing or empty; skipping history commit"
+            exit 0
+          fi
+          if git diff --quiet docs/BENCHMARK_HISTORY.md; then
+            echo "benchmark history unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/BENCHMARK_HISTORY.md
+          git commit -m "docs: update benchmark history"
+          git pull --rebase origin develop
+          git push origin HEAD:develop
+
+      - name: Upload benchmark history artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-history
+          path: mumei-agent/docs/BENCHMARK_HISTORY.md
 
       - name: Upload proliferate artifacts
         if: always()
