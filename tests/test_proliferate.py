@@ -6,6 +6,8 @@ mocked so the tests stay hermetic — no network, no mumei binary.
 """
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -570,8 +572,6 @@ class TestProliferateDryRun:
 
 class TestBuildParser:
     def test_required_and_default_args(self) -> None:
-        import argparse
-
         parser = argparse.ArgumentParser()
         proliferate.build_parser(parser)
         args = parser.parse_args(["--mumei-repo", "/tmp/m"])
@@ -579,10 +579,9 @@ class TestBuildParser:
         assert args.max_proposals == 3
         assert args.dry_run is False
         assert args.output_json is None
+        assert args.enable_lean_fallback is False
 
     def test_dry_run_flag(self) -> None:
-        import argparse
-
         parser = argparse.ArgumentParser()
         proliferate.build_parser(parser)
         args = parser.parse_args(
@@ -592,14 +591,35 @@ class TestBuildParser:
         assert args.dry_run is True
 
     def test_output_json_flag(self) -> None:
-        import argparse
-
         parser = argparse.ArgumentParser()
         proliferate.build_parser(parser)
         args = parser.parse_args(
             ["--mumei-repo", "/tmp/m", "--output-json", "/tmp/summary.json"]
         )
         assert args.output_json == "/tmp/summary.json"
+
+    def test_lean_fallback_flag_passed_to_proliferate(self) -> None:
+        parser = argparse.ArgumentParser()
+        proliferate.build_parser(parser)
+        args = parser.parse_args(
+            [
+                "--mumei-repo",
+                "/tmp/m",
+                "--enable-lean-fallback",
+            ]
+        )
+
+        with patch("agent.proliferate.proliferate", return_value=[]) as run_mock:
+            proliferate.main(args)
+
+        run_mock.assert_called_once_with(
+            mumei_repo_dir="/tmp/m",
+            max_proposals=3,
+            dry_run=False,
+            mumei_bin=None,
+            output_json=None,
+            enable_lean_fallback=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +726,33 @@ class TestJsonifyResult:
 
 
 class TestOutputJson:
+    def test_lean_fallback_summary_in_output_json(self, tmp_path: Path) -> None:
+        out_path = tmp_path / "summary.json"
+        lean_fallback = {
+            "attempted": True,
+            "unknown_count": 2,
+            "proved": 1,
+            "bridge": "mumei-lean",
+        }
+
+        proliferate._write_output_json(
+            out_path,
+            started_at="2026-05-02T10:00:00+00:00",
+            pre_health=None,
+            post_health=None,
+            results=[
+                {
+                    "success": True,
+                    "reason": "published",
+                    "lean_fallback": lean_fallback,
+                }
+            ],
+            dry_run=False,
+        )
+
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["details"][0]["lean_fallback"] == lean_fallback
+
     def test_no_std_writes_summary_json(self, tmp_path: Path) -> None:
         out_path = tmp_path / "summary.json"
         proliferate.proliferate(
@@ -713,9 +760,8 @@ class TestOutputJson:
             dry_run=True,
             output_json=out_path,
         )
-        import json as _json
 
-        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        data = json.loads(out_path.read_text(encoding="utf-8"))
         assert data["proposals_processed"] == 1
         assert data["proposals_succeeded"] == 0
         assert data["dry_run"] is True
@@ -749,9 +795,8 @@ class TestOutputJson:
             dry_run=True,
             output_json=out_path,
         )
-        import json as _json
 
-        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        data = json.loads(out_path.read_text(encoding="utf-8"))
         assert data["proposals_processed"] == 1
         assert data["proposals_succeeded"] == 1
         assert data["details"][0]["reason"] == "no_proposals"
@@ -877,9 +922,8 @@ class TestHealthRegressionAutoClose:
             dry_run=True,
             output_json=out_path,
         )
-        import json as _json
 
-        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        data = json.loads(out_path.read_text(encoding="utf-8"))
         assert data["model"] == "qwen3.5:4b"
 
     def test_output_json_model_defaults_to_agent_config(
@@ -897,9 +941,8 @@ class TestHealthRegressionAutoClose:
             dry_run=True,
             output_json=out_path,
         )
-        import json as _json
 
         from agent.config import AgentConfig
 
-        data = _json.loads(out_path.read_text(encoding="utf-8"))
+        data = json.loads(out_path.read_text(encoding="utf-8"))
         assert data["model"] == AgentConfig().model
