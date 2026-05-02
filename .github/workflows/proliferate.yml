@@ -142,11 +142,22 @@ jobs:
           token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Check out mumei-lean
+        # Best-effort checkout: the Lean fallback is optional and the
+        # bridge degrades gracefully when the repo is unavailable (see
+        # agent/lean_bridge.py::lean_fallback_available).  A failure here
+        # must not abort the entire proliferation pipeline (gap analysis,
+        # forge, blast-radius, PR creation all run independently of Lean).
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: mumei-lang/mumei-lean
           ref: develop
           path: mumei-lean
+          # Mirror the token fallback chain used for the mumei checkout
+          # above so this keeps working if mumei-lean ever goes private.
+          # GITHUB_TOKEN alone is scoped to mumei-agent and cannot read
+          # sibling private repos in the mumei-lang org.
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
