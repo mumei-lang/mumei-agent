@@ -121,11 +121,7 @@ def _detect_violation_type(source: str) -> str | None:
         "ensures: result > 0" in source and "body: x;" in source
     ):
         return "postcondition_violated"
-    # precondition must be checked BEFORE division_by_zero because
-    # precondition_violated.mm contains the phrase "division by zero" in a
-    # comment.  The structural heuristic (requires: true + a / b) is unique to
-    # the precondition fixture.
-    if "precondition" in lower or (
+    if "precondition violation" in lower or (
         "requires: true" in source and "a / b" in source
     ):
         return "precondition_violated"
