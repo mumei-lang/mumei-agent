@@ -161,6 +161,11 @@ class TestRealForgeSpecs:
             "vstd_fixed_point.json",
             "vstd_string_utils.json",
             "vstd_math_min_max.json",
+            "vstd_math_sqrt.json",
+            "vstd_container_priority_queue.json",
+            "vstd_bitwise.json",
+            "vstd_math_log2.json",
+            "vstd_container_set.json",
         ],
     )
     def test_new_p9d_specs_load(self, spec_name):
@@ -187,5 +192,10 @@ class TestRealForgeSpecs:
             "vstd-fixed-point",
             "vstd-string-utils",
             "vstd-math-min-max",
+            "vstd-math-sqrt",
+            "vstd-container-priority-queue",
+            "vstd-bitwise",
+            "vstd-math-log2",
+            "vstd-container-set",
         }:
             assert required in ids, f"{required} not found in {sorted(ids)}"

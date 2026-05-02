@@ -1,0 +1,31 @@
+{
+  "task_id": "vstd-math-log2",
+  "target_file": "std/math/log2.mm",
+  "mode": "create",
+  "priority": 12,
+  "max_retries": 5,
+  "auto_commit": false,
+  "description": "Integer base-2 logarithm (`ilog2`) for positive inputs. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/log2 — verified integer log2'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm already uses and keep non-linear reasoning bounded.",
+  "context_files": [
+    "std/core.mm",
+    "std/math/pow.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "ilog2",
+      "description": "Integer log2 witness for a positive input. The result is always non-negative.",
+      "inputs": [
+        {"name": "n", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "n > 0",
+      "ensures": "result >= 0",
+      "reference_patterns": ["pow_small", "safe_narrow"]
+    }
+  ],
+  "source": "vstd-roadmap",
+  "difficulty": "medium"
+}

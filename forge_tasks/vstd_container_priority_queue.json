@@ -1,0 +1,58 @@
+{
+  "task_id": "vstd-container-priority-queue",
+  "target_file": "std/container/priority_queue.mm",
+  "mode": "create",
+  "priority": 10,
+  "max_retries": 8,
+  "auto_commit": false,
+  "description": "Priority queue backed by bounded storage with push, pop, and peek bookkeeping atoms. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/container/priority_queue — verified priority queue'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/container/safe_queue.mm and std/contracts.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/contracts.mm already use.",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm",
+    "std/container/safe_queue.mm",
+    "std/container/binary_heap.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/contracts.mm"
+  ],
+  "atoms": [
+    {
+      "name": "pq_push",
+      "description": "Bookkeeping step for inserting an item with a priority into a bounded priority queue.",
+      "inputs": [
+        {"name": "len", "type": "i64"},
+        {"name": "cap", "type": "i64"},
+        {"name": "priority", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "cap > 0 && len >= 0 && len < cap && priority >= 0",
+      "ensures": "result == len + 1 && result >= 1 && result <= cap",
+      "reference_patterns": ["enqueue", "heap_insert_len", "checked_add"]
+    },
+    {
+      "name": "pq_pop",
+      "description": "Bookkeeping step for removing the highest-priority item from a non-empty priority queue.",
+      "inputs": [
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len > 0",
+      "ensures": "result == len - 1 && result >= 0",
+      "reference_patterns": ["dequeue", "heap_extract_len", "checked_sub"]
+    },
+    {
+      "name": "pq_peek",
+      "description": "Peek at a non-empty priority queue without changing its length.",
+      "inputs": [
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len > 0",
+      "ensures": "result == len && result > 0",
+      "reference_patterns": ["queue_peek", "heap_parent", "safe_narrow"]
+    }
+  ],
+  "source": "vstd-roadmap",
+  "difficulty": "high"
+}

@@ -1,0 +1,59 @@
+{
+  "task_id": "vstd-container-set",
+  "target_file": "std/container/set.mm",
+  "mode": "create",
+  "priority": 13,
+  "max_retries": 8,
+  "auto_commit": false,
+  "description": "Bounded set operation primitives for membership, insertion bookkeeping, and size queries. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/container/set — verified set primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/container/safe_list.mm and std/contracts.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/contracts.mm already use.",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm",
+    "std/container/safe_list.mm",
+    "std/container/sorted_list.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/contracts.mm"
+  ],
+  "atoms": [
+    {
+      "name": "set_contains",
+      "description": "Membership predicate stub for a logical set identified by set_tag. Returns a boolean-like 0/1 witness.",
+      "inputs": [
+        {"name": "set_tag", "type": "i64"},
+        {"name": "elem", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "set_tag >= 0 && elem >= 0",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["safe_peek", "sorted_is_ordered_pair"]
+    },
+    {
+      "name": "set_add",
+      "description": "Bookkeeping step for adding an element to a bounded set identified by set_tag.",
+      "inputs": [
+        {"name": "set_tag", "type": "i64"},
+        {"name": "elem", "type": "i64"},
+        {"name": "cap", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "set_tag >= 0 && elem >= 0 && cap > 0",
+      "ensures": "result >= 0 && result <= cap",
+      "reference_patterns": ["safe_push", "sorted_insert_len", "checked_add"]
+    },
+    {
+      "name": "set_size",
+      "description": "Size query for a bounded set identified by set_tag.",
+      "inputs": [
+        {"name": "set_tag", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "set_tag >= 0",
+      "ensures": "result >= 0",
+      "reference_patterns": ["safe_len", "safe_narrow"]
+    }
+  ],
+  "source": "vstd-roadmap",
+  "difficulty": "high"
+}

@@ -228,11 +228,17 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ `forge_tasks/vstd_math_gcd.json` — `std/math/gcd.mm` Euclidean-algorithm step atoms（Z3 整数理論で完全検証可能）
 - ✅ `forge_tasks/vstd_math_clamp.json` — `std/math/clamp.mm` clamp primitives（`std/contracts.mm` の `clamp` を独立モジュール化）
 - ✅ `forge_tasks/vstd_container_deque.json` — `std/container/deque.mm` 両端キュー（`safe_queue.mm` パターン拡張）
+- ✅ `forge_tasks/vstd_math_sqrt.json` — `std/math/sqrt.mm` 整数平方根 `isqrt`（`n >= 0` → `result >= 0 && result * result <= n`）
+- ✅ `forge_tasks/vstd_container_priority_queue.json` — `std/container/priority_queue.mm` 優先度キュー（`pq_push` / `pq_pop` / `pq_peek`）
+- ✅ `forge_tasks/vstd_bitwise.json` — `std/bitwise.mm` ビット演算プリミティブ（and/or/xor/shift）
+- ✅ `forge_tasks/vstd_math_log2.json` — `std/math/log2.mm` 整数 `ilog2`（`n > 0` → `result >= 0`）
+- ✅ `forge_tasks/vstd_container_set.json` — `std/container/set.mm` 集合操作（`set_contains` / `set_add` / `set_size`）
 - ✅ `tests/test_llm_benchmark.py` — LLM モデル別 forge 生成品質ベンチマーク基盤（`@pytest.mark.benchmark` で opt-in、`forge_tasks/vstd_math_abs.json` を基準タスクとする）
   - `LLM_BENCHMARK_MODELS` / `LLM_BENCHMARK_TRIALS` / `LLM_BENCHMARK_OUTPUT` 環境変数でモデル・試行回数・出力先を制御
   - `success_rate` / `avg_code_length` / `avg_time_seconds` を JSON に記録（`generate_code` は retries を返さないため、コード長を品質プロキシとして利用）
   - `.github/workflows/proliferate.yml` の `llm_model` 入力説明に推奨モデルと品質トレードオフを追記
-- 📋 vStd ロードマップ全項目の forge タスク化
+- ✅ `.github/workflows/proliferate.yml` schedule 実行でも LLM benchmark を自動実行し、`docs/BENCHMARK_HISTORY.md` に `success_rate` / `avg_code_length` の時系列を最大50行で蓄積
+- 📋 vStd ロードマップ残項目の forge タスク化
 
 ---
 
