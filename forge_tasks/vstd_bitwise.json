@@ -51,14 +51,14 @@
     },
     {
       "name": "bit_shift_left",
-      "description": "Left shift by a non-negative amount, with caller-provided bounds keeping the result non-negative.",
+      "description": "Left shift by a non-negative amount, with caller-provided bounds keeping the result within i64 range. Operand bounds mirror std/core.mm (checked_mul) and std/math/pow.mm (pow_small) so the result cannot overflow signed i64.",
       "inputs": [
         {"name": "x", "type": "i64"},
         {"name": "n", "type": "i64"}
       ],
       "return_type": "i64",
-      "requires": "x >= 0 && n >= 0 && n <= 62",
-      "ensures": "result >= x",
+      "requires": "x >= 0 && x <= 1000000 && n >= 0 && n <= 30",
+      "ensures": "result >= 0 && result >= x",
       "reference_patterns": ["checked_mul", "pow_small"]
     },
     {
