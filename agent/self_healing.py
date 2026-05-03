@@ -19,6 +19,13 @@ from agent.strategies.fix_strategy import get_fix
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 from agent.metrics import Metrics
+from agent.thought_log import (
+    ThoughtProcess,
+    describe_fix,
+    infer_fix_strategy,
+    summarize_code_diff,
+    summarize_z3_result,
+)
 
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
@@ -141,10 +148,22 @@ def main() -> None:
     success = False
     outer_history = RetryHistory()
     pattern_lib = PatternLibrary()
+    thought = ThoughtProcess(target_file=source_file)
     try:
         for attempt in range(max_retries + 1):
             result = mumei.verify(source_file)
             report = result["report"] or {}
+            try:
+                thought.add_step(
+                    action="initial_verify" if attempt == 0 else "re_verify",
+                    z3_result=summarize_z3_result(result),
+                    verification_success=bool(result["success"]),
+                    re_verify_success=(
+                        bool(result["success"]) if attempt > 0 else None
+                    ),
+                )
+            except Exception:
+                pass
 
             if result["success"]:
                 print(f"Success! Blade is flawless (Attempt {attempt + 1}).")
@@ -173,6 +192,11 @@ def main() -> None:
                     except Exception:
                         pass
                 success = True
+                try:
+                    thought.final_success = True
+                    thought.total_attempts = attempt + 1
+                except Exception:
+                    pass
                 return
 
             print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
@@ -216,6 +240,20 @@ def main() -> None:
                 retry_history=outer_history,
                 pattern_library=pattern_lib,
             )
+            try:
+                thought.add_step(
+                    action="llm_fix",
+                    verification_success=False,
+                    fix_strategy=infer_fix_strategy(report),
+                    fix_description=describe_fix(report),
+                    code_diff_summary=(
+                        summarize_code_diff(source, fixed_code)
+                        if fixed_code
+                        else "No candidate fix produced."
+                    ),
+                )
+            except Exception:
+                pass
 
             # Validate before overwriting
             if not fixed_code:
@@ -232,6 +270,23 @@ def main() -> None:
     except Exception as exc:
         print(f"Error during healing: {exc}")
     finally:
+        try:
+            thought.final_success = success
+            thought.total_attempts = len(
+                [s for s in thought.steps if s.action in ("initial_verify", "re_verify")]
+            )
+            thought_path = ROOT_DIR / "visualizer" / "thought_process.json"
+            thought_path.parent.mkdir(exist_ok=True)
+            thought_path.write_text(
+                json.dumps(thought.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            print(
+                "Thought process: "
+                + json.dumps(thought.to_dict(), ensure_ascii=False)
+            )
+        except Exception:
+            pass
         # Restore original source on failure so the user isn't left with
         # broken code.  This runs on retries exhausted, exceptions (including
         # KeyboardInterrupt via the finally block), and any other non-success

@@ -13,6 +13,12 @@ from openai import OpenAI
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
 from agent.prompts.report_formatter import format_error_diff, is_contextual_suggestion
+from agent.thought_log import (
+    ThoughtProcess,
+    describe_fix,
+    summarize_code_diff,
+    summarize_z3_result,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -305,6 +311,7 @@ def generate_multi_atom(
     config_max_retries: int = 5,
     mumei_client: MumeiClient | None = None,
     metrics: Metrics | None = None,
+    thought_process: ThoughtProcess | None = None,
 ) -> tuple[str, bool]:
     """Generate a multi-atom Mumei module from a specification.
 
@@ -391,6 +398,12 @@ def generate_multi_atom(
 
     if mumei_client is None:
         metrics.record_success("generation")
+        if thought_process is not None:
+            try:
+                thought_process.final_success = True
+                thought_process.total_attempts = 0
+            except Exception:
+                pass
         return generated_code, True
 
     # Stage 2+3: Check, verify, and targeted fix loop
@@ -424,8 +437,38 @@ def generate_multi_atom(
 
             # Full verification
             verify_result = mumei_client.verify(tmp_path)
+            if thought_process is not None:
+                try:
+                    thought_process.add_step(
+                        action=(
+                            "initial_verify" if attempt == 0 else "re_verify"
+                        ),
+                        z3_result=summarize_z3_result(verify_result),
+                        verification_success=bool(verify_result["success"]),
+                        re_verify_success=(
+                            bool(verify_result["success"]) if attempt > 0 else None
+                        ),
+                    )
+                except Exception:
+                    pass
             if verify_result["success"]:
                 metrics.record_success(last_violation_type)
+                if thought_process is not None:
+                    try:
+                        thought_process.final_success = True
+                        # Count verification steps rather than loop
+                        # iterations so the early-exit and post-loop
+                        # paths agree on ``total_attempts`` semantics
+                        # (parse-error iterations don't add steps).
+                        thought_process.total_attempts = len(
+                            [
+                                s
+                                for s in thought_process.steps
+                                if s.action in ("initial_verify", "re_verify")
+                            ]
+                        )
+                    except Exception:
+                        pass
                 return current_code, True
 
             _logger.info(
@@ -441,10 +484,24 @@ def generate_multi_atom(
 
             # Identify which atoms failed and build targeted fix prompt
             failing = _identify_failing_atoms(report, atom_names)
+            before_fix = current_code
             current_code = _attempt_multi_atom_fix(
                 client, model, spec_json, current_code, error_log, report,
                 failing, metrics,
             )
+            if thought_process is not None:
+                try:
+                    thought_process.add_step(
+                        action="llm_fix",
+                        verification_success=False,
+                        fix_strategy="llm",
+                        fix_description=describe_fix(report),
+                        code_diff_summary=summarize_code_diff(
+                            before_fix, current_code,
+                        ),
+                    )
+                except Exception:
+                    pass
 
         finally:
             try:
@@ -463,6 +520,16 @@ def generate_multi_atom(
             tmp_path = tmp.name
             tmp.write(current_code)
         verify_result = mumei_client.verify(tmp_path)
+        if thought_process is not None:
+            try:
+                thought_process.add_step(
+                    action="re_verify",
+                    z3_result=summarize_z3_result(verify_result),
+                    verification_success=bool(verify_result["success"]),
+                    re_verify_success=bool(verify_result["success"]),
+                )
+            except Exception:
+                pass
         if verify_result["success"]:
             metrics.record_success(last_violation_type)
             verified = True
@@ -470,6 +537,19 @@ def generate_multi_atom(
         try:
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if thought_process is not None:
+        try:
+            thought_process.final_success = verified
+            thought_process.total_attempts = len(
+                [
+                    s
+                    for s in thought_process.steps
+                    if s.action in ("initial_verify", "re_verify")
+                ]
+            )
         except Exception:
             pass
 
@@ -530,6 +610,7 @@ def generate_code(
     config_max_retries: int = 5,
     mumei_client: MumeiClient | None = None,
     metrics: Metrics | None = None,
+    thought_process: ThoughtProcess | None = None,
 ) -> tuple[str, bool]:
     """Generate Mumei code from a specification, verify, and fix if needed.
 
@@ -563,6 +644,7 @@ def generate_code(
             config_max_retries=config_max_retries,
             mumei_client=mumei_client,
             metrics=metrics,
+            thought_process=thought_process,
         )
 
     if metrics is None:
@@ -630,6 +712,12 @@ def generate_code(
 
     if mumei_client is None:
         metrics.record_success("generation")
+        if thought_process is not None:
+            try:
+                thought_process.final_success = True
+                thought_process.total_attempts = 0
+            except Exception:
+                pass
         return generated_code, True
 
     # Stage 2+3: Check, verify, and fix loop
@@ -665,8 +753,38 @@ def generate_code(
 
             # Full verification
             verify_result = mumei_client.verify(tmp_path)
+            if thought_process is not None:
+                try:
+                    thought_process.add_step(
+                        action=(
+                            "initial_verify" if attempt == 0 else "re_verify"
+                        ),
+                        z3_result=summarize_z3_result(verify_result),
+                        verification_success=bool(verify_result["success"]),
+                        re_verify_success=(
+                            bool(verify_result["success"]) if attempt > 0 else None
+                        ),
+                    )
+                except Exception:
+                    pass
             if verify_result["success"]:
                 metrics.record_success(last_violation_type)
+                if thought_process is not None:
+                    try:
+                        thought_process.final_success = True
+                        # Count verification steps rather than loop
+                        # iterations so the early-exit and post-loop
+                        # paths agree on ``total_attempts`` semantics
+                        # (parse-error iterations don't add steps).
+                        thought_process.total_attempts = len(
+                            [
+                                s
+                                for s in thought_process.steps
+                                if s.action in ("initial_verify", "re_verify")
+                            ]
+                        )
+                    except Exception:
+                        pass
                 return current_code, True
 
             _logger.info(
@@ -678,11 +796,25 @@ def generate_code(
             last_violation_type = violation_type
             metrics.record_attempt(violation_type)
 
+            before_fix = current_code
             current_code = _attempt_fix(
                 client, model, spec_json, current_code, error_log, report,
                 prompt_module, metrics, inferred_context=inferred_context,
                 prev_report=prev_report,
             )
+            if thought_process is not None:
+                try:
+                    thought_process.add_step(
+                        action="llm_fix",
+                        verification_success=False,
+                        fix_strategy="llm",
+                        fix_description=describe_fix(report),
+                        code_diff_summary=summarize_code_diff(
+                            before_fix, current_code
+                        ),
+                    )
+                except Exception:
+                    pass
             prev_report = report
 
         finally:
@@ -702,6 +834,16 @@ def generate_code(
             tmp_path = tmp.name
             tmp.write(current_code)
         verify_result = mumei_client.verify(tmp_path)
+        if thought_process is not None:
+            try:
+                thought_process.add_step(
+                    action="re_verify",
+                    z3_result=summarize_z3_result(verify_result),
+                    verification_success=bool(verify_result["success"]),
+                    re_verify_success=bool(verify_result["success"]),
+                )
+            except Exception:
+                pass
         if verify_result["success"]:
             metrics.record_success(last_violation_type)
             verified = True
@@ -709,6 +851,19 @@ def generate_code(
         try:
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if thought_process is not None:
+        try:
+            thought_process.final_success = verified
+            thought_process.total_attempts = len(
+                [
+                    s
+                    for s in thought_process.steps
+                    if s.action in ("initial_verify", "re_verify")
+                ]
+            )
         except Exception:
             pass
 
