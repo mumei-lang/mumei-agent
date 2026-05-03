@@ -240,6 +240,17 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ `.github/workflows/proliferate.yml` schedule 実行でも LLM benchmark を自動実行し、`docs/BENCHMARK_HISTORY.md` に `success_rate` / `avg_code_length` の時系列を最大50行で蓄積
 - 📋 vStd ロードマップ残項目の forge タスク化
 
+### P9-E: Demo Integration Forge Tasks
+
+Phase 1 統合デモ用の forge タスク。
+
+- ✅ `forge_tasks/vstd_ownership.json` — Ownership Transfer Protocol (PR #53)
+  - `std/ownership.mm` の `propose_transfer` / `accept_transfer` / `cancel_transfer` / `full_transfer` / `propose_and_cancel` を forge ターゲットとする
+  - `context_files`: `tests/test_order_state_machine.mm`, `tests/test_modular_verification.mm`, `std/effects.mm`
+  - Temporal Effect（stateful effect）を含む初の forge タスク
+- 📋 `forge_tasks/vstd_settlement.json` — RTGS Settlement (Phase 2 Demo, Planned)
+- 📋 `forge_tasks/vstd_regtech.json` — RegTech Compliance (Phase 3 Demo, Planned)
+
 ---
 
 ## SI-5: Self-Improving Standard Library (Phase 2) — ✅ Implemented
@@ -494,6 +505,27 @@ python -m agent proliferate \
 
 - [mumei-lang/mumei-lean README](https://github.com/mumei-lang/mumei-lean/blob/main/README.md) — Lean 側の bridge / ingest_cert / export_cert の仕。
 - `agent/lean_bridge.py` — agent 側のルパ層`tests/test_lean_bridge.py` テスを照。
+
+---
+
+## 統合デモ戦略
+
+mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CROSS_PROJECT_ROADMAP.md](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の「統合デモ戦略」セクションを参照。
+
+### デモにおける mumei-agent の役割
+
+1. **バグ入りコード生成**: `generate_code()` で LLM にコードを書かせる（意図的にバグを含む）
+2. **検証ループの可視化**: Z3 失敗 → LLM 修正 → 再検証の思考プロセスを構造化ログとして出力
+3. **Lean fallback**: `--enable-lean-fallback` で Z3 unknown atom を mumei-lean に委譲
+
+### 残タスク
+
+| 項目 | 状態 | 備考 |
+|---|---|---|
+| vstd_ownership.json | ✅ Complete (PR #53) | Phase 1 Demo |
+| 検証ループの Step-by-step 思考プロセスログ | 📋 Planned | `summary.json` の拡張。各ステップの Z3 結果・LLM 修正・再検証を構造化 |
+| vstd_settlement.json | 📋 Planned | Phase 2 Demo (RTGS) |
+| vstd_regtech.json | 📋 Planned | Phase 3 Demo (RegTech) |
 
 ---
 
