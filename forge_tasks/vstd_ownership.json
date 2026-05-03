@@ -75,17 +75,18 @@
     },
     {
       "name": "propose_and_cancel",
-      "description": "Cross-atom composition of propose_transfer then cancel_transfer. The sequence proves Idle -> PendingTransfer -> Idle.",
+      "description": "Cross-atom composition of propose_transfer then cancel_transfer. The sequence proves Idle -> PendingTransfer -> Idle. Takes the current owner (who retains ownership after cancellation) and the proposed new owner as distinct inputs.",
       "inputs": [
-        {"name": "owner", "type": "i64"}
+        {"name": "current_owner", "type": "i64"},
+        {"name": "proposed_owner", "type": "i64"}
       ],
       "return_type": "i64",
-      "requires": "owner >= 0",
-      "ensures": "result == owner",
+      "requires": "current_owner >= 0 && proposed_owner >= 0",
+      "ensures": "result == current_owner",
       "effects": ["Ownership"],
       "effect_pre": {"Ownership": "Idle"},
       "effect_post": {"Ownership": "Idle"},
-      "composition": ["propose_transfer(owner)", "cancel_transfer(owner)"],
+      "composition": ["propose_transfer(proposed_owner)", "cancel_transfer(current_owner)"],
       "reference_patterns": ["full_pipeline", "test_cancellation"]
     }
   ],
