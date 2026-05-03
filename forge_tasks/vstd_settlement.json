@@ -100,6 +100,7 @@
       "name": "verify_all_balances_non_negative",
       "description": "Universal quantifier verification: all account balances in the array are non-negative. Uses forall(i, 0, n, arr[i] >= 0) in requires clause.",
       "inputs": [
+        {"name": "arr", "type": "i64"},
         {"name": "n", "type": "i64"}
       ],
       "return_type": "i64",
