@@ -524,7 +524,7 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 |---|---|---|
 | vstd_ownership.json | ✅ Complete (PR #53) | Phase 1 Demo |
 | 検証ループの Step-by-step 思考プロセスログ | ✅ Implemented | `summary.json` の拡張。各ステップの Z3 結果・LLM 修正・再検証を構造化 |
-| vstd_settlement.json | 📋 Planned | Phase 2 Demo (RTGS) |
+| vstd_settlement.json | ✅ Complete | Phase 2 Demo (RTGS) |
 | vstd_regtech.json | 📋 Planned | Phase 3 Demo (RegTech) |
 
 ---
