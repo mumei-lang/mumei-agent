@@ -99,6 +99,7 @@ adding or promoting tasks.
 | Task ID                          | Target file                              | Difficulty | Atoms | Status   |
 |----------------------------------|------------------------------------------|------------|-------|----------|
 | `vstd-core`                      | `std/core.mm`                            | low        | 4     | created  |
+| `vstd-ownership`                 | `std/ownership.mm`                       | medium     | 5     | created  |
 | `vstd-trait-iterable`            | `std/trait/iterable.mm`                  | medium     | 3     | created  |
 | `vstd-iter`                      | `std/iter.mm`                            | medium     | 5+    | forged   |
 | `vstd-hash`                      | `std/hash.mm`                            | medium     | 2+    | forged   |
