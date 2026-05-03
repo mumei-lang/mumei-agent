@@ -1,0 +1,133 @@
+{
+  "task_id": "vstd-settlement",
+  "target_file": "std/settlement.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Phase 2 Demo: RTGS Settlement Protocol. Generate a new standard-library module defining a stateful Settlement effect with Resource Hierarchy and verified atoms. The generated file MUST follow the Stateful Effects documentation pattern from std/effects.mm and the exact state-machine syntax: `effect Settlement`, `states: [Pending, Validated, Settled];`, `initial: Pending;`, and transitions `validate: Pending -> Validated`, `settle: Validated -> Settled`, `reject: Pending -> Pending`. Resource Hierarchy MUST declare `resource ledger priority: 1 mode: exclusive;` and `resource queue priority: 2 mode: exclusive;` with acquisition in priority order (ledger before queue) to prevent deadlocks. Each atom MUST declare `effects: [Settlement];` plus explicit `effect_pre` and `effect_post` contracts where applicable. Atom bodies MUST use `perform Settlement.validate;`, `perform Settlement.settle;`, and `perform Settlement.reject;` for primitive transitions. Cross-atom composition atoms (full_settlement, safe_settlement) MUST chain primitive atoms and inherit their effect contracts. Loop-based atoms (process_queue) MUST use `while` with `invariant:` and `decreases:` clauses for termination proof. Quantifier atoms (verify_all_balances_non_negative) MUST use `forall(i, 0, n, ...)` in `requires:` for universal properties. The key invariant is balance conservation: `(sender - amount) + (receiver + amount) == sender + receiver`.",
+  "context_files": [
+    "tests/test_settlement.mm",
+    "tests/test_order_state_machine.mm",
+    "std/effects.mm",
+    "std/ownership.mm"
+  ],
+  "depends_on": [],
+  "atoms": [
+    {
+      "name": "submit_transaction",
+      "description": "Submit a transaction for processing. This primitive operation keeps Settlement in Pending state (via reject transition, representing initial submission). Validates that sender and receiver are distinct non-negative identifiers and amount is positive.",
+      "inputs": [
+        {"name": "sender", "type": "i64"},
+        {"name": "receiver", "type": "i64"},
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "sender >= 0 && receiver >= 0 && amount > 0 && sender != receiver",
+      "ensures": "result == amount",
+      "effects": ["Settlement"],
+      "effect_pre": {"Settlement": "Pending"},
+      "effect_post": {"Settlement": "Pending"},
+      "body_pattern": "perform Settlement.reject; amount",
+      "reference_patterns": ["test_standard_fulfillment"]
+    },
+    {
+      "name": "validate_transaction",
+      "description": "Validate a transaction by checking sender has sufficient balance. Transitions Settlement from Pending to Validated. Returns the remaining balance after deducting the transfer amount.",
+      "inputs": [
+        {"name": "sender_balance", "type": "i64"},
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "sender_balance >= 0 && amount > 0 && sender_balance >= amount",
+      "ensures": "result == sender_balance - amount",
+      "effects": ["Settlement"],
+      "effect_pre": {"Settlement": "Pending"},
+      "effect_post": {"Settlement": "Validated"},
+      "body_pattern": "perform Settlement.validate; sender_balance - amount",
+      "reference_patterns": ["propose_transfer"]
+    },
+    {
+      "name": "execute_settlement",
+      "description": "Execute the settlement by finalizing the balance transfer. Transitions Settlement from Validated to Settled. The key invariant is balance conservation: (sender - amount) + (receiver + amount) == sender + receiver.",
+      "inputs": [
+        {"name": "sender_balance", "type": "i64"},
+        {"name": "receiver_balance", "type": "i64"},
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "sender_balance >= 0 && receiver_balance >= 0 && amount > 0 && sender_balance >= amount",
+      "ensures": "result == sender_balance + receiver_balance",
+      "effects": ["Settlement"],
+      "effect_pre": {"Settlement": "Validated"},
+      "effect_post": {"Settlement": "Settled"},
+      "body_pattern": "perform Settlement.settle; let new_sender = sender_balance - amount; let new_receiver = receiver_balance + amount; new_sender + new_receiver",
+      "reference_patterns": ["accept_transfer"]
+    },
+    {
+      "name": "full_settlement",
+      "description": "Cross-atom composition of validate_transaction then execute_settlement with Resource Hierarchy. Acquires ledger (priority 1) before queue (priority 2) to prevent deadlocks. The sequence proves Pending -> Validated -> Settled with balance conservation.",
+      "inputs": [
+        {"name": "sender_balance", "type": "i64"},
+        {"name": "receiver_balance", "type": "i64"},
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "sender_balance >= 0 && receiver_balance >= 0 && amount > 0 && sender_balance >= amount",
+      "ensures": "result == sender_balance + receiver_balance",
+      "effects": ["Settlement"],
+      "effect_pre": {"Settlement": "Pending"},
+      "effect_post": {"Settlement": "Settled"},
+      "resources": ["ledger", "queue"],
+      "composition": ["validate_transaction(sender_balance, amount)", "execute_settlement(sender_balance, receiver_balance, amount)"],
+      "reference_patterns": ["full_transfer"]
+    },
+    {
+      "name": "process_queue",
+      "description": "Batch processing of queued transactions with termination proof. Uses while loop with invariant and decreases clause to prove the loop terminates and maintains non-negative counters.",
+      "inputs": [
+        {"name": "n", "type": "i64"},
+        {"name": "total_balance", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "n >= 0 && total_balance >= 0",
+      "ensures": "result >= 0",
+      "effects": [],
+      "body_pattern": "while loop with invariant: i >= 0 && i <= n && processed >= 0 && processed <= i && remaining >= 0; decreases: n - i",
+      "reference_patterns": ["verified_sum"]
+    },
+    {
+      "name": "verify_all_balances_non_negative",
+      "description": "Universal quantifier verification: all account balances in the array are non-negative. Uses forall(i, 0, n, arr[i] >= 0) in requires clause.",
+      "inputs": [
+        {"name": "arr", "type": "i64"},
+        {"name": "n", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "n >= 0 && forall(i, 0, n, arr[i] >= 0)",
+      "ensures": "result == 1",
+      "effects": [],
+      "body_pattern": "1",
+      "reference_patterns": ["verify_insertion_sort_skeleton"]
+    },
+    {
+      "name": "safe_settlement",
+      "description": "Cross-atom composition of validate_transaction then execute_settlement without Resource Hierarchy. Simpler version of full_settlement that proves Pending -> Validated -> Settled with balance conservation.",
+      "inputs": [
+        {"name": "sender_balance", "type": "i64"},
+        {"name": "receiver_balance", "type": "i64"},
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "sender_balance >= 0 && receiver_balance >= 0 && amount > 0 && sender_balance >= amount",
+      "ensures": "result == sender_balance + receiver_balance",
+      "effects": ["Settlement"],
+      "effect_pre": {"Settlement": "Pending"},
+      "effect_post": {"Settlement": "Settled"},
+      "composition": ["validate_transaction(sender_balance, amount)", "execute_settlement(sender_balance, receiver_balance, amount)"],
+      "reference_patterns": ["full_transfer"]
+    }
+  ],
+  "source": "phase2-demo-settlement",
+  "difficulty": "hard"
+}
