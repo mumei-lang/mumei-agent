@@ -1176,7 +1176,13 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
                 try:
                     out["thought_process"] = value.to_dict()
                 except Exception:
-                    out["thought_process"] = value
+                    # ``to_dict()`` should never raise in practice, but
+                    # if it does we must not store the raw dataclass —
+                    # ``json.dumps`` in ``_write_output_json`` cannot
+                    # serialise it and would crash the whole run. Fall
+                    # back to a JSON-safe ``repr()`` placeholder so the
+                    # surrounding summary still gets written.
+                    out["thought_process"] = repr(value)
             else:
                 out["thought_process"] = value
         elif key == "publish_result":

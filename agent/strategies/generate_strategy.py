@@ -456,7 +456,17 @@ def generate_multi_atom(
                 if thought_process is not None:
                     try:
                         thought_process.final_success = True
-                        thought_process.total_attempts = attempt + 1
+                        # Count verification steps rather than loop
+                        # iterations so the early-exit and post-loop
+                        # paths agree on ``total_attempts`` semantics
+                        # (parse-error iterations don't add steps).
+                        thought_process.total_attempts = len(
+                            [
+                                s
+                                for s in thought_process.steps
+                                if s.action in ("initial_verify", "re_verify")
+                            ]
+                        )
                     except Exception:
                         pass
                 return current_code, True
@@ -762,7 +772,17 @@ def generate_code(
                 if thought_process is not None:
                     try:
                         thought_process.final_success = True
-                        thought_process.total_attempts = attempt + 1
+                        # Count verification steps rather than loop
+                        # iterations so the early-exit and post-loop
+                        # paths agree on ``total_attempts`` semantics
+                        # (parse-error iterations don't add steps).
+                        thought_process.total_attempts = len(
+                            [
+                                s
+                                for s in thought_process.steps
+                                if s.action in ("initial_verify", "re_verify")
+                            ]
+                        )
                     except Exception:
                         pass
                 return current_code, True
