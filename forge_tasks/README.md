@@ -126,3 +126,4 @@ adding or promoting tasks.
 | `vstd-container-stack`           | `std/container/stack.mm`                 | medium     | 4+    | forged   |
 | `vstd-container-set`             | `std/container/set.mm`                   | high       | 3     | created  |
 | `vstd-container-sorted-list`     | `std/container/sorted_list.mm`           | medium     | 3     | created  |
+| `vstd-settlement`                | `std/settlement.mm`                      | hard       | 7     | created  |
