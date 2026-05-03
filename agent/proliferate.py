@@ -36,6 +36,12 @@ from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.propose import build_spec_from_proposal
 from agent.publish import publish
 from agent.strategies.generate_strategy import generate_code
+from agent.thought_log import (
+    ThoughtProcess,
+    describe_fix,
+    summarize_code_diff,
+    summarize_z3_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +202,7 @@ def attempt_heal(
     broken_info: dict[str, Any],
     mumei_client: MumeiClient,
     max_retries: int = 3,
+    thought_process: ThoughtProcess | None = None,
 ) -> bool:
     """Attempt to heal a broken ``.mm`` file using the fix strategy.
 
@@ -214,7 +221,25 @@ def attempt_heal(
 
     for attempt in range(max_retries):
         verify = mumei_client.verify(file_path)
+        if thought_process is not None:
+            try:
+                thought_process.add_step(
+                    action="initial_verify" if attempt == 0 else "re_verify",
+                    z3_result=summarize_z3_result(verify),
+                    verification_success=bool(verify["success"]),
+                    re_verify_success=(
+                        bool(verify["success"]) if attempt > 0 else None
+                    ),
+                )
+            except Exception:
+                pass
         if verify["success"]:
+            if thought_process is not None:
+                try:
+                    thought_process.final_success = True
+                    thought_process.total_attempts = attempt + 1
+                except Exception:
+                    pass
             return True
 
         error_log = verify.get("stderr", "") + verify.get("stdout", "")
@@ -229,6 +254,21 @@ def attempt_heal(
             mumei_client=mumei_client,
             source_path=file_path,
         )
+        if thought_process is not None:
+            try:
+                thought_process.add_step(
+                    action="llm_fix",
+                    verification_success=False,
+                    fix_strategy="llm",
+                    fix_description=describe_fix(report_data),
+                    code_diff_summary=(
+                        summarize_code_diff(source_code, fixed_code)
+                        if fixed_code
+                        else "No candidate fix produced."
+                    ),
+                )
+            except Exception:
+                pass
         if not fixed_code or fixed_code == source_code:
             logger.warning(
                 "Heal attempt %d/%d for %s produced no change",
@@ -244,6 +284,24 @@ def attempt_heal(
 
     # Final check
     final = mumei_client.verify(file_path)
+    if thought_process is not None:
+        try:
+            thought_process.add_step(
+                action="re_verify",
+                z3_result=summarize_z3_result(final),
+                verification_success=bool(final["success"]),
+                re_verify_success=bool(final["success"]),
+            )
+            thought_process.final_success = bool(final["success"])
+            thought_process.total_attempts = len(
+                [
+                    s
+                    for s in thought_process.steps
+                    if s.action in ("initial_verify", "re_verify")
+                ]
+            )
+        except Exception:
+            pass
     return final["success"]
 
 
@@ -612,6 +670,8 @@ def proliferate(
             "success": False,
         }
         target_file = spec.get("target_file", "unknown.mm")
+        thought = ThoughtProcess(target_file=str(target_file))
+        spec_result["thought_process"] = thought
         _log_step(3, 4, f"Forging proposal {idx}/{len(specs)}: {target_file}")
 
         # 3a. Generate code
@@ -622,22 +682,56 @@ def proliferate(
                 spec=spec,
                 config_max_retries=config.max_retries,
                 mumei_client=mumei_client,
+                thought_process=thought,
             )
         except Exception as exc:
             logger.error("Code generation failed for %s: %s", target_file, exc)
             spec_result["reason"] = f"generation_error: {exc}"
+            try:
+                thought.final_success = False
+                thought.total_attempts = len(
+                    [
+                        s
+                        for s in thought.steps
+                        if s.action in ("initial_verify", "re_verify")
+                    ]
+                )
+            except Exception:
+                pass
             results.append(spec_result)
             continue
 
         if not code:
             logger.warning("No code generated for %s", target_file)
             spec_result["reason"] = "empty_code"
+            try:
+                thought.final_success = False
+                thought.total_attempts = len(
+                    [
+                        s
+                        for s in thought.steps
+                        if s.action in ("initial_verify", "re_verify")
+                    ]
+                )
+            except Exception:
+                pass
             results.append(spec_result)
             continue
 
         if not verified:
             logger.warning("Generated code for %s did not pass verification", target_file)
             spec_result["reason"] = "verification_failed"
+            try:
+                thought.final_success = False
+                thought.total_attempts = len(
+                    [
+                        s
+                        for s in thought.steps
+                        if s.action in ("initial_verify", "re_verify")
+                    ]
+                )
+            except Exception:
+                pass
             results.append(spec_result)
             continue
 
@@ -697,6 +791,7 @@ def proliferate(
                         model=config.model,
                         broken_info=broken,
                         mumei_client=mumei_client,
+                        thought_process=thought,
                     )
                     if not healed:
                         logger.error(
@@ -722,6 +817,17 @@ def proliferate(
                 if new_file_path.exists():
                     new_file_path.unlink()
                 spec_result["reason"] = "blast_radius_heal_failed"
+                try:
+                    thought.final_success = False
+                    thought.total_attempts = len(
+                        [
+                            s
+                            for s in thought.steps
+                            if s.action in ("initial_verify", "re_verify")
+                        ]
+                    )
+                except Exception:
+                    pass
                 results.append(spec_result)
                 continue
 
@@ -750,6 +856,17 @@ def proliferate(
             logger.info("Dry run — skipping publish for %s", target_file)
             spec_result["success"] = True
             spec_result["dry_run"] = True
+            try:
+                thought.final_success = True
+                thought.total_attempts = len(
+                    [
+                        s
+                        for s in thought.steps
+                        if s.action in ("initial_verify", "re_verify")
+                    ]
+                )
+            except Exception:
+                pass
             results.append(spec_result)
             continue
 
@@ -785,6 +902,17 @@ def proliferate(
                 spec_result.get("health_delta", float("nan")),
             )
             spec_result.setdefault("reason", "health_regression")
+            try:
+                thought.final_success = False
+                thought.total_attempts = len(
+                    [
+                        s
+                        for s in thought.steps
+                        if s.action in ("initial_verify", "re_verify")
+                    ]
+                )
+            except Exception:
+                pass
             results.append(spec_result)
             continue
 
@@ -827,11 +955,33 @@ def proliferate(
             )
             spec_result["publish_result"] = pub_result
             spec_result["success"] = pub_result.get("success", False)
+            try:
+                thought.final_success = bool(spec_result["success"])
+                thought.total_attempts = len(
+                    [
+                        s
+                        for s in thought.steps
+                        if s.action in ("initial_verify", "re_verify")
+                    ]
+                )
+            except Exception:
+                pass
             if pub_result.get("pr_url"):
                 spec_result["pr_url"] = pub_result["pr_url"]
         except Exception as exc:
             logger.error("Publish failed for %s: %s", target_file, exc)
             spec_result["reason"] = f"publish_error: {exc}"
+            try:
+                thought.final_success = False
+                thought.total_attempts = len(
+                    [
+                        s
+                        for s in thought.steps
+                        if s.action in ("initial_verify", "re_verify")
+                    ]
+                )
+            except Exception:
+                pass
         finally:
             if tmp_spec_path is not None:
                 try:
@@ -1021,6 +1171,14 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
                     else None
                 ),
             }
+        elif key == "thought_process":
+            if hasattr(value, "to_dict"):
+                try:
+                    out["thought_process"] = value.to_dict()
+                except Exception:
+                    out["thought_process"] = value
+            else:
+                out["thought_process"] = value
         elif key == "publish_result":
             # ``publish()`` now returns the full ``proof_certificate``
             # (parsed ``mumei verify --json`` report) so the Lean
