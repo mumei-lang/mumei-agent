@@ -86,15 +86,16 @@
     },
     {
       "name": "full_kyc_check",
-      "description": "Composite KYC check combining customer classification (match exhaustiveness) with transaction history verification (forall quantifier). The most complex atom exercising both Phase 3 features simultaneously. The transaction-history bound is derived from the customer's risk-based limit via composition (classify_risk → get_transaction_limit), so no separate `limit` parameter is required.",
+      "description": "Composite KYC check combining customer classification (match exhaustiveness) with transaction history verification (forall quantifier). The most complex atom exercising both Phase 3 features simultaneously.",
       "inputs": [
         {"name": "customer_type", "type": "i64"},
         {"name": "amount", "type": "i64"},
         {"name": "n_history", "type": "i64"},
-        {"name": "arr", "type": "i64"}
+        {"name": "arr", "type": "i64"},
+        {"name": "limit", "type": "i64"}
       ],
       "return_type": "i64",
-      "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= get_transaction_limit(classify_risk(customer_type)))",
+      "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && limit > 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= limit)",
       "ensures": "result >= 0 && result <= 1",
       "effects": [],
       "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)"],
@@ -115,9 +116,5 @@
     }
   ],
   "source": "phase3-demo-regtech",
-  "difficulty": "medium",
-  "notes": [
-    "full_kyc_check derives its forall upper bound from get_transaction_limit(classify_risk(customer_type)) inside `requires`. This relies on the mumei/Z3 verifier being able to evaluate nested atom calls inside a forall bound. If verification fails to parse or discharge this nested call, fall back to taking an explicit `history_limit: i64` input and asserting `history_limit == get_transaction_limit(classify_risk(customer_type))` separately, or split full_kyc_check into a pre-classification helper plus a forall-only verifier.",
-    "_detect_dependencies (agent/strategies/generate_strategy.py:213-237) uses word-boundary matching on requires/ensures/description, so referencing classify_risk and get_transaction_limit inside requires automatically registers them as dependencies for full_kyc_check — this is intended and stronger than relying on `composition` alone."
-  ]
+  "difficulty": "medium"
 }
