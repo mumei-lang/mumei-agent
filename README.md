@@ -253,24 +253,28 @@ Exported tools:
 | `list_forge_log(log_path)` | Read `forge_log.json` |
 | `get_agent_status()` | Report LLM provider, mumei binary, available subcommands |
 
-Example `.mcp.json` snippet:
+Example `.mcp.json` snippet for Claude Code project MCP config:
 
 ```json
 {
   "mcpServers": {
     "mumei-forge": {
-      "command": "python",
-      "args": ["mcp_server.py"],
-      "cwd": "/path/to/mumei"
+      "command": "sh",
+      "args": ["-lc", "cd ../mumei && exec python mcp_server.py"]
     },
     "mumei-agent": {
-      "command": "python",
-      "args": ["-m", "agent", "mcp-server"],
-      "cwd": "/path/to/mumei-agent"
+      "command": "sh",
+      "args": ["-lc", "cd . && exec python -m agent mcp-server"]
     }
   }
 }
 ```
+
+The committed `.mcp.json` assumes the mumei compiler repository is checked out
+as a sibling directory (`../mumei`).  Adjust that path if your workspace layout
+differs.  The config intentionally uses `sh -lc "cd ... && exec ..."` instead
+of a `cwd` field because Claude Code project MCP configs are most portable when
+the working directory is set by the command itself.
 
 ### MCP-backed verification (opt-in)
 

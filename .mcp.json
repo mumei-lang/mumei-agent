@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mumei-forge": {
+      "command": "sh",
+      "args": ["-lc", "cd ../mumei && exec python mcp_server.py"]
+    },
+    "mumei-agent": {
+      "command": "sh",
+      "args": ["-lc", "cd . && exec python -m agent mcp-server"]
+    }
+  }
+}

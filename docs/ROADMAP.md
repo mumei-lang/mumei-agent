@@ -457,17 +457,22 @@ feedback（`semantic_feedback` / `machine_readable` / `counter_example` /
 - ✅`tests/test_gap_rules.py` — `analyze_gaps_local` の純関数挙動 /
   `PREFER_MCP_GAPS` ON-OFF / fake `mcp_server` モジュールでのデリゲーション
 
-### Cross-repo: mumei-side MCP tools (P10-D)
+### Cross-repo: mumei-side MCP tools (P10-D) ✅ Implemented
 
-mumei-lang/mumei 側 `mcp_server.py` に以下を追加して external agents が
+mumei-lang/mumei 側 `mcp_server.py` に以下が実装済み。external agents が
 mumei-agent のインストールなしに proof health / proof certificate /
-documentation を取得できるようにする:
+documentation を取得できる:
 
-- `measure_std_health()` — std/ 全体に対する health metric を JSON で返却
-- `get_proof_certificate(module_path)` — `std/certs/` または proof bundle から
+- ✅ `measure_std_health()` — std/ 全体に対する health metric を JSON で返却
+  （`mumei/mcp_server.py` L1333-L1447）
+- ✅ `get_proof_certificate(module_path)` — `std/certs/` または proof bundle から
   proof certificate JSON を返却
-- `generate_doc(source_code, format="json")` — `mumei doc --format json` を起動し
-  構造化ドキュメントを返却
+  （`mumei/mcp_server.py` L1450-L1526）
+- ✅ `generate_doc(source_code, format="json")` — `mumei doc --format json` を起動し
+  構造化ドキュメントを返却（`mumei/mcp_server.py` L1530-L1643）
+- ✅ Claude Code CLI 統合 — project scope の `.mcp.json` と `.claude/CLAUDE.md`
+  を mumei / mumei-agent の両リポジトリに配置し、Claude Code から
+  `mumei-forge` / `mumei-agent` MCP server を自動検出できるようにした。
 
 ---
 
