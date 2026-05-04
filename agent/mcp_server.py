@@ -464,6 +464,7 @@ def get_agent_status() -> str:
             "propose",
             "proliferate",
             "health",
+            "extract-spec",
             "mcp-server",
         }
     )
@@ -483,6 +484,7 @@ def get_agent_status() -> str:
                 "propose_forge_tasks",
                 "list_forge_log",
                 "get_agent_status",
+                "extract_spec",
             ],
             "feature_flags": {
                 "PREFER_MCP_GAPS": os.environ.get("PREFER_MCP_GAPS", ""),
@@ -492,6 +494,84 @@ def get_agent_status() -> str:
             "python": sys.version,
         }
     )
+
+
+@mcp.tool()
+def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = False, mumei_repo: str = "") -> str:
+    """Extract a Mumei forge task spec from natural language requirements.
+
+    This is the "Step 0" that converts human-readable requirements into
+    structured forge task specs compatible with forge_task() and the
+    existing generate pipeline.
+
+    Args:
+        natural_language: The requirement text in any language.
+        domain_hint: Optional domain (e.g., "financial", "security").
+        generate: When true, also generate and verify the code via the
+            configured ``mumei`` binary (``AgentConfig.mumei_bin``).
+        mumei_repo: Path to mumei repo (used when generate=true to prefer
+            a repo-local target/debug or target/release mumei binary).
+
+    Returns:
+        JSON string with ``spec`` (the extracted forge task spec),
+        and optionally ``code``, ``verified`` when generate=true.
+    """
+    if not natural_language.strip():
+        return _err("natural_language must be non-empty")
+
+    try:
+        from agent.config import AgentConfig
+        from agent.mumei_client import create_mumei_client
+        from agent.spec_extractor import (
+            extract_and_generate as extract_and_generate_impl,
+            extract_spec as extract_spec_impl,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    try:
+        config = AgentConfig()
+        client = config.create_client()
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY (or OPENAI_API_KEY)",
+        )
+
+    mumei_bin = config.mumei_bin
+    if generate and mumei_repo:
+        repo = _resolve_repo(mumei_repo)
+        if not repo.exists():
+            return _err(f"mumei_repo does not exist: {repo}")
+        release_bin = repo / "target" / "release" / "mumei"
+        debug_bin = repo / "target" / "debug" / "mumei"
+        if release_bin.exists():
+            mumei_bin = str(release_bin)
+        elif debug_bin.exists():
+            mumei_bin = str(debug_bin)
+
+    mumei = create_mumei_client(mumei_bin)
+    try:
+        if generate:
+            code, verified, spec = extract_and_generate_impl(
+                client,
+                config.model,
+                natural_language,
+                domain_hint=domain_hint,
+                mumei_client=mumei,
+                max_generation_retries=config.max_retries,
+            )
+            return _ok({"spec": spec, "code": code, "verified": verified})
+        spec = extract_spec_impl(
+            client,
+            config.model,
+            natural_language,
+            domain_hint=domain_hint,
+            mumei_client=mumei,
+        )
+        return _ok({"spec": spec})
+    except Exception as exc:
+        return _err(f"extract_spec failed: {exc}")
 
 
 # ---------------------------------------------------------------------------

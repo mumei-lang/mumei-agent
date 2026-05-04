@@ -476,6 +476,41 @@ documentation を取得できる:
 
 ---
 
+
+## P11: Natural Language Specification Extraction
+
+自然言語の要件テキストを forge task spec JSON に変換する Step 0 を追加し、
+既存の `generate_code()` / `spec_refinement` / `forge_task` / self-healing loop は変更せずに
+「自然言語 → forge task spec JSON → verified .mm」の導線を提供する。
+
+- Entry Point A（新規）: 自然言語テキスト → `agent.spec_extractor.extract_spec()` → forge task spec JSON → 既存パイプライン
+- Entry Point B（既存）: forge task spec JSON → 既存パイプライン
+
+### CLI
+
+```bash
+python -m agent extract-spec --text "安全な銀行送金機能。残高不足はエラーにする" --output spec.json
+python -m agent extract-spec --text-file requirements.md --domain financial --output spec.json --generate --generate-output transfer.mm
+```
+
+### MCP
+
+- `extract_spec(natural_language, domain_hint="", generate=false, mumei_repo="")` —
+  human-readable requirements を structured forge task spec に抽出し、`generate=true` の場合は
+  抽出した spec をそのまま `generate_code()` + `run_refinement_loop()` に接続する。
+
+### 接続設計
+
+- `agent/prompts/spec_extraction.py` — forge task schema、入出力例、`domain_hint`、
+  existing std catalog context を含む仕様抽出プロンプト。
+- `agent/spec_extractor.py` — LLM 出力 JSON の抽出、forge task schema validation、
+  invalid JSON / schema error feedback retry、`extract_and_generate()` の薄い統合。
+- `agent/extract_spec.py` — `python -m agent extract-spec` サブコマンド。
+- 既存の `generate_code()`、`spec_refinement.run_refinement_loop()`、`forge_task` MCP tool、
+  self-healing loop はそのまま再利用し、Step 0 の追加に限定する。
+
+---
+
 ## Task 2-C: mumei-lean integration pipeline (opt-in)
 
 mumei-agent の forge / verify サクル、`z3_check_result == "unknown"` の atom が残た合に[mumei-lang/mumei-lean](https://github.com/mumei-lang/mumei-lean)Lean 4 ロフバクド連携、人手の介在なし lean_verified 状態を昇格さるプライ。
