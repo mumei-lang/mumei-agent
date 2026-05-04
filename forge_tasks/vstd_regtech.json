@@ -115,5 +115,9 @@
     }
   ],
   "source": "phase3-demo-regtech",
-  "difficulty": "medium"
+  "difficulty": "medium",
+  "notes": [
+    "full_kyc_check derives its forall upper bound from get_transaction_limit(classify_risk(customer_type)) inside `requires`. This relies on the mumei/Z3 verifier being able to evaluate nested atom calls inside a forall bound. If verification fails to parse or discharge this nested call, fall back to taking an explicit `history_limit: i64` input and asserting `history_limit == get_transaction_limit(classify_risk(customer_type))` separately, or split full_kyc_check into a pre-classification helper plus a forall-only verifier.",
+    "_detect_dependencies (agent/strategies/generate_strategy.py:213-237) uses word-boundary matching on requires/ensures/description, so referencing classify_risk and get_transaction_limit inside requires automatically registers them as dependencies for full_kyc_check — this is intended and stronger than relying on `composition` alone."
+  ]
 }
