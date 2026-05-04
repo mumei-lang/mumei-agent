@@ -1,0 +1,117 @@
+{
+  "task_id": "vstd-regtech",
+  "target_file": "std/compliance.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 8,
+  "auto_commit": false,
+  "description": "Phase 3 Demo: RegTech Compliance Protocol. Generate a new standard-library module defining KYC/AML compliance checking with enum-based customer classification and forall-quantified transaction limit verification. The generated file MUST define `enum CustomerType { Individual, Corporate, Government, PEP }` and `enum RiskLevel { Low, Medium, High, Critical }` with refinement types `type RiskScore = i64 where v >= 0 && v <= 100;` and `type TransactionAmount = i64 where v >= 0;`. Each classification atom MUST use `match` with exhaustive coverage of all enum variants — Z3 will reject non-exhaustive matches with counter-examples. Quantifier atoms MUST use `forall(i, 0, n, ...)` in `requires:` for universal compliance properties. Guard-based match arms (`a if a <= threshold => ...`) are used for amount-based approval levels. No temporal effects or resource hierarchy — this demo focuses on match exhaustiveness + forall quantifiers only.",
+  "context_files": [
+    "tests/test_compliance.mm",
+    "tests/test_enum_payload.mm",
+    "examples/match_atm.mm",
+    "std/option.mm"
+  ],
+  "depends_on": [],
+  "atoms": [
+    {
+      "name": "classify_risk",
+      "description": "Map customer type to risk level using exhaustive match. Individual(0)->Low(0), Corporate(1)->Medium(1), Government(2)->Low(0), PEP(3)->Critical(3). Z3 verifies all 4 customer types are covered.",
+      "inputs": [
+        {"name": "customer_type", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "customer_type >= 0 && customer_type <= 3",
+      "ensures": "result >= 0 && result <= 3",
+      "effects": [],
+      "body_pattern": "match customer_type { 0 => 0, 1 => 1, 2 => 0, 3 => 3, _ => 2 }",
+      "reference_patterns": ["atm_transition", "test_color_match"]
+    },
+    {
+      "name": "get_transaction_limit",
+      "description": "Determine transaction limit based on risk level using exhaustive match. Low->1000000, Medium->500000, High->100000, Critical->10000. All limits are strictly positive.",
+      "inputs": [
+        {"name": "risk_level", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "risk_level >= 0 && risk_level <= 3",
+      "ensures": "result > 0",
+      "effects": [],
+      "body_pattern": "match risk_level { 0 => 1000000, 1 => 500000, 2 => 100000, 3 => 10000, _ => 10000 }",
+      "reference_patterns": ["atm_transition"]
+    },
+    {
+      "name": "check_transaction",
+      "description": "Check if a single transaction complies with the customer's risk-based limit. Composes classify_risk and get_transaction_limit, then compares amount against the limit. Returns 1 (compliant) or 0 (non-compliant).",
+      "inputs": [
+        {"name": "customer_type", "type": "i64"},
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0",
+      "ensures": "result >= 0 && result <= 1",
+      "effects": [],
+      "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)"],
+      "reference_patterns": ["atm_transition", "atm_withdraw"]
+    },
+    {
+      "name": "verify_all_transactions_compliant",
+      "description": "Universal quantifier: all transactions in the array are within the specified limit. Uses forall(i, 0, n, arr[i] >= 0 && arr[i] <= limit) in requires.",
+      "inputs": [
+        {"name": "n", "type": "i64"},
+        {"name": "limit", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "n >= 0 && limit > 0 && forall(i, 0, n, arr[i] >= 0 && arr[i] <= limit)",
+      "ensures": "result == 1",
+      "effects": [],
+      "body_pattern": "1",
+      "reference_patterns": ["verify_insertion_sort_skeleton"]
+    },
+    {
+      "name": "verify_all_risk_scores_within_threshold",
+      "description": "Universal quantifier: all customer risk scores are within the threshold. Uses forall with RiskScore refinement type (0-100).",
+      "inputs": [
+        {"name": "n", "type": "i64"},
+        {"name": "threshold", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "n >= 0 && threshold >= 0 && threshold <= 100 && forall(i, 0, n, arr[i] >= 0 && arr[i] <= threshold)",
+      "ensures": "result == 1",
+      "effects": [],
+      "body_pattern": "1",
+      "reference_patterns": ["verify_insertion_sort_skeleton"]
+    },
+    {
+      "name": "full_kyc_check",
+      "description": "Composite KYC check combining customer classification (match exhaustiveness) with transaction history verification (forall quantifier). The most complex atom exercising both Phase 3 features simultaneously.",
+      "inputs": [
+        {"name": "customer_type", "type": "i64"},
+        {"name": "amount", "type": "i64"},
+        {"name": "n_history", "type": "i64"},
+        {"name": "limit", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && limit > 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= limit)",
+      "ensures": "result >= 0 && result <= 1",
+      "effects": [],
+      "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)"],
+      "reference_patterns": ["atm_transition"]
+    },
+    {
+      "name": "approval_level",
+      "description": "Determine approval level based on transaction amount using match with guard conditions. <=10000->Auto(0), <=100000->Manager(1), <=1000000->Director(2), >1000000->Board(3).",
+      "inputs": [
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "amount >= 0",
+      "ensures": "result >= 0 && result <= 3",
+      "effects": [],
+      "body_pattern": "match amount { a if a <= 10000 => 0, a if a <= 100000 => 1, a if a <= 1000000 => 2, _ => 3 }",
+      "reference_patterns": ["atm_transition"]
+    }
+  ],
+  "source": "phase3-demo-regtech",
+  "difficulty": "medium"
+}
