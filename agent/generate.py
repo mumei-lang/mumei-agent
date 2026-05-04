@@ -6,6 +6,7 @@ verified Mumei code using LLM + mumei check/verify pipeline.
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from agent.config import AgentConfig
 from agent.mumei_client import create_mumei_client
@@ -48,6 +49,52 @@ def _validate_spec(spec: dict) -> None:
             sys.exit(1)
 
 
+def _module_name_from_target(target_file: str) -> str:
+    """Return the Mumei module path implied by a forge target file."""
+    target = target_file.removesuffix(".mm")
+    return target.replace("\\", "/")
+
+
+def _normalize_forge_task_spec(spec: dict) -> dict:
+    """Convert forge task specs into generate-compatible specs.
+
+    ``agent generate`` accepts generic single/multi-atom specs, but P11's
+    extraction step emits forge task specs.  A single-atom forge task should
+    use the stronger single-atom generation path instead of the multi-atom
+    module prompt.
+    """
+    atoms = spec.get("atoms")
+    if not isinstance(atoms, list):
+        return spec
+
+    is_forge_task = any(key in spec for key in ("task_id", "target_file", "mode"))
+    if not is_forge_task:
+        return spec
+
+    normalized_atoms = []
+    for atom in atoms:
+        item = dict(atom)
+        if "inputs" in item and "params" not in item:
+            item["params"] = item["inputs"]
+        normalized_atoms.append(item)
+
+    target_file = spec.get("target_file")
+    if len(normalized_atoms) == 1:
+        result = dict(normalized_atoms[0])
+        if target_file:
+            result["target_file"] = target_file
+            result.setdefault("module_name", _module_name_from_target(str(target_file)))
+        return result
+
+    result = dict(spec)
+    result["atoms"] = normalized_atoms
+    if target_file and not result.get("module_name"):
+        result["module_name"] = _module_name_from_target(str(target_file))
+    else:
+        result.setdefault("module_name", spec.get("task_id", Path(str(target_file or "module")).stem))
+    return result
+
+
 def _load_spec(args: argparse.Namespace) -> dict:
     """Load specification from --spec (inline JSON) or --spec-file (path)."""
     if args.spec is not None:
@@ -68,7 +115,7 @@ def _load_spec(args: argparse.Namespace) -> dict:
         sys.exit(1)
 
     _validate_spec(spec)
-    return spec
+    return _normalize_forge_task_spec(spec)
 
 
 def build_parser(

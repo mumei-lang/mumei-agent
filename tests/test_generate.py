@@ -40,6 +40,41 @@ def test_load_spec_from_file(tmp_path):
     assert len(result["params"]) == 1
 
 
+def test_load_single_atom_forge_task_spec_uses_single_atom_path(tmp_path):
+    """Forge task specs with one atom normalize to generate's single-atom shape."""
+    spec = {
+        "task_id": "nl-safe-transfer",
+        "target_file": "std/finance/safe_transfer.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "safe_transfer",
+                "inputs": [
+                    {"name": "from_balance", "type": "i64"},
+                    {"name": "amount", "type": "i64"},
+                ],
+                "return_type": "i64",
+                "requires": "from_balance >= amount && amount > 0",
+                "ensures": "result == from_balance - amount",
+                "effects": [],
+            },
+        ],
+    }
+    spec_file = tmp_path / "spec.json"
+    spec_file.write_text(json.dumps(spec))
+
+    ns = MagicMock()
+    ns.spec = None
+    ns.spec_file = str(spec_file)
+    result = _load_spec(ns)
+
+    assert result["name"] == "safe_transfer"
+    assert "atoms" not in result
+    assert result["params"] == spec["atoms"][0]["inputs"]
+    assert result["target_file"] == "std/finance/safe_transfer.mm"
+    assert result["module_name"] == "std/finance/safe_transfer"
+
+
 # --- Prompt generation tests ---
 
 
@@ -366,6 +401,17 @@ def test_build_skeleton_with_effects():
     assert "atom read_file(path: Str)" in result
     assert "effects: [FileRead, Log]" in result
     assert "requires: ___;" in result
+
+
+def test_build_skeleton_includes_return_type_when_present():
+    """Test skeleton generation includes explicit return type."""
+    spec = {
+        "name": "safe_transfer",
+        "params": [{"name": "from_balance", "type": "i64"}],
+        "return_type": "i64",
+    }
+    result = _build_skeleton(spec)
+    assert "atom safe_transfer(from_balance: i64) -> i64" in result
 
 
 def test_build_skeleton_no_params():
