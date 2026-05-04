@@ -90,8 +90,13 @@ def _normalize_forge_task_spec(spec: dict) -> dict:
     result["atoms"] = normalized_atoms
     if target_file and not result.get("module_name"):
         result["module_name"] = _module_name_from_target(str(target_file))
-    else:
-        result.setdefault("module_name", spec.get("task_id", Path(str(target_file or "module")).stem))
+    elif not result.get("module_name"):
+        # Use ``or`` rather than ``dict.get(key, default)`` so that an
+        # explicit ``None`` value for ``task_id`` falls through to the
+        # path-based fallback instead of producing ``module_name=None``.
+        result["module_name"] = (
+            spec.get("task_id") or Path(str(target_file or "module")).stem
+        )
     return result
 
 
@@ -197,7 +202,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     metrics = Metrics()
 
     if spec.get("atoms"):
-        module_name = spec.get("module_name", "module")
+        module_name = spec.get("module_name") or "module"
         atom_names = [a["name"] for a in spec["atoms"]]
         print(
             f"Mumei Generate Mode: generating module '{module_name}' "

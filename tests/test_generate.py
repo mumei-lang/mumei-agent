@@ -2,7 +2,7 @@
 import json
 from unittest.mock import MagicMock
 
-from agent.generate import _load_spec
+from agent.generate import _load_spec, _normalize_forge_task_spec
 from agent.metrics import Metrics
 from agent.prompts import generate_atom, generate_stdlib
 from agent.strategies.generate_strategy import (
@@ -73,6 +73,26 @@ def test_load_single_atom_forge_task_spec_uses_single_atom_path(tmp_path):
     assert result["params"] == spec["atoms"][0]["inputs"]
     assert result["target_file"] == "std/finance/safe_transfer.mm"
     assert result["module_name"] == "std/finance/safe_transfer"
+
+
+def test_normalize_forge_task_spec_multi_atom_with_null_task_id():
+    """Multi-atom forge spec with task_id=None falls back to path-based name.
+
+    ``dict.get("task_id", default)`` would return ``None`` when the key is
+    explicitly set to ``None``; the normalizer must fall through to the
+    target_file/path-based fallback instead of producing ``module_name=None``.
+    """
+    spec = {
+        "task_id": None,
+        "mode": "create",
+        "atoms": [
+            {"name": "a", "inputs": [], "return_type": "i64"},
+            {"name": "b", "inputs": [], "return_type": "i64"},
+        ],
+    }
+    result = _normalize_forge_task_spec(spec)
+    assert result["module_name"] == "module"
+    assert result["module_name"] is not None
 
 
 # --- Prompt generation tests ---
