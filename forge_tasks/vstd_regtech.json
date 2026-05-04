@@ -86,16 +86,15 @@
     },
     {
       "name": "full_kyc_check",
-      "description": "Composite KYC check combining customer classification (match exhaustiveness) with transaction history verification (forall quantifier). The most complex atom exercising both Phase 3 features simultaneously.",
+      "description": "Composite KYC check combining customer classification (match exhaustiveness) with transaction history verification (forall quantifier). The most complex atom exercising both Phase 3 features simultaneously. The transaction-history bound is derived from the customer's risk-based limit via composition (classify_risk → get_transaction_limit), so no separate `limit` parameter is required.",
       "inputs": [
         {"name": "customer_type", "type": "i64"},
         {"name": "amount", "type": "i64"},
         {"name": "n_history", "type": "i64"},
-        {"name": "arr", "type": "i64"},
-        {"name": "limit", "type": "i64"}
+        {"name": "arr", "type": "i64"}
       ],
       "return_type": "i64",
-      "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && limit > 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= limit)",
+      "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= get_transaction_limit(classify_risk(customer_type)))",
       "ensures": "result >= 0 && result <= 1",
       "effects": [],
       "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)"],
