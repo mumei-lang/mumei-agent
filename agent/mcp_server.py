@@ -497,7 +497,7 @@ def get_agent_status() -> str:
 
 
 @mcp.tool()
-def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = False, mumei_repo: str = "") -> str:
+def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = False) -> str:
     """Extract a Mumei forge task spec from natural language requirements.
 
     This is the "Step 0" that converts human-readable requirements into
@@ -507,8 +507,8 @@ def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = 
     Args:
         natural_language: The requirement text in any language.
         domain_hint: Optional domain (e.g., "financial", "security").
-        generate: When true, also generate and verify the code.
-        mumei_repo: Path to mumei repo (used when generate=true).
+        generate: When true, also generate and verify the code via the
+            configured ``mumei`` binary (``AgentConfig.mumei_bin``).
 
     Returns:
         JSON string with ``spec`` (the extracted forge task spec),
@@ -516,10 +516,6 @@ def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = 
     """
     if not natural_language.strip():
         return _err("natural_language must be non-empty")
-    if generate and mumei_repo:
-        repo = _resolve_repo(mumei_repo)
-        if not repo.exists():
-            return _err(f"mumei_repo does not exist: {repo}")
 
     try:
         from agent.config import AgentConfig
