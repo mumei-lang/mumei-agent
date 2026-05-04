@@ -51,7 +51,8 @@
       "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0",
       "ensures": "result >= 0 && result <= 1",
       "effects": [],
-      "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)"],
+      "body_pattern": "let risk = classify_risk(customer_type); let limit = get_transaction_limit(risk); if amount <= limit { 1 } else { 0 }",
+      "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)", "if amount <= limit { 1 } else { 0 }"],
       "reference_patterns": ["atm_transition", "atm_withdraw"]
     },
     {
@@ -86,7 +87,7 @@
     },
     {
       "name": "full_kyc_check",
-      "description": "Composite KYC check combining customer classification (match exhaustiveness) with transaction history verification (forall quantifier). The most complex atom exercising both Phase 3 features simultaneously.",
+      "description": "Composite KYC check combining customer classification (match exhaustiveness) with transaction history verification via verify_all_transactions_compliant (forall quantifier). The most complex atom exercising both Phase 3 features simultaneously.",
       "inputs": [
         {"name": "customer_type", "type": "i64"},
         {"name": "amount", "type": "i64"},
@@ -98,7 +99,8 @@
       "requires": "customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && limit > 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= limit)",
       "ensures": "result >= 0 && result <= 1",
       "effects": [],
-      "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)"],
+      "body_pattern": "let risk = classify_risk(customer_type); let transaction_limit = get_transaction_limit(risk); let history_ok = verify_all_transactions_compliant(arr, n_history, limit); if amount <= transaction_limit && history_ok == 1 { 1 } else { 0 }",
+      "composition": ["classify_risk(customer_type)", "get_transaction_limit(risk)", "verify_all_transactions_compliant(arr, n_history, limit)", "if amount <= transaction_limit && history_ok == 1 { 1 } else { 0 }"],
       "reference_patterns": ["atm_transition"]
     },
     {
