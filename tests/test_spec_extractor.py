@@ -118,9 +118,19 @@ def test_extract_and_generate_integration() -> None:
 
     assert code == "atom safe_transfer() body: 0;"
     assert verified is True
-    assert final_spec == VALID_SPEC
+    # Single-atom forge task specs are normalized into the flat single-atom
+    # generation shape before being passed to the refinement loop.
+    assert "atoms" not in final_spec
+    assert final_spec["name"] == "safe_transfer"
+    assert final_spec["target_file"] == "std/finance/safe_transfer.mm"
+    assert final_spec["module_name"] == "std/finance/safe_transfer"
     mock_generate.assert_called_once()
     assert mock_generate.call_args.kwargs["config_max_retries"] == 2
+    # The spec passed to generate_code must also be the normalized form so
+    # the CLI and extract_and_generate pipelines stay in sync.
+    forwarded_spec = mock_generate.call_args.args[2]
+    assert "atoms" not in forwarded_spec
+    assert forwarded_spec["name"] == "safe_transfer"
 
 
 def test_extract_spec_with_domain_hint() -> None:
