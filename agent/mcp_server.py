@@ -497,7 +497,7 @@ def get_agent_status() -> str:
 
 
 @mcp.tool()
-def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = False) -> str:
+def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = False, mumei_repo: str = "") -> str:
     """Extract a Mumei forge task spec from natural language requirements.
 
     This is the "Step 0" that converts human-readable requirements into
@@ -509,6 +509,8 @@ def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = 
         domain_hint: Optional domain (e.g., "financial", "security").
         generate: When true, also generate and verify the code via the
             configured ``mumei`` binary (``AgentConfig.mumei_bin``).
+        mumei_repo: Path to mumei repo (used when generate=true to prefer
+            a repo-local target/debug or target/release mumei binary).
 
     Returns:
         JSON string with ``spec`` (the extracted forge task spec),
@@ -536,7 +538,19 @@ def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = 
             hint="set LLM_API_KEY (or OPENAI_API_KEY)",
         )
 
-    mumei = create_mumei_client(config.mumei_bin)
+    mumei_bin = config.mumei_bin
+    if generate and mumei_repo:
+        repo = _resolve_repo(mumei_repo)
+        if not repo.exists():
+            return _err(f"mumei_repo does not exist: {repo}")
+        release_bin = repo / "target" / "release" / "mumei"
+        debug_bin = repo / "target" / "debug" / "mumei"
+        if release_bin.exists():
+            mumei_bin = str(release_bin)
+        elif debug_bin.exists():
+            mumei_bin = str(debug_bin)
+
+    mumei = create_mumei_client(mumei_bin)
     try:
         if generate:
             code, verified, spec = extract_and_generate_impl(

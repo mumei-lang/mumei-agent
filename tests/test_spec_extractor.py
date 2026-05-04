@@ -162,3 +162,30 @@ def test_extract_spec_mcp_tool() -> None:
 
     assert payload["status"] == "ok"
     assert payload["spec"] == VALID_SPEC
+
+
+def test_extract_spec_mcp_tool_uses_mumei_repo_binary_for_generate(tmp_path) -> None:
+    fake_config = MagicMock()
+    fake_config.model = "m"
+    fake_config.mumei_bin = "mumei"
+    fake_config.max_retries = 5
+    fake_config.create_client.return_value = MagicMock()
+    repo = tmp_path / "mumei"
+    bin_dir = repo / "target" / "debug"
+    bin_dir.mkdir(parents=True)
+    mumei_bin = bin_dir / "mumei"
+    mumei_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with patch("agent.config.AgentConfig", return_value=fake_config), patch(
+        "agent.mumei_client.create_mumei_client", return_value=MagicMock()
+    ) as mock_create, patch(
+        "agent.spec_extractor.extract_and_generate",
+        return_value=("atom safe_transfer() body: 0;", True, VALID_SPEC),
+    ):
+        payload = json.loads(
+            mcp_server.extract_spec("安全な銀行送金機能", "financial", True, str(repo))
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["verified"] is True
+    mock_create.assert_called_once_with(str(mumei_bin))
