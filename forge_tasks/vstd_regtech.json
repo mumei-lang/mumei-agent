@@ -58,6 +58,7 @@
       "name": "verify_all_transactions_compliant",
       "description": "Universal quantifier: all transactions in the array are within the specified limit. Uses forall(i, 0, n, arr[i] >= 0 && arr[i] <= limit) in requires.",
       "inputs": [
+        {"name": "arr", "type": "i64"},
         {"name": "n", "type": "i64"},
         {"name": "limit", "type": "i64"}
       ],
@@ -72,6 +73,7 @@
       "name": "verify_all_risk_scores_within_threshold",
       "description": "Universal quantifier: all customer risk scores are within the threshold. Uses forall with RiskScore refinement type (0-100).",
       "inputs": [
+        {"name": "arr", "type": "i64"},
         {"name": "n", "type": "i64"},
         {"name": "threshold", "type": "i64"}
       ],
@@ -89,6 +91,7 @@
         {"name": "customer_type", "type": "i64"},
         {"name": "amount", "type": "i64"},
         {"name": "n_history", "type": "i64"},
+        {"name": "arr", "type": "i64"},
         {"name": "limit", "type": "i64"}
       ],
       "return_type": "i64",
