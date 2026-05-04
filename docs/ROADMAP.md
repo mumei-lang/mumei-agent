@@ -316,15 +316,15 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
 
 - ✅ `.github/workflows/proliferate.yml` — SI-5 Autonomous Proliferation workflow
   - `cron: '0 0 * * 1'`（毎週月曜 00:00 UTC = JST 09:00）+ `workflow_dispatch` による手動トリガー
-  - `workflow_dispatch` 入力: `max_proposals`（default: 3）、`dry_run`（default: true）
-  - `schedule` 起動時 / `dry_run=true` では `--dry-run` を必ず付与し、初期は PR を作らずにパイプラインだけを検証
+  - `workflow_dispatch` 入力: `max_proposals`（default: 3）、`dry_run`（default: false）
+  - `schedule` 起動時と `workflow_dispatch` のデフォルトは実 PR 作成モード。dry run が必要な場合だけ `dry_run=true` を明示する
   - mumei-agent / mumei / mumei-lean を checkout → mumei コンパイラを `cargo build --release` → `PATH` に追加
   - Lean toolchain を best-effort で導入し、`MUMEI_LEAN_REPO=${{ github.workspace }}/mumei-lean` + `--enable-lean-fallback` で Z3 `unknown` atom の Lean 4 証明を CI 常時試行（Lean/lake 不在時は bridge 側で graceful degrade）
   - `python -m agent health` で pre/post-flight のヘルス JSON を取得
   - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json --enable-lean-fallback`
   - 生成物: `pre_health.json` / `post_health.json` / `proliferate.log` / `summary.json` を `proliferate-logs` artifact として保存
-  - **ハイブリッド LLM プロファイル**（`workflow_dispatch` 入力 `llm_profile` / `llm_model` で切替。cron ではデフォルト `ollama-local` + `qwen3.5:0.8b` を使用し外部依存ゼロで動作）:
-    - `ollama-local`（default）: runner 内で `ollama serve` を起動 → `ollama pull ${llm_model}` → `LLM_BASE_URL=http://localhost:11434/v1` に接続。`~/.ollama/models` を `actions/cache@v4` で `llm_model` 毎にキャッシュ。既定モデルは軽量な `qwen3.5:0.8b`、品質優先なら `qwen3.5:4b` / `qwen2.5-coder:7b`、予備枠として 1bit 量子化系（例: `bonsai-1bit-qwen`）を `llm_model` 入力で指定可能
+  - **ハイブリッド LLM プロファイル**（`workflow_dispatch` 入力 `llm_profile` / `llm_model` で切替。cron ではデフォルト `ollama-local` + `qwen3.5:4b` を使用し外部依存ゼロで動作）:
+    - `ollama-local`（default）: runner 内で `ollama serve` を起動 → `ollama pull ${llm_model}` → `LLM_BASE_URL=http://localhost:11434/v1` に接続。`~/.ollama/models` を `actions/cache@v4` で `llm_model` 毎にキャッシュ。既定モデルは `qwen3.5:4b`、スモークテストなら軽量な `qwen3.5:0.8b`、品質優先なら `qwen2.5-coder:7b`、予備枠として 1bit 量子化系（例: `bonsai-1bit-qwen`）を `llm_model` 入力で指定可能
     - `remote`: 任意の OpenAI 互換エンドポイント（DashScope / vLLM / tailscale 経由の自宅 Ollama / OpenAI）を secrets 経由で利用。優先順: `LLM_API_KEY` → legacy `OPENAI_API_KEY`。`LLM_BASE_URL` / `LLM_MODEL` は optional、後者は未設定なら `llm_model` 入力で上書き
   - 必要なシークレット（操作者が手動で設定）:
     - `MUMEI_REPO_TOKEN`（必須） — mumei-lang/mumei への cross-repo write / PR 作成権限を持つ PAT or GitHub App token
@@ -343,16 +343,17 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
 
 ### 検証手順
 1. mumei-lang/mumei-agent の Settings → Secrets and variables → Actions で `MUMEI_REPO_TOKEN` を登録する（必須）。`remote` プロファイルを使いたい場合のみ `LLM_API_KEY`（+ 必要に応じて `LLM_BASE_URL` / `LLM_MODEL`）も登録する。`ollama-local` プロファイルでは追加 secret は不要。
-2. 初回は Actions タブから "SI-5 Autonomous Proliferation" を `workflow_dispatch` + `llm_profile=ollama-local` + `dry_run=true` で起動し、`proliferate-logs` artifact の `summary.json` / `proliferate.log` を確認する（runner 内で ollama 起動 → qwen3.5:0.8b を pull する 1 回目は数分かかる、2 回目以降はキャッシュが効く）。
-3. 問題がなければ `dry_run=false` に切り替えて実行し、生成される PR のタイトル・description・health delta を確認する。
-4. 最後に週次 cron（月曜 00:00 UTC = JST 09:00）の自動起動を待つ。cron は常に `ollama-local` + `dry_run=true` で起動するため、`dry_run=false` で恒常運用したい場合は `cron` 行を `on.workflow_dispatch` だけに縮退させるか、`Run proliferate` step の `DRY_RUN_FLAG` 分岐を調整する。
+2. dry run が必要な検証時のみ Actions タブから "SI-5 Autonomous Proliferation" を `workflow_dispatch` + `llm_profile=ollama-local` + `dry_run=true` で起動し、`proliferate-logs` artifact の `summary.json` / `proliferate.log` を確認する（runner 内で ollama 起動 → qwen3.5:4b を pull する 1 回目は数分かかる、2 回目以降はキャッシュが効く）。
+3. 通常運用では `dry_run` のデフォルト `false` を使い、生成される PR のタイトル・description・health delta を確認する。
+4. 最後に週次 cron（月曜 00:00 UTC = JST 09:00）の自動起動を待つ。cron は `ollama-local` + 実 PR 作成モードで起動し、health regression が出た場合は artifact 保存後にジョブを失敗させる。
 
 ### 恒常運用の推奨設定（PR 4）
 
 - **モデル選択**: cron でのデフォルトは `qwen3.5:4b`（`LLM_MODEL_INPUT` のデフォルト値）。`qwen3.5:0.8b` は CI のスモークテスト用と割り切り、品質優先のラン（PR を本当に開くラン）では `4b` 以上を選ぶ。`qwen2.5-coder:7b` は精度が最も高いが ollama-local では runner キャッシュ容量を圧迫する点に注意。
 - **max_proposals**: デフォルトの `3` を維持。1 ラン = 最大 3 PR を上限とすることで、レビューキューが詰まらないバランスをとる。スパイク的な大量提案が必要な場合のみ `workflow_dispatch` で個別に上書きする。
-- **健全度ゲート**: `Compare pre/post health` ステップが post-flight `health_score` < pre-flight - 0.001 のときに `::warning` アノテーションを出すようになった。ジョブ自体は失敗させないが、運用ダッシュボードでこの警告を週次で集計し、3 週連続で警告が出る場合は `qwen3.5:4b` から `qwen2.5-coder:7b` への昇格、または `forge_tasks/` の難易度シフトを検討する。
-- **summary.json の `health_delta`**: `agent.proliferate._write_output_json()` が pre/post の `health_score` 差分を `health_delta` として出力する。負値が出たランは PR を作っていても本質的には red とみなして再走させる運用が安全。
+- **dry_run デフォルト**: `workflow_dispatch` の `dry_run` default は `false`。schedule 実行で実 PR 作成が検証済みになったため、手動実行も production mode を既定にし、パイプライン検証時だけ明示的に `dry_run=true` を指定する。
+- **健全度ゲート**: `Compare pre/post health` ステップが post-flight `health_score` < pre-flight - 0.001 のときに `::warning` アノテーションを出し、`health_regression=true` を後続ステップへ渡す。`Upload proliferate artifacts` の後に `Fail on health regression` が実行されるため、PR が作成済みでも CI を赤にして degraded PR のマージを防ぐ。
+- **summary.json の `health_delta`**: `agent.proliferate._write_output_json()` が pre/post の `health_score` 差分を `health_delta` として出力する。`Compare pre/post health` はこの値も読み取り、負値なら `::warning` を出して health regression と同じ失敗ゲートへ接続する。
 
 ---
 
