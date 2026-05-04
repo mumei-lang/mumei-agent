@@ -14,6 +14,7 @@ from agent.prompts.spec_extraction import (
     SPEC_EXTRACTION_SYSTEM_PROMPT,
     build_extraction_prompt,
 )
+from agent.generate import _normalize_forge_task_spec
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.spec_refinement import run_refinement_loop
 
@@ -208,7 +209,7 @@ def extract_and_generate(
     return run_refinement_loop(
         client,
         model,
-        spec,
+        _normalize_forge_task_spec(spec),
         generate_code,
         max_refinements=max_refinements,
         config_max_retries=max_generation_retries,

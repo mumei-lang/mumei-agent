@@ -30,7 +30,10 @@ COMMON_MISTAKES = (
     "(e.g., Port, Percentage, clamp, safe_divide). "
     "Use `import \"std/contracts\" as contracts;` and call `contracts::clamp(val, min, max)`\n"
     "9. **Fixed-point arithmetic**: For financial calculations, use "
-    "std/math/fixed_point.mm instead of raw i64 division to prevent precision loss"
+    "std/math/fixed_point.mm instead of raw i64 division to prevent precision loss\n"
+    "10. **Mumei syntax only**: Use `if cond { a } else { b }`, not "
+    "`if cond then a else b`. Do not invent Option methods like "
+    "`.is_some()` / `.unwrap()`, and do not add atom-level `else { ... }` blocks."
 )
 
 

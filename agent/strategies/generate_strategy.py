@@ -201,8 +201,10 @@ def _build_skeleton(spec: dict) -> str:
     )
     effects = spec.get("effects", [])
     effects_str = f"    effects: [{', '.join(effects)}]\n" if effects else ""
+    return_type = spec.get("return_type")
+    signature_return = f" -> {return_type}" if return_type else ""
     return (
-        f"atom {name}({params})\n"
+        f"atom {name}({params}){signature_return}\n"
         f"{effects_str}"
         f"    requires: ___;\n"
         f"    ensures: ___;\n"
@@ -349,7 +351,7 @@ def generate_multi_atom(
     spec.pop("_agent_config", None)
 
     atoms = spec["atoms"]
-    module_name = spec.get("module_name", "module")
+    module_name = spec.get("module_name") or "module"
     atom_names = [a["name"] for a in atoms]
     deps = _detect_dependencies(atoms)
 

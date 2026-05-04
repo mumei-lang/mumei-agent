@@ -640,6 +640,9 @@ def test_generate_atom_prompt_contains_common_mistakes():
     result = generate_atom.build_prompt("{}", "", {})
     assert "Common mistakes" in result
     assert "Division by zero" in result
+    assert "Mumei syntax only" in result
+    assert "if cond { a } else { b }" in result
+    assert ".unwrap()" in result
     assert "Linearity" in result
 
 
