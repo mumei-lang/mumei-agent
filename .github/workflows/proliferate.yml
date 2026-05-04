@@ -42,8 +42,8 @@ name: SI-5 Autonomous Proliferation
 #                        workflow_dispatch `llm_model` input.
 #   - OPENAI_API_KEY   : Legacy alias for LLM_API_KEY; used only as fallback.
 #
-# The first operator run should use `workflow_dispatch` with
-# `dry_run=true` to exercise the pipeline without creating PRs.
+# Use `workflow_dispatch` with `dry_run=true` only when explicitly
+# exercising the pipeline without creating PRs.
 
 on:
   schedule:
@@ -57,7 +57,7 @@ on:
         type: string
       dry_run:
         description: 'Dry run (skip git/PR operations)'
-        default: 'true'
+        default: 'false'
         type: boolean
       llm_profile:
         description: 'LLM backend profile'
@@ -393,14 +393,32 @@ jobs:
         if: always()
         run: |
           # PR 4: emit a ::warning annotation when post-flight health
-          # regresses below pre-flight. The job still succeeds — the
-          # regression-diff verification gate in mumei is the hard
-          # blocker for PR creation; this step is an early-warning
-          # signal for the maintainer reading the workflow run.
+          # regresses below pre-flight. The health_regression output is
+          # consumed after artifact upload so forensic logs are preserved
+          # even when the run is marked failed.
           set -e
+          SUMMARY_REGRESSION="0"
+          if [ -s /tmp/proliferate/summary.json ]; then
+            SUMMARY_DELTA=$(python3 -c "import json; d=json.load(open('/tmp/proliferate/summary.json')); v=d.get('health_delta'); print('' if v is None else v)")
+            if [ -n "$SUMMARY_DELTA" ]; then
+              echo "[proliferate] summary_health_delta=${SUMMARY_DELTA}"
+              SUMMARY_REGRESSION=$(python3 -c "import sys; print('1' if float(sys.argv[1]) < -0.001 else '0')" "$SUMMARY_DELTA")
+              if [ "$SUMMARY_REGRESSION" = "1" ]; then
+                echo "::warning::Proliferate summary.json health_delta is negative: ${SUMMARY_DELTA}"
+              fi
+            else
+              echo "summary.json health_delta missing or null"
+            fi
+          else
+            echo "summary.json missing or empty; skipping summary health_delta check"
+          fi
           if [ ! -s /tmp/proliferate/pre_health.json ] || [ ! -s /tmp/proliferate/post_health.json ]; then
             echo "skipping health-delta comparison: pre or post snapshot missing"
-            echo "health_regression=false" >> "$GITHUB_OUTPUT"
+            if [ "$SUMMARY_REGRESSION" = "1" ]; then
+              echo "health_regression=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "health_regression=false" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
           # SECURITY: pass JSON-derived values via sys.argv rather than
@@ -415,9 +433,15 @@ jobs:
           POST_SCORE=$(python3 -c "import json; d=json.load(open('/tmp/proliferate/post_health.json')); print(d.get('score', d.get('health_score', 0.0)))")
           DELTA=$(python3 -c "import sys; print(float(sys.argv[1]) - float(sys.argv[2]))" "$POST_SCORE" "$PRE_SCORE")
           echo "[proliferate] pre=${PRE_SCORE} post=${POST_SCORE} delta=${DELTA}"
-          IS_REGRESSION=$(python3 -c "import sys; print('1' if (float(sys.argv[1]) - float(sys.argv[2])) < -0.001 else '0')" "$POST_SCORE" "$PRE_SCORE")
+          SNAPSHOT_REGRESSION=$(python3 -c "import sys; print('1' if (float(sys.argv[1]) - float(sys.argv[2])) < -0.001 else '0')" "$POST_SCORE" "$PRE_SCORE")
+          IS_REGRESSION="$SNAPSHOT_REGRESSION"
+          if [ "$SUMMARY_REGRESSION" = "1" ]; then
+            IS_REGRESSION="1"
+          fi
           if [ "$IS_REGRESSION" = "1" ]; then
-            echo "::warning::Proliferate health score regressed: pre=${PRE_SCORE} post=${POST_SCORE} delta=${DELTA}"
+            if [ "$SNAPSHOT_REGRESSION" = "1" ]; then
+              echo "::warning::Proliferate health score regressed: pre=${PRE_SCORE} post=${POST_SCORE} delta=${DELTA}"
+            fi
             # Task 2-A: expose the regression flag as a step output so
             # downstream steps can conditionally skip artifact uploads
             # or surface a failure annotation without re-parsing JSON.
@@ -499,3 +523,9 @@ jobs:
             /tmp/proliferate/proliferate.log
             /tmp/proliferate/summary.json
             /tmp/proliferate/benchmark.json
+
+      - name: Fail on health regression
+        if: always() && steps.health_compare.outputs.health_regression == 'true'
+        run: |
+          echo "::error::Health score regressed. Aborting to prevent degraded PRs from being merged."
+          exit 1
