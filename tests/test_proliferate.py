@@ -461,9 +461,13 @@ class TestProliferateDryRun:
             "math/safe_div.mm",
             "math/safe_mul.mm",
             "math/pow.mm",
+            "math/factorial.mm",
+            "math/fibonacci.mm",
             "container/ring_buffer.mm",
             "container/binary_heap.mm",
             "container/bounded_array.mm",
+            "container/sorted_map.mm",
+            "string/validator.mm",
         ):
             _write_mm(std / rel, "atom ok(x: i64) ensures: true; body: x;\n")
         _write_mm(
@@ -824,9 +828,13 @@ class TestOutputJson:
             "math/safe_div.mm",
             "math/safe_mul.mm",
             "math/pow.mm",
+            "math/factorial.mm",
+            "math/fibonacci.mm",
             "container/ring_buffer.mm",
             "container/binary_heap.mm",
             "container/bounded_array.mm",
+            "container/sorted_map.mm",
+            "string/validator.mm",
         ):
             _write_mm(std / rel, "atom ok(x: i64) ensures: true; body: x;\n")
         _write_mm(

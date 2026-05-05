@@ -124,6 +124,32 @@ _STD_GAP_RULES: list[dict[str, Any]] = [
             "requires_present": ["std/core.mm"],
         },
     },
+    {
+        "target": "std/math/factorial.mm",
+        "reason": (
+            "Factorial calculation with n >= 0 precondition and "
+            "result >= 1 postcondition. Z3 integer theory can verify it."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/math/factorial.mm",
+            "requires_present": ["std/core.mm"],
+        },
+    },
+    {
+        "target": "std/math/fibonacci.mm",
+        "reason": (
+            "Fibonacci sequence with loop invariant and decreases "
+            "termination proof."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/math/fibonacci.mm",
+            "requires_present": ["std/core.mm"],
+        },
+    },
     # std/container 系（Z3 配列理論）
     {
         "target": "std/container/ring_buffer.mm",
@@ -147,6 +173,29 @@ _STD_GAP_RULES: list[dict[str, Any]] = [
             "missing": "std/container/binary_heap.mm",
             "requires_present": ["std/container/bounded_array.mm"],
         },
+    },
+    {
+        "target": "std/container/sorted_map.mm",
+        "reason": (
+            "Sorted key-value map with sort invariant preservation "
+            "after insert. Z3 can verify the array ordering invariant."
+        ),
+        "depends_on": ["std/container/bounded_array.mm"],
+        "difficulty": "high",
+        "trigger": {
+            "missing": "std/container/sorted_map.mm",
+            "requires_present": ["std/container/bounded_array.mm"],
+        },
+    },
+    {
+        "target": "std/string/validator.mm",
+        "reason": (
+            "String validation helpers such as is_numeric and "
+            "is_alphanumeric for RegTech demo scenarios."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "low",
+        "trigger": {"missing": "std/string/validator.mm"},
     },
 ]
 
