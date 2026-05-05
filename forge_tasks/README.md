@@ -98,7 +98,7 @@ adding or promoting tasks.
 
 | Task ID                          | Target file                              | Difficulty | Atoms | Status   |
 |----------------------------------|------------------------------------------|------------|-------|----------|
-| `vstd-core`                      | `std/core.mm`                            | low        | 4     | created  |
+| `vstd-core`                      | `std/core.mm`                            | low        | 4     | verified |
 | `vstd-ownership`                 | `std/ownership.mm`                       | medium     | 5     | created  |
 | `vstd-trait-iterable`            | `std/trait/iterable.mm`                  | medium     | 3     | created  |
 | `vstd-iter`                      | `std/iter.mm`                            | medium     | 5+    | forged   |
@@ -109,16 +109,16 @@ adding or promoting tasks.
 | `vstd-math-abs`                  | `std/math/abs.mm`                        | low        | 2     | verified |
 | `vstd-math-clamp`                | `std/math/clamp.mm`                      | low        | 2+    | forged   |
 | `vstd-math-gcd`                  | `std/math/gcd.mm`                        | low        | 2+    | forged   |
-| `vstd-math-sqrt`                 | `std/math/sqrt.mm`                       | medium     | 1     | created  |
+| `vstd-math-sqrt`                 | `std/math/sqrt.mm`                       | medium     | 1     | verified |
 | `vstd-math-min-max`              | `std/math/min_max.mm`                    | low        | 2+    | forged   |
-| `vstd-math-log2`                 | `std/math/log2.mm`                       | medium     | 1     | created  |
+| `vstd-math-log2`                 | `std/math/log2.mm`                       | medium     | 1     | verified |
 | `vstd-math-pow`                  | `std/math/pow.mm`                        | medium     | 2+    | forged   |
 | `vstd-math-pow-nat`              | `std/math/pow_nat.mm`                    | medium     | 2+    | forged   |
 | `vstd-math-safe-div`             | `std/math/safe_div.mm`                   | low        | 2     | forged   |
 | `vstd-math-safe-mul`             | `std/math/safe_mul.mm`                   | low        | 2+    | forged   |
-| `vstd-math-factorial`            | `std/math/factorial.mm`                  | low        | 2     | created  |
-| `vstd-bitwise`                   | `std/bitwise.mm`                         | medium     | 5     | created  |
-| `vstd-option-utils`              | `std/option.mm`                          | low        | 4     | created  |
+| `vstd-math-factorial`            | `std/math/factorial.mm`                  | low        | 2     | verified |
+| `vstd-bitwise`                   | `std/bitwise.mm`                         | medium     | 5     | verified |
+| `vstd-option-utils`              | `std/option.mm`                          | low        | 4     | verified |
 | `vstd-container-binary-heap`     | `std/container/binary_heap.mm`           | high       | 2+    | forged   |
 | `vstd-container-deque`           | `std/container/deque.mm`                 | medium     | 2+    | forged   |
 | `vstd-container-priority-queue`  | `std/container/priority_queue.mm`        | high       | 3     | created  |
