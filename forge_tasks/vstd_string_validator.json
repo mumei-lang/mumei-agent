@@ -1,0 +1,40 @@
+{
+  "task_id": "vstd-string-validator",
+  "target_file": "std/string/validator.mm",
+  "mode": "create",
+  "priority": 7,
+  "max_retries": 8,
+  "auto_commit": false,
+  "description": "String validation helpers such as is_numeric and is_alphanumeric for RegTech demo scenarios. Keep validation results encoded as i64 booleans so contracts remain Z3 integer-theory friendly while the string representation stays opaque. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/string/validator — verified string validators'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm and std/string_utils.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm already uses.",
+  "context_files": [
+    "std/core.mm",
+    "std/string_utils.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "is_numeric_ascii_code",
+      "description": "Return 1 when an ASCII code is in the digit range ['0', '9'], otherwise 0.",
+      "inputs": [
+        {"name": "code", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "code >= 0 && code <= 127",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_within_range", "is_ascii"]
+    },
+    {
+      "name": "is_alphanumeric_ascii_code",
+      "description": "Return 1 when an ASCII code is numeric or alphabetic, otherwise 0.",
+      "inputs": [
+        {"name": "code", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "code >= 0 && code <= 127",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_numeric_ascii_code", "is_ascii"]
+    }
+  ]
+}

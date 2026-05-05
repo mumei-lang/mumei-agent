@@ -1,0 +1,41 @@
+{
+  "task_id": "vstd-math-fibonacci",
+  "target_file": "std/math/fibonacci.mm",
+  "mode": "create",
+  "priority": 5,
+  "max_retries": 10,
+  "auto_commit": false,
+  "description": "Fibonacci sequence helper atoms with loop invariant and decreases-style termination evidence. Keep contracts in Z3 integer theory by using bounded inputs and explicit accumulator-step atoms. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/fibonacci — verified fibonacci helpers'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm already uses (checked_add, checked_sub, conditional expressions).",
+  "context_files": [
+    "std/core.mm",
+    "std/math/safe_mul.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "atoms": [
+    {
+      "name": "fib_step_next",
+      "description": "Compute the next Fibonacci accumulator value from adjacent non-negative values.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && a + b <= 9223372036854775807",
+      "ensures": "result == a + b && result >= b",
+      "reference_patterns": ["checked_add", "safe_narrow"]
+    },
+    {
+      "name": "fib_remaining_decreases",
+      "description": "One-loop termination witness: remaining iterations strictly decrease while staying non-negative.",
+      "inputs": [
+        {"name": "remaining", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "remaining > 0",
+      "ensures": "result == remaining - 1 && result >= 0 && result < remaining",
+      "reference_patterns": ["checked_sub", "heap_extract_len"]
+    }
+  ]
+}
