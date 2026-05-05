@@ -547,6 +547,12 @@ python -m agent proliferate \
 - [mumei-lang/mumei-lean README](https://github.com/mumei-lang/mumei-lean/blob/main/README.md) — Lean 側の bridge / ingest_cert / export_cert の仕。
 - `agent/lean_bridge.py` — agent 側のルパ層`tests/test_lean_bridge.py` テスを照。
 
+### E2E 検証メモ
+
+- `tests/test_lean_bridge_e2e.py` を追加し、`pytest --run-integration tests/test_lean_bridge_e2e.py` で `_run_lean_fallback()` から `summary.json.details[].lean_fallback.proved > 0` まで実地検証する。
+- PR 3-A の Lean 側実 std/ proof witness として `std/math/abs.mm::abs_saturating` を使用。Lean 証明は `MumeiLean.StdMathAbs.abs_saturating_correct` で、`norm_num` / `omega` により i64::MIN 飽和分岐・非負分岐・負値分岐を閉じる。
+- 最新 `mumei-lang/mumei-lean` `develop` (`6e6da16ae64d6a46b720a4b6190806228c85a568`) では `lake build MumeiLean.StdMathAbs` は成功する一方、`scripts/bridge.py --cert ... --lean-cert-out ...` 経由の live generated theorem path は `Generated.Std.Math.Abs` で theorem-level attribution 前に失敗し、`lean_verified` をまだ export できない。そのため integration test はこの precondition を検出した場合 skip し、bridge 経由で PR 3-A proof witness が到達可能になった時点で同じテストが `lean_verified` 昇格を検証する。
+
 ---
 
 ## 統合デモ戦略

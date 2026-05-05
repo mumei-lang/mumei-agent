@@ -512,6 +512,50 @@ class TestProliferateDryRun:
         assert results[0].get("dry_run") is True
         assert results[0]["code"] == fake_code
 
+    def test_dry_run_lean_fallback_verify_exception_is_best_effort(
+        self, tmp_path: Path
+    ) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+        summary_path = tmp_path / "summary.json"
+        fake_code = "atom core_ok(x: i64) ensures: true; body: x;\n"
+
+        with patch("agent.proliferate.generate_code") as gen_mock, patch(
+            "agent.proliferate.AgentConfig"
+        ) as cfg_mock, patch(
+            "agent.proliferate.create_mumei_client"
+        ) as client_mock, patch(
+            "agent.proliferate._run_lean_fallback"
+        ) as fallback_mock:
+            gen_mock.return_value = (fake_code, True)
+            cfg_instance = MagicMock()
+            cfg_instance.mumei_bin = "mumei"
+            cfg_instance.model = "gpt-test"
+            cfg_instance.max_retries = 2
+            cfg_instance.mumei_lean_repo = "/tmp/mumei-lean"
+            cfg_instance.create_client.return_value = MagicMock()
+            cfg_mock.return_value = cfg_instance
+
+            verify_client = MagicMock()
+            verify_client.verify.side_effect = FileNotFoundError("mumei")
+            client_mock.return_value = verify_client
+
+            results = proliferate.proliferate(
+                tmp_path,
+                dry_run=True,
+                max_proposals=1,
+                output_json=summary_path,
+                enable_lean_fallback=True,
+            )
+
+        assert results[0]["success"] is True
+        assert results[0].get("dry_run") is True
+        assert "publish_result" not in results[0]
+        fallback_mock.assert_called_once()
+        assert summary_path.exists()
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert data["details"][0]["success"] is True
+
     def test_dry_run_with_broken_blast_radius_does_not_mutate(
         self, tmp_path: Path
     ) -> None:

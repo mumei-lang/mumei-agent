@@ -388,6 +388,38 @@ jobs:
             > /tmp/proliferate/post_health.json || true
           cat /tmp/proliferate/post_health.json || true
 
+      - name: Check Lean fallback proof count
+        if: always()
+        run: |
+          if ! command -v lake >/dev/null 2>&1; then
+            echo "lake not on PATH; skipping Lean fallback proved-count check"
+            exit 0
+          fi
+          if [ ! -s /tmp/proliferate/summary.json ]; then
+            echo "summary.json missing or empty; skipping Lean fallback proved-count check"
+            exit 0
+          fi
+          python3 - <<'PY'
+import json
+from pathlib import Path
+
+summary = json.loads(Path("/tmp/proliferate/summary.json").read_text())
+proved = 0
+attempted = False
+for detail in summary.get("details", []):
+    fallback = detail.get("lean_fallback") if isinstance(detail, dict) else None
+    if not isinstance(fallback, dict):
+        continue
+    attempted = attempted or bool(fallback.get("attempted"))
+    proved += int(fallback.get("proved") or 0)
+if not attempted:
+    print("Lean fallback not attempted; skipping proved-count check")
+    raise SystemExit(0)
+print(f"lean_fallback.proved={proved}")
+if proved <= 0:
+    raise SystemExit("Lean fallback was attempted but proved no atoms")
+PY
+
       - name: Compare pre/post health (PR 4)
         id: health_compare
         if: always()

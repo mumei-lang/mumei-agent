@@ -1,0 +1,184 @@
+"""Live E2E tests for the mumei-agent → mumei-lean fallback path."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agent import lean_bridge
+from agent import proliferate as proliferate_mod
+
+pytestmark = pytest.mark.integration
+
+
+LEAN_PROOF_ATOM = "abs_saturating"
+LEAN_PROOF_TACTICS = ("norm_num", "omega")
+
+
+@pytest.fixture()
+def mumei_lean_repo() -> Path:
+    repo = Path(
+        os.environ.get("MUMEI_LEAN_REPO", "/home/ubuntu/repos/mumei-lean")
+    ).resolve()
+    if not (repo / "scripts" / "bridge.py").exists():
+        pytest.skip(f"mumei-lean bridge.py not found at {repo}")
+    if shutil.which("lake") is None:
+        elan_bin = Path.home() / ".elan" / "bin"
+        if shutil.which("lake", path=f"{elan_bin}:{os.environ.get('PATH', '')}"):
+            os.environ["PATH"] = f"{elan_bin}:{os.environ.get('PATH', '')}"
+    if shutil.which("lake") is None:
+        pytest.skip("lake not on PATH; skipping live Lean fallback E2E")
+    return repo
+
+
+@pytest.fixture()
+def std_abs_unknown_cert() -> dict:
+    return {
+        "file": "std/math/abs.mm",
+        "mumei_version": "test-fixture",
+        "all_verified": False,
+        "atoms": [
+            {
+                "name": LEAN_PROOF_ATOM,
+                "z3_check_result": "unknown",
+                "status": "unknown",
+                "requires": "true",
+                "ensures": "result >= 0",
+                "content_hash": "fixture-abs-saturating",
+            }
+        ],
+    }
+
+
+def _skip_if_bridge_precondition_missing(result: dict) -> None:
+    stderr = str(result.get("stderr", ""))
+    # TODO: Latest mumei-lean develop (6e6da16) has MumeiLean.StdMathAbs
+    # proving std/math/abs.mm::abs_saturating via norm_num / omega, but the
+    # live scripts/bridge.py path still emits Generated modules that can fail
+    # before theorem-level attribution (observed as "invalid 'import' command"),
+    # so no lean_verified atom is exported. Keep this skip until PR 3-A's std/
+    # proof witness is reachable through bridge.py end-to-end.
+    if result.get("returncode") != 0 and "no theorem-level failures" in stderr:
+        pytest.skip(
+            "mumei-lean bridge.py did not export lean_verified for the PR 3-A "
+            "std proof witness yet"
+        )
+
+
+def test_lean_fallback_upgrades_unknown_to_lean_verified(
+    tmp_path: Path,
+    mumei_lean_repo: Path,
+    std_abs_unknown_cert: dict,
+) -> None:
+    src = (mumei_lean_repo / "MumeiLean" / "StdMathAbs.lean").read_text(
+        encoding="utf-8"
+    )
+    assert f"theorem {LEAN_PROOF_ATOM}_correct" in src
+    for tactic in LEAN_PROOF_TACTICS:
+        assert tactic in src
+
+    cert_path = tmp_path / "std-abs.proof-cert.json"
+    lean_cert_out = tmp_path / "std-abs.lean-cert.json"
+    cert_path.write_text(json.dumps(std_abs_unknown_cert), encoding="utf-8")
+
+    bridge_result = lean_bridge.run_lean_bridge(
+        cert_path=cert_path,
+        lean_cert_out=lean_cert_out,
+        mumei_lean_repo=mumei_lean_repo,
+    )
+    _skip_if_bridge_precondition_missing(bridge_result)
+
+    assert bridge_result["success"] is True, bridge_result.get("stderr", "")
+    assert isinstance(bridge_result["lean_cert"], dict)
+    upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
+        std_abs_unknown_cert,
+        bridge_result["lean_cert"],
+    )
+    atom = next(a for a in upgraded["atoms"] if a["name"] == LEAN_PROOF_ATOM)
+    assert atom["z3_check_result"] == "lean_verified"
+    assert atom["status"] == "verified"
+    assert upgraded["all_verified"] is True
+
+
+def test_proliferate_lean_fallback_summary_json(
+    tmp_path: Path,
+    mumei_lean_repo: Path,
+    std_abs_unknown_cert: dict,
+) -> None:
+    probe_cert = tmp_path / "probe.proof-cert.json"
+    probe_out = tmp_path / "probe.lean-cert.json"
+    probe_cert.write_text(json.dumps(std_abs_unknown_cert), encoding="utf-8")
+    probe = lean_bridge.run_lean_bridge(
+        cert_path=probe_cert,
+        lean_cert_out=probe_out,
+        mumei_lean_repo=mumei_lean_repo,
+    )
+    _skip_if_bridge_precondition_missing(probe)
+
+    std = tmp_path / "std"
+    std.mkdir()
+    summary_path = tmp_path / "summary.json"
+    fake_code = "atom core_ok(x: i64) ensures: true; body: x;\n"
+
+    with patch("agent.proliferate.generate_code") as gen_mock, patch(
+        "agent.proliferate.AgentConfig"
+    ) as cfg_mock, patch(
+        "agent.proliferate.create_mumei_client"
+    ) as client_mock, patch(
+        "agent.proliferate.analyze_gaps"
+    ) as gaps_mock, patch(
+        "agent.proliferate.generate_specs_from_gaps"
+    ) as specs_mock, patch(
+        "agent.proliferate.publish"
+    ) as publish_mock:
+        gaps_mock.return_value = {"proposals": [{"name": "std/core.mm"}]}
+        specs_mock.return_value = [
+            {"task_id": "lean-fallback-e2e", "target_file": "std/core.mm"}
+        ]
+        gen_mock.return_value = (fake_code, True)
+        cfg = MagicMock()
+        cfg.mumei_bin = "mumei"
+        cfg.model = "gpt-test"
+        cfg.max_retries = 1
+        cfg.mumei_lean_repo = str(mumei_lean_repo)
+        cfg.create_client.return_value = MagicMock()
+        cfg_mock.return_value = cfg
+        client = MagicMock()
+        # ``_attach_dry_run_proof_certificate`` stores ``report`` as the
+        # proof certificate that ``_run_lean_fallback`` later inspects
+        # for ``unknown`` atoms. An empty dict would be treated as falsy
+        # by the ``cert.get(...) or ...`` chain in ``_run_lean_fallback``
+        # and the spec would be silently skipped, so the assertions
+        # below (``fallback["attempted"] is True`` /
+        # ``fallback["proved"] > 0``) would never hold. Supply the
+        # fixture cert (with a single ``unknown`` atom) so the bridge
+        # actually has something to discharge.
+        client.verify.return_value = {
+            "success": True,
+            "report": std_abs_unknown_cert,
+        }
+        client_mock.return_value = client
+        publish_mock.return_value = {
+            "success": True,
+            "generated_file": "std/core.mm",
+            "proof_certificate": std_abs_unknown_cert,
+            "artifacts": [],
+        }
+
+        results = proliferate_mod.proliferate(
+            tmp_path,
+            dry_run=True,
+            max_proposals=1,
+            output_json=summary_path,
+            enable_lean_fallback=True,
+        )
+
+    assert results[0]["success"] is True
+    data = json.loads(summary_path.read_text(encoding="utf-8"))
+    fallback = data["details"][0]["lean_fallback"]
+    assert fallback["attempted"] is True
+    assert fallback["proved"] > 0

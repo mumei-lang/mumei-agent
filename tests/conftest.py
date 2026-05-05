@@ -13,6 +13,15 @@ import pytest
 from agent.mumei_client import MumeiClient
 
 
+def pytest_addoption(parser) -> None:
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="run tests marked integration",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Directory containing .mm fixture files
 # ---------------------------------------------------------------------------
@@ -331,6 +340,15 @@ def mumei_mock_e2e_client(mumei_mock_bin: str) -> MumeiClient:
 # ``LLM_BENCHMARK_RUN=1`` in the environment).
 
 def pytest_collection_modifyitems(config, items):
+    run_integration = bool(config.getoption("run_integration"))
+    if not run_integration:
+        skip_integration = pytest.mark.skip(
+            reason="integration tests are opt-in; run with `pytest --run-integration`"
+        )
+        for item in items:
+            if "integration" in item.keywords:
+                item.add_marker(skip_integration)
+
     markexpr = config.getoption("markexpr") or ""
     if "benchmark" in markexpr or os.environ.get("LLM_BENCHMARK_RUN"):
         return
