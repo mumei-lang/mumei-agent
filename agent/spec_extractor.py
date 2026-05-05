@@ -108,6 +108,29 @@ def _validate_extracted_spec(spec: dict) -> list[str]:
     return errors
 
 
+def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
+    """Return errors when extraction obviously copied the schema example."""
+    lowered_prompt = natural_language.lower()
+    spec_text = json.dumps(spec, ensure_ascii=False).lower()
+    keyword_groups = [
+        ("銀行", ("transfer", "balance", "amount", "送金", "残高")),
+        ("送金", ("transfer", "balance", "amount", "送金", "残高")),
+        ("kyc", ("kyc", "risk", "pep", "customer", "顧客")),
+        ("pep", ("kyc", "risk", "pep", "customer", "顧客")),
+        ("絶対値", ("abs", "absolute", "non-negative", "非負")),
+    ]
+    errors = []
+    for trigger, expected_keywords in keyword_groups:
+        if trigger in lowered_prompt and not any(
+            keyword in spec_text for keyword in expected_keywords
+        ):
+            errors.append(
+                f"spec does not reflect requirement keyword {trigger!r}; "
+                "do not copy the schema example"
+            )
+    return errors
+
+
 def extract_spec(
     client: OpenAI,
     model: str,
@@ -169,6 +192,8 @@ def extract_spec(
             continue
 
         validation_errors = _validate_extracted_spec(spec)
+        if not validation_errors:
+            validation_errors = _keyword_validation_errors(spec, natural_language)
         if not validation_errors:
             return spec
         last_errors = validation_errors
