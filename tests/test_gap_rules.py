@@ -26,6 +26,13 @@ def _write_mm(p: Path, content: str) -> None:
     p.write_text(content, encoding="utf-8")
 
 
+def _std_gap_rule(target: str) -> dict:
+    for rule in gap_rules._STD_GAP_RULES:
+        if rule["target"] == target:
+            return rule
+    raise AssertionError(f"missing gap rule for {target}")
+
+
 # ---------------------------------------------------------------------------
 # gap_rules.analyze_gaps_local
 # ---------------------------------------------------------------------------
@@ -66,6 +73,70 @@ class TestAnalyzeGapsLocal:
         assert proliferate._STD_GAP_RULES is gap_rules._STD_GAP_RULES
         assert proliferate._scan_std_imports is gap_rules._scan_std_imports
         assert proliferate._evaluate_rule is gap_rules._evaluate_rule
+
+    @pytest.mark.parametrize(
+        ("target", "required"),
+        [
+            ("std/math/factorial.mm", "std/core.mm"),
+            ("std/container/sorted_map.mm", "std/container/bounded_array.mm"),
+            ("std/string/validator.mm", None),
+            ("std/math/fibonacci.mm", "std/core.mm"),
+        ],
+    )
+    def test_new_std_gap_rule_triggers_when_missing(
+        self, tmp_path: Path, target: str, required: str | None
+    ) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+        if required is not None:
+            _write_mm(tmp_path / required, "atom required_ok(x: i64) ensures: true;\n")
+
+        existing_paths = set(gap_rules._scan_std_imports(std).keys())
+        rule = _std_gap_rule(target)
+
+        assert gap_rules._evaluate_rule(rule, existing_paths, std)
+
+    @pytest.mark.parametrize(
+        ("target", "required"),
+        [
+            ("std/math/factorial.mm", "std/core.mm"),
+            ("std/container/sorted_map.mm", "std/container/bounded_array.mm"),
+            ("std/string/validator.mm", None),
+            ("std/math/fibonacci.mm", "std/core.mm"),
+        ],
+    )
+    def test_new_std_gap_rule_does_not_trigger_when_present(
+        self, tmp_path: Path, target: str, required: str | None
+    ) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+        if required is not None:
+            _write_mm(tmp_path / required, "atom required_ok(x: i64) ensures: true;\n")
+        _write_mm(tmp_path / target, "atom target_ok(x: i64) ensures: true;\n")
+
+        existing_paths = set(gap_rules._scan_std_imports(std).keys())
+        rule = _std_gap_rule(target)
+
+        assert not gap_rules._evaluate_rule(rule, existing_paths, std)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "std/math/factorial.mm",
+            "std/container/sorted_map.mm",
+            "std/math/fibonacci.mm",
+        ],
+    )
+    def test_new_std_gap_rule_does_not_trigger_without_required_dependency(
+        self, tmp_path: Path, target: str
+    ) -> None:
+        std = tmp_path / "std"
+        std.mkdir()
+
+        existing_paths = set(gap_rules._scan_std_imports(std).keys())
+        rule = _std_gap_rule(target)
+
+        assert not gap_rules._evaluate_rule(rule, existing_paths, std)
 
 
 # ---------------------------------------------------------------------------
