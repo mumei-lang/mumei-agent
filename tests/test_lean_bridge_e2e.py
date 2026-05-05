@@ -148,7 +148,19 @@ def test_proliferate_lean_fallback_summary_json(
         cfg.create_client.return_value = MagicMock()
         cfg_mock.return_value = cfg
         client = MagicMock()
-        client.verify.return_value = {"success": True, "report": {}}
+        # ``_attach_dry_run_proof_certificate`` stores ``report`` as the
+        # proof certificate that ``_run_lean_fallback`` later inspects
+        # for ``unknown`` atoms. An empty dict would be treated as falsy
+        # by the ``cert.get(...) or ...`` chain in ``_run_lean_fallback``
+        # and the spec would be silently skipped, so the assertions
+        # below (``fallback["attempted"] is True`` /
+        # ``fallback["proved"] > 0``) would never hold. Supply the
+        # fixture cert (with a single ``unknown`` atom) so the bridge
+        # actually has something to discharge.
+        client.verify.return_value = {
+            "success": True,
+            "report": std_abs_unknown_cert,
+        }
         client_mock.return_value = client
         publish_mock.return_value = {
             "success": True,
