@@ -215,6 +215,10 @@ Available spec files:
 | `examples/e2e_demo_spec.json` | Fetch GitHub user via HTTPS | `SecureHttpGet` |
 | `examples/simple_add_spec.json` | Add two non-negative numbers | None |
 
+### P11 Natural-language Specification Extraction
+
+See [`docs/NL_SPEC_DEMO.md`](docs/NL_SPEC_DEMO.md) for a recorded field demo of `python -m agent extract-spec`, including bank-transfer, RegTech KYC, and spec-extraction-to-code-generation examples with `mumei verify` output.
+
 ## LLM Provider Support
 
 | Provider | Config Pattern | Cost |

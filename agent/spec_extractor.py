@@ -158,6 +158,7 @@ def extract_spec(
                 {"role": "system", "content": SPEC_EXTRACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
+            response_format={"type": "json_object"},
         )
         raw = response.choices[0].message.content or ""
         try:
