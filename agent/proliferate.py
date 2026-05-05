@@ -885,9 +885,16 @@ def proliferate(
             spec_result["success"] = True
             spec_result["dry_run"] = True
             if enable_lean_fallback:
-                _attach_dry_run_proof_certificate(
-                    spec_result, code, mumei_client
-                )
+                try:
+                    _attach_dry_run_proof_certificate(
+                        spec_result, code, mumei_client
+                    )
+                except Exception:
+                    logger.debug(
+                        "Could not attach dry-run proof certificate for %s",
+                        target_file,
+                        exc_info=True,
+                    )
             try:
                 thought.final_success = True
                 thought.total_attempts = len(
