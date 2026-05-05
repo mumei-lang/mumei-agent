@@ -249,7 +249,7 @@ Phase 1 統合デモ用の forge タスク。
   - `context_files`: `tests/test_order_state_machine.mm`, `tests/test_modular_verification.mm`, `std/effects.mm`
   - Temporal Effect（stateful effect）を含む初の forge タスク
 - ✅ `forge_tasks/vstd_settlement.json` — RTGS Settlement (Phase 2 Demo, Complete)
-- 📋 `forge_tasks/vstd_regtech.json` — RegTech Compliance (Phase 3 Demo, Planned)
+- ✅ `forge_tasks/vstd_regtech.json` — RegTech Compliance (Phase 3 Demo)
 
 ---
 
