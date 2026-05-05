@@ -2,7 +2,7 @@
   "task_id": "vstd-regtech",
   "description": "RegTech Compliance Protocol: KYC/AML compliance atoms with match exhaustiveness and forall quantifier verification",
   "target_file": "std/compliance.mm",
-  "mode": "append",
+  "mode": "create",
   "context_files": ["std/core.mm", "std/contracts.mm"],
   "atoms": [
     {
