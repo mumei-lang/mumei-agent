@@ -128,5 +128,13 @@ def build_extraction_prompt(
                 existing_catalog.strip(),
             ]
         )
-    parts.extend(["", "Return ONLY valid JSON."])
+    parts.extend(
+        [
+            "",
+            "# Requirement to extract",
+            natural_language.strip(),
+            "",
+            "Return ONLY valid JSON for the requirement above. Do not copy the example.",
+        ]
+    )
     return "\n".join(parts)

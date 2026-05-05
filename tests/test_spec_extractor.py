@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from agent import mcp_server
 from agent.prompts.spec_extraction import build_extraction_prompt
 from agent.spec_extractor import (
+    _keyword_validation_errors,
     _validate_extracted_spec,
     extract_and_generate,
     extract_spec,
@@ -137,6 +138,32 @@ def test_extract_spec_with_domain_hint() -> None:
     prompt = build_extraction_prompt("送金", domain_hint="financial")
 
     assert "Domain: financial" in prompt
+
+
+def test_keyword_validation_rejects_example_copy() -> None:
+    copied_example = dict(VALID_SPEC, task_id="nl-safe-add")
+    copied_example["atoms"] = [
+        {
+            "name": "safe_add",
+            "description": "Overflow-safe addition",
+            "inputs": [
+                {"name": "a", "type": "i64"},
+                {"name": "b", "type": "i64"},
+            ],
+            "return_type": "i64",
+            "requires": "a >= 0 && b >= 0",
+            "ensures": "result == a + b",
+            "effects": [],
+        }
+    ]
+
+    errors = _keyword_validation_errors(
+        copied_example,
+        "KYC顧客分類。PEPは最高リスク。",
+    )
+
+    assert errors
+    assert "do not copy the schema example" in errors[0]
 
 
 def test_extract_spec_with_existing_catalog() -> None:

@@ -42,7 +42,7 @@ def build_parser(parser=None):
     )
     parser.add_argument(
         "--domain",
-        choices=["financial", "security", "data_structure", "general"],
+        choices=["financial", "regtech", "security", "data_structure", "general"],
         default="",
         help="Optional domain hint for safer specification extraction",
     )
