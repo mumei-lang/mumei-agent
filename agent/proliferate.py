@@ -529,6 +529,34 @@ def _run_lean_fallback(
             spec_result["upgraded_cert"] = upgraded
 
 
+def _attach_dry_run_proof_certificate(
+    spec_result: dict[str, Any],
+    code: str,
+    mumei_client: MumeiClient,
+) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".mm",
+        delete=False,
+        encoding="utf-8",
+    ) as tmp:
+        tmp_path = tmp.name
+        tmp.write(code)
+    try:
+        verify_result = mumei_client.verify(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    report = verify_result.get("report")
+    if not isinstance(report, dict):
+        return
+    spec_result["publish_result"] = {
+        "success": bool(verify_result.get("success", False)),
+        "proof_certificate": report,
+        "verified_at_generation": bool(spec_result.get("verified", False)),
+    }
+
+
 def proliferate(
     mumei_repo_dir: str | Path,
     *,
@@ -856,6 +884,10 @@ def proliferate(
             logger.info("Dry run — skipping publish for %s", target_file)
             spec_result["success"] = True
             spec_result["dry_run"] = True
+            if enable_lean_fallback:
+                _attach_dry_run_proof_certificate(
+                    spec_result, code, mumei_client
+                )
             try:
                 thought.final_success = True
                 thought.total_attempts = len(
@@ -1002,7 +1034,7 @@ def proliferate(
     # TypeError from json.dumps, etc.) is logged and swallowed so
     # the post-loop health measurement, auto-close logic, and JSON
     # summary writing below still run.
-    if enable_lean_fallback and not dry_run:
+    if enable_lean_fallback:
         try:
             _run_lean_fallback(
                 results, mumei_lean_repo=config.mumei_lean_repo
