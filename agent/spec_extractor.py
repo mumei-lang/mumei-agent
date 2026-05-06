@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
@@ -44,15 +46,52 @@ def _catalog_to_prompt_text(catalog: Any) -> str:
 
 
 def _load_existing_catalog(mumei_client: MumeiClient | None) -> str:
-    """Read std catalog context from an MCP-capable mumei client if available."""
-    if mumei_client is None or not hasattr(mumei_client, "list_catalog"):
+    """Read std catalog context from an MCP-capable mumei client if available.
+
+    Falls back to scanning std/ directory for atom names when MCP is unavailable.
+    """
+    if mumei_client is None:
         return ""
-    try:
-        catalog = mumei_client.list_catalog()  # type: ignore[attr-defined]
-    except Exception as exc:
-        logger.warning("failed to load std catalog: %s", exc)
+    if hasattr(mumei_client, "list_catalog"):
+        try:
+            catalog = mumei_client.list_catalog()  # type: ignore[attr-defined]
+            return _catalog_to_prompt_text(catalog)
+        except Exception as exc:
+            logger.warning("failed to load std catalog via MCP: %s", exc)
+    return _scan_std_catalog_local(mumei_client)
+
+
+def _scan_std_catalog_local(mumei_client: MumeiClient) -> str:
+    """Scan std/ directory for atom names as a catalog fallback."""
+    mumei_bin = getattr(mumei_client, "mumei_bin", None) or ""
+    mumei_repo = os.environ.get("MUMEI_REPO", "")
+    if not mumei_repo and mumei_bin:
+        path = Path(mumei_bin)
+        if path.name == "mumei" and len(path.parents) >= 3:
+            candidate = path.parents[2]
+            if (candidate / "std").exists():
+                mumei_repo = str(candidate)
+    if not mumei_repo:
         return ""
-    return _catalog_to_prompt_text(catalog)
+    std_dir = Path(mumei_repo) / "std"
+    if not std_dir.exists():
+        return ""
+
+    atom_re = re.compile(r"^\s*(?:trusted\s+)?atom\s+(\w+)")
+    catalog_lines = []
+    for mm_file in sorted(std_dir.rglob("*.mm")):
+        rel = str(mm_file.relative_to(std_dir.parent))
+        atoms = []
+        try:
+            for line in mm_file.read_text(encoding="utf-8").splitlines():
+                match = atom_re.match(line)
+                if match:
+                    atoms.append(match.group(1))
+        except OSError:
+            continue
+        if atoms:
+            catalog_lines.append(f"- {rel}: {', '.join(atoms)}")
+    return "\n".join(catalog_lines) if catalog_lines else ""
 
 
 def _validate_extracted_spec(spec: dict) -> list[str]:
@@ -139,6 +178,7 @@ def extract_spec(
     domain_hint: str = "",
     mumei_client: MumeiClient | None = None,
     max_retries: int = 3,
+    metrics: Metrics | None = None,
 ) -> dict:
     """Extract a forge task spec from natural language.
 
@@ -167,6 +207,8 @@ def extract_spec(
     last_errors: list[str] = []
 
     for attempt in range(1, attempts + 1):
+        if metrics is not None:
+            metrics.record_extraction_attempt()
         prompt = base_prompt
         if feedback:
             prompt += (
@@ -195,6 +237,8 @@ def extract_spec(
         if not validation_errors:
             validation_errors = _keyword_validation_errors(spec, natural_language)
         if not validation_errors:
+            if metrics is not None:
+                metrics.record_extraction_success()
             return spec
         last_errors = validation_errors
         feedback = "; ".join(validation_errors)
@@ -224,6 +268,7 @@ def extract_and_generate(
     Returns:
         A tuple of (code, verified, final_spec).
     """
+    metrics = Metrics()
     spec = extract_spec(
         client,
         model,
@@ -231,6 +276,7 @@ def extract_and_generate(
         domain_hint=domain_hint,
         mumei_client=mumei_client,
         max_retries=max_extraction_retries,
+        metrics=metrics,
     )
     return run_refinement_loop(
         client,
@@ -240,5 +286,5 @@ def extract_and_generate(
         max_refinements=max_refinements,
         config_max_retries=max_generation_retries,
         mumei_client=mumei_client,
-        metrics=Metrics(),
+        metrics=metrics,
     )

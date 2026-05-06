@@ -5,9 +5,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 from agent import mcp_server
+from agent.metrics import Metrics
 from agent.prompts.spec_extraction import build_extraction_prompt
 from agent.spec_extractor import (
     _keyword_validation_errors,
+    _scan_std_catalog_local,
     _validate_extracted_spec,
     extract_and_generate,
     extract_spec,
@@ -138,6 +140,15 @@ def test_extract_spec_with_domain_hint() -> None:
     prompt = build_extraction_prompt("送金", domain_hint="financial")
 
     assert "Domain: financial" in prompt
+    assert "Financial domain conventions" in prompt
+    assert "sender_balance >= amount" in prompt
+
+
+def test_build_extraction_prompt_matches_domain_hint_substring() -> None:
+    prompt = build_extraction_prompt("PUT API", domain_hint="public web endpoint")
+
+    assert "Web API domain conventions" in prompt
+    assert "result >= 100 && result <= 599" in prompt
 
 
 def test_keyword_validation_rejects_example_copy() -> None:
@@ -186,19 +197,142 @@ def test_extract_spec_with_existing_catalog() -> None:
     assert "Domain: financial" in prompt
 
 
+def test_scan_std_catalog_local_from_mumei_repo_env(tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "mumei"
+    std = repo / "std" / "math"
+    std.mkdir(parents=True)
+    (std / "safe.mm").write_text(
+        "atom safe_add(a: i64, b: i64) -> i64\n"
+        "trusted atom ffi_abs(x: i64) -> i64\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MUMEI_REPO", str(repo))
+    mumei_client = MagicMock()
+    mumei_client.mumei_bin = str(repo / "target" / "debug" / "mumei")
+
+    catalog = _scan_std_catalog_local(mumei_client)
+
+    assert "- std/math/safe.mm: safe_add, ffi_abs" in catalog
+
+
+def test_scan_std_catalog_local_from_mumei_bin(tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "mumei"
+    bin_dir = repo / "target" / "debug"
+    std = repo / "std"
+    bin_dir.mkdir(parents=True)
+    std.mkdir()
+    (std / "io.mm").write_text("trusted atom read_file(path: str) -> str\n", encoding="utf-8")
+    monkeypatch.delenv("MUMEI_REPO", raising=False)
+    mumei_client = MagicMock()
+    mumei_client.mumei_bin = str(bin_dir / "mumei")
+
+    catalog = _scan_std_catalog_local(mumei_client)
+
+    assert "- std/io.mm: read_file" in catalog
+
+
+def test_extract_spec_records_metrics() -> None:
+    client = _mock_client("not json", json.dumps(VALID_SPEC))
+    metrics = Metrics()
+
+    result = extract_spec(client, "m", "安全な加算", max_retries=2, metrics=metrics)
+
+    assert result == VALID_SPEC
+    assert metrics.extraction_attempts == 2
+    assert metrics.extraction_successes == 1
+    assert metrics.extraction_success_rate == 0.5
+
+
+def test_extract_spec_does_not_record_keyword_validation_failure_as_success() -> None:
+    copied_example = dict(VALID_SPEC, task_id="nl-safe-add")
+    copied_example["atoms"] = [
+        {
+            "name": "safe_add",
+            "description": "Overflow-safe addition",
+            "inputs": [
+                {"name": "a", "type": "i64"},
+                {"name": "b", "type": "i64"},
+            ],
+            "return_type": "i64",
+            "requires": "a >= 0 && b >= 0",
+            "ensures": "result == a + b",
+            "effects": [],
+        }
+    ]
+    valid_kyc_spec = {
+        "task_id": "nl-kyc-risk",
+        "target_file": "std/security/kyc.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "classify_kyc_risk",
+                "description": "Classify KYC customer risk",
+                "inputs": [
+                    {"name": "is_pep", "type": "i64"},
+                    {"name": "has_sanction_hit", "type": "i64"},
+                ],
+                "return_type": "i64",
+                "requires": "is_pep >= 0 && is_pep <= 1",
+                "ensures": "result >= 0 && result <= 3",
+                "effects": [],
+            }
+        ],
+    }
+    client = _mock_client(json.dumps(copied_example), json.dumps(valid_kyc_spec))
+    metrics = Metrics()
+
+    result = extract_spec(client, "m", "KYC顧客分類。PEPは最高リスク。", max_retries=2, metrics=metrics)
+
+    assert result == valid_kyc_spec
+    assert metrics.extraction_attempts == 2
+    assert metrics.extraction_successes == 1
+
+
+def test_extract_and_generate_shares_metrics_between_stages() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC))
+    captured: dict[str, Metrics] = {}
+
+    def fake_refinement(*args, **kwargs):
+        captured["metrics"] = kwargs["metrics"]
+        return ("atom safe_transfer() body: 0;", True, args[2])
+
+    with patch("agent.spec_extractor.run_refinement_loop", side_effect=fake_refinement):
+        extract_and_generate(
+            client,
+            "m",
+            "安全な銀行送金機能",
+            max_extraction_retries=1,
+            max_generation_retries=1,
+            max_refinements=0,
+        )
+
+    metrics = captured["metrics"]
+    assert metrics.extraction_attempts == 1
+    assert metrics.extraction_successes == 1
+
+
 def test_extract_spec_mcp_tool() -> None:
     fake_config = MagicMock()
     fake_config.model = "m"
     fake_config.mumei_bin = "mumei"
     fake_config.create_client.return_value = MagicMock()
 
+    def fake_extract(*args, **kwargs):
+        metrics = kwargs.get("metrics")
+        if metrics is not None:
+            metrics.record_extraction_attempt()
+            metrics.record_extraction_success()
+        return VALID_SPEC
+
     with patch("agent.config.AgentConfig", return_value=fake_config), patch(
         "agent.mumei_client.create_mumei_client", return_value=None
-    ), patch("agent.spec_extractor.extract_spec", return_value=VALID_SPEC):
+    ), patch("agent.spec_extractor.extract_spec", side_effect=fake_extract):
         payload = json.loads(mcp_server.extract_spec("安全な銀行送金機能", "financial"))
 
     assert payload["status"] == "ok"
     assert payload["spec"] == VALID_SPEC
+    assert payload["extraction_attempts"] == 1
+    assert payload["extraction_successes"] == 1
 
 
 def test_extract_spec_mcp_tool_uses_mumei_repo_binary_for_generate(tmp_path) -> None:

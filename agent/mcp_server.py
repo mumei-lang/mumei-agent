@@ -521,6 +521,7 @@ def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = 
 
     try:
         from agent.config import AgentConfig
+        from agent.metrics import Metrics
         from agent.mumei_client import create_mumei_client
         from agent.spec_extractor import (
             extract_and_generate as extract_and_generate_impl,
@@ -562,14 +563,22 @@ def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = 
                 max_generation_retries=config.max_retries,
             )
             return _ok({"spec": spec, "code": code, "verified": verified})
+        metrics = Metrics()
         spec = extract_spec_impl(
             client,
             config.model,
             natural_language,
             domain_hint=domain_hint,
             mumei_client=mumei,
+            metrics=metrics,
         )
-        return _ok({"spec": spec})
+        return _ok(
+            {
+                "spec": spec,
+                "extraction_attempts": metrics.extraction_attempts,
+                "extraction_successes": metrics.extraction_successes,
+            }
+        )
     except Exception as exc:
         return _err(f"extract_spec failed: {exc}")
 
