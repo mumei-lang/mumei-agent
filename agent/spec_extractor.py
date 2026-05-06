@@ -268,6 +268,7 @@ def extract_and_generate(
     Returns:
         A tuple of (code, verified, final_spec).
     """
+    metrics = Metrics()
     spec = extract_spec(
         client,
         model,
@@ -275,6 +276,7 @@ def extract_and_generate(
         domain_hint=domain_hint,
         mumei_client=mumei_client,
         max_retries=max_extraction_retries,
+        metrics=metrics,
     )
     return run_refinement_loop(
         client,
@@ -284,5 +286,5 @@ def extract_and_generate(
         max_refinements=max_refinements,
         config_max_retries=max_generation_retries,
         mumei_client=mumei_client,
-        metrics=Metrics(),
+        metrics=metrics,
     )
