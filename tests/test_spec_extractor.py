@@ -288,19 +288,51 @@ def test_extract_spec_does_not_record_keyword_validation_failure_as_success() ->
     assert metrics.extraction_successes == 1
 
 
+def test_extract_and_generate_shares_metrics_between_stages() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC))
+    captured: dict[str, Metrics] = {}
+
+    def fake_refinement(*args, **kwargs):
+        captured["metrics"] = kwargs["metrics"]
+        return ("atom safe_transfer() body: 0;", True, args[2])
+
+    with patch("agent.spec_extractor.run_refinement_loop", side_effect=fake_refinement):
+        extract_and_generate(
+            client,
+            "m",
+            "安全な銀行送金機能",
+            max_extraction_retries=1,
+            max_generation_retries=1,
+            max_refinements=0,
+        )
+
+    metrics = captured["metrics"]
+    assert metrics.extraction_attempts == 1
+    assert metrics.extraction_successes == 1
+
+
 def test_extract_spec_mcp_tool() -> None:
     fake_config = MagicMock()
     fake_config.model = "m"
     fake_config.mumei_bin = "mumei"
     fake_config.create_client.return_value = MagicMock()
 
+    def fake_extract(*args, **kwargs):
+        metrics = kwargs.get("metrics")
+        if metrics is not None:
+            metrics.record_extraction_attempt()
+            metrics.record_extraction_success()
+        return VALID_SPEC
+
     with patch("agent.config.AgentConfig", return_value=fake_config), patch(
         "agent.mumei_client.create_mumei_client", return_value=None
-    ), patch("agent.spec_extractor.extract_spec", return_value=VALID_SPEC):
+    ), patch("agent.spec_extractor.extract_spec", side_effect=fake_extract):
         payload = json.loads(mcp_server.extract_spec("安全な銀行送金機能", "financial"))
 
     assert payload["status"] == "ok"
     assert payload["spec"] == VALID_SPEC
+    assert payload["extraction_attempts"] == 1
+    assert payload["extraction_successes"] == 1
 
 
 def test_extract_spec_mcp_tool_uses_mumei_repo_binary_for_generate(tmp_path) -> None:
