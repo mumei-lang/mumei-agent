@@ -5,9 +5,11 @@ import json
 from unittest.mock import MagicMock, patch
 
 from agent import mcp_server
+from agent.metrics import Metrics
 from agent.prompts.spec_extraction import build_extraction_prompt
 from agent.spec_extractor import (
     _keyword_validation_errors,
+    _scan_std_catalog_local,
     _validate_extracted_spec,
     extract_and_generate,
     extract_spec,
@@ -138,6 +140,15 @@ def test_extract_spec_with_domain_hint() -> None:
     prompt = build_extraction_prompt("送金", domain_hint="financial")
 
     assert "Domain: financial" in prompt
+    assert "Financial domain conventions" in prompt
+    assert "sender_balance >= amount" in prompt
+
+
+def test_build_extraction_prompt_matches_domain_hint_substring() -> None:
+    prompt = build_extraction_prompt("PUT API", domain_hint="public web endpoint")
+
+    assert "Web API domain conventions" in prompt
+    assert "result >= 100 && result <= 599" in prompt
 
 
 def test_keyword_validation_rejects_example_copy() -> None:
@@ -184,6 +195,52 @@ def test_extract_spec_with_existing_catalog() -> None:
     prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert "safe_subtract" in prompt
     assert "Domain: financial" in prompt
+
+
+def test_scan_std_catalog_local_from_mumei_repo_env(tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "mumei"
+    std = repo / "std" / "math"
+    std.mkdir(parents=True)
+    (std / "safe.mm").write_text(
+        "atom safe_add(a: i64, b: i64) -> i64\n"
+        "trusted atom ffi_abs(x: i64) -> i64\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MUMEI_REPO", str(repo))
+    mumei_client = MagicMock()
+    mumei_client.mumei_bin = str(repo / "target" / "debug" / "mumei")
+
+    catalog = _scan_std_catalog_local(mumei_client)
+
+    assert "- std/math/safe.mm: safe_add, ffi_abs" in catalog
+
+
+def test_scan_std_catalog_local_from_mumei_bin(tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "mumei"
+    bin_dir = repo / "target" / "debug"
+    std = repo / "std"
+    bin_dir.mkdir(parents=True)
+    std.mkdir()
+    (std / "io.mm").write_text("trusted atom read_file(path: str) -> str\n", encoding="utf-8")
+    monkeypatch.delenv("MUMEI_REPO", raising=False)
+    mumei_client = MagicMock()
+    mumei_client.mumei_bin = str(bin_dir / "mumei")
+
+    catalog = _scan_std_catalog_local(mumei_client)
+
+    assert "- std/io.mm: read_file" in catalog
+
+
+def test_extract_spec_records_metrics() -> None:
+    client = _mock_client("not json", json.dumps(VALID_SPEC))
+    metrics = Metrics()
+
+    result = extract_spec(client, "m", "安全な加算", max_retries=2, metrics=metrics)
+
+    assert result == VALID_SPEC
+    assert metrics.extraction_attempts == 2
+    assert metrics.extraction_successes == 1
+    assert metrics.extraction_success_rate == 0.5
 
 
 def test_extract_spec_mcp_tool() -> None:

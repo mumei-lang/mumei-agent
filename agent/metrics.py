@@ -24,6 +24,8 @@ class Metrics:
     rule_based_successes: int = 0
     pattern_attempts: int = 0
     pattern_successes: int = 0
+    extraction_attempts: int = 0
+    extraction_successes: int = 0
     elapsed_seconds: float = 0.0
     challenge_name: str = ""
     llm_tokens_used: int = 0
@@ -32,6 +34,14 @@ class Metrics:
     def record_tokens(self, count: int) -> None:
         """Record LLM tokens consumed."""
         self.llm_tokens_used += count
+
+    def record_extraction_attempt(self) -> None:
+        """Record a natural-language spec extraction attempt."""
+        self.extraction_attempts += 1
+
+    def record_extraction_success(self) -> None:
+        """Record a successful natural-language spec extraction."""
+        self.extraction_successes += 1
 
     def record_rule_based_attempt(self, violation_type: str = "unknown") -> None:
         """Record a rule-based fix attempt.
@@ -99,6 +109,13 @@ class Metrics:
             return 0.0
         return self.rule_based_successes / self.rule_based_attempts
 
+    @property
+    def extraction_success_rate(self) -> float:
+        """Return the success rate for natural-language spec extraction."""
+        if self.extraction_attempts == 0:
+            return 0.0
+        return self.extraction_successes / self.extraction_attempts
+
     def record_attempt(self, violation_type: str = "unknown") -> None:
         """Record a fix or generation attempt."""
         self.total_attempts += 1
@@ -136,6 +153,8 @@ class Metrics:
             "rule_based_successes": self.rule_based_successes,
             "pattern_attempts": self.pattern_attempts,
             "pattern_successes": self.pattern_successes,
+            "extraction_attempts": self.extraction_attempts,
+            "extraction_successes": self.extraction_successes,
             "elapsed_seconds": self.elapsed_seconds,
             "challenge_name": self.challenge_name,
             "llm_tokens_used": self.llm_tokens_used,
@@ -171,6 +190,8 @@ class Metrics:
             rule_based_successes=data.get("rule_based_successes", 0),
             pattern_attempts=data.get("pattern_attempts", 0),
             pattern_successes=data.get("pattern_successes", 0),
+            extraction_attempts=data.get("extraction_attempts", 0),
+            extraction_successes=data.get("extraction_successes", 0),
             elapsed_seconds=data.get("elapsed_seconds", 0.0),
             challenge_name=data.get("challenge_name", ""),
             llm_tokens_used=data.get("llm_tokens_used", 0),

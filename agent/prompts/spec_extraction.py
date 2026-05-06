@@ -18,6 +18,36 @@ SPEC_EXTRACTION_SYSTEM_PROMPT = (
     "Output ONLY valid JSON, no explanation."
 )
 
+DOMAIN_TEMPLATES: dict[str, str] = {
+    "financial": (
+        "Financial domain conventions:\n"
+        "- Balance must be non-negative: `requires: balance >= 0`\n"
+        "- Transfer amount must be positive: `requires: amount > 0`\n"
+        "- Sender must have sufficient funds: `requires: sender_balance >= amount`\n"
+        "- No money creation: `ensures: result_sender + result_receiver == sender_balance + receiver_balance`\n"
+        "- Use effects: [State(balance)] for balance mutations\n"
+    ),
+    "security": (
+        "Security domain conventions:\n"
+        "- Input validation: all string inputs must be bounded\n"
+        "- Authentication state: `requires: is_authenticated == 1`\n"
+        "- Authorization: `requires: has_permission(user, resource) == 1`\n"
+        "- No information leakage in error paths\n"
+    ),
+    "iot": (
+        "IoT domain conventions:\n"
+        "- Sensor values have physical bounds: `requires: value >= MIN && value <= MAX`\n"
+        "- Timestamps are monotonically increasing\n"
+        "- Device state transitions must be valid\n"
+    ),
+    "web": (
+        "Web API domain conventions:\n"
+        "- HTTP status codes: `ensures: result >= 100 && result <= 599`\n"
+        "- Request validation before processing\n"
+        "- Idempotency for PUT/DELETE operations\n"
+    ),
+}
+
 
 _SCHEMA = """{
   "task_id": "vstd-contracts-safe-add",
@@ -109,6 +139,19 @@ def build_extraction_prompt(
         "```",
     ]
     if domain_hint:
+        matched_domain = None
+        for key in DOMAIN_TEMPLATES:
+            if key in domain_hint.lower():
+                matched_domain = key
+                break
+        if matched_domain:
+            parts.extend(
+                [
+                    "",
+                    "# Domain-specific contract patterns",
+                    DOMAIN_TEMPLATES[matched_domain],
+                ]
+            )
         parts.extend(
             [
                 "",
