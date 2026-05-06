@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from agent.config import AgentConfig
+from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
 from agent.spec_extractor import extract_and_generate, extract_spec
 
@@ -117,6 +118,7 @@ def main(args=None):
         else:
             code = ""
             verified = False
+            metrics = Metrics()
             spec = extract_spec(
                 client,
                 config.model,
@@ -124,6 +126,12 @@ def main(args=None):
                 domain_hint=domain_hint,
                 mumei_client=mumei,
                 max_retries=args.max_retries,
+                metrics=metrics,
+            )
+            print(
+                f"Extraction metrics: attempts={metrics.extraction_attempts}, "
+                f"successes={metrics.extraction_successes}",
+                file=sys.stderr,
             )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
