@@ -243,6 +243,51 @@ def test_extract_spec_records_metrics() -> None:
     assert metrics.extraction_success_rate == 0.5
 
 
+def test_extract_spec_does_not_record_keyword_validation_failure_as_success() -> None:
+    copied_example = dict(VALID_SPEC, task_id="nl-safe-add")
+    copied_example["atoms"] = [
+        {
+            "name": "safe_add",
+            "description": "Overflow-safe addition",
+            "inputs": [
+                {"name": "a", "type": "i64"},
+                {"name": "b", "type": "i64"},
+            ],
+            "return_type": "i64",
+            "requires": "a >= 0 && b >= 0",
+            "ensures": "result == a + b",
+            "effects": [],
+        }
+    ]
+    valid_kyc_spec = {
+        "task_id": "nl-kyc-risk",
+        "target_file": "std/security/kyc.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "classify_kyc_risk",
+                "description": "Classify KYC customer risk",
+                "inputs": [
+                    {"name": "is_pep", "type": "i64"},
+                    {"name": "has_sanction_hit", "type": "i64"},
+                ],
+                "return_type": "i64",
+                "requires": "is_pep >= 0 && is_pep <= 1",
+                "ensures": "result >= 0 && result <= 3",
+                "effects": [],
+            }
+        ],
+    }
+    client = _mock_client(json.dumps(copied_example), json.dumps(valid_kyc_spec))
+    metrics = Metrics()
+
+    result = extract_spec(client, "m", "KYC顧客分類。PEPは最高リスク。", max_retries=2, metrics=metrics)
+
+    assert result == valid_kyc_spec
+    assert metrics.extraction_attempts == 2
+    assert metrics.extraction_successes == 1
+
+
 def test_extract_spec_mcp_tool() -> None:
     fake_config = MagicMock()
     fake_config.model = "m"

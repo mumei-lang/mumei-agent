@@ -235,10 +235,10 @@ def extract_spec(
 
         validation_errors = _validate_extracted_spec(spec)
         if not validation_errors:
-            if metrics is not None:
-                metrics.record_extraction_success()
             validation_errors = _keyword_validation_errors(spec, natural_language)
         if not validation_errors:
+            if metrics is not None:
+                metrics.record_extraction_success()
             return spec
         last_errors = validation_errors
         feedback = "; ".join(validation_errors)
