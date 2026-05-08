@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,6 +21,49 @@ def _read_text(args: argparse.Namespace) -> str:
         return Path(args.text_file).read_text(encoding="utf-8")
     except OSError as exc:
         print(f"Error: Failed to read --text-file: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _safe_task_filename(spec: dict) -> str:
+    task_id = str(spec.get("task_id") or "extracted-spec")
+    safe = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "-"
+        for char in task_id
+    ).strip(".-")
+    return f"{safe or 'extracted-spec'}.json"
+
+
+def _write_forge_task_spec(spec: dict, tasks_dir: str) -> Path:
+    path = Path(tasks_dir).resolve() / _safe_task_filename(spec)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(spec, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return path
+
+
+def _run_forge(args: argparse.Namespace, config: AgentConfig, client, mumei, spec_path: Path) -> None:
+    from agent.forge import MumeiForge
+
+    tasks_dir = Path(args.forge_tasks_dir).resolve()
+    mumei_repo = (
+        Path(args.mumei_repo).resolve()
+        if args.mumei_repo
+        else Path(os.environ.get("MUMEI_REPO", ".")).resolve()
+    )
+    log_path = Path(args.forge_log_path).resolve() if args.forge_log_path else None
+    forge = MumeiForge(
+        config=None if args.forge_dry_run else config,
+        mumei_client=mumei,
+        mumei_repo_dir=mumei_repo,
+        forge_tasks_dir=tasks_dir,
+        log_path=log_path,
+        openai_client=None if args.forge_dry_run else client,
+    )
+    results = forge.run(dry_run=args.forge_dry_run, single_task_path=spec_path)
+    print(f"Forge task spec written to {spec_path}")
+    for result in results:
+        extra = f" ({result.error})" if result.error else ""
+        print(f"Forge result: {result.task_id} {result.status}{extra}")
+    if not args.forge_dry_run and any(result.status == "failed" for result in results):
         sys.exit(1)
 
 
@@ -43,7 +87,17 @@ def build_parser(parser=None):
     )
     parser.add_argument(
         "--domain",
-        choices=["financial", "regtech", "security", "data_structure", "general"],
+        choices=[
+            "financial",
+            "compliance",
+            "regtech",
+            "security",
+            "iot",
+            "web",
+            "data_structure",
+            "math",
+            "general",
+        ],
         default="",
         help="Optional domain hint for safer specification extraction",
     )
@@ -78,6 +132,31 @@ def build_parser(parser=None):
         type=int,
         default=3,
         help="Maximum spec refinement attempts when --generate is set",
+    )
+    parser.add_argument(
+        "--forge",
+        action="store_true",
+        help="Write the extracted spec to forge_tasks/ and run the forge pipeline",
+    )
+    parser.add_argument(
+        "--forge-tasks-dir",
+        default="forge_tasks",
+        help="Directory where --forge writes the extracted task spec",
+    )
+    parser.add_argument(
+        "--mumei-repo",
+        default=None,
+        help="Path to the mumei repo used by --forge",
+    )
+    parser.add_argument(
+        "--forge-dry-run",
+        action="store_true",
+        help="Preview the forge plan after extraction without generating code",
+    )
+    parser.add_argument(
+        "--forge-log-path",
+        default=None,
+        help="Path to forge_log.json when --forge runs",
     )
     return parser
 
@@ -142,6 +221,10 @@ def main(args=None):
         encoding="utf-8",
     )
     print(f"Extracted spec written to {args.output}")
+
+    if args.forge:
+        forge_spec_path = _write_forge_task_spec(spec, args.forge_tasks_dir)
+        _run_forge(args, config, client, mumei, forge_spec_path)
 
     if args.generate:
         if not code:
