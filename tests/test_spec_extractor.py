@@ -328,12 +328,23 @@ def test_keyword_validation_additional_keyword_groups() -> None:
         copied_example,
         "Queue enqueue should respect capacity before insertion.",
     )
+    list_errors = _keyword_validation_errors(copied_example, "List indexing checks bounds.")
     aml_errors = _keyword_validation_errors(copied_example, "AML sanction screening")
     overflow_errors = _keyword_validation_errors(copied_example, "Prevent overflow in math")
 
     assert queue_errors
+    assert list_errors
     assert aml_errors
     assert overflow_errors
+
+
+def test_keyword_validation_avoids_list_substring_false_positive() -> None:
+    errors = _keyword_validation_errors(
+        VALID_SPEC,
+        "Create a realistic authentication handler.",
+    )
+
+    assert errors == []
 
 
 def test_extract_and_generate_e2e_with_mumei_mock() -> None:

@@ -315,14 +315,17 @@ def _validate_extracted_spec(spec: dict) -> list[str]:
     return errors
 
 
+def _matches_requirement_trigger(trigger: str, lowered_prompt: str) -> bool:
+    if trigger.isascii():
+        pattern = rf"(?<![a-z0-9_]){re.escape(trigger)}(?![a-z0-9_])"
+        return re.search(pattern, lowered_prompt) is not None
+    return trigger in lowered_prompt
+
+
 def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
     """Return errors when extraction obviously copied the schema example."""
     lowered_prompt = natural_language.lower()
     spec_text = json.dumps(spec, ensure_ascii=False).lower()
-    # ASCII triggers use word-boundary matching to avoid false positives like
-    # "list" matching "realistic" or "queue" matching "queueing-system-text".
-    # Non-ASCII (Japanese) triggers fall back to substring matching since
-    # CJK text typically has no whitespace word boundaries.
     keyword_groups = [
         ("銀行", ("transfer", "balance", "amount", "送金", "残高")),
         ("送金", ("transfer", "balance", "amount", "送金", "残高")),
@@ -330,16 +333,15 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
         ("pep", ("kyc", "risk", "pep", "customer", "顧客")),
         ("aml", ("aml", "risk", "sanction", "customer", "kyc")),
         ("queue", ("queue", "enqueue", "dequeue", "capacity", "length")),
+        ("list", ("list", "index", "length", "bounds", "capacity")),
         ("overflow", ("overflow", "bounded", "max", "min", "安全")),
         ("絶対値", ("abs", "absolute", "non-negative", "非負")),
     ]
     errors = []
     for trigger, expected_keywords in keyword_groups:
-        if trigger.isascii():
-            matched = re.search(rf"\b{re.escape(trigger)}\b", lowered_prompt) is not None
-        else:
-            matched = trigger in lowered_prompt
-        if matched and not any(keyword in spec_text for keyword in expected_keywords):
+        if _matches_requirement_trigger(trigger, lowered_prompt) and not any(
+            keyword in spec_text for keyword in expected_keywords
+        ):
             errors.append(
                 f"spec does not reflect requirement keyword {trigger!r}; "
                 "do not copy the schema example"
