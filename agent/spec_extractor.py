@@ -1,6 +1,7 @@
 """Natural-language to forge task spec extraction."""
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -23,14 +24,181 @@ from agent.strategies.spec_refinement import run_refinement_loop
 logger = logging.getLogger(__name__)
 
 
-def _extract_json(raw: str) -> dict:
-    """Parse a JSON object from a raw LLM response."""
+def _json_object_candidate(raw: str) -> str:
+    """Extract the most likely JSON object payload from an LLM response."""
     json_match = re.search(r"```(?:json)?\s*\n(.*?)```", raw, re.DOTALL)
-    json_str = json_match.group(1).strip() if json_match else raw.strip()
-    parsed = json.loads(json_str)
-    if not isinstance(parsed, dict):
-        raise ValueError("extracted JSON must be an object")
-    return parsed
+    if json_match:
+        return json_match.group(1).strip()
+
+    text = raw.strip()
+    start = text.find("{")
+    if start < 0:
+        return text
+    end = text.rfind("}")
+    if end >= start:
+        return text[start:end + 1].strip()
+    return text[start:].strip()
+
+
+def _strip_json_comments(text: str) -> str:
+    """Remove JSON-like comment lines and inline comments outside strings."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("//") or stripped.startswith("#"):
+            continue
+        lines.append(_strip_inline_json_comment(line))
+    return "\n".join(lines).strip()
+
+
+def _strip_inline_json_comment(line: str) -> str:
+    quote = ""
+    escaped = False
+    output: list[str] = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            index += 1
+            continue
+
+        if char in {"'", '"'}:
+            quote = char
+            output.append(char)
+            index += 1
+            continue
+        if char == "#" or (char == "/" and index + 1 < len(line) and line[index + 1] == "/"):
+            break
+        output.append(char)
+        index += 1
+    return "".join(output).rstrip()
+
+
+def _remove_trailing_commas(text: str) -> str:
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def _complete_json_closers(text: str) -> str:
+    stack: list[str] = []
+    quote = ""
+    escaped = False
+    open_to_close = {"{": "}", "[": "]"}
+    close_to_open = {"}": "{", "]": "["}
+
+    for char in text:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in open_to_close:
+            stack.append(char)
+        elif char in close_to_open and stack and stack[-1] == close_to_open[char]:
+            stack.pop()
+
+    return text.rstrip() + "".join(open_to_close[char] for char in reversed(stack))
+
+
+def _single_quoted_json_to_double(text: str) -> str:
+    output: list[str] = []
+    quote = ""
+    escaped = False
+    for char in text:
+        if quote == "'":
+            if escaped:
+                output.append(char)
+                escaped = False
+            elif char == "\\":
+                output.append(char)
+                escaped = True
+            elif char == "'":
+                output.append('"')
+                quote = ""
+            elif char == '"':
+                output.append('\\"')
+            else:
+                output.append(char)
+            continue
+        if quote == '"':
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = ""
+            continue
+        if char == "'":
+            output.append('"')
+            quote = "'"
+        else:
+            if char == '"':
+                quote = '"'
+            output.append(char)
+    return "".join(output)
+
+
+def _json_repair_candidates(json_str: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    add(json_str)
+    for base in (json_str, _strip_json_comments(json_str)):
+        add(base)
+        no_trailing = _remove_trailing_commas(base)
+        add(no_trailing)
+        add(_complete_json_closers(no_trailing))
+        single_repaired = _single_quoted_json_to_double(no_trailing)
+        add(single_repaired)
+        add(_complete_json_closers(single_repaired))
+    return candidates
+
+
+def _parse_json_candidate(candidate: str) -> object:
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return ast.literal_eval(candidate)
+    except (SyntaxError, ValueError):
+        return json.loads(candidate)
+
+
+def _extract_json(raw: str) -> dict:
+    """Parse and repair a JSON object from a raw LLM response."""
+    json_str = _json_object_candidate(raw)
+    last_error: Exception | None = None
+    for candidate in _json_repair_candidates(json_str):
+        try:
+            parsed = _parse_json_candidate(candidate)
+        except (json.JSONDecodeError, ValueError, SyntaxError) as exc:
+            last_error = exc
+            continue
+        if not isinstance(parsed, dict):
+            raise ValueError("extracted JSON must be an object")
+        return parsed
+    if last_error is not None:
+        raise last_error
+    raise ValueError("extracted JSON must be non-empty")
 
 
 def _catalog_to_prompt_text(catalog: Any) -> str:
@@ -147,6 +315,13 @@ def _validate_extracted_spec(spec: dict) -> list[str]:
     return errors
 
 
+def _matches_requirement_trigger(trigger: str, lowered_prompt: str) -> bool:
+    if trigger.isascii():
+        pattern = rf"(?<![a-z0-9_]){re.escape(trigger)}(?![a-z0-9_])"
+        return re.search(pattern, lowered_prompt) is not None
+    return trigger in lowered_prompt
+
+
 def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
     """Return errors when extraction obviously copied the schema example."""
     lowered_prompt = natural_language.lower()
@@ -156,11 +331,15 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
         ("送金", ("transfer", "balance", "amount", "送金", "残高")),
         ("kyc", ("kyc", "risk", "pep", "customer", "顧客")),
         ("pep", ("kyc", "risk", "pep", "customer", "顧客")),
+        ("aml", ("aml", "risk", "sanction", "customer", "kyc")),
+        ("queue", ("queue", "enqueue", "dequeue", "capacity", "length")),
+        ("list", ("list", "index", "length", "bounds", "capacity")),
+        ("overflow", ("overflow", "bounded", "max", "min", "安全")),
         ("絶対値", ("abs", "absolute", "non-negative", "非負")),
     ]
     errors = []
     for trigger, expected_keywords in keyword_groups:
-        if trigger in lowered_prompt and not any(
+        if _matches_requirement_trigger(trigger, lowered_prompt) and not any(
             keyword in spec_text for keyword in expected_keywords
         ):
             errors.append(
@@ -168,6 +347,31 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
                 "do not copy the schema example"
             )
     return errors
+
+
+_RETRY_FEEDBACK_RAW_LIMIT = 2000
+
+
+def _format_retry_feedback(raw_output: str, errors: list[str]) -> str:
+    """Format retry feedback with concrete errors and prior LLM output.
+
+    The previous LLM output is truncated to ``_RETRY_FEEDBACK_RAW_LIMIT``
+    characters to avoid unbounded prompt growth across retries (which would
+    inflate token usage and risk exceeding context limits).
+    """
+    truncated = raw_output.strip()
+    if len(truncated) > _RETRY_FEEDBACK_RAW_LIMIT:
+        truncated = (
+            truncated[:_RETRY_FEEDBACK_RAW_LIMIT]
+            + f"\n... [truncated, {len(raw_output) - _RETRY_FEEDBACK_RAW_LIMIT} chars omitted]"
+        )
+    return (
+        "Validation errors:\n"
+        + "\n".join(f"- {error}" for error in errors)
+        + "\n\nPrevious LLM output:\n```\n"
+        + truncated
+        + "\n```"
+    )
 
 
 def extract_spec(
@@ -230,7 +434,7 @@ def extract_spec(
             spec = _extract_json(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             last_errors = [f"invalid JSON: {exc}"]
-            feedback = "; ".join(last_errors)
+            feedback = _format_retry_feedback(raw, last_errors)
             continue
 
         validation_errors = _validate_extracted_spec(spec)
@@ -241,7 +445,7 @@ def extract_spec(
                 metrics.record_extraction_success()
             return spec
         last_errors = validation_errors
-        feedback = "; ".join(validation_errors)
+        feedback = _format_retry_feedback(raw, validation_errors)
 
     raise ValueError(
         f"failed to extract valid forge task spec after {attempts} attempts: "

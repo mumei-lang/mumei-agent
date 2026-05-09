@@ -14,7 +14,11 @@ SPEC_EXTRACTION_SYSTEM_PROMPT = (
     "Your output must be a valid forge task spec JSON. "
     "Extract ALL implicit safety properties the user would expect "
     "(e.g., no overflow, no division by zero, non-negative balances). "
-    "If the user's description is ambiguous, choose the SAFER interpretation.\n\n"
+    "If the user's description is ambiguous, choose the SAFER interpretation. "
+    "When the requirement describes multiple related operations, produce one "
+    "atom per operation in the atoms array instead of collapsing them into a "
+    "single atom. For example, bank-transfer requirements with both debit and "
+    "credit behavior should emit debit_transfer and credit_transfer atoms.\n\n"
     "Output ONLY valid JSON, no explanation."
 )
 
@@ -26,6 +30,30 @@ DOMAIN_TEMPLATES: dict[str, str] = {
         "- Sender must have sufficient funds: `requires: sender_balance >= amount`\n"
         "- No money creation: `ensures: result_sender + result_receiver == sender_balance + receiver_balance`\n"
         "- Use effects: [State(balance)] for balance mutations\n"
+    ),
+    "compliance": (
+        "Compliance / KYC / AML / RegTech domain conventions:\n"
+        "- Model customer categories as CustomerType-like enum values: Individual, Corporate, Government, PEP\n"
+        "- RiskLevel outputs should be bounded, e.g. `ensures: result >= Low && result <= Critical`\n"
+        "- PEP or sanctions hits imply high risk: `ensures: is_pep == 1 ==> result >= High`\n"
+        "- AML screening should preserve auditability and not silently drop flagged customers\n"
+        "- Use forall-style patterns for portfolio rules: `forall customer in customers: screened(customer)`\n"
+    ),
+    "data_structure": (
+        "Data-structure domain conventions:\n"
+        "- Boundary checks before indexing: `requires: index >= 0 && index < length`\n"
+        "- Capacity constraints for containers: `requires: length < capacity` before push/enqueue\n"
+        "- Pop/dequeue requires non-empty state: `requires: length > 0`\n"
+        "- Size updates are exact: `ensures: result_length == length + 1` or `length - 1`\n"
+        "- Preserve ordering/FIFO/LIFO invariants for queues, lists, stacks, and deques\n"
+    ),
+    "math": (
+        "Math domain conventions:\n"
+        "- Prevent overflow: bound operands with min/max constraints before arithmetic\n"
+        "- Define domain restrictions explicitly, e.g. denominator != 0, input >= 0 for sqrt\n"
+        "- Absolute-value results must be non-negative and preserve magnitude\n"
+        "- Monotonic functions should state monotonicity where relevant\n"
+        "- Use effects: [] for pure mathematical functions\n"
     ),
     "security": (
         "Security domain conventions:\n"
@@ -46,6 +74,16 @@ DOMAIN_TEMPLATES: dict[str, str] = {
         "- Request validation before processing\n"
         "- Idempotency for PUT/DELETE operations\n"
     ),
+}
+
+DOMAIN_ALIASES: dict[str, str] = {
+    "regtech": "compliance",
+    "kyc": "compliance",
+    "aml": "compliance",
+    "container": "data_structure",
+    "queue": "data_structure",
+    "list": "data_structure",
+    "mathematics": "math",
 }
 
 
@@ -126,6 +164,8 @@ def build_extraction_prompt(
         "- `target_file`: path under `std/`, for example `std/math/safe_add.mm`.",
         "- `mode`: one of `append`, `create`, or `replace`.",
         "- `atoms`: non-empty list of atom specs.",
+        "- Use multiple atom entries when the requirement describes multiple related operations.",
+        "- Example: `銀行送金機能。送金と受取の両方を実装` should produce separate `debit_transfer` and `credit_transfer` atoms.",
         "- Each atom must include `name`, `description`, `inputs`, `return_type`, "
         "`requires`, `ensures`, and `effects`.",
         '- `inputs` must be a list of `{"name", "type"}` objects.',
@@ -140,10 +180,16 @@ def build_extraction_prompt(
     ]
     if domain_hint:
         matched_domain = None
-        for key in DOMAIN_TEMPLATES:
-            if key in domain_hint.lower():
-                matched_domain = key
+        lowered_domain = domain_hint.lower()
+        for alias, canonical in DOMAIN_ALIASES.items():
+            if alias in lowered_domain:
+                matched_domain = canonical
                 break
+        if matched_domain is None:
+            for key in DOMAIN_TEMPLATES:
+                if key in lowered_domain:
+                    matched_domain = key
+                    break
         if matched_domain:
             parts.extend(
                 [
