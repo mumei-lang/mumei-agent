@@ -319,6 +319,10 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
     """Return errors when extraction obviously copied the schema example."""
     lowered_prompt = natural_language.lower()
     spec_text = json.dumps(spec, ensure_ascii=False).lower()
+    # ASCII triggers use word-boundary matching to avoid false positives like
+    # "list" matching "realistic" or "queue" matching "queueing-system-text".
+    # Non-ASCII (Japanese) triggers fall back to substring matching since
+    # CJK text typically has no whitespace word boundaries.
     keyword_groups = [
         ("銀行", ("transfer", "balance", "amount", "送金", "残高")),
         ("送金", ("transfer", "balance", "amount", "送金", "残高")),
@@ -326,15 +330,16 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
         ("pep", ("kyc", "risk", "pep", "customer", "顧客")),
         ("aml", ("aml", "risk", "sanction", "customer", "kyc")),
         ("queue", ("queue", "enqueue", "dequeue", "capacity", "length")),
-        ("list", ("list", "index", "length", "bounds", "capacity")),
         ("overflow", ("overflow", "bounded", "max", "min", "安全")),
         ("絶対値", ("abs", "absolute", "non-negative", "非負")),
     ]
     errors = []
     for trigger, expected_keywords in keyword_groups:
-        if trigger in lowered_prompt and not any(
-            keyword in spec_text for keyword in expected_keywords
-        ):
+        if trigger.isascii():
+            matched = re.search(rf"\b{re.escape(trigger)}\b", lowered_prompt) is not None
+        else:
+            matched = trigger in lowered_prompt
+        if matched and not any(keyword in spec_text for keyword in expected_keywords):
             errors.append(
                 f"spec does not reflect requirement keyword {trigger!r}; "
                 "do not copy the schema example"
@@ -342,13 +347,27 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
     return errors
 
 
+_RETRY_FEEDBACK_RAW_LIMIT = 2000
+
+
 def _format_retry_feedback(raw_output: str, errors: list[str]) -> str:
-    """Format retry feedback with concrete errors and prior LLM output."""
+    """Format retry feedback with concrete errors and prior LLM output.
+
+    The previous LLM output is truncated to ``_RETRY_FEEDBACK_RAW_LIMIT``
+    characters to avoid unbounded prompt growth across retries (which would
+    inflate token usage and risk exceeding context limits).
+    """
+    truncated = raw_output.strip()
+    if len(truncated) > _RETRY_FEEDBACK_RAW_LIMIT:
+        truncated = (
+            truncated[:_RETRY_FEEDBACK_RAW_LIMIT]
+            + f"\n... [truncated, {len(raw_output) - _RETRY_FEEDBACK_RAW_LIMIT} chars omitted]"
+        )
     return (
         "Validation errors:\n"
         + "\n".join(f"- {error}" for error in errors)
         + "\n\nPrevious LLM output:\n```\n"
-        + raw_output.strip()
+        + truncated
         + "\n```"
     )
 

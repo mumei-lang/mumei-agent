@@ -10,7 +10,7 @@ from pathlib import Path
 from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
-from agent.spec_extractor import extract_and_generate, extract_spec
+from agent.spec_extractor import extract_spec
 
 
 def _read_text(args: argparse.Namespace) -> str:
@@ -178,40 +178,50 @@ def main(args=None):
     domain_hint = "" if args.domain == "general" else args.domain
 
     try:
+        # Always extract the raw forge task spec first so that --forge has
+        # access to the unnormalized spec (with `atoms`, `task_id`, `mode`).
+        # extract_and_generate's returned spec is post-normalization and is
+        # not a valid forge task spec for single-atom requirements.
+        metrics = Metrics()
+        forge_spec = extract_spec(
+            client,
+            config.model,
+            natural_language,
+            domain_hint=domain_hint,
+            mumei_client=mumei,
+            max_retries=args.max_retries,
+            metrics=metrics,
+        )
+        print(
+            f"Extraction metrics: attempts={metrics.extraction_attempts}, "
+            f"successes={metrics.extraction_successes}",
+            file=sys.stderr,
+        )
+
         if args.generate:
+            from agent.generate import _normalize_forge_task_spec
+            from agent.strategies.generate_strategy import generate_code
+            from agent.strategies.spec_refinement import run_refinement_loop
+
             max_generation_retries = (
                 args.max_generation_retries
                 if args.max_generation_retries is not None
                 else config.max_retries
             )
-            code, verified, spec = extract_and_generate(
+            code, verified, spec = run_refinement_loop(
                 client,
                 config.model,
-                natural_language,
-                domain_hint=domain_hint,
-                mumei_client=mumei,
-                max_extraction_retries=args.max_retries,
-                max_generation_retries=max_generation_retries,
+                _normalize_forge_task_spec(forge_spec),
+                generate_code,
                 max_refinements=args.max_refinements,
+                config_max_retries=max_generation_retries,
+                mumei_client=mumei,
+                metrics=metrics,
             )
         else:
             code = ""
             verified = False
-            metrics = Metrics()
-            spec = extract_spec(
-                client,
-                config.model,
-                natural_language,
-                domain_hint=domain_hint,
-                mumei_client=mumei,
-                max_retries=args.max_retries,
-                metrics=metrics,
-            )
-            print(
-                f"Extraction metrics: attempts={metrics.extraction_attempts}, "
-                f"successes={metrics.extraction_successes}",
-                file=sys.stderr,
-            )
+            spec = forge_spec
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -223,7 +233,9 @@ def main(args=None):
     print(f"Extracted spec written to {args.output}")
 
     if args.forge:
-        forge_spec_path = _write_forge_task_spec(spec, args.forge_tasks_dir)
+        # Use the original (unnormalized) forge task spec, which is required
+        # to have `atoms`, `task_id`, and `mode` for the forge pipeline.
+        forge_spec_path = _write_forge_task_spec(forge_spec, args.forge_tasks_dir)
         _run_forge(args, config, client, mumei, forge_spec_path)
 
     if args.generate:
