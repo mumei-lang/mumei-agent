@@ -160,9 +160,14 @@ class TestHealFile:
         fake_config.strategy = "single"
         fake_config.create_client.return_value = MagicMock()
 
+        fake_mumei = MagicMock()
+
         with patch(
             "agent.config.AgentConfig", return_value=fake_config
         ), patch(
+            "agent.mumei_client.create_mumei_client",
+            return_value=fake_mumei,
+        ) as mock_create_mumei, patch(
             "agent.strategies.fix_strategy.get_fix",
             return_value="atom fixed() ensures: true; body: 0;",
         ) as mock_fix:
@@ -174,6 +179,8 @@ class TestHealFile:
             )
 
         mock_fix.assert_called_once()
+        mock_create_mumei.assert_called_once_with("mumei")
+        assert mock_fix.call_args.kwargs["mumei_client"] is fake_mumei
         assert result["status"] == "ok"
         assert result["success"] is True
         assert "atom fixed" in result["healed_code"]

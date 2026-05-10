@@ -271,6 +271,7 @@ def heal_file(source_code: str, error_report: str = "") -> str:
                     pass
 
     try:
+        mumei = create_mumei_client(config.mumei_bin)
         healed = get_fix(
             client=client,
             model=config.model,
@@ -278,6 +279,7 @@ def heal_file(source_code: str, error_report: str = "") -> str:
             error_log=error_log or "",
             report_data=report_data,
             strategy=getattr(config, "strategy", "single"),
+            mumei_client=mumei,
         )
     except Exception as exc:
         return _err(f"fix_strategy.get_fix raised: {exc}")
