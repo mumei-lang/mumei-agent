@@ -49,6 +49,9 @@ The agent uses an OpenAI-compatible client.
 | `USE_MCP_CLIENT` | When true, route verification through the Mumei MCP client before falling back to subprocess verification. |
 | `PREFER_MCP_GAPS` | When true, prefer the Mumei MCP server gap analyzer. |
 | `AGENT_STRATEGY` | Repair strategy: `single` or `multi-stage`. |
+| `ENABLE_LATENT_DEBUG` | When true, enable latent-space debugging in fix strategy (experimental). |
+| `ENABLE_DENSE_PROPERTIES` | When true, enable high-density property generation (experimental). |
+| `ENABLE_LATENT_PROTOCOL` | When true, enable the latent representation MCP protocol (experimental). |
 
 Local Ollama smoke-test example:
 
@@ -106,6 +109,7 @@ Important mumei-agent MCP tools:
 | `list_forge_log(log_path)` | Read `forge_log.json`. |
 | `get_agent_status()` | Inspect LLM settings, Mumei binary, feature flags, and subcommands. |
 | `extract_spec(natural_language, domain_hint, generate)` | Extract NL requirements into a forge task spec; optionally generate verified code. |
+| `send_latent_message(message, context, verify)` | Encode an inter-agent message as a latent vector when `ENABLE_LATENT_PROTOCOL=true`. |
 
 ## Common Workflows
 

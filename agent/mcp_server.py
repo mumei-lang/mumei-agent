@@ -271,6 +271,7 @@ def heal_file(source_code: str, error_report: str = "") -> str:
                     pass
 
     try:
+        mumei = create_mumei_client(config.mumei_bin)
         healed = get_fix(
             client=client,
             model=config.model,
@@ -278,6 +279,7 @@ def heal_file(source_code: str, error_report: str = "") -> str:
             error_log=error_log or "",
             report_data=report_data,
             strategy=getattr(config, "strategy", "single"),
+            mumei_client=mumei,
         )
     except Exception as exc:
         return _err(f"fix_strategy.get_fix raised: {exc}")
@@ -485,13 +487,84 @@ def get_agent_status() -> str:
                 "list_forge_log",
                 "get_agent_status",
                 "extract_spec",
+                "send_latent_message",
             ],
             "feature_flags": {
                 "PREFER_MCP_GAPS": os.environ.get("PREFER_MCP_GAPS", ""),
                 "USE_MCP_CLIENT": os.environ.get("USE_MCP_CLIENT", ""),
                 "INJECT_CORE_AXIOMS": os.environ.get("INJECT_CORE_AXIOMS", ""),
+                "ENABLE_LATENT_DEBUG": os.environ.get("ENABLE_LATENT_DEBUG", ""),
+                "ENABLE_DENSE_PROPERTIES": os.environ.get("ENABLE_DENSE_PROPERTIES", ""),
+                "ENABLE_LATENT_PROTOCOL": os.environ.get("ENABLE_LATENT_PROTOCOL", ""),
             },
             "python": sys.version,
+        }
+    )
+
+
+@mcp.tool()
+def send_latent_message(
+    message: str,
+    context: str = "{}",
+    verify: bool = True,
+) -> str:
+    """Send a message using the experimental latent protocol.
+
+    Args:
+        message: JSON object string representing the message.
+        context: Optional JSON object string for surrounding context.
+        verify: When true, verify a Mumei representation of the latent vector.
+    """
+    try:
+        from agent.config import AgentConfig
+        from agent.latent_protocol import LatentProtocol
+        from agent.mumei_client import create_mumei_client
+    except Exception as exc:
+        return _err(f"failed to import agent modules: {exc}")
+
+    try:
+        message_dict = json.loads(message)
+    except json.JSONDecodeError as exc:
+        return _err(f"message is not valid JSON: {exc}")
+    if not isinstance(message_dict, dict):
+        return _err("message must decode to a JSON object")
+
+    try:
+        context_dict = json.loads(context)
+    except json.JSONDecodeError:
+        context_dict = {}
+    if not isinstance(context_dict, dict):
+        context_dict = {}
+
+    try:
+        config = AgentConfig()
+    except Exception as exc:
+        return _err(f"AgentConfig() failed: {exc}")
+    if not config.enable_latent_protocol:
+        return _err(
+            "ENABLE_LATENT_PROTOCOL is not enabled",
+            hint="set ENABLE_LATENT_PROTOCOL=true in .env",
+        )
+
+    protocol = LatentProtocol()
+    latent_vector = protocol.encode_message(message_dict, context_dict)
+
+    verification_result = None
+    if verify:
+        try:
+            mumei_client = create_mumei_client(config.mumei_bin)
+            verification_result = protocol.verify_message(
+                latent_vector,
+                mumei_client,
+            )
+        except Exception as exc:
+            return _err(f"verification failed: {exc}")
+
+    return _ok(
+        {
+            "latent_vector": latent_vector.tolist(),
+            "decoded": protocol.decode_message(latent_vector),
+            "verification_result": verification_result,
         }
     )
 

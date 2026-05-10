@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "AI-driven autonomous fix loop for the Mumei programming language"
 requires-python = ">=3.11"
 dependencies = [
+    "numpy>=1.26",
     "openai>=1.0",
     "python-dotenv>=1.0",
     "streamlit>=1.30",

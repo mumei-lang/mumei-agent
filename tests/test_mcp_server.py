@@ -41,8 +41,16 @@ class TestGetAgentStatus:
             "propose_forge_tasks",
             "list_forge_log",
             "get_agent_status",
+            "send_latent_message",
         }
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
+        assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
+
+    def test_status_tools_match_registered_tools(self) -> None:
+        result = _payload(mcp_server.get_agent_status())
+        registered = set(mcp_server.mcp._tool_manager._tools)
+        assert set(result["mcp_tools"]) == registered
+        assert "send_latent_message" in registered
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +160,14 @@ class TestHealFile:
         fake_config.strategy = "single"
         fake_config.create_client.return_value = MagicMock()
 
+        fake_mumei = MagicMock()
+
         with patch(
             "agent.config.AgentConfig", return_value=fake_config
         ), patch(
+            "agent.mumei_client.create_mumei_client",
+            return_value=fake_mumei,
+        ) as mock_create_mumei, patch(
             "agent.strategies.fix_strategy.get_fix",
             return_value="atom fixed() ensures: true; body: 0;",
         ) as mock_fix:
@@ -166,6 +179,8 @@ class TestHealFile:
             )
 
         mock_fix.assert_called_once()
+        mock_create_mumei.assert_called_once_with("mumei")
+        assert mock_fix.call_args.kwargs["mumei_client"] is fake_mumei
         assert result["status"] == "ok"
         assert result["success"] is True
         assert "atom fixed" in result["healed_code"]
@@ -276,3 +291,35 @@ class TestListForgeLog:
         log.write_text("not json", encoding="utf-8")
         result = _payload(mcp_server.list_forge_log(str(log)))
         assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# send_latent_message
+# ---------------------------------------------------------------------------
+
+
+class TestSendLatentMessage:
+    def test_requires_feature_flag(self) -> None:
+        result = _payload(mcp_server.send_latent_message('{"action":"generate"}'))
+        assert result["status"] == "error"
+        assert "ENABLE_LATENT_PROTOCOL" in result["error"]
+
+    def test_invalid_json_returns_error(self, monkeypatch) -> None:
+        monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
+        result = _payload(mcp_server.send_latent_message("{not json", verify=False))
+        assert result["status"] == "error"
+        assert "valid JSON" in result["error"]
+
+    def test_encodes_when_enabled_without_verification(self, monkeypatch) -> None:
+        monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
+        result = _payload(
+            mcp_server.send_latent_message(
+                json.dumps({"action": "generate"}),
+                context=json.dumps({"domain": "arithmetic"}),
+                verify=False,
+            )
+        )
+        assert result["status"] == "ok"
+        assert len(result["latent_vector"]) == 16
+        assert result["decoded"]["decoded"] is True
+        assert result["verification_result"] is None
