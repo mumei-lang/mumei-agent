@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from unittest.mock import Mock
-
 from agent.strategies.dense_property_generator import DensePropertyGenerator
+from agent.strategies.generate_strategy import generate_code
 from agent.strategies.generate_strategy import _apply_dense_properties
 
 
@@ -78,3 +78,51 @@ def test_apply_dense_properties_replaces_first_contracts() -> None:
 
     assert "requires: a > 0;" in updated
     assert "ensures: result >= a;" in updated
+
+
+def test_multi_atom_generation_applies_dense_properties() -> None:
+    """Dense properties are not skipped by the multi-atom dispatch path."""
+    generated = """```mumei
+atom first() -> i64
+    requires: true;
+    ensures: true;
+    body: { 1 }
+
+atom second() -> i64
+    requires: true;
+    ensures: true;
+    body: { 2 }
+```"""
+    spec = {
+        "module_name": "demo",
+        "atoms": [
+            {"name": "first", "params": [], "return_type": "i64"},
+            {"name": "second", "params": [], "return_type": "i64"},
+        ],
+    }
+    client = Mock()
+    generation_response = Mock()
+    generation_response.choices = [Mock()]
+    generation_response.choices[0].message.content = generated
+    dense_response = Mock()
+    dense_response.choices = [Mock()]
+    dense_response.choices[0].message.content = (
+        "requires: false;\nensures: result == 1;"
+    )
+    client.chat.completions.create.side_effect = [
+        generation_response,
+        dense_response,
+    ]
+
+    code, verified = generate_code(
+        client,
+        "test-model",
+        spec,
+        mumei_client=None,
+        enable_dense_properties=True,
+    )
+
+    assert verified is True
+    assert "requires: false;" in code
+    assert "ensures: result == 1;" in code
+    assert client.chat.completions.create.call_count == 2

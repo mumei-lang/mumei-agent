@@ -314,6 +314,7 @@ def generate_multi_atom(
     mumei_client: MumeiClient | None = None,
     metrics: Metrics | None = None,
     thought_process: ThoughtProcess | None = None,
+    enable_dense_properties: bool | None = None,
 ) -> tuple[str, bool]:
     """Generate a multi-atom Mumei module from a specification.
 
@@ -328,12 +329,22 @@ def generate_multi_atom(
         config_max_retries: Maximum number of fix attempts.
         mumei_client: MumeiClient for running check/verify.
         metrics: Optional Metrics instance for tracking.
+        thought_process: Optional ThoughtProcess for explainability.
+        enable_dense_properties: When true, generate dense contracts after
+            initial code generation.
 
     Returns:
         A tuple of (code, verified).
     """
     if metrics is None:
         metrics = Metrics()
+
+    if enable_dense_properties is None:
+        try:
+            from agent.config import AgentConfig
+            enable_dense_properties = AgentConfig().enable_dense_properties
+        except Exception:
+            enable_dense_properties = False
 
     # Extract cross_file_context without mutating the caller's spec dict —
     # ``run_refinement_loop`` (and any other caller) may reuse the same
@@ -397,6 +408,14 @@ def generate_multi_atom(
     if not generated_code:
         _logger.warning("LLM returned empty multi-atom generation result")
         return "", False
+
+    if enable_dense_properties:
+        generated_code = _try_apply_dense_properties(
+            generated_code,
+            spec_for_json,
+            client,
+            model,
+        )
 
     if mumei_client is None:
         metrics.record_success("generation")
@@ -651,6 +670,7 @@ def generate_code(
             mumei_client=mumei_client,
             metrics=metrics,
             thought_process=thought_process,
+            enable_dense_properties=enable_dense_properties,
         )
 
     if metrics is None:
