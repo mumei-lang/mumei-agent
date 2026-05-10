@@ -500,6 +500,7 @@ def get_agent_status() -> str:
     )
 
 
+@mcp.tool()
 def send_latent_message(
     message: str,
     context: str = "{}",
@@ -566,7 +567,6 @@ def send_latent_message(
     )
 
 
-@mcp.tool()
 @mcp.tool()
 def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = False, mumei_repo: str = "") -> str:
     """Extract a Mumei forge task spec from natural language requirements.

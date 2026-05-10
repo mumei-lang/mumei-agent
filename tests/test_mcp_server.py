@@ -46,6 +46,12 @@ class TestGetAgentStatus:
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
         assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
 
+    def test_status_tools_match_registered_tools(self) -> None:
+        result = _payload(mcp_server.get_agent_status())
+        registered = set(mcp_server.mcp._tool_manager._tools)
+        assert set(result["mcp_tools"]) == registered
+        assert "send_latent_message" in registered
+
 
 # ---------------------------------------------------------------------------
 # forge_task
