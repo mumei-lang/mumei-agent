@@ -7,6 +7,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse common environment boolean values."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+
 def _default_core_axiom_path() -> str:
     """Default search path for ``std/core.mm`` (Phase 2-B).
 
@@ -42,7 +50,13 @@ class AgentConfig:
     mumei_bin: str = field(default_factory=lambda: os.getenv("MUMEI_BIN", "mumei"))
     max_retries: int = 5
     strategy: str = field(default_factory=lambda: os.getenv("AGENT_STRATEGY", "single"))
-    visualizer_sync: bool = field(default_factory=lambda: os.getenv("ENABLE_VISUALIZER_SYNC", "false").lower() == "true")
+    visualizer_sync: bool = field(default_factory=lambda: _env_bool("ENABLE_VISUALIZER_SYNC"))
+
+    # Phase 12 — experimental NLAE-inspired features.  All remain opt-in
+    # so default generation, healing, and MCP behavior stays unchanged.
+    enable_latent_debug: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_DEBUG"))
+    enable_dense_properties: bool = field(default_factory=lambda: _env_bool("ENABLE_DENSE_PROPERTIES"))
+    enable_latent_protocol: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_PROTOCOL"))
 
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)

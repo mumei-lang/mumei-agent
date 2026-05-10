@@ -41,8 +41,10 @@ class TestGetAgentStatus:
             "propose_forge_tasks",
             "list_forge_log",
             "get_agent_status",
+            "send_latent_message",
         }
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
+        assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
 
 
 # ---------------------------------------------------------------------------
@@ -276,3 +278,35 @@ class TestListForgeLog:
         log.write_text("not json", encoding="utf-8")
         result = _payload(mcp_server.list_forge_log(str(log)))
         assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# send_latent_message
+# ---------------------------------------------------------------------------
+
+
+class TestSendLatentMessage:
+    def test_requires_feature_flag(self) -> None:
+        result = _payload(mcp_server.send_latent_message('{"action":"generate"}'))
+        assert result["status"] == "error"
+        assert "ENABLE_LATENT_PROTOCOL" in result["error"]
+
+    def test_invalid_json_returns_error(self, monkeypatch) -> None:
+        monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
+        result = _payload(mcp_server.send_latent_message("{not json", verify=False))
+        assert result["status"] == "error"
+        assert "valid JSON" in result["error"]
+
+    def test_encodes_when_enabled_without_verification(self, monkeypatch) -> None:
+        monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
+        result = _payload(
+            mcp_server.send_latent_message(
+                json.dumps({"action": "generate"}),
+                context=json.dumps({"domain": "arithmetic"}),
+                verify=False,
+            )
+        )
+        assert result["status"] == "ok"
+        assert len(result["latent_vector"]) == 16
+        assert result["decoded"]["decoded"] is True
+        assert result["verification_result"] is None

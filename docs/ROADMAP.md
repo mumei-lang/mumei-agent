@@ -477,6 +477,44 @@ documentation を取得できる:
 ---
 
 
+## P12: NLAE Integration (Experimental) 📋 Planned
+
+Anthropic Natural Language Autoencoders (NLAE) の概念を mumei-agent に統合し、
+潜在空間でのデバッグ、高密度プロパティ生成、エージェント間通信標準化を
+オプトイン機能として提供する。
+
+### P12-A: Latent-space Debugging 📋 Planned
+
+- 📋 `LatentEncoder` / `LatentDecoder` の実装
+- 📋 `LatentDebugStrategy` の実装
+- 📋 `fix_strategy.py` への Phase 0 統合
+- 📋 フォールバック動作とユニットテスト
+
+### P12-B: Dense Property Generation 📋 Planned
+
+- 📋 `DensePropertyGenerator` の実装
+- 📋 `generate_strategy.py` への opt-in 統合
+- 📋 高密度 `requires` / `ensures` 生成テスト
+
+### P12-C: Latent Protocol for Agent Communication 📋 Planned
+
+- 📋 `LatentProtocol` の実装
+- 📋 `mcp_server.py` への `send_latent_message` 追加
+- 📋 MCP feature flag とプロトコルテスト
+
+### Configuration
+
+- すべての機能はデフォルト無効
+- `ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, `ENABLE_LATENT_PROTOCOL`
+
+### References
+
+- Anthropic NLAE research: https://www.anthropic.com/research/natural-language-autoencoders
+- Reference implementation: https://github.com/kitft/natural_language_autoencoders
+
+---
+
+
 ## P11: Natural Language Specification Extraction
 
 自然言語の要件テキストを forge task spec JSON に変換する Step 0 を追加し、

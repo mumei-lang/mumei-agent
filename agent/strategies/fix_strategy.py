@@ -62,6 +62,7 @@ def get_fix(
     retry_history: RetryHistory | None = None,
     metrics: Metrics | None = None,
     pattern_library: PatternLibrary | None = None,
+    enable_latent_debug: bool | None = None,
 ) -> str:
     """Generate a fix using the appropriate prompt template.
 
@@ -77,7 +78,70 @@ def get_fix(
         retry_history: Optional retry history for context across attempts.
         metrics: Optional Metrics instance for tracking rule-based vs LLM fixes.
         pattern_library: Optional PatternLibrary for few-shot examples.
+        enable_latent_debug: When true, try latent-space debugging first.
     """
+    if enable_latent_debug is None:
+        try:
+            from agent.config import AgentConfig
+            enable_latent_debug = AgentConfig().enable_latent_debug
+        except Exception:
+            enable_latent_debug = False
+
+    # Phase 0: optional latent-space debug.  Any failure falls through to
+    # the existing deterministic rule-based and LLM repair pipeline.
+    if enable_latent_debug:
+        try:
+            from agent.latent_decoder import LatentDecoder
+            from agent.latent_encoder import LatentEncoder
+            from agent.strategies.latent_debug_strategy import LatentDebugStrategy
+
+            latent_fix = LatentDebugStrategy().get_fix_with_latent_debug(
+                source_code,
+                report_data,
+                LatentEncoder(),
+                LatentDecoder(),
+            )
+            if latent_fix:
+                vt = report_data.get("violation_type") or report_data.get(
+                    "failure_type",
+                    "latent_debug",
+                )
+                if mumei_client is not None:
+                    tmp_path: str | None = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            mode="w",
+                            suffix=".mm",
+                            delete=False,
+                            encoding="utf-8",
+                        ) as tmp:
+                            tmp_path = tmp.name
+                            tmp.write(latent_fix)
+                        validation = mumei_client.verify(tmp_path)
+                        if validation["success"]:
+                            if metrics is not None:
+                                metrics.record_attempt(vt)
+                                metrics.record_success(vt)
+                            return latent_fix
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "Latent debug validation failed; falling through",
+                            exc_info=True,
+                        )
+                    finally:
+                        try:
+                            if tmp_path:
+                                Path(tmp_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                else:
+                    return latent_fix
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Latent debug initialization failed; falling through",
+                exc_info=True,
+            )
+
     # Phase 1: Try rule-based fix (no LLM, deterministic)
     vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
     rule_fix = try_rule_based_fix(source_code, report_data)
