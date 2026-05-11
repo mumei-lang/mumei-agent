@@ -54,18 +54,20 @@ def test_decoder_applies_new_repair_strategies() -> None:
     source = (
         "atom transfer(flag: i64)\n"
         "    requires: true;\n"
-        "    ensures: result >= 0 && result <= 1;\n"
+        "    ensures: (result >= 0 && flag >= 0) && result <= 1;\n"
         "    effects: [Read balances, Write balances];\n"
-        "    body: { 1 };\n"
+        "    body: { let flag = true; 1 };\n"
     )
 
     weaken = np.zeros(13, dtype=np.float32)
     weaken[6] = 0.75
-    assert "result <= 1" not in decoder.decode_to_source(weaken, source)
+    weakened = decoder.decode_to_source(weaken, source)
+    assert "(result >= 0 && flag >= 0)" in weakened
+    assert "result <= 1" not in weakened
 
     add_effect = np.zeros(13, dtype=np.float32)
     add_effect[10] = 0.75
-    assert "Write balances, Write" in decoder.decode_to_source(add_effect, source)
+    assert "Write balances" in decoder.decode_to_source(add_effect, source)
 
     remove_effect = np.zeros(13, dtype=np.float32)
     remove_effect[11] = 0.75
@@ -75,7 +77,7 @@ def test_decoder_applies_new_repair_strategies() -> None:
 
     refine = np.zeros(13, dtype=np.float32)
     refine[12] = 0.75
-    assert "flag: bool" in decoder.decode_to_source(refine, source)
+    assert "let flag: bool = true" in decoder.decode_to_source(refine, source)
 
 
 def test_bug_direction_targets_enhanced_violation_types() -> None:

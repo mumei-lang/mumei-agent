@@ -45,7 +45,7 @@ class LatentDecoder:
         )
 
     def _weaken_ensures(self, source_code: str) -> str:
-        """Weaken the first ensures clause by removing one conjunct."""
+        """Weaken the first ensures clause by replacing one conjunct with true."""
         return re.sub(
             r"(ensures\s*:\s*)([^;]+)(;)",
             lambda match: (
@@ -57,11 +57,35 @@ class LatentDecoder:
         )
 
     def _remove_one_conjunct(self, expression: str) -> str:
-        """Return an ensures expression with the last top-level conjunct removed."""
-        conjuncts = [part.strip() for part in expression.split("&&") if part.strip()]
+        """Return an ensures expression with one top-level conjunct weakened."""
+        conjuncts = self._split_top_level_conjuncts(expression)
         if len(conjuncts) <= 1:
             return expression.strip()
-        return " && ".join(conjuncts[:-1])
+        return " && ".join([*conjuncts[:-1], "true"])
+
+    def _split_top_level_conjuncts(self, expression: str) -> list[str]:
+        conjuncts: list[str] = []
+        start = 0
+        depth = 0
+        i = 0
+        while i < len(expression):
+            char = expression[i]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth = max(0, depth - 1)
+            elif expression.startswith("&&", i) and depth == 0:
+                part = expression[start:i].strip()
+                if part:
+                    conjuncts.append(part)
+                i += 2
+                start = i
+                continue
+            i += 1
+        tail = expression[start:].strip()
+        if tail:
+            conjuncts.append(tail)
+        return conjuncts
 
     def _add_effect(self, source_code: str, effect_name: str) -> str:
         """Add an effect to the first effects clause or create one after the header."""
@@ -74,18 +98,29 @@ class LatentDecoder:
             ]
             if effect_name in existing:
                 return source_code
-            updated = ", ".join([*existing, effect_name])
+            selected = self._choose_effect_name(effect_name, existing)
+            if selected in existing:
+                return source_code
+            updated = ", ".join([*existing, selected])
             return (
                 source_code[:effects_match.start()]
                 + f"{effects_match.group(1)}{updated}{effects_match.group(3)}"
                 + source_code[effects_match.end():]
             )
+        selected = self._choose_effect_name(effect_name, [])
         return re.sub(
             r"(\batom\s+[A-Za-z_][A-Za-z0-9_]*[^\n]*\n)",
-            f"\\1    effects: [{effect_name}];\n",
+            f"\\1    effects: [{selected}];\n",
             source_code,
             count=1,
         )
+
+    def _choose_effect_name(self, fallback: str, existing: list[str]) -> str:
+        for effect in existing:
+            words = effect.split()
+            if len(words) > 1:
+                return words[0]
+        return fallback
 
     def _remove_first_effect(self, source_code: str) -> str:
         """Remove one effect entry from the first effects clause."""
@@ -102,10 +137,13 @@ class LatentDecoder:
         return re.sub(r"(effects\s*:\s*\[)([^\]]*)(\])", replace, source_code, count=1)
 
     def _refine_i64_types(self, source_code: str) -> str:
-        """Refine obviously boolean i64 parameters to bool."""
-        return re.sub(
-            r"\b(is_[A-Za-z0-9_]*|has_[A-Za-z0-9_]*|flag)\s*:\s*i64\b",
-            lambda match: f"{match.group(1)}: bool",
+        """Refine obviously boolean local bindings to bool annotations."""
+        local_refinement = re.sub(
+            r"\blet\s+(is_[A-Za-z0-9_]*|has_[A-Za-z0-9_]*|flag)\s*=\s*(true|false)\b",
+            lambda match: f"let {match.group(1)}: bool = {match.group(2)}",
             source_code,
             count=1,
         )
+        if local_refinement != source_code:
+            return local_refinement
+        return source_code
