@@ -66,5 +66,13 @@ class LatentDebugStrategy:
             direction[5] = 0.1
         elif "postcondition" in violation_type and len(direction) > 6:
             direction[6] = 0.1
+        elif "effect_mismatch" in violation_type and len(direction) > 10:
+            direction[10] = -0.75
+        elif "temporal_effect" in violation_type and len(direction) > 11:
+            direction[11] = -0.75
+        elif "invariant" in violation_type and len(direction) > 6:
+            direction[6] = 0.15
+            if len(direction) > 12:
+                direction[12] = -0.75
 
         return direction

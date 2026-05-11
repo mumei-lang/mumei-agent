@@ -7,6 +7,16 @@ from typing import Any
 import numpy as np
 
 
+EFFECT_FEATURE_TYPES = (
+    "read",
+    "write",
+    "file",
+    "http",
+    "settlement",
+    "temporal",
+)
+
+
 class LatentEncoder:
     """Mumei-specific NLAE-inspired latent encoder.
 
@@ -23,12 +33,20 @@ class LatentEncoder:
         """Return a latent feature vector for source plus verification state."""
         syntax_features = self._extract_syntax_features(source_code)
         semantic_features = self._extract_semantic_features(source_code)
+        effect_features = self._extract_effect_features(source_code)
+        dependency_features = self._extract_dependency_features(source_code)
+        contract_features = self._extract_contract_complexity_features(source_code)
+        scope_features = self._extract_scope_features(source_code)
         verification_features = self._extract_verification_features(
             verification_report,
         )
         return self._combine_features(
             syntax_features,
             semantic_features,
+            effect_features,
+            dependency_features,
+            contract_features,
+            scope_features,
             verification_features,
         )
 
@@ -65,6 +83,122 @@ class LatentEncoder:
             dtype=np.float32,
         )
 
+    def _extract_effect_features(self, source_code: str) -> np.ndarray:
+        """Extract effect category counts and declaration complexity."""
+        effects_matches = re.findall(r"effects\s*:\s*\[([^\]]*)\]", source_code)
+        effect_types: list[str] = []
+        for match in effects_matches:
+            effect_types.extend(
+                effect.strip()
+                for effect in match.split(",")
+                if effect.strip()
+            )
+        category_counts = self._encode_effect_types(effect_types)
+        return np.concatenate(
+            [
+                category_counts,
+                np.array(
+                    [
+                        len(effect_types),
+                        len(set(effect_types)),
+                    ],
+                    dtype=np.float32,
+                ),
+            ],
+        )
+
+    def _encode_effect_types(self, effect_types: list[str]) -> np.ndarray:
+        """One-hot-like effect category encoding."""
+        lowered = [effect.lower() for effect in effect_types]
+        counts = []
+        for category in EFFECT_FEATURE_TYPES:
+            counts.append(sum(1 for effect in lowered if category in effect))
+        return np.array(counts, dtype=np.float32)
+
+    def _extract_dependency_features(self, source_code: str) -> np.ndarray:
+        """Extract atom call-graph depth features."""
+        atom_names = re.findall(r"\batom\s+([A-Za-z_][A-Za-z0-9_]*)", source_code)
+        atom_blocks = re.findall(
+            r"\batom\s+([A-Za-z_][A-Za-z0-9_]*)[\s\S]*?body\s*:\s*\{([\s\S]*?)\}\s*;",
+            source_code,
+        )
+        graph: dict[str, set[str]] = {name: set() for name in atom_names}
+        for atom_name, body in atom_blocks:
+            calls = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", body)
+            graph.setdefault(atom_name, set()).update(
+                call for call in calls if call in graph and call != atom_name
+            )
+
+        def depth(name: str, seen: set[str]) -> int:
+            children = graph.get(name, set()) - seen
+            if not children:
+                return 0
+            return 1 + max(depth(child, seen | {child}) for child in children)
+
+        edge_count = sum(len(children) for children in graph.values())
+        max_depth = max((depth(name, {name}) for name in graph), default=0)
+        recursive_edges = sum(
+            1
+            for name, children in graph.items()
+            if name in children
+        )
+        return np.array([edge_count, max_depth, recursive_edges], dtype=np.float32)
+
+    def _extract_contract_complexity_features(self, source_code: str) -> np.ndarray:
+        """Extract nesting, connective, and quantifier counts from contracts."""
+        contract_matches = re.findall(
+            r"(?:requires|ensures)\s*:\s*([^;]+);",
+            source_code,
+        )
+        contract_text = " && ".join(contract_matches)
+        max_depth = 0
+        current_depth = 0
+        for char in contract_text:
+            if char == "(":
+                current_depth += 1
+                max_depth = max(max_depth, current_depth)
+            elif char == ")":
+                current_depth = max(0, current_depth - 1)
+        return np.array(
+            [
+                max_depth,
+                contract_text.count("&&"),
+                contract_text.count("||"),
+                len(re.findall(r"\b(forall|exists)\b", contract_text)),
+                len(re.findall(r"(<=|>=|==|!=|<|>)", contract_text)),
+                len(contract_text),
+            ],
+            dtype=np.float32,
+        )
+
+    def _extract_scope_features(self, source_code: str) -> np.ndarray:
+        """Extract parameter/local variable scope features."""
+        atom_headers = re.findall(
+            r"\batom\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)",
+            source_code,
+        )
+        params: list[str] = []
+        for header in atom_headers:
+            params.extend(
+                match.group(1)
+                for match in re.finditer(
+                    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:",
+                    header,
+                )
+            )
+        locals_ = re.findall(r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\b", source_code)
+        scoped = params + locals_
+        shadowed = len(scoped) - len(set(scoped))
+        return np.array(
+            [
+                len(params),
+                len(locals_),
+                len(set(scoped)),
+                shadowed,
+            ],
+            dtype=np.float32,
+        )
+
     def _extract_verification_features(
         self,
         verification_report: dict[str, Any],
@@ -95,7 +229,21 @@ class LatentEncoder:
         self,
         syntax: np.ndarray,
         semantic: np.ndarray,
+        effects: np.ndarray,
+        dependency: np.ndarray,
+        contract: np.ndarray,
+        scope: np.ndarray,
         verification: np.ndarray,
     ) -> np.ndarray:
         """Combine extracted feature groups into one vector."""
-        return np.concatenate([syntax, semantic, verification])
+        return np.concatenate(
+            [
+                syntax,
+                semantic,
+                effects,
+                dependency,
+                contract,
+                scope,
+                verification,
+            ],
+        )
