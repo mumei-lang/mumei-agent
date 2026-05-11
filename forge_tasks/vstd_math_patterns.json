@@ -1,0 +1,87 @@
+{
+  "task_id": "vstd-math-patterns",
+  "target_file": "std/math/patterns.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 6,
+  "auto_commit": false,
+  "description": "Create std/math/patterns.mm with reusable proof-pattern atoms for finance, payments, and smart-contract verification. Generated atoms must mirror MumeiLean.Patterns names and use only existing Mumei scalar syntax already present in std/contracts.mm and std/math/*.mm.",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm",
+    "std/math/safe_mul.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/contracts.mm"
+  ],
+  "atoms": [
+    {
+      "name": "bounded_mul_with_overflow_check",
+      "description": "Multiply two non-negative i64 values under explicit bounds and prove the result stays within the caller-provided overflow limit.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"},
+        {"name": "limit", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && limit >= 0 && a <= limit && b <= limit && a * b <= limit",
+      "ensures": "result >= 0 && result <= limit && result == a * b",
+      "reference_patterns": ["safe_multiply", "std/contracts.mm::safe_multiply"]
+    },
+    {
+      "name": "clamp_preserves_order",
+      "description": "Clamp x into [min_val, max_val] and prove the result is bounded by the interval.",
+      "inputs": [
+        {"name": "x", "type": "i64"},
+        {"name": "min_val", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "min_val <= max_val",
+      "ensures": "result >= min_val && result <= max_val",
+      "reference_patterns": ["std/contracts.mm::clamp"]
+    },
+    {
+      "name": "round_trip_conversion",
+      "description": "Encode/decode a scaled integer and prove round-trip identity within a declared valid range.",
+      "inputs": [
+        {"name": "x", "type": "i64"},
+        {"name": "scale", "type": "i64"},
+        {"name": "min_val", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "scale > 0 && min_val <= x && x <= max_val && (x * scale) / scale == x",
+      "ensures": "result == x && result >= min_val && result <= max_val",
+      "reference_patterns": ["std/math/fixed_point.mm::fp_from_int"]
+    },
+    {
+      "name": "sum_invariant",
+      "description": "Move an amount between two balances while preserving their combined total.",
+      "inputs": [
+        {"name": "from_balance", "type": "i64"},
+        {"name": "to_balance", "type": "i64"},
+        {"name": "amount", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "amount >= 0 && from_balance >= amount && to_balance >= 0",
+      "ensures": "result == from_balance + to_balance",
+      "reference_patterns": ["std/settlement.mm", "std/contracts.mm::safe_subtract"]
+    },
+    {
+      "name": "count_invariant",
+      "description": "Consume and re-add an equal count while preserving a non-negative aggregate count.",
+      "inputs": [
+        {"name": "count_before", "type": "i64"},
+        {"name": "removed", "type": "i64"},
+        {"name": "added", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "count_before >= 0 && removed >= 0 && added >= 0 && removed <= count_before && removed == added",
+      "ensures": "result == count_before && result >= 0",
+      "reference_patterns": ["std/contracts.mm::bounded_decrement", "std/contracts.mm::bounded_increment"]
+    }
+  ],
+  "difficulty": "medium"
+}
