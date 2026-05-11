@@ -1,0 +1,92 @@
+{
+  "task_id": "vstd-math-patterns",
+  "target_file": "std/math/patterns.mm",
+  "mode": "create",
+  "priority": 3,
+  "max_retries": 6,
+  "auto_commit": false,
+  "description": "Create std/math/patterns.mm with reusable proof-pattern atoms for finance, payments, and smart-contract verification. Generated atoms must mirror MumeiLean.Patterns names and use only existing Mumei scalar syntax already present in std/contracts.mm and std/math/*.mm.",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm",
+    "std/list.mm",
+    "std/math/safe_mul.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/contracts.mm",
+    "std/list.mm"
+  ],
+  "atoms": [
+    {
+      "name": "bounded_mul_with_overflow_check",
+      "description": "Multiply two non-negative i64 values under explicit bounds and prove the result stays within the caller-provided overflow limit.",
+      "inputs": [
+        {"name": "a", "type": "i64"},
+        {"name": "b", "type": "i64"},
+        {"name": "limit", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0 && limit >= 0 && a <= limit && b <= limit && a * b <= limit",
+      "ensures": "result >= 0 && result <= limit && result == a * b",
+      "reference_patterns": ["safe_multiply", "std/contracts.mm::safe_multiply"]
+    },
+    {
+      "name": "clamp_preserves_order",
+      "description": "Clamp x into [min_val, max_val] and prove the result is bounded by the interval.",
+      "inputs": [
+        {"name": "x", "type": "i64"},
+        {"name": "min_val", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "min_val <= max_val",
+      "ensures": "result >= min_val && result <= max_val",
+      "reference_patterns": ["std/contracts.mm::clamp"]
+    },
+    {
+      "name": "round_trip_conversion",
+      "description": "Encode/decode a scaled integer and prove round-trip identity within a declared valid range.",
+      "inputs": [
+        {"name": "x", "type": "i64"},
+        {"name": "scale", "type": "i64"},
+        {"name": "min_val", "type": "i64"},
+        {"name": "max_val", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "scale > 0 && min_val <= x && x <= max_val && (x * scale) / scale == x",
+      "ensures": "result == x && result >= min_val && result <= max_val",
+      "reference_patterns": ["std/math/fixed_point.mm::fp_from_int"]
+    },
+    {
+      "name": "sum_invariant",
+      "description": "Compare before/after arrays pointwise and prove their aggregate sum is preserved.",
+      "inputs": [
+        {"name": "before_values", "type": "[i64]"},
+        {"name": "after_values", "type": "[i64]"},
+        {"name": "n", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "n >= 0 && len(before_values) >= n && len(after_values) >= n && forall(i, 0, n, before_values[i] >= 0 && after_values[i] >= 0 && before_values[i] == after_values[i])",
+      "ensures": "result == 0",
+      "body_pattern": "loop over 0..n accumulating before_sum and after_sum with invariant before_sum == after_sum; return after_sum - before_sum",
+      "reference_patterns": ["fold_sum", "vvec_sum", "std/list.mm::fold_sum"]
+    },
+    {
+      "name": "count_invariant",
+      "description": "Compare before/after arrays pointwise and prove the count of target values is preserved.",
+      "inputs": [
+        {"name": "before_values", "type": "[i64]"},
+        {"name": "after_values", "type": "[i64]"},
+        {"name": "n", "type": "i64"},
+        {"name": "target", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "n >= 0 && len(before_values) >= n && len(after_values) >= n && forall(i, 0, n, before_values[i] == after_values[i])",
+      "ensures": "result == 0",
+      "body_pattern": "loop over 0..n counting target occurrences in both arrays with invariant before_count == after_count; return after_count - before_count",
+      "reference_patterns": ["fold_count_gte", "std/list.mm::fold_count_gte"]
+    }
+  ],
+  "difficulty": "medium"
+}
