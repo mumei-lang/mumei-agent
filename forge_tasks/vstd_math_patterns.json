@@ -9,11 +9,13 @@
   "context_files": [
     "std/core.mm",
     "std/contracts.mm",
+    "std/list.mm",
     "std/math/safe_mul.mm"
   ],
   "depends_on": [
     "std/core.mm",
-    "std/contracts.mm"
+    "std/contracts.mm",
+    "std/list.mm"
   ],
   "atoms": [
     {
@@ -58,29 +60,32 @@
     },
     {
       "name": "sum_invariant",
-      "description": "Move an amount between two balances while preserving their combined total.",
+      "description": "Compare before/after arrays pointwise and prove their aggregate sum is preserved.",
       "inputs": [
-        {"name": "from_balance", "type": "i64"},
-        {"name": "to_balance", "type": "i64"},
-        {"name": "amount", "type": "i64"}
+        {"name": "before_values", "type": "[i64]"},
+        {"name": "after_values", "type": "[i64]"},
+        {"name": "n", "type": "i64"}
       ],
       "return_type": "i64",
-      "requires": "amount >= 0 && from_balance >= amount && to_balance >= 0",
-      "ensures": "result == from_balance + to_balance",
-      "reference_patterns": ["std/settlement.mm", "std/contracts.mm::safe_subtract"]
+      "requires": "n >= 0 && len(before_values) >= n && len(after_values) >= n && forall(i, 0, n, before_values[i] >= 0 && after_values[i] >= 0 && before_values[i] == after_values[i])",
+      "ensures": "result == 0",
+      "body_pattern": "loop over 0..n accumulating before_sum and after_sum with invariant before_sum == after_sum; return after_sum - before_sum",
+      "reference_patterns": ["fold_sum", "vvec_sum", "std/list.mm::fold_sum"]
     },
     {
       "name": "count_invariant",
-      "description": "Consume and re-add an equal count while preserving a non-negative aggregate count.",
+      "description": "Compare before/after arrays pointwise and prove the count of target values is preserved.",
       "inputs": [
-        {"name": "count_before", "type": "i64"},
-        {"name": "removed", "type": "i64"},
-        {"name": "added", "type": "i64"}
+        {"name": "before_values", "type": "[i64]"},
+        {"name": "after_values", "type": "[i64]"},
+        {"name": "n", "type": "i64"},
+        {"name": "target", "type": "i64"}
       ],
       "return_type": "i64",
-      "requires": "count_before >= 0 && removed >= 0 && added >= 0 && removed <= count_before && removed == added",
-      "ensures": "result == count_before && result >= 0",
-      "reference_patterns": ["std/contracts.mm::bounded_decrement", "std/contracts.mm::bounded_increment"]
+      "requires": "n >= 0 && len(before_values) >= n && len(after_values) >= n && forall(i, 0, n, before_values[i] == after_values[i])",
+      "ensures": "result == 0",
+      "body_pattern": "loop over 0..n counting target occurrences in both arrays with invariant before_count == after_count; return after_count - before_count",
+      "reference_patterns": ["fold_count_gte", "std/list.mm::fold_count_gte"]
     }
   ],
   "difficulty": "medium"
