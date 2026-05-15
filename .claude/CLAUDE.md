@@ -30,6 +30,7 @@ Use `/mcp` in Claude Code to inspect server status and approve tools. If your mu
 | `list_forge_log(log_path)` | Read forge execution history from `forge_log.json`. |
 | `get_agent_status()` | Inspect LLM settings, mumei binary configuration, feature flags, and available subcommands. |
 | `extract_spec(natural_language, domain_hint, generate)` | Extract a forge task spec from natural-language requirements (Step 0). Set `generate=true` to also run the generate + refinement pipeline and return verified `.mm` code. |
+| `extract_spec_from_code(code_file, language, domain_hint, generate, mumei_repo)` | Extract a natural-language spec from existing Rust/C/Go/Python/etc. source code, then feed it into the forge task spec extraction pipeline. |
 
 ## Recommended workflow
 
