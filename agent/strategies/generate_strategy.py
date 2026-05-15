@@ -7,6 +7,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openai import OpenAI
 
@@ -20,6 +21,9 @@ from agent.thought_log import (
     summarize_code_diff,
     summarize_z3_result,
 )
+
+if TYPE_CHECKING:
+    from agent.config import AgentConfig
 
 _logger = logging.getLogger(__name__)
 
@@ -348,6 +352,153 @@ def _verify_with_spec_code_mapping(
     return verify_result
 
 
+def _load_generation_config(spec: dict) -> AgentConfig | None:
+    """Return an AgentConfig for generation-scoped feature flags."""
+    try:
+        from agent.config import AgentConfig
+    except ImportError:  # pragma: no cover - defensive
+        return None
+
+    config = spec.get("_agent_config")
+    if isinstance(config, AgentConfig):
+        if not hasattr(config, "enable_generation_health_check"):
+            config.enable_generation_health_check = True
+        if not hasattr(config, "enable_dense_properties"):
+            config.enable_dense_properties = False
+        return config
+    try:
+        return AgentConfig()
+    except Exception:
+        return None
+
+
+def _health_check_generated_code(
+    spec_json: str,
+    generated_code: str,
+    model: str,
+    config: AgentConfig | None,
+    past_code_examples: list[str],
+    *,
+    track_example: bool = True,
+) -> bool:
+    if config is None or not config.enable_generation_health_check:
+        if track_example:
+            past_code_examples.append(generated_code)
+        return True
+
+    from agent.generation_health_checker import GenerationHealthChecker
+
+    checker = GenerationHealthChecker(config)
+    for past_code in past_code_examples:
+        checker.add_past_example(past_code)
+
+    result = checker.check_generation_health(
+        spec_json,
+        generated_code,
+        generation_metadata={"model": model},
+    )
+    if track_example:
+        past_code_examples.append(generated_code)
+    if result.is_healthy:
+        return True
+
+    _logger.warning(
+        "Generation health check failed: warnings=%s errors=%s",
+        result.warnings,
+        result.errors,
+    )
+    return False
+
+
+def _retry_for_health(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system_content: str,
+    spec_for_json: dict,
+    enable_dense_properties: bool,
+) -> str:
+    retry_code = _regenerate_for_health(
+        client,
+        model,
+        prompt,
+        system_content,
+        "low spec adherence or low code diversity",
+    )
+    if retry_code and enable_dense_properties:
+        retry_code = _try_apply_dense_properties(
+            retry_code,
+            spec_for_json,
+            client,
+            model,
+        )
+    return retry_code
+
+
+def _regenerate_unhealthy_code(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system_content: str,
+    spec_json: str,
+    generated_code: str,
+    config: AgentConfig | None,
+    past_code_examples: list[str],
+    spec_for_json: dict,
+    enable_dense_properties: bool,
+) -> str:
+    if _health_check_generated_code(
+        spec_json,
+        generated_code,
+        model,
+        config,
+        past_code_examples,
+        track_example=False,
+    ):
+        return generated_code
+
+    retry_code = _retry_for_health(
+        client,
+        model,
+        prompt,
+        system_content,
+        spec_for_json,
+        enable_dense_properties,
+    )
+    if not retry_code:
+        return generated_code
+
+    _health_check_generated_code(
+        spec_json, retry_code, model, config, past_code_examples,
+    )
+    return retry_code
+
+
+def _regenerate_for_health(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system_content: str,
+    health_warnings: str,
+) -> str:
+    retry_prompt = (
+        f"{prompt}\n\n"
+        "# Generation Health Retry\n"
+        "The previous generation did not sufficiently reflect the current specification "
+        "or was too similar to prior examples. Regenerate from the specification, "
+        "using the skeleton and current requirements as the source of truth.\n"
+        f"Health warnings: {health_warnings}"
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": retry_prompt},
+        ],
+    )
+    return _extract_code(response.choices[0].message.content or "")
+
+
 def generate_multi_atom(
     client: OpenAI,
     model: str,
@@ -383,13 +534,15 @@ def generate_multi_atom(
     """
     if metrics is None:
         metrics = Metrics()
+    generation_config = _load_generation_config(spec)
+    past_code_examples: list[str] = []
 
     if enable_dense_properties is None:
-        try:
-            from agent.config import AgentConfig
-            enable_dense_properties = AgentConfig().enable_dense_properties
-        except Exception:
-            enable_dense_properties = False
+        enable_dense_properties = (
+            generation_config.enable_dense_properties
+            if generation_config is not None
+            else False
+        )
 
     if enable_spec_code_mapping is None:
         try:
@@ -411,10 +564,10 @@ def generate_multi_atom(
 
     # Remove the scratch ``_agent_config`` pointer (if any) before the
     # spec is JSON-serialised into the prompt.
-    spec.pop("_agent_config", None)
+    spec_for_prompt = {k: v for k, v in spec.items() if k != "_agent_config"}
 
-    atoms = spec["atoms"]
-    module_name = spec.get("module_name") or "module"
+    atoms = spec_for_prompt["atoms"]
+    module_name = spec_for_prompt.get("module_name") or "module"
     atom_names = [a["name"] for a in atoms]
     deps = _detect_dependencies(atoms)
 
@@ -422,7 +575,11 @@ def generate_multi_atom(
     combined_skeleton = _build_multi_atom_prompt(atoms, deps)
     # Exclude cross_file_context from the JSON payload so it renders as
     # readable markdown later in the prompt rather than JSON-escaped text.
-    spec_for_json = {k: v for k, v in spec.items() if k != "cross_file_context"}
+    spec_for_json = {
+        k: v
+        for k, v in spec_for_prompt.items()
+        if k != "cross_file_context"
+    }
     spec_json = json.dumps(spec_for_json, indent=2, ensure_ascii=False)
 
     # Stage 1: Initial generation
@@ -441,17 +598,15 @@ def generate_multi_atom(
         f"Fill in the ___ placeholders with correct logic."
     )
 
+    system_content = (
+        "You are a helpful programming assistant specializing "
+        "in the Mumei language with its effect system and Z3 formal verification. "
+        "Generate a complete module with multiple atoms."
+    )
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful programming assistant specializing "
-                    "in the Mumei language with its effect system and Z3 formal verification. "
-                    "Generate a complete module with multiple atoms."
-                ),
-            },
+            {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ],
     )
@@ -470,6 +625,18 @@ def generate_multi_atom(
         )
 
     if mumei_client is None:
+        generated_code = _regenerate_unhealthy_code(
+            client,
+            model,
+            prompt,
+            system_content,
+            spec_json,
+            generated_code,
+            generation_config,
+            past_code_examples,
+            spec_for_json,
+            bool(enable_dense_properties),
+        )
         metrics.record_success("generation")
         if thought_process is not None:
             try:
@@ -482,6 +649,7 @@ def generate_multi_atom(
     # Stage 2+3: Check, verify, and targeted fix loop
     current_code = generated_code
     last_violation_type = "generation"
+    health_retry_attempted = False
     for attempt in range(config_max_retries):
         tmp_path = None
         try:
@@ -507,6 +675,22 @@ def generate_multi_atom(
                     atom_names, metrics, spec=spec_for_json,
                     enable_spec_code_mapping=bool(enable_spec_code_mapping),
                 )
+                continue
+
+            if not health_retry_attempted and not _health_check_generated_code(
+                spec_json, current_code, model, generation_config, past_code_examples,
+            ):
+                health_retry_attempted = True
+                retry_code = _retry_for_health(
+                    client,
+                    model,
+                    prompt,
+                    system_content,
+                    spec_for_json,
+                    bool(enable_dense_properties),
+                )
+                if retry_code:
+                    current_code = retry_code
                 continue
 
             # Full verification
@@ -752,13 +936,15 @@ def generate_code(
 
     if metrics is None:
         metrics = Metrics()
+    generation_config = _load_generation_config(spec)
+    past_code_examples: list[str] = []
 
     if enable_dense_properties is None:
-        try:
-            from agent.config import AgentConfig
-            enable_dense_properties = AgentConfig().enable_dense_properties
-        except Exception:
-            enable_dense_properties = False
+        enable_dense_properties = (
+            generation_config.enable_dense_properties
+            if generation_config is not None
+            else False
+        )
 
     if enable_spec_code_mapping is None:
         try:
@@ -776,18 +962,21 @@ def generate_code(
     # Phase 2-B — inject std/core.mm axioms for std/ module generation.
     core_axiom_context = _build_core_axiom_context(spec)
 
-    # Drop the scratch config pointer (if present) before JSON-serialising.
-    spec.pop("_agent_config", None)
+    spec_for_prompt = {k: v for k, v in spec.items() if k != "_agent_config"}
 
-    prompt_module = _select_prompt_module(spec)
+    prompt_module = _select_prompt_module(spec_for_prompt)
     # Exclude cross_file_context from the JSON payload so it renders as
     # readable markdown later in the prompt rather than JSON-escaped text.
-    spec_for_json = {k: v for k, v in spec.items() if k != "cross_file_context"}
+    spec_for_json = {
+        k: v
+        for k, v in spec_for_prompt.items()
+        if k != "cross_file_context"
+    }
     spec_json = json.dumps(spec_for_json, indent=2, ensure_ascii=False)
 
     # Infer effects and contracts if context_file is provided
     inferred_context: dict | None = None
-    context_file = spec.get("context_file")
+    context_file = spec_for_prompt.get("context_file")
     if context_file and mumei_client is not None:
         effects_result = mumei_client.infer_effects(context_file)
         contracts_result = mumei_client.infer_contracts(context_file)
@@ -797,7 +986,7 @@ def generate_code(
         }
 
     # Build skeleton
-    skeleton = _build_skeleton(spec)
+    skeleton = _build_skeleton(spec_for_prompt)
 
     # Stage 1: Initial generation
     metrics.record_attempt("generation")
@@ -808,16 +997,14 @@ def generate_code(
         prompt += f"\n\n{cross_file_context}"
     prompt += f"\n\n# Skeleton (fill in ___ placeholders):\n```mumei\n{skeleton}```"
 
+    system_content = (
+        "You are a helpful programming assistant specializing "
+        "in the Mumei language with its effect system and Z3 formal verification."
+    )
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful programming assistant specializing "
-                    "in the Mumei language with its effect system and Z3 formal verification."
-                ),
-            },
+            {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ],
     )
@@ -836,6 +1023,18 @@ def generate_code(
         )
 
     if mumei_client is None:
+        generated_code = _regenerate_unhealthy_code(
+            client,
+            model,
+            prompt,
+            system_content,
+            spec_json,
+            generated_code,
+            generation_config,
+            past_code_examples,
+            spec_for_json,
+            bool(enable_dense_properties),
+        )
         metrics.record_success("generation")
         if thought_process is not None:
             try:
@@ -849,6 +1048,7 @@ def generate_code(
     current_code = generated_code
     last_violation_type = "generation"
     prev_report: dict | None = None
+    health_retry_attempted = False
     for attempt in range(config_max_retries):
         tmp_path = None
         try:
@@ -875,6 +1075,22 @@ def generate_code(
                     prev_report=prev_report, spec=spec_for_json,
                     enable_spec_code_mapping=bool(enable_spec_code_mapping),
                 )
+                continue
+
+            if not health_retry_attempted and not _health_check_generated_code(
+                spec_json, current_code, model, generation_config, past_code_examples,
+            ):
+                health_retry_attempted = True
+                retry_code = _retry_for_health(
+                    client,
+                    model,
+                    prompt,
+                    system_content,
+                    spec_for_json,
+                    bool(enable_dense_properties),
+                )
+                if retry_code:
+                    current_code = retry_code
                 continue
 
             # Full verification
