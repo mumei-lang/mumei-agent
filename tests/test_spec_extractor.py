@@ -193,6 +193,14 @@ def test_build_extraction_prompt_expanded_domain_hints() -> None:
     data_structure = build_extraction_prompt("queue push", domain_hint="data_structure")
     math = build_extraction_prompt("絶対値", domain_hint="math")
     crypto = build_extraction_prompt("RSA署名検証", domain_hint="rsa signature")
+    method_signature = build_extraction_prompt(
+        "関数シグネチャ検証",
+        domain_hint="method signature validation",
+    )
+    digital_signature = build_extraction_prompt(
+        "デジタル署名検証",
+        domain_hint="digital_signature verification",
+    )
 
     assert "Financial domain conventions" in financial
     assert "CustomerType" in compliance
@@ -200,8 +208,10 @@ def test_build_extraction_prompt_expanded_domain_hints() -> None:
     assert "Boundary checks before indexing" in data_structure
     assert "Prevent overflow" in math
     assert "Cryptography domain conventions" in crypto
-    assert "pow(signature, public_key)" in crypto
+    assert "mod(pow(signature, public_key), n)" in crypto
     assert "mod(message, n)" in crypto
+    assert "Cryptography domain conventions" not in method_signature
+    assert "Cryptography domain conventions" in digital_signature
 
 
 def test_keyword_validation_rejects_example_copy() -> None:

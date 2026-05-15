@@ -19,7 +19,7 @@ def _crypto_cert() -> dict:
             {
                 "name": "rsa_identity_signature",
                 "requires": "n > 0",
-                "ensures": "pow(signature, public_key) == mod(message, n)",
+                "ensures": "mod(pow(signature, public_key), n) == mod(message, n)",
                 "z3_check_result": "unknown",
                 "status": "unknown",
                 "content_hash": "h-rsa-identity",
@@ -53,7 +53,7 @@ def test_crypto_domain_hint_expands_contract_guidance() -> None:
     )
 
     assert "Cryptography domain conventions" in prompt
-    assert "pow(signature, public_key)" in prompt
+    assert "mod(pow(signature, public_key), n)" in prompt
     assert "mod(message, n)" in prompt
     assert "0 <= x < p" in prompt
 
@@ -78,6 +78,7 @@ args = parser.parse_args()
 cert = json.loads(open(args.cert, encoding="utf-8").read())
 ensures = "\\n".join(atom.get("ensures", "") for atom in cert["atoms"])
 assert "pow(signature, public_key)" in ensures
+assert "mod(pow(signature, public_key), n)" in ensures
 assert "mod(message, n)" in ensures
 assert "mod(sum_ab, p)" in ensures
 

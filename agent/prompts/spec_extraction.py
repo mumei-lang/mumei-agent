@@ -59,7 +59,7 @@ DOMAIN_TEMPLATES: dict[str, str] = {
         "Cryptography domain conventions:\n"
         "- Modular arithmetic: use `mod` for remainder operations\n"
         "- Exponentiation: use `pow(base, exp)` for power operations\n"
-        "- RSA signatures: verify with `pow(signature, public_key) == mod(message, n)`\n"
+        "- RSA signatures: verify with `mod(pow(signature, public_key), n) == mod(message, n)`\n"
         "- Include modulus preconditions such as `n > 0` before modular arithmetic\n"
         "- Finite field operations: bounds are `0 <= x < p` where p is prime\n"
         "- Use effects: [] for pure cryptographic verification helpers\n"
@@ -95,7 +95,8 @@ DOMAIN_ALIASES: dict[str, str] = {
     "mathematics": "math",
     "cryptography": "crypto",
     "rsa": "crypto",
-    "signature": "crypto",
+    "digital_signature": "crypto",
+    "crypto_signature": "crypto",
 }
 
 
