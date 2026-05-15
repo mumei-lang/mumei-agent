@@ -350,6 +350,10 @@ def _load_generation_config(spec: dict) -> AgentConfig | None:
 
     config = spec.get("_agent_config")
     if isinstance(config, AgentConfig):
+        if not hasattr(config, "enable_generation_health_check"):
+            config.enable_generation_health_check = True
+        if not hasattr(config, "enable_dense_properties"):
+            config.enable_dense_properties = False
         return config
     try:
         return AgentConfig()
@@ -389,6 +393,46 @@ def _health_check_generated_code(
         result.errors,
     )
     return False
+
+
+def _regenerate_unhealthy_code(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system_content: str,
+    spec_json: str,
+    generated_code: str,
+    config: AgentConfig | None,
+    past_code_examples: list[str],
+    spec_for_json: dict,
+    enable_dense_properties: bool,
+) -> str:
+    if _health_check_generated_code(
+        spec_json, generated_code, model, config, past_code_examples,
+    ):
+        return generated_code
+
+    retry_code = _regenerate_for_health(
+        client,
+        model,
+        prompt,
+        system_content,
+        "low spec adherence or low code diversity",
+    )
+    if not retry_code:
+        return generated_code
+
+    if enable_dense_properties:
+        retry_code = _try_apply_dense_properties(
+            retry_code,
+            spec_for_json,
+            client,
+            model,
+        )
+    _health_check_generated_code(
+        spec_json, retry_code, model, config, past_code_examples,
+    )
+    return retry_code
 
 
 def _regenerate_for_health(
@@ -532,28 +576,18 @@ def generate_multi_atom(
         )
 
     if mumei_client is None:
-        if not _health_check_generated_code(
-            spec_json, generated_code, model, generation_config, past_code_examples,
-        ):
-            retry_code = _regenerate_for_health(
-                client,
-                model,
-                prompt,
-                system_content,
-                "low spec adherence or low code diversity",
-            )
-            if retry_code:
-                generated_code = retry_code
-                if enable_dense_properties:
-                    generated_code = _try_apply_dense_properties(
-                        generated_code,
-                        spec_for_json,
-                        client,
-                        model,
-                    )
-                _health_check_generated_code(
-                    spec_json, generated_code, model, generation_config, past_code_examples,
-                )
+        generated_code = _regenerate_unhealthy_code(
+            client,
+            model,
+            prompt,
+            system_content,
+            spec_json,
+            generated_code,
+            generation_config,
+            past_code_examples,
+            spec_for_json,
+            bool(enable_dense_properties),
+        )
         metrics.record_success("generation")
         if thought_process is not None:
             try:
@@ -595,24 +629,11 @@ def generate_multi_atom(
             if not _health_check_generated_code(
                 spec_json, current_code, model, generation_config, past_code_examples,
             ):
-                metrics.record_attempt("generation_health")
-                retry_code = _regenerate_for_health(
-                    client,
-                    model,
-                    prompt,
-                    system_content,
-                    "low spec adherence or low code diversity",
+                _logger.info(
+                    "Multi-atom generation health check failed on attempt %d; "
+                    "continuing to verification/fix loop",
+                    attempt + 1,
                 )
-                if retry_code:
-                    current_code = retry_code
-                    if enable_dense_properties:
-                        current_code = _try_apply_dense_properties(
-                            current_code,
-                            spec_for_json,
-                            client,
-                            model,
-                        )
-                continue
 
             # Full verification
             verify_result = _verify_with_spec_code_mapping(
@@ -917,28 +938,18 @@ def generate_code(
         )
 
     if mumei_client is None:
-        if not _health_check_generated_code(
-            spec_json, generated_code, model, generation_config, past_code_examples,
-        ):
-            retry_code = _regenerate_for_health(
-                client,
-                model,
-                prompt,
-                system_content,
-                "low spec adherence or low code diversity",
-            )
-            if retry_code:
-                generated_code = retry_code
-                if enable_dense_properties:
-                    generated_code = _try_apply_dense_properties(
-                        generated_code,
-                        spec_for_json,
-                        client,
-                        model,
-                    )
-                _health_check_generated_code(
-                    spec_json, generated_code, model, generation_config, past_code_examples,
-                )
+        generated_code = _regenerate_unhealthy_code(
+            client,
+            model,
+            prompt,
+            system_content,
+            spec_json,
+            generated_code,
+            generation_config,
+            past_code_examples,
+            spec_for_json,
+            bool(enable_dense_properties),
+        )
         metrics.record_success("generation")
         if thought_process is not None:
             try:
@@ -982,24 +993,11 @@ def generate_code(
             if not _health_check_generated_code(
                 spec_json, current_code, model, generation_config, past_code_examples,
             ):
-                metrics.record_attempt("generation_health")
-                retry_code = _regenerate_for_health(
-                    client,
-                    model,
-                    prompt,
-                    system_content,
-                    "low spec adherence or low code diversity",
+                _logger.info(
+                    "Generation health check failed on attempt %d; "
+                    "continuing to verification/fix loop",
+                    attempt + 1,
                 )
-                if retry_code:
-                    current_code = retry_code
-                    if enable_dense_properties:
-                        current_code = _try_apply_dense_properties(
-                            current_code,
-                            spec_for_json,
-                            client,
-                            model,
-                        )
-                continue
 
             # Full verification
             verify_result = _verify_with_spec_code_mapping(
