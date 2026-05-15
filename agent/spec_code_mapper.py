@@ -82,9 +82,24 @@ class SpecCodeMapper:
                 else:
                     mappings.append(ensures_mapping)
 
+            for effect_clause in self._clauses(atom_spec.get("effects")):
+                effect_mapping = self.map_effect_to_code(
+                    effect_clause,
+                    generated_code,
+                    verification_report,
+                    atom_name=atom_name,
+                    description=str(atom_spec.get("description") or atom_name),
+                )
+                if effect_mapping is None:
+                    warnings.append(
+                        f"No code location found for effect clause: {effect_clause}",
+                    )
+                else:
+                    mappings.append(effect_mapping)
+
             if not self._clauses(atom_spec.get("requires")) and not self._clauses(
                 atom_spec.get("ensures"),
-            ):
+            ) and not self._clauses(atom_spec.get("effects")):
                 fallback = self._map_atom_to_code(
                     atom_spec,
                     generated_code,
@@ -137,6 +152,25 @@ class SpecCodeMapper:
             description=description,
         )
 
+    def map_effect_to_code(
+        self,
+        effect_clause: str,
+        generated_code: str,
+        verification_report: dict[str, Any] | None = None,
+        *,
+        atom_name: str = "",
+        description: str = "",
+    ) -> SpecCodeMapping | None:
+        """Map an effect clause to the closest generated code location."""
+        return self._map_clause_to_code(
+            "effect",
+            effect_clause,
+            generated_code,
+            verification_report,
+            atom_name=atom_name,
+            description=description,
+        )
+
     _map_requires_to_code = map_requires_to_code
     _map_ensures_to_code = map_ensures_to_code
 
@@ -164,7 +198,11 @@ class SpecCodeMapper:
             verification_report or {},
             atom_name,
         )
-        prefix = "Precondition" if spec_type == "requires" else "Postcondition"
+        prefix = {
+            "requires": "Precondition",
+            "ensures": "Postcondition",
+            "effect": "Effect",
+        }.get(spec_type, "Specification")
         return SpecCodeMapping(
             spec_description=f"{prefix}: {clause}",
             spec_type=spec_type,

@@ -14,6 +14,7 @@ def test_build_mapping_simple():
                 "description": "Safe addition with overflow check",
                 "requires": "a + b >= a && a + b >= b",
                 "ensures": "result == a + b",
+                "effects": [],
                 "inputs": [
                     {"name": "a", "type": "i64"},
                     {"name": "b", "type": "i64"},
@@ -130,6 +131,30 @@ atom safe_div(a: i64, b: i64) -> i64
     assert ensures is not None
     assert ensures.spec_type == "ensures"
     assert ensures.code_location["line"] == 4
+
+
+def test_effect_mapping():
+    mapper = SpecCodeMapper()
+    spec = {
+        "atoms": [
+            {
+                "name": "write_log",
+                "effects": ["Log"],
+            }
+        ]
+    }
+    code = """
+atom write_log(msg: Nat)
+    effects: [Log];
+    body: msg
+"""
+
+    mappings = mapper.build_mapping(spec, code, {"status": "ok"}).mappings
+
+    assert len(mappings) == 1
+    assert mappings[0].spec_type == "effect"
+    assert mappings[0].spec_clause == "Log"
+    assert mappings[0].code_location["line"] == 3
 
 
 def test_violated_constraint_marks_clause_failed():
