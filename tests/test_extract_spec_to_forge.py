@@ -43,6 +43,25 @@ def test_extract_spec_forge_option_parses() -> None:
     assert args.domain == "math"
 
 
+def test_extract_spec_code_file_option_parses() -> None:
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            "tests/fixtures/code_samples/simple_add.rs",
+            "--code-language",
+            "rust",
+            "--domain",
+            "math",
+            "--output",
+            "spec.json",
+        ]
+    )
+
+    assert args.code_file == "tests/fixtures/code_samples/simple_add.rs"
+    assert args.code_language == "rust"
+    assert args.domain == "math"
+
+
 def test_extract_spec_to_forge_to_verify_with_mocks(tmp_path: Path) -> None:
     spec = {
         "task_id": "nl-abs-i64",

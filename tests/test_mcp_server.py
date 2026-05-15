@@ -41,15 +41,18 @@ class TestGetAgentStatus:
             "propose_forge_tasks",
             "list_forge_log",
             "get_agent_status",
+            "extract_spec_from_code",
             "send_latent_message",
         }
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
         assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
+        assert "ENABLE_CODE_TO_SPEC" in result["feature_flags"]
 
     def test_status_tools_match_registered_tools(self) -> None:
         result = _payload(mcp_server.get_agent_status())
         registered = set(mcp_server.mcp._tool_manager._tools)
         assert set(result["mcp_tools"]) == registered
+        assert "extract_spec_from_code" in registered
         assert "send_latent_message" in registered
 
 
@@ -291,6 +294,45 @@ class TestListForgeLog:
         log.write_text("not json", encoding="utf-8")
         result = _payload(mcp_server.list_forge_log(str(log)))
         assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# extract_spec_from_code
+# ---------------------------------------------------------------------------
+
+
+class TestExtractSpecFromCode:
+    def test_missing_file_returns_error(self) -> None:
+        result = _payload(mcp_server.extract_spec_from_code("/no/such/file.rs"))
+
+        assert result["status"] == "error"
+        assert "does not exist" in result["error"]
+
+    def test_extracts_spec_with_mock_extractor(self, tmp_path: Path) -> None:
+        source = tmp_path / "simple_add.rs"
+        source.write_text("pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")
+
+        fake_result = MagicMock()
+        fake_result.success = True
+        fake_result.natural_language_spec = "simple_add returns a + b without side effects"
+        fake_result.forge_task_spec = {"task_id": "code-simple-add", "atoms": []}
+        fake_result.detected_language = "rust"
+        fake_result.warnings = []
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+
+        fake_extractor = MagicMock()
+        fake_extractor.extract_from_file.return_value = fake_result
+
+        with patch("agent.config.AgentConfig", return_value=fake_config), patch(
+            "agent.code_to_spec.CodeToSpecExtractor", return_value=fake_extractor
+        ), patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()):
+            result = _payload(mcp_server.extract_spec_from_code(str(source)))
+
+        assert result["status"] == "ok"
+        assert result["detected_language"] == "rust"
+        assert result["spec"]["task_id"] == "code-simple-add"
 
 
 # ---------------------------------------------------------------------------
