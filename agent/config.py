@@ -61,6 +61,9 @@ class AgentConfig:
     enable_generation_health_check: bool = field(
         default_factory=lambda: _env_bool("ENABLE_GENERATION_HEALTH_CHECK", True)
     )
+    enable_ambiguity_detection: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_AMBIGUITY_DETECTION", True)
+    )
 
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)

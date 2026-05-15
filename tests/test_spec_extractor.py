@@ -99,6 +99,21 @@ def test_extract_spec_basic() -> None:
     assert "安全な銀行送金機能" in call.kwargs["messages"][1]["content"]
 
 
+def test_extract_spec_detects_ambiguity_when_enabled(caplog) -> None:
+    client = _mock_client(json.dumps(VALID_SPEC))
+
+    result = extract_spec(
+        client,
+        "m",
+        "必要に応じて適切な検査を行う",
+        detect_ambiguity=True,
+        config=MagicMock(enable_ambiguity_detection=False),
+    )
+
+    assert result == VALID_SPEC
+    assert "Ambiguity detected in specification" in caplog.text
+
+
 def test_validate_extracted_spec_valid() -> None:
     assert _validate_extracted_spec(VALID_SPEC) == []
 

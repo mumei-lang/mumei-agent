@@ -11,6 +11,7 @@ from typing import Any
 
 from openai import OpenAI
 
+from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 from agent.prompts.spec_extraction import (
@@ -383,6 +384,8 @@ def extract_spec(
     mumei_client: MumeiClient | None = None,
     max_retries: int = 3,
     metrics: Metrics | None = None,
+    detect_ambiguity: bool = False,
+    config: AgentConfig | None = None,
 ) -> dict:
     """Extract a forge task spec from natural language.
 
@@ -399,6 +402,21 @@ def extract_spec(
     """
     if not natural_language.strip():
         raise ValueError("natural_language must be non-empty")
+
+    if detect_ambiguity:
+        from agent.ambiguity_detector import AmbiguityDetector
+
+        detector = AmbiguityDetector(config or AgentConfig())
+        ambiguity_result = detector.detect_ambiguity(natural_language)
+        for warning in ambiguity_result.warnings:
+            logger.warning(warning)
+        if ambiguity_result.errors:
+            raise ValueError("; ".join(ambiguity_result.errors))
+        if ambiguity_result.has_ambiguity:
+            logger.warning(
+                "Ambiguity detected in specification: %d findings",
+                len(ambiguity_result.findings),
+            )
 
     existing_catalog = _load_existing_catalog(mumei_client)
     base_prompt = build_extraction_prompt(
