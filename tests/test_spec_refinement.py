@@ -58,28 +58,31 @@ def test_refine_spec_returns_refined_json():
     }
     client = _mock_client(f"```json\n{json.dumps(refined)}\n```")
 
-    result = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
+    result, intent_drift = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
 
     assert result["requires"] == "a >= 0 && b >= 0 && a + b < 100"
     assert result["ensures"] == "result == a + b"
+    assert intent_drift is not None
 
 
 def test_refine_spec_returns_original_on_invalid_json():
     """Test that refine_spec returns the original spec if LLM returns invalid JSON."""
     client = _mock_client("This is not valid JSON at all")
 
-    result = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
+    result, intent_drift = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
 
     assert result == ORIGINAL_SPEC
+    assert intent_drift is None
 
 
 def test_refine_spec_returns_original_on_non_dict():
     """Test that refine_spec returns the original spec if LLM returns non-dict JSON."""
     client = _mock_client("[1, 2, 3]")
 
-    result = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
+    result, intent_drift = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
 
     assert result == ORIGINAL_SPEC
+    assert intent_drift is None
 
 
 def test_refine_spec_handles_raw_json_without_fences():
@@ -87,9 +90,10 @@ def test_refine_spec_handles_raw_json_without_fences():
     refined = {"name": "bounded_add", "requires": "a >= 0 && b >= 0 && a < 50 && b < 50"}
     client = _mock_client(json.dumps(refined))
 
-    result = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
+    result, intent_drift = refine_spec(client, "m", ORIGINAL_SPEC, REPORT)
 
     assert result["requires"] == "a >= 0 && b >= 0 && a < 50 && b < 50"
+    assert intent_drift is not None
 
 
 def test_refine_spec_includes_error_log():
@@ -101,6 +105,24 @@ def test_refine_spec_includes_error_log():
 
     prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert "Z3 timed out" in prompt
+
+
+def test_refine_spec_returns_intent_tracking_tuple_when_enabled():
+    """Test that refine_spec can return intent drift analysis."""
+    refined = dict(ORIGINAL_SPEC, requires="a >= 0")
+    client = _mock_client(json.dumps(refined))
+
+    result, intent_drift = refine_spec(
+        client,
+        "m",
+        ORIGINAL_SPEC,
+        REPORT,
+        enable_intent_tracking=True,
+    )
+
+    assert result["requires"] == "a >= 0"
+    assert intent_drift is not None
+    assert intent_drift.drift_score < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +140,7 @@ def test_refinement_loop_succeeds_on_first_try():
     code, verified, final_spec = run_refinement_loop(
         client, "m", ORIGINAL_SPEC, mock_generate,
         max_refinements=3, metrics=metrics,
+        enable_intent_tracking=False,
     )
 
     assert verified is True
@@ -143,6 +166,7 @@ def test_refinement_loop_refines_and_succeeds():
     code, verified, final_spec = run_refinement_loop(
         client, "m", ORIGINAL_SPEC, mock_generate,
         max_refinements=3,
+        enable_intent_tracking=False,
     )
 
     assert verified is True
@@ -161,6 +185,7 @@ def test_refinement_loop_exhausts_refinements():
     code, verified, final_spec = run_refinement_loop(
         client, "m", ORIGINAL_SPEC, mock_generate,
         max_refinements=2,
+        enable_intent_tracking=False,
     )
 
     assert verified is False
@@ -189,6 +214,7 @@ def test_refinement_loop_uses_report_from_generate_fn():
     code, verified, final_spec = run_refinement_loop(
         client, "m", ORIGINAL_SPEC, mock_generate,
         max_refinements=3,
+        enable_intent_tracking=False,
     )
 
     assert verified is True
@@ -216,8 +242,29 @@ def test_refinement_loop_stops_when_spec_unchanged():
     code, verified, final_spec = run_refinement_loop(
         client, "m", ORIGINAL_SPEC, mock_generate,
         max_refinements=5,
+        enable_intent_tracking=False,
     )
 
     assert verified is False
     # Should stop after first generate + one refinement attempt
     assert call_count == 1
+
+
+def test_refinement_loop_logs_intent_drift(caplog):
+    """Test that drift warnings are logged when refinement weakens intent."""
+    refined_spec = dict(ORIGINAL_SPEC, requires="a >= 0")
+    client = _mock_client(json.dumps(refined_spec))
+
+    def mock_generate(c, m, spec, config_max_retries=5, mumei_client=None, metrics=None):
+        return "bad code", False
+
+    run_refinement_loop(
+        client,
+        "m",
+        ORIGINAL_SPEC,
+        mock_generate,
+        max_refinements=1,
+        enable_intent_tracking=True,
+    )
+
+    assert "Spec refinement may have drifted from original intent" in caplog.text

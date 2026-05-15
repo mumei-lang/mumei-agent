@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.config import AgentConfig
+from agent.intent_tracker import IntentDriftResult
 
 
 @dataclass
@@ -21,6 +22,7 @@ class SpecCodeMapping:
     spec_item_id: str = ""
     requires_clause: str | None = None
     ensures_clause: str | None = None
+    intent_drift_score: float | None = None
 
 
 @dataclass
@@ -44,6 +46,7 @@ class SpecCodeMapper:
         spec: dict[str, Any],
         generated_code: str,
         verification_report: dict[str, Any] | None = None,
+        intent_drift_result: IntentDriftResult | None = None,
     ) -> MappingResult:
         """Build mappings between specification clauses and code locations."""
         mappings: list[SpecCodeMapping] = []
@@ -59,6 +62,7 @@ class SpecCodeMapper:
                     verification_report,
                     atom_name=atom_name,
                     description=str(atom_spec.get("description") or atom_name),
+                    intent_drift_result=intent_drift_result,
                 )
                 if requires_mapping is None:
                     warnings.append(
@@ -74,6 +78,7 @@ class SpecCodeMapper:
                     verification_report,
                     atom_name=atom_name,
                     description=str(atom_spec.get("description") or atom_name),
+                    intent_drift_result=intent_drift_result,
                 )
                 if ensures_mapping is None:
                     warnings.append(
@@ -89,6 +94,7 @@ class SpecCodeMapper:
                     verification_report,
                     atom_name=atom_name,
                     description=str(atom_spec.get("description") or atom_name),
+                    intent_drift_result=intent_drift_result,
                 )
                 if effect_mapping is None:
                     warnings.append(
@@ -104,6 +110,7 @@ class SpecCodeMapper:
                     atom_spec,
                     generated_code,
                     verification_report,
+                    intent_drift_result,
                 )
                 mappings.append(fallback)
 
@@ -122,6 +129,7 @@ class SpecCodeMapper:
         *,
         atom_name: str = "",
         description: str = "",
+        intent_drift_result: IntentDriftResult | None = None,
     ) -> SpecCodeMapping | None:
         """Map a requires clause to the closest generated code location."""
         return self._map_clause_to_code(
@@ -131,6 +139,7 @@ class SpecCodeMapper:
             verification_report,
             atom_name=atom_name,
             description=description,
+            intent_drift_result=intent_drift_result,
         )
 
     def map_ensures_to_code(
@@ -141,6 +150,7 @@ class SpecCodeMapper:
         *,
         atom_name: str = "",
         description: str = "",
+        intent_drift_result: IntentDriftResult | None = None,
     ) -> SpecCodeMapping | None:
         """Map an ensures clause to the closest generated code location."""
         return self._map_clause_to_code(
@@ -150,6 +160,7 @@ class SpecCodeMapper:
             verification_report,
             atom_name=atom_name,
             description=description,
+            intent_drift_result=intent_drift_result,
         )
 
     def map_effect_to_code(
@@ -160,6 +171,7 @@ class SpecCodeMapper:
         *,
         atom_name: str = "",
         description: str = "",
+        intent_drift_result: IntentDriftResult | None = None,
     ) -> SpecCodeMapping | None:
         """Map an effect clause to the closest generated code location."""
         return self._map_clause_to_code(
@@ -169,6 +181,7 @@ class SpecCodeMapper:
             verification_report,
             atom_name=atom_name,
             description=description,
+            intent_drift_result=intent_drift_result,
         )
 
     _map_requires_to_code = map_requires_to_code
@@ -183,6 +196,7 @@ class SpecCodeMapper:
         *,
         atom_name: str,
         description: str,
+        intent_drift_result: IntentDriftResult | None,
     ) -> SpecCodeMapping | None:
         line, confidence = self._find_clause_location(
             generated_code,
@@ -213,6 +227,11 @@ class SpecCodeMapper:
             requires_clause=clause if spec_type == "requires" else None,
             ensures_clause=clause if spec_type == "ensures" else None,
             confidence=confidence,
+            intent_drift_score=self._intent_drift_score(
+                intent_drift_result,
+                spec_type,
+                atom_name,
+            ),
         )
 
     def _map_atom_to_code(
@@ -220,6 +239,7 @@ class SpecCodeMapper:
         atom_spec: dict[str, Any],
         code: str,
         verification_report: dict[str, Any] | None,
+        intent_drift_result: IntentDriftResult | None = None,
     ) -> SpecCodeMapping:
         atom_name = str(atom_spec.get("name", ""))
         code_location = self._find_atom_location(code, atom_name)
@@ -232,6 +252,11 @@ class SpecCodeMapper:
             verification_status=status,
             spec_item_id=atom_name,
             confidence=self._calculate_confidence(atom_spec, code, code_location),
+            intent_drift_score=self._intent_drift_score(
+                intent_drift_result,
+                "effect",
+                atom_name,
+            ),
         )
 
     def _atom_specs(self, spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -449,6 +474,25 @@ class SpecCodeMapper:
 
         return min(confidence, 1.0)
 
+    def _intent_drift_score(
+        self,
+        intent_drift_result: IntentDriftResult | None,
+        spec_type: str,
+        atom_name: str,
+    ) -> float | None:
+        if intent_drift_result is None:
+            return None
+
+        field = "effects" if spec_type == "effect" else spec_type
+        expected_fields = {field}
+        if atom_name:
+            expected_fields.add(f"atoms.{atom_name}.{field}")
+
+        for change in intent_drift_result.changes:
+            if change.field in expected_fields:
+                return intent_drift_result.drift_score
+        return intent_drift_result.drift_score
+
     def to_json(self, mappings: list[SpecCodeMapping]) -> list[dict[str, Any]]:
         """Convert mappings to JSON-serializable format."""
         return [
@@ -462,6 +506,7 @@ class SpecCodeMapper:
                 "code_location": mapping.code_location,
                 "verification_status": mapping.verification_status,
                 "confidence": mapping.confidence,
+                "intent_drift_score": mapping.intent_drift_score,
             }
             for mapping in mappings
         ]

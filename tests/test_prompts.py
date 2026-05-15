@@ -6,6 +6,7 @@ from agent.prompts import (
     division_by_zero,
     linearity,
     invariant,
+    intent_tracking,
     postcondition,
     spec_code_mapping,
     temporal_effect,
@@ -74,6 +75,19 @@ def test_spec_code_mapping_prompt():
     assert "safe_div" in result
     assert "spec_type" in result
     assert "code_location" in result
+
+
+def test_intent_tracking_prompt():
+    result = intent_tracking.build_intent_analysis_prompt(
+        {"name": "safe_div", "requires": "b != 0"},
+        {"name": "safe_div", "requires": "b != 0 && a >= 0"},
+        "Division must be safe.",
+    )
+
+    assert intent_tracking.INTENT_TRACKING_SYSTEM_PROMPT
+    assert "safe_div" in result
+    assert "drift_score" in result
+    assert "Division must be safe" in result
 
 
 def test_effect_mismatch_prompt_with_span_and_suggestion():
