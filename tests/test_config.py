@@ -11,6 +11,7 @@ def test_nla_options_default_false(monkeypatch) -> None:
     monkeypatch.delenv("ENABLE_LATENT_PROTOCOL", raising=False)
     monkeypatch.delenv("ENABLE_CODE_TO_SPEC", raising=False)
     monkeypatch.delenv("ENABLE_GENERATION_HEALTH_CHECK", raising=False)
+    monkeypatch.delenv("ENABLE_SPEC_CODE_MAPPING", raising=False)
     monkeypatch.delenv("ENABLE_AMBIGUITY_DETECTION", raising=False)
 
     config = AgentConfig()
@@ -20,6 +21,7 @@ def test_nla_options_default_false(monkeypatch) -> None:
     assert config.enable_latent_protocol is False
     assert config.enable_code_to_spec is True
     assert config.enable_generation_health_check is True
+    assert config.enable_spec_code_mapping is True
     assert config.enable_ambiguity_detection is True
 
 
@@ -30,6 +32,7 @@ def test_nla_options_from_env(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
     monkeypatch.setenv("ENABLE_CODE_TO_SPEC", "false")
     monkeypatch.setenv("ENABLE_GENERATION_HEALTH_CHECK", "false")
+    monkeypatch.setenv("ENABLE_SPEC_CODE_MAPPING", "false")
     monkeypatch.setenv("ENABLE_AMBIGUITY_DETECTION", "false")
 
     config = AgentConfig()
@@ -39,6 +42,7 @@ def test_nla_options_from_env(monkeypatch) -> None:
     assert config.enable_latent_protocol is True
     assert config.enable_code_to_spec is False
     assert config.enable_generation_health_check is False
+    assert config.enable_spec_code_mapping is False
     assert config.enable_ambiguity_detection is False
 
 

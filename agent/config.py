@@ -61,6 +61,7 @@ class AgentConfig:
     enable_generation_health_check: bool = field(
         default_factory=lambda: _env_bool("ENABLE_GENERATION_HEALTH_CHECK", True)
     )
+    enable_spec_code_mapping: bool = field(default_factory=lambda: _env_bool("ENABLE_SPEC_CODE_MAPPING", True))
     enable_ambiguity_detection: bool = field(
         default_factory=lambda: _env_bool("ENABLE_AMBIGUITY_DETECTION", True)
     )
