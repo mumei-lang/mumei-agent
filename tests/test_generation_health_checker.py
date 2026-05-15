@@ -5,7 +5,7 @@ import json
 
 from agent.config import AgentConfig
 from agent.generation_health_checker import GenerationHealthChecker
-from agent.strategies.generate_strategy import generate_code
+from agent.strategies.generate_strategy import generate_code, generate_multi_atom
 
 from tests.test_generate import _make_response, _mock_client
 
@@ -118,3 +118,74 @@ def test_generate_code_skips_health_check_when_disabled() -> None:
     assert verified is True
     assert "unrelated" in result
     assert client.chat.completions.create.call_count == 1
+
+
+def test_generate_code_regenerates_after_parse_valid_health_failure() -> None:
+    client = _mock_client("```mumei\natom unrelated() -> i64 body: { 0 }\n```")
+    client.chat.completions.create.side_effect = [
+        _make_response("```mumei\natom unrelated() -> i64 body: { 0 }\n```"),
+        _make_response("```mumei\natom safe_add(a: i64, b: i64) -> i64 body: { a + b }\n```"),
+    ]
+    mumei = _mock_client("")
+    mumei.check.side_effect = [
+        {"success": True, "stdout": "", "stderr": ""},
+        {"success": True, "stdout": "", "stderr": ""},
+    ]
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "",
+        "stderr": "",
+    }
+    spec = {
+        "name": "safe_add",
+        "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+        "requires": "a_nonnegative b_nonnegative",
+        "ensures": "safe_add result",
+        "_agent_config": AgentConfig(api_key="test", enable_generation_health_check=True),
+    }
+
+    result, verified = generate_code(client, "test-model", spec, mumei_client=mumei)
+
+    assert verified is True
+    assert "safe_add" in result
+    assert client.chat.completions.create.call_count == 2
+    assert mumei.verify.call_count == 1
+
+
+def test_generate_multi_atom_regenerates_after_parse_valid_health_failure() -> None:
+    client = _mock_client("```mumei\natom unrelated() -> i64 body: { 0 }\n```")
+    client.chat.completions.create.side_effect = [
+        _make_response("```mumei\natom unrelated() -> i64 body: { 0 }\n```"),
+        _make_response("```mumei\natom safe_add(a: i64, b: i64) -> i64 body: { a + b }\n```"),
+    ]
+    mumei = _mock_client("")
+    mumei.check.side_effect = [
+        {"success": True, "stdout": "", "stderr": ""},
+        {"success": True, "stdout": "", "stderr": ""},
+    ]
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "",
+        "stderr": "",
+    }
+    spec = {
+        "module_name": "math",
+        "atoms": [
+            {
+                "name": "safe_add",
+                "inputs": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+                "requires": "a_nonnegative b_nonnegative",
+                "ensures": "safe_add result",
+            }
+        ],
+        "_agent_config": AgentConfig(api_key="test", enable_generation_health_check=True),
+    }
+
+    result, verified = generate_multi_atom(client, "test-model", spec, mumei_client=mumei)
+
+    assert verified is True
+    assert "safe_add" in result
+    assert client.chat.completions.create.call_count == 2
+    assert mumei.verify.call_count == 1

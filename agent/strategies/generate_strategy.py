@@ -367,9 +367,12 @@ def _health_check_generated_code(
     model: str,
     config: AgentConfig | None,
     past_code_examples: list[str],
+    *,
+    track_example: bool = True,
 ) -> bool:
     if config is None or not config.enable_generation_health_check:
-        past_code_examples.append(generated_code)
+        if track_example:
+            past_code_examples.append(generated_code)
         return True
 
     from agent.generation_health_checker import GenerationHealthChecker
@@ -383,7 +386,8 @@ def _health_check_generated_code(
         generated_code,
         generation_metadata={"model": model},
     )
-    past_code_examples.append(generated_code)
+    if track_example:
+        past_code_examples.append(generated_code)
     if result.is_healthy:
         return True
 
@@ -393,6 +397,31 @@ def _health_check_generated_code(
         result.errors,
     )
     return False
+
+
+def _retry_for_health(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    system_content: str,
+    spec_for_json: dict,
+    enable_dense_properties: bool,
+) -> str:
+    retry_code = _regenerate_for_health(
+        client,
+        model,
+        prompt,
+        system_content,
+        "low spec adherence or low code diversity",
+    )
+    if retry_code and enable_dense_properties:
+        retry_code = _try_apply_dense_properties(
+            retry_code,
+            spec_for_json,
+            client,
+            model,
+        )
+    return retry_code
 
 
 def _regenerate_unhealthy_code(
@@ -408,27 +437,26 @@ def _regenerate_unhealthy_code(
     enable_dense_properties: bool,
 ) -> str:
     if _health_check_generated_code(
-        spec_json, generated_code, model, config, past_code_examples,
+        spec_json,
+        generated_code,
+        model,
+        config,
+        past_code_examples,
+        track_example=False,
     ):
         return generated_code
 
-    retry_code = _regenerate_for_health(
+    retry_code = _retry_for_health(
         client,
         model,
         prompt,
         system_content,
-        "low spec adherence or low code diversity",
+        spec_for_json,
+        enable_dense_properties,
     )
     if not retry_code:
         return generated_code
 
-    if enable_dense_properties:
-        retry_code = _try_apply_dense_properties(
-            retry_code,
-            spec_for_json,
-            client,
-            model,
-        )
     _health_check_generated_code(
         spec_json, retry_code, model, config, past_code_examples,
     )
@@ -600,6 +628,7 @@ def generate_multi_atom(
     # Stage 2+3: Check, verify, and targeted fix loop
     current_code = generated_code
     last_violation_type = "generation"
+    health_retry_attempted = False
     for attempt in range(config_max_retries):
         tmp_path = None
         try:
@@ -626,14 +655,21 @@ def generate_multi_atom(
                 )
                 continue
 
-            if not _health_check_generated_code(
+            if not health_retry_attempted and not _health_check_generated_code(
                 spec_json, current_code, model, generation_config, past_code_examples,
             ):
-                _logger.info(
-                    "Multi-atom generation health check failed on attempt %d; "
-                    "continuing to verification/fix loop",
-                    attempt + 1,
+                health_retry_attempted = True
+                retry_code = _retry_for_health(
+                    client,
+                    model,
+                    prompt,
+                    system_content,
+                    spec_for_json,
+                    bool(enable_dense_properties),
                 )
+                if retry_code:
+                    current_code = retry_code
+                continue
 
             # Full verification
             verify_result = _verify_with_spec_code_mapping(
@@ -963,6 +999,7 @@ def generate_code(
     current_code = generated_code
     last_violation_type = "generation"
     prev_report: dict | None = None
+    health_retry_attempted = False
     for attempt in range(config_max_retries):
         tmp_path = None
         try:
@@ -990,14 +1027,21 @@ def generate_code(
                 )
                 continue
 
-            if not _health_check_generated_code(
+            if not health_retry_attempted and not _health_check_generated_code(
                 spec_json, current_code, model, generation_config, past_code_examples,
             ):
-                _logger.info(
-                    "Generation health check failed on attempt %d; "
-                    "continuing to verification/fix loop",
-                    attempt + 1,
+                health_retry_attempted = True
+                retry_code = _retry_for_health(
+                    client,
+                    model,
+                    prompt,
+                    system_content,
+                    spec_for_json,
+                    bool(enable_dense_properties),
                 )
+                if retry_code:
+                    current_code = retry_code
+                continue
 
             # Full verification
             verify_result = _verify_with_spec_code_mapping(

@@ -1,6 +1,7 @@
 """Check the health of the AI code generation process."""
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -55,6 +56,9 @@ class GenerationHealthChecker:
         "description",
         "return_type",
         "effects",
+        "inputs",
+        "module_name",
+        "atoms",
     }
 
     def __init__(self, config: AgentConfig):
@@ -87,7 +91,9 @@ class GenerationHealthChecker:
                 "The generated code may be copying from past examples."
             )
 
-        is_healthy = spec_adherence >= 0.3 and diversity >= 0.2
+        is_healthy = (
+            spec_adherence >= 0.3 or self._has_spec_name_anchor(spec_text, generated_code)
+        ) and diversity >= 0.2
 
         return HealthCheckResult(
             is_healthy=is_healthy,
@@ -147,6 +153,35 @@ class GenerationHealthChecker:
             seen.add(lowered)
             keywords.append(word)
         return keywords
+
+    def _has_spec_name_anchor(self, spec_text: str, generated_code: str) -> bool:
+        code_tokens = self._tokenize(generated_code)
+        return any(name.lower() in code_tokens for name in self._extract_spec_names(spec_text))
+
+    def _extract_spec_names(self, spec_text: str) -> list[str]:
+        try:
+            payload = json.loads(spec_text)
+        except json.JSONDecodeError:
+            return []
+
+        names: list[str] = []
+
+        def collect(value: object) -> None:
+            if isinstance(value, Mapping):
+                for key, nested in value.items():
+                    if key in {"name", "module_name"} and isinstance(nested, str):
+                        names.extend(self._split_identifier(nested))
+                    collect(nested)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(payload)
+        return names
+
+    def _split_identifier(self, value: str) -> list[str]:
+        return re.findall(r"[A-Za-z_][A-Za-z0-9_]*", value)
 
     def _tokenize(self, text: str) -> set[str]:
         return {word.lower() for word in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", text)}
