@@ -65,6 +65,12 @@ class AgentConfig:
     enable_ambiguity_detection: bool = field(
         default_factory=lambda: _env_bool("ENABLE_AMBIGUITY_DETECTION", True)
     )
+    enable_intent_tracking: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_INTENT_TRACKING", True)
+    )
+    intent_drift_threshold: float = field(
+        default_factory=lambda: float(os.getenv("INTENT_DRIFT_THRESHOLD", "0.7"))
+    )
 
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)

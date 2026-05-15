@@ -1,6 +1,7 @@
 """Tests for spec-code mapper."""
 
 from agent.spec_code_mapper import SpecCodeMapper, SpecCodeMapping
+from agent.intent_tracker import IntentChange, IntentDriftResult
 
 
 def test_build_mapping_simple():
@@ -216,3 +217,37 @@ def test_to_json():
     assert len(json_data) == 1
     assert json_data[0]["spec_description"] == "Test"
     assert json_data[0]["confidence"] == 0.9
+
+
+def test_mapping_accepts_intent_drift_score():
+    mapper = SpecCodeMapper()
+    drift = IntentDriftResult(
+        intent_preserved=False,
+        changes=[
+            IntentChange(
+                field="atoms.safe_add.requires",
+                original="a >= 0 && b >= 0",
+                refined="a >= 0",
+                change_type="weakened",
+                intent_impact="weakened",
+            )
+        ],
+        drift_score=0.5,
+        warnings=[],
+        errors=[],
+    )
+    spec = {
+        "atoms": [
+            {
+                "name": "safe_add",
+                "requires": "a >= 0",
+            }
+        ]
+    }
+    code = "atom safe_add(a: i64, b: i64) -> i64\n    requires: a >= 0;"
+
+    mapping = mapper.build_mapping(spec, code, intent_drift_result=drift).mappings[0]
+    payload = mapper.to_json([mapping])
+
+    assert mapping.intent_drift_score == 0.5
+    assert payload[0]["intent_drift_score"] == 0.5

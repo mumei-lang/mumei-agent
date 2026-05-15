@@ -13,6 +13,8 @@ def test_nla_options_default_false(monkeypatch) -> None:
     monkeypatch.delenv("ENABLE_GENERATION_HEALTH_CHECK", raising=False)
     monkeypatch.delenv("ENABLE_SPEC_CODE_MAPPING", raising=False)
     monkeypatch.delenv("ENABLE_AMBIGUITY_DETECTION", raising=False)
+    monkeypatch.delenv("ENABLE_INTENT_TRACKING", raising=False)
+    monkeypatch.delenv("INTENT_DRIFT_THRESHOLD", raising=False)
 
     config = AgentConfig()
 
@@ -23,6 +25,8 @@ def test_nla_options_default_false(monkeypatch) -> None:
     assert config.enable_generation_health_check is True
     assert config.enable_spec_code_mapping is True
     assert config.enable_ambiguity_detection is True
+    assert config.enable_intent_tracking is True
+    assert config.intent_drift_threshold == 0.7
 
 
 def test_nla_options_from_env(monkeypatch) -> None:
@@ -34,6 +38,8 @@ def test_nla_options_from_env(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_GENERATION_HEALTH_CHECK", "false")
     monkeypatch.setenv("ENABLE_SPEC_CODE_MAPPING", "false")
     monkeypatch.setenv("ENABLE_AMBIGUITY_DETECTION", "false")
+    monkeypatch.setenv("ENABLE_INTENT_TRACKING", "false")
+    monkeypatch.setenv("INTENT_DRIFT_THRESHOLD", "0.9")
 
     config = AgentConfig()
 
@@ -44,6 +50,8 @@ def test_nla_options_from_env(monkeypatch) -> None:
     assert config.enable_generation_health_check is False
     assert config.enable_spec_code_mapping is False
     assert config.enable_ambiguity_detection is False
+    assert config.enable_intent_tracking is False
+    assert config.intent_drift_threshold == 0.9
 
 
 def test_nla_options_case_insensitive(monkeypatch) -> None:
