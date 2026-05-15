@@ -10,6 +10,7 @@ def test_nla_options_default_false(monkeypatch) -> None:
     monkeypatch.delenv("ENABLE_DENSE_PROPERTIES", raising=False)
     monkeypatch.delenv("ENABLE_LATENT_PROTOCOL", raising=False)
     monkeypatch.delenv("ENABLE_CODE_TO_SPEC", raising=False)
+    monkeypatch.delenv("ENABLE_AMBIGUITY_DETECTION", raising=False)
 
     config = AgentConfig()
 
@@ -17,6 +18,7 @@ def test_nla_options_default_false(monkeypatch) -> None:
     assert config.enable_dense_properties is False
     assert config.enable_latent_protocol is False
     assert config.enable_code_to_spec is True
+    assert config.enable_ambiguity_detection is True
 
 
 def test_nla_options_from_env(monkeypatch) -> None:
@@ -25,6 +27,7 @@ def test_nla_options_from_env(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_DENSE_PROPERTIES", "true")
     monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
     monkeypatch.setenv("ENABLE_CODE_TO_SPEC", "false")
+    monkeypatch.setenv("ENABLE_AMBIGUITY_DETECTION", "false")
 
     config = AgentConfig()
 
@@ -32,6 +35,7 @@ def test_nla_options_from_env(monkeypatch) -> None:
     assert config.enable_dense_properties is True
     assert config.enable_latent_protocol is True
     assert config.enable_code_to_spec is False
+    assert config.enable_ambiguity_detection is False
 
 
 def test_nla_options_case_insensitive(monkeypatch) -> None:
