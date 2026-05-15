@@ -284,7 +284,8 @@ def publish(
 
     # 3. Verify
     mapper = SpecCodeMapper()
-    spec_code_mapping = mapper.to_json(mapper.build_mapping(spec, code))
+    mapping_result = mapper.build_mapping(spec, code)
+    spec_code_mapping = mapper.to_json(mapping_result.mappings)
     verify_result = client.verify(
         str(generated_path),
         spec_code_mapping=spec_code_mapping,
@@ -302,9 +303,8 @@ def publish(
     # did not emit a structured report.
     report = verify_result.get("report")
     if isinstance(report, dict):
-        spec_code_mapping = mapper.to_json(
-            mapper.build_mapping(spec, code, report),
-        )
+        mapping_result = mapper.build_mapping(spec, code, report)
+        spec_code_mapping = mapper.to_json(mapping_result.mappings)
         report["spec_code_mapping"] = spec_code_mapping
         result["proof_certificate"] = report
     result["spec_code_mapping"] = spec_code_mapping

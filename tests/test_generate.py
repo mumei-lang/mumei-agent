@@ -273,6 +273,8 @@ def test_generate_code_attaches_mapping_to_verification():
     assert verified is True
     kwargs = mumei.verify.call_args.kwargs
     assert kwargs["spec_code_mapping"][0]["spec_item_id"] == "test"
+    assert kwargs["spec_code_mapping"][0]["spec_type"] == "requires"
+    assert kwargs["spec_code_mapping"][1]["spec_type"] == "ensures"
 
 
 def test_generate_code_with_mapping_returns_json_payload():
@@ -289,6 +291,31 @@ def test_generate_code_with_mapping_returns_json_payload():
     assert result["verified"] is True
     assert "atom test()" in result["code"]
     assert result["spec_code_mapping"][0]["spec_item_id"] == "test"
+
+
+def test_generate_code_can_disable_spec_code_mapping():
+    client = _mock_client("```mumei\natom test() body: 1;\n```")
+    mumei = MagicMock()
+    mumei.check.return_value = {"success": True, "stdout": "", "stderr": ""}
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "",
+        "stderr": "",
+    }
+
+    spec = {"name": "test", "params": [], "requires": "true"}
+    result, verified = generate_code(
+        client,
+        "test-model",
+        spec,
+        mumei_client=mumei,
+        enable_spec_code_mapping=False,
+    )
+
+    assert "atom test()" in result
+    assert verified is True
+    assert "spec_code_mapping" not in mumei.verify.call_args.kwargs
 
 
 def test_generate_code_fix_after_check_failure():

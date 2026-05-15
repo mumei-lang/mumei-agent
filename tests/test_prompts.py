@@ -7,6 +7,7 @@ from agent.prompts import (
     linearity,
     invariant,
     postcondition,
+    spec_code_mapping,
     temporal_effect,
 )
 from agent.prompts.report_formatter import (
@@ -60,6 +61,19 @@ def test_effect_mismatch_prompt():
     assert "FileWrite" in result
     assert "Option A" in result
     assert "Option B" in result
+
+
+def test_spec_code_mapping_prompt():
+    result = spec_code_mapping.build_mapping_prompt(
+        {"name": "safe_div", "requires": "b != 0"},
+        "atom safe_div(a: i64, b: i64) -> i64\n    requires: b != 0;",
+        {"status": "ok"},
+    )
+
+    assert spec_code_mapping.SPEC_CODE_MAPPING_SYSTEM_PROMPT
+    assert "safe_div" in result
+    assert "spec_type" in result
+    assert "code_location" in result
 
 
 def test_effect_mismatch_prompt_with_span_and_suggestion():

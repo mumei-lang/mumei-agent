@@ -311,10 +311,14 @@ def _spec_code_mapping_payload(
     spec: dict,
     code: str,
     verification_report: dict | None = None,
+    *,
+    enabled: bool = True,
 ) -> list[dict]:
+    if not enabled:
+        return []
     mapper = SpecCodeMapper()
-    mappings = mapper.build_mapping(spec, code, verification_report)
-    return mapper.to_json(mappings)
+    result = mapper.build_mapping(spec, code, verification_report)
+    return mapper.to_json(result.mappings)
 
 
 def _verify_with_spec_code_mapping(
@@ -322,18 +326,25 @@ def _verify_with_spec_code_mapping(
     source_path: str,
     spec: dict,
     code: str,
+    *,
+    enabled: bool = True,
 ) -> dict:
-    mapping = _spec_code_mapping_payload(spec, code)
+    mapping = _spec_code_mapping_payload(spec, code, enabled=enabled)
     try:
-        verify_result = mumei_client.verify(source_path, spec_code_mapping=mapping)
+        if enabled:
+            verify_result = mumei_client.verify(source_path, spec_code_mapping=mapping)
+        else:
+            verify_result = mumei_client.verify(source_path)
     except TypeError:
         verify_result = mumei_client.verify(source_path)
     report = verify_result.get("report") or {}
     if isinstance(report, dict):
-        mapping = _spec_code_mapping_payload(spec, code, report)
-        report["spec_code_mapping"] = mapping
+        mapping = _spec_code_mapping_payload(spec, code, report, enabled=enabled)
+        if enabled:
+            report["spec_code_mapping"] = mapping
         verify_result["report"] = report
-    verify_result["spec_code_mapping"] = mapping
+    if enabled:
+        verify_result["spec_code_mapping"] = mapping
     return verify_result
 
 
@@ -346,6 +357,7 @@ def generate_multi_atom(
     metrics: Metrics | None = None,
     thought_process: ThoughtProcess | None = None,
     enable_dense_properties: bool | None = None,
+    enable_spec_code_mapping: bool | None = None,
 ) -> tuple[str, bool]:
     """Generate a multi-atom Mumei module from a specification.
 
@@ -363,6 +375,8 @@ def generate_multi_atom(
         thought_process: Optional ThoughtProcess for explainability.
         enable_dense_properties: When true, generate dense contracts after
             initial code generation.
+        enable_spec_code_mapping: When true, attach spec-to-code mapping
+            metadata to verification reports.
 
     Returns:
         A tuple of (code, verified).
@@ -376,6 +390,13 @@ def generate_multi_atom(
             enable_dense_properties = AgentConfig().enable_dense_properties
         except Exception:
             enable_dense_properties = False
+
+    if enable_spec_code_mapping is None:
+        try:
+            from agent.config import AgentConfig
+            enable_spec_code_mapping = AgentConfig().enable_spec_code_mapping
+        except Exception:
+            enable_spec_code_mapping = True
 
     # Extract cross_file_context without mutating the caller's spec dict —
     # ``run_refinement_loop`` (and any other caller) may reuse the same
@@ -483,13 +504,18 @@ def generate_multi_atom(
                 error_log = check_result["stdout"] + check_result["stderr"]
                 current_code = _attempt_multi_atom_fix(
                     client, model, spec_json, current_code, error_log, {},
-                    atom_names, metrics,
+                    atom_names, metrics, spec=spec_for_json,
+                    enable_spec_code_mapping=bool(enable_spec_code_mapping),
                 )
                 continue
 
             # Full verification
             verify_result = _verify_with_spec_code_mapping(
-                mumei_client, tmp_path, spec_for_json, current_code,
+                mumei_client,
+                tmp_path,
+                spec_for_json,
+                current_code,
+                enabled=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
                 try:
@@ -541,7 +567,8 @@ def generate_multi_atom(
             before_fix = current_code
             current_code = _attempt_multi_atom_fix(
                 client, model, spec_json, current_code, error_log, report,
-                failing, metrics,
+                failing, metrics, spec=spec_for_json,
+                enable_spec_code_mapping=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
                 try:
@@ -574,7 +601,11 @@ def generate_multi_atom(
             tmp_path = tmp.name
             tmp.write(current_code)
         verify_result = _verify_with_spec_code_mapping(
-            mumei_client, tmp_path, spec_for_json, current_code,
+            mumei_client,
+            tmp_path,
+            spec_for_json,
+            current_code,
+            enabled=bool(enable_spec_code_mapping),
         )
         if thought_process is not None:
             try:
@@ -621,6 +652,9 @@ def _attempt_multi_atom_fix(
     report: dict,
     failing_atoms: list[str],
     metrics: Metrics,
+    *,
+    spec: dict | None = None,
+    enable_spec_code_mapping: bool = True,
 ) -> str:
     """Attempt to fix specific failing atoms in a multi-atom module."""
     failing_str = ", ".join(failing_atoms)
@@ -656,6 +690,10 @@ def _attempt_multi_atom_fix(
     fixed_code = _extract_code(fix_response.choices[0].message.content or "")
     if not fixed_code:
         return current_code
+    if enable_spec_code_mapping and spec:
+        mapper = SpecCodeMapper()
+        mapping_result = mapper.build_mapping(spec, fixed_code, report)
+        report["spec_code_mapping"] = mapper.to_json(mapping_result.mappings)
     return fixed_code
 
 
@@ -668,6 +706,7 @@ def generate_code(
     metrics: Metrics | None = None,
     thought_process: ThoughtProcess | None = None,
     enable_dense_properties: bool | None = None,
+    enable_spec_code_mapping: bool | None = None,
 ) -> tuple[str, bool]:
     """Generate Mumei code from a specification, verify, and fix if needed.
 
@@ -691,6 +730,8 @@ def generate_code(
         thought_process: Optional ThoughtProcess for explainability.
         enable_dense_properties: When true, generate dense contracts after
             initial code generation.
+        enable_spec_code_mapping: When true, attach spec-to-code mapping
+            metadata to verification reports.
 
     Returns:
         A tuple of (code, verified) where *code* is the generated (and
@@ -706,6 +747,7 @@ def generate_code(
             metrics=metrics,
             thought_process=thought_process,
             enable_dense_properties=enable_dense_properties,
+            enable_spec_code_mapping=enable_spec_code_mapping,
         )
 
     if metrics is None:
@@ -717,6 +759,13 @@ def generate_code(
             enable_dense_properties = AgentConfig().enable_dense_properties
         except Exception:
             enable_dense_properties = False
+
+    if enable_spec_code_mapping is None:
+        try:
+            from agent.config import AgentConfig
+            enable_spec_code_mapping = AgentConfig().enable_spec_code_mapping
+        except Exception:
+            enable_spec_code_mapping = True
 
     # Extract cross_file_context without mutating the caller's spec dict —
     # ``run_refinement_loop`` (and any other caller) may reuse the same
@@ -823,13 +872,18 @@ def generate_code(
                 current_code = _attempt_fix(
                     client, model, spec_json, current_code, error_log, {},
                     prompt_module, metrics, inferred_context=inferred_context,
-                    prev_report=prev_report,
+                    prev_report=prev_report, spec=spec_for_json,
+                    enable_spec_code_mapping=bool(enable_spec_code_mapping),
                 )
                 continue
 
             # Full verification
             verify_result = _verify_with_spec_code_mapping(
-                mumei_client, tmp_path, spec_for_json, current_code,
+                mumei_client,
+                tmp_path,
+                spec_for_json,
+                current_code,
+                enabled=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
                 try:
@@ -878,7 +932,8 @@ def generate_code(
             current_code = _attempt_fix(
                 client, model, spec_json, current_code, error_log, report,
                 prompt_module, metrics, inferred_context=inferred_context,
-                prev_report=prev_report,
+                prev_report=prev_report, spec=spec_for_json,
+                enable_spec_code_mapping=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
                 try:
@@ -912,7 +967,11 @@ def generate_code(
             tmp_path = tmp.name
             tmp.write(current_code)
         verify_result = _verify_with_spec_code_mapping(
-            mumei_client, tmp_path, spec_for_json, current_code,
+            mumei_client,
+            tmp_path,
+            spec_for_json,
+            current_code,
+            enabled=bool(enable_spec_code_mapping),
         )
         if thought_process is not None:
             try:
@@ -959,6 +1018,7 @@ def generate_code_with_mapping(
     metrics: Metrics | None = None,
     thought_process: ThoughtProcess | None = None,
     enable_dense_properties: bool | None = None,
+    enable_spec_code_mapping: bool | None = None,
 ) -> dict:
     """Generate code with spec-to-code mapping."""
     code, verified = generate_code(
@@ -970,11 +1030,16 @@ def generate_code_with_mapping(
         metrics=metrics,
         thought_process=thought_process,
         enable_dense_properties=enable_dense_properties,
+        enable_spec_code_mapping=enable_spec_code_mapping,
     )
     return {
         "code": code,
         "verified": verified,
-        "spec_code_mapping": _spec_code_mapping_payload(spec, code),
+        "spec_code_mapping": _spec_code_mapping_payload(
+            spec,
+            code,
+            enabled=enable_spec_code_mapping is not False,
+        ),
     }
 
 
@@ -1089,6 +1154,8 @@ def _attempt_fix(
     metrics: Metrics,
     inferred_context: dict | None = None,
     prev_report: dict | None = None,
+    spec: dict | None = None,
+    enable_spec_code_mapping: bool = True,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
     fix_prompt = _build_retry_prompt(
@@ -1114,4 +1181,8 @@ def _attempt_fix(
     fixed_code = _extract_code(fix_response.choices[0].message.content or "")
     if not fixed_code:
         return current_code
+    if enable_spec_code_mapping and spec:
+        mapper = SpecCodeMapper()
+        mapping_result = mapper.build_mapping(spec, fixed_code, report)
+        report["spec_code_mapping"] = mapper.to_json(mapping_result.mappings)
     return fixed_code

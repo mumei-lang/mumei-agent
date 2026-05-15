@@ -99,6 +99,30 @@ def test_no_code_block_returns_raw():
     assert result == "Just plain text fix suggestion"
 
 
+def test_get_fix_updates_spec_code_mapping():
+    client = _mock_client(
+        "```mumei\n"
+        "atom safe_div(a: i64, b: i64) -> i64\n"
+        "    requires: b != 0;\n"
+        "    ensures: result == a / b;\n"
+        "    body: a / b;\n"
+        "```"
+    )
+    report = {"status": "failed"}
+    spec = {
+        "name": "safe_div",
+        "params": [{"name": "a"}, {"name": "b"}],
+        "requires": "b != 0",
+        "ensures": "result == a / b",
+    }
+
+    result = get_fix(client, "m", "src", "err", report, spec=spec)
+
+    assert "atom safe_div" in result
+    assert report["spec_code_mapping"][0]["spec_type"] == "requires"
+    assert report["spec_code_mapping"][1]["spec_type"] == "ensures"
+
+
 # --- P2: failure_type routing tests ---
 
 def test_division_by_zero_routes_correctly():
