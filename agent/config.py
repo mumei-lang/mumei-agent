@@ -59,6 +59,9 @@ class AgentConfig:
     enable_latent_protocol: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_PROTOCOL"))
     enable_code_to_spec: bool = field(default_factory=lambda: _env_bool("ENABLE_CODE_TO_SPEC", True))
     enable_spec_code_mapping: bool = field(default_factory=lambda: _env_bool("ENABLE_SPEC_CODE_MAPPING", True))
+    enable_ambiguity_detection: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_AMBIGUITY_DETECTION", True)
+    )
 
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)
