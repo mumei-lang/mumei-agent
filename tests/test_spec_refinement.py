@@ -101,9 +101,17 @@ def test_refine_spec_includes_error_log():
     refined = {"name": "test"}
     client = _mock_client(json.dumps(refined))
 
-    refine_spec(client, "m", ORIGINAL_SPEC, REPORT, error_log="Z3 timed out")
+    result, intent_drift = refine_spec(
+        client,
+        "m",
+        ORIGINAL_SPEC,
+        REPORT,
+        error_log="Z3 timed out",
+    )
 
     prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert result == refined
+    assert intent_drift is not None
     assert "Z3 timed out" in prompt
 
 

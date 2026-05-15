@@ -36,7 +36,7 @@ def refine_spec(
     report: dict,
     error_log: str = "",
     enable_intent_tracking: bool = True,
-) -> dict | tuple[dict, IntentDriftResult | None]:
+) -> tuple[dict, IntentDriftResult | None]:
     """Ask the LLM to refine a specification based on a verification failure.
 
     The LLM is given the original spec and the structured verification report
@@ -51,10 +51,9 @@ def refine_spec(
         error_log: Raw error output from the verifier.
 
     Returns:
-        By default, a new spec dict with refinements applied. When
-        ``enable_intent_tracking`` is true, returns
-        ``(refined_spec, intent_drift_result)``. If the LLM fails to produce
-        valid JSON, the original spec is returned unchanged.
+        A tuple of ``(refined_spec, intent_drift_result)``.
+        ``intent_drift_result`` is ``None`` when tracking is disabled or the
+        LLM fails to produce a refined dict.
     """
     spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
     report_json = json.dumps(report, indent=2, ensure_ascii=False)
@@ -103,9 +102,9 @@ def refine_spec(
         refined = json.loads(json_str)
         if not isinstance(refined, dict):
             _logger.warning("LLM returned non-dict JSON; using original spec")
-            return (spec, None) if enable_intent_tracking else spec
+            return spec, None
         if not enable_intent_tracking:
-            return refined
+            return refined, None
 
         config = AgentConfig()
         tracker = IntentTracker(config)
@@ -118,7 +117,7 @@ def refine_spec(
         return refined, intent_drift_result
     except json.JSONDecodeError:
         _logger.warning("LLM returned invalid JSON for spec refinement; using original spec")
-        return (spec, None) if enable_intent_tracking else spec
+        return spec, None
 
 
 def run_refinement_loop(
@@ -203,18 +202,13 @@ def run_refinement_loop(
             break
 
         # Refine the spec using the last verification report
-        refined_result = refine_spec(
+        refined, intent_drift = refine_spec(
             client,
             model,
             current_spec,
             last_report,
             enable_intent_tracking=enable_intent_tracking,
         )
-        if enable_intent_tracking:
-            refined, intent_drift = refined_result
-        else:
-            refined = refined_result
-            intent_drift = None
 
         if intent_drift and not intent_drift.intent_preserved:
             _logger.warning(

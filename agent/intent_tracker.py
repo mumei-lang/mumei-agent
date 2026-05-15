@@ -261,20 +261,24 @@ class IntentTracker:
 
     def _calculate_drift_score(self, changes: list[IntentChange]) -> float:
         """Calculate a 0.0-1.0 intent preservation score."""
-        if not changes:
+        scored_changes = [
+            change for change in changes
+            if change.change_type != "unchanged"
+        ]
+        if not scored_changes:
             return 1.0
 
         impact_scores = {
             "preserved": 1.0,
             "strengthened": 0.8,
-            "weakened": 0.3,
+            "weakened": 0.5,
             "violated": 0.0,
         }
         total_score = sum(
             impact_scores.get(change.intent_impact, 0.0)
-            for change in changes
+            for change in scored_changes
         )
-        return total_score / len(changes)
+        return total_score / len(scored_changes)
 
     def _build_warnings(
         self,

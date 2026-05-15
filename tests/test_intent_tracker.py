@@ -36,7 +36,7 @@ def test_intent_drift_strengthened_is_partially_preserved():
     result = IntentTracker(AgentConfig()).track_intent_drift(original, refined)
 
     assert result.intent_preserved
-    assert result.drift_score == 0.9
+    assert result.drift_score == 0.8
     assert any(change.intent_impact == "strengthened" for change in result.changes)
 
 
