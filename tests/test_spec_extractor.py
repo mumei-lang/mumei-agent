@@ -192,12 +192,16 @@ def test_build_extraction_prompt_expanded_domain_hints() -> None:
     regtech = build_extraction_prompt("AML分類", domain_hint="regtech")
     data_structure = build_extraction_prompt("queue push", domain_hint="data_structure")
     math = build_extraction_prompt("絶対値", domain_hint="math")
+    crypto = build_extraction_prompt("RSA署名検証", domain_hint="rsa signature")
 
     assert "Financial domain conventions" in financial
     assert "CustomerType" in compliance
     assert "Compliance / KYC / AML / RegTech" in regtech
     assert "Boundary checks before indexing" in data_structure
     assert "Prevent overflow" in math
+    assert "Cryptography domain conventions" in crypto
+    assert "pow(signature, public_key)" in crypto
+    assert "mod(message, n)" in crypto
 
 
 def test_keyword_validation_rejects_example_copy() -> None:
