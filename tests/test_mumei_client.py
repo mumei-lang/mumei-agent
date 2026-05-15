@@ -33,6 +33,19 @@ def test_verify_command_with_report_dir():
         ]
 
 
+def test_verify_includes_spec_code_mapping():
+    """Test verify can attach spec-code mapping to reports."""
+    client = MumeiClient()
+    mapping = [{"spec_item_id": "safe_add"}]
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout='{"status":"success"}', stderr=""
+        )
+        result = client.verify("test.mm", spec_code_mapping=mapping)
+        assert result["spec_code_mapping"] == mapping
+        assert result["report"]["spec_code_mapping"] == mapping
+
+
 def test_verify_command_cargo_run():
     """Test that cargo run style invocation splits correctly."""
     client = MumeiClient("cargo run --manifest-path /path/Cargo.toml --")

@@ -7,6 +7,7 @@ from agent.metrics import Metrics
 from agent.prompts import generate_atom, generate_stdlib
 from agent.strategies.generate_strategy import (
     generate_code,
+    generate_code_with_mapping,
     _extract_code,
     _has_effects,
     _select_prompt_module,
@@ -239,6 +240,55 @@ def test_generate_code_success_on_first_try():
     assert "atom test()" in result
     assert verified is True
     assert metrics.successes == 1
+
+
+def test_generate_code_attaches_mapping_to_verification():
+    """Test generation passes mapping metadata to verification."""
+    client = _mock_client(
+        "```mumei\n"
+        "atom test() -> i64\n"
+        "    requires: true;\n"
+        "    ensures: result == 1;\n"
+        "    body: 1;\n"
+        "```"
+    )
+    mumei = MagicMock()
+    mumei.check.return_value = {"success": True, "stdout": "", "stderr": ""}
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "",
+        "stderr": "",
+    }
+
+    spec = {
+        "name": "test",
+        "params": [],
+        "requires": "true",
+        "ensures": "result == 1",
+    }
+    result, verified = generate_code(client, "test-model", spec, mumei_client=mumei)
+
+    assert "atom test()" in result
+    assert verified is True
+    kwargs = mumei.verify.call_args.kwargs
+    assert kwargs["spec_code_mapping"][0]["spec_item_id"] == "test"
+
+
+def test_generate_code_with_mapping_returns_json_payload():
+    client = _mock_client("```mumei\natom test() body: 1;\n```")
+    spec = {"name": "test", "params": []}
+
+    result = generate_code_with_mapping(
+        client,
+        "test-model",
+        spec,
+        mumei_client=None,
+    )
+
+    assert result["verified"] is True
+    assert "atom test()" in result["code"]
+    assert result["spec_code_mapping"][0]["spec_item_id"] == "test"
 
 
 def test_generate_code_fix_after_check_failure():

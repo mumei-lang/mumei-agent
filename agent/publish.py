@@ -32,6 +32,7 @@ from urllib.request import Request, urlopen
 
 from agent.config import AgentConfig
 from agent.mumei_client import create_mumei_client
+from agent.spec_code_mapper import SpecCodeMapper
 from agent.strategies.generate_strategy import generate_code
 
 logger = logging.getLogger(__name__)
@@ -282,7 +283,12 @@ def publish(
     logger.info("Generated: %s (verified=%s)", generated_path, verified)
 
     # 3. Verify
-    verify_result = client.verify(str(generated_path))
+    mapper = SpecCodeMapper()
+    spec_code_mapping = mapper.to_json(mapper.build_mapping(spec, code))
+    verify_result = client.verify(
+        str(generated_path),
+        spec_code_mapping=spec_code_mapping,
+    )
     if not verify_result["success"]:
         logger.error("Verification failed: %s", verify_result.get("stderr", ""))
         result["verify_error"] = verify_result
@@ -296,7 +302,12 @@ def publish(
     # did not emit a structured report.
     report = verify_result.get("report")
     if isinstance(report, dict):
+        spec_code_mapping = mapper.to_json(
+            mapper.build_mapping(spec, code, report),
+        )
+        report["spec_code_mapping"] = spec_code_mapping
         result["proof_certificate"] = report
+    result["spec_code_mapping"] = spec_code_mapping
 
     logger.info("Verification passed")
 

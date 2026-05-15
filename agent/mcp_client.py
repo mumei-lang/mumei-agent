@@ -272,7 +272,10 @@ class MumeiMCPClient:
     # ------------------------------------------------------------------
 
     def verify(
-        self, source_path: str, report_dir: str | None = None
+        self,
+        source_path: str,
+        report_dir: str | None = None,
+        spec_code_mapping: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """``MumeiClient.verify``-compatible wrapper.
 
@@ -282,7 +285,11 @@ class MumeiMCPClient:
         forwards directly to the underlying CLI client.
         """
         if not use_mcp_client_enabled() or self._mode == "unavailable":
-            return self._fallback.verify(source_path, report_dir=report_dir)
+            return self._fallback.verify(
+                source_path,
+                report_dir=report_dir,
+                spec_code_mapping=spec_code_mapping,
+            )
         try:
             source_code = Path(source_path).read_text(encoding="utf-8")
         except OSError as exc:
@@ -291,14 +298,22 @@ class MumeiMCPClient:
                 source_path,
                 exc,
             )
-            return self._fallback.verify(source_path, report_dir=report_dir)
+            return self._fallback.verify(
+                source_path,
+                report_dir=report_dir,
+                spec_code_mapping=spec_code_mapping,
+            )
         result = self.validate_logic(source_code)
+        report = result.get("report") or {}
+        if isinstance(report, dict) and (report or spec_code_mapping):
+            report.setdefault("spec_code_mapping", spec_code_mapping or [])
         return {
             "success": result.get("success", False),
-            "report": result.get("report") or {},
+            "report": report,
             "stdout": result.get("raw", ""),
             "stderr": "" if result.get("success") else result.get("raw", ""),
             "mcp": True,
+            "spec_code_mapping": spec_code_mapping or [],
         }
 
     def check(self, source_path: str) -> dict[str, Any]:

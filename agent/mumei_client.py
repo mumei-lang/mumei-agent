@@ -38,7 +38,12 @@ class MumeiClient:
         # Support "cargo run --" style invocation
         self._cmd_prefix = mumei_bin.split()
 
-    def verify(self, source_path: str, report_dir: str | None = None) -> dict:
+    def verify(
+        self,
+        source_path: str,
+        report_dir: str | None = None,
+        spec_code_mapping: list[dict] | None = None,
+    ) -> dict:
         """Run mumei verify --json and return parsed result.
 
         The self-healing loop calls this method to obtain a structured
@@ -56,12 +61,16 @@ class MumeiClient:
                 report = json.loads(result.stdout)
             except json.JSONDecodeError:
                 pass
-        return {
+        result_report = {
             "success": result.returncode == 0,
             "report": report,
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
+        result_report["spec_code_mapping"] = spec_code_mapping or []
+        if isinstance(report, dict) and (report or spec_code_mapping):
+            report.setdefault("spec_code_mapping", spec_code_mapping or [])
+        return result_report
 
     def check(self, source_path: str) -> dict:
         """Run mumei check to verify parsing succeeds.
