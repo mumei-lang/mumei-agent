@@ -55,6 +55,15 @@ DOMAIN_TEMPLATES: dict[str, str] = {
         "- Monotonic functions should state monotonicity where relevant\n"
         "- Use effects: [] for pure mathematical functions\n"
     ),
+    "crypto": (
+        "Cryptography domain conventions:\n"
+        "- Modular arithmetic: use `mod` for remainder operations\n"
+        "- Exponentiation: use `pow(base, exp)` for power operations\n"
+        "- RSA signatures: verify with `mod(pow(signature, public_key), n) == mod(message, n)`\n"
+        "- Include modulus preconditions such as `n > 0` before modular arithmetic\n"
+        "- Finite field operations: bounds are `0 <= x < p` where p is prime\n"
+        "- Use effects: [] for pure cryptographic verification helpers\n"
+    ),
     "security": (
         "Security domain conventions:\n"
         "- Input validation: all string inputs must be bounded\n"
@@ -84,6 +93,10 @@ DOMAIN_ALIASES: dict[str, str] = {
     "queue": "data_structure",
     "list": "data_structure",
     "mathematics": "math",
+    "cryptography": "crypto",
+    "rsa": "crypto",
+    "digital_signature": "crypto",
+    "crypto_signature": "crypto",
 }
 
 
