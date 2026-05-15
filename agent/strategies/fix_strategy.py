@@ -20,6 +20,7 @@ from agent.prompts import (
     temporal_effect,
 )
 from agent.metrics import Metrics
+from agent.spec_code_mapper import SpecCodeMapper
 from agent.strategies.retry_history import RetryHistory
 from agent.strategies.rule_based_fix import try_rule_based_fix
 from agent.prompts.report_formatter import format_actionable_fix_hint
@@ -63,6 +64,8 @@ def get_fix(
     metrics: Metrics | None = None,
     pattern_library: PatternLibrary | None = None,
     enable_latent_debug: bool | None = None,
+    spec: dict | None = None,
+    enable_spec_code_mapping: bool | None = None,
 ) -> str:
     """Generate a fix using the appropriate prompt template.
 
@@ -79,6 +82,8 @@ def get_fix(
         metrics: Optional Metrics instance for tracking rule-based vs LLM fixes.
         pattern_library: Optional PatternLibrary for few-shot examples.
         enable_latent_debug: When true, try latent-space debugging first.
+        spec: Optional original specification used to update mapping metadata.
+        enable_spec_code_mapping: When true, update spec-code mapping after fixes.
     """
     if enable_latent_debug is None:
         try:
@@ -86,6 +91,13 @@ def get_fix(
             enable_latent_debug = AgentConfig().enable_latent_debug
         except Exception:
             enable_latent_debug = False
+
+    if enable_spec_code_mapping is None:
+        try:
+            from agent.config import AgentConfig
+            enable_spec_code_mapping = AgentConfig().enable_spec_code_mapping
+        except Exception:
+            enable_spec_code_mapping = True
 
     # Phase 0: optional latent-space debug.  Any failure falls through to
     # the existing deterministic rule-based and LLM repair pipeline.
@@ -122,6 +134,12 @@ def get_fix(
                             if metrics is not None:
                                 metrics.record_attempt(vt)
                                 metrics.record_success(vt)
+                            _update_spec_code_mapping(
+                                report_data,
+                                spec,
+                                latent_fix,
+                                enable_spec_code_mapping,
+                            )
                             return latent_fix
                     except Exception:
                         logging.getLogger(__name__).warning(
@@ -135,6 +153,12 @@ def get_fix(
                         except Exception:
                             pass
                 else:
+                    _update_spec_code_mapping(
+                        report_data,
+                        spec,
+                        latent_fix,
+                        enable_spec_code_mapping,
+                    )
                     return latent_fix
         except Exception:
             logging.getLogger(__name__).warning(
@@ -166,6 +190,12 @@ def get_fix(
                         source_code, rule_fix, report_data,
                         fix_method="rule_based",
                     )
+                    _update_spec_code_mapping(
+                        report_data,
+                        spec,
+                        rule_fix,
+                        enable_spec_code_mapping,
+                    )
                     return rule_fix
             except Exception:
                 # Infrastructure failure (binary not found, OS error, etc.)
@@ -195,6 +225,12 @@ def get_fix(
                 source_code, rule_fix, report_data,
                 fix_method="rule_based",
             )
+            _update_spec_code_mapping(
+                report_data,
+                spec,
+                rule_fix,
+                enable_spec_code_mapping,
+            )
             return rule_fix
 
     # Phase 1.5: Try pattern-based fix
@@ -212,19 +248,32 @@ def get_fix(
             if pattern_fix is not None:
                 if metrics is not None:
                     metrics.record_pattern_success(vt)
+                _update_spec_code_mapping(
+                    report_data,
+                    spec,
+                    pattern_fix,
+                    enable_spec_code_mapping,
+                )
                 return pattern_fix
 
     # Phase 2: LLM-based fix (existing logic)
     if strategy == "multi-stage":
         if mumei_client is not None and source_path is not None:
             from agent.strategies.multi_stage_strategy import get_fix_multi_stage
-            return get_fix_multi_stage(
+            fixed_code = get_fix_multi_stage(
                 client, model, source_code, error_log, report_data,
                 mumei_client, source_path,
                 retry_history=retry_history,
                 metrics=metrics,
                 pattern_library=pattern_library,
             )
+            _update_spec_code_mapping(
+                report_data,
+                spec,
+                fixed_code,
+                enable_spec_code_mapping,
+            )
+            return fixed_code
         logging.getLogger(__name__).warning(
             "multi-stage strategy requested but mumei_client or source_path is None; "
             "falling back to single-shot strategy."
@@ -265,8 +314,36 @@ def get_fix(
         re.DOTALL,
     )
     if code_match:
-        return code_match.group(1).strip()
-    return content.strip()
+        fixed_code = code_match.group(1).strip()
+    else:
+        fixed_code = content.strip()
+    _update_spec_code_mapping(
+        report_data,
+        spec,
+        fixed_code,
+        enable_spec_code_mapping,
+    )
+    return fixed_code
+
+
+def _update_spec_code_mapping(
+    report_data: dict,
+    spec: dict | None,
+    fixed_code: str,
+    enabled: bool | None,
+) -> None:
+    """Update structured report mapping metadata after a fix."""
+    if not enabled or not spec or not fixed_code:
+        return
+    try:
+        mapper = SpecCodeMapper()
+        result = mapper.build_mapping(spec, fixed_code, report_data)
+        report_data["spec_code_mapping"] = mapper.to_json(result.mappings)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Failed to update spec-code mapping after fix",
+            exc_info=True,
+        )
 
 
 def _record_pattern(
