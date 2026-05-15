@@ -80,7 +80,7 @@ class SpecCodeMapper:
             before_match = code[:match.start()]
             line = before_match.count("\n") + 1
             last_newline = before_match.rfind("\n")
-            col = match.start() - last_newline if last_newline >= 0 else match.start()
+            col = match.start() - last_newline if last_newline >= 0 else match.start() + 1
             return {"line": line, "col": col}
         return {"line": 0, "col": 0}
 
@@ -117,7 +117,7 @@ class SpecCodeMapper:
         if isinstance(items, set):
             items = list(items)
         if isinstance(items, dict):
-            items = items.values()
+            items = list(items.values())
         if not isinstance(items, list) and not isinstance(items, tuple):
             return False
         for item in items:

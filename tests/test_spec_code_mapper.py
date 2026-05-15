@@ -82,6 +82,28 @@ def test_failed_atom_status_from_report():
     assert mappings[0].verification_status == "failed"
 
 
+def test_report_dict_values_are_checked_for_atom_status():
+    mapper = SpecCodeMapper()
+    spec = {"atoms": [{"name": "safe_add"}]}
+    code = "atom safe_add() -> i64"
+
+    mappings = mapper.build_mapping(
+        spec,
+        code,
+        {"failed_atoms": {"safe_add": {"name": "safe_add"}}, "success": True},
+    )
+
+    assert mappings[0].verification_status == "failed"
+
+
+def test_first_line_atom_location_uses_one_indexed_column():
+    mapper = SpecCodeMapper()
+
+    location = mapper._find_atom_location("atom safe_add() -> i64", "safe_add")
+
+    assert location == {"line": 1, "col": 1}
+
+
 def test_to_json():
     """Test JSON serialization."""
     mapper = SpecCodeMapper()
