@@ -1,0 +1,35 @@
+{
+  "task_id": "vstd_aviation_control",
+  "target_file": "std/concurrency/aviation.mm",
+  "mode": "create",
+  "priority": 1,
+  "description": "Create an aviation runway-allocation standard-library module with ordered resource acquisition and deadlock prevention. The generated module MUST define a RunwayAllocation state machine with Idle -> Ordered -> Allocated transitions, resource hierarchy declarations for runway_primary (priority 1) and runway_secondary (priority 2), and atoms that acquire runway resources in priority order.",
+  "context_files": [
+    "std/settlement.mm",
+    "std/effects.mm",
+    "tests/test_effect_resource_combo.mm"
+  ],
+  "depends_on": [],
+  "atoms": [
+    {
+      "name": "allocate_runway",
+      "description": "Ordered runway allocation with deadlock prevention",
+      "inputs": [
+        {"name": "flight", "type": "i64"},
+        {"name": "runway1", "type": "i64"},
+        {"name": "runway2", "type": "i64"},
+        {"name": "lock_state", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "flight >= 0 && runway1 >= 0 && runway2 >= 0 && runway1 != runway2 && runway1 < runway2",
+      "ensures": "result != 0 && result == runway1 + runway2",
+      "effects": ["RunwayAllocation"],
+      "effect_pre": {"RunwayAllocation": "Idle"},
+      "effect_post": {"RunwayAllocation": "Allocated"},
+      "resources": ["runway_primary", "runway_secondary"],
+      "body_pattern": "perform RunwayAllocation.order; acquire runway_primary { acquire runway_secondary { perform RunwayAllocation.allocate; runway1 + runway2 } }"
+    }
+  ],
+  "max_retries": 5,
+  "auto_commit": false
+}
