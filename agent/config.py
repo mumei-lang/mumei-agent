@@ -57,6 +57,7 @@ class AgentConfig:
     enable_latent_debug: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_DEBUG"))
     enable_dense_properties: bool = field(default_factory=lambda: _env_bool("ENABLE_DENSE_PROPERTIES"))
     enable_latent_protocol: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_PROTOCOL"))
+    enable_code_to_spec: bool = field(default_factory=lambda: _env_bool("ENABLE_CODE_TO_SPEC", True))
 
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)

@@ -85,6 +85,27 @@ def build_parser(parser=None):
         type=str,
         help="Path to a file containing natural language requirements",
     )
+    text_group.add_argument(
+        "--code-file",
+        type=str,
+        help="Path to a source-code file to convert into natural language requirements",
+    )
+    parser.add_argument(
+        "--code-language",
+        choices=[
+            "rust",
+            "c",
+            "go",
+            "python",
+            "javascript",
+            "typescript",
+            "java",
+            "cpp",
+            "unknown",
+        ],
+        default=None,
+        help="Optional language override for --code-file",
+    )
     parser.add_argument(
         "--domain",
         choices=[
@@ -171,32 +192,55 @@ def main(args=None):
         print("Error: --generate-output is required when --generate is set.", file=sys.stderr)
         sys.exit(1)
 
-    natural_language = _read_text(args)
     config = AgentConfig()
     client = config.create_client()
     mumei = create_mumei_client(config.mumei_bin)
     domain_hint = "" if args.domain == "general" else args.domain
 
     try:
-        # Always extract the raw forge task spec first so that --forge has
-        # access to the unnormalized spec (with `atoms`, `task_id`, `mode`).
-        # extract_and_generate's returned spec is post-normalization and is
-        # not a valid forge task spec for single-atom requirements.
-        metrics = Metrics()
-        forge_spec = extract_spec(
-            client,
-            config.model,
-            natural_language,
-            domain_hint=domain_hint,
-            mumei_client=mumei,
-            max_retries=args.max_retries,
-            metrics=metrics,
-        )
-        print(
-            f"Extraction metrics: attempts={metrics.extraction_attempts}, "
-            f"successes={metrics.extraction_successes}",
-            file=sys.stderr,
-        )
+        if args.code_file:
+            from agent.code_to_spec import CodeToSpecExtractor
+
+            code_result = CodeToSpecExtractor(config).extract_from_file(
+                Path(args.code_file),
+                language=args.code_language,
+                domain_hint=domain_hint,
+                mumei_client=mumei,
+                max_retries=args.max_retries,
+            )
+            for warning in code_result.warnings:
+                print(f"Warning: {warning}", file=sys.stderr)
+            if not code_result.success or code_result.forge_task_spec is None:
+                print(
+                    "Error: failed to extract spec from code: "
+                    + "; ".join(code_result.errors),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(
+                f"Code language: {code_result.detected_language}",
+                file=sys.stderr,
+            )
+            natural_language = code_result.natural_language_spec
+            forge_spec = code_result.forge_task_spec
+            metrics = Metrics()
+        else:
+            natural_language = _read_text(args)
+            metrics = Metrics()
+            forge_spec = extract_spec(
+                client,
+                config.model,
+                natural_language,
+                domain_hint=domain_hint,
+                mumei_client=mumei,
+                max_retries=args.max_retries,
+                metrics=metrics,
+            )
+            print(
+                f"Extraction metrics: attempts={metrics.extraction_attempts}, "
+                f"successes={metrics.extraction_successes}",
+                file=sys.stderr,
+            )
 
         if args.generate:
             from agent.generate import _normalize_forge_task_spec

@@ -487,6 +487,7 @@ def get_agent_status() -> str:
                 "list_forge_log",
                 "get_agent_status",
                 "extract_spec",
+                "extract_spec_from_code",
                 "send_latent_message",
             ],
             "feature_flags": {
@@ -496,6 +497,7 @@ def get_agent_status() -> str:
                 "ENABLE_LATENT_DEBUG": os.environ.get("ENABLE_LATENT_DEBUG", ""),
                 "ENABLE_DENSE_PROPERTIES": os.environ.get("ENABLE_DENSE_PROPERTIES", ""),
                 "ENABLE_LATENT_PROTOCOL": os.environ.get("ENABLE_LATENT_PROTOCOL", ""),
+                "ENABLE_CODE_TO_SPEC": os.environ.get("ENABLE_CODE_TO_SPEC", ""),
             },
             "python": sys.version,
         }
@@ -654,6 +656,121 @@ def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = 
         )
     except Exception as exc:
         return _err(f"extract_spec failed: {exc}")
+
+
+@mcp.tool()
+def extract_spec_from_code(
+    code_file: str,
+    language: str = "",
+    domain_hint: str = "",
+    generate: bool = False,
+    mumei_repo: str = "",
+) -> str:
+    """Extract a Mumei forge task spec from an existing source-code file.
+
+    Args:
+        code_file: Path to a Rust/C/Go/Python/etc. source file.
+        language: Optional language override. If omitted, extension and
+            source-content heuristics are used.
+        domain_hint: Optional domain hint for forge task extraction.
+        generate: When true, also generate and verify Mumei code.
+        mumei_repo: Path to mumei repo, used to prefer repo-local mumei
+            binaries when generate=true.
+
+    Returns:
+        JSON string with the extracted natural-language spec, detected
+        language, forge task spec, warnings, and optional generation result.
+    """
+    source_path = Path(code_file).expanduser().resolve()
+    if not source_path.exists():
+        return _err(f"code_file does not exist: {source_path}")
+    if not source_path.is_file():
+        return _err(f"code_file is not a file: {source_path}")
+
+    try:
+        from agent.code_to_spec import CodeToSpecExtractor, Language
+        from agent.config import AgentConfig
+        from agent.mumei_client import create_mumei_client
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    selected_language: Language | None
+    if language:
+        allowed = set(CodeToSpecExtractor.EXTENSION_MAP.values()) | {"unknown"}
+        if language not in allowed:
+            return _err(
+                f"unsupported language: {language}",
+                supported_languages=sorted(allowed),
+            )
+        selected_language = language  # type: ignore[assignment]
+    else:
+        selected_language = None
+
+    try:
+        config = AgentConfig()
+        mumei_bin = config.mumei_bin
+        if generate and mumei_repo:
+            repo = _resolve_repo(mumei_repo)
+            if not repo.exists():
+                return _err(f"mumei_repo does not exist: {repo}")
+            release_bin = repo / "target" / "release" / "mumei"
+            debug_bin = repo / "target" / "debug" / "mumei"
+            if release_bin.exists():
+                mumei_bin = str(release_bin)
+            elif debug_bin.exists():
+                mumei_bin = str(debug_bin)
+        mumei = create_mumei_client(mumei_bin)
+        result = CodeToSpecExtractor(config).extract_from_file(
+            source_path,
+            language=selected_language,
+            domain_hint=domain_hint,
+            mumei_client=mumei,
+        )
+    except Exception as exc:
+        return _err(
+            f"extract_spec_from_code failed: {exc}",
+            hint="set LLM_API_KEY (or OPENAI_API_KEY)",
+        )
+
+    if not result.success or result.forge_task_spec is None:
+        return _err(
+            "code-to-spec extraction failed",
+            natural_language_spec=result.natural_language_spec,
+            detected_language=result.detected_language,
+            warnings=result.warnings,
+            errors=result.errors,
+        )
+
+    payload: dict[str, Any] = {
+        "natural_language_spec": result.natural_language_spec,
+        "detected_language": result.detected_language,
+        "spec": result.forge_task_spec,
+        "warnings": result.warnings,
+    }
+
+    if generate:
+        try:
+            from agent.generate import _normalize_forge_task_spec
+            from agent.strategies.generate_strategy import generate_code
+            from agent.strategies.spec_refinement import run_refinement_loop
+
+            code, verified, final_spec = run_refinement_loop(
+                config.create_client(),
+                config.model,
+                _normalize_forge_task_spec(result.forge_task_spec),
+                generate_code,
+                max_refinements=3,
+                config_max_retries=config.max_retries,
+                mumei_client=mumei,
+            )
+            payload.update({"code": code, "verified": verified, "final_spec": final_spec})
+        except Exception as exc:
+            return _err(
+                f"generation failed after code-to-spec extraction: {exc}",
+                **payload,
+            )
+
+    return _ok(payload)
 
 
 # ---------------------------------------------------------------------------

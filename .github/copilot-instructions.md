@@ -109,6 +109,7 @@ Important mumei-agent MCP tools:
 | `list_forge_log(log_path)` | Read `forge_log.json`. |
 | `get_agent_status()` | Inspect LLM settings, Mumei binary, feature flags, and subcommands. |
 | `extract_spec(natural_language, domain_hint, generate)` | Extract NL requirements into a forge task spec; optionally generate verified code. |
+| `extract_spec_from_code(code_file, language, domain_hint, generate, mumei_repo)` | Extract NL requirements from existing source code, then convert them into a forge task spec. |
 | `send_latent_message(message, context, verify)` | Encode an inter-agent message as a latent vector when `ENABLE_LATENT_PROTOCOL=true`. |
 
 ## Common Workflows
