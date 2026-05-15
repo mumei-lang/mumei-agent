@@ -13,6 +13,7 @@ from openai import OpenAI
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
 from agent.prompts.report_formatter import format_error_diff, is_contextual_suggestion
+from agent.spec_code_mapper import SpecCodeMapper
 from agent.thought_log import (
     ThoughtProcess,
     describe_fix,
@@ -306,6 +307,36 @@ def _identify_failing_atoms(
     return unique if unique else list(atom_names)
 
 
+def _spec_code_mapping_payload(
+    spec: dict,
+    code: str,
+    verification_report: dict | None = None,
+) -> list[dict]:
+    mapper = SpecCodeMapper()
+    mappings = mapper.build_mapping(spec, code, verification_report)
+    return mapper.to_json(mappings)
+
+
+def _verify_with_spec_code_mapping(
+    mumei_client: MumeiClient,
+    source_path: str,
+    spec: dict,
+    code: str,
+) -> dict:
+    mapping = _spec_code_mapping_payload(spec, code)
+    try:
+        verify_result = mumei_client.verify(source_path, spec_code_mapping=mapping)
+    except TypeError:
+        verify_result = mumei_client.verify(source_path)
+    report = verify_result.get("report") or {}
+    if isinstance(report, dict):
+        mapping = _spec_code_mapping_payload(spec, code, report)
+        report["spec_code_mapping"] = mapping
+        verify_result["report"] = report
+    verify_result["spec_code_mapping"] = mapping
+    return verify_result
+
+
 def generate_multi_atom(
     client: OpenAI,
     model: str,
@@ -457,7 +488,9 @@ def generate_multi_atom(
                 continue
 
             # Full verification
-            verify_result = mumei_client.verify(tmp_path)
+            verify_result = _verify_with_spec_code_mapping(
+                mumei_client, tmp_path, spec_for_json, current_code,
+            )
             if thought_process is not None:
                 try:
                     thought_process.add_step(
@@ -540,7 +573,9 @@ def generate_multi_atom(
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(current_code)
-        verify_result = mumei_client.verify(tmp_path)
+        verify_result = _verify_with_spec_code_mapping(
+            mumei_client, tmp_path, spec_for_json, current_code,
+        )
         if thought_process is not None:
             try:
                 thought_process.add_step(
@@ -793,7 +828,9 @@ def generate_code(
                 continue
 
             # Full verification
-            verify_result = mumei_client.verify(tmp_path)
+            verify_result = _verify_with_spec_code_mapping(
+                mumei_client, tmp_path, spec_for_json, current_code,
+            )
             if thought_process is not None:
                 try:
                     thought_process.add_step(
@@ -874,7 +911,9 @@ def generate_code(
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(current_code)
-        verify_result = mumei_client.verify(tmp_path)
+        verify_result = _verify_with_spec_code_mapping(
+            mumei_client, tmp_path, spec_for_json, current_code,
+        )
         if thought_process is not None:
             try:
                 thought_process.add_step(
@@ -909,6 +948,34 @@ def generate_code(
             pass
 
     return current_code, verified
+
+
+def generate_code_with_mapping(
+    client: OpenAI,
+    model: str,
+    spec: dict,
+    config_max_retries: int = 5,
+    mumei_client: MumeiClient | None = None,
+    metrics: Metrics | None = None,
+    thought_process: ThoughtProcess | None = None,
+    enable_dense_properties: bool | None = None,
+) -> dict:
+    """Generate code with spec-to-code mapping."""
+    code, verified = generate_code(
+        client,
+        model,
+        spec,
+        config_max_retries=config_max_retries,
+        mumei_client=mumei_client,
+        metrics=metrics,
+        thought_process=thought_process,
+        enable_dense_properties=enable_dense_properties,
+    )
+    return {
+        "code": code,
+        "verified": verified,
+        "spec_code_mapping": _spec_code_mapping_payload(spec, code),
+    }
 
 
 def _try_apply_dense_properties(
