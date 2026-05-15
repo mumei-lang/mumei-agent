@@ -11,6 +11,7 @@ dependencies = [
     "numpy>=1.26",
     "openai>=1.0",
     "python-dotenv>=1.0",
+    "syn>=0.0.14",
     "streamlit>=1.30",
 ]
 

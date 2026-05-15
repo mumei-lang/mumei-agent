@@ -58,6 +58,10 @@ class AgentConfig:
     enable_dense_properties: bool = field(default_factory=lambda: _env_bool("ENABLE_DENSE_PROPERTIES"))
     enable_latent_protocol: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_PROTOCOL"))
 
+    # Transpiler configuration.
+    enable_transpiler: bool = field(default_factory=lambda: _env_bool("ENABLE_TRANSPILER"))
+    transpiler_llm_inference: bool = field(default_factory=lambda: _env_bool("TRANSPILER_LLM_INFERENCE"))
+
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)
     inject_core_axioms: bool = field(

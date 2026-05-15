@@ -10,6 +10,7 @@ _SUBCOMMANDS = {
     "proliferate",
     "health",
     "extract-spec",
+    "transpile",
     "mcp-server",
 }
 
@@ -114,6 +115,17 @@ def main() -> None:
         extract_build_parser(parser=parser)
         args = parser.parse_args(argv[1:])
         extract_main(args)
+    elif command == "transpile":
+        import argparse
+        from agent.transpiler import build_parser as transpile_build_parser, main as transpile_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent transpile",
+            description="Transpile existing code to Mumei DSL.",
+        )
+        transpile_build_parser(parser=parser)
+        args = parser.parse_args(argv[1:])
+        transpile_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
