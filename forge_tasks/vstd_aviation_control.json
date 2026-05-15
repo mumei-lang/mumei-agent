@@ -1,5 +1,5 @@
 {
-  "task_id": "vstd_aviation_control",
+  "task_id": "vstd-aviation-control",
   "target_file": "std/concurrency/aviation.mm",
   "mode": "create",
   "priority": 1,
