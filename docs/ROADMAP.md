@@ -131,6 +131,15 @@ PR 上の `.mm` ファイルを自動検証し、結果をコメントとして�
 - ✅ `RetryHistory.is_same_error_repeating()` トリガーで仕様洗練モードに切り替え
 - ✅ `mumei infer-contracts` 結果を活用した仕様推論
 
+## P8-C: Proof-friendly Specification Metrics ✅ Complete (PR #87)
+
+`mumei-agent` now measures whether newly generated specifications stay inside the Z3-stable decidable fragment before escalating to Lean.
+
+- ✅ `agent.mcp_server.get_spec_guidelines()` — MCP clients can request guidance for linear arithmetic, bounded array/sequence access, bounded quantifiers, and finite temporal state machines.
+- ✅ Generation prompts include the same decidable-fragment checklist and tell the agent to simplify specs that trigger `outside_decidable_fragment` before changing implementation code.
+- ✅ `Metrics.record_new_spec()` tracks `new_spec_attempts`, `outside_decidable_fragment_warnings`, `z3_unknowns`, `first_pass_verification_success_rate`, and `by_logic_fragment` success rates for quarterly guidance refreshes.
+- ✅ Lean escalation remains explicit: non-linear arithmetic, symbolic division/modulo, quantifier alternation, and unbounded temporal invariants are tagged for Lean rather than hidden in first-pass Z3 retries.
+
 ---
 
 ## Strategic Initiatives（次期戦略）
@@ -255,7 +264,7 @@ Phase 1 統合デモ用の forge タスク。
 
 ## SI-5: Self-Improving Standard Library (Phase 2) — ✅ Implemented
 
-mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mumei-agent 側の forge パイプラインを直接接続し、`std/core.mm` の公理型を新規 std モジュール生成プロンプトに常時注入することで、std の自己拡張ループをクローズする。
+mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mumei-agent 側の forge パイプラインを直接接続し、`std/core.mm` の公理型と P8-C の proof-friendly specification guidance を新規 std モジュール生成プロンプトに常時注入することで、std の自己拡張ループをクローズする。
 
 ### SI-5 Phase 2-A: Forge Task Auto-Proposal ✅ Implemented
 
@@ -268,6 +277,7 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `--auto` — mumei MCP サーバーの `analyze_std_gaps` をインプロセス呼び出し
   - `--output-dir` / `--overwrite` / `--dry-run`
   - 各提案の概要（task_id / target / difficulty / depends_on / reason）を stdout に表示
+  - `get_spec_guidelines` の decidable fragment guidance と連携し、生成前に線形算術・有限範囲 quantifier・明示的 state transition を優先する spec へ整形
 - ✅ `tests/test_propose.py` — 全 fixture 駆動の互換性テスト（difficulty → retries 変換、import プレアンブル生成、`forge_discovery` ラウンドトリップ、CLI エントリポイント）
 - ✅ `tests/fixtures/sample_gaps.json` — `analyze_std_gaps` の代表的な JSON 出力を fixture として固定化
 

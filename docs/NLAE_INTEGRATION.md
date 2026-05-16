@@ -10,7 +10,8 @@ NLAE-inspired features add three capabilities:
 1. **Latent-space debugging**: try a deterministic latent repair before the
    existing rule-based and LLM fix pipeline. Enabled by default.
 2. **Dense property generation**: synthesize compact `requires` / `ensures`
-   clauses after initial generation. Enabled by default.
+   clauses after initial generation, biased by proof-friendly specification
+   guidance. Enabled by default.
 3. **Latent protocol**: encode inter-agent messages as latent vectors exposed
    through the MCP server. Still opt-in.
 
@@ -36,7 +37,10 @@ Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
   generation.
 - `agent/prompts/dense_property.py`: dense property prompt builder.
 - `agent/latent_protocol.py`: hash-based latent inter-agent protocol.
-- `agent/mcp_server.py`: exposes `send_latent_message`.
+- `agent/mcp_server.py`: exposes `send_latent_message` and `get_spec_guidelines`.
+  The latter returns decidable-fragment guidance (`outside_decidable_fragment`,
+  bounded quantifiers, explicit witnesses, and Lean escalation candidates) for
+  MCP clients that want to preflight a spec before generation.
 
 ## Usage
 
@@ -55,6 +59,10 @@ ENABLE_LATENT_DEBUG=false ENABLE_DENSE_PROPERTIES=false python -m agent generate
 `send_latent_message(message, context="{}", verify=true)` accepts JSON object
 strings and returns the latent vector, decoded metadata, and optional verifier
 result.
+
+`get_spec_guidelines()` returns the proof-friendly specification checklist used
+by the generation prompts. Use it when dense properties or natural-language
+extraction produce contracts that may leave the Z3-stable fragment.
 
 ## Current Scope
 

@@ -53,7 +53,7 @@ mumei build output.mm --emit <target>
 
 **mumei-agent** is a turnkey solution — it integrates LLM calls, `mumei verify`, and retry logic into a single autonomous fix loop. It invokes the mumei CLI directly via subprocess (no MCP required).
 
-The [mumei](https://github.com/mumei-lang/mumei) compiler repository also ships an **MCP Server** (`mcp_server.py`, implemented as FastMCP("Mumei-Forge")), which allows any MCP-compatible AI agent (Claude Code, Devin, Codex, Qwen, etc.) to access mumei's verification capabilities directly over the Model Context Protocol.
+The [mumei](https://github.com/mumei-lang/mumei) compiler repository also ships an **MCP Server** (`mcp_server.py`, implemented as FastMCP("Mumei-Forge")), which allows any MCP-compatible AI agent (Claude Code, Devin, Codex, Qwen, etc.) to access mumei's verification capabilities directly over the Model Context Protocol. The agent MCP server complements that with proof-friendly specification guidance so clients can request decidable-fragment hints before generating contracts.
 
 ```mermaid
 graph TD
@@ -256,6 +256,7 @@ Exported tools:
 | `propose_forge_tasks(mumei_repo, max_proposals=3)` | MCP-accessible `python -m agent propose --auto` |
 | `list_forge_log(log_path)` | Read `forge_log.json` |
 | `get_agent_status()` | Report LLM provider, mumei binary, available subcommands |
+| `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
 
 Example `.mcp.json` snippet for Claude Code project MCP config:
 
@@ -279,6 +280,12 @@ as a sibling directory (`../mumei`).  Adjust that path if your workspace layout
 differs.  The config intentionally uses `sh -lc "cd ... && exec ..."` instead
 of a `cwd` field because Claude Code project MCP configs are most portable when
 the working directory is set by the command itself.
+
+### Proof-friendly specification guidance
+
+`get_spec_guidelines()` exposes the same decidable-fragment guidance injected into generation prompts: prefer linear arithmetic, bounded array/sequence access, bounded quantifiers, and explicit finite temporal states. When a spec triggers `outside_decidable_fragment`, callers should simplify the contract, add explicit bounds or witnesses, or route the obligation to Lean.
+
+P8-C metrics in `agent.metrics.Metrics` track how often new specifications fall outside the decidable fragment (`outside_decidable_fragment_warnings`, `z3_unknowns`, `first_pass_verification_success_rate`, and `by_logic_fragment`) so the guidance can be refreshed quarterly.
 
 ### MCP-backed verification (opt-in)
 

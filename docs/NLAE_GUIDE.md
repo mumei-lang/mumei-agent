@@ -29,11 +29,11 @@ ENABLE_LATENT_DEBUG=false python -m agent heal path/to/file.mm
 Dense property generation runs after initial code generation when `ENABLE_DENSE_PROPERTIES` is enabled.
 
 1. `DensePropertyGenerator` extracts existing `requires` and `ensures` clauses from generated code.
-2. It asks the configured LLM for compact, mathematically precise replacements using `agent.prompts.dense_property`.
+2. It asks the configured LLM for compact, mathematically precise replacements using `agent.prompts.dense_property` and the shared proof-friendly specification guidance.
 3. `_apply_dense_properties()` replaces the first generated `requires` and `ensures` clauses with the dense variants.
 4. Failures are logged and the original generated code is used unchanged.
 
-Dense properties improve proof density by replacing broad placeholders such as `true` with contract clauses tied to the task specification. They are intentionally scoped to generated contracts; they do not prove the properties independently and they can still require later verification repair.
+Dense properties improve proof density by replacing broad placeholders such as `true` with contract clauses tied to the task specification. They are intentionally scoped to generated contracts; they do not prove the properties independently and they can still require later verification repair. MCP clients can call `get_spec_guidelines` to inspect the same decidable-fragment guidance (`outside_decidable_fragment`, bounded quantifiers, explicit witnesses) before asking the agent to generate or densify a spec.
 
 Disable dense properties for a single run:
 
@@ -47,6 +47,7 @@ ENABLE_DENSE_PROPERTIES=false python -m agent generate --spec-file spec.json --o
 - Dense property generation adds one LLM request per generation attempt where dense properties are enabled.
 - Both features are best-effort. Exceptions fall back to the previous pipeline instead of failing the whole task.
 - Metrics record dense property attempts, successful code changes, and `dense_property_usage_rate` so runs can verify usage targets such as 50% or higher.
+- P8-C metrics record `outside_decidable_fragment_warnings`, `z3_unknowns`, and per-fragment first-pass success rates so dense-property prompts can be tuned toward proof-friendly specs.
 
 ## Environment variables
 
