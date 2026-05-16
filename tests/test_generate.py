@@ -1,4 +1,5 @@
 """Tests for the generate mode."""
+
 import json
 from unittest.mock import MagicMock
 
@@ -101,14 +102,16 @@ def test_normalize_forge_task_spec_multi_atom_with_null_task_id():
 
 def test_generate_stdlib_prompt_produces_valid_string():
     """Test that generate_stdlib.build_prompt returns a non-empty string."""
-    spec_json = json.dumps({
-        "name": "safe_read",
-        "params": [{"name": "path", "type": "Str"}],
-        "effects": ["SafeFileRead(path)"],
-        "requires": 'starts_with(path, "/tmp/") && not_contains(path, "..")',
-        "ensures": "result >= 0",
-        "description": "Read a file safely with path traversal prevention",
-    })
+    spec_json = json.dumps(
+        {
+            "name": "safe_read",
+            "params": [{"name": "path", "type": "Str"}],
+            "effects": ["SafeFileRead(path)"],
+            "requires": 'starts_with(path, "/tmp/") && not_contains(path, "..")',
+            "ensures": "result >= 0",
+            "description": "Read a file safely with path traversal prevention",
+        }
+    )
     result = generate_stdlib.build_prompt(spec_json, "", {})
     assert isinstance(result, str)
     assert len(result) > 0
@@ -116,30 +119,38 @@ def test_generate_stdlib_prompt_produces_valid_string():
     assert "SafeFileRead" in result
     assert "std/file.mm" in result
     assert "std/http.mm" in result
+    assert "Z3-stable specification fragment" in result
+    assert "outside_decidable_fragment" in result
 
 
 def test_generate_stdlib_prompt_with_errors():
     """Test that generate_stdlib.build_prompt includes error context."""
     spec_json = '{"name": "test"}'
-    result = generate_stdlib.build_prompt(spec_json, "Parse error: unexpected token", {})
+    result = generate_stdlib.build_prompt(
+        spec_json, "Parse error: unexpected token", {}
+    )
     assert "Parse error" in result
 
 
 def test_generate_atom_prompt_produces_valid_string():
     """Test that generate_atom.build_prompt returns a non-empty string."""
-    spec_json = json.dumps({
-        "name": "add",
-        "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
-        "requires": "true",
-        "ensures": "result == a + b",
-        "description": "Add two numbers",
-    })
+    spec_json = json.dumps(
+        {
+            "name": "add",
+            "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+            "requires": "true",
+            "ensures": "result == a + b",
+            "description": "Add two numbers",
+        }
+    )
     result = generate_atom.build_prompt(spec_json, "", {})
     assert isinstance(result, str)
     assert len(result) > 0
     assert "add" in result
     assert "requires" in result.lower()
     assert "ensures" in result.lower()
+    assert "Z3-stable specification fragment" in result
+    assert "outside_decidable_fragment" in result
 
 
 def test_generate_atom_prompt_with_errors():
@@ -240,8 +251,11 @@ def test_generate_code_success_on_first_try():
     spec = {"name": "test", "params": []}
     metrics = Metrics()
     result, verified = generate_code(
-        client, "test-model", spec,
-        mumei_client=mumei, metrics=metrics,
+        client,
+        "test-model",
+        spec,
+        mumei_client=mumei,
+        metrics=metrics,
     )
     assert "atom test()" in result
     assert verified is True
@@ -366,7 +380,9 @@ def test_generate_code_fix_after_verify_failure():
         # Initial generation
         _make_response("```mumei\natom test() requires: true; body: 1;\n```"),
         # Fix attempt
-        _make_response("```mumei\natom test() requires: true; ensures: result >= 0; body: 1;\n```"),
+        _make_response(
+            "```mumei\natom test() requires: true; ensures: result >= 0; body: 1;\n```"
+        ),
     ]
 
     mumei = MagicMock()
@@ -390,8 +406,11 @@ def test_generate_code_fix_after_verify_failure():
     spec = {"name": "test", "params": []}
     metrics = Metrics()
     result, verified = generate_code(
-        client, "test-model", spec,
-        mumei_client=mumei, metrics=metrics,
+        client,
+        "test-model",
+        spec,
+        mumei_client=mumei,
+        metrics=metrics,
         enable_dense_properties=False,
     )
     assert "atom test()" in result
@@ -420,9 +439,12 @@ def test_generate_code_all_retries_exhausted():
     spec = {"name": "bad", "params": []}
     metrics = Metrics()
     result, verified = generate_code(
-        client, "test-model", spec,
+        client,
+        "test-model",
+        spec,
         config_max_retries=2,
-        mumei_client=mumei, metrics=metrics,
+        mumei_client=mumei,
+        metrics=metrics,
         enable_dense_properties=False,
     )
     assert verified is False
@@ -603,7 +625,10 @@ def test_generate_code_with_context_file():
 
     spec = {"name": "test", "params": [], "context_file": "/tmp/ctx.mm"}
     result, verified = generate_code(
-        client, "test-model", spec, mumei_client=mumei,
+        client,
+        "test-model",
+        spec,
+        mumei_client=mumei,
     )
     assert verified is True
     mumei.infer_effects.assert_called_once_with("/tmp/ctx.mm")
@@ -624,7 +649,10 @@ def test_generate_code_without_context_file():
 
     spec = {"name": "test", "params": []}
     result, verified = generate_code(
-        client, "test-model", spec, mumei_client=mumei,
+        client,
+        "test-model",
+        spec,
+        mumei_client=mumei,
     )
     assert verified is True
     mumei.infer_effects.assert_not_called()

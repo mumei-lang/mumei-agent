@@ -1,4 +1,5 @@
 """Metrics tracking for heal and generate runs."""
+
 from __future__ import annotations
 
 import json
@@ -35,10 +36,16 @@ class Metrics:
     dense_property_verification_seconds: float = 0.0
     extraction_attempts: int = 0
     extraction_successes: int = 0
+    new_spec_attempts: int = 0
+    outside_decidable_fragment_warnings: int = 0
+    z3_unknowns: int = 0
+    first_pass_verification_attempts: int = 0
+    first_pass_verification_successes: int = 0
     elapsed_seconds: float = 0.0
     challenge_name: str = ""
     llm_tokens_used: int = 0
     by_violation_type: dict[str, ViolationMetrics] = field(default_factory=dict)
+    by_logic_fragment: dict[str, ViolationMetrics] = field(default_factory=dict)
 
     def record_tokens(self, count: int) -> None:
         """Record LLM tokens consumed."""
@@ -78,6 +85,31 @@ class Metrics:
     def record_extraction_success(self) -> None:
         """Record a successful natural-language spec extraction."""
         self.extraction_successes += 1
+
+    def record_new_spec(
+        self,
+        logic_fragment_tags: list[str] | tuple[str, ...] = (),
+        *,
+        outside_decidable_fragment: bool = False,
+        z3_unknown: bool = False,
+        first_pass_verified: bool | None = None,
+    ) -> None:
+        """Record P8-C metrics for a newly generated specification."""
+        self.new_spec_attempts += 1
+        if outside_decidable_fragment or logic_fragment_tags:
+            self.outside_decidable_fragment_warnings += 1
+        if z3_unknown:
+            self.z3_unknowns += 1
+        if first_pass_verified is not None:
+            self.first_pass_verification_attempts += 1
+            if first_pass_verified:
+                self.first_pass_verification_successes += 1
+        for tag in logic_fragment_tags:
+            if tag not in self.by_logic_fragment:
+                self.by_logic_fragment[tag] = ViolationMetrics()
+            self.by_logic_fragment[tag].attempts += 1
+            if first_pass_verified:
+                self.by_logic_fragment[tag].successes += 1
 
     def record_rule_based_attempt(self, violation_type: str = "unknown") -> None:
         """Record a rule-based fix attempt.
@@ -193,6 +225,37 @@ class Metrics:
             return 0.0
         return (baseline - self.dense_property_verification_seconds) / baseline
 
+    @property
+    def outside_decidable_fragment_warning_rate(self) -> float:
+        """Return the new-spec rate for outside_decidable_fragment warnings."""
+        if self.new_spec_attempts == 0:
+            return 0.0
+        return self.outside_decidable_fragment_warnings / self.new_spec_attempts
+
+    @property
+    def z3_unknown_rate(self) -> float:
+        """Return the new-spec rate for Z3 unknown outcomes."""
+        if self.new_spec_attempts == 0:
+            return 0.0
+        return self.z3_unknowns / self.new_spec_attempts
+
+    @property
+    def first_pass_verification_success_rate(self) -> float:
+        """Return the first-pass verification success rate for generated specs."""
+        if self.first_pass_verification_attempts == 0:
+            return 0.0
+        return (
+            self.first_pass_verification_successes
+            / self.first_pass_verification_attempts
+        )
+
+    def logic_fragment_success_rate(self, tag: str) -> float:
+        """Return the first-pass success rate for a logic fragment tag."""
+        metrics = self.by_logic_fragment.get(tag)
+        if metrics is None or metrics.attempts == 0:
+            return 0.0
+        return metrics.successes / metrics.attempts
+
     def record_attempt(self, violation_type: str = "unknown") -> None:
         """Record a fix or generation attempt."""
         self.total_attempts += 1
@@ -253,12 +316,24 @@ class Metrics:
             ),
             "extraction_attempts": self.extraction_attempts,
             "extraction_successes": self.extraction_successes,
+            "new_spec_attempts": self.new_spec_attempts,
+            "outside_decidable_fragment_warnings": self.outside_decidable_fragment_warnings,
+            "outside_decidable_fragment_warning_rate": self.outside_decidable_fragment_warning_rate,
+            "z3_unknowns": self.z3_unknowns,
+            "z3_unknown_rate": self.z3_unknown_rate,
+            "first_pass_verification_attempts": self.first_pass_verification_attempts,
+            "first_pass_verification_successes": self.first_pass_verification_successes,
+            "first_pass_verification_success_rate": self.first_pass_verification_success_rate,
             "elapsed_seconds": self.elapsed_seconds,
             "challenge_name": self.challenge_name,
             "llm_tokens_used": self.llm_tokens_used,
             "by_violation_type": {
                 vtype: {"attempts": m.attempts, "successes": m.successes}
                 for vtype, m in self.by_violation_type.items()
+            },
+            "by_logic_fragment": {
+                tag: {"attempts": m.attempts, "successes": m.successes}
+                for tag, m in self.by_logic_fragment.items()
             },
         }
 
@@ -280,6 +355,12 @@ class Metrics:
             by_vtype[vtype] = ViolationMetrics(
                 attempts=vdata.get("attempts", 0),
                 successes=vdata.get("successes", 0),
+            )
+        by_logic_fragment: dict[str, ViolationMetrics] = {}
+        for tag, tag_data in data.get("by_logic_fragment", {}).items():
+            by_logic_fragment[tag] = ViolationMetrics(
+                attempts=tag_data.get("attempts", 0),
+                successes=tag_data.get("successes", 0),
             )
         return cls(
             total_attempts=data.get("total_attempts", 0),
@@ -307,10 +388,22 @@ class Metrics:
             ),
             extraction_attempts=data.get("extraction_attempts", 0),
             extraction_successes=data.get("extraction_successes", 0),
+            new_spec_attempts=data.get("new_spec_attempts", 0),
+            outside_decidable_fragment_warnings=data.get(
+                "outside_decidable_fragment_warnings", 0
+            ),
+            z3_unknowns=data.get("z3_unknowns", 0),
+            first_pass_verification_attempts=data.get(
+                "first_pass_verification_attempts", 0
+            ),
+            first_pass_verification_successes=data.get(
+                "first_pass_verification_successes", 0
+            ),
             elapsed_seconds=data.get("elapsed_seconds", 0.0),
             challenge_name=data.get("challenge_name", ""),
             llm_tokens_used=data.get("llm_tokens_used", 0),
             by_violation_type=by_vtype,
+            by_logic_fragment=by_logic_fragment,
         )
 
     def to_json(self) -> str:

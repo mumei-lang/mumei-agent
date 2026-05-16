@@ -1,4 +1,5 @@
 """Prompt template for generic atom generation from a spec JSON."""
+
 import json
 
 from agent.prompts.report_formatter import (
@@ -7,6 +8,17 @@ from agent.prompts.report_formatter import (
     format_structured_unsat_core,
     format_data_flow,
 )
+
+DECIDABLE_FRAGMENT_GUIDELINES = (
+    "# Z3-stable specification fragment:\n"
+    "- Prefer linear i64/Nat arithmetic: addition, subtraction, comparisons, and constant multiplication.\n"
+    "- Avoid variable multiplication, symbolic division/modulo, exponentiation, and recursive arithmetic invariants unless the task explicitly needs Lean escalation.\n"
+    "- For every array or sequence access `a[i]`, make `0 <= i && i < len(a)` explicit in `requires` or a bounded `forall`.\n"
+    "- Keep `forall` over bounded ranges or finite collections; for `exists`, expose a constructible witness.\n"
+    "- Keep temporal effects as finite state machines with explicit transitions and pre/post states.\n"
+    "- If verification reports `outside_decidable_fragment`, first simplify the spec before changing implementation code."
+)
+
 
 # Common mistakes checklist injected into all generation prompts.
 # Shared with generate_stdlib via import.
@@ -28,16 +40,23 @@ COMMON_MISTAKES = (
     "8. **Reuse std contracts**: Before writing custom validation, check if "
     "std/contracts.mm already provides the type or atom you need "
     "(e.g., Port, Percentage, clamp, safe_divide). "
-    "Use `import \"std/contracts\" as contracts;` and call `contracts::clamp(val, min, max)`\n"
+    'Use `import "std/contracts" as contracts;` and call `contracts::clamp(val, min, max)`\n'
     "9. **Fixed-point arithmetic**: For financial calculations, use "
     "std/math/fixed_point.mm instead of raw i64 division to prevent precision loss\n"
     "10. **Mumei syntax only**: Use `if cond { a } else { b }`, not "
     "`if cond then a else b`. Do not invent Option methods like "
-    "`.is_some()` / `.unwrap()`, and do not add atom-level `else { ... }` blocks."
+    "`.is_some()` / `.unwrap()`, and do not add atom-level `else { ... }` blocks.\n\n"
+    + DECIDABLE_FRAGMENT_GUIDELINES
 )
 
 
-def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferred_context: dict | None = None) -> str:
+def build_prompt(
+    source_code: str,
+    error_log: str,
+    report_data: dict,
+    *,
+    inferred_context: dict | None = None,
+) -> str:
     """Build a prompt for generating a Mumei atom from a specification.
 
     Args:
@@ -73,7 +92,9 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
 
     # Pre-generation checklist if spec is parseable as JSON
     try:
-        spec_dict = json.loads(source_code) if isinstance(source_code, str) else source_code
+        spec_dict = (
+            json.loads(source_code) if isinstance(source_code, str) else source_code
+        )
         if isinstance(spec_dict, dict):
             checklist = format_for_initial_generate(spec_dict)
             if checklist:
@@ -84,9 +105,7 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
     sections.append(f"# Specification:\n{source_code}")
 
     if error_log:
-        sections.append(
-            f"# Previous attempt produced errors. Fix these:\n{error_log}"
-        )
+        sections.append(f"# Previous attempt produced errors. Fix these:\n{error_log}")
 
     if report_data:
         # Actionable fix hint (human-readable)
@@ -97,7 +116,9 @@ def build_prompt(source_code: str, error_log: str, report_data: dict, *, inferre
         # Structured unsat core
         suc = format_structured_unsat_core(report_data)
         if suc:
-            sections.append(f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}")
+            sections.append(
+                f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}"
+            )
 
         # Data flow trace
         df = format_data_flow(report_data)
