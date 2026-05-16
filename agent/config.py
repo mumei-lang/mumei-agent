@@ -52,9 +52,9 @@ class AgentConfig:
     strategy: str = field(default_factory=lambda: os.getenv("AGENT_STRATEGY", "single"))
     visualizer_sync: bool = field(default_factory=lambda: _env_bool("ENABLE_VISUALIZER_SYNC"))
 
-    # Phase 12 — NLAE-inspired features.  Debugging and dense property
-    # generation are enabled by default; latent protocol remains opt-in.
-    enable_latent_debug: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_DEBUG", True))
+    # Phase 12 — NLAE-inspired features.  Latent debugging remains opt-in;
+    # dense property generation is enabled by default and latent protocol is opt-in.
+    enable_latent_debug: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_DEBUG"))
     enable_dense_properties: bool = field(default_factory=lambda: _env_bool("ENABLE_DENSE_PROPERTIES", True))
     enable_latent_protocol: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_PROTOCOL"))
     enable_code_to_spec: bool = field(default_factory=lambda: _env_bool("ENABLE_CODE_TO_SPEC", True))

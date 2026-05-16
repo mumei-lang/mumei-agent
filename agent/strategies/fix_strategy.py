@@ -99,6 +99,8 @@ def get_fix(
         except Exception:
             enable_spec_code_mapping = True
 
+    vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
+
     # Phase 0: optional latent-space debug.  Any failure falls through to
     # the existing deterministic rule-based and LLM repair pipeline.
     if enable_latent_debug:
@@ -107,6 +109,8 @@ def get_fix(
             from agent.latent_encoder import LatentEncoder
             from agent.strategies.latent_debug_strategy import LatentDebugStrategy
 
+            if metrics is not None:
+                metrics.record_latent_debug_attempt(vt)
             latent_fix = LatentDebugStrategy().get_fix_with_latent_debug(
                 source_code,
                 report_data,
@@ -114,10 +118,6 @@ def get_fix(
                 LatentDecoder(),
             )
             if latent_fix:
-                vt = report_data.get("violation_type") or report_data.get(
-                    "failure_type",
-                    "latent_debug",
-                )
                 if mumei_client is not None:
                     tmp_path: str | None = None
                     try:
@@ -132,8 +132,13 @@ def get_fix(
                         validation = mumei_client.verify(tmp_path)
                         if validation["success"]:
                             if metrics is not None:
-                                metrics.record_attempt(vt)
-                                metrics.record_success(vt)
+                                metrics.record_latent_debug_success(vt)
+                            _record_pattern(
+                                pattern_library, vt,
+                                report_data.get("failure_type", ""),
+                                source_code, latent_fix, report_data,
+                                fix_method="latent_debug",
+                            )
                             _update_spec_code_mapping(
                                 report_data,
                                 spec,
@@ -153,6 +158,14 @@ def get_fix(
                         except Exception:
                             pass
                 else:
+                    if metrics is not None:
+                        metrics.record_latent_debug_success(vt)
+                    _record_pattern(
+                        pattern_library, vt,
+                        report_data.get("failure_type", ""),
+                        source_code, latent_fix, report_data,
+                        fix_method="latent_debug",
+                    )
                     _update_spec_code_mapping(
                         report_data,
                         spec,
@@ -167,7 +180,6 @@ def get_fix(
             )
 
     # Phase 1: Try rule-based fix (no LLM, deterministic)
-    vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
     rule_fix = try_rule_based_fix(source_code, report_data)
     if rule_fix is not None:
         if metrics is not None:

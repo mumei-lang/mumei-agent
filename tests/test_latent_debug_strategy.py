@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from agent.latent_decoder import LatentDecoder
 from agent.latent_encoder import LatentEncoder
+from agent.latent_debug_strategy import LatentDebugStrategy as PublicLatentDebugStrategy
 from agent.strategies.latent_debug_strategy import LatentDebugStrategy
 
 
 def test_latent_debug_strategy_initialization() -> None:
     """LatentDebugStrategy initializes."""
     assert LatentDebugStrategy() is not None
+    assert PublicLatentDebugStrategy is LatentDebugStrategy
 
 
 def test_latent_encoder_initialization() -> None:
@@ -52,6 +54,7 @@ def test_latent_debug_fix_with_mock_report() -> None:
     source_code = "atom safe_div(a: i64, b: i64) -> i64\n    body: { a / b }\n"
     report = {
         "violation_type": "division_by_zero",
+        "atom": "safe_div",
         "counterexample": {"b": 0},
     }
 
@@ -62,4 +65,5 @@ def test_latent_debug_fix_with_mock_report() -> None:
         decoder,
     )
 
-    assert fixed_code is None or isinstance(fixed_code, str)
+    assert fixed_code is not None
+    assert "atom safe_div(a: i64, b: i64) -> i64\n    requires: b != 0;" in fixed_code
