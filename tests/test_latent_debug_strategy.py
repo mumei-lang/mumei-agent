@@ -66,4 +66,4 @@ def test_latent_debug_fix_with_mock_report() -> None:
     )
 
     assert fixed_code is not None
-    assert "requires: b != 0;" in fixed_code
+    assert "atom safe_div(a: i64, b: i64) -> i64\n    requires: b != 0;" in fixed_code

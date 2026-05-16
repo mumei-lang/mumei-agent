@@ -257,10 +257,11 @@ class LatentDecoder:
         return source_code[:decl_end] + insertion + source_code[decl_end:]
 
     def _find_atom_declaration_end(self, source_code: str, atom_name: str = "") -> int | None:
+        return_type = r"(?:\s*->\s*[^\n{;]+)?"
         if atom_name:
-            pattern = re.compile(rf"\batom\s+{re.escape(atom_name)}\s*\([^)]*\)", re.DOTALL)
+            pattern = re.compile(rf"\batom\s+{re.escape(atom_name)}\s*\([^)]*\){return_type}")
         else:
-            pattern = re.compile(r"\batom\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)", re.DOTALL)
+            pattern = re.compile(rf"\batom\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\){return_type}")
         match = pattern.search(source_code)
         if match is not None:
             return match.end()
