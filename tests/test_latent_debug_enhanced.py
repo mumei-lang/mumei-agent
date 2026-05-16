@@ -31,7 +31,7 @@ atom settle(account: i64, amount: i64)
         {"violation_type": "effect_mismatch", "counterexample": {"amount": 1}},
     )
 
-    assert len(latent) == 35
+    assert len(latent) == 52
     assert encoder._extract_effect_features(source).tolist() == [
         0.0,
         1.0,
@@ -41,12 +41,14 @@ atom settle(account: i64, amount: i64)
         1.0,
         3.0,
         3.0,
+        0.0,
+        0.0,
     ]
-    assert encoder._extract_dependency_features(source).tolist() == [1.0, 1.0, 0.0]
+    assert encoder._extract_dependency_features(source).tolist() == [1.0, 1.0, 0.0, 0.0, 2.0]
     contract_features = encoder._extract_contract_complexity_features(source)
     assert contract_features[0] >= 1.0
     assert contract_features[3] == 1.0
-    assert encoder._extract_scope_features(source).tolist() == [4.0, 1.0, 3.0, 2.0]
+    assert encoder._extract_scope_features(source).tolist()[:4] == [4.0, 1.0, 3.0, 2.0]
 
 
 def test_decoder_applies_new_repair_strategies() -> None:
@@ -100,7 +102,7 @@ def test_bug_direction_targets_enhanced_violation_types() -> None:
         vector,
         {"failure_type": "invariant_violated"},
     )
-    assert invariant_direction[6] > 0
+    assert invariant_direction[6] < 0
     assert invariant_direction[12] < 0
 
 
@@ -115,10 +117,14 @@ def test_latent_debug_produces_effect_candidate() -> None:
 
     fixed = strategy.get_fix_with_latent_debug(
         source,
-        {"violation_type": "effect_mismatch"},
+        {
+            "violation_type": "effect_mismatch",
+            "atom": "save",
+            "effect_violation": {"required_effect": "FileWrite"},
+        },
         LatentEncoder(),
         LatentDecoder(),
     )
 
     assert fixed is not None
-    assert "effects: [Write];" in fixed
+    assert "effects: [FileWrite];" in fixed

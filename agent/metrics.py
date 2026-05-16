@@ -24,6 +24,8 @@ class Metrics:
     rule_based_successes: int = 0
     pattern_attempts: int = 0
     pattern_successes: int = 0
+    latent_debug_attempts: int = 0
+    latent_debug_successes: int = 0
     dense_property_attempts: int = 0
     dense_property_successes: int = 0
     extraction_attempts: int = 0
@@ -105,6 +107,16 @@ class Metrics:
         self.record_attempt(violation_type)
         self.record_success(violation_type)
 
+    def record_latent_debug_attempt(self, violation_type: str = "unknown") -> None:
+        """Record a latent-space debug attempt."""
+        self.latent_debug_attempts += 1
+
+    def record_latent_debug_success(self, violation_type: str = "unknown") -> None:
+        """Record a successful latent-space debug fix."""
+        self.latent_debug_successes += 1
+        self.record_attempt(violation_type)
+        self.record_success(violation_type)
+
     @property
     def pattern_success_rate(self) -> float:
         """Return the success rate for pattern-based fixes."""
@@ -118,6 +130,13 @@ class Metrics:
         if self.rule_based_attempts == 0:
             return 0.0
         return self.rule_based_successes / self.rule_based_attempts
+
+    @property
+    def latent_debug_success_rate(self) -> float:
+        """Return the success rate for latent-space debug fixes."""
+        if self.latent_debug_attempts == 0:
+            return 0.0
+        return self.latent_debug_successes / self.latent_debug_attempts
 
     @property
     def dense_property_usage_rate(self) -> float:
@@ -170,6 +189,9 @@ class Metrics:
             "rule_based_successes": self.rule_based_successes,
             "pattern_attempts": self.pattern_attempts,
             "pattern_successes": self.pattern_successes,
+            "latent_debug_attempts": self.latent_debug_attempts,
+            "latent_debug_successes": self.latent_debug_successes,
+            "latent_debug_success_rate": self.latent_debug_success_rate,
             "dense_property_attempts": self.dense_property_attempts,
             "dense_property_successes": self.dense_property_successes,
             "dense_property_usage_rate": self.dense_property_usage_rate,
@@ -210,6 +232,8 @@ class Metrics:
             rule_based_successes=data.get("rule_based_successes", 0),
             pattern_attempts=data.get("pattern_attempts", 0),
             pattern_successes=data.get("pattern_successes", 0),
+            latent_debug_attempts=data.get("latent_debug_attempts", 0),
+            latent_debug_successes=data.get("latent_debug_successes", 0),
             dense_property_attempts=data.get("dense_property_attempts", 0),
             dense_property_successes=data.get("dense_property_successes", 0),
             extraction_attempts=data.get("extraction_attempts", 0),

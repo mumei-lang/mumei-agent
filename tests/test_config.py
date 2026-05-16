@@ -5,7 +5,7 @@ from agent.config import AgentConfig
 
 
 def test_nla_options_default_values(monkeypatch) -> None:
-    """NLA defaults enable debug and dense properties only."""
+    """NLA defaults keep latent debug disabled and dense properties enabled."""
     monkeypatch.delenv("ENABLE_LATENT_DEBUG", raising=False)
     monkeypatch.delenv("ENABLE_DENSE_PROPERTIES", raising=False)
     monkeypatch.delenv("ENABLE_LATENT_PROTOCOL", raising=False)
@@ -18,7 +18,7 @@ def test_nla_options_default_values(monkeypatch) -> None:
 
     config = AgentConfig()
 
-    assert config.enable_latent_debug is True
+    assert config.enable_latent_debug is False
     assert config.enable_dense_properties is True
     assert config.enable_latent_protocol is False
     assert config.enable_code_to_spec is True
@@ -68,7 +68,7 @@ def test_nla_options_case_insensitive(monkeypatch) -> None:
 
 
 def test_nla_options_false_values(monkeypatch) -> None:
-    """Non-truthy values override enabled-by-default NLA options."""
+    """Non-truthy values override boolean NLA options."""
     for value in ["false", "False", "FALSE", "0", "no", "No", "NO", "off", "OFF"]:
         monkeypatch.setenv("ENABLE_LATENT_DEBUG", value)
         monkeypatch.setenv("ENABLE_DENSE_PROPERTIES", value)

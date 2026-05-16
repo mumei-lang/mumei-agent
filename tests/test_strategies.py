@@ -1,5 +1,6 @@
 """Tests for fix_strategy module."""
 from unittest.mock import MagicMock, patch, call
+from agent.metrics import Metrics
 from agent.strategies.fix_strategy import get_fix, _build_prompt_for_report
 from agent.strategies.multi_stage_strategy import _parse_diagnosis, _extract_code
 
@@ -97,6 +98,51 @@ def test_no_code_block_returns_raw():
     client = _mock_client("Just plain text fix suggestion")
     result = get_fix(client, "m", "src", "err", {})
     assert result == "Just plain text fix suggestion"
+
+
+def test_get_fix_latent_debug_default_disabled(monkeypatch):
+    """Latent Phase 0 is opt-in by default."""
+    monkeypatch.delenv("ENABLE_LATENT_DEBUG", raising=False)
+    client = _mock_client("```mumei\natom llm() body: 1;\n```")
+    metrics = Metrics()
+    source = "atom save(x: i64) -> i64\n    body: { x }\n"
+    report = {
+        "violation_type": "effect_mismatch",
+        "effect_violation": {"required_effect": "FileWrite"},
+    }
+
+    result = get_fix(client, "m", source, "err", report, metrics=metrics)
+
+    assert "atom llm()" in result
+    assert client.chat.completions.create.call_count == 1
+    assert metrics.latent_debug_attempts == 0
+
+
+def test_get_fix_latent_debug_runs_before_llm_when_enabled():
+    """Enabled latent Phase 0 returns a candidate before LLM repair."""
+    client = _mock_client("```mumei\natom llm() body: 1;\n```")
+    metrics = Metrics()
+    source = "atom save(x: i64) -> i64\n    body: { x }\n"
+    report = {
+        "violation_type": "effect_mismatch",
+        "effect_violation": {"required_effect": "FileWrite"},
+    }
+
+    result = get_fix(
+        client,
+        "m",
+        source,
+        "err",
+        report,
+        metrics=metrics,
+        enable_latent_debug=True,
+    )
+
+    assert "effects: [FileWrite];" in result
+    assert client.chat.completions.create.call_count == 0
+    assert metrics.latent_debug_attempts == 1
+    assert metrics.latent_debug_successes == 1
+    assert metrics.latent_debug_success_rate >= 0.30
 
 
 def test_get_fix_updates_spec_code_mapping():

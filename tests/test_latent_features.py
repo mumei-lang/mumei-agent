@@ -1,4 +1,4 @@
-"""Coverage for default-enabled latent and dense property features."""
+"""Coverage for latent debug and dense property feature flags."""
 from __future__ import annotations
 
 from unittest.mock import Mock
@@ -40,15 +40,15 @@ def _mock_response(content: str) -> Mock:
     return response
 
 
-def test_default_nlae_flags_enable_debug_and_dense_only(monkeypatch) -> None:
-    """Latent debug and dense properties are enabled without env vars."""
+def test_default_nlae_flags_disable_debug_and_enable_dense_only(monkeypatch) -> None:
+    """Latent debug is opt-in while dense properties stay enabled by default."""
     monkeypatch.delenv("ENABLE_LATENT_DEBUG", raising=False)
     monkeypatch.delenv("ENABLE_DENSE_PROPERTIES", raising=False)
     monkeypatch.delenv("ENABLE_LATENT_PROTOCOL", raising=False)
 
     config = AgentConfig()
 
-    assert config.enable_latent_debug is True
+    assert config.enable_latent_debug is False
     assert config.enable_dense_properties is True
     assert config.enable_latent_protocol is False
 
