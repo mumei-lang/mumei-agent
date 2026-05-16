@@ -28,6 +28,11 @@ class Metrics:
     latent_debug_successes: int = 0
     dense_property_attempts: int = 0
     dense_property_successes: int = 0
+    dense_property_compression_ratios: list[float] = field(default_factory=list)
+    verification_times_seconds: list[float] = field(default_factory=list)
+    dense_verification_times_seconds: list[float] = field(default_factory=list)
+    dense_property_baseline_verification_seconds: float = 0.0
+    dense_property_verification_seconds: float = 0.0
     extraction_attempts: int = 0
     extraction_successes: int = 0
     elapsed_seconds: float = 0.0
@@ -46,6 +51,25 @@ class Metrics:
     def record_dense_property_success(self) -> None:
         """Record a dense property generation that changed generated code."""
         self.dense_property_successes += 1
+
+    def record_dense_property_compression(self, ratio: float) -> None:
+        """Record how much dense property compression retained."""
+        self.dense_property_compression_ratios.append(ratio)
+
+    def record_verification_time(self, seconds: float, dense_properties: bool = False) -> None:
+        """Record time spent verifying generated contracts."""
+        self.verification_times_seconds.append(seconds)
+        if dense_properties:
+            self.dense_verification_times_seconds.append(seconds)
+
+    def record_dense_property_verification_time(
+        self,
+        baseline_seconds: float,
+        dense_seconds: float,
+    ) -> None:
+        """Record comparable baseline and dense contract verification timings."""
+        self.dense_property_baseline_verification_seconds += baseline_seconds
+        self.dense_property_verification_seconds += dense_seconds
 
     def record_extraction_attempt(self) -> None:
         """Record a natural-language spec extraction attempt."""
@@ -152,6 +176,23 @@ class Metrics:
             return 0.0
         return self.extraction_successes / self.extraction_attempts
 
+    @property
+    def dense_property_average_compression_ratio(self) -> float:
+        """Return average retained predicate ratio after compression."""
+        if not self.dense_property_compression_ratios:
+            return 1.0
+        return sum(self.dense_property_compression_ratios) / len(
+            self.dense_property_compression_ratios,
+        )
+
+    @property
+    def dense_property_verification_improvement_rate(self) -> float:
+        """Return relative verification-time reduction for dense contracts."""
+        baseline = self.dense_property_baseline_verification_seconds
+        if baseline <= 0.0:
+            return 0.0
+        return (baseline - self.dense_property_verification_seconds) / baseline
+
     def record_attempt(self, violation_type: str = "unknown") -> None:
         """Record a fix or generation attempt."""
         self.total_attempts += 1
@@ -195,6 +236,21 @@ class Metrics:
             "dense_property_attempts": self.dense_property_attempts,
             "dense_property_successes": self.dense_property_successes,
             "dense_property_usage_rate": self.dense_property_usage_rate,
+            "dense_property_compression_ratios": self.dense_property_compression_ratios,
+            "dense_property_average_compression_ratio": (
+                self.dense_property_average_compression_ratio
+            ),
+            "verification_times_seconds": self.verification_times_seconds,
+            "dense_verification_times_seconds": self.dense_verification_times_seconds,
+            "dense_property_baseline_verification_seconds": (
+                self.dense_property_baseline_verification_seconds
+            ),
+            "dense_property_verification_seconds": (
+                self.dense_property_verification_seconds
+            ),
+            "dense_property_verification_improvement_rate": (
+                self.dense_property_verification_improvement_rate
+            ),
             "extraction_attempts": self.extraction_attempts,
             "extraction_successes": self.extraction_successes,
             "elapsed_seconds": self.elapsed_seconds,
@@ -236,6 +292,19 @@ class Metrics:
             latent_debug_successes=data.get("latent_debug_successes", 0),
             dense_property_attempts=data.get("dense_property_attempts", 0),
             dense_property_successes=data.get("dense_property_successes", 0),
+            dense_property_compression_ratios=data.get(
+                "dense_property_compression_ratios", [],
+            ),
+            verification_times_seconds=data.get("verification_times_seconds", []),
+            dense_verification_times_seconds=data.get(
+                "dense_verification_times_seconds", [],
+            ),
+            dense_property_baseline_verification_seconds=data.get(
+                "dense_property_baseline_verification_seconds", 0.0,
+            ),
+            dense_property_verification_seconds=data.get(
+                "dense_property_verification_seconds", 0.0,
+            ),
             extraction_attempts=data.get("extraction_attempts", 0),
             extraction_successes=data.get("extraction_successes", 0),
             elapsed_seconds=data.get("elapsed_seconds", 0.0),

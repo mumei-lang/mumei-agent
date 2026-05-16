@@ -95,6 +95,41 @@ class TestMetricsLlmTokens:
         assert loaded.llm_tokens_used == 0
 
 
+class TestDensePropertyMetrics:
+    """Test dense property compression and verification timing metrics."""
+
+    def test_dense_property_verification_improvement_rate(self) -> None:
+        """Dense verification timing records relative improvement."""
+        metrics = Metrics()
+        metrics.record_dense_property_compression(0.5)
+        metrics.record_dense_property_verification_time(10.0, 7.5)
+        metrics.record_verification_time(7.5, dense_properties=True)
+
+        data = metrics.to_dict()
+
+        assert data["dense_property_average_compression_ratio"] == 0.5
+        assert data["dense_property_verification_improvement_rate"] == 0.25
+        assert data["verification_times_seconds"] == [7.5]
+        assert data["dense_verification_times_seconds"] == [7.5]
+
+    def test_from_file_roundtrip_dense_property_metrics(self, tmp_path: Path) -> None:
+        """from_file() preserves dense property timing fields."""
+        metrics = Metrics()
+        metrics.record_dense_property_compression(0.25)
+        metrics.record_dense_property_verification_time(4.0, 3.0)
+        metrics.record_verification_time(3.0, dense_properties=True)
+        path = tmp_path / "metrics.json"
+        path.write_text(metrics.to_json(), encoding="utf-8")
+
+        loaded = Metrics.from_file(path)
+
+        assert loaded.dense_property_compression_ratios == [0.25]
+        assert loaded.dense_property_baseline_verification_seconds == 4.0
+        assert loaded.dense_property_verification_seconds == 3.0
+        assert loaded.dense_property_verification_improvement_rate == 0.25
+        assert loaded.dense_verification_times_seconds == [3.0]
+
+
 class TestMetricsFromFile:
     """Test Metrics.from_file() classmethod."""
 

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -352,6 +353,60 @@ def _verify_with_spec_code_mapping(
     return verify_result
 
 
+def _verify_with_metrics(
+    mumei_client: MumeiClient,
+    source_path: str,
+    spec: dict,
+    code: str,
+    metrics: Metrics | None,
+    *,
+    dense_properties: bool,
+    enabled: bool = True,
+) -> dict:
+    start = time.perf_counter()
+    verify_result = _verify_with_spec_code_mapping(
+        mumei_client,
+        source_path,
+        spec,
+        code,
+        enabled=enabled,
+    )
+    if metrics is not None:
+        metrics.record_verification_time(time.perf_counter() - start, dense_properties)
+    return verify_result
+
+
+def _time_verify_candidate(
+    mumei_client: MumeiClient,
+    code: str,
+    spec: dict,
+    *,
+    enabled: bool = True,
+) -> tuple[dict, float]:
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".mm", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp_path = tmp.name
+            tmp.write(code)
+        start = time.perf_counter()
+        verify_result = _verify_with_spec_code_mapping(
+            mumei_client,
+            tmp_path,
+            spec,
+            code,
+            enabled=enabled,
+        )
+        return verify_result, time.perf_counter() - start
+    finally:
+        try:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _load_generation_config(spec: dict) -> AgentConfig | None:
     """Return an AgentConfig for generation-scoped feature flags."""
     try:
@@ -620,14 +675,19 @@ def generate_multi_atom(
         _logger.warning("LLM returned empty multi-atom generation result")
         return "", False
 
+    dense_properties_applied = False
     if enable_dense_properties:
+        original_code = generated_code
         generated_code = _try_apply_dense_properties(
             generated_code,
             spec_for_json,
             client,
             model,
             metrics,
+            mumei_client=mumei_client,
+            enable_spec_code_mapping=bool(enable_spec_code_mapping),
         )
+        dense_properties_applied = generated_code != original_code
 
     if mumei_client is None:
         generated_code = _regenerate_unhealthy_code(
@@ -701,11 +761,13 @@ def generate_multi_atom(
                 continue
 
             # Full verification
-            verify_result = _verify_with_spec_code_mapping(
+            verify_result = _verify_with_metrics(
                 mumei_client,
                 tmp_path,
                 spec_for_json,
                 current_code,
+                metrics,
+                dense_properties=dense_properties_applied,
                 enabled=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
@@ -791,11 +853,13 @@ def generate_multi_atom(
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(current_code)
-        verify_result = _verify_with_spec_code_mapping(
+        verify_result = _verify_with_metrics(
             mumei_client,
             tmp_path,
             spec_for_json,
             current_code,
+            metrics,
+            dense_properties=dense_properties_applied,
             enabled=bool(enable_spec_code_mapping),
         )
         if thought_process is not None:
@@ -1021,14 +1085,19 @@ def generate_code(
         _logger.warning("LLM returned empty generation result")
         return "", False
 
+    dense_properties_applied = False
     if enable_dense_properties:
+        original_code = generated_code
         generated_code = _try_apply_dense_properties(
             generated_code,
             spec_for_json,
             client,
             model,
             metrics,
+            mumei_client=mumei_client,
+            enable_spec_code_mapping=bool(enable_spec_code_mapping),
         )
+        dense_properties_applied = generated_code != original_code
 
     if mumei_client is None:
         generated_code = _regenerate_unhealthy_code(
@@ -1104,11 +1173,13 @@ def generate_code(
                 continue
 
             # Full verification
-            verify_result = _verify_with_spec_code_mapping(
+            verify_result = _verify_with_metrics(
                 mumei_client,
                 tmp_path,
                 spec_for_json,
                 current_code,
+                metrics,
+                dense_properties=dense_properties_applied,
                 enabled=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
@@ -1192,11 +1263,13 @@ def generate_code(
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(current_code)
-        verify_result = _verify_with_spec_code_mapping(
+        verify_result = _verify_with_metrics(
             mumei_client,
             tmp_path,
             spec_for_json,
             current_code,
+            metrics,
+            dense_properties=dense_properties_applied,
             enabled=bool(enable_spec_code_mapping),
         )
         if thought_process is not None:
@@ -1275,12 +1348,15 @@ def _try_apply_dense_properties(
     client: OpenAI,
     model: str,
     metrics: Metrics | None = None,
+    *,
+    mumei_client: MumeiClient | None = None,
+    enable_spec_code_mapping: bool = True,
 ) -> str:
     """Best-effort dense property generation with safe fallback."""
     if metrics is not None:
         metrics.record_dense_property_attempt()
     try:
-        from agent.strategies.dense_property_generator import DensePropertyGenerator
+        from agent.dense_property_generator import DensePropertyGenerator
 
         dense_props = DensePropertyGenerator().generate_dense_properties(
             spec,
@@ -1288,8 +1364,41 @@ def _try_apply_dense_properties(
             client,
             model,
         )
+        if metrics is not None:
+            compression = dense_props.get("compression")
+            if isinstance(compression, dict):
+                ratio = compression.get("predicate_ratio")
+                if isinstance(ratio, int | float):
+                    metrics.record_dense_property_compression(float(ratio))
         updated_code = _apply_dense_properties(current_code, dense_props)
-        if metrics is not None and updated_code != current_code:
+        if updated_code == current_code:
+            return current_code
+        if mumei_client is not None:
+            baseline_result, baseline_seconds = _time_verify_candidate(
+                mumei_client,
+                current_code,
+                spec,
+                enabled=enable_spec_code_mapping,
+            )
+            dense_result, dense_seconds = _time_verify_candidate(
+                mumei_client,
+                updated_code,
+                spec,
+                enabled=enable_spec_code_mapping,
+            )
+            if metrics is not None:
+                metrics.record_dense_property_verification_time(
+                    baseline_seconds,
+                    dense_seconds,
+                )
+            if not dense_result.get("success"):
+                return current_code
+            if (
+                baseline_result.get("success")
+                and dense_seconds > baseline_seconds * 0.8
+            ):
+                return current_code
+        if metrics is not None:
             metrics.record_dense_property_success()
         return updated_code
     except Exception:

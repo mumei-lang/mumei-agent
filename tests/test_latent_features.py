@@ -1,4 +1,4 @@
-"""Coverage for latent debug and dense property feature flags."""
+"""Coverage for latent and dense property opt-in feature flags."""
 from __future__ import annotations
 
 from unittest.mock import Mock
@@ -40,8 +40,8 @@ def _mock_response(content: str) -> Mock:
     return response
 
 
-def test_default_nlae_flags_disable_debug_and_enable_dense_only(monkeypatch) -> None:
-    """Latent debug is opt-in while dense properties stay enabled by default."""
+def test_default_nlae_flags_disable_debug_and_dense(monkeypatch) -> None:
+    """Latent debug and dense properties stay opt-in by default."""
     monkeypatch.delenv("ENABLE_LATENT_DEBUG", raising=False)
     monkeypatch.delenv("ENABLE_DENSE_PROPERTIES", raising=False)
     monkeypatch.delenv("ENABLE_LATENT_PROTOCOL", raising=False)
@@ -49,7 +49,7 @@ def test_default_nlae_flags_disable_debug_and_enable_dense_only(monkeypatch) -> 
     config = AgentConfig()
 
     assert config.enable_latent_debug is False
-    assert config.enable_dense_properties is True
+    assert config.enable_dense_properties is False
     assert config.enable_latent_protocol is False
 
 
@@ -105,9 +105,9 @@ def test_dense_property_generator_validates_output_shape() -> None:
     assert "requires:" in dense_props["raw"]
 
 
-def test_generate_code_uses_default_dense_properties_and_records_metrics(monkeypatch) -> None:
-    """Default generation applies dense properties and records at least 50% usage."""
-    monkeypatch.delenv("ENABLE_DENSE_PROPERTIES", raising=False)
+def test_generate_code_uses_opt_in_dense_properties_and_records_metrics(monkeypatch) -> None:
+    """Opt-in generation applies dense properties and records usage."""
+    monkeypatch.setenv("ENABLE_DENSE_PROPERTIES", "true")
     monkeypatch.setenv("ENABLE_GENERATION_HEALTH_CHECK", "false")
     client = Mock()
     client.chat.completions.create.side_effect = [

@@ -5,7 +5,7 @@ from agent.config import AgentConfig
 
 
 def test_nla_options_default_values(monkeypatch) -> None:
-    """NLA defaults keep latent debug disabled and dense properties enabled."""
+    """NLA defaults keep latent debug and dense properties opt-in."""
     monkeypatch.delenv("ENABLE_LATENT_DEBUG", raising=False)
     monkeypatch.delenv("ENABLE_DENSE_PROPERTIES", raising=False)
     monkeypatch.delenv("ENABLE_LATENT_PROTOCOL", raising=False)
@@ -19,7 +19,7 @@ def test_nla_options_default_values(monkeypatch) -> None:
     config = AgentConfig()
 
     assert config.enable_latent_debug is False
-    assert config.enable_dense_properties is True
+    assert config.enable_dense_properties is False
     assert config.enable_latent_protocol is False
     assert config.enable_code_to_spec is True
     assert config.enable_generation_health_check is True
