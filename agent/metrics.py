@@ -24,6 +24,8 @@ class Metrics:
     rule_based_successes: int = 0
     pattern_attempts: int = 0
     pattern_successes: int = 0
+    dense_property_attempts: int = 0
+    dense_property_successes: int = 0
     extraction_attempts: int = 0
     extraction_successes: int = 0
     elapsed_seconds: float = 0.0
@@ -34,6 +36,14 @@ class Metrics:
     def record_tokens(self, count: int) -> None:
         """Record LLM tokens consumed."""
         self.llm_tokens_used += count
+
+    def record_dense_property_attempt(self) -> None:
+        """Record a dense property generation attempt."""
+        self.dense_property_attempts += 1
+
+    def record_dense_property_success(self) -> None:
+        """Record a dense property generation that changed generated code."""
+        self.dense_property_successes += 1
 
     def record_extraction_attempt(self) -> None:
         """Record a natural-language spec extraction attempt."""
@@ -110,6 +120,13 @@ class Metrics:
         return self.rule_based_successes / self.rule_based_attempts
 
     @property
+    def dense_property_usage_rate(self) -> float:
+        """Return the rate at which dense property attempts changed code."""
+        if self.dense_property_attempts == 0:
+            return 0.0
+        return self.dense_property_successes / self.dense_property_attempts
+
+    @property
     def extraction_success_rate(self) -> float:
         """Return the success rate for natural-language spec extraction."""
         if self.extraction_attempts == 0:
@@ -153,6 +170,9 @@ class Metrics:
             "rule_based_successes": self.rule_based_successes,
             "pattern_attempts": self.pattern_attempts,
             "pattern_successes": self.pattern_successes,
+            "dense_property_attempts": self.dense_property_attempts,
+            "dense_property_successes": self.dense_property_successes,
+            "dense_property_usage_rate": self.dense_property_usage_rate,
             "extraction_attempts": self.extraction_attempts,
             "extraction_successes": self.extraction_successes,
             "elapsed_seconds": self.elapsed_seconds,
@@ -190,6 +210,8 @@ class Metrics:
             rule_based_successes=data.get("rule_based_successes", 0),
             pattern_attempts=data.get("pattern_attempts", 0),
             pattern_successes=data.get("pattern_successes", 0),
+            dense_property_attempts=data.get("dense_property_attempts", 0),
+            dense_property_successes=data.get("dense_property_successes", 0),
             extraction_attempts=data.get("extraction_attempts", 0),
             extraction_successes=data.get("extraction_successes", 0),
             elapsed_seconds=data.get("elapsed_seconds", 0.0),

@@ -5,24 +5,23 @@ Autoencoder (NLAE) concepts into `mumei-agent`.
 
 ## Overview
 
-NLAE-inspired features add three opt-in capabilities:
+NLAE-inspired features add three capabilities:
 
 1. **Latent-space debugging**: try a deterministic latent repair before the
-   existing rule-based and LLM fix pipeline.
+   existing rule-based and LLM fix pipeline. Enabled by default.
 2. **Dense property generation**: synthesize compact `requires` / `ensures`
-   clauses after initial generation.
+   clauses after initial generation. Enabled by default.
 3. **Latent protocol**: encode inter-agent messages as latent vectors exposed
-   through the MCP server.
+   through the MCP server. Still opt-in.
 
-All capabilities are disabled by default and fall back to existing behavior on
-failure.
+Enabled capabilities fall back to existing behavior on failure.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ENABLE_LATENT_DEBUG` | `false` | Enable latent-space debugging in fix strategy. |
-| `ENABLE_DENSE_PROPERTIES` | `false` | Enable high-density property generation. |
+| `ENABLE_LATENT_DEBUG` | `true` | Enable latent-space debugging in fix strategy. |
+| `ENABLE_DENSE_PROPERTIES` | `true` | Enable high-density property generation. |
 | `ENABLE_LATENT_PROTOCOL` | `false` | Enable latent protocol MCP tool usage. |
 
 Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
@@ -42,9 +41,15 @@ Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
 ## Usage
 
 ```bash
-ENABLE_LATENT_DEBUG=true python -m agent heal examples/sword_test.mm
-ENABLE_DENSE_PROPERTIES=true python -m agent generate --spec-file examples/spec.json --output out.mm
+python -m agent heal examples/sword_test.mm
+python -m agent generate --spec-file examples/spec.json --output out.mm
 ENABLE_LATENT_PROTOCOL=true python -m agent mcp-server
+```
+
+Disable the default generation/healing helpers with:
+
+```bash
+ENABLE_LATENT_DEBUG=false ENABLE_DENSE_PROPERTIES=false python -m agent generate --spec-file examples/spec.json --output out.mm
 ```
 
 `send_latent_message(message, context="{}", verify=true)` accepts JSON object

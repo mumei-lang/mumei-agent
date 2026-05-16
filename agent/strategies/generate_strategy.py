@@ -417,6 +417,7 @@ def _retry_for_health(
     system_content: str,
     spec_for_json: dict,
     enable_dense_properties: bool,
+    metrics: Metrics | None = None,
 ) -> str:
     retry_code = _regenerate_for_health(
         client,
@@ -431,6 +432,7 @@ def _retry_for_health(
             spec_for_json,
             client,
             model,
+            metrics,
         )
     return retry_code
 
@@ -446,6 +448,7 @@ def _regenerate_unhealthy_code(
     past_code_examples: list[str],
     spec_for_json: dict,
     enable_dense_properties: bool,
+    metrics: Metrics | None = None,
 ) -> str:
     if _health_check_generated_code(
         spec_json,
@@ -464,6 +467,7 @@ def _regenerate_unhealthy_code(
         system_content,
         spec_for_json,
         enable_dense_properties,
+        metrics,
     )
     if not retry_code:
         return generated_code
@@ -622,6 +626,7 @@ def generate_multi_atom(
             spec_for_json,
             client,
             model,
+            metrics,
         )
 
     if mumei_client is None:
@@ -636,6 +641,7 @@ def generate_multi_atom(
             past_code_examples,
             spec_for_json,
             bool(enable_dense_properties),
+            metrics,
         )
         metrics.record_success("generation")
         if thought_process is not None:
@@ -688,6 +694,7 @@ def generate_multi_atom(
                     system_content,
                     spec_for_json,
                     bool(enable_dense_properties),
+                    metrics,
                 )
                 if retry_code:
                     current_code = retry_code
@@ -1020,6 +1027,7 @@ def generate_code(
             spec_for_json,
             client,
             model,
+            metrics,
         )
 
     if mumei_client is None:
@@ -1034,6 +1042,7 @@ def generate_code(
             past_code_examples,
             spec_for_json,
             bool(enable_dense_properties),
+            metrics,
         )
         metrics.record_success("generation")
         if thought_process is not None:
@@ -1088,6 +1097,7 @@ def generate_code(
                     system_content,
                     spec_for_json,
                     bool(enable_dense_properties),
+                    metrics,
                 )
                 if retry_code:
                     current_code = retry_code
@@ -1264,8 +1274,11 @@ def _try_apply_dense_properties(
     spec: dict,
     client: OpenAI,
     model: str,
+    metrics: Metrics | None = None,
 ) -> str:
     """Best-effort dense property generation with safe fallback."""
+    if metrics is not None:
+        metrics.record_dense_property_attempt()
     try:
         from agent.strategies.dense_property_generator import DensePropertyGenerator
 
@@ -1275,7 +1288,10 @@ def _try_apply_dense_properties(
             client,
             model,
         )
-        return _apply_dense_properties(current_code, dense_props)
+        updated_code = _apply_dense_properties(current_code, dense_props)
+        if metrics is not None and updated_code != current_code:
+            metrics.record_dense_property_success()
+        return updated_code
     except Exception:
         _logger.warning(
             "Dense property generation failed; using original properties",
