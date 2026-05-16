@@ -675,7 +675,9 @@ def generate_multi_atom(
         _logger.warning("LLM returned empty multi-atom generation result")
         return "", False
 
+    dense_properties_applied = False
     if enable_dense_properties:
+        original_code = generated_code
         generated_code = _try_apply_dense_properties(
             generated_code,
             spec_for_json,
@@ -685,6 +687,7 @@ def generate_multi_atom(
             mumei_client=mumei_client,
             enable_spec_code_mapping=bool(enable_spec_code_mapping),
         )
+        dense_properties_applied = generated_code != original_code
 
     if mumei_client is None:
         generated_code = _regenerate_unhealthy_code(
@@ -764,7 +767,7 @@ def generate_multi_atom(
                 spec_for_json,
                 current_code,
                 metrics,
-                dense_properties=bool(enable_dense_properties),
+                dense_properties=dense_properties_applied,
                 enabled=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
@@ -856,7 +859,7 @@ def generate_multi_atom(
             spec_for_json,
             current_code,
             metrics,
-            dense_properties=bool(enable_dense_properties),
+            dense_properties=dense_properties_applied,
             enabled=bool(enable_spec_code_mapping),
         )
         if thought_process is not None:
@@ -1082,7 +1085,9 @@ def generate_code(
         _logger.warning("LLM returned empty generation result")
         return "", False
 
+    dense_properties_applied = False
     if enable_dense_properties:
+        original_code = generated_code
         generated_code = _try_apply_dense_properties(
             generated_code,
             spec_for_json,
@@ -1092,6 +1097,7 @@ def generate_code(
             mumei_client=mumei_client,
             enable_spec_code_mapping=bool(enable_spec_code_mapping),
         )
+        dense_properties_applied = generated_code != original_code
 
     if mumei_client is None:
         generated_code = _regenerate_unhealthy_code(
@@ -1173,7 +1179,7 @@ def generate_code(
                 spec_for_json,
                 current_code,
                 metrics,
-                dense_properties=bool(enable_dense_properties),
+                dense_properties=dense_properties_applied,
                 enabled=bool(enable_spec_code_mapping),
             )
             if thought_process is not None:
@@ -1263,7 +1269,7 @@ def generate_code(
             spec_for_json,
             current_code,
             metrics,
-            dense_properties=bool(enable_dense_properties),
+            dense_properties=dense_properties_applied,
             enabled=bool(enable_spec_code_mapping),
         )
         if thought_process is not None:
@@ -1385,11 +1391,10 @@ def _try_apply_dense_properties(
                     baseline_seconds,
                     dense_seconds,
                 )
-            if baseline_result.get("success") and not dense_result.get("success"):
+            if not dense_result.get("success"):
                 return current_code
             if (
                 baseline_result.get("success")
-                and dense_result.get("success")
                 and dense_seconds > baseline_seconds * 0.8
             ):
                 return current_code

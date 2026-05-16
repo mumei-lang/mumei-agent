@@ -89,11 +89,19 @@ def test_contract_compression_removes_redundant_bounds_and_orders_for_z3() -> No
     assert compressed["compression"]["char_ratio"] < 1.0
 
 
-class FastVerifier:
-    """Verifier double that succeeds for timing comparisons."""
+class SequenceVerifier:
+    """Verifier double that returns configured results in order."""
+
+    def __init__(self, successes: list[bool]) -> None:
+        self._successes = iter(successes)
 
     def verify(self, source_path: str, spec_code_mapping: str | None = None) -> dict:
-        return {"success": True, "report": {}, "stdout": "", "stderr": ""}
+        return {
+            "success": next(self._successes),
+            "report": {},
+            "stdout": "",
+            "stderr": "",
+        }
 
 
 def test_dense_property_verification_metrics_require_twenty_percent_gain(monkeypatch) -> None:
@@ -113,12 +121,72 @@ def test_dense_property_verification_metrics_require_twenty_percent_gain(monkeyp
         client,
         "test-model",
         metrics,
-        mumei_client=FastVerifier(),
+        mumei_client=SequenceVerifier([True, True]),
     )
 
     assert "requires: a >= 1;" in updated
     assert metrics.dense_property_successes == 1
     assert metrics.dense_property_verification_improvement_rate == pytest.approx(0.3)
+
+
+def test_dense_property_falls_back_when_dense_verification_fails(monkeypatch) -> None:
+    """Dense contracts are rejected when their own verification fails."""
+    client = Mock()
+    response = Mock()
+    response.choices = [Mock()]
+    response.choices[0].message.content = "requires: a >= 1;\nensures: result >= a;"
+    client.chat.completions.create.return_value = response
+    metrics = Metrics()
+    times = iter([0.0, 1.0, 1.0, 1.5])
+    monkeypatch.setattr(generate_strategy.time, "perf_counter", lambda: next(times))
+    original = (
+        "atom test(a: i64) -> i64\n"
+        "    requires: a >= 0;\n"
+        "    ensures: true;\n"
+        "    body: { a }"
+    )
+
+    updated = _try_apply_dense_properties(
+        original,
+        {"name": "test", "params": []},
+        client,
+        "test-model",
+        metrics,
+        mumei_client=SequenceVerifier([False, False]),
+    )
+
+    assert updated == original
+    assert metrics.dense_property_successes == 0
+
+
+def test_dense_property_falls_back_without_twenty_percent_gain(monkeypatch) -> None:
+    """Dense contracts are rejected unless they are at least 20% faster."""
+    client = Mock()
+    response = Mock()
+    response.choices = [Mock()]
+    response.choices[0].message.content = "requires: a >= 1;\nensures: result >= a;"
+    client.chat.completions.create.return_value = response
+    metrics = Metrics()
+    times = iter([0.0, 1.0, 1.0, 1.85])
+    monkeypatch.setattr(generate_strategy.time, "perf_counter", lambda: next(times))
+    original = (
+        "atom test(a: i64) -> i64\n"
+        "    requires: a >= 0;\n"
+        "    ensures: true;\n"
+        "    body: { a }"
+    )
+
+    updated = _try_apply_dense_properties(
+        original,
+        {"name": "test", "params": []},
+        client,
+        "test-model",
+        metrics,
+        mumei_client=SequenceVerifier([True, True]),
+    )
+
+    assert updated == original
+    assert metrics.dense_property_successes == 0
 
 
 def test_apply_dense_properties_replaces_first_contracts() -> None:
