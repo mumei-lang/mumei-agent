@@ -93,7 +93,11 @@ def test_generate_code_regenerates_after_health_failure() -> None:
         "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
         "requires": "a_nonnegative b_nonnegative",
         "ensures": "safe_add result",
-        "_agent_config": AgentConfig(api_key="test", enable_generation_health_check=True),
+        "_agent_config": AgentConfig(
+            api_key="test",
+            enable_generation_health_check=True,
+            enable_dense_properties=False,
+        ),
     }
 
     result, verified = generate_code(client, "test-model", spec, mumei_client=None)
@@ -110,7 +114,11 @@ def test_generate_code_skips_health_check_when_disabled() -> None:
         "name": "safe_add",
         "params": [],
         "requires": "a_nonnegative b_nonnegative",
-        "_agent_config": AgentConfig(api_key="test", enable_generation_health_check=False),
+        "_agent_config": AgentConfig(
+            api_key="test",
+            enable_generation_health_check=False,
+            enable_dense_properties=False,
+        ),
     }
 
     result, verified = generate_code(client, "test-model", spec, mumei_client=None)
@@ -142,7 +150,11 @@ def test_generate_code_regenerates_after_parse_valid_health_failure() -> None:
         "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
         "requires": "a_nonnegative b_nonnegative",
         "ensures": "safe_add result",
-        "_agent_config": AgentConfig(api_key="test", enable_generation_health_check=True),
+        "_agent_config": AgentConfig(
+            api_key="test",
+            enable_generation_health_check=True,
+            enable_dense_properties=False,
+        ),
     }
 
     result, verified = generate_code(client, "test-model", spec, mumei_client=mumei)
@@ -180,7 +192,11 @@ def test_generate_multi_atom_regenerates_after_parse_valid_health_failure() -> N
                 "ensures": "safe_add result",
             }
         ],
-        "_agent_config": AgentConfig(api_key="test", enable_generation_health_check=True),
+        "_agent_config": AgentConfig(
+            api_key="test",
+            enable_generation_health_check=True,
+            enable_dense_properties=False,
+        ),
     }
 
     result, verified = generate_multi_atom(client, "test-model", spec, mumei_client=mumei)

@@ -258,6 +258,7 @@ def test_generate_multi_atom_verified_on_first_try():
     code, verified = generate_multi_atom(
         client, "m", MULTI_ATOM_SPEC,
         mumei_client=mumei, metrics=metrics,
+        enable_dense_properties=False,
     )
     assert verified is True
     assert metrics.successes == 1
@@ -303,6 +304,7 @@ def test_generate_multi_atom_fix_after_verify_failure():
     code, verified = generate_multi_atom(
         client, "m", MULTI_ATOM_SPEC,
         mumei_client=mumei, metrics=metrics,
+        enable_dense_properties=False,
     )
     assert verified is True
     assert "b != 0" in code
@@ -337,6 +339,7 @@ def test_generate_multi_atom_all_retries_exhausted():
         client, "m", MULTI_ATOM_SPEC,
         config_max_retries=2,
         mumei_client=mumei, metrics=metrics,
+        enable_dense_properties=False,
     )
     assert verified is False
     assert metrics.successes == 0

@@ -344,6 +344,7 @@ class TestGenerateStrategyCrossFileContext:
         code, verified = generate_code(
             client, "test-model", spec,
             config_max_retries=0, mumei_client=None,
+            enable_dense_properties=False,
         )
         # Spec must still contain cross_file_context after the call.
         assert spec.get("cross_file_context") == (
@@ -385,6 +386,7 @@ class TestGenerateStrategyCrossFileContext:
         generate_multi_atom(
             client, "test-model", spec,
             config_max_retries=0, mumei_client=None,
+            enable_dense_properties=False,
         )
         assert spec.get("cross_file_context") == (
             "# Context file: std/b.mm\nsentinel_xyz"
