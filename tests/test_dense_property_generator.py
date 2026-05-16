@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 from unittest.mock import Mock
-from agent.strategies.dense_property_generator import DensePropertyGenerator
-from agent.strategies.generate_strategy import generate_code
+
+import pytest
+
+from agent.dense_property_generator import DensePropertyGenerator
+from agent.metrics import Metrics
+from agent.strategies import generate_strategy
 from agent.strategies.generate_strategy import _apply_dense_properties
+from agent.strategies.generate_strategy import _try_apply_dense_properties
+from agent.strategies.generate_strategy import generate_code
 
 
 def test_dense_property_generator_initialization() -> None:
@@ -60,6 +66,59 @@ def test_generate_dense_properties_with_mock_llm() -> None:
 
     assert dense_props["requires"] == ["a > 0"]
     assert dense_props["ensures"] == ["result >= a"]
+    assert dense_props["compression"]["predicate_ratio"] == 1.0
+
+
+def test_contract_compression_removes_redundant_bounds_and_orders_for_z3() -> None:
+    """Compression deduplicates clauses and prioritizes cheap Z3 predicates."""
+    generator = DensePropertyGenerator()
+
+    compressed = generator._compress_properties(
+        {
+            "requires": [
+                "forall i. i >= 0 && a >= 0 && a >= 1 && a >= 1 && b <= 10 && b < 10",
+            ],
+            "ensures": ["expensive(result) && result >= a && result >= a"],
+            "raw": "requires: ...; ensures: ...;",
+        },
+    )
+
+    assert compressed["requires"] == ["a >= 1 && b < 10 && forall i. i >= 0"]
+    assert compressed["ensures"] == ["result >= a && expensive(result)"]
+    assert compressed["compression"]["predicate_ratio"] < 1.0
+    assert compressed["compression"]["char_ratio"] < 1.0
+
+
+class FastVerifier:
+    """Verifier double that succeeds for timing comparisons."""
+
+    def verify(self, source_path: str, spec_code_mapping: str | None = None) -> dict:
+        return {"success": True, "report": {}, "stdout": "", "stderr": ""}
+
+
+def test_dense_property_verification_metrics_require_twenty_percent_gain(monkeypatch) -> None:
+    """Dense contracts are accepted when measured verification is 20% faster."""
+    client = Mock()
+    response = Mock()
+    response.choices = [Mock()]
+    response.choices[0].message.content = "requires: a >= 1;\nensures: result >= a;"
+    client.chat.completions.create.return_value = response
+    metrics = Metrics()
+    times = iter([0.0, 1.0, 1.0, 1.7])
+    monkeypatch.setattr(generate_strategy.time, "perf_counter", lambda: next(times))
+
+    updated = _try_apply_dense_properties(
+        "atom test(a: i64) -> i64\n    requires: a >= 0;\n    ensures: true;\n    body: { a }",
+        {"name": "test", "params": []},
+        client,
+        "test-model",
+        metrics,
+        mumei_client=FastVerifier(),
+    )
+
+    assert "requires: a >= 1;" in updated
+    assert metrics.dense_property_successes == 1
+    assert metrics.dense_property_verification_improvement_rate == pytest.approx(0.3)
 
 
 def test_apply_dense_properties_replaces_first_contracts() -> None:

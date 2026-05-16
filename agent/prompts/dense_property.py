@@ -1,33 +1,40 @@
 """Prompt builder for high-density Mumei property generation."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Mapping
 
 
 def build_dense_property_prompt(
-    spec: dict[str, Any],
-    current_properties: dict[str, Any],
+    spec: Mapping[str, object],
+    current_properties: Mapping[str, list[str]],
 ) -> str:
     """Build the prompt used to synthesize compact contracts."""
-    return f"""# Generate High-Density Properties
+    return f"""# Generate High-Density Mumei Properties
 
 ## Specification
-{spec}
+{dict(spec)}
 
 ## Current Properties
 Requires: {current_properties.get("requires", [])}
 Ensures: {current_properties.get("ensures", [])}
 
-## Instructions
-Generate high-density, mathematically precise requires/ensures clauses that:
-1. Capture all semantic constraints from the specification
-2. Use minimal tokens while maintaining mathematical precision
-3. Leverage Mumei's effect system and type system
-4. Are optimized for Z3 verification efficiency
+## Objective
+Generate dense requires/ensures clauses that preserve the intended contract while
+reducing Z3 verification cost.
 
-Output format:
+## Z3 Efficiency Rules
+1. Prefer quantifier-free linear arithmetic and direct equalities.
+2. Combine related bounds into one conjunction and remove redundant predicates.
+3. Put cheap guard predicates first: non-null/non-empty, ranges, divisors, equalities.
+4. Avoid disjunctions, implications, quantifiers, non-linear arithmetic, and
+   repeated function calls unless required by the spec.
+5. Reuse existing variable names, result, effects, and Mumei type refinements exactly.
+6. Do not weaken safety: keep every semantic precondition/postcondition required by the spec.
+
+## Output
+Return only this Mumei contract block, with no prose:
 ```mumei
-requires: <high-density requires clause>;
-ensures: <high-density ensures clause>;
+requires: <dense requires clause>;
+ensures: <dense ensures clause>;
 ```
 """
