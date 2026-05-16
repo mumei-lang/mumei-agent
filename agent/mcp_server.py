@@ -22,6 +22,7 @@ Running the server::
 
 .. _Model Context Protocol: https://modelcontextprotocol.io/
 """
+
 from __future__ import annotations
 
 import json
@@ -61,9 +62,82 @@ def _resolve_repo(path: str) -> Path:
     return Path(path).expanduser().resolve()
 
 
+_SPEC_GUIDELINES: dict[str, Any] = {
+    "summary": "Prefer the Z3-stable decidable fragment before escalating to Lean.",
+    "fragment_catalog": [
+        {
+            "name": "linear_arithmetic",
+            "recommended": [
+                "i64/Nat refinements with addition, subtraction, comparisons, and constant multiplication",
+                "explicit finite bounds for overflow-prone arithmetic",
+            ],
+            "lean_escalation_candidates": [
+                "variable * variable",
+                "symbolic division or modulo",
+                "exponentiation or recursive arithmetic invariants",
+            ],
+        },
+        {
+            "name": "array_and_sequence_access",
+            "recommended": [
+                "require 0 <= i and i < len(a) before a[i]",
+                "single-index reads/writes and length-preserving updates",
+            ],
+            "lean_escalation_candidates": [
+                "multi-index relational updates",
+                "unbounded quantified array triggers",
+            ],
+        },
+        {
+            "name": "quantifiers",
+            "recommended": [
+                "forall over bounded ranges or finite collections",
+                "exists with a constructible witness exposed in the spec",
+            ],
+            "lean_escalation_candidates": [
+                "forall/exists alternation",
+                "nested quantifiers or array-trigger-heavy bodies",
+            ],
+        },
+        {
+            "name": "effects_and_temporal_state",
+            "recommended": [
+                "finite state machines with explicit transitions",
+                "explicit pre/post effect states for temporal protocols",
+            ],
+            "lean_escalation_candidates": [
+                "recursive or unbounded temporal invariants",
+                "large protocol products without decomposition",
+            ],
+        },
+    ],
+    "warning": {
+        "code": "outside_decidable_fragment",
+        "response": "simplify the spec, add explicit bounds/witnesses, or route the obligation to Lean",
+    },
+    "metric_refresh": {
+        "source": "P8-C metrics",
+        "fields": [
+            "new_spec_attempts",
+            "outside_decidable_fragment_warnings",
+            "z3_unknowns",
+            "first_pass_verification_success_rate",
+            "by_logic_fragment",
+        ],
+        "cadence": "quarterly",
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_spec_guidelines() -> str:
+    """Return agent-facing guidance for proof-friendly Mumei specifications."""
+    return _ok({"guidelines": _SPEC_GUIDELINES})
 
 
 @mcp.tool()
@@ -486,6 +560,7 @@ def get_agent_status() -> str:
                 "propose_forge_tasks",
                 "list_forge_log",
                 "get_agent_status",
+                "get_spec_guidelines",
                 "extract_spec",
                 "extract_spec_from_code",
                 "send_latent_message",
@@ -495,7 +570,9 @@ def get_agent_status() -> str:
                 "USE_MCP_CLIENT": os.environ.get("USE_MCP_CLIENT", ""),
                 "INJECT_CORE_AXIOMS": os.environ.get("INJECT_CORE_AXIOMS", ""),
                 "ENABLE_LATENT_DEBUG": os.environ.get("ENABLE_LATENT_DEBUG", ""),
-                "ENABLE_DENSE_PROPERTIES": os.environ.get("ENABLE_DENSE_PROPERTIES", ""),
+                "ENABLE_DENSE_PROPERTIES": os.environ.get(
+                    "ENABLE_DENSE_PROPERTIES", ""
+                ),
                 "ENABLE_LATENT_PROTOCOL": os.environ.get("ENABLE_LATENT_PROTOCOL", ""),
                 "ENABLE_CODE_TO_SPEC": os.environ.get("ENABLE_CODE_TO_SPEC", ""),
             },
@@ -572,7 +649,12 @@ def send_latent_message(
 
 
 @mcp.tool()
-def extract_spec(natural_language: str, domain_hint: str = "", generate: bool = False, mumei_repo: str = "") -> str:
+def extract_spec(
+    natural_language: str,
+    domain_hint: str = "",
+    generate: bool = False,
+    mumei_repo: str = "",
+) -> str:
     """Extract a Mumei forge task spec from natural language requirements.
 
     This is the "Step 0" that converts human-readable requirements into
@@ -763,7 +845,9 @@ def extract_spec_from_code(
                 config_max_retries=config.max_retries,
                 mumei_client=mumei,
             )
-            payload.update({"code": code, "verified": verified, "final_spec": final_spec})
+            payload.update(
+                {"code": code, "verified": verified, "final_spec": final_spec}
+            )
         except Exception as exc:
             return _err(
                 f"generation failed after code-to-spec extraction: {exc}",

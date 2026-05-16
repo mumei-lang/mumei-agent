@@ -5,13 +5,12 @@ transport is not booted.  External dependencies (``MumeiClient``,
 ``AgentConfig``, ``MumeiForge``) are patched so the suite stays
 hermetic: no LLM calls, no mumei binary required.
 """
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from agent import mcp_server
 
@@ -41,6 +40,7 @@ class TestGetAgentStatus:
             "propose_forge_tasks",
             "list_forge_log",
             "get_agent_status",
+            "get_spec_guidelines",
             "extract_spec_from_code",
             "send_latent_message",
         }
@@ -53,7 +53,26 @@ class TestGetAgentStatus:
         registered = set(mcp_server.mcp._tool_manager._tools)
         assert set(result["mcp_tools"]) == registered
         assert "extract_spec_from_code" in registered
+        assert "get_spec_guidelines" in registered
         assert "send_latent_message" in registered
+
+
+# ---------------------------------------------------------------------------
+# get_spec_guidelines
+# ---------------------------------------------------------------------------
+
+
+class TestGetSpecGuidelines:
+    def test_returns_decidable_fragment_guidance(self) -> None:
+        result = _payload(mcp_server.get_spec_guidelines())
+        assert result["status"] == "ok"
+        guidelines = result["guidelines"]
+        assert guidelines["warning"]["code"] == "outside_decidable_fragment"
+        assert any(
+            item["name"] == "array_and_sequence_access"
+            for item in guidelines["fragment_catalog"]
+        )
+        assert "P8-C metrics" in guidelines["metric_refresh"]["source"]
 
 
 # ---------------------------------------------------------------------------
@@ -120,10 +139,10 @@ class TestForgeTask:
         fake_forge = MagicMock()
         fake_forge.forge_one.return_value = fake_result
 
-        with patch(
-            "agent.config.AgentConfig", return_value=fake_config
-        ), patch("agent.forge.MumeiForge", return_value=fake_forge), patch(
-            "agent.mumei_client.MumeiClient"
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.forge.MumeiForge", return_value=fake_forge),
+            patch("agent.mumei_client.MumeiClient"),
         ):
             result = _payload(
                 mcp_server.forge_task(
@@ -165,15 +184,17 @@ class TestHealFile:
 
         fake_mumei = MagicMock()
 
-        with patch(
-            "agent.config.AgentConfig", return_value=fake_config
-        ), patch(
-            "agent.mumei_client.create_mumei_client",
-            return_value=fake_mumei,
-        ) as mock_create_mumei, patch(
-            "agent.strategies.fix_strategy.get_fix",
-            return_value="atom fixed() ensures: true; body: 0;",
-        ) as mock_fix:
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch(
+                "agent.mumei_client.create_mumei_client",
+                return_value=fake_mumei,
+            ) as mock_create_mumei,
+            patch(
+                "agent.strategies.fix_strategy.get_fix",
+                return_value="atom fixed() ensures: true; body: 0;",
+            ) as mock_fix,
+        ):
             result = _payload(
                 mcp_server.heal_file(
                     "atom broken() ensures: false; body: 0;",
@@ -261,9 +282,7 @@ class TestProposeForgeTasks:
 
 class TestListForgeLog:
     def test_missing_log_is_ok(self, tmp_path: Path) -> None:
-        result = _payload(
-            mcp_server.list_forge_log(str(tmp_path / "nope.json"))
-        )
+        result = _payload(mcp_server.list_forge_log(str(tmp_path / "nope.json")))
         assert result["status"] == "ok"
         assert result["count"] == 0
         assert result["entries"] == []
@@ -310,11 +329,15 @@ class TestExtractSpecFromCode:
 
     def test_extracts_spec_with_mock_extractor(self, tmp_path: Path) -> None:
         source = tmp_path / "simple_add.rs"
-        source.write_text("pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")
+        source.write_text(
+            "pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8"
+        )
 
         fake_result = MagicMock()
         fake_result.success = True
-        fake_result.natural_language_spec = "simple_add returns a + b without side effects"
+        fake_result.natural_language_spec = (
+            "simple_add returns a + b without side effects"
+        )
         fake_result.forge_task_spec = {"task_id": "code-simple-add", "atoms": []}
         fake_result.detected_language = "rust"
         fake_result.warnings = []
@@ -325,9 +348,13 @@ class TestExtractSpecFromCode:
         fake_extractor = MagicMock()
         fake_extractor.extract_from_file.return_value = fake_result
 
-        with patch("agent.config.AgentConfig", return_value=fake_config), patch(
-            "agent.code_to_spec.CodeToSpecExtractor", return_value=fake_extractor
-        ), patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()):
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch(
+                "agent.code_to_spec.CodeToSpecExtractor", return_value=fake_extractor
+            ),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
             result = _payload(mcp_server.extract_spec_from_code(str(source)))
 
         assert result["status"] == "ok"

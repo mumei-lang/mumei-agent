@@ -1,10 +1,9 @@
 """Tests for the new Metrics fields: elapsed_seconds, challenge_name, from_file()."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
 
 from agent.metrics import Metrics
 
@@ -130,6 +129,48 @@ class TestDensePropertyMetrics:
         assert loaded.dense_verification_times_seconds == [3.0]
 
 
+class TestMetricsP8C:
+    """Test P8-C proof-friendly specification metrics."""
+
+    def test_record_new_spec_fragment_metrics(self) -> None:
+        m = Metrics()
+        m.record_new_spec(
+            ["nonlinear_arithmetic", "array_without_bounds"],
+            outside_decidable_fragment=True,
+            z3_unknown=True,
+            first_pass_verified=False,
+        )
+        m.record_new_spec(first_pass_verified=True)
+
+        assert m.new_spec_attempts == 2
+        assert m.outside_decidable_fragment_warnings == 1
+        assert m.outside_decidable_fragment_warning_rate == 0.5
+        assert m.z3_unknowns == 1
+        assert m.z3_unknown_rate == 0.5
+        assert m.first_pass_verification_success_rate == 0.5
+        assert m.logic_fragment_success_rate("nonlinear_arithmetic") == 0.0
+
+    def test_record_new_spec_with_fragment_tag_counts_warning(self) -> None:
+        m = Metrics()
+        m.record_new_spec(["quantifier_alternation"], first_pass_verified=True)
+
+        assert m.new_spec_attempts == 1
+        assert m.outside_decidable_fragment_warnings == 1
+        assert m.outside_decidable_fragment_warning_rate == 1.0
+
+    def test_to_dict_and_from_file_preserve_fragment_metrics(
+        self, tmp_path: Path
+    ) -> None:
+        m = Metrics()
+        m.record_new_spec(["quantifier_alternation"], first_pass_verified=True)
+        path = tmp_path / "metrics.json"
+        path.write_text(m.to_json(), encoding="utf-8")
+
+        loaded = Metrics.from_file(path)
+        assert loaded.to_dict() == m.to_dict()
+        assert loaded.by_logic_fragment["quantifier_alternation"].successes == 1
+
+
 class TestMetricsFromFile:
     """Test Metrics.from_file() classmethod."""
 
@@ -219,7 +260,7 @@ class TestMetricsFromFile:
         original.record_success("linearity_violated")
 
         path = tmp_path / "metrics.json"
-        path.write_text(m_json := original.to_json(), encoding="utf-8")
+        path.write_text(original.to_json(), encoding="utf-8")
 
         loaded = Metrics.from_file(path)
         assert loaded.to_dict() == original.to_dict()
