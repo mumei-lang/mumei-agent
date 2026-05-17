@@ -163,14 +163,19 @@ def test_validate_extracted_spec_rejects_bad_atom_names_and_effects() -> None:
     spec = dict(
         VALID_SPEC,
         atoms=[
-            dict(VALID_SPEC["atoms"][0], name="bad-name", effects=["State(balance)"]),
-            dict(VALID_SPEC["atoms"][0], name="bad-name", reference_patterns=["safe_subtract", ""]),
+            dict(VALID_SPEC["atoms"][0], name="bad-name", effects=["State(balance)", ""]),
+            dict(
+                VALID_SPEC["atoms"][0],
+                name="bad-name",
+                reference_patterns=["safe_subtract", ""],
+            ),
         ],
     )
 
     errors = _validate_extracted_spec(spec)
 
     assert "atoms[0].name must match [A-Za-z_][A-Za-z0-9_]*" in errors
+    assert "atoms[0].effects entries must be non-empty strings" in errors
     assert "atoms[1].name must match [A-Za-z_][A-Za-z0-9_]*" in errors
     assert "atoms[1].name must be unique within atoms" in errors
     assert "atoms[1].reference_patterns must be a list of non-empty strings" in errors
