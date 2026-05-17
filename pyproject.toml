@@ -36,6 +36,7 @@ include = ["agent*"]
 
 [project.scripts]
 mumei-heal = "agent.self_healing:main"
+mumei-extract-spec = "agent.extract_spec:main"
 mumei-agent-mcp = "agent.mcp_server:main"
 
 [tool.pytest.ini_options]
