@@ -57,6 +57,171 @@ _CODE_FENCE_RE = re.compile(r"```\w*\s*\n(.*?)```", re.DOTALL)
 _SAFE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 
 
+def _count_mapping(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for key, raw_count in value.items():
+        if isinstance(key, str):
+            try:
+                counts[key] = int(raw_count)
+            except (TypeError, ValueError):
+                counts[key] = 0
+    return counts
+
+
+def _merge_counts(target: dict[str, int], source: dict[str, int]) -> None:
+    for key, count in source.items():
+        target[key] = target.get(key, 0) + count
+
+
+def _low_success_categories(by_reason: dict[str, int], lean_successes: int) -> list[str]:
+    categories = [
+        reason
+        for reason, attempts in by_reason.items()
+        if attempts > 0 and lean_successes / attempts < 0.5
+    ]
+    return sorted(categories)
+
+
+def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
+    bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    summary = bundle.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+    candidates = bundle.get("candidates", [])
+    if not isinstance(candidates, list):
+        candidates = []
+
+    by_reason = _count_mapping(summary.get("by_reason"))
+    by_logic_fragment = _count_mapping(summary.get("by_logic_fragment"))
+    lean_successes = 0
+    partial_translation = 0
+    manual_required = 0
+
+    if candidates:
+        by_reason = {}
+        by_logic_fragment = {}
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            reason = candidate.get("escalation_reason")
+            if isinstance(reason, str):
+                by_reason[reason] = by_reason.get(reason, 0) + 1
+            tags = candidate.get("logic_fragment_tags", [])
+            if isinstance(tags, list):
+                for tag in tags:
+                    if isinstance(tag, str):
+                        by_logic_fragment[tag] = by_logic_fragment.get(tag, 0) + 1
+            lean_metadata = candidate.get("lean_metadata")
+            status = lean_metadata.get("status") if isinstance(lean_metadata, dict) else None
+            if status == "lean_verified":
+                lean_successes += 1
+            elif status == "partial_translation":
+                partial_translation += 1
+            elif candidate.get("manual_lemma_reason") is not None:
+                manual_required += 1
+
+    candidate_count = int(summary.get("candidate_count", len(candidates)) or 0)
+    total_atoms = int(summary.get("total_atoms", 0) or 0)
+    success_rate = lean_successes / candidate_count if candidate_count else 0.0
+    return {
+        "total_atoms": total_atoms,
+        "candidate_count": candidate_count,
+        "escalation_attempts": candidate_count,
+        "lean_successes": lean_successes,
+        "partial_translation": partial_translation,
+        "manual_required": manual_required,
+        "success_rate": success_rate,
+        "by_reason": by_reason,
+        "by_failure_reason": by_reason,
+        "by_logic_fragment": by_logic_fragment,
+        "low_success_categories": _low_success_categories(by_reason, lean_successes),
+    }
+
+
+def track_escalation_trends(metrics_history: list[dict[str, Any]]) -> dict[str, Any]:
+    quarters: dict[str, dict[str, Any]] = {}
+    aggregate_by_reason: dict[str, int] = {}
+    aggregate_by_logic_fragment: dict[str, int] = {}
+    aggregate_attempts = 0
+    aggregate_successes = 0
+    aggregate_partial_translation = 0
+    aggregate_manual_required = 0
+
+    for metrics in metrics_history:
+        quarter = str(
+            metrics.get("quarter")
+            or metrics.get("metrics_quarter")
+            or metrics_quarter()
+        )
+        quarter_metrics = quarters.setdefault(
+            quarter,
+            {
+                "escalation_attempts": 0,
+                "lean_successes": 0,
+                "partial_translation": 0,
+                "manual_required": 0,
+                "by_reason": {},
+                "by_logic_fragment": {},
+                "low_success_categories": [],
+            },
+        )
+        attempts = int(metrics.get("escalation_attempts", metrics.get("candidate_count", 0)) or 0)
+        successes = int(metrics.get("lean_successes", 0) or 0)
+        partial = int(metrics.get("partial_translation", 0) or 0)
+        manual = int(metrics.get("manual_required", 0) or 0)
+        by_reason = _count_mapping(
+            metrics.get("by_failure_reason", metrics.get("by_reason", {}))
+        )
+        by_logic_fragment = _count_mapping(metrics.get("by_logic_fragment"))
+
+        quarter_metrics["escalation_attempts"] += attempts
+        quarter_metrics["lean_successes"] += successes
+        quarter_metrics["partial_translation"] += partial
+        quarter_metrics["manual_required"] += manual
+        _merge_counts(quarter_metrics["by_reason"], by_reason)
+        _merge_counts(quarter_metrics["by_logic_fragment"], by_logic_fragment)
+
+        aggregate_attempts += attempts
+        aggregate_successes += successes
+        aggregate_partial_translation += partial
+        aggregate_manual_required += manual
+        _merge_counts(aggregate_by_reason, by_reason)
+        _merge_counts(aggregate_by_logic_fragment, by_logic_fragment)
+
+    for quarter_metrics in quarters.values():
+        attempts = quarter_metrics["escalation_attempts"]
+        successes = quarter_metrics["lean_successes"]
+        partial = quarter_metrics["partial_translation"]
+        quarter_metrics["success_rate"] = successes / attempts if attempts else 0.0
+        quarter_metrics["partial_translation_rate"] = partial / attempts if attempts else 0.0
+        quarter_metrics["low_success_categories"] = _low_success_categories(
+            quarter_metrics["by_reason"],
+            successes,
+        )
+
+    return {
+        "quarters": dict(sorted(quarters.items())),
+        "overall": {
+            "escalation_attempts": aggregate_attempts,
+            "lean_successes": aggregate_successes,
+            "partial_translation": aggregate_partial_translation,
+            "manual_required": aggregate_manual_required,
+            "success_rate": aggregate_successes / aggregate_attempts if aggregate_attempts else 0.0,
+            "partial_translation_rate": (
+                aggregate_partial_translation / aggregate_attempts if aggregate_attempts else 0.0
+            ),
+            "by_reason": aggregate_by_reason,
+            "by_logic_fragment": aggregate_by_logic_fragment,
+            "low_success_categories": _low_success_categories(
+                aggregate_by_reason,
+                aggregate_successes,
+            ),
+        },
+    }
+
+
 @dataclass
 class ForgeResult:
     """Outcome of forging a single task."""
