@@ -139,6 +139,10 @@ class TestForgeOneAppend:
         assert result.status == "success"
         assert result.atoms_added == ["safe_add"]
         assert result.attempts == 1
+        assert (
+            mumei.verify.call_args_list[-1].kwargs["collect_decidable_metrics"]
+            is True
+        )
         text = target.read_text(encoding="utf-8")
         assert "safe_subtract" in text  # preserved
         assert "safe_add" in text       # appended

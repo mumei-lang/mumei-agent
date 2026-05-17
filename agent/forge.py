@@ -31,6 +31,11 @@ from openai import OpenAI
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.forge_discovery import discover_tasks, filter_completed_tasks
+from agent.metrics import (
+    Metrics,
+    decidable_fragment_tags_from_verify_result,
+    metrics_quarter,
+)
 from agent.prompts.forge.forge_append import build_append_prompt
 from agent.prompts.forge.forge_system import FORGE_SYSTEM_PROMPT
 from agent.prompts.report_formatter import (
@@ -61,6 +66,9 @@ class ForgeResult:
     attempts: int = 0
     target_file: str | None = None
     atoms_added: list[str] = field(default_factory=list)
+    logic_fragment_tags: list[str] = field(default_factory=list)
+    outside_decidable_fragment: bool = False
+    metrics_quarter: str | None = None
     commit_sha: str | None = None
     error: str | None = None
 
@@ -90,6 +98,7 @@ class MumeiForge:
         self.mumei_repo_dir = Path(mumei_repo_dir).resolve()
         self.forge_tasks_dir = Path(forge_tasks_dir).resolve()
         self.log_path = Path(log_path) if log_path else self.forge_tasks_dir.parent / "forge_log.json"
+        self.metrics_path = self.log_path.with_name("p8_decidable_metrics.json")
         self._client: OpenAI | None = openai_client
 
     # ------------------------------------------------------------------
@@ -238,7 +247,14 @@ class MumeiForge:
             )
 
         # Verify the full updated file before finalizing the change.
-        verify_result = self.mumei.verify(str(target_path))
+        verify_result = self.mumei.verify(
+            str(target_path),
+            collect_decidable_metrics=True,
+        )
+        logic_fragment_tags, metrics_quarter_key = self._record_decidable_fragment_metrics(
+            verify_result,
+            first_pass_verified=bool(verify_result.get("success", False)),
+        )
         if not verify_result["success"]:
             _logger.warning(
                 "Post-write verification failed for %s: %s",
@@ -248,6 +264,9 @@ class MumeiForge:
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
                 attempts=attempts, atoms_added=[a.get("name", "") for a in atoms],
+                logic_fragment_tags=logic_fragment_tags,
+                outside_decidable_fragment=bool(logic_fragment_tags),
+                metrics_quarter=metrics_quarter_key,
                 error="post-write verify failed",
             )
 
@@ -263,6 +282,9 @@ class MumeiForge:
             attempts=attempts,
             target_file=target_rel,
             atoms_added=atoms_added,
+            logic_fragment_tags=logic_fragment_tags,
+            outside_decidable_fragment=bool(logic_fragment_tags),
+            metrics_quarter=metrics_quarter_key,
             commit_sha=commit_sha,
         )
 
@@ -570,6 +592,32 @@ class MumeiForge:
         if sha.returncode == 0:
             return sha.stdout.strip()
         return None
+
+    def _record_decidable_fragment_metrics(
+        self,
+        verify_result: dict[str, Any],
+        *,
+        first_pass_verified: bool,
+    ) -> tuple[list[str], str]:
+        generated_at = datetime.datetime.now(datetime.timezone.utc)
+        quarter = metrics_quarter(generated_at)
+        try:
+            metrics = (
+                Metrics.from_file(self.metrics_path)
+                if self.metrics_path.exists()
+                else Metrics()
+            )
+            tags = metrics.record_verify_result_as_new_spec(
+                verify_result,
+                first_pass_verified=first_pass_verified,
+                generated_at=generated_at,
+            )
+            self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            self.metrics_path.write_text(metrics.to_json(), encoding="utf-8")
+            return tags, quarter
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("Could not record P8-D metrics: %s", exc, exc_info=True)
+            return decidable_fragment_tags_from_verify_result(verify_result), quarter
 
     # ------------------------------------------------------------------
     # Logging

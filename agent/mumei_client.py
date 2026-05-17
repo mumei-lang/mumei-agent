@@ -3,6 +3,17 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
+from pathlib import Path
+
+
+def _decidable_metrics_emit_unsupported(stderr: str) -> bool:
+    text = stderr.lower()
+    emit_flag_unsupported = "unexpected argument" in text and "--emit" in text
+    target_unsupported = "decidable-metrics" in text and (
+        "invalid value" in text or "unknown" in text or "possible values" in text
+    )
+    return emit_flag_unsupported or target_unsupported
 
 
 def create_mumei_client(mumei_bin: str = "mumei") -> "MumeiClient":
@@ -43,6 +54,7 @@ class MumeiClient:
         source_path: str,
         report_dir: str | None = None,
         spec_code_mapping: list[dict] | None = None,
+        collect_decidable_metrics: bool = False,
     ) -> dict:
         """Run mumei verify --json and return parsed result.
 
@@ -50,17 +62,55 @@ class MumeiClient:
         verification report as an in-memory dict.
         """
         cmd = [*self._cmd_prefix, "verify", "--json"]
+        metrics_path: Path | None = None
+        if collect_decidable_metrics:
+            metrics_file = tempfile.NamedTemporaryFile(
+                "w", suffix=".decidable-metrics.json", delete=False, encoding="utf-8"
+            )
+            metrics_path = Path(metrics_file.name)
+            metrics_file.close()
+            cmd.extend(["--emit", "decidable-metrics", "--output", str(metrics_path)])
         if report_dir:
             cmd.extend(["--report-dir", report_dir])
         cmd.append(source_path)
 
         result = subprocess.run(cmd, capture_output=True, text=True)
+        if (
+            collect_decidable_metrics
+            and metrics_path is not None
+            and not metrics_path.read_text(encoding="utf-8", errors="ignore").strip()
+            and _decidable_metrics_emit_unsupported(result.stderr)
+        ):
+            try:
+                metrics_path.unlink()
+            except OSError:
+                pass
+            return self.verify(
+                source_path,
+                report_dir=report_dir,
+                spec_code_mapping=spec_code_mapping,
+            )
+
         report = {}
         if result.stdout.strip():
             try:
                 report = json.loads(result.stdout)
             except json.JSONDecodeError:
                 pass
+        if collect_decidable_metrics and metrics_path is not None:
+            try:
+                metrics_text = metrics_path.read_text(encoding="utf-8")
+                if metrics_text.strip():
+                    decidable_metrics = json.loads(metrics_text)
+                    if isinstance(decidable_metrics, dict):
+                        report.setdefault("decidable_fragment", decidable_metrics)
+            except (OSError, json.JSONDecodeError):
+                pass
+            finally:
+                try:
+                    metrics_path.unlink()
+                except OSError:
+                    pass
         result_report = {
             "success": result.returncode == 0,
             "report": report,

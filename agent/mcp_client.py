@@ -276,6 +276,7 @@ class MumeiMCPClient:
         source_path: str,
         report_dir: str | None = None,
         spec_code_mapping: list[dict[str, Any]] | None = None,
+        collect_decidable_metrics: bool = False,
     ) -> dict[str, Any]:
         """``MumeiClient.verify``-compatible wrapper.
 
@@ -284,11 +285,16 @@ class MumeiMCPClient:
         receive richer feedback in the ``report`` field.  Otherwise it
         forwards directly to the underlying CLI client.
         """
-        if not use_mcp_client_enabled() or self._mode == "unavailable":
+        if (
+            collect_decidable_metrics
+            or not use_mcp_client_enabled()
+            or self._mode == "unavailable"
+        ):
             return self._fallback.verify(
                 source_path,
                 report_dir=report_dir,
                 spec_code_mapping=spec_code_mapping,
+                collect_decidable_metrics=collect_decidable_metrics,
             )
         try:
             source_code = Path(source_path).read_text(encoding="utf-8")
@@ -302,6 +308,7 @@ class MumeiMCPClient:
                 source_path,
                 report_dir=report_dir,
                 spec_code_mapping=spec_code_mapping,
+                collect_decidable_metrics=collect_decidable_metrics,
             )
         result = self.validate_logic(source_code)
         report = result.get("report") or {}

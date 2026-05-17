@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 from pathlib import Path
 
-from agent.metrics import Metrics
+from agent.metrics import (
+    Metrics,
+    decidable_fragment_tags_from_verify_result,
+    extract_logic_fragment_tags,
+)
 
 
 class TestMetricsNewFields:
@@ -169,6 +174,57 @@ class TestMetricsP8C:
         loaded = Metrics.from_file(path)
         assert loaded.to_dict() == m.to_dict()
         assert loaded.by_logic_fragment["quantifier_alternation"].successes == 1
+
+
+class TestMetricsP8D:
+    """Test P8-D decidable-fragment metrics extraction."""
+
+    def test_extract_logic_fragment_tags_from_warning_text(self) -> None:
+        text = (
+            "outside_decidable_fragment: atom 'a' uses nonlinear_arithmetic, "
+            "array_without_bounds; prefer docs"
+        )
+
+        assert extract_logic_fragment_tags(text) == [
+            "nonlinear_arithmetic",
+            "array_without_bounds",
+        ]
+
+    def test_record_verify_result_updates_quarterly_metrics(self) -> None:
+        metrics = Metrics()
+        generated_at = datetime.datetime(2026, 5, 17, tzinfo=datetime.timezone.utc)
+        tags = metrics.record_verify_result_as_new_spec(
+            {
+                "success": True,
+                "stderr": (
+                    "outside_decidable_fragment: atom 'a' uses "
+                    "trigger_sensitive_quantifier; prefer docs"
+                ),
+            },
+            first_pass_verified=True,
+            generated_at=generated_at,
+        )
+
+        assert tags == ["trigger_sensitive_quantifier"]
+        assert metrics.quarterly_new_spec_attempts == {"2026-Q2": 1}
+        assert metrics.quarterly_outside_decidable_fragment_warnings == {"2026-Q2": 1}
+        assert metrics.quarterly_outside_decidable_fragment_warning_rate("2026-Q2") == 1.0
+
+    def test_verify_result_report_warning_counts_are_extracted(self) -> None:
+        tags = decidable_fragment_tags_from_verify_result(
+            {
+                "report": {
+                    "decidable_fragment": {
+                        "warning_counts": {
+                            "nonlinear_arithmetic": 2,
+                            "quantifier_alternation": 1,
+                        },
+                    },
+                },
+            }
+        )
+
+        assert tags == ["nonlinear_arithmetic", "quantifier_alternation"]
 
 
 class TestMetricsFromFile:
