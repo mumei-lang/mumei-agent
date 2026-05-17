@@ -1,6 +1,6 @@
 # NLAE Guide
 
-`mumei-agent` ships lightweight Natural Language Autoencoder-inspired features for denser generation and earlier repair attempts. Latent-space debugging and dense property generation are enabled by default. The latent protocol for inter-agent communication remains disabled by default.
+`mumei-agent` ships lightweight Natural Language Autoencoder-inspired features for denser generation and earlier repair attempts. Latent-space debugging and dense property generation are disabled by default. The latent protocol for inter-agent communication remains disabled by default.
 
 ## Latent-space debugging
 
@@ -53,15 +53,15 @@ ENABLE_DENSE_PROPERTIES=false python -m agent generate --spec-file spec.json --o
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `ENABLE_LATENT_DEBUG` | `true` | Run latent-space repair before rule-based and LLM fixes. |
-| `ENABLE_DENSE_PROPERTIES` | `true` | Generate dense `requires` / `ensures` clauses after initial generation. |
+| `ENABLE_LATENT_DEBUG` | `false` | Run latent-space repair before rule-based and LLM fixes. |
+| `ENABLE_DENSE_PROPERTIES` | `false` | Generate dense `requires` / `ensures` clauses after initial generation. |
 | `ENABLE_LATENT_PROTOCOL` | `false` | Expose latent inter-agent protocol behavior through MCP tools. |
 
 Truthy values are `true`, `1`, `yes`, and `on` case-insensitively. Any other set value disables the flag.
 
 ## Recommended controls
 
-- Use the defaults for normal agent generation and healing.
+- Enable `ENABLE_LATENT_DEBUG=true` and `ENABLE_DENSE_PROPERTIES=true` for normal agent generation and healing to benefit from NLAE-inspired features.
 - Set `ENABLE_DENSE_PROPERTIES=false` for low-latency experiments that must avoid the extra LLM call.
 - Set `ENABLE_LATENT_DEBUG=false` when comparing against the legacy repair pipeline.
 - Keep `ENABLE_LATENT_PROTOCOL=false` unless explicitly testing latent inter-agent communication.

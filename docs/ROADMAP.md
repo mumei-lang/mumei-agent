@@ -487,30 +487,30 @@ documentation を取得できる:
 ---
 
 
-## P12: NLAE Integration (Experimental) 📋 Planned
+## P12: NLAE Integration (Experimental) ✅ Implemented
 
 Anthropic Natural Language Autoencoders (NLAE) の概念を mumei-agent に統合し、
 潜在空間でのデバッグ、高密度プロパティ生成、エージェント間通信標準化を
 オプトイン機能として提供する。
 
-### P12-A: Latent-space Debugging 📋 Planned
+### P12-A: Latent-space Debugging ✅ Implemented
 
-- 📋 `LatentEncoder` / `LatentDecoder` の実装
-- 📋 `LatentDebugStrategy` の実装
-- 📋 `fix_strategy.py` への Phase 0 統合
-- 📋 フォールバック動作とユニットテスト
+- ✅ `LatentEncoder` / `LatentDecoder` の実装
+- ✅ `LatentDebugStrategy` の実装
+- ✅ `fix_strategy.py` への Phase 0 統合
+- ✅ フォールバック動作とユニットテスト
 
-### P12-B: Dense Property Generation 📋 Planned
+### P12-B: Dense Property Generation ✅ Implemented
 
-- 📋 `DensePropertyGenerator` の実装
-- 📋 `generate_strategy.py` への opt-in 統合
-- 📋 高密度 `requires` / `ensures` 生成テスト
+- ✅ `DensePropertyGenerator` の実装
+- ✅ `generate_strategy.py` への opt-in 統合
+- ✅ 高密度 `requires` / `ensures` 生成テスト
 
-### P12-C: Latent Protocol for Agent Communication 📋 Planned
+### P12-C: Latent Protocol for Agent Communication ✅ Implemented
 
-- 📋 `LatentProtocol` の実装
-- 📋 `mcp_server.py` への `send_latent_message` 追加
-- 📋 MCP feature flag とプロトコルテスト
+- ✅ `LatentProtocol` の実装
+- ✅ `mcp_server.py` への `send_latent_message` 追加
+- ✅ MCP feature flag とプロトコルテスト
 
 ### Configuration
 
@@ -521,6 +521,7 @@ Anthropic Natural Language Autoencoders (NLAE) の概念を mumei-agent に統�
 
 - Anthropic NLAE research: https://www.anthropic.com/research/natural-language-autoencoders
 - Reference implementation: https://github.com/kitft/natural_language_autoencoders
+- Implementation guide: `docs/NLAE_GUIDE.md`
 
 ---
 
