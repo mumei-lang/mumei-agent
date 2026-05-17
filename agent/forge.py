@@ -247,7 +247,10 @@ class MumeiForge:
             )
 
         # Verify the full updated file before finalizing the change.
-        verify_result = self.mumei.verify(str(target_path))
+        verify_result = self.mumei.verify(
+            str(target_path),
+            collect_decidable_metrics=True,
+        )
         logic_fragment_tags, metrics_quarter_key = self._record_decidable_fragment_metrics(
             verify_result,
             first_pass_verified=bool(verify_result.get("success", False)),

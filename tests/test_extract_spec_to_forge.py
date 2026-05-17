@@ -126,7 +126,10 @@ def test_extract_spec_to_forge_to_verify_with_mocks(tmp_path: Path) -> None:
 
     target_path = mumei_repo / "std" / "math" / "abs_i64.mm"
     assert target_path.read_text(encoding="utf-8") == generated_code
-    mumei_client.verify.assert_called_once_with(str(target_path))
+    mumei_client.verify.assert_called_once_with(
+        str(target_path),
+        collect_decidable_metrics=True,
+    )
     mock_generate.assert_called_once()
     assert mock_generate.call_args.kwargs["mumei_client"] is mumei_client
 

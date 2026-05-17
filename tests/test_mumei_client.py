@@ -1,4 +1,5 @@
 """Tests for MumeiClient command construction."""
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 from agent.mumei_client import MumeiClient
 
@@ -31,6 +32,56 @@ def test_verify_command_with_report_dir():
             "--report-dir", "/tmp/reports",
             "test.mm",
         ]
+
+
+def test_verify_collect_decidable_metrics_embeds_report():
+    """Test that decidable metrics are requested and attached to reports."""
+    client = MumeiClient()
+    metrics_paths: list[Path] = []
+
+    def fake_run(cmd, capture_output=True, text=True):
+        metrics_path = Path(cmd[cmd.index("--output") + 1])
+        metrics_paths.append(metrics_path)
+        metrics_path.write_text(
+            '{"total_atoms_checked":1,"atoms_with_warnings":1,'
+            '"warning_counts":{"nonlinear_arithmetic":1}}',
+            encoding="utf-8",
+        )
+        return MagicMock(returncode=0, stdout='{"status":"success"}', stderr="")
+
+    with patch("agent.mumei_client.subprocess.run", side_effect=fake_run) as mock_run:
+        result = client.verify("test.mm", collect_decidable_metrics=True)
+        call_args = mock_run.call_args[0][0]
+        assert call_args[:5] == [
+            "mumei", "verify", "--json", "--emit", "decidable-metrics",
+        ]
+        assert "--output" in call_args
+        assert result["success"] is True
+        assert result["report"]["decidable_fragment"]["total_atoms_checked"] == 1
+        assert result["report"]["decidable_fragment"]["warning_counts"] == {
+            "nonlinear_arithmetic": 1,
+        }
+        assert metrics_paths and not metrics_paths[0].exists()
+
+
+def test_verify_collect_decidable_metrics_falls_back_when_unsupported():
+    """Test that older mumei binaries still work without metrics emit support."""
+    client = MumeiClient()
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=2,
+                stdout="",
+                stderr="error: unexpected argument '--emit' found",
+            ),
+            MagicMock(returncode=0, stdout='{"status":"success"}', stderr=""),
+        ]
+        result = client.verify("test.mm", collect_decidable_metrics=True)
+        first_call = mock_run.call_args_list[0][0][0]
+        second_call = mock_run.call_args_list[1][0][0]
+        assert "--emit" in first_call
+        assert second_call == ["mumei", "verify", "--json", "test.mm"]
+        assert result["success"] is True
 
 
 def test_verify_includes_spec_code_mapping():
