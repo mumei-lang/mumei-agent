@@ -14,6 +14,7 @@ from agent.spec_extractor import (
     _validate_extracted_spec,
     extract_and_generate,
     extract_spec,
+    validate_forge_task_spec,
 )
 
 
@@ -133,10 +134,58 @@ def test_validate_extracted_spec_invalid_atoms() -> None:
     errors = _validate_extracted_spec(spec)
 
     assert "atoms[0].name must be a non-empty string" in errors
+    assert "atoms[0].description must be a non-empty string" in errors
     assert "atoms[0].return_type must be a non-empty string" in errors
     assert "atoms[0].requires must be a non-empty string" in errors
     assert "atoms[0].ensures must be a non-empty string" in errors
     assert "atoms[0].inputs[0].type must be a non-empty string" in errors
+    assert "atoms[0].effects must be a list" in errors
+
+
+def test_validate_extracted_spec_rejects_unsafe_paths_and_bad_optional_fields() -> None:
+    spec = dict(
+        VALID_SPEC,
+        target_file="std/../secrets.mm",
+        priority=True,
+        max_retries=0,
+        auto_commit="yes",
+    )
+
+    errors = _validate_extracted_spec(spec)
+
+    assert "target_file must be a safe relative std/*.mm path" in errors
+    assert "priority must be an integer when present" in errors
+    assert "max_retries must be a positive integer when present" in errors
+    assert "auto_commit must be a boolean when present" in errors
+
+
+def test_validate_extracted_spec_rejects_bad_atom_names_and_effects() -> None:
+    spec = dict(
+        VALID_SPEC,
+        atoms=[
+            dict(VALID_SPEC["atoms"][0], name="bad-name", effects=["State(balance)"]),
+            dict(VALID_SPEC["atoms"][0], name="bad-name", reference_patterns=["safe_subtract", ""]),
+        ],
+    )
+
+    errors = _validate_extracted_spec(spec)
+
+    assert "atoms[0].name must match [A-Za-z_][A-Za-z0-9_]*" in errors
+    assert "atoms[1].name must match [A-Za-z_][A-Za-z0-9_]*" in errors
+    assert "atoms[1].name must be unique within atoms" in errors
+    assert "atoms[1].reference_patterns must be a list of non-empty strings" in errors
+
+
+def test_validate_forge_task_spec_raises_with_feedback() -> None:
+    spec = dict(VALID_SPEC, target_file="std/math/safe_add")
+
+    try:
+        validate_forge_task_spec(spec)
+    except ValueError as exc:
+        assert "invalid forge task spec" in str(exc)
+        assert "safe relative std/*.mm path" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("validate_forge_task_spec should reject invalid specs")
 
 
 def test_extract_spec_retry_on_invalid_json() -> None:

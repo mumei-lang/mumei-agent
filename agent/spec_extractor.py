@@ -24,6 +24,8 @@ from agent.strategies.spec_refinement import run_refinement_loop
 
 logger = logging.getLogger(__name__)
 
+_ATOM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def _json_object_candidate(raw: str) -> str:
     """Extract the most likely JSON object payload from an LLM response."""
@@ -266,46 +268,69 @@ def _scan_std_catalog_local(mumei_client: MumeiClient) -> str:
 def _validate_extracted_spec(spec: dict) -> list[str]:
     """Validate an extracted spec against the forge task spec schema.
 
-    Checks:
-    - task_id exists and is a string
-    - target_file exists and starts with "std/"
-    - mode is one of "append", "create", "replace"
-    - atoms is a non-empty list
-    - Each atom has name, inputs (list of {name, type}), return_type, requires, ensures
-    - requires and ensures are non-empty strings
-
     Returns:
         A list of validation error messages (empty if valid).
     """
     errors: list[str] = []
     if not isinstance(spec.get("task_id"), str) or not spec.get("task_id", "").strip():
         errors.append("task_id must be a non-empty string")
+
     target_file = spec.get("target_file")
     if not isinstance(target_file, str) or not target_file.startswith("std/"):
         errors.append('target_file must be a string starting with "std/"')
+    elif (
+        Path(target_file).is_absolute()
+        or ".." in Path(target_file).parts
+        or not target_file.endswith(".mm")
+    ):
+        errors.append('target_file must be a safe relative std/*.mm path')
+
     if spec.get("mode") not in {"append", "create", "replace"}:
         errors.append('mode must be one of "append", "create", or "replace"')
+
+    priority = spec.get("priority")
+    if priority is not None and (not isinstance(priority, int) or isinstance(priority, bool)):
+        errors.append("priority must be an integer when present")
+    max_retries = spec.get("max_retries")
+    if max_retries is not None and (
+        not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries <= 0
+    ):
+        errors.append("max_retries must be a positive integer when present")
+    auto_commit = spec.get("auto_commit")
+    if auto_commit is not None and not isinstance(auto_commit, bool):
+        errors.append("auto_commit must be a boolean when present")
 
     atoms = spec.get("atoms")
     if not isinstance(atoms, list) or not atoms:
         errors.append("atoms must be a non-empty list")
         return errors
 
+    seen_atom_names: set[str] = set()
     for index, atom in enumerate(atoms):
         prefix = f"atoms[{index}]"
         if not isinstance(atom, dict):
             errors.append(f"{prefix} must be an object")
             continue
-        for field in ("name", "return_type", "requires", "ensures"):
+
+        for field in ("name", "description", "return_type", "requires", "ensures"):
             value = atom.get(field)
             if not isinstance(value, str) or not value.strip():
                 errors.append(f"{prefix}.{field} must be a non-empty string")
-        inputs = atom.get("inputs", atom.get("params"))
+        name = atom.get("name")
+        if isinstance(name, str) and name.strip():
+            if not _ATOM_NAME_RE.match(name):
+                errors.append(f"{prefix}.name must match [A-Za-z_][A-Za-z0-9_]*")
+            if name in seen_atom_names:
+                errors.append(f"{prefix}.name must be unique within atoms")
+            seen_atom_names.add(name)
+
+        inputs_key = "inputs" if "inputs" in atom else "params"
+        inputs = atom.get(inputs_key)
         if not isinstance(inputs, list):
             errors.append(f"{prefix}.inputs must be a list")
         else:
             for input_index, item in enumerate(inputs):
-                item_prefix = f"{prefix}.inputs[{input_index}]"
+                item_prefix = f"{prefix}.{inputs_key}[{input_index}]"
                 if not isinstance(item, dict):
                     errors.append(f"{item_prefix} must be an object")
                     continue
@@ -313,7 +338,27 @@ def _validate_extracted_spec(spec: dict) -> list[str]:
                     value = item.get(field)
                     if not isinstance(value, str) or not value.strip():
                         errors.append(f"{item_prefix}.{field} must be a non-empty string")
+
+        effects = atom.get("effects")
+        if not isinstance(effects, list):
+            errors.append(f"{prefix}.effects must be a list")
+        elif not all(isinstance(effect, str) and effect.strip() for effect in effects):
+            errors.append(f"{prefix}.effects entries must be non-empty strings")
+
+        reference_patterns = atom.get("reference_patterns")
+        if reference_patterns is not None and (
+            not isinstance(reference_patterns, list)
+            or not all(isinstance(pattern, str) and pattern.strip() for pattern in reference_patterns)
+        ):
+            errors.append(f"{prefix}.reference_patterns must be a list of non-empty strings")
     return errors
+
+
+def validate_forge_task_spec(spec: dict) -> None:
+    """Raise ``ValueError`` if *spec* is not a valid forge task spec."""
+    errors = _validate_extracted_spec(spec)
+    if errors:
+        raise ValueError("invalid forge task spec: " + "; ".join(errors))
 
 
 def _matches_requirement_trigger(trigger: str, lowered_prompt: str) -> bool:
