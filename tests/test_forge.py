@@ -8,7 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent.forge import ForgeResult, MumeiForge
+from agent.forge import (
+    ForgeResult,
+    MumeiForge,
+    collect_escalation_metrics,
+    track_escalation_trends,
+)
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -100,6 +105,87 @@ class TestForgeResult:
         assert d["status"] == "success"
         assert d["atoms_added"] == ["foo"]
         assert d["commit_sha"] == "abc"
+
+
+class TestEscalationMetrics:
+    def test_collect_escalation_metrics_from_bundle(self, tmp_path):
+        bundle_path = tmp_path / "example.escalation-bundle.json"
+        bundle_path.write_text(json.dumps({
+            "summary": {
+                "total_atoms": 3,
+                "candidate_count": 2,
+                "by_reason": {"z3_unknown_complex_fragment": 2},
+                "by_logic_fragment": {"nonlinear_arithmetic": 2},
+            },
+            "candidates": [
+                {
+                    "name": "proved",
+                    "escalation_reason": "z3_unknown_complex_fragment",
+                    "logic_fragment_tags": ["nonlinear_arithmetic"],
+                    "lean_metadata": {"status": "lean_verified"},
+                },
+                {
+                    "name": "partial",
+                    "escalation_reason": "z3_unknown_complex_fragment",
+                    "logic_fragment_tags": ["nonlinear_arithmetic"],
+                    "lean_metadata": {"status": "partial_translation"},
+                },
+            ],
+        }), encoding="utf-8")
+
+        metrics = collect_escalation_metrics(str(bundle_path))
+
+        assert metrics["total_atoms"] == 3
+        assert metrics["candidate_count"] == 2
+        assert metrics["lean_successes"] == 1
+        assert metrics["partial_translation"] == 1
+        assert metrics["success_rate"] == 0.5
+        assert metrics["by_reason"] == {"z3_unknown_complex_fragment": 2}
+        assert metrics["successes_by_failure_reason"] == {"z3_unknown_complex_fragment": 1}
+        assert metrics["by_logic_fragment"] == {"nonlinear_arithmetic": 2}
+
+    def test_track_escalation_trends_by_quarter(self):
+        trends = track_escalation_trends([
+            {
+                "quarter": "2026-Q2",
+                "escalation_attempts": 5,
+                "lean_successes": 2,
+                "partial_translation": 1,
+                "manual_required": 1,
+                "by_reason": {
+                    "z3_unknown_complex_fragment": 4,
+                    "trusted_atom_human_review": 1,
+                },
+                "successes_by_failure_reason": {
+                    "z3_unknown_complex_fragment": 1,
+                    "trusted_atom_human_review": 1,
+                },
+                "by_logic_fragment": {"nonlinear_arithmetic": 5},
+            },
+            {
+                "quarter": "2026-Q3",
+                "candidate_count": 2,
+                "lean_successes": 2,
+                "by_failure_reason": {"trusted_atom_human_review": 2},
+                "by_logic_fragment": {"inductive_data_type": 2},
+            },
+        ])
+
+        assert trends["quarters"]["2026-Q2"]["success_rate"] == 0.4
+        assert trends["quarters"]["2026-Q2"]["partial_translation_rate"] == 0.2
+        assert trends["quarters"]["2026-Q2"]["low_success_categories"] == [
+            "z3_unknown_complex_fragment"
+        ]
+        assert trends["overall"]["escalation_attempts"] == 7
+        assert trends["overall"]["success_rate"] == 4 / 7
+        assert trends["overall"]["successes_by_failure_reason"] == {
+            "z3_unknown_complex_fragment": 1,
+            "trusted_atom_human_review": 3,
+        }
+        assert trends["overall"]["by_logic_fragment"] == {
+            "nonlinear_arithmetic": 5,
+            "inductive_data_type": 2,
+        }
 
 
 # --- forge_one: append mode -------------------------------------------------
