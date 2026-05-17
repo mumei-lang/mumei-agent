@@ -75,11 +75,28 @@ def _merge_counts(target: dict[str, int], source: dict[str, int]) -> None:
         target[key] = target.get(key, 0) + count
 
 
-def _low_success_categories(by_reason: dict[str, int], lean_successes: int) -> list[str]:
+def _success_counts_by_reason(
+    value: Any,
+    by_reason: dict[str, int],
+    lean_successes: int,
+) -> dict[str, int]:
+    successes_by_reason = _count_mapping(value)
+    if successes_by_reason:
+        return successes_by_reason
+    if len(by_reason) == 1:
+        reason, attempts = next(iter(by_reason.items()))
+        return {reason: min(lean_successes, attempts)}
+    return {}
+
+
+def _low_success_categories(
+    by_reason: dict[str, int],
+    successes_by_reason: dict[str, int],
+) -> list[str]:
     categories = [
         reason
         for reason, attempts in by_reason.items()
-        if attempts > 0 and lean_successes / attempts < 0.5
+        if attempts > 0 and successes_by_reason.get(reason, 0) / attempts < 0.5
     ]
     return sorted(categories)
 
@@ -96,6 +113,7 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
     by_reason = _count_mapping(summary.get("by_reason"))
     by_logic_fragment = _count_mapping(summary.get("by_logic_fragment"))
     lean_successes = 0
+    successes_by_reason: dict[str, int] = {}
     partial_translation = 0
     manual_required = 0
 
@@ -117,6 +135,8 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
             status = lean_metadata.get("status") if isinstance(lean_metadata, dict) else None
             if status == "lean_verified":
                 lean_successes += 1
+                if isinstance(reason, str):
+                    successes_by_reason[reason] = successes_by_reason.get(reason, 0) + 1
             elif status == "partial_translation":
                 partial_translation += 1
             elif candidate.get("manual_lemma_reason") is not None:
@@ -124,6 +144,13 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
 
     candidate_count = int(summary.get("candidate_count", len(candidates)) or 0)
     total_atoms = int(summary.get("total_atoms", 0) or 0)
+    if not candidates:
+        lean_successes = int(summary.get("lean_successes", 0) or 0)
+        successes_by_reason = _success_counts_by_reason(
+            summary.get("successes_by_failure_reason"),
+            by_reason,
+            lean_successes,
+        )
     success_rate = lean_successes / candidate_count if candidate_count else 0.0
     return {
         "total_atoms": total_atoms,
@@ -135,8 +162,9 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
         "success_rate": success_rate,
         "by_reason": by_reason,
         "by_failure_reason": by_reason,
+        "successes_by_failure_reason": successes_by_reason,
         "by_logic_fragment": by_logic_fragment,
-        "low_success_categories": _low_success_categories(by_reason, lean_successes),
+        "low_success_categories": _low_success_categories(by_reason, successes_by_reason),
     }
 
 
@@ -144,6 +172,7 @@ def track_escalation_trends(metrics_history: list[dict[str, Any]]) -> dict[str, 
     quarters: dict[str, dict[str, Any]] = {}
     aggregate_by_reason: dict[str, int] = {}
     aggregate_by_logic_fragment: dict[str, int] = {}
+    aggregate_successes_by_reason: dict[str, int] = {}
     aggregate_attempts = 0
     aggregate_successes = 0
     aggregate_partial_translation = 0
@@ -163,6 +192,7 @@ def track_escalation_trends(metrics_history: list[dict[str, Any]]) -> dict[str, 
                 "partial_translation": 0,
                 "manual_required": 0,
                 "by_reason": {},
+                "successes_by_failure_reason": {},
                 "by_logic_fragment": {},
                 "low_success_categories": [],
             },
@@ -175,12 +205,18 @@ def track_escalation_trends(metrics_history: list[dict[str, Any]]) -> dict[str, 
             metrics.get("by_failure_reason", metrics.get("by_reason", {}))
         )
         by_logic_fragment = _count_mapping(metrics.get("by_logic_fragment"))
+        successes_by_reason = _success_counts_by_reason(
+            metrics.get("successes_by_failure_reason"),
+            by_reason,
+            successes,
+        )
 
         quarter_metrics["escalation_attempts"] += attempts
         quarter_metrics["lean_successes"] += successes
         quarter_metrics["partial_translation"] += partial
         quarter_metrics["manual_required"] += manual
         _merge_counts(quarter_metrics["by_reason"], by_reason)
+        _merge_counts(quarter_metrics["successes_by_failure_reason"], successes_by_reason)
         _merge_counts(quarter_metrics["by_logic_fragment"], by_logic_fragment)
 
         aggregate_attempts += attempts
@@ -188,6 +224,7 @@ def track_escalation_trends(metrics_history: list[dict[str, Any]]) -> dict[str, 
         aggregate_partial_translation += partial
         aggregate_manual_required += manual
         _merge_counts(aggregate_by_reason, by_reason)
+        _merge_counts(aggregate_successes_by_reason, successes_by_reason)
         _merge_counts(aggregate_by_logic_fragment, by_logic_fragment)
 
     for quarter_metrics in quarters.values():
@@ -198,7 +235,7 @@ def track_escalation_trends(metrics_history: list[dict[str, Any]]) -> dict[str, 
         quarter_metrics["partial_translation_rate"] = partial / attempts if attempts else 0.0
         quarter_metrics["low_success_categories"] = _low_success_categories(
             quarter_metrics["by_reason"],
-            successes,
+            quarter_metrics["successes_by_failure_reason"],
         )
 
     return {
@@ -213,10 +250,11 @@ def track_escalation_trends(metrics_history: list[dict[str, Any]]) -> dict[str, 
                 aggregate_partial_translation / aggregate_attempts if aggregate_attempts else 0.0
             ),
             "by_reason": aggregate_by_reason,
+            "successes_by_failure_reason": aggregate_successes_by_reason,
             "by_logic_fragment": aggregate_by_logic_fragment,
             "low_success_categories": _low_success_categories(
                 aggregate_by_reason,
-                aggregate_successes,
+                aggregate_successes_by_reason,
             ),
         },
     }

@@ -141,18 +141,26 @@ class TestEscalationMetrics:
         assert metrics["partial_translation"] == 1
         assert metrics["success_rate"] == 0.5
         assert metrics["by_reason"] == {"z3_unknown_complex_fragment": 2}
+        assert metrics["successes_by_failure_reason"] == {"z3_unknown_complex_fragment": 1}
         assert metrics["by_logic_fragment"] == {"nonlinear_arithmetic": 2}
 
     def test_track_escalation_trends_by_quarter(self):
         trends = track_escalation_trends([
             {
                 "quarter": "2026-Q2",
-                "escalation_attempts": 4,
-                "lean_successes": 1,
+                "escalation_attempts": 5,
+                "lean_successes": 2,
                 "partial_translation": 1,
                 "manual_required": 1,
-                "by_reason": {"z3_unknown_complex_fragment": 4},
-                "by_logic_fragment": {"nonlinear_arithmetic": 4},
+                "by_reason": {
+                    "z3_unknown_complex_fragment": 4,
+                    "trusted_atom_human_review": 1,
+                },
+                "successes_by_failure_reason": {
+                    "z3_unknown_complex_fragment": 1,
+                    "trusted_atom_human_review": 1,
+                },
+                "by_logic_fragment": {"nonlinear_arithmetic": 5},
             },
             {
                 "quarter": "2026-Q3",
@@ -163,15 +171,19 @@ class TestEscalationMetrics:
             },
         ])
 
-        assert trends["quarters"]["2026-Q2"]["success_rate"] == 0.25
-        assert trends["quarters"]["2026-Q2"]["partial_translation_rate"] == 0.25
+        assert trends["quarters"]["2026-Q2"]["success_rate"] == 0.4
+        assert trends["quarters"]["2026-Q2"]["partial_translation_rate"] == 0.2
         assert trends["quarters"]["2026-Q2"]["low_success_categories"] == [
             "z3_unknown_complex_fragment"
         ]
-        assert trends["overall"]["escalation_attempts"] == 6
-        assert trends["overall"]["success_rate"] == 0.5
+        assert trends["overall"]["escalation_attempts"] == 7
+        assert trends["overall"]["success_rate"] == 4 / 7
+        assert trends["overall"]["successes_by_failure_reason"] == {
+            "z3_unknown_complex_fragment": 1,
+            "trusted_atom_human_review": 3,
+        }
         assert trends["overall"]["by_logic_fragment"] == {
-            "nonlinear_arithmetic": 4,
+            "nonlinear_arithmetic": 5,
             "inductive_data_type": 2,
         }
 
