@@ -2,9 +2,60 @@
 
 from __future__ import annotations
 
+import datetime
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+_OUTSIDE_DECIDABLE_FRAGMENT_RE = re.compile(
+    r"outside_decidable_fragment:.*? uses (?P<tags>[^;\n]+)"
+)
+_LOGIC_FRAGMENT_TAG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def metrics_quarter(value: datetime.datetime | None = None) -> str:
+    """Return a stable year-quarter key for P8-C/P8-D metrics."""
+    timestamp = value or datetime.datetime.now(datetime.timezone.utc)
+    quarter = ((timestamp.month - 1) // 3) + 1
+    return f"{timestamp.year}-Q{quarter}"
+
+
+def extract_logic_fragment_tags(text: str) -> list[str]:
+    """Extract decidable-fragment tags from verifier warning text."""
+    tags: list[str] = []
+    for match in _OUTSIDE_DECIDABLE_FRAGMENT_RE.finditer(text):
+        for raw_tag in match.group("tags").split(","):
+            tag = raw_tag.strip()
+            if _LOGIC_FRAGMENT_TAG_RE.fullmatch(tag) and tag not in tags:
+                tags.append(tag)
+    return tags
+
+
+def decidable_fragment_tags_from_verify_result(
+    verify_result: Mapping[str, object],
+) -> list[str]:
+    """Extract decidable-fragment tags from a Mumei verification result."""
+    tags: list[str] = []
+    report = verify_result.get("report")
+    if isinstance(report, Mapping):
+        decidable_fragment = report.get("decidable_fragment")
+        if isinstance(decidable_fragment, Mapping):
+            warning_counts = decidable_fragment.get("warning_counts")
+            if isinstance(warning_counts, Mapping):
+                for tag in warning_counts:
+                    if isinstance(tag, str) and tag not in tags:
+                        tags.append(tag)
+
+    for key in ("stdout", "stderr", "error"):
+        value = verify_result.get(key)
+        if isinstance(value, str):
+            for tag in extract_logic_fragment_tags(value):
+                if tag not in tags:
+                    tags.append(tag)
+    return tags
 
 
 @dataclass
@@ -46,6 +97,8 @@ class Metrics:
     llm_tokens_used: int = 0
     by_violation_type: dict[str, ViolationMetrics] = field(default_factory=dict)
     by_logic_fragment: dict[str, ViolationMetrics] = field(default_factory=dict)
+    quarterly_new_spec_attempts: dict[str, int] = field(default_factory=dict)
+    quarterly_outside_decidable_fragment_warnings: dict[str, int] = field(default_factory=dict)
 
     def record_tokens(self, count: int) -> None:
         """Record LLM tokens consumed."""
@@ -93,11 +146,19 @@ class Metrics:
         outside_decidable_fragment: bool = False,
         z3_unknown: bool = False,
         first_pass_verified: bool | None = None,
+        generated_at: datetime.datetime | None = None,
     ) -> None:
         """Record P8-C metrics for a newly generated specification."""
+        quarter = metrics_quarter(generated_at)
         self.new_spec_attempts += 1
+        self.quarterly_new_spec_attempts[quarter] = (
+            self.quarterly_new_spec_attempts.get(quarter, 0) + 1
+        )
         if outside_decidable_fragment or logic_fragment_tags:
             self.outside_decidable_fragment_warnings += 1
+            self.quarterly_outside_decidable_fragment_warnings[quarter] = (
+                self.quarterly_outside_decidable_fragment_warnings.get(quarter, 0) + 1
+            )
         if z3_unknown:
             self.z3_unknowns += 1
         if first_pass_verified is not None:
@@ -256,6 +317,45 @@ class Metrics:
             return 0.0
         return metrics.successes / metrics.attempts
 
+    def quarterly_outside_decidable_fragment_warning_rate(self, quarter: str) -> float:
+        """Return outside_decidable_fragment warning rate for a quarter."""
+        attempts = self.quarterly_new_spec_attempts.get(quarter, 0)
+        if attempts == 0:
+            return 0.0
+        warnings = self.quarterly_outside_decidable_fragment_warnings.get(quarter, 0)
+        return warnings / attempts
+
+    def record_verify_result_as_new_spec(
+        self,
+        verify_result: Mapping[str, object],
+        *,
+        first_pass_verified: bool | None = None,
+        generated_at: datetime.datetime | None = None,
+    ) -> list[str]:
+        """Record new-spec metrics from a Mumei verification result."""
+        tags = decidable_fragment_tags_from_verify_result(verify_result)
+        z3_unknown = False
+        report = verify_result.get("report")
+        if isinstance(report, Mapping):
+            atoms = report.get("atoms")
+            if isinstance(atoms, list):
+                z3_unknown = any(
+                    isinstance(atom, Mapping)
+                    and atom.get("z3_check_result") == "unknown"
+                    for atom in atoms
+                )
+        stderr = verify_result.get("stderr")
+        if isinstance(stderr, str) and "unknown" in stderr.lower():
+            z3_unknown = True
+        self.record_new_spec(
+            tags,
+            outside_decidable_fragment=bool(tags),
+            z3_unknown=z3_unknown,
+            first_pass_verified=first_pass_verified,
+            generated_at=generated_at,
+        )
+        return tags
+
     def record_attempt(self, violation_type: str = "unknown") -> None:
         """Record a fix or generation attempt."""
         self.total_attempts += 1
@@ -335,6 +435,14 @@ class Metrics:
                 tag: {"attempts": m.attempts, "successes": m.successes}
                 for tag, m in self.by_logic_fragment.items()
             },
+            "quarterly_new_spec_attempts": self.quarterly_new_spec_attempts,
+            "quarterly_outside_decidable_fragment_warnings": (
+                self.quarterly_outside_decidable_fragment_warnings
+            ),
+            "quarterly_outside_decidable_fragment_warning_rates": {
+                quarter: self.quarterly_outside_decidable_fragment_warning_rate(quarter)
+                for quarter in self.quarterly_new_spec_attempts
+            },
         }
 
     @classmethod
@@ -362,6 +470,16 @@ class Metrics:
                 attempts=tag_data.get("attempts", 0),
                 successes=tag_data.get("successes", 0),
             )
+        quarterly_new_spec_attempts = {
+            str(quarter): int(count)
+            for quarter, count in data.get("quarterly_new_spec_attempts", {}).items()
+        }
+        quarterly_warnings = {
+            str(quarter): int(count)
+            for quarter, count in data.get(
+                "quarterly_outside_decidable_fragment_warnings", {}
+            ).items()
+        }
         return cls(
             total_attempts=data.get("total_attempts", 0),
             successes=data.get("successes", 0),
@@ -404,6 +522,8 @@ class Metrics:
             llm_tokens_used=data.get("llm_tokens_used", 0),
             by_violation_type=by_vtype,
             by_logic_fragment=by_logic_fragment,
+            quarterly_new_spec_attempts=quarterly_new_spec_attempts,
+            quarterly_outside_decidable_fragment_warnings=quarterly_warnings,
         )
 
     def to_json(self) -> str:
