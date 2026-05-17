@@ -219,6 +219,8 @@ Available spec files:
 
 See [`docs/NL_SPEC_DEMO.md`](docs/NL_SPEC_DEMO.md) for a recorded field demo of `python -m agent extract-spec`, including bank-transfer, RegTech KYC, and spec-extraction-to-code-generation examples with `mumei verify` output.
 
+https://github.com/user-attachments/assets/7426e5e0-c9ac-4c30-a267-012ad8b0ffdd
+
 A live OpenAI extraction E2E recording is available at [`docs/p11_live_extraction_e2e.mp4`](docs/p11_live_extraction_e2e.mp4).
 
 ## LLM Provider Support
