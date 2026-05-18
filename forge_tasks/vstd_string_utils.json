@@ -39,7 +39,7 @@
       ],
       "return_type": "i64",
       "requires": "true",
-      "ensures": "result == 0 || result == 1",
+      "ensures": "((code >= 0 && code <= 127) && result == 1) || ((code < 0 || code > 127) && result == 0)",
       "reference_patterns": ["std/core.equals", "std/string/validator.is_numeric_ascii_code"]
     }
   ]

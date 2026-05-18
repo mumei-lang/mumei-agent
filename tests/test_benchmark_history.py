@@ -108,3 +108,46 @@ def test_select_model_prefers_success_then_shorter_code(tmp_path):
 
 def test_select_model_uses_fallback_without_rows(tmp_path):
     assert select_model(tmp_path / "missing.md", fallback="fallback-model") == "fallback-model"
+
+
+def test_select_model_filters_to_ollama_allowlist(tmp_path):
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "|------|-------|--------------|-----------------|",
+            "| 2026-05-01 | gpt-4o-mini | 0.990 | 100.0 |",
+            "| 2026-05-02 | qwen3.5:4b | 0.750 | 200.0 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert select_model(
+        history,
+        fallback="qwen3.5:4b",
+        profile="ollama-local",
+        ollama_models="qwen3.5:4b",
+    ) == "qwen3.5:4b"
+
+
+def test_select_model_falls_back_without_allowed_ollama_rows(tmp_path):
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "|------|-------|--------------|-----------------|",
+            "| 2026-05-01 | gpt-4o-mini | 0.990 | 100.0 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert select_model(
+        history,
+        fallback="qwen3.5:4b",
+        profile="ollama-local",
+        ollama_models="qwen3.5:4b",
+    ) == "qwen3.5:4b"

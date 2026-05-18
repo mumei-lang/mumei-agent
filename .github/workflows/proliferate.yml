@@ -119,6 +119,7 @@ jobs:
       # fully self-contained ollama-local profile with the qwen3.5:4b model.
       LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
       LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:4b' }}
+      OLLAMA_MODEL_ALLOWLIST: qwen3.5:4b,qwen3.5:0.8b,qwen2.5-coder:1.5b,qwen2.5-coder:7b,bonsai-1bit-qwen
     steps:
       - name: Check out mumei-agent
         uses: actions/checkout@v4
@@ -222,16 +223,31 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REQUESTED_LLM_MODEL: ${{ github.event.inputs.llm_model }}
         run: |
+          validate_model_name() {
+            local model_name="$1"
+            if [ -z "$model_name" ]; then
+              echo "::error::LLM model name cannot be empty"
+              exit 1
+            fi
+            case "$model_name" in
+              *$'\n'*|*$'\r'*)
+                echo "::error::LLM model name must be a single line"
+                exit 1
+                ;;
+            esac
+          }
+
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$REQUESTED_LLM_MODEL" ]; then
             SELECTED_MODEL="$REQUESTED_LLM_MODEL"
             MODEL_SOURCE="workflow_dispatch"
           else
-            SELECTED_MODEL="$(python scripts/select_benchmark_model.py --history docs/BENCHMARK_HISTORY.md --fallback "$LLM_MODEL_INPUT")"
+            SELECTED_MODEL="$(python scripts/select_benchmark_model.py --history docs/BENCHMARK_HISTORY.md --fallback "$LLM_MODEL_INPUT" --profile "$LLM_PROFILE" --ollama-models "$OLLAMA_MODEL_ALLOWLIST")"
             MODEL_SOURCE="benchmark_history"
           fi
-          echo "model=${SELECTED_MODEL}" >> "$GITHUB_OUTPUT"
-          echo "source=${MODEL_SOURCE}" >> "$GITHUB_OUTPUT"
-          echo "LLM_MODEL_SELECTED=${SELECTED_MODEL}" >> "$GITHUB_ENV"
+          validate_model_name "$SELECTED_MODEL"
+          printf 'model=%s\n' "$SELECTED_MODEL" >> "$GITHUB_OUTPUT"
+          printf 'source=%s\n' "$MODEL_SOURCE" >> "$GITHUB_OUTPUT"
+          printf 'LLM_MODEL_SELECTED=%s\n' "$SELECTED_MODEL" >> "$GITHUB_ENV"
           echo "Selected LLM model: ${SELECTED_MODEL} (${MODEL_SOURCE})"
 
       # ----- LLM provisioning: ollama-local -----
@@ -310,6 +326,12 @@ jobs:
             if [ -z "${REMOTE_MODEL}" ]; then
               REMOTE_MODEL="${LLM_MODEL_SELECTED}"
             fi
+            case "${REMOTE_MODEL}" in
+              *$'\n'*|*$'\r'*)
+                echo "::error::LLM model name must be a single line"
+                exit 1
+                ;;
+            esac
             {
               echo "api_key<<__EOF__"
               echo "${REMOTE_KEY}"

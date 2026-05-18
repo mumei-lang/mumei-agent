@@ -7,6 +7,13 @@ from pathlib import Path
 
 DEFAULT_HISTORY_PATH = Path(__file__).resolve().parents[1] / "docs" / "BENCHMARK_HISTORY.md"
 DEFAULT_MODEL = "qwen3.5:4b"
+DEFAULT_OLLAMA_MODELS = (
+    "qwen3.5:4b",
+    "qwen3.5:0.8b",
+    "qwen2.5-coder:1.5b",
+    "qwen2.5-coder:7b",
+    "bonsai-1bit-qwen",
+)
 
 
 @dataclass(frozen=True)
@@ -74,12 +81,23 @@ def parse_history_rows(history_path: Path = DEFAULT_HISTORY_PATH) -> list[Benchm
     return rows
 
 
+def _model_allowlist(models: str | None) -> set[str]:
+    if not models:
+        return set(DEFAULT_OLLAMA_MODELS)
+    return {model.strip() for model in models.split(",") if model.strip()}
+
+
 def select_model(
     history_path: Path = DEFAULT_HISTORY_PATH,
     *,
     fallback: str = DEFAULT_MODEL,
+    profile: str | None = None,
+    ollama_models: str | None = None,
 ) -> str:
     rows = parse_history_rows(history_path)
+    if profile == "ollama-local":
+        allowed_models = _model_allowlist(ollama_models)
+        rows = [row for row in rows if row.model in allowed_models]
     if not rows:
         return fallback
 
@@ -99,8 +117,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history", type=Path, default=DEFAULT_HISTORY_PATH)
     parser.add_argument("--fallback", default=DEFAULT_MODEL)
+    parser.add_argument("--profile", choices=("ollama-local", "remote"))
+    parser.add_argument(
+        "--ollama-models",
+        default=",".join(DEFAULT_OLLAMA_MODELS),
+        help="Comma-separated models eligible for ollama-local selection.",
+    )
     args = parser.parse_args()
-    print(select_model(args.history, fallback=args.fallback))
+    print(
+        select_model(
+            args.history,
+            fallback=args.fallback,
+            profile=args.profile,
+            ollama_models=args.ollama_models,
+        )
+    )
     return 0
 
 
