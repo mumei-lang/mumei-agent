@@ -215,6 +215,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test]"
 
+      - name: Select benchmark-backed LLM model
+        id: model_selection
+        working-directory: mumei-agent
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_LLM_MODEL: ${{ github.event.inputs.llm_model }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$REQUESTED_LLM_MODEL" ]; then
+            SELECTED_MODEL="$REQUESTED_LLM_MODEL"
+            MODEL_SOURCE="workflow_dispatch"
+          else
+            SELECTED_MODEL="$(python scripts/select_benchmark_model.py --history docs/BENCHMARK_HISTORY.md --fallback "$LLM_MODEL_INPUT")"
+            MODEL_SOURCE="benchmark_history"
+          fi
+          echo "model=${SELECTED_MODEL}" >> "$GITHUB_OUTPUT"
+          echo "source=${MODEL_SOURCE}" >> "$GITHUB_OUTPUT"
+          echo "LLM_MODEL_SELECTED=${SELECTED_MODEL}" >> "$GITHUB_ENV"
+          echo "Selected LLM model: ${SELECTED_MODEL} (${MODEL_SOURCE})"
+
       # ----- LLM provisioning: ollama-local -----
 
       - name: Cache ollama models
@@ -222,7 +241,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ollama/models
-          key: ollama-${{ env.LLM_MODEL_INPUT }}
+          key: ollama-${{ steps.model_selection.outputs.model }}
           restore-keys: |
             ollama-
 
@@ -252,8 +271,8 @@ jobs:
       - name: Pull ollama model
         if: env.LLM_PROFILE == 'ollama-local'
         run: |
-          echo "Pulling ${LLM_MODEL_INPUT}..."
-          ollama pull "${LLM_MODEL_INPUT}"
+          echo "Pulling ${LLM_MODEL_SELECTED}..."
+          ollama pull "${LLM_MODEL_SELECTED}"
           ollama list
 
       # ----- LLM provisioning: remote -----
@@ -270,7 +289,7 @@ jobs:
           if [ "${LLM_PROFILE}" = "ollama-local" ]; then
             echo "api_key=ollama" >> "$GITHUB_OUTPUT"
             echo "base_url=http://localhost:11434/v1" >> "$GITHUB_OUTPUT"
-            echo "model=${LLM_MODEL_INPUT}" >> "$GITHUB_OUTPUT"
+            echo "model=${LLM_MODEL_SELECTED}" >> "$GITHUB_OUTPUT"
           else
             # Remote profile: read secrets via env vars (never inline
             # ${{ secrets.* }} in the script body — values containing $
@@ -289,7 +308,7 @@ jobs:
             REMOTE_BASE="${_LLM_BASE_URL}"
             REMOTE_MODEL="${_LLM_MODEL}"
             if [ -z "${REMOTE_MODEL}" ]; then
-              REMOTE_MODEL="${LLM_MODEL_INPUT}"
+              REMOTE_MODEL="${LLM_MODEL_SELECTED}"
             fi
             {
               echo "api_key<<__EOF__"
