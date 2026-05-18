@@ -7,7 +7,8 @@ Given one or more forge task specs, generate verified atoms and append or create
 
 # Devin Secrets Needed
 
-- `LLM_API_KEY` or `OPENAI_API_KEY`: required for live forge generation. Use dry-run mode when no LLM key is available.
+- `LLM_API_KEY` or `OPENAI_API_KEY`: required for live forge execution that calls an LLM.
+- No secret is required for dry-run planning, JSON validation, or deterministic task-spec review.
 
 # Step 1: Inspect forge tasks
 
@@ -22,6 +23,13 @@ Result:
 
 ```bash
 python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+```
+
+For a changed task spec, also validate JSON and dry-run that task directly:
+
+```bash
+python -m json.tool forge_tasks/<task>.json >/dev/null
+python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task forge_tasks/<task>.json --dry-run
 ```
 
 If the Mumei CLI is not on `PATH`, set `MUMEI_BIN` explicitly:
@@ -45,6 +53,8 @@ Result:
 python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1
 python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task path/to/task.json
 ```
+
+If LLM credentials are unavailable, do not claim live-forged output. Report the secret blocker and limit validation to deterministic checks such as task JSON parsing, dry-run plan discovery, and relevant unit tests.
 
 For validation without touching the real sibling Mumei checkout, copy `std/` into a scratch directory and point `--mumei-repo` there. When generated code imports std modules such as `std/core`, set `MUMEI_STD_PATH` to the scratch `std/` directory so temp-file verification can resolve imports:
 
@@ -79,6 +89,22 @@ MUMEI_STD_PATH=/path/to/scratch/std mumei verify --json /path/to/scratch/std/<ta
 ```
 
 If `mumei verify --json` exits 0 with `status: passed` but reports `verified: 0` and skipped atoms, report the run as generation/check validation rather than full Z3 proof evidence.
+
+# Step 4: Regression checks for deterministic forge task changes
+
+Action:
+    Run focused tests covering forge discovery/task schema changes, then the full suite when practical.
+
+Expectation:
+    Deterministic task-spec edits should not require LLM credentials and should be covered by shell-only tests.
+
+Result:
+    Report exact command output and clearly separate live forge gaps from deterministic validation.
+
+```bash
+python -m pytest tests/test_forge_discovery.py -q
+python -m pytest -q
+```
 
 # Parameters
 
