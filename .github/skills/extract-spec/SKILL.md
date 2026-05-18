@@ -59,6 +59,53 @@ Result:
 python -m json.tool spec.json >/dev/null
 ```
 
+# Live E2E testing
+
+Use this section when verifying the real LLM-backed extraction path rather than mocks.
+
+## Devin Secrets Needed
+
+- `OPENAI_API_KEY`: OpenAI API key used by the live integration tests and CLI extraction flow.
+
+## Step 1: Run focused local tests
+
+Action:
+    Run the focused P11-adjacent local suite before relying on live LLM behavior.
+
+```bash
+python -m pytest tests/test_spec_extractor.py tests/test_extract_spec_to_forge.py tests/test_mcp_server.py -v
+```
+
+Expectation:
+    The suite passes locally. These tests do not prove live LLM extraction, but they verify validator, CLI, and MCP behavior around extraction.
+
+## Step 2: Run live integration tests
+
+Action:
+    Run the live extraction E2E tests with both the integration marker and the repository opt-in flag.
+
+```bash
+python -m pytest tests/test_spec_extractor_e2e.py -m integration --run-integration -v
+```
+
+Expectation:
+    Tests should execute rather than skip. If `--run-integration` is omitted, `tests/conftest.py` skips integration tests even when `OPENAI_API_KEY` is present.
+
+## Step 3: Run manual CLI smoke extraction
+
+Action:
+    Exercise the public CLI with a representative domain hint and validate the output.
+
+```bash
+python -m agent extract-spec \
+  --text "安全な銀行送金機能。送金額は正の整数のみ。残高不足は拒否し、送金後の送金元残高と受取人残高の合計は保存される。" \
+  --domain financial \
+  --output /home/ubuntu/p11_live_cli_financial_spec.json
+```
+
+Expectation:
+    The command exits 0, writes JSON, and extraction metrics show at least one success. Validate that `target_file` is a safe `std/**/*.mm` path, atoms are present, schema validation returns no errors, and domain-relevant safety constraints are represented.
+
 # Parameters
 
 | Parameter | Type | Required | Default | Description |

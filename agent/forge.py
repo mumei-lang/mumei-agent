@@ -663,6 +663,13 @@ class MumeiForge:
             if cross_ctx:
                 spec["cross_file_context"] = cross_ctx
 
+        task_description = task.get("description")
+        if task_description:
+            spec["task_description"] = task_description
+        implementation_notes = task.get("implementation_notes")
+        if implementation_notes:
+            spec["implementation_notes"] = implementation_notes
+
         # Propagate target_file so downstream helpers (e.g.
         # _is_std_module in generate_strategy) can detect std/ modules.
         target_file = task.get("target_file")
