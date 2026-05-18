@@ -5,14 +5,19 @@
   "priority": 5,
   "max_retries": 5,
   "auto_commit": false,
-  "description": "Total min/max primitives over signed i64 values. The contracts assert both the order property (result <= a && result <= b for min, result >= a && result >= b for max) and the membership property (result is one of the inputs). Proven with Z3 integer theory only. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/min_max — verified min/max primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/math/clamp.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only what std/core.mm and std/math/clamp.mm already use (conditional expressions, comparisons).",
+  "description": "Total min/max primitives over signed i64 values. This task is intentionally self-contained: do not depend on std/math/clamp.mm because that module is not guaranteed to exist in the current mumei checkout. Use std/core.mm's safe_narrow/min/max style as context, then emit independent atoms whose contracts stay in Z3's decidable integer fragment. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/math/min_max — verified min/max primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only conditionals, comparisons, conjunction, disjunction, and integer constants already present in std/core.mm.",
   "context_files": [
     "std/core.mm",
-    "std/math/clamp.mm"
+    "std/math/abs.mm"
   ],
   "depends_on": [
-    "std/core.mm",
-    "std/math/clamp.mm"
+    "std/core.mm"
+  ],
+  "implementation_notes": [
+    "Use direct if/else expressions rather than calling a missing std/math/clamp.mm module.",
+    "min2 body shape: if a <= b { a } else { b }.",
+    "max2 body shape: if a >= b { a } else { b }.",
+    "min3 may be expressed by nested comparisons or by inlining the min2 shape."
   ],
   "atoms": [
     {
@@ -25,7 +30,7 @@
       "return_type": "i64",
       "requires": "true",
       "ensures": "result <= a && result <= b && (result == a || result == b)",
-      "reference_patterns": ["clamp_i64", "clamp_nonneg"]
+      "reference_patterns": ["std/core.min", "safe_narrow"]
     },
     {
       "name": "max2",
@@ -37,11 +42,11 @@
       "return_type": "i64",
       "requires": "true",
       "ensures": "result >= a && result >= b && (result == a || result == b)",
-      "reference_patterns": ["clamp_i64", "clamp_nonneg"]
+      "reference_patterns": ["std/core.max", "safe_narrow"]
     },
     {
       "name": "min3",
-      "description": "Minimum of three i64 values. Z3 discharges the contract by case-splitting on two ordered comparisons.",
+      "description": "Minimum of three i64 values. Keep the proof in linear integer arithmetic by using nested if/else comparisons only.",
       "inputs": [
         {"name": "a", "type": "i64"},
         {"name": "b", "type": "i64"},
@@ -50,7 +55,7 @@
       "return_type": "i64",
       "requires": "true",
       "ensures": "result <= a && result <= b && result <= c && (result == a || result == b || result == c)",
-      "reference_patterns": ["clamp_i64", "min2"]
+      "reference_patterns": ["min2", "std/core.min"]
     }
   ]
 }

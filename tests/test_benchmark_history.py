@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from scripts.select_benchmark_model import parse_history_rows, select_model
 from scripts.update_benchmark_history import update_history
 
 
@@ -65,3 +66,88 @@ def test_update_history_keeps_latest_rows(tmp_path):
     assert "old-a" not in text
     assert "| 2026-05-01 | old-b | 0.200 | 2.0 |" in text
     assert "| 2026-05-02 | new-model | 1.000 | 10.0 |" in text
+
+
+def test_parse_history_rows_unescapes_pipe_cells(tmp_path):
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "|------|-------|--------------|-----------------|",
+            "| 2026-05-01 | model\\|with-pipe | 0.750 | 24.0 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    rows = parse_history_rows(history)
+    assert len(rows) == 1
+    assert rows[0].model == "model|with-pipe"
+    assert rows[0].success_rate == 0.75
+    assert rows[0].avg_code_length == 24.0
+
+
+def test_select_model_prefers_success_then_shorter_code(tmp_path):
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "|------|-------|--------------|-----------------|",
+            "| 2026-05-01 | verbose-model | 0.900 | 500.0 |",
+            "| 2026-05-02 | concise-model | 0.900 | 100.0 |",
+            "| 2026-05-03 | lower-success | 0.800 | 10.0 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert select_model(history, fallback="fallback") == "concise-model"
+
+
+def test_select_model_uses_fallback_without_rows(tmp_path):
+    assert select_model(tmp_path / "missing.md", fallback="fallback-model") == "fallback-model"
+
+
+def test_select_model_filters_to_ollama_allowlist(tmp_path):
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "|------|-------|--------------|-----------------|",
+            "| 2026-05-01 | gpt-4o-mini | 0.990 | 100.0 |",
+            "| 2026-05-02 | qwen3.5:4b | 0.750 | 200.0 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert select_model(
+        history,
+        fallback="qwen3.5:4b",
+        profile="ollama-local",
+        ollama_models="qwen3.5:4b",
+    ) == "qwen3.5:4b"
+
+
+def test_select_model_falls_back_without_allowed_ollama_rows(tmp_path):
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "|------|-------|--------------|-----------------|",
+            "| 2026-05-01 | gpt-4o-mini | 0.990 | 100.0 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert select_model(
+        history,
+        fallback="qwen3.5:4b",
+        profile="ollama-local",
+        ollama_models="qwen3.5:4b",
+    ) == "qwen3.5:4b"

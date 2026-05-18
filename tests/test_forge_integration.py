@@ -306,6 +306,21 @@ class TestTaskToGenerateSpecCrossFileContext:
         spec = forge._task_to_generate_spec(task)
         assert "cross_file_context" not in spec
 
+    def test_task_level_prompt_guidance_is_preserved(self, tmp_path):
+        forge = self._make_forge(tmp_path)
+        task = {
+            "task_id": "guided",
+            "description": "Generate a module header.",
+            "implementation_notes": ["Use nested if/else only."],
+            "atoms": [
+                {"name": "a"},
+                {"name": "b"},
+            ],
+        }
+        spec = forge._task_to_generate_spec(task)
+        assert spec["task_description"] == "Generate a module header."
+        assert spec["implementation_notes"] == ["Use nested if/else only."]
+
 
 # ---------------------------------------------------------------------------
 # generate_strategy cross_file_context handling (PR #33 follow-up)
@@ -394,6 +409,42 @@ class TestGenerateStrategyCrossFileContext:
         prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
         assert "sentinel_xyz" in prompt
         assert "\"cross_file_context\"" not in prompt
+
+    def test_generate_multi_atom_includes_task_level_guidance(self):
+        from agent.strategies.generate_strategy import generate_multi_atom
+        spec = {
+            "module_name": "guided",
+            "task_description": "Generate a module header.",
+            "implementation_notes": ["Use nested if/else only."],
+            "atoms": [
+                {
+                    "name": "a",
+                    "params": [{"name": "x", "type": "i64"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "true",
+                },
+                {
+                    "name": "b",
+                    "params": [{"name": "x", "type": "i64"}],
+                    "return_type": "i64",
+                    "requires": "true",
+                    "ensures": "true",
+                },
+            ],
+        }
+        client = self._fake_client_returning(
+            "```mumei\natom a(x: i64) -> i64 { body: x }\n"
+            "atom b(x: i64) -> i64 { body: x }\n```"
+        )
+        generate_multi_atom(
+            client, "test-model", spec,
+            config_max_retries=0, mumei_client=None,
+            enable_dense_properties=False,
+        )
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+        assert "Generate a module header." in prompt
+        assert "Use nested if/else only." in prompt
 
 
 # ---------------------------------------------------------------------------
