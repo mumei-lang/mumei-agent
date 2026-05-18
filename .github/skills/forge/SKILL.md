@@ -5,6 +5,10 @@ description: Execute Mumei std-library forge tasks with python -m agent forge an
 
 Given one or more forge task specs, generate verified atoms and append or create target std modules.
 
+# Devin Secrets Needed
+
+- `LLM_API_KEY` or `OPENAI_API_KEY`: required for live forge generation. Use dry-run mode when no LLM key is available.
+
 # Step 1: Inspect forge tasks
 
 Action:
@@ -18,6 +22,12 @@ Result:
 
 ```bash
 python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+```
+
+If the Mumei CLI is not on `PATH`, set `MUMEI_BIN` explicitly:
+
+```bash
+MUMEI_BIN=/path/to/mumei python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
 ```
 
 # Step 2: Run forge
@@ -36,6 +46,14 @@ python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks
 python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task path/to/task.json
 ```
 
+For validation without touching the real sibling Mumei checkout, copy `std/` into a scratch directory and point `--mumei-repo` there. When generated code imports std modules such as `std/core`, set `MUMEI_STD_PATH` to the scratch `std/` directory so temp-file verification can resolve imports:
+
+```bash
+MUMEI_BIN=/path/to/mumei MUMEI_STD_PATH=/path/to/scratch/std \
+  python -m agent forge --task forge_tasks/example.json \
+  --mumei-repo /path/to/scratch --log-path /path/to/forge_log.json
+```
+
 # Step 3: Inspect `forge_log.json`
 
 Action:
@@ -49,8 +67,18 @@ Result:
 
 ```bash
 python -m json.tool forge_log.json
+mumei check ../mumei/std/<target>.mm
 mumei verify ../mumei/std/<target>.mm --json
 ```
+
+If using a scratch checkout, keep `MUMEI_STD_PATH` set for direct checks too:
+
+```bash
+MUMEI_STD_PATH=/path/to/scratch/std mumei check /path/to/scratch/std/<target>.mm
+MUMEI_STD_PATH=/path/to/scratch/std mumei verify --json /path/to/scratch/std/<target>.mm
+```
+
+If `mumei verify --json` exits 0 with `status: passed` but reports `verified: 0` and skipped atoms, report the run as generation/check validation rather than full Z3 proof evidence.
 
 # Parameters
 
