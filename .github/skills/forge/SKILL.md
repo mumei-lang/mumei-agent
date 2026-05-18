@@ -5,6 +5,11 @@ description: Execute Mumei std-library forge tasks with python -m agent forge an
 
 Given one or more forge task specs, generate verified atoms and append or create target std modules.
 
+# Devin Secrets Needed
+
+- `LLM_API_KEY` or `OPENAI_API_KEY`: required for live forge execution that calls an LLM.
+- No secret is required for dry-run planning, JSON validation, or deterministic task-spec review.
+
 # Step 1: Inspect forge tasks
 
 Action:
@@ -18,6 +23,13 @@ Result:
 
 ```bash
 python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+```
+
+For a changed task spec, also validate JSON and dry-run that task directly:
+
+```bash
+python -m json.tool forge_tasks/<task>.json >/dev/null
+python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task forge_tasks/<task>.json --dry-run
 ```
 
 # Step 2: Run forge
@@ -36,6 +48,8 @@ python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks
 python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task path/to/task.json
 ```
 
+If LLM credentials are unavailable, do not claim live-forged output. Report the secret blocker and limit validation to deterministic checks such as task JSON parsing, dry-run plan discovery, and relevant unit tests.
+
 # Step 3: Inspect `forge_log.json`
 
 Action:
@@ -50,6 +64,22 @@ Result:
 ```bash
 python -m json.tool forge_log.json
 mumei verify ../mumei/std/<target>.mm --json
+```
+
+# Step 4: Regression checks for deterministic forge task changes
+
+Action:
+    Run focused tests covering forge discovery/task schema changes, then the full suite when practical.
+
+Expectation:
+    Deterministic task-spec edits should not require LLM credentials and should be covered by shell-only tests.
+
+Result:
+    Report exact command output and clearly separate live forge gaps from deterministic validation.
+
+```bash
+python -m pytest tests/test_forge_discovery.py -q
+python -m pytest -q
 ```
 
 # Parameters
