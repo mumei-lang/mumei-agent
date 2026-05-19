@@ -36,6 +36,26 @@ _FAILURE_TYPE_MAP = {
 }
 
 
+def response_token_count(response: object) -> int:
+    try:
+        usage = response.usage
+    except AttributeError:
+        return 0
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        total_tokens = usage.get("total_tokens")
+    else:
+        try:
+            total_tokens = usage.total_tokens
+        except AttributeError:
+            return 0
+    try:
+        return int(total_tokens or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _build_prompt_for_report(source_code: str, error_log: str, report_data: dict) -> str:
     """Select the appropriate prompt template and build the prompt string."""
     violation_type = report_data.get("violation_type", "")
@@ -341,6 +361,10 @@ def get_fix(
             {"role": "user", "content": prompt},
         ],
     )
+    llm_tokens_used = response_token_count(response)
+    if metrics is not None:
+        metrics.record_tokens(llm_tokens_used)
+    report_data["llm_tokens_used"] = llm_tokens_used
 
     content = response.choices[0].message.content or ""
     # Extract code block (handles various LLM fence labels)

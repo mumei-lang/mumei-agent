@@ -16,6 +16,7 @@ def _mock_client(response_text: str) -> MagicMock:
     choice.message = message
     response = MagicMock()
     response.choices = [choice]
+    response.usage.total_tokens = 0
     client.chat.completions.create.return_value = response
     return client
 
@@ -129,6 +130,19 @@ def test_get_fix_returns_empty_when_budget_exhausted():
     assert result == ""
     assert report["manual_review_required"]["status"] == "manual_review_required"
     assert client.chat.completions.create.call_count == 0
+
+
+def test_get_fix_records_response_token_usage_for_budget_accounting():
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    client.chat.completions.create.return_value.usage.total_tokens = 321
+    metrics = Metrics()
+    report = {"failure_type": "postcondition_violated"}
+
+    result = get_fix(client, "m", "src", "err", report, metrics=metrics)
+
+    assert "atom fixed()" in result
+    assert report["llm_tokens_used"] == 321
+    assert metrics.llm_tokens_used == 321
 
 
 def test_get_fix_latent_debug_default_disabled(monkeypatch):

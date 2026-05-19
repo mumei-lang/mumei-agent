@@ -288,6 +288,7 @@ def main() -> None:
                     report_data=report,
                     diagnosis={},  # outer loop has no standalone diagnosis
                     action_class=decision.action_class,
+                    tokens_used=int(report.get("llm_tokens_used") or 0),
                     solver_time_seconds=_solver_seconds_from_report(report),
                     spec_drift_score=_spec_drift_from_report(report),
                 )

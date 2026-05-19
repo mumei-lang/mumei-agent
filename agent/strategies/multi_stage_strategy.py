@@ -12,7 +12,7 @@ from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.pattern_library import PatternLibrary
-from agent.strategies.fix_strategy import _build_prompt_for_report
+from agent.strategies.fix_strategy import _build_prompt_for_report, response_token_count
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 
 if TYPE_CHECKING:
@@ -104,7 +104,7 @@ def _diagnose(
     report_data: dict,
     *,
     approach_switch: bool = False,
-) -> dict:
+) -> tuple[dict, int]:
     """Run Stage 1 diagnosis and return a parsed diagnosis dict.
 
     Args:
@@ -136,7 +136,10 @@ def _diagnose(
             {"role": "user", "content": diagnose_prompt},
         ],
     )
-    return _parse_diagnosis(diag_response.choices[0].message.content or "")
+    return (
+        _parse_diagnosis(diag_response.choices[0].message.content or ""),
+        response_token_count(diag_response),
+    )
 
 
 def _build_retry_context(retry_history: RetryHistory) -> str:
@@ -201,7 +204,7 @@ def get_fix_multi_stage(
     for retry in range(_MAX_INTERNAL_RETRIES + 1):
         # --- Stage 1: Diagnose (re-run each iteration) ---
         approach_switch = retry_history.is_same_error_repeating()
-        diagnosis = _diagnose(
+        diagnosis, diagnose_tokens = _diagnose(
             client,
             model,
             source_code,
@@ -241,6 +244,11 @@ def get_fix_multi_stage(
                 {"role": "user", "content": fix_prompt},
             ],
         )
+        fix_tokens = response_token_count(fix_response)
+        total_tokens = diagnose_tokens + fix_tokens
+        report_data["llm_tokens_used"] = total_tokens
+        if metrics is not None:
+            metrics.record_tokens(total_tokens)
 
         fixed_code = _extract_code(fix_response.choices[0].message.content or "")
         if not fixed_code:
@@ -289,6 +297,7 @@ def get_fix_multi_stage(
                     report_data=new_report,
                     diagnosis=diagnosis,
                     action_class=action_class,
+                    tokens_used=total_tokens,
                 )
             )
 
