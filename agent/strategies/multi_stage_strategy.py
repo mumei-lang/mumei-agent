@@ -176,6 +176,7 @@ def get_fix_multi_stage(
     retry_history: RetryHistory | None = None,
     metrics: Metrics | None = None,  # noqa: ARG001 — reserved for future use
     pattern_library: PatternLibrary | None = None,
+    action_class: str = "llm_fix",
 ) -> str:
     """Generate a fix using a multi-stage LLM pipeline.
 
@@ -287,6 +288,7 @@ def get_fix_multi_stage(
                     error_log=new_error_log,
                     report_data=new_report,
                     diagnosis=diagnosis,
+                    action_class=action_class,
                 )
             )
 

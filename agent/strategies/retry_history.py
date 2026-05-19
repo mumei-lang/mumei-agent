@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 
 
 @dataclass
@@ -13,6 +15,10 @@ class RetryAttempt:
     error_log: str
     report_data: dict
     diagnosis: dict  # keys: root_cause, fix_approach, target_section
+    action_class: str = "llm_fix"
+    tokens_used: int = 0
+    solver_time_seconds: float = 0.0
+    spec_drift_score: float = 0.0
 
 
 @dataclass
@@ -83,6 +89,46 @@ class RetryHistory:
         recent = self.attempts[-self._repeat_threshold :]
         first_report = recent[0].report_data
         return all(_same_error(first_report, att.report_data) for att in recent[1:])
+
+    def counterexample_signature(self, report_data: dict) -> str:
+        """Return a stable signature for a verifier failure and counterexample."""
+        payload = {
+            "failure_type": report_data.get("failure_type"),
+            "violation_type": report_data.get("violation_type"),
+            "counterexample": _normalize_counterexample(report_data.get("counterexample")),
+            "semantic_feedback": report_data.get("semantic_feedback"),
+        }
+        data = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+    def same_counterexample_signature_seen(self, report_data: dict) -> bool:
+        signature = self.counterexample_signature(report_data)
+        return any(
+            self.counterexample_signature(att.report_data) == signature for att in self.attempts
+        )
+
+    def attempts_by_action_class(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for attempt in self.attempts:
+            counts[attempt.action_class] = counts.get(attempt.action_class, 0) + 1
+        return counts
+
+    def tokens_by_action_class(self) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for attempt in self.attempts:
+            totals[attempt.action_class] = totals.get(attempt.action_class, 0) + attempt.tokens_used
+        return totals
+
+    def total_tokens(self) -> int:
+        return sum(attempt.tokens_used for attempt in self.attempts)
+
+    def total_solver_time_seconds(self) -> float:
+        return sum(attempt.solver_time_seconds for attempt in self.attempts)
+
+    def max_spec_drift_score(self) -> float:
+        if not self.attempts:
+            return 0.0
+        return max(attempt.spec_drift_score for attempt in self.attempts)
 
 
 def _same_error(a: dict, b: dict) -> bool:

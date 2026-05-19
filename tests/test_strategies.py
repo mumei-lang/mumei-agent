@@ -1,8 +1,10 @@
 """Tests for fix_strategy module."""
 from unittest.mock import MagicMock, patch, call
 from agent.metrics import Metrics
+from agent.budget_policy import BudgetPolicy
 from agent.strategies.fix_strategy import get_fix, _build_prompt_for_report
 from agent.strategies.multi_stage_strategy import _parse_diagnosis, _extract_code
+from agent.strategies.retry_history import RetryAttempt, RetryHistory
 
 
 def _mock_client(response_text: str) -> MagicMock:
@@ -98,6 +100,35 @@ def test_no_code_block_returns_raw():
     client = _mock_client("Just plain text fix suggestion")
     result = get_fix(client, "m", "src", "err", {})
     assert result == "Just plain text fix suggestion"
+
+
+def test_get_fix_returns_empty_when_budget_exhausted():
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    history = RetryHistory()
+    history.add(
+        RetryAttempt(
+            attempt_number=1,
+            source_code="src",
+            error_log="err",
+            report_data={"failure_type": "postcondition_violated"},
+            diagnosis={},
+        )
+    )
+    report = {"failure_type": "postcondition_violated", "counterexample": {"x": 1}}
+
+    result = get_fix(
+        client,
+        "m",
+        "src",
+        "err",
+        report,
+        retry_history=history,
+        budget_policy=BudgetPolicy(max_attempts=1),
+    )
+
+    assert result == ""
+    assert report["manual_review_required"]["status"] == "manual_review_required"
+    assert client.chat.completions.create.call_count == 0
 
 
 def test_get_fix_latent_debug_default_disabled(monkeypatch):
