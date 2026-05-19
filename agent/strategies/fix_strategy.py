@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 
 from openai import OpenAI
+from agent.budget_policy import BudgetPolicy, evaluate_budget
+from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 from agent.pattern_library import PatternLibrary
 from agent.prompts import (
@@ -19,7 +21,6 @@ from agent.prompts import (
     postcondition,
     temporal_effect,
 )
-from agent.metrics import Metrics
 from agent.spec_code_mapper import SpecCodeMapper
 from agent.strategies.retry_history import RetryHistory
 from agent.strategies.rule_based_fix import try_rule_based_fix
@@ -33,6 +34,26 @@ _FAILURE_TYPE_MAP = {
     "postcondition_violated": postcondition,
     "temporal_effect_violated": temporal_effect,
 }
+
+
+def response_token_count(response: object) -> int:
+    try:
+        usage = response.usage
+    except AttributeError:
+        return 0
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        total_tokens = usage.get("total_tokens")
+    else:
+        try:
+            total_tokens = usage.total_tokens
+        except AttributeError:
+            return 0
+    try:
+        return int(total_tokens or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _build_prompt_for_report(source_code: str, error_log: str, report_data: dict) -> str:
@@ -66,6 +87,8 @@ def get_fix(
     enable_latent_debug: bool | None = None,
     spec: dict | None = None,
     enable_spec_code_mapping: bool | None = None,
+    budget_policy: BudgetPolicy | None = None,
+    action_class: str | None = None,
 ) -> str:
     """Generate a fix using the appropriate prompt template.
 
@@ -84,6 +107,8 @@ def get_fix(
         enable_latent_debug: When true, try latent-space debugging first.
         spec: Optional original specification used to update mapping metadata.
         enable_spec_code_mapping: When true, update spec-code mapping after fixes.
+        budget_policy: Optional retry budget policy.
+        action_class: Optional action class selected by the caller.
     """
     if enable_latent_debug is None:
         try:
@@ -100,6 +125,17 @@ def get_fix(
             enable_spec_code_mapping = True
 
     vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
+    if budget_policy is not None and retry_history is not None:
+        decision = evaluate_budget(
+            budget_policy,
+            retry_history,
+            report_data,
+            proposed_action_class=action_class,
+        )
+        if not decision.allowed:
+            report_data["manual_review_required"] = decision.summary
+            return ""
+        action_class = decision.action_class
 
     # Phase 0: optional latent-space debug.  Any failure falls through to
     # the existing deterministic rule-based and LLM repair pipeline.
@@ -278,6 +314,7 @@ def get_fix(
                 retry_history=retry_history,
                 metrics=metrics,
                 pattern_library=pattern_library,
+                action_class=action_class or "llm_fix",
             )
             _update_spec_code_mapping(
                 report_data,
@@ -298,6 +335,13 @@ def get_fix(
     if hint:
         prompt += f"\n\n# Actionable fix instructions:\n{hint}"
 
+    if action_class:
+        prompt += (
+            "\n\n# Retry budget action class\n"
+            f"Use action class `{action_class}`. If this class is exhausted, switch "
+            "to a materially different repair strategy rather than weakening the specification."
+        )
+
     # Enrich with few-shot examples from pattern library
     if pattern_library is not None:
         few_shot = pattern_library.format_few_shot(vt)
@@ -317,6 +361,10 @@ def get_fix(
             {"role": "user", "content": prompt},
         ],
     )
+    llm_tokens_used = response_token_count(response)
+    if metrics is not None:
+        metrics.record_tokens(llm_tokens_used)
+    report_data["llm_tokens_used"] = llm_tokens_used
 
     content = response.choices[0].message.content or ""
     # Extract code block (handles various LLM fence labels)

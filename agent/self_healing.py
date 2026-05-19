@@ -12,13 +12,21 @@ import datetime
 import fcntl
 from pathlib import Path
 
+from agent.budget_policy import (
+    BudgetPolicy,
+    classify_action_class,
+    compute_policy_fingerprint,
+    evaluate_budget,
+    load_budget_policy,
+)
+from agent.budget_metrics import aggregate_metrics
 from agent.config import AgentConfig
+from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
 from agent.pattern_library import PatternLibrary
 from agent.strategies.fix_strategy import get_fix
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
-from agent.metrics import Metrics
 from agent.thought_log import (
     ThoughtProcess,
     describe_fix,
@@ -111,11 +119,19 @@ def main() -> None:
         metavar="OUTPUT_FILE",
         help="Output file for generated code (required with --generate).",
     )
+    parser.add_argument(
+        "--budget-policy",
+        type=str,
+        default=None,
+        metavar="POLICY_JSON",
+        help="Path to retry budget policy JSON (default: built-in P8-G policy).",
+    )
     args = parser.parse_args()
 
     if args.generate is not None and args.output is None:
         parser.error("--output is required when using --generate")
 
+    source_file = args.source_file
     config = AgentConfig()
     if args.strategy is not None:
         config.strategy = args.strategy
@@ -125,11 +141,13 @@ def main() -> None:
     # while keeping the subprocess CLI as the default/fallback.
     mumei = create_mumei_client(config.mumei_bin)
 
-    source_file = args.source_file
     max_retries = args.max_retries if args.max_retries is not None else config.max_retries
+    budget_policy = load_budget_policy(args.budget_policy)
+    max_retries = min(max_retries, budget_policy.max_attempts)
 
     # --- Generate mode (P1-A): generate → verify → fix loop ---
     if args.generate is not None:
+        success = True
         _run_generate_mode(
             client, config.model, args.generate,
             output_file=args.output,
@@ -192,6 +210,15 @@ def main() -> None:
                     except Exception:
                         pass
                 success = True
+                metrics = aggregate_metrics(outer_history)
+                print(
+                    "Retry budget metrics: "
+                    f"attempts={metrics.attempts_to_success}, "
+                    f"tokens={metrics.tokens_to_success}, "
+                    f"solver_seconds={metrics.solver_seconds_to_success:.3f}, "
+                    f"spec_drift={metrics.spec_drift_score:.3f}, "
+                    f"policy_fingerprint={compute_policy_fingerprint(budget_policy)}"
+                )
                 try:
                     thought.final_success = True
                     thought.total_attempts = attempt + 1
@@ -214,22 +241,31 @@ def main() -> None:
 
             # On the last iteration, don't generate a fix — all retries exhausted
             if attempt >= max_retries:
+                summary = evaluate_budget(
+                    BudgetPolicy(max_attempts=len(outer_history.attempts)),
+                    outer_history,
+                    report,
+                    proposed_action_class=classify_action_class(report),
+                ).summary
+                summary["reason"] = "max_retries_exhausted"
+                print(json.dumps(summary, indent=2, ensure_ascii=False))
                 break
 
             with open(source_file, "r", encoding="utf-8") as f:
                 source = f.read()
-
-            # Record the failed attempt in outer history so that subsequent
-            # iterations (and the inner multi-stage loop) have full context.
-            outer_history.add(
-                RetryAttempt(
-                    attempt_number=len(outer_history.attempts) + 1,
-                    source_code=source,
-                    error_log=logs,
-                    report_data=report,
-                    diagnosis={},  # outer loop has no standalone diagnosis
-                )
+            action_class = classify_action_class(
+                report,
+                repeated_signature=outer_history.same_counterexample_signature_seen(report),
             )
+            decision = evaluate_budget(
+                budget_policy,
+                outer_history,
+                report,
+                proposed_action_class=action_class,
+            )
+            if not decision.allowed:
+                print(json.dumps(decision.summary, indent=2, ensure_ascii=False))
+                return
 
             # Get fix from AI
             fixed_code = get_fix(
@@ -239,6 +275,23 @@ def main() -> None:
                 source_path=source_file,
                 retry_history=outer_history,
                 pattern_library=pattern_lib,
+                budget_policy=budget_policy,
+                action_class=decision.action_class,
+            )
+            # Record this accepted attempt after fix selection so nested
+            # budget checks only see completed prior attempts.
+            outer_history.add(
+                RetryAttempt(
+                    attempt_number=len(outer_history.attempts) + 1,
+                    source_code=source,
+                    error_log=logs,
+                    report_data=report,
+                    diagnosis={},  # outer loop has no standalone diagnosis
+                    action_class=decision.action_class,
+                    tokens_used=int(report.get("llm_tokens_used") or 0),
+                    solver_time_seconds=_solver_seconds_from_report(report),
+                    spec_drift_score=_spec_drift_from_report(report),
+                )
             )
             try:
                 thought.add_step(
@@ -257,6 +310,9 @@ def main() -> None:
 
             # Validate before overwriting
             if not fixed_code:
+                if "manual_review_required" in report:
+                    print(json.dumps(report["manual_review_required"], indent=2, ensure_ascii=False))
+                    return
                 print("Warning: AI returned empty fix. Skipping overwrite.")
                 continue
 
@@ -288,14 +344,39 @@ def main() -> None:
         except Exception:
             pass
         # Restore original source on failure so the user isn't left with
-        # broken code.  This runs on retries exhausted, exceptions (including
-        # KeyboardInterrupt via the finally block), and any other non-success
-        # exit.  On success, `return` executes the finally block but the
-        # guard skips restoration.
+        # broken code. This runs on retries exhausted, exceptions, and any
+        # other non-success exit. On success, `return` executes the finally
+        # block but the guard skips restoration.
         if not success:
             shutil.copy2(backup_file, source_file)
             print(f"Healing failed. Original source restored from {backup_file}")
             sys.exit(1)
+
+
+def _solver_seconds_from_report(report: dict) -> float:
+    raw = (
+        report.get("solver_seconds")
+        or report.get("solver_time_seconds")
+        or report.get("z3_check_time_seconds")
+        or 0.0
+    )
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _spec_drift_from_report(report: dict) -> float:
+    raw = (
+        report.get("spec_drift_score")
+        or report.get("semantic_delta")
+        or report.get("intent_drift_score")
+        or 0.0
+    )
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _run_generate_mode(

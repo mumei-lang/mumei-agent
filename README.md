@@ -108,12 +108,34 @@ python -m agent heal
 # Or specify a file explicitly:
 python -m agent heal examples/effect_test.mm
 
+# Optional: bound retries with an explicit P8-G budget policy
+python -m agent heal examples/effect_test.mm --budget-policy budget_policy.json
+
 # 5. Generate new code from a specification
 python -m agent generate --spec-file examples/spec.json --output out.mm
 
 # 6. (Optional) Start Streamlit visualizer
 streamlit run visualizer/app.py
 ```
+
+## Retry Budget Policy (P8-G)
+
+Self-healing uses a budget-aware loop to avoid unbounded token spend, repeated solver work, and false success from spec weakening. By default it uses a conservative in-code policy; pass `--budget-policy` to load JSON:
+
+```json
+{
+  "max_attempts": 5,
+  "max_tokens": 10000,
+  "max_solver_time_ms": 30000,
+  "max_semantic_delta": 0.5,
+  "action_class_limits": {
+    "llm_fix": { "max_attempts": 3, "max_tokens": 5000, "max_lean_escalations": 0 },
+    "lean_escalation": { "max_attempts": 1, "max_tokens": 5000, "max_lean_escalations": 1 }
+  }
+}
+```
+
+When the budget is exhausted or the same counterexample signature repeats without new information, the loop suppresses another LLM call and prints a structured `manual_review_required` summary containing the policy fingerprint, attempt counts, token/solver usage, spec drift score, and recommended action class. Successful runs aggregate `attempts_to_success`, `tokens_to_success`, `solver_seconds_to_success`, and `spec_drift_score` for quarterly feedback tuning.
 
 ## Examples
 
