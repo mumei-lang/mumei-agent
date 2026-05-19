@@ -267,8 +267,19 @@ def main() -> None:
                 print(json.dumps(decision.summary, indent=2, ensure_ascii=False))
                 return
 
-            # Record the failed attempt in outer history so that subsequent
-            # iterations (and the inner multi-stage loop) have full context.
+            # Get fix from AI
+            fixed_code = get_fix(
+                client, config.model, source, logs, report,
+                strategy=config.strategy,
+                mumei_client=mumei,
+                source_path=source_file,
+                retry_history=outer_history,
+                pattern_library=pattern_lib,
+                budget_policy=budget_policy,
+                action_class=decision.action_class,
+            )
+            # Record this accepted attempt after fix selection so nested
+            # budget checks only see completed prior attempts.
             outer_history.add(
                 RetryAttempt(
                     attempt_number=len(outer_history.attempts) + 1,
@@ -280,18 +291,6 @@ def main() -> None:
                     solver_time_seconds=_solver_seconds_from_report(report),
                     spec_drift_score=_spec_drift_from_report(report),
                 )
-            )
-
-            # Get fix from AI
-            fixed_code = get_fix(
-                client, config.model, source, logs, report,
-                strategy=config.strategy,
-                mumei_client=mumei,
-                source_path=source_file,
-                retry_history=outer_history,
-                pattern_library=pattern_lib,
-                budget_policy=budget_policy,
-                action_class=decision.action_class,
             )
             try:
                 thought.add_step(
