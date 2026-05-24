@@ -32,6 +32,7 @@ from agent.gap_rules import (
     _scan_std_imports,
     analyze_gaps_local,
 )
+from agent.harness_metrics import HarnessMetrics, harness_profile_names
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.propose import build_spec_from_proposal
 from agent.publish import publish
@@ -565,6 +566,7 @@ def proliferate(
     mumei_bin: str | None = None,
     output_json: str | Path | None = None,
     enable_lean_fallback: bool = False,
+    harness_profile: str = "basic",
 ) -> list[dict[str, Any]]:
     """Run the autonomous proliferation loop.
 
@@ -595,6 +597,8 @@ def proliferate(
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="seconds"
     )
+    harness_metrics = HarnessMetrics.from_profile(harness_profile)
+    enable_lean_fallback = enable_lean_fallback or harness_metrics.lean_fallback_enabled
     mumei_repo = Path(mumei_repo_dir).resolve()
     std_dir = mumei_repo / "std"
 
@@ -608,6 +612,7 @@ def proliferate(
             post_health=None,
             results=results,
             dry_run=dry_run,
+            harness_metrics=harness_metrics,
         )
         return results
 
@@ -652,6 +657,7 @@ def proliferate(
             health_delta=0.0 if health_before is not None else None,
             results=results,
             dry_run=dry_run,
+            harness_metrics=harness_metrics,
         )
         return results
 
@@ -675,6 +681,7 @@ def proliferate(
             health_delta=0.0 if health_before is not None else None,
             results=results,
             dry_run=dry_run,
+            harness_metrics=harness_metrics,
         )
         return results
 
@@ -693,6 +700,7 @@ def proliferate(
 
     results: list[dict[str, Any]] = []
     for idx, spec in enumerate(specs, start=1):
+        spec = harness_metrics.apply_to_spec(spec)
         spec_result: dict[str, Any] = {
             "spec": spec,
             "success": False,
@@ -715,6 +723,11 @@ def proliferate(
         except Exception as exc:
             logger.error("Code generation failed for %s: %s", target_file, exc)
             spec_result["reason"] = f"generation_error: {exc}"
+            harness_metrics.record_result(
+                "proliferate_generation",
+                False,
+                retry_class="generation_error",
+            )
             try:
                 thought.final_success = False
                 thought.total_attempts = len(
@@ -732,6 +745,11 @@ def proliferate(
         if not code:
             logger.warning("No code generated for %s", target_file)
             spec_result["reason"] = "empty_code"
+            harness_metrics.record_result(
+                "proliferate_generation",
+                False,
+                retry_class="empty_code",
+            )
             try:
                 thought.final_success = False
                 thought.total_attempts = len(
@@ -749,6 +767,11 @@ def proliferate(
         if not verified:
             logger.warning("Generated code for %s did not pass verification", target_file)
             spec_result["reason"] = "verification_failed"
+            harness_metrics.record_result(
+                "proliferate_generation",
+                False,
+                retry_class="verification_failed",
+            )
             try:
                 thought.final_success = False
                 thought.total_attempts = len(
@@ -766,6 +789,11 @@ def proliferate(
         _log_info(f"Forged {target_file}: verified=True")
         spec_result["code"] = code
         spec_result["verified"] = verified
+        harness_metrics.record_result(
+            "proliferate_generation",
+            True,
+            retry_class="none",
+        )
 
         # 3b. Blast radius check
         _log_step(4, 4, f"Blast-radius check for {target_file}")
@@ -794,6 +822,14 @@ def proliferate(
                 spec_result["blast_radius"] = blast["broken_files"]
                 spec_result["reason"] = "blast_radius_broken_dry_run"
                 spec_result["dry_run"] = True
+                harness_metrics.record_stage(
+                    "proliferate_blast_radius",
+                    module="stateful_handoff",
+                    verification_gate=False,
+                    handoff_count=len(blast["broken_files"]),
+                    retry_class="blast_radius_broken_dry_run",
+                    intent_fidelity_status="untested",
+                )
                 results.append(spec_result)
                 continue
 
@@ -884,6 +920,14 @@ def proliferate(
             logger.info("Dry run — skipping publish for %s", target_file)
             spec_result["success"] = True
             spec_result["dry_run"] = True
+            harness_metrics.record_stage(
+                "proliferate_publish",
+                module="stateful_handoff",
+                artifact_contract_passed=True,
+                verification_gate=True,
+                retry_class="dry_run",
+                intent_fidelity_status="passed",
+            )
             if enable_lean_fallback:
                 try:
                     _attach_dry_run_proof_certificate(
@@ -1105,6 +1149,7 @@ def proliferate(
         health_delta=health_delta,
         results=results,
         dry_run=dry_run,
+        harness_metrics=harness_metrics,
     )
 
     return results
@@ -1119,6 +1164,7 @@ def _write_output_json(
     results: list[dict[str, Any]],
     dry_run: bool,
     health_delta: float | None = None,
+    harness_metrics: HarnessMetrics | None = None,
 ) -> None:
     """Write a structured summary of the run to *output_json* (if set).
 
@@ -1154,6 +1200,8 @@ def _write_output_json(
         "proposals_failed": processed - succeeded,
         "details": [_jsonify_result(r) for r in results],
     }
+    if harness_metrics is not None:
+        payload["harness_metrics"] = harness_metrics.aggregate_metrics()
     path = Path(output_json)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1319,20 +1367,33 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
             "MUMEI_LEAN_REPO to point at a mumei-lang/mumei-lean checkout."
         ),
     )
+    parser.add_argument(
+        "--harness-profile",
+        choices=harness_profile_names(),
+        default="basic",
+        help=(
+            "NLAH module-ablation profile. Heavy multi-candidate search is "
+            "enabled only by self_evolution/full."
+        ),
+    )
 
 
 def main(args: argparse.Namespace) -> None:
     """Entry point for the proliferate subcommand."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    results = proliferate(
-        mumei_repo_dir=args.mumei_repo,
-        max_proposals=args.max_proposals,
-        dry_run=args.dry_run,
-        mumei_bin=args.mumei_bin,
-        output_json=args.output_json,
-        enable_lean_fallback=getattr(args, "enable_lean_fallback", False),
-    )
+    run_kwargs: dict[str, Any] = {
+        "mumei_repo_dir": args.mumei_repo,
+        "max_proposals": args.max_proposals,
+        "dry_run": args.dry_run,
+        "mumei_bin": args.mumei_bin,
+        "output_json": args.output_json,
+        "enable_lean_fallback": getattr(args, "enable_lean_fallback", False),
+    }
+    harness_profile = getattr(args, "harness_profile", "basic")
+    if isinstance(harness_profile, str) and harness_profile != "basic":
+        run_kwargs["harness_profile"] = harness_profile
+    results = proliferate(**run_kwargs)
 
     succeeded = sum(1 for r in results if r.get("success"))
     total = len(results)

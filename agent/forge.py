@@ -31,6 +31,7 @@ from openai import OpenAI
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.forge_discovery import discover_tasks, filter_completed_tasks
+from agent.harness_metrics import HarnessMetrics, harness_profile_names
 from agent.metrics import (
     Metrics,
     decidable_fragment_tags_from_verify_result,
@@ -291,6 +292,7 @@ class MumeiForge:
         *,
         log_path: Path | None = None,
         openai_client: OpenAI | None = None,
+        harness_metrics: HarnessMetrics | None = None,
     ) -> None:
         # ``config`` may be ``None`` for dry-run usage, where the forge
         # only discovers/prints tasks and never calls the LLM or
@@ -303,6 +305,7 @@ class MumeiForge:
         self.log_path = Path(log_path) if log_path else self.forge_tasks_dir.parent / "forge_log.json"
         self.metrics_path = self.log_path.with_name("p8_decidable_metrics.json")
         self._client: OpenAI | None = openai_client
+        self.harness_metrics = harness_metrics or HarnessMetrics.from_profile("basic")
 
     # ------------------------------------------------------------------
     # Public API
@@ -341,6 +344,8 @@ class MumeiForge:
 
         if max_tasks is not None:
             tasks = tasks[:max_tasks]
+
+        tasks = [self.harness_metrics.apply_to_spec(task) for task in tasks]
 
         if dry_run:
             self._print_plan(tasks)
@@ -443,6 +448,12 @@ class MumeiForge:
             # _forge_append already restores on its own retry exhaustion,
             # but _forge_module may have left a partial write behind.
             _restore_target()
+            self.harness_metrics.record_result(
+                "forge_generation",
+                False,
+                retry_class="generation_failed",
+                attempts=attempts,
+            )
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
                 attempts=attempts,
@@ -464,6 +475,12 @@ class MumeiForge:
                 target_path, verify_result.get("stderr", "")[:200],
             )
             _restore_target()
+            self.harness_metrics.record_result(
+                "forge_post_write_verify",
+                False,
+                retry_class="post_write_verify_failed",
+                attempts=attempts,
+            )
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
                 attempts=attempts, atoms_added=[a.get("name", "") for a in atoms],
@@ -474,6 +491,12 @@ class MumeiForge:
             )
 
         atoms_added = [a.get("name", "") for a in atoms if a.get("name")]
+        self.harness_metrics.record_result(
+            "forge_post_write_verify",
+            True,
+            retry_class="none",
+            attempts=attempts,
+        )
 
         commit_sha: str | None = None
         if bool(task.get("auto_commit", False)):
@@ -754,6 +777,10 @@ class MumeiForge:
 
     def _print_plan(self, tasks: list[dict[str, Any]]) -> None:
         print(f"Forge plan: {len(tasks)} task(s)")
+        print(
+            f"Harness profile: {self.harness_metrics.profile} "
+            f"modules={self.harness_metrics.module_flags}"
+        )
         for t in tasks:
             atoms = ", ".join(a.get("name", "?") for a in (t.get("atoms") or []))
             print(
@@ -968,6 +995,15 @@ def build_parser(parser) -> None:  # type: ignore[no-untyped-def]
         default=None,
         help="Path to forge_log.json (default: <tasks_dir>/../forge_log.json)",
     )
+    parser.add_argument(
+        "--harness-profile",
+        choices=harness_profile_names(),
+        default="basic",
+        help=(
+            "NLAH module-ablation profile. Heavy multi-candidate search is "
+            "enabled only by self_evolution/full."
+        ),
+    )
 
 
 def argparse_bool_action():
@@ -1001,6 +1037,10 @@ def main(args) -> None:  # type: ignore[no-untyped-def]
     mumei = create_mumei_client(mumei_bin)
 
     log_path = Path(args.log_path).resolve() if args.log_path else tasks_dir.parent / "forge_log.json"
+    harness_profile = getattr(args, "harness_profile", "basic")
+    if not isinstance(harness_profile, str):
+        harness_profile = "basic"
+    harness_metrics = HarnessMetrics.from_profile(harness_profile)
 
     forge = MumeiForge(
         config=config,
@@ -1008,6 +1048,7 @@ def main(args) -> None:  # type: ignore[no-untyped-def]
         mumei_repo_dir=mumei_repo,
         forge_tasks_dir=tasks_dir,
         log_path=log_path,
+        harness_metrics=harness_metrics,
     )
 
     single_task_path = Path(args.task) if args.task else None
@@ -1032,3 +1073,5 @@ def main(args) -> None:  # type: ignore[no-untyped-def]
         marker = {"success": "+", "failed": "-", "skipped": "."}.get(r.status, "?")
         extra = f" ({r.error})" if r.error else ""
         print(f"  [{marker}] {r.task_id}{extra}")
+    print("Harness metrics:")
+    print(harness_metrics.aggregate_metrics_json())
