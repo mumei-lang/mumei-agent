@@ -226,7 +226,12 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ 複数 std ファイルをまたいだスタイル / 契約パターンの参照基盤
 - ✅ `create` / `replace` モードでも `_task_to_generate_spec` が spec に `cross_file_context` を付与
 
-### P9-D: vStd Autonomous Expansion 🚧 In Progress
+### P9-D: vStd Autonomous Expansion ✅ Phase 1-3 Complete
+
+- ✅ Phase 1 Created→Forged: 7/7 タスクを昇格（既存生成済みの ownership / regtech / settlement は再検証で採用、trait-iterable / sorted-list / priority-queue / set を verified std atom に整備）
+- ✅ Phase 2 Forged→Verified: 16/16 タスクを `mumei verify --proof-cert` で検証（Low 5、Medium 10、High 1）
+- ✅ 追加検証: Phase 1 の 7 タスクもすべて proof certificate 生成フローで検証済み
+- ✅ 成功指標: created 昇格率 100%、forged verified 昇格率 100%（目標 ≥80%）、Lean escalation は不要（対象 atom は Z3 decidable fragment 内で完了）
 
 - ✅ `forge_tasks/vstd_safe_list.json` — `std/container/safe_list.mm` の `safe_push` / `safe_pop` / `safe_peek` / `safe_len` 鍛造ターゲット（`safe_queue.mm` パターン拡張）
 - ✅ `forge_tasks/vstd_fixed_point.json` — `std/math/fixed_point.mm` 固定小数点演算モジュール（`fixed_from_int` / `fixed_to_int` / `fixed_add` / `fixed_mul`、`safe_mul.mm` を活用）
@@ -242,6 +247,15 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ `forge_tasks/vstd_bitwise.json` — `std/bitwise.mm` ビット演算プリミティブ（and/or/xor/shift）
 - ✅ `forge_tasks/vstd_math_log2.json` — `std/math/log2.mm` 整数 `ilog2`（`n > 0` → `result >= 0`）
 - ✅ `forge_tasks/vstd_container_set.json` — `std/container/set.mm` 集合操作（`set_contains` / `set_add` / `set_size`）
+- ✅ `forge_tasks/vstd_trait_iterable.json` — `std/trait/iterable.mm` Iterable traversal interface（`iterable_len_nonneg` / `iterable_in_bounds` / `iterable_advance`）
+- ✅ `forge_tasks/vstd_container_sorted_list.json` — `std/container/sorted_list.mm` ordered sequence helpers（`sorted_insert_position` / `sorted_insert_len` / `sorted_is_ordered_pair`）
+- ✅ `forge_tasks/vstd_container_binary_heap.json` — `std/container/binary_heap.mm` heap index / length helpers（`heap_parent` / children / insert / extract）
+- ✅ `forge_tasks/vstd_container_stack.json` — `std/container/stack.mm` bounded stack helpers（`stack_push` / `stack_pop` / `stack_peek` / `stack_is_empty`）
+- ✅ `forge_tasks/vstd_container_ring_buffer.json` — `std/container/ring_buffer.mm` circular buffer helpers（advance / push / pop / empty / full）
+- ✅ `forge_tasks/vstd_math_pow.json` — `std/math/pow.mm` bounded integer power helpers（`pow_small` / `pow_saturating`）
+- ✅ `forge_tasks/vstd_math_pow_nat.json` — `std/math/pow_nat.mm` small-domain natural power helpers（`pow2` / `pow_nat`）
+- ✅ `forge_tasks/vstd_math_safe_div.json` — `std/math/safe_div.mm` safe division / modulo helpers
+- ✅ `forge_tasks/vstd_math_safe_mul.json` — `std/math/safe_mul.mm` safe multiplication helpers
 - ✅ `tests/test_llm_benchmark.py` — LLM モデル別 forge 生成品質ベンチマーク基盤（`@pytest.mark.benchmark` で opt-in、`forge_tasks/vstd_math_abs.json` を基準タスクとする）
   - `LLM_BENCHMARK_MODELS` / `LLM_BENCHMARK_TRIALS` / `LLM_BENCHMARK_OUTPUT` 環境変数でモデル・試行回数・出力先を制御
   - `success_rate` / `avg_code_length` / `avg_time_seconds` を JSON に記録（`generate_code` は retries を返さないため、コード長を品質プロキシとして利用）
