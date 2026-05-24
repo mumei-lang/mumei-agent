@@ -277,8 +277,11 @@ class HarnessMetrics:
         intent_fidelity: dict[str, int] = {}
 
         for record in self.records:
-            for bucket in (by_stage.setdefault(record.stage, _empty_bucket()),
-                           by_module.setdefault(record.module, _empty_bucket())):
+            buckets = (
+                by_stage.setdefault(record.stage, _empty_bucket()),
+                by_module.setdefault(record.module, _empty_bucket()),
+            )
+            for bucket in buckets:
                 _accumulate(bucket, record)
             retry_classes[record.retry_class] = retry_classes.get(record.retry_class, 0) + 1
             intent_fidelity[record.intent_fidelity_status] = (

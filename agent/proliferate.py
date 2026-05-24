@@ -719,8 +719,6 @@ def proliferate(
                 config_max_retries=config.max_retries,
                 mumei_client=mumei_client,
                 thought_process=thought,
-                enable_dense_properties=harness_metrics.module_flags.get("verification_gate"),
-                enable_spec_code_mapping=harness_metrics.module_flags.get("intent_fidelity"),
             )
         except Exception as exc:
             logger.error("Code generation failed for %s: %s", target_file, exc)

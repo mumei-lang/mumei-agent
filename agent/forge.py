@@ -600,8 +600,6 @@ class MumeiForge:
             spec=spec,
             config_max_retries=max_retries,
             mumei_client=self.mumei,
-            enable_dense_properties=self.harness_metrics.module_flags.get("verification_gate"),
-            enable_spec_code_mapping=self.harness_metrics.module_flags.get("intent_fidelity"),
         )
         # ``generate_code`` does not expose its internal retry count, so
         # we can only report a lower bound (≥ 1 LLM call was made).
