@@ -15,7 +15,8 @@ requires: n >= 0;
 ensures: result >= 0;
 body: {
     let i = 0;
-    while i < n invariant: i >= 0 {
+    while i < n
+    {
         i = i + 1;
     }
 };"""
