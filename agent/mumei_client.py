@@ -53,6 +53,7 @@ class MumeiClient:
         self,
         source_path: str,
         report_dir: str | None = None,
+        extra_args: list[str] | None = None,
         spec_code_mapping: list[dict] | None = None,
         collect_decidable_metrics: bool = False,
     ) -> dict:
@@ -72,6 +73,8 @@ class MumeiClient:
             cmd.extend(["--emit", "decidable-metrics", "--output", str(metrics_path)])
         if report_dir:
             cmd.extend(["--report-dir", report_dir])
+        if extra_args:
+            cmd.extend(extra_args)
         cmd.append(source_path)
 
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -88,6 +91,7 @@ class MumeiClient:
             return self.verify(
                 source_path,
                 report_dir=report_dir,
+                extra_args=extra_args,
                 spec_code_mapping=spec_code_mapping,
             )
 
