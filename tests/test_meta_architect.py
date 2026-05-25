@@ -83,3 +83,24 @@ body: x;
 
     assert "atom a(x: i64)\nrequires: x >= 0;" in updated
     assert "atom b(x: i64)\nrequires: x >= 0;" in updated
+
+
+def test_meta_architect_refactor_failure_falls_back() -> None:
+    from agent.self_healing import _try_meta_architect_refactor
+
+    class FailingClient:
+        def verify(self, *_args, **_kwargs) -> dict:
+            raise RuntimeError("cross-spec unavailable")
+
+    thought = SimpleNamespace(steps=[], add_step=lambda **_kwargs: None)
+
+    assert _try_meta_architect_refactor(
+        client=SimpleNamespace(),
+        model="model",
+        mumei=FailingClient(),
+        config=SimpleNamespace(),
+        source_files=[],
+        source="atom a() body: 0;",
+        retry_history=SimpleNamespace(attempts=[]),
+        thought=thought,
+    ) is None

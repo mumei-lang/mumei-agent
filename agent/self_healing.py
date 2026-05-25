@@ -548,11 +548,24 @@ def _try_meta_architect_refactor(
     retry_history: RetryHistory,
     thought: ThoughtProcess,
 ) -> str | None:
-    meta_architect = MetaArchitect(client, model, mumei, config)
-    analysis = meta_architect.analyze_architecture(
-        source_files,
-        _retry_history_to_dict(retry_history),
-    )
+    try:
+        meta_architect = MetaArchitect(client, model, mumei, config)
+        analysis = meta_architect.analyze_architecture(
+            source_files,
+            _retry_history_to_dict(retry_history),
+        )
+    except Exception as exc:
+        try:
+            thought.add_step(
+                action="meta_architect_refactor",
+                verification_success=False,
+                fix_strategy="meta_architect_unavailable",
+                fix_description=f"Meta-Architect analysis failed: {exc}",
+            )
+        except Exception:
+            pass
+        return None
+
     proposals = analysis.get("refactoring_proposals", [])
     if not isinstance(proposals, list):
         return None
