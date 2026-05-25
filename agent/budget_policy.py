@@ -31,6 +31,7 @@ class BudgetDecision:
     allowed: bool
     reason: str = ""
     action_class: str = "llm_fix"
+    trigger_meta_architect: bool = False
     summary: dict[str, Any] = field(default_factory=dict)
 
 
@@ -113,34 +114,87 @@ def evaluate_budget(
 
     if action_class == "manual_review":
         summary["reason"] = "repeated_counterexample_signature"
-        return BudgetDecision(False, "repeated_counterexample_signature", action_class, summary)
+        return BudgetDecision(
+            allowed=False,
+            reason="repeated_counterexample_signature",
+            action_class=action_class,
+            trigger_meta_architect=True,
+            summary=summary,
+        )
     if attempts_used >= policy.max_attempts:
         summary["reason"] = "max_attempts_exhausted"
-        return BudgetDecision(False, "max_attempts_exhausted", action_class, summary)
+        return BudgetDecision(
+            allowed=False,
+            reason="max_attempts_exhausted",
+            action_class=action_class,
+            trigger_meta_architect=True,
+            summary=summary,
+        )
     if tokens_used >= policy.max_tokens:
         summary["reason"] = "max_tokens_exhausted"
-        return BudgetDecision(False, "max_tokens_exhausted", action_class, summary)
+        return BudgetDecision(
+            allowed=False,
+            reason="max_tokens_exhausted",
+            action_class=action_class,
+            trigger_meta_architect=True,
+            summary=summary,
+        )
     if solver_time_ms_used >= policy.max_solver_time_ms:
         summary["reason"] = "max_solver_time_exhausted"
-        return BudgetDecision(False, "max_solver_time_exhausted", action_class, summary)
+        return BudgetDecision(
+            allowed=False,
+            reason="max_solver_time_exhausted",
+            action_class=action_class,
+            trigger_meta_architect=True,
+            summary=summary,
+        )
     if spec_drift > policy.max_semantic_delta:
         summary["reason"] = "semantic_delta_exceeded"
-        return BudgetDecision(False, "semantic_delta_exceeded", action_class, summary)
+        return BudgetDecision(
+            allowed=False,
+            reason="semantic_delta_exceeded",
+            action_class=action_class,
+            trigger_meta_architect=True,
+            summary=summary,
+        )
     if limit is not None:
         if projected_class_attempts > limit.max_attempts:
             summary["reason"] = "action_class_attempts_exhausted"
-            return BudgetDecision(False, "action_class_attempts_exhausted", action_class, summary)
+            return BudgetDecision(
+                allowed=False,
+                reason="action_class_attempts_exhausted",
+                action_class=action_class,
+                trigger_meta_architect=True,
+                summary=summary,
+            )
         if history.tokens_by_action_class().get(action_class, 0) >= limit.max_tokens:
             summary["reason"] = "action_class_tokens_exhausted"
-            return BudgetDecision(False, "action_class_tokens_exhausted", action_class, summary)
+            return BudgetDecision(
+                allowed=False,
+                reason="action_class_tokens_exhausted",
+                action_class=action_class,
+                trigger_meta_architect=True,
+                summary=summary,
+            )
         if (
             action_class == "lean_escalation"
             and counts.get("lean_escalation", 0) >= limit.max_lean_escalations
         ):
             summary["reason"] = "lean_escalations_exhausted"
-            return BudgetDecision(False, "lean_escalations_exhausted", action_class, summary)
+            return BudgetDecision(
+                allowed=False,
+                reason="lean_escalations_exhausted",
+                action_class=action_class,
+                trigger_meta_architect=True,
+                summary=summary,
+            )
 
-    return BudgetDecision(True, action_class=action_class, summary=summary)
+    return BudgetDecision(
+        allowed=True,
+        action_class=action_class,
+        trigger_meta_architect=history.is_same_error_repeating() or attempts_used >= 5,
+        summary=summary,
+    )
 
 
 def build_failure_summary(

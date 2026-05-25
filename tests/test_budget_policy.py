@@ -53,6 +53,7 @@ def test_budget_exhaustion_returns_structured_manual_review_summary() -> None:
     assert decision.summary["status"] == "manual_review_required"
     assert decision.summary["reason"] == "max_attempts_exhausted"
     assert decision.summary["total_attempts"] == 1
+    assert decision.trigger_meta_architect is True
 
 
 def test_repeated_counterexample_signature_is_blocked() -> None:
@@ -73,6 +74,7 @@ def test_repeated_counterexample_signature_is_blocked() -> None:
     assert decision.allowed is False
     assert decision.reason == "repeated_counterexample_signature"
     assert decision.summary["counterexample_signature"] == history.counterexample_signature(report)
+    assert decision.trigger_meta_architect is True
 
 
 def test_action_class_limit_is_enforced() -> None:

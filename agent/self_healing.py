@@ -21,6 +21,7 @@ from agent.budget_policy import (
 )
 from agent.budget_metrics import aggregate_metrics
 from agent.config import AgentConfig
+from agent.meta_architect import MetaArchitect
 from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
 from agent.pattern_library import PatternLibrary
@@ -33,6 +34,10 @@ from agent.strategies.cegis_loop import (
     normalize_loop_line,
 )
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
+from agent.strategies.refactor_strategy import (
+    apply_refactoring_proposal,
+    should_trigger_meta_architect,
+)
 from agent.thought_log import (
     ThoughtProcess,
     VerificationStep,
@@ -139,6 +144,7 @@ def main() -> None:
         parser.error("--output is required when using --generate")
 
     source_file = args.source_file
+    source_path = Path(source_file)
     config = AgentConfig()
     if args.strategy is not None:
         config.strategy = args.strategy
@@ -271,8 +277,70 @@ def main() -> None:
                 proposed_action_class=action_class,
             )
             if not decision.allowed:
+                meta_fixed_code = None
+                if decision.trigger_meta_architect:
+                    meta_fixed_code = _try_meta_architect_refactor(
+                        client=client,
+                        model=config.model,
+                        mumei=mumei,
+                        config=config,
+                        source_files=[source_path],
+                        source=source,
+                        retry_history=outer_history,
+                        thought=thought,
+                    )
+                if meta_fixed_code:
+                    outer_history.add(
+                        RetryAttempt(
+                            attempt_number=len(outer_history.attempts) + 1,
+                            source_code=source,
+                            error_log=logs,
+                            report_data=report,
+                            diagnosis={"strategy": "meta_architect"},
+                            action_class="meta_architect",
+                            tokens_used=0,
+                            solver_time_seconds=_solver_seconds_from_report(report),
+                            spec_drift_score=_spec_drift_from_report(report),
+                        )
+                    )
+                    with open(source_file, "w", encoding="utf-8") as f:
+                        f.write(meta_fixed_code)
+                    print("Meta-Architect applied interface refactoring. Retrying...")
+                    time.sleep(2)
+                    continue
                 print(json.dumps(decision.summary, indent=2, ensure_ascii=False))
                 return
+
+            if should_trigger_meta_architect(outer_history):
+                meta_fixed_code = _try_meta_architect_refactor(
+                    client=client,
+                    model=config.model,
+                    mumei=mumei,
+                    config=config,
+                    source_files=[source_path],
+                    source=source,
+                    retry_history=outer_history,
+                    thought=thought,
+                )
+                if meta_fixed_code:
+                    outer_history.add(
+                        RetryAttempt(
+                            attempt_number=len(outer_history.attempts) + 1,
+                            source_code=source,
+                            error_log=logs,
+                            report_data=report,
+                            diagnosis={"strategy": "meta_architect"},
+                            action_class="meta_architect",
+                            tokens_used=0,
+                            solver_time_seconds=_solver_seconds_from_report(report),
+                            spec_drift_score=_spec_drift_from_report(report),
+                        )
+                    )
+                    with open(source_file, "w", encoding="utf-8") as f:
+                        f.write(meta_fixed_code)
+                    print("Meta-Architect applied interface refactoring. Retrying...")
+                    time.sleep(2)
+                    continue
 
             cegis_result = _try_cegis_repair(
                 config=config,
@@ -467,6 +535,69 @@ def _try_cegis_repair(
         except Exception:
             pass
     return None
+
+
+def _try_meta_architect_refactor(
+    *,
+    client,
+    model: str,
+    mumei,
+    config: AgentConfig,
+    source_files: list[Path],
+    source: str,
+    retry_history: RetryHistory,
+    thought: ThoughtProcess,
+) -> str | None:
+    meta_architect = MetaArchitect(client, model, mumei, config)
+    analysis = meta_architect.analyze_architecture(
+        source_files,
+        _retry_history_to_dict(retry_history),
+    )
+    proposals = analysis.get("refactoring_proposals", [])
+    if not isinstance(proposals, list):
+        return None
+
+    for proposal in proposals:
+        if not isinstance(proposal, dict):
+            continue
+        modified_code = apply_refactoring_proposal(proposal, source)
+        if modified_code == source:
+            continue
+        try:
+            thought.steps.append(
+                VerificationStep(
+                    step_number=len(thought.steps) + 1,
+                    timestamp=datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(timespec="seconds"),
+                    action="meta_architect_refactor",
+                    fix_strategy=str(proposal.get("refactoring_type", "meta_architect")),
+                    fix_description=str(proposal.get("description", "interface refactoring")),
+                    code_diff_summary=summarize_code_diff(source, modified_code),
+                    verification_success=False,
+                )
+            )
+        except Exception:
+            pass
+        return modified_code
+    return None
+
+
+def _retry_history_to_dict(history: RetryHistory) -> dict:
+    return {
+        "attempts": [
+            {
+                "attempt_number": attempt.attempt_number,
+                "report_data": attempt.report_data,
+                "diagnosis": attempt.diagnosis,
+                "action_class": attempt.action_class,
+                "tokens_used": attempt.tokens_used,
+                "solver_time_seconds": attempt.solver_time_seconds,
+                "spec_drift_score": attempt.spec_drift_score,
+            }
+            for attempt in history.attempts
+        ],
+    }
 
 
 def _spec_drift_from_report(report: dict) -> float:

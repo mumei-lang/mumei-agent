@@ -275,6 +275,7 @@ class MumeiMCPClient:
         self,
         source_path: str,
         report_dir: str | None = None,
+        extra_args: list[str] | None = None,
         spec_code_mapping: list[dict[str, Any]] | None = None,
         collect_decidable_metrics: bool = False,
     ) -> dict[str, Any]:
@@ -287,12 +288,14 @@ class MumeiMCPClient:
         """
         if (
             collect_decidable_metrics
+            or extra_args
             or not use_mcp_client_enabled()
             or self._mode == "unavailable"
         ):
             return self._fallback.verify(
                 source_path,
                 report_dir=report_dir,
+                extra_args=extra_args,
                 spec_code_mapping=spec_code_mapping,
                 collect_decidable_metrics=collect_decidable_metrics,
             )
@@ -307,6 +310,7 @@ class MumeiMCPClient:
             return self._fallback.verify(
                 source_path,
                 report_dir=report_dir,
+                extra_args=extra_args,
                 spec_code_mapping=spec_code_mapping,
                 collect_decidable_metrics=collect_decidable_metrics,
             )
