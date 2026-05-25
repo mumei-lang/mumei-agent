@@ -5,6 +5,7 @@ from agent.strategies.cegis_loop import (
     CEGISLoop,
     apply_invariant,
     escalate_to_lean,
+    normalize_loop_line,
 )
 
 
@@ -21,7 +22,7 @@ body: {
 
     result = apply_invariant(source, "i >= 0 && i <= n", 6)
 
-    assert "    invariant: i >= 0 && i <= n;" in result
+    assert "    while i < n\n    invariant: i >= 0 && i <= n" in result
 
 
 def test_cegis_loop_convergence(tmp_path):
@@ -92,3 +93,17 @@ def test_escalate_to_lean_writes_bundle(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert '"loop_line": 12' in text
     assert "cegis_max_iterations_reached" in text
+
+
+def test_normalize_loop_line_finds_nearest_loop():
+    source = """atom count(n: i64)
+body: {
+    let i = 0;
+    while i < n
+    invariant: true
+    {
+        i = i + 1;
+    }
+};"""
+
+    assert normalize_loop_line(source, 1) == 4

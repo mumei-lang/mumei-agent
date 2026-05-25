@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,11 +84,21 @@ class CEGISLoop:
         path = Path(source_file)
         original = path.read_text(encoding="utf-8")
         candidate = apply_invariant(original, invariant, loop_line)
-        path.write_text(candidate, encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=path.suffix,
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            tmp.write(candidate)
+            tmp_path = Path(tmp.name)
         try:
-            result = self.mumei_client.verify(source_file)
+            result = self.mumei_client.verify(str(tmp_path))
         finally:
-            path.write_text(original, encoding="utf-8")
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
         report = result.get("report") or {}
         if result.get("success"):
@@ -228,19 +240,30 @@ Return ONLY the refined invariant expression."""
 
 
 def apply_invariant(source_code: str, invariant: str, loop_line: int) -> str:
-    """Insert an invariant before a loop line."""
+    """Apply a generated invariant to a loop statement."""
     lines = source_code.split("\n")
     if loop_line <= 0:
         return source_code
     for index, line in enumerate(lines):
         if index + 1 == loop_line:
             stripped = line.lstrip()
-            if stripped.startswith("invariant:") or f"invariant: {invariant};" in source_code:
+            if stripped.startswith("invariant:") or _loop_has_invariant(lines, index):
                 return source_code
             indent = len(line) - len(stripped)
-            lines.insert(index, f"{' ' * indent}invariant: {invariant};")
+            lines.insert(index + 1, f"{' ' * indent}invariant: {invariant}")
             break
     return "\n".join(lines)
+
+
+def _loop_has_invariant(lines: list[str], loop_index: int) -> bool:
+    if " invariant:" in lines[loop_index]:
+        return True
+    for line in lines[loop_index + 1 :]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return stripped.startswith("invariant:")
+    return False
 
 
 def escalate_to_lean(source_file: str, loop_info: dict[str, Any]) -> Path:
@@ -281,3 +304,31 @@ def _clean_invariant(content: str) -> str:
         text = parts[1] if len(parts) > 1 else text
         text = text.removeprefix("mumei").strip()
     return text.strip().rstrip(";").strip()
+
+
+def normalize_loop_line(source_code: str, reported_line: int) -> int:
+    """Map a reported loop line to a 1-indexed line in the source text."""
+    if reported_line > 0:
+        lines = source_code.splitlines()
+        if reported_line <= len(lines) and _is_loop_line(lines[reported_line - 1]):
+            return reported_line
+    return find_loop_line(source_code, reported_line)
+
+
+def find_loop_line(source_code: str, hint_line: int = 0) -> int:
+    """Find the nearest while-loop line, returning 0 when none is found."""
+    lines = source_code.splitlines()
+    candidates = [
+        index + 1
+        for index, line in enumerate(lines)
+        if _is_loop_line(line)
+    ]
+    if not candidates:
+        return 0
+    if hint_line <= 0:
+        return candidates[0]
+    return min(candidates, key=lambda candidate: abs(candidate - hint_line))
+
+
+def _is_loop_line(line: str) -> bool:
+    return re.search(r"(^|\s)while\s+", line) is not None

@@ -26,7 +26,12 @@ from agent.mumei_client import create_mumei_client
 from agent.pattern_library import PatternLibrary
 from agent.strategies.fix_strategy import get_fix
 from agent.strategies.generate_strategy import generate_code
-from agent.strategies.cegis_loop import CEGISLoop, apply_invariant, escalate_to_lean
+from agent.strategies.cegis_loop import (
+    CEGISLoop,
+    apply_invariant,
+    escalate_to_lean,
+    normalize_loop_line,
+)
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 from agent.thought_log import (
     ThoughtProcess,
@@ -416,7 +421,9 @@ def _try_cegis_repair(
     loop_info = report.get("loop_info")
     if not isinstance(loop_info, dict):
         return None
-    loop_line = int(loop_info.get("line") or 0)
+    loop_line = normalize_loop_line(source, int(loop_info.get("line") or 0))
+    if loop_line <= 0:
+        return None
     loop_context = loop_info.get("context")
     if not isinstance(loop_context, dict):
         loop_context = {}
