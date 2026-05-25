@@ -37,14 +37,11 @@ def _load_contract_manifest(path: str | None) -> dict | None:
         with open(path, encoding="utf-8") as file:
             loaded = json.load(file)
     except OSError as exc:
-        _logger.warning("Failed to load contract manifest '%s': %s", path, exc)
-        return None
+        raise ValueError(f"Failed to load contract manifest '{path}': {exc}") from exc
     except json.JSONDecodeError as exc:
-        _logger.warning("Invalid contract manifest JSON '%s': %s", path, exc)
-        return None
+        raise ValueError(f"Invalid contract manifest JSON '{path}': {exc}") from exc
     if not isinstance(loaded, dict):
-        _logger.warning("Contract manifest '%s' is not a JSON object", path)
-        return None
+        raise ValueError(f"Contract manifest '{path}' is not a JSON object")
     return loaded
 
 
@@ -57,7 +54,18 @@ def check_contract_integrity(
     if manifest is None:
         return True, ""
 
-    for field in ("requires", "ensures", "effects"):
+    protected_fields = (
+        "requires",
+        "ensures",
+        "effects",
+        "invariant",
+        "effect_pre",
+        "effect_post",
+        "contracts",
+        "fn_contracts",
+    )
+
+    for field in protected_fields:
         original_val = original_spec.get(field)
         refined_val = refined_spec.get(field)
 
@@ -77,14 +85,14 @@ def check_contract_integrity(
 
     for orig_atom, ref_atom in zip(original_atoms, refined_atoms, strict=False):
         if not isinstance(orig_atom, Mapping) or not isinstance(ref_atom, Mapping):
-            continue
+            return False, "Contract mutation detected: atom entry shape changed"
         atom_name = orig_atom.get("name")
         if atom_name != ref_atom.get("name"):
             return False, (
                 f"Contract mutation detected: atom '{atom_name}' was renamed "
                 f"to '{ref_atom.get('name')}'"
             )
-        for field in ("requires", "ensures", "effects"):
+        for field in protected_fields:
             if orig_atom.get(field) != ref_atom.get(field):
                 return False, (
                     f"Contract mutation detected in atom '{atom_name}': "

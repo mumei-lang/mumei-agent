@@ -2,9 +2,12 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent.metrics import Metrics
 from agent.config import AgentConfig
 from agent.strategies.spec_refinement import (
+    _load_contract_manifest,
     check_contract_integrity,
     refine_spec,
     run_refinement_loop,
@@ -167,6 +170,65 @@ def test_check_contract_integrity_detects_atom_contract_change():
     assert "atom 'safe_add'" in error
 
 
+def test_check_contract_integrity_detects_invariant_change():
+    original = dict(ORIGINAL_SPEC, invariant="i >= 0")
+    refined = dict(original, invariant="i > 0")
+
+    is_valid, error = check_contract_integrity(original, refined, manifest={})
+
+    assert not is_valid
+    assert "field 'invariant' changed" in error
+
+
+def test_check_contract_integrity_detects_effect_state_contract_change():
+    original = {
+        "atoms": [
+            {
+                "name": "process_order",
+                "requires": "true",
+                "ensures": "result >= 0",
+                "effects": ["Order"],
+                "effect_pre": {"Order": "Created"},
+                "effect_post": {"Order": "Shipped"},
+            }
+        ]
+    }
+    refined = {
+        "atoms": [
+            {
+                "name": "process_order",
+                "requires": "true",
+                "ensures": "result >= 0",
+                "effects": ["Order"],
+                "effect_pre": {"Order": "Created"},
+                "effect_post": {"Order": "Cancelled"},
+            }
+        ]
+    }
+
+    is_valid, error = check_contract_integrity(original, refined, manifest={})
+
+    assert not is_valid
+    assert "field 'effect_post' changed" in error
+
+
+def test_check_contract_integrity_detects_atom_shape_change():
+    original = {"atoms": [{"name": "safe_add", "requires": "true", "ensures": "true"}]}
+    refined = {"atoms": ["safe_add"]}
+
+    is_valid, error = check_contract_integrity(original, refined, manifest={})
+
+    assert not is_valid
+    assert "atom entry shape changed" in error
+
+
+def test_load_contract_manifest_raises_for_missing_manifest(tmp_path):
+    missing_path = tmp_path / "missing-contract-manifest.json"
+
+    with pytest.raises(ValueError, match="Failed to load contract manifest"):
+        _load_contract_manifest(str(missing_path))
+
+
 def test_refine_spec_rejects_contract_mutation_when_manifest_enabled():
     refined = dict(ORIGINAL_SPEC, ensures="result >= a")
     client = _mock_client(json.dumps(refined))
@@ -178,12 +240,8 @@ def test_refine_spec_rejects_contract_mutation_when_manifest_enabled():
     original_loader = refine_spec.__globals__["_load_contract_manifest"]
     refine_spec.__globals__["_load_contract_manifest"] = lambda path: {}
     try:
-        try:
+        with pytest.raises(ValueError, match="Contract mutation detected"):
             refine_spec(client, "m", ORIGINAL_SPEC, REPORT, config=config)
-        except ValueError as exc:
-            assert "Contract mutation detected" in str(exc)
-        else:
-            raise AssertionError("expected ValueError for contract mutation")
     finally:
         refine_spec.__globals__["_load_contract_manifest"] = original_loader
 
