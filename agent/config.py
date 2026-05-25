@@ -71,6 +71,13 @@ class AgentConfig:
     enable_contract_isolation: bool = field(
         default_factory=lambda: _env_bool("ENABLE_CONTRACT_ISOLATION", True)
     )
+    enable_cegis_loop: bool = field(default_factory=lambda: _env_bool("ENABLE_CEGIS_LOOP", True))
+    cegis_max_iterations: int = field(
+        default_factory=lambda: int(os.getenv("CEGIS_MAX_ITERATIONS", "10"))
+    )
+    cegis_escalate_to_lean: bool = field(
+        default_factory=lambda: _env_bool("CEGIS_ESCALATE_TO_LEAN", True)
+    )
     contract_manifest_path: str | None = field(
         default_factory=lambda: os.getenv("CONTRACT_MANIFEST_PATH") or None
     )
