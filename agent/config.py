@@ -68,6 +68,12 @@ class AgentConfig:
     enable_intent_tracking: bool = field(
         default_factory=lambda: _env_bool("ENABLE_INTENT_TRACKING", True)
     )
+    enable_contract_isolation: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_CONTRACT_ISOLATION", True)
+    )
+    contract_manifest_path: str | None = field(
+        default_factory=lambda: os.getenv("CONTRACT_MANIFEST_PATH") or None
+    )
     intent_drift_threshold: float = field(
         default_factory=lambda: float(os.getenv("INTENT_DRIFT_THRESHOLD", "0.7"))
     )

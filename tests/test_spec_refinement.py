@@ -3,7 +3,12 @@ import json
 from unittest.mock import MagicMock
 
 from agent.metrics import Metrics
-from agent.strategies.spec_refinement import refine_spec, run_refinement_loop
+from agent.config import AgentConfig
+from agent.strategies.spec_refinement import (
+    check_contract_integrity,
+    refine_spec,
+    run_refinement_loop,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +136,56 @@ def test_refine_spec_returns_intent_tracking_tuple_when_enabled():
     assert result["requires"] == "a >= 0"
     assert intent_drift is not None
     assert intent_drift.drift_score < 1.0
+
+
+def test_check_contract_integrity_detects_top_level_contract_change():
+    refined = dict(ORIGINAL_SPEC, ensures="result >= a")
+
+    is_valid, error = check_contract_integrity(ORIGINAL_SPEC, refined, manifest={})
+
+    assert not is_valid
+    assert "field 'ensures' changed" in error
+
+
+def test_check_contract_integrity_allows_body_only_change():
+    original = dict(ORIGINAL_SPEC, body="a + b")
+    refined = dict(original, body="b + a")
+
+    is_valid, error = check_contract_integrity(original, refined, manifest={})
+
+    assert is_valid
+    assert error == ""
+
+
+def test_check_contract_integrity_detects_atom_contract_change():
+    original = {"atoms": [{"name": "safe_add", "requires": "a >= 0", "ensures": "result >= a"}]}
+    refined = {"atoms": [{"name": "safe_add", "requires": "true", "ensures": "result >= a"}]}
+
+    is_valid, error = check_contract_integrity(original, refined, manifest={})
+
+    assert not is_valid
+    assert "atom 'safe_add'" in error
+
+
+def test_refine_spec_rejects_contract_mutation_when_manifest_enabled():
+    refined = dict(ORIGINAL_SPEC, ensures="result >= a")
+    client = _mock_client(json.dumps(refined))
+    config = AgentConfig(
+        enable_contract_isolation=True,
+        contract_manifest_path="contract-manifest.json",
+    )
+
+    original_loader = refine_spec.__globals__["_load_contract_manifest"]
+    refine_spec.__globals__["_load_contract_manifest"] = lambda path: {}
+    try:
+        try:
+            refine_spec(client, "m", ORIGINAL_SPEC, REPORT, config=config)
+        except ValueError as exc:
+            assert "Contract mutation detected" in str(exc)
+        else:
+            raise AssertionError("expected ValueError for contract mutation")
+    finally:
+        refine_spec.__globals__["_load_contract_manifest"] = original_loader
 
 
 # ---------------------------------------------------------------------------
