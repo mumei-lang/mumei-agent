@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 
 from openai import OpenAI
 
@@ -29,6 +30,78 @@ from agent.metrics import Metrics
 _logger = logging.getLogger(__name__)
 
 
+def _load_contract_manifest(path: str | None) -> dict | None:
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as file:
+            loaded = json.load(file)
+    except OSError as exc:
+        raise ValueError(f"Failed to load contract manifest '{path}': {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid contract manifest JSON '{path}': {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Contract manifest '{path}' is not a JSON object")
+    return loaded
+
+
+def check_contract_integrity(
+    original_spec: dict,
+    refined_spec: dict,
+    manifest: dict | None = None,
+) -> tuple[bool, str]:
+    """Check if the contract (specification) has been mutated."""
+    if manifest is None:
+        return True, ""
+
+    protected_fields = (
+        "requires",
+        "ensures",
+        "effects",
+        "invariant",
+        "effect_pre",
+        "effect_post",
+        "contracts",
+        "fn_contracts",
+    )
+
+    for field in protected_fields:
+        original_val = original_spec.get(field)
+        refined_val = refined_spec.get(field)
+
+        if original_val != refined_val:
+            return False, (
+                f"Contract mutation detected: field '{field}' changed from "
+                f"'{original_val}' to '{refined_val}'. "
+                "Specification changes are not allowed. "
+                "Please modify only the implementation (body)."
+            )
+
+    original_atoms = original_spec.get("atoms", [])
+    refined_atoms = refined_spec.get("atoms", [])
+
+    if len(original_atoms) != len(refined_atoms):
+        return False, "Contract mutation detected: number of atoms changed"
+
+    for orig_atom, ref_atom in zip(original_atoms, refined_atoms, strict=False):
+        if not isinstance(orig_atom, Mapping) or not isinstance(ref_atom, Mapping):
+            return False, "Contract mutation detected: atom entry shape changed"
+        atom_name = orig_atom.get("name")
+        if atom_name != ref_atom.get("name"):
+            return False, (
+                f"Contract mutation detected: atom '{atom_name}' was renamed "
+                f"to '{ref_atom.get('name')}'"
+            )
+        for field in protected_fields:
+            if orig_atom.get(field) != ref_atom.get(field):
+                return False, (
+                    f"Contract mutation detected in atom '{atom_name}': "
+                    f"field '{field}' changed. Specification changes are not allowed."
+                )
+
+    return True, ""
+
+
 def refine_spec(
     client: OpenAI,
     model: str,
@@ -36,6 +109,7 @@ def refine_spec(
     report: dict,
     error_log: str = "",
     enable_intent_tracking: bool = True,
+    config: AgentConfig | None = None,
 ) -> tuple[dict, IntentDriftResult | None]:
     """Ask the LLM to refine a specification based on a verification failure.
 
@@ -103,11 +177,21 @@ def refine_spec(
         if not isinstance(refined, dict):
             _logger.warning("LLM returned non-dict JSON; using original spec")
             return spec, None
+        effective_config = config or AgentConfig()
+        manifest = (
+            _load_contract_manifest(effective_config.contract_manifest_path)
+            if effective_config.enable_contract_isolation
+            else None
+        )
+        is_valid, contract_error = check_contract_integrity(spec, refined, manifest)
+        if not is_valid:
+            _logger.error(contract_error)
+            raise ValueError(contract_error)
+
         if not enable_intent_tracking:
             return refined, None
 
-        config = AgentConfig()
-        tracker = IntentTracker(config)
+        tracker = IntentTracker(effective_config)
         intent_drift_result = tracker.track_intent_drift(spec, refined)
         if not intent_drift_result.intent_preserved:
             _logger.warning(
@@ -130,6 +214,7 @@ def run_refinement_loop(
     mumei_client=None,
     metrics: Metrics | None = None,
     enable_intent_tracking: bool | None = None,
+    config: AgentConfig | None = None,
 ) -> tuple[str, bool, dict]:
     """Run a specification refinement loop around code generation.
 
@@ -164,8 +249,9 @@ def run_refinement_loop(
     """
     if metrics is None:
         metrics = Metrics()
+    effective_config = config or AgentConfig()
     if enable_intent_tracking is None:
-        enable_intent_tracking = AgentConfig().enable_intent_tracking
+        enable_intent_tracking = effective_config.enable_intent_tracking
 
     current_spec = spec
     last_code = ""
@@ -208,6 +294,7 @@ def run_refinement_loop(
             current_spec,
             last_report,
             enable_intent_tracking=enable_intent_tracking,
+            config=effective_config,
         )
 
         if intent_drift and not intent_drift.intent_preserved:
