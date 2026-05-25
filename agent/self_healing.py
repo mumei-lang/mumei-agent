@@ -26,9 +26,11 @@ from agent.mumei_client import create_mumei_client
 from agent.pattern_library import PatternLibrary
 from agent.strategies.fix_strategy import get_fix
 from agent.strategies.generate_strategy import generate_code
+from agent.strategies.cegis_loop import CEGISLoop, apply_invariant, escalate_to_lean
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 from agent.thought_log import (
     ThoughtProcess,
+    VerificationStep,
     describe_fix,
     infer_fix_strategy,
     summarize_code_diff,
@@ -267,6 +269,39 @@ def main() -> None:
                 print(json.dumps(decision.summary, indent=2, ensure_ascii=False))
                 return
 
+            cegis_result = _try_cegis_repair(
+                config=config,
+                mumei=mumei,
+                source_file=source_file,
+                source=source,
+                report=report,
+                thought=thought,
+            )
+            if cegis_result is not None:
+                fixed_code, result_summary = cegis_result
+                outer_history.add(
+                    RetryAttempt(
+                        attempt_number=len(outer_history.attempts) + 1,
+                        source_code=source,
+                        error_log=logs,
+                        report_data=report,
+                        diagnosis={"strategy": "cegis_loop"},
+                        action_class="cegis_loop",
+                        tokens_used=0,
+                        solver_time_seconds=_solver_seconds_from_report(report),
+                        spec_drift_score=_spec_drift_from_report(report),
+                    )
+                )
+                if fixed_code:
+                    with open(source_file, "w", encoding="utf-8") as f:
+                        f.write(fixed_code)
+                    print(
+                        "CEGIS generated loop invariant "
+                        f"after {result_summary.iterations} iteration(s). Retrying..."
+                    )
+                    time.sleep(2)
+                    continue
+
             # Get fix from AI
             fixed_code = get_fix(
                 client, config.model, source, logs, report,
@@ -364,6 +399,67 @@ def _solver_seconds_from_report(report: dict) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _try_cegis_repair(
+    *,
+    config: AgentConfig,
+    mumei,
+    source_file: str,
+    source: str,
+    report: dict,
+    thought: ThoughtProcess,
+) -> tuple[str | None, object] | None:
+    failure_type = str(report.get("failure_type") or report.get("violation_type") or "")
+    if not config.enable_cegis_loop or "invariant_violated" not in failure_type:
+        return None
+    loop_info = report.get("loop_info")
+    if not isinstance(loop_info, dict):
+        return None
+    loop_line = int(loop_info.get("line") or 0)
+    loop_context = loop_info.get("context")
+    if not isinstance(loop_context, dict):
+        loop_context = {}
+    cegis = CEGISLoop(config, mumei, max_iterations=config.cegis_max_iterations)
+    result = cegis.run(source_file, loop_line, loop_context)
+    if result.success and result.final_invariant:
+        fixed_code = apply_invariant(source, result.final_invariant, loop_line)
+        try:
+            thought.steps.append(
+                VerificationStep(
+                    step_number=len(thought.steps) + 1,
+                    timestamp=datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(timespec="seconds"),
+                    action="cegis_invariant_generated",
+                    fix_strategy="cegis_loop",
+                    fix_description=f"Generated invariant: {result.final_invariant}",
+                    code_diff_summary=summarize_code_diff(source, fixed_code),
+                    verification_success=False,
+                )
+            )
+        except Exception:
+            pass
+        return fixed_code, result
+
+    if config.cegis_escalate_to_lean:
+        bundle_path = escalate_to_lean(source_file, loop_info)
+        try:
+            thought.steps.append(
+                VerificationStep(
+                    step_number=len(thought.steps) + 1,
+                    timestamp=datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(timespec="seconds"),
+                    action="cegis_failed_escalate_to_lean",
+                    fix_strategy="cegis_loop",
+                    fix_description=f"Escalated to Lean bundle: {bundle_path}",
+                    verification_success=False,
+                )
+            )
+        except Exception:
+            pass
+    return None
 
 
 def _spec_drift_from_report(report: dict) -> float:
