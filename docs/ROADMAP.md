@@ -539,7 +539,7 @@ Anthropic Natural Language Autoencoders (NLAE) の概念を mumei-agent に統�
 
 ---
 
-## P13: Agent Harness Externalization (NLAH-style) 🚧 Planned
+## P13: Agent Harness Externalization (NLAH-style) ✅ Complete
 
 `mumei-lang/mumei` の Priority 11 roadmap に沿って、mumei-agent の既存
 Forge / heal / extract-spec / proliferate / Lean fallback を、コード内の暗黙制御ではなく
@@ -551,17 +551,17 @@ Forge / heal / extract-spec / proliferate / Lean fallback を、コード内の�
 - ✅ role、stage、artifact contract、state semantics、verifier gates、failure taxonomy、budget/search policy、intent fidelity、module ablation plan を明文化。
 - ✅ 既存 entrypoint (`extract-spec`, `generate`, `heal`, `forge`, `proliferate`, `mcp-server`) と runtime module の責務対応を整理。
 
-### P13-B: Harness telemetry & ablation metrics 🚧 Planned
+### P13-B: Harness telemetry & ablation metrics ✅ Implemented
 
-- `agent/harness_metrics.py` を追加し、stage/module 単位で `artifact_contract_passed`, `verification_gate`, `handoff_count`, `retry_class`, `intent_fidelity_status` を集計する。
-- P8-G `budget_metrics.py` と統合し、attempts/token/solver-time/spec-drift と同じ summary に出す。
-- `--harness-profile basic|stateful|verifier|self_evolution|lean_fallback|full` を dry-run 可能な flow から導入する。
+- ✅ `agent/harness_metrics.py` を追加し、stage/module 単位で `artifact_contract_passed`, `verification_gate`, `handoff_count`, `retry_class`, `intent_fidelity_status` を集計する。
+- ✅ P8-G `budget_metrics.py` と統合し、attempts/token/solver-time/spec-drift と同じ summary に出す。
+- ✅ `--harness-profile basic|stateful|verifier|self_evolution|lean_fallback|full` を dry-run 可能な flow から導入する。
 
-### P13-C: Harness-aware summaries 🚧 Planned
+### P13-C: Harness-aware summaries ✅ Implemented
 
-- `forge_log.json` と `proliferate --output-json` の details に stage evidence を追加する。
-- Lean fallback、manual review、blast-radius rollback を同じ failure taxonomy で表示する。
-- mumei 側 certificate metadata (`harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`) が利用可能になったら summary から参照する。
+- ✅ `forge_log.json` と `proliferate --output-json` の details に stage evidence を追加する。
+- ✅ Lean fallback、manual review、blast-radius rollback を同じ failure taxonomy で表示する。
+- ✅ mumei 側 certificate metadata (`harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`) が利用可能になったら summary から参照する。
 
 ---
 
