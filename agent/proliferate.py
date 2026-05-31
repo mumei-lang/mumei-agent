@@ -33,6 +33,7 @@ from agent.gap_rules import (
     analyze_gaps_local,
 )
 from agent.harness_metrics import HarnessMetrics, harness_profile_names
+from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.propose import build_spec_from_proposal
 from agent.publish import publish
@@ -108,6 +109,15 @@ def analyze_gaps(std_dir: Path) -> dict[str, Any]:
             )
 
     return analyze_gaps_local(std_dir)
+
+
+def _metrics_payload(metrics: Metrics) -> dict[str, float | int]:
+    return {
+        "attempts_to_success": metrics.total_attempts,
+        "tokens_to_success": metrics.llm_tokens_used,
+        "solver_seconds_to_success": sum(metrics.verification_times_seconds),
+        "spec_drift_score": 0.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +721,7 @@ def proliferate(
         _log_step(3, 4, f"Forging proposal {idx}/{len(specs)}: {target_file}")
 
         # 3a. Generate code
+        generation_metrics = Metrics()
         try:
             code, verified = generate_code(
                 client=openai_client,
@@ -718,6 +729,7 @@ def proliferate(
                 spec=spec,
                 config_max_retries=config.max_retries,
                 mumei_client=mumei_client,
+                metrics=generation_metrics,
                 thought_process=thought,
             )
         except Exception as exc:
@@ -727,6 +739,7 @@ def proliferate(
                 "proliferate_generation",
                 False,
                 retry_class="generation_error",
+                **_metrics_payload(generation_metrics),
             )
             try:
                 thought.final_success = False
@@ -749,6 +762,7 @@ def proliferate(
                 "proliferate_generation",
                 False,
                 retry_class="empty_code",
+                **_metrics_payload(generation_metrics),
             )
             try:
                 thought.final_success = False
@@ -771,6 +785,7 @@ def proliferate(
                 "proliferate_generation",
                 False,
                 retry_class="verification_failed",
+                **_metrics_payload(generation_metrics),
             )
             try:
                 thought.final_success = False
@@ -793,6 +808,7 @@ def proliferate(
             "proliferate_generation",
             True,
             retry_class="none",
+            **_metrics_payload(generation_metrics),
         )
 
         # 3b. Blast radius check

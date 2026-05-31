@@ -141,6 +141,7 @@ class HarnessMetricRecord:
     artifact_contract_passed: bool | None = None
     verification_gate: bool | None = None
     handoff_count: int = 0
+    attempts_to_success: int = 0
     retry_class: str = "none"
     intent_fidelity_status: str = "unknown"
     tokens_to_success: int = 0
@@ -155,6 +156,7 @@ class HarnessMetricRecord:
             "artifact_contract_passed": self.artifact_contract_passed,
             "verification_gate": self.verification_gate,
             "handoff_count": self.handoff_count,
+            "attempts_to_success": self.attempts_to_success,
             "retry_class": self.retry_class,
             "intent_fidelity_status": self.intent_fidelity_status,
             "tokens_to_success": self.tokens_to_success,
@@ -197,6 +199,11 @@ class HarnessMetrics:
         updated["harness_profile"] = self.profile
         updated["harness_modules"] = dict(self.module_flags)
         updated["enable_multi_candidate_search"] = self.multi_candidate_search_enabled
+        updated["enable_lean_fallback"] = self.lean_fallback_enabled
+        updated["enable_self_evolution"] = _enabled(
+            self.module_flags,
+            "self_evolution",
+        )
         return updated
 
     def record_stage(
@@ -207,6 +214,7 @@ class HarnessMetrics:
         artifact_contract_passed: bool | None = None,
         verification_gate: bool | None = None,
         handoff_count: int = 0,
+        attempts_to_success: int = 0,
         retry_class: str | None = None,
         intent_fidelity_status: str | None = None,
         tokens_to_success: int = 0,
@@ -221,6 +229,7 @@ class HarnessMetrics:
             artifact_contract_passed=artifact_contract_passed,
             verification_gate=verification_gate,
             handoff_count=max(0, int(handoff_count)),
+            attempts_to_success=max(0, int(attempts_to_success)),
             retry_class=_retry_class(retry_class),
             intent_fidelity_status=_intent_status(intent_fidelity_status),
             tokens_to_success=max(0, int(tokens_to_success)),
@@ -246,6 +255,7 @@ class HarnessMetrics:
             module="artifact_contract",
             artifact_contract_passed=success,
             handoff_count=attempts,
+            attempts_to_success=attempts,
             retry_class=retry_class,
             tokens_to_success=tokens_to_success,
             solver_seconds_to_success=solver_seconds_to_success,
@@ -255,6 +265,7 @@ class HarnessMetrics:
             stage,
             module="verification_gate",
             verification_gate=success,
+            attempts_to_success=attempts,
             retry_class=retry_class,
             tokens_to_success=tokens_to_success,
             solver_seconds_to_success=solver_seconds_to_success,
@@ -264,6 +275,7 @@ class HarnessMetrics:
             stage,
             module="intent_fidelity",
             intent_fidelity_status="passed" if success else "failed",
+            attempts_to_success=attempts,
             retry_class=retry_class,
             tokens_to_success=tokens_to_success,
             solver_seconds_to_success=solver_seconds_to_success,
@@ -283,7 +295,9 @@ class HarnessMetrics:
             )
             for bucket in buckets:
                 _accumulate(bucket, record)
-            retry_classes[record.retry_class] = retry_classes.get(record.retry_class, 0) + 1
+            retry_classes[record.retry_class] = (
+                retry_classes.get(record.retry_class, 0) + 1
+            )
             intent_fidelity[record.intent_fidelity_status] = (
                 intent_fidelity.get(record.intent_fidelity_status, 0) + 1
             )
@@ -291,12 +305,15 @@ class HarnessMetrics:
         for bucket in [*by_stage.values(), *by_module.values()]:
             _finalize_bucket(bucket)
 
+        module_comparison = _module_comparison(self.module_flags, by_module)
+
         return {
             "profile": self.profile,
             "module_enabled": dict(self.module_flags),
             "records": [record.to_dict() for record in self.records],
             "by_stage": by_stage,
             "by_module": by_module,
+            "module_comparison": module_comparison,
             "retry_class": retry_classes,
             "intent_fidelity_status": intent_fidelity,
         }
@@ -314,9 +331,13 @@ def _empty_bucket() -> dict[str, Any]:
         "verification_gate_total": 0,
         "verification_gate_passed": 0,
         "handoff_count": 0,
+        "attempts_to_success": 0,
         "tokens_to_success": 0,
         "solver_seconds_to_success": 0.0,
+        "spec_drift_score_total": 0.0,
         "max_spec_drift_score": 0.0,
+        "outcome_total": 0,
+        "outcome_passed": 0,
     }
 
 
@@ -332,9 +353,16 @@ def _accumulate(bucket: dict[str, Any], record: HarnessMetricRecord) -> None:
         bucket["verification_gate_total"] += 1
         if record.verification_gate:
             bucket["verification_gate_passed"] += 1
+    outcome = _record_outcome(record)
+    if outcome is not None:
+        bucket["outcome_total"] += 1
+        if outcome:
+            bucket["outcome_passed"] += 1
     bucket["handoff_count"] += record.handoff_count
+    bucket["attempts_to_success"] += record.attempts_to_success
     bucket["tokens_to_success"] += record.tokens_to_success
     bucket["solver_seconds_to_success"] += record.solver_seconds_to_success
+    bucket["spec_drift_score_total"] += record.spec_drift_score
     bucket["max_spec_drift_score"] = max(
         bucket["max_spec_drift_score"],
         record.spec_drift_score,
@@ -350,3 +378,69 @@ def _finalize_bucket(bucket: dict[str, Any]) -> None:
         bucket["verification_gate_passed"],
         bucket["verification_gate_total"],
     )
+    bucket["success_rate"] = _success_rate(
+        bucket["outcome_passed"],
+        bucket["outcome_total"],
+    )
+    bucket["average_tokens_to_success"] = _average(
+        bucket["tokens_to_success"],
+        bucket["records"],
+    )
+    bucket["average_solver_seconds_to_success"] = _average(
+        bucket["solver_seconds_to_success"],
+        bucket["records"],
+    )
+    bucket["average_spec_drift_score"] = _average(
+        bucket["spec_drift_score_total"],
+        bucket["records"],
+    )
+    bucket["cost"] = {
+        "tokens_to_success": bucket["tokens_to_success"],
+        "solver_seconds_to_success": bucket["solver_seconds_to_success"],
+    }
+
+
+def _record_outcome(record: HarnessMetricRecord) -> bool | None:
+    if record.artifact_contract_passed is not None:
+        return record.artifact_contract_passed
+    if record.verification_gate is not None:
+        return record.verification_gate
+    if record.intent_fidelity_status == "passed":
+        return True
+    if record.intent_fidelity_status in {"failed", "drifted"}:
+        return False
+    return None
+
+
+def _average(total: int | float, count: int) -> float:
+    return float(total) / count if count else 0.0
+
+
+def _module_comparison(
+    module_flags: Mapping[str, bool],
+    by_module: Mapping[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    comparison: dict[str, dict[str, Any]] = {}
+    for module in HARNESS_MODULES:
+        bucket = dict(by_module.get(module, _empty_bucket()))
+        if "success_rate" not in bucket:
+            _finalize_bucket(bucket)
+        comparison[module] = {
+            "module_enabled": _enabled(module_flags, module),
+            "records": bucket["records"],
+            "success_rate": bucket["success_rate"],
+            "artifact_contract_success_rate": bucket[
+                "artifact_contract_success_rate"
+            ],
+            "verification_gate_success_rate": bucket[
+                "verification_gate_success_rate"
+            ],
+            "attempts_to_success": bucket["attempts_to_success"],
+            "handoff_count": bucket["handoff_count"],
+            "tokens_to_success": bucket["tokens_to_success"],
+            "solver_seconds_to_success": bucket["solver_seconds_to_success"],
+            "max_spec_drift_score": bucket["max_spec_drift_score"],
+            "average_spec_drift_score": bucket["average_spec_drift_score"],
+            "cost": dict(bucket["cost"]),
+        }
+    return comparison

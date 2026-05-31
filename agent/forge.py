@@ -426,11 +426,23 @@ class MumeiForge:
                     target_path, restore_exc,
                 )
 
+        generation_metrics = Metrics()
         try:
             if mode == "append":
-                new_code, attempts = self._forge_append(task, target_path, max_retries)
+                new_code, attempts = self._forge_append(
+                    task,
+                    target_path,
+                    max_retries,
+                    metrics=generation_metrics,
+                )
             elif mode in {"create", "replace"}:
-                new_code, attempts = self._forge_module(task, target_path, mode, max_retries)
+                new_code, attempts = self._forge_module(
+                    task,
+                    target_path,
+                    mode,
+                    max_retries,
+                    metrics=generation_metrics,
+                )
             else:
                 return ForgeResult(
                     task_id=task_id, status="failed", target_file=target_rel,
@@ -453,6 +465,10 @@ class MumeiForge:
                 False,
                 retry_class="generation_failed",
                 attempts=attempts,
+                tokens_to_success=generation_metrics.llm_tokens_used,
+                solver_seconds_to_success=sum(
+                    generation_metrics.verification_times_seconds
+                ),
             )
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
@@ -480,6 +496,10 @@ class MumeiForge:
                 False,
                 retry_class="post_write_verify_failed",
                 attempts=attempts,
+                tokens_to_success=generation_metrics.llm_tokens_used,
+                solver_seconds_to_success=sum(
+                    generation_metrics.verification_times_seconds
+                ),
             )
             return ForgeResult(
                 task_id=task_id, status="failed", target_file=target_rel,
@@ -496,6 +516,10 @@ class MumeiForge:
             True,
             retry_class="none",
             attempts=attempts,
+            tokens_to_success=generation_metrics.llm_tokens_used,
+            solver_seconds_to_success=sum(
+                generation_metrics.verification_times_seconds
+            ),
         )
 
         commit_sha: str | None = None
@@ -523,6 +547,8 @@ class MumeiForge:
         task: dict[str, Any],
         target_path: Path,
         max_retries: int,
+        *,
+        metrics: Metrics | None = None,
     ) -> tuple[str, int]:
         """Generate new atoms and append them to an existing .mm file.
 
@@ -544,6 +570,7 @@ class MumeiForge:
             snippet = self._generate_append_snippet(
                 task, original_source,
                 last_error=last_error, last_snippet=last_snippet,
+                metrics=metrics,
             )
             if not snippet:
                 continue
@@ -560,7 +587,13 @@ class MumeiForge:
                 )
                 continue
 
+            verify_started_at = datetime.datetime.now(datetime.timezone.utc)
             verify = self.mumei.verify(str(target_path))
+            if metrics is not None:
+                elapsed = (
+                    datetime.datetime.now(datetime.timezone.utc) - verify_started_at
+                ).total_seconds()
+                metrics.record_verification_time(elapsed)
             if verify["success"]:
                 return combined, attempts
 
@@ -584,6 +617,8 @@ class MumeiForge:
         target_path: Path,
         mode: str,
         max_retries: int,
+        *,
+        metrics: Metrics | None = None,
     ) -> tuple[str, int]:
         """Generate a whole module (create/replace mode) via generate_code()."""
         if mode == "create" and target_path.exists():
@@ -600,6 +635,7 @@ class MumeiForge:
             spec=spec,
             config_max_retries=max_retries,
             mumei_client=self.mumei,
+            metrics=metrics,
         )
         # ``generate_code`` does not expose its internal retry count, so
         # we can only report a lower bound (≥ 1 LLM call was made).
@@ -627,6 +663,7 @@ class MumeiForge:
         *,
         last_error: str | None = None,
         last_snippet: str | None = None,
+        metrics: Metrics | None = None,
     ) -> str:
         """Ask the LLM to generate just the new atom(s) for append mode."""
         client = self._ensure_openai_client()
@@ -653,6 +690,13 @@ class MumeiForge:
             content = response.choices[0].message.content or ""
         except (AttributeError, IndexError):
             return ""
+        if metrics is not None:
+            usage = getattr(response, "usage", None)
+            total_tokens = getattr(usage, "total_tokens", 0)
+            try:
+                metrics.record_tokens(int(total_tokens or 0))
+            except (TypeError, ValueError):
+                pass
 
         return _extract_code(content)
 
