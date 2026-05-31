@@ -113,7 +113,7 @@ def analyze_gaps(std_dir: Path) -> dict[str, Any]:
 
 def _metrics_payload(metrics: Metrics) -> dict[str, float | int]:
     return {
-        "attempts_to_success": metrics.total_attempts,
+        "attempts": metrics.total_attempts,
         "tokens_to_success": metrics.llm_tokens_used,
         "solver_seconds_to_success": sum(metrics.verification_times_seconds),
         "spec_drift_score": 0.0,
