@@ -50,8 +50,15 @@ def test_harness_metrics_aggregate_summary_json() -> None:
     assert payload["module_enabled"]["verification_gate"] is True
     assert payload["by_stage"]["forge"]["tokens_to_success"] == 400
     assert payload["by_stage"]["forge"]["handoff_count"] == 2
+    assert payload["by_stage"]["forge"]["attempts_to_success"] == 0
     assert payload["by_module"]["verification_gate"]["verification_gate_success_rate"] == 1.0
     assert payload["by_module"]["artifact_contract"]["artifact_contract_success_rate"] == 0.0
+    assert payload["module_comparison"]["verification_gate"]["success_rate"] == 1.0
+    assert payload["module_comparison"]["verification_gate"]["cost"] == {
+        "tokens_to_success": 300,
+        "solver_seconds_to_success": 1.25,
+    }
+    assert payload["module_comparison"]["artifact_contract"]["max_spec_drift_score"] == 0.4
     assert payload["retry_class"] == {"llm_fix": 2}
     assert payload["intent_fidelity_status"] == {"passed": 1, "failed": 1}
 
@@ -105,3 +112,29 @@ def test_apply_profile_to_spec_surfaces_runtime_module_controls() -> None:
     assert spec["harness_profile"] == "self_evolution"
     assert spec["harness_modules"]["multi_candidate_search"] is True
     assert spec["enable_multi_candidate_search"] is True
+    assert spec["enable_self_evolution"] is True
+    assert spec["enable_lean_fallback"] is False
+
+
+def test_module_comparison_surfaces_disabled_profile_modules() -> None:
+    metrics = HarnessMetrics.from_profile("basic")
+    metrics.record_result(
+        "forge",
+        True,
+        attempts=2,
+        tokens_to_success=50,
+        solver_seconds_to_success=0.25,
+        spec_drift_score=0.1,
+    )
+
+    summary = metrics.aggregate_metrics()
+
+    assert summary["module_comparison"]["artifact_contract"]["module_enabled"] is True
+    assert summary["module_comparison"]["artifact_contract"]["success_rate"] == 1.0
+    assert summary["module_comparison"]["artifact_contract"]["attempts_to_success"] == 2
+    assert summary["module_comparison"]["lean_fallback"]["module_enabled"] is False
+    assert summary["module_comparison"]["lean_fallback"]["records"] == 0
+    assert summary["module_comparison"]["lean_fallback"]["cost"] == {
+        "tokens_to_success": 0,
+        "solver_seconds_to_success": 0.0,
+    }
