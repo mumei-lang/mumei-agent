@@ -627,6 +627,14 @@ class TestBuildParser:
         assert args.max_proposals == 3
         assert args.dry_run is False
         assert args.output_json is None
+        assert args.enable_lean_fallback is True
+
+    def test_disable_lean_fallback_flag(self) -> None:
+        parser = argparse.ArgumentParser()
+        proliferate.build_parser(parser)
+        args = parser.parse_args(
+            ["--mumei-repo", "/tmp/m", "--disable-lean-fallback"]
+        )
         assert args.enable_lean_fallback is False
 
     def test_dry_run_flag(self) -> None:
@@ -800,6 +808,16 @@ class TestOutputJson:
 
         data = json.loads(out_path.read_text(encoding="utf-8"))
         assert data["details"][0]["lean_fallback"] == lean_fallback
+        assert data["lean_fallback_attempted"] == 2
+        assert data["lean_fallback_proved"] == 1
+        assert data["lean_fallback_failed"] == 1
+        assert data["lean_fallback_success_rate"] == 0.5
+        assert data["lean_fallback_metrics"] == {
+            "lean_fallback_attempted": 2,
+            "lean_fallback_proved": 1,
+            "lean_fallback_failed": 1,
+            "lean_fallback_success_rate": 0.5,
+        }
 
     def test_no_std_writes_summary_json(self, tmp_path: Path) -> None:
         out_path = tmp_path / "summary.json"

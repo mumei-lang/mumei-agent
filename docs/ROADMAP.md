@@ -349,9 +349,10 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - `workflow_dispatch` 入力: `max_proposals`（default: 3）、`dry_run`（default: false）
   - `schedule` 起動時と `workflow_dispatch` のデフォルトは実 PR 作成モード。dry run が必要な場合だけ `dry_run=true` を明示する
   - mumei-agent / mumei / mumei-lean を checkout → mumei コンパイラを `cargo build --release` → `PATH` に追加
-  - Lean toolchain を best-effort で導入し、`MUMEI_LEAN_REPO=${{ github.workspace }}/mumei-lean` + `--enable-lean-fallback` で Z3 `unknown` atom の Lean 4 証明を CI 常時試行（Lean/lake 不在時は bridge 側で graceful degrade）
+  - Lean toolchain を best-effort で導入し、`lean --version` / `lake --version` を診断出力。`python -m agent proliferate` は Lean fallback がデフォルト有効のため、`MUMEI_LEAN_REPO=${{ github.workspace }}/mumei-lean` 経由で Z3 `unknown` atom の Lean 4 証明を CI 常時試行（Lean/lake 不在時は `lean_unavailable` / `lake_missing` として graceful degrade）
   - `python -m agent health` で pre/post-flight のヘルス JSON を取得
-  - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json --enable-lean-fallback`
+  - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json`（Lean fallback は default-on、ローカルデバッグ時のみ `--disable-lean-fallback` で無効化）
+  - `summary.json` に `lean_fallback_attempted` / `lean_fallback_proved` / `lean_fallback_failed` / `lean_fallback_success_rate` を出力し、CI job summary にも同じ metrics を表示。Z3 `unknown` atom がある run では Lean fallback success rate 70%以上をゲートする
   - 生成物: `pre_health.json` / `post_health.json` / `proliferate.log` / `summary.json` を `proliferate-logs` artifact として保存
   - **ハイブリッド LLM プロファイル**（`workflow_dispatch` 入力 `llm_profile` / `llm_model` で切替。cron ではデフォルト `ollama-local` + `qwen3.5:4b` を使用し外部依存ゼロで動作）:
     - `ollama-local`（default）: runner 内で `ollama serve` を起動 → `ollama pull ${llm_model}` → `LLM_BASE_URL=http://localhost:11434/v1` に接続。`~/.ollama/models` を `actions/cache@v4` で `llm_model` 毎にキャッシュ。既定モデルは `qwen3.5:4b`、スモークテストなら軽量な `qwen3.5:0.8b`、品質優先なら `qwen2.5-coder:7b`、予備枠として 1bit 量子化系（例: `bonsai-1bit-qwen`）を `llm_model` 入力で指定可能
@@ -365,10 +366,14 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
 - ✅ `agent/proliferate.py` の CI 対応強化
   - `[PROLIFERATE] Step N/4: ...` 形式のステップログで CI 出力を人間が追跡しやすく
   - `_log_step()` / `_log_info()` ヘルパーで一貫したプレフィックス付きログを出力
-  - `--output-json <path>` オプションで構造化サマリを書き出し（`timestamp` / `dry_run` / `pre_health` / `post_health` / `proposals_processed` / `proposals_succeeded` / `proposals_failed` / `details[]`）
+  - `--output-json <path>` オプションで構造化サマリを書き出し（`timestamp` / `dry_run` / `pre_health` / `post_health` / `proposals_processed` / `proposals_succeeded` / `proposals_failed` / `lean_fallback_*` metrics / `details[]`）
+  - `agent/lean_bridge.py` は `lake_missing` / `partial_translation` / `timeout` / `bridge_failed` を `error_code` + `diagnostics[]` として返し、fallback 不能時も `summary.json` に失敗 atom 数を残す
   - `_jsonify_result()` で巨大な生成コード本体を `code_length` に圧縮して JSON artifact サイズを抑制
   - `_build_pr_body_extra()` で PR description を構築: 提案（target / reason / difficulty / depends_on / priority）+ 健全度 delta + 検証サマリ
   - `publish()` に `pr_title_prefix` / `pr_body_extra` を追加し、PR タイトルに `[SI-5 Autonomous Proliferation]` を付与
+- ✅ Lean fallback 運用ドキュメント
+  - `docs/LEAN_FALLBACK_TROUBLESHOOTING.md` — `lean_unavailable` / `lake_missing` / `partial_translation` / `timeout` の診断と復旧手順
+  - `docs/CI_WORKFLOWS.md` — proliferate workflow の Lean toolchain verification、default-on fallback、metrics gate を説明
 - ✅ `mumei-lang/mumei` `.github/workflows/verify-std.yml` — std/ 変更 PR に対する自動検証ゲート（cross-repo 安全柵）
 
 ### 検証手順

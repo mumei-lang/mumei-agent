@@ -182,3 +182,31 @@ def test_proliferate_lean_fallback_summary_json(
     fallback = data["details"][0]["lean_fallback"]
     assert fallback["attempted"] is True
     assert fallback["proved"] > 0
+    assert data["lean_fallback_attempted"] >= 1
+    assert data["lean_fallback_proved"] >= 1
+    assert data["lean_fallback_failed"] == 0
+    assert data["lean_fallback_success_rate"] >= 0.70
+
+
+def test_lean_fallback_gracefully_records_unavailable_repo(
+    std_abs_unknown_cert: dict,
+) -> None:
+    results = [
+        {
+            "success": True,
+            "publish_result": {
+                "success": True,
+                "proof_certificate": std_abs_unknown_cert,
+            },
+        }
+    ]
+
+    proliferate_mod._run_lean_fallback(results, mumei_lean_repo=None)
+
+    fallback = results[0]["lean_fallback"]
+    assert fallback["attempted"] is True
+    assert fallback["unknown_count"] == 1
+    assert fallback["proved"] == 0
+    assert fallback["failed"] == 1
+    assert fallback["success"] is False
+    assert fallback["error_code"] == "lean_unavailable"

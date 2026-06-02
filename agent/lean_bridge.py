@@ -30,10 +30,94 @@ import logging
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _result(
+    *,
+    success: bool,
+    returncode: int,
+    lean_cert_path: str | None = None,
+    lean_cert: dict[str, Any] | None = None,
+    stdout: str = "",
+    stderr: str = "",
+    error_code: str | None = None,
+    diagnostics: list[str] | None = None,
+    duration_seconds: float | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "success": success,
+        "returncode": returncode,
+        "lean_cert_path": lean_cert_path,
+        "lean_cert": lean_cert,
+        "stdout": stdout,
+        "stderr": stderr,
+        "error_code": error_code,
+        "diagnostics": diagnostics or [],
+    }
+    if duration_seconds is not None:
+        payload["duration_seconds"] = duration_seconds
+    return payload
+
+
+def _coerce_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _classify_bridge_failure(
+    *,
+    stdout: str,
+    stderr: str,
+    returncode: int,
+) -> tuple[str | None, list[str]]:
+    combined = f"{stdout}\n{stderr}".lower()
+    diagnostics: list[str] = []
+    error_code: str | None = None
+
+    if returncode == 0:
+        return None, diagnostics
+
+    if (
+        "lake" in combined
+        and (
+            "not found" in combined
+            or "no such file" in combined
+            or "command not found" in combined
+        )
+    ):
+        error_code = "lake_missing"
+        diagnostics.append(
+            "lake is not available to the bridge; install elan/Lean and ensure "
+            "$HOME/.elan/bin is on PATH."
+        )
+    elif (
+        "partial_translation" in combined
+        or "partial translation" in combined
+        or "manual_review" in combined
+        or "unsupported syntax" in combined
+        or "unsupported expression" in combined
+    ):
+        error_code = "partial_translation"
+        diagnostics.append(
+            "mumei-lean emitted a partial translation; inspect the generated Lean "
+            "module for unsupported Mumei syntax or manual_review atoms."
+        )
+    else:
+        error_code = "bridge_failed"
+        diagnostics.append(
+            "mumei-lean bridge exited non-zero; inspect stdout/stderr for the "
+            "Lean theorem or Lake build that failed."
+        )
+
+    return error_code, diagnostics
 
 
 def extract_unknown_atoms(verify_result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -115,24 +199,45 @@ def run_lean_bridge(
     """
     repo_path = Path(mumei_lean_repo)
     if not repo_path.exists():
-        return {
-            "success": False,
-            "returncode": -1,
-            "lean_cert_path": None,
-            "lean_cert": None,
-            "stdout": "",
-            "stderr": f"mumei_lean_repo does not exist: {repo_path}",
-        }
+        return _result(
+            success=False,
+            returncode=-1,
+            stderr=f"mumei_lean_repo does not exist: {repo_path}",
+            error_code="repo_missing",
+            diagnostics=[
+                "Set MUMEI_LEAN_REPO to a mumei-lang/mumei-lean checkout."
+            ],
+        )
     bridge_script = repo_path / "scripts" / "bridge.py"
     if not bridge_script.exists():
-        return {
-            "success": False,
-            "returncode": -1,
-            "lean_cert_path": None,
-            "lean_cert": None,
-            "stdout": "",
-            "stderr": f"bridge.py not found at {bridge_script}",
-        }
+        return _result(
+            success=False,
+            returncode=-1,
+            stderr=f"bridge.py not found at {bridge_script}",
+            error_code="bridge_missing",
+            diagnostics=[
+                "mumei-lean checkout is incomplete; expected scripts/bridge.py."
+            ],
+        )
+
+    diagnostics: list[str] = []
+    if not no_build:
+        if shutil.which("lake") is None and (repo_path / "lakefile.lean").exists():
+            return _result(
+                success=False,
+                returncode=-1,
+                stderr="lake not found on PATH",
+                error_code="lake_missing",
+                diagnostics=[
+                    "lake is required for Lean build fallback; install elan/Lean "
+                    "and ensure $HOME/.elan/bin is on PATH."
+                ],
+            )
+        if not (repo_path / "lakefile.lean").exists():
+            diagnostics.append(
+                "lakefile.lean not found; bridge.py may be running in a fixture "
+                "or an incomplete mumei-lean checkout."
+            )
 
     # Invoke bridge.py directly rather than via ``python -m
     # scripts.bridge`` because ``mumei-lean``'s ``scripts/`` directory
@@ -152,6 +257,7 @@ def run_lean_bridge(
         cmd.append("--no-build")
 
     logger.info("lean_bridge: invoking %s", " ".join(cmd))
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             cmd,
@@ -161,15 +267,36 @@ def run_lean_bridge(
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {
-            "success": False,
-            "returncode": -1,
-            "lean_cert_path": None,
-            "lean_cert": None,
-            "stdout": "",
-            "stderr": f"lean_bridge subprocess failed: {exc}",
-        }
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - started
+        return _result(
+            success=False,
+            returncode=-1,
+            stdout=_coerce_output(exc.stdout),
+            stderr=(
+                f"lean_bridge subprocess timed out after {timeout} seconds\n"
+                f"{_coerce_output(exc.stderr)}"
+            ).strip(),
+            error_code="timeout",
+            diagnostics=[
+                "Lean build exceeded the configured timeout; retry with a warm "
+                "Lake cache or increase the bridge timeout for large modules."
+            ],
+            duration_seconds=elapsed,
+        )
+    except OSError as exc:
+        elapsed = time.monotonic() - started
+        return _result(
+            success=False,
+            returncode=-1,
+            stderr=f"lean_bridge subprocess failed: {exc}",
+            error_code="subprocess_error",
+            diagnostics=[
+                "Python could not execute mumei-lean/scripts/bridge.py."
+            ],
+            duration_seconds=elapsed,
+        )
+    elapsed = time.monotonic() - started
 
     lean_cert: dict[str, Any] | None = None
     out_path = Path(lean_cert_out)
@@ -181,14 +308,24 @@ def run_lean_bridge(
                 "lean_bridge: could not parse %s: %s", out_path, exc
             )
 
-    return {
-        "success": proc.returncode == 0,
-        "returncode": proc.returncode,
-        "lean_cert_path": str(out_path) if lean_cert is not None else None,
-        "lean_cert": lean_cert,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-    }
+    error_code, failure_diagnostics = _classify_bridge_failure(
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        returncode=proc.returncode,
+    )
+    diagnostics.extend(failure_diagnostics)
+
+    return _result(
+        success=proc.returncode == 0,
+        returncode=proc.returncode,
+        lean_cert_path=str(out_path) if lean_cert is not None else None,
+        lean_cert=lean_cert,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        error_code=error_code,
+        diagnostics=diagnostics,
+        duration_seconds=elapsed,
+    )
 
 
 def merge_lean_cert_into_proof_cert(

@@ -171,6 +171,15 @@ jobs:
           curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.16.0
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
+      - name: Verify Lean toolchain (diagnostic)
+        continue-on-error: true
+        run: |
+          export PATH="$HOME/.elan/bin:$PATH"
+          echo "[lean] lean=$(command -v lean || true)"
+          echo "[lean] lake=$(command -v lake || true)"
+          lean --version
+          lake --version
+
       - name: Install mumei system dependencies
         run: |
           sudo apt-get update
@@ -412,7 +421,6 @@ jobs:
             --mumei-repo ../mumei \
             --max-proposals "$MAX_PROPOSALS" \
             --output-json /tmp/proliferate/summary.json \
-            --enable-lean-fallback \
             $DRY_RUN_FLAG \
             2>&1 | tee /tmp/proliferate/proliferate.log
 
@@ -429,15 +437,11 @@ jobs:
             > /tmp/proliferate/post_health.json || true
           cat /tmp/proliferate/post_health.json || true
 
-      - name: Check Lean fallback proof count
+      - name: Report Lean fallback metrics
         if: always()
         run: |
-          if ! command -v lake >/dev/null 2>&1; then
-            echo "lake not on PATH; skipping Lean fallback proved-count check"
-            exit 0
-          fi
           if [ ! -s /tmp/proliferate/summary.json ]; then
-            echo "summary.json missing or empty; skipping Lean fallback proved-count check"
+            echo "summary.json missing or empty; skipping Lean fallback metrics"
             exit 0
           fi
           python3 - <<'PY'
@@ -445,21 +449,42 @@ import json
 from pathlib import Path
 
 summary = json.loads(Path("/tmp/proliferate/summary.json").read_text())
-proved = 0
-attempted = False
-for detail in summary.get("details", []):
-    fallback = detail.get("lean_fallback") if isinstance(detail, dict) else None
-    if not isinstance(fallback, dict):
-        continue
-    attempted = attempted or bool(fallback.get("attempted"))
-    proved += int(fallback.get("proved") or 0)
-if not attempted:
-    print("Lean fallback not attempted; skipping proved-count check")
+attempted = int(summary.get("lean_fallback_attempted") or 0)
+proved = int(summary.get("lean_fallback_proved") or 0)
+failed = int(summary.get("lean_fallback_failed") or 0)
+rate = summary.get("lean_fallback_success_rate")
+rate_text = "n/a" if rate is None else f"{float(rate):.3f}"
+print(f"lean_fallback_attempted={attempted}")
+print(f"lean_fallback_proved={proved}")
+print(f"lean_fallback_failed={failed}")
+print(f"lean_fallback_success_rate={rate_text}")
+summary_md = Path.home() / "lean-fallback-summary.md"
+summary_md.write_text(
+    "\n".join(
+        [
+            "### Lean fallback metrics",
+            "",
+            "| metric | value |",
+            "| --- | ---: |",
+            f"| attempted | {attempted} |",
+            f"| proved | {proved} |",
+            f"| failed | {failed} |",
+            f"| success_rate | {rate_text} |",
+            "",
+        ]
+    ),
+    encoding="utf-8",
+)
+if attempted == 0:
+    print("Lean fallback did not see Z3 unknown atoms; skipping success-rate gate")
     raise SystemExit(0)
-print(f"lean_fallback.proved={proved}")
-if proved <= 0:
-    raise SystemExit("Lean fallback was attempted but proved no atoms")
+if rate is None or float(rate) < 0.70:
+    raise SystemExit(
+        "Lean fallback success rate below 70% for Z3 unknown atoms: "
+        f"{rate_text}"
+    )
 PY
+          cat "$HOME/lean-fallback-summary.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compare pre/post health (PR 4)
         id: health_compare
