@@ -315,7 +315,7 @@ class LatentDecoder:
         atom_name: str = "",
     ) -> str:
         """Rename one or more variables with conservative word-boundary edits."""
-        scoped = self._scoped_region(source_code, atom_name)
+        scoped = self._refactor_region(source_code, atom_name)
         selected = dict(rename_map or {})
         if not selected:
             selected = self._infer_variable_rename(scoped.text)
@@ -345,6 +345,18 @@ class LatentDecoder:
             "x": "input_value",
         }
         return {old_name: inferred[old_name]}
+
+    def _refactor_region(self, source_code: str, atom_name: str) -> "_ScopedRegion":
+        if not atom_name:
+            return _ScopedRegion(source_code, 0, len(source_code))
+        pattern = re.compile(rf"\batom\s+{re.escape(atom_name)}\s*\(")
+        match = pattern.search(source_code)
+        if match is None:
+            return _ScopedRegion(source_code, 0, len(source_code))
+        rest = source_code[match.end():]
+        next_atom = re.search(r"\natom\s", rest)
+        end = match.end() + next_atom.start() if next_atom is not None else len(source_code)
+        return _ScopedRegion(source_code[match.start():end], match.start(), end)
 
     def _find_clause_span(
         self,

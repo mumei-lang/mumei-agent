@@ -150,6 +150,15 @@ def test_decoder_applies_new_repair_strategies() -> None:
     assert "let idx = 0;" in renamed_code
     assert "while idx < n" in renamed_code
 
+    param_renamed = decoder.decode_to_source(
+        rename,
+        loop_source,
+        {"atom": "bounded_sum", "rename_map": {"n": "limit"}},
+    )
+    assert "atom bounded_sum(limit: i64) -> i64" in param_renamed
+    assert "requires: limit >= 0;" in param_renamed
+    assert "while i < limit" in param_renamed
+
 
 def test_bug_direction_targets_enhanced_violation_types() -> None:
     strategy = LatentDebugStrategy()
