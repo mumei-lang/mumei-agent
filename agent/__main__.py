@@ -10,6 +10,7 @@ _SUBCOMMANDS = {
     "proliferate",
     "health",
     "extract-spec",
+    "self-correct",
     "mcp-server",
 }
 
@@ -114,6 +115,20 @@ def main() -> None:
         extract_build_parser(parser=parser)
         args = parser.parse_args(argv[1:])
         extract_main(args)
+    elif command == "self-correct":
+        import argparse
+        from agent.strategies.self_correction_strategy import (
+            build_parser as self_correct_build_parser,
+            main as self_correct_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent self-correct",
+            description="Run the P9-F self-correction protocol.",
+        )
+        self_correct_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        self_correct_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
