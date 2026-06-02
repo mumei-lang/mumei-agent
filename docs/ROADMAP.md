@@ -256,6 +256,12 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ `forge_tasks/vstd_math_pow_nat.json` — `std/math/pow_nat.mm` small-domain natural power helpers（`pow2` / `pow_nat`）
 - ✅ `forge_tasks/vstd_math_safe_div.json` — `std/math/safe_div.mm` safe division / modulo helpers
 - ✅ `forge_tasks/vstd_math_safe_mul.json` — `std/math/safe_mul.mm` safe multiplication helpers
+- ✅ Phase 4 high-priority expansion checkpoint（2026-Q2）
+  - `vstd_aviation_control.json` — `std/concurrency/aviation.mm` に runway resource hierarchy と `RunwayAllocation` temporal effect を追加
+  - `vstd_container_sorted_map.json` — `std/container/sorted_map.mm` の挿入位置 / 長さ更新 / key ordering witness を forge log 上で完了扱いに更新
+  - `vstd_math_factorial.json` — `std/math/factorial.mm` の `factorial_step` / `factorial_in_range` を proof certificate 生成フローで確認
+  - `vstd_math_fibonacci.json` — 既存 `std/math/fibonacci.mm` を proof certificate 生成フローで確認（live forge は生成品質ゲートで停止）
+  - `vstd_string_validator.json` — `std/string/validator.mm` の ASCII numeric / alphanumeric predicates を forge log 上で完了扱いに更新
 - ✅ `tests/test_llm_benchmark.py` — LLM モデル別 forge 生成品質ベンチマーク基盤（`@pytest.mark.benchmark` で opt-in、`forge_tasks/vstd_math_abs.json` を基準タスクとする）
   - `LLM_BENCHMARK_MODELS` / `LLM_BENCHMARK_TRIALS` / `LLM_BENCHMARK_OUTPUT` 環境変数でモデル・試行回数・出力先を制御
   - `success_rate` / `avg_code_length` / `avg_time_seconds` を JSON に記録（`generate_code` は retries を返さないため、コード長を品質プロキシとして利用）
