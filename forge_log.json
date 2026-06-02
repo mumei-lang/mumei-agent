@@ -1,0 +1,102 @@
+{
+  "runs": [
+    {
+      "task_id": "vstd-aviation-control",
+      "status": "success",
+      "attempts": 1,
+      "target_file": "std/concurrency/aviation.mm",
+      "atoms_added": [
+        "allocate_runway"
+      ],
+      "logic_fragment_tags": [
+        "inductive_data_type"
+      ],
+      "outside_decidable_fragment": true,
+      "metrics_quarter": "2026-Q2",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-06-02T07:44:47.767692+00:00",
+      "task_spec_path": "forge_tasks/vstd_aviation_control.json"
+    },
+    {
+      "task_id": "vstd-container-sorted-map",
+      "status": "success",
+      "attempts": 1,
+      "target_file": "std/container/sorted_map.mm",
+      "atoms_added": [
+        "sorted_map_insert_position",
+        "sorted_map_insert_len",
+        "sorted_map_key_ordered"
+      ],
+      "logic_fragment_tags": [
+        "trigger_sensitive_quantifier",
+        "inductive_data_type",
+        "nonlinear_arithmetic"
+      ],
+      "outside_decidable_fragment": true,
+      "metrics_quarter": "2026-Q2",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-06-02T07:45:30.369838+00:00",
+      "task_spec_path": "forge_tasks/vstd_container_sorted_map.json"
+    },
+    {
+      "task_id": "vstd-math-factorial",
+      "status": "success",
+      "attempts": 1,
+      "target_file": "std/math/factorial.mm",
+      "atoms_added": [
+        "factorial_step",
+        "factorial_in_range"
+      ],
+      "logic_fragment_tags": [
+        "inductive_data_type",
+        "nonlinear_arithmetic"
+      ],
+      "outside_decidable_fragment": true,
+      "metrics_quarter": "2026-Q2",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-06-02T07:45:34.566204+00:00",
+      "task_spec_path": "forge_tasks/vstd_math_factorial.json"
+    },
+    {
+      "task_id": "vstd-string-validator",
+      "status": "success",
+      "attempts": 1,
+      "target_file": "std/string/validator.mm",
+      "atoms_added": [
+        "is_numeric_ascii_code",
+        "is_alphanumeric_ascii_code"
+      ],
+      "logic_fragment_tags": [
+        "inductive_data_type",
+        "nonlinear_arithmetic"
+      ],
+      "outside_decidable_fragment": true,
+      "metrics_quarter": "2026-Q2",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-06-02T07:46:44.334626+00:00",
+      "task_spec_path": "forge_tasks/vstd_string_validator.json"
+    },
+    {
+      "task_id": "vstd-math-fibonacci",
+      "status": "success",
+      "attempts": 0,
+      "target_file": "std/math/fibonacci.mm",
+      "atoms_added": [
+        "fib_step_next",
+        "fib_remaining_decreases"
+      ],
+      "logic_fragment_tags": [],
+      "outside_decidable_fragment": false,
+      "metrics_quarter": "2026-Q2",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-06-02T07:48:35.809536+00:00",
+      "task_spec_path": "forge_tasks/vstd_math_fibonacci.json",
+      "note": "Live forge generation hit the generation health gate; the existing target module was retained and passed mumei verify --proof-cert."
+    }
+  ]
+}
