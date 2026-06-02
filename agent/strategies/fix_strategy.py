@@ -35,6 +35,133 @@ _FAILURE_TYPE_MAP = {
     "temporal_effect_violated": temporal_effect,
 }
 
+_SUPPORTED_LOSS_SCHEMA_VERSION = "p9-de/v1"
+
+
+def _nested_dict(value: object) -> dict[str, object] | None:
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def _structured_feedback(report_data: dict) -> dict[str, object]:
+    return _nested_dict(report_data.get("structured_feedback")) or {}
+
+
+def _reconstruction_loss_payload(report_data: dict) -> dict[str, object]:
+    structured_loss = _nested_dict(_structured_feedback(report_data).get("reconstruction_loss"))
+    if structured_loss is not None:
+        return structured_loss
+    semantic_feedback = _nested_dict(report_data.get("semantic_feedback")) or {}
+    semantic_loss = _nested_dict(semantic_feedback.get("reconstruction_loss"))
+    if semantic_loss is not None:
+        return semantic_loss
+    return _nested_dict(report_data.get("reconstruction_loss")) or {}
+
+
+def _loss_vector(report_data: dict) -> list[float]:
+    payload = _reconstruction_loss_payload(report_data)
+    raw_vector = payload.get("loss_vector")
+    if not isinstance(raw_vector, list):
+        return []
+    vector: list[float] = []
+    for component in raw_vector:
+        if isinstance(component, int | float):
+            vector.append(float(component))
+    return vector
+
+
+def _loss_counterexample(report_data: dict) -> dict[str, object]:
+    payload = _reconstruction_loss_payload(report_data)
+    return _nested_dict(payload.get("counter_example")) or _nested_dict(
+        report_data.get("counterexample")
+    ) or {}
+
+
+def _loss_schema_version(report_data: dict) -> str:
+    payload = _reconstruction_loss_payload(report_data)
+    schema_version = payload.get("schema_version")
+    return schema_version if isinstance(schema_version, str) else ""
+
+
+def _loss_schema_supported(report_data: dict) -> bool:
+    schema_version = _loss_schema_version(report_data)
+    return schema_version in {"", _SUPPORTED_LOSS_SCHEMA_VERSION}
+
+
+def _classify_structured_error(report_data: dict) -> str:
+    feedback = _structured_feedback(report_data)
+    error_type = feedback.get("error_type")
+    if isinstance(error_type, str) and error_type:
+        return error_type
+    payload = _reconstruction_loss_payload(report_data)
+    violated_property = payload.get("violated_property")
+    property_text = violated_property.lower() if isinstance(violated_property, str) else ""
+    counterexample = _loss_counterexample(report_data)
+    divisor_is_zero = counterexample.get("divisor") == 0
+    slash_divisor_is_zero = counterexample.get("b") == 0 and "/" in property_text
+    if divisor_is_zero or slash_divisor_is_zero:
+        return "division_by_zero"
+    if "requires" in property_text:
+        return "precondition_violated"
+    if "ensures" in property_text or "result" in property_text:
+        return "postcondition_violated"
+    return ""
+
+
+def _repair_strategy_for_error(error_type: str, vector: list[float]) -> str:
+    if error_type == "division_by_zero":
+        return "strengthen_nonzero_precondition"
+    if error_type == "postcondition_violated":
+        return "repair_body_to_reduce_l_recon"
+    if error_type == "precondition_violated":
+        return "repair_callsite_or_requires"
+    if error_type == "invariant_violated":
+        return "repair_invariant_constraint"
+    if any(abs(component) > 0.0 for component in vector):
+        return "target_largest_loss_component"
+    return "generic_verifier_repair"
+
+
+def interpret_structured_feedback(report_data: dict) -> dict[str, object]:
+    vector = _loss_vector(report_data)
+    error_type = (
+        report_data.get("failure_type")
+        if isinstance(report_data.get("failure_type"), str)
+        else ""
+    ) or _classify_structured_error(report_data)
+    magnitude = sum(abs(component) for component in vector)
+    return {
+        "error_type": error_type or "unknown",
+        "loss_magnitude": magnitude,
+        "repair_strategy": _repair_strategy_for_error(error_type, vector),
+        "counterexample": _loss_counterexample(report_data),
+        "schema_version": _loss_schema_version(report_data) or "legacy",
+        "schema_supported": _loss_schema_supported(report_data),
+    }
+
+
+def _format_loss_vector_guidance(report_data: dict) -> str:
+    payload = _reconstruction_loss_payload(report_data)
+    if not payload:
+        return ""
+    vector = _loss_vector(report_data)
+    interpretation = interpret_structured_feedback(report_data)
+    counterexample = _loss_counterexample(report_data)
+    violated_property = payload.get("violated_property", "")
+    lines = [
+        "Structured feedback loss vector:",
+        f"- violated_property: {violated_property}",
+        f"- loss_vector: {vector}",
+        f"- total L_recon: {interpretation['loss_magnitude']}",
+        f"- selected repair strategy: {interpretation['repair_strategy']}",
+    ]
+    if counterexample:
+        pairs = ", ".join(f"{key}={value}" for key, value in counterexample.items())
+        lines.append(f"- counterexample: {pairs}")
+    lines.append("Prioritize edits that reduce non-zero L_recon components without weakening the contract.")
+    return "\n".join(lines)
+
 
 def response_token_count(response: object) -> int:
     try:
@@ -59,7 +186,7 @@ def response_token_count(response: object) -> int:
 def _build_prompt_for_report(source_code: str, error_log: str, report_data: dict) -> str:
     """Select the appropriate prompt template and build the prompt string."""
     violation_type = report_data.get("violation_type", "")
-    failure_type = report_data.get("failure_type", "")
+    failure_type = report_data.get("failure_type", "") or _classify_structured_error(report_data)
 
     if violation_type == "effect_mismatch":
         return effect_mismatch.build_prompt(source_code, error_log, report_data)
@@ -123,6 +250,21 @@ def get_fix(
             enable_spec_code_mapping = AgentConfig().enable_spec_code_mapping
         except Exception:
             enable_spec_code_mapping = True
+
+    interpretation = interpret_structured_feedback(report_data)
+    if not interpretation["schema_supported"]:
+        report_data["manual_review_required"] = {
+            "status": "manual_review_required",
+            "reason": "unsupported_loss_schema",
+            "schema_version": interpretation["schema_version"],
+        }
+        report_data["loss_vector_interpretation"] = interpretation
+        return ""
+    if not report_data.get("failure_type") and interpretation["error_type"] != "unknown":
+        report_data["failure_type"] = interpretation["error_type"]
+    report_data["loss_vector_interpretation"] = interpretation
+    if action_class is None and interpretation["repair_strategy"] != "generic_verifier_repair":
+        action_class = str(interpretation["repair_strategy"])
 
     vt = report_data.get("violation_type") or report_data.get("failure_type", "unknown")
     if budget_policy is not None and retry_history is not None:
@@ -334,6 +476,10 @@ def get_fix(
     hint = format_actionable_fix_hint(report_data)
     if hint:
         prompt += f"\n\n# Actionable fix instructions:\n{hint}"
+
+    loss_guidance = _format_loss_vector_guidance(report_data)
+    if loss_guidance:
+        prompt += f"\n\n# Structured feedback interpretation:\n{loss_guidance}"
 
     if action_class:
         prompt += (

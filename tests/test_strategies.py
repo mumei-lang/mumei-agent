@@ -2,7 +2,11 @@
 from unittest.mock import MagicMock, patch, call
 from agent.metrics import Metrics
 from agent.budget_policy import BudgetPolicy
-from agent.strategies.fix_strategy import get_fix, _build_prompt_for_report
+from agent.strategies.fix_strategy import (
+    get_fix,
+    _build_prompt_for_report,
+    interpret_structured_feedback,
+)
 from agent.strategies.multi_stage_strategy import _parse_diagnosis, _extract_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 
@@ -251,6 +255,70 @@ def test_postcondition_violated_routes_correctly():
     get_fix(client, "test-model", "source", "error", report)
     prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert "postcondition" in prompt.lower()
+
+
+def test_structured_feedback_error_type_routes_prompt_and_guidance():
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {
+        "structured_feedback": {
+            "status": "verification_failed",
+            "error_type": "postcondition_violated",
+            "reconstruction_loss": {
+                "schema_version": "p9-de/v1",
+                "violated_property": "ensures result >= 0",
+                "counter_example": {"x": -3},
+                "loss_vector": [3.0],
+            },
+            "feedback_instruction": "Fix the body for x=-3.",
+        }
+    }
+
+    get_fix(client, "test-model", "source", "error", report)
+
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert report["failure_type"] == "postcondition_violated"
+    assert report["loss_vector_interpretation"]["repair_strategy"] == (
+        "repair_body_to_reduce_l_recon"
+    )
+    assert "Structured feedback loss vector" in prompt
+    assert "total L_recon: 3.0" in prompt
+    assert "postcondition" in prompt.lower()
+
+
+def test_interpret_structured_feedback_classifies_division_by_zero_loss():
+    report = {
+        "reconstruction_loss": {
+            "violated_property": "ensures result == a / b",
+            "counter_example": {"a": 10, "b": 0},
+            "loss_vector": [10.0, 0.0],
+        }
+    }
+
+    interpretation = interpret_structured_feedback(report)
+
+    assert interpretation["error_type"] == "division_by_zero"
+    assert interpretation["repair_strategy"] == "strengthen_nonzero_precondition"
+    assert interpretation["loss_magnitude"] == 10.0
+    assert interpretation["schema_version"] == "legacy"
+    assert interpretation["schema_supported"] is True
+
+
+def test_get_fix_routes_unsupported_loss_schema_to_manual_review():
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {
+        "reconstruction_loss": {
+            "schema_version": "p9-de/v99",
+            "violated_property": "ensures result >= 0",
+            "counter_example": {"x": -1},
+            "loss_vector": [1.0],
+        }
+    }
+
+    result = get_fix(client, "test-model", "source", "error", report)
+
+    assert result == ""
+    assert report["manual_review_required"]["reason"] == "unsupported_loss_schema"
+    assert client.chat.completions.create.call_count == 0
 
 
 def test_temporal_effect_routes_correctly():
