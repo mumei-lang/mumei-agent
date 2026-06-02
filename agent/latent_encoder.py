@@ -52,6 +52,10 @@ class LatentEncoder:
         dependency_features = self._extract_dependency_features(source_code)
         contract_features = self._extract_contract_complexity_features(source_code)
         scope_features = self._extract_scope_features(source_code)
+        cfg_features = self._extract_control_flow_graph_features(source_code)
+        data_flow_features = self._extract_data_flow_features(source_code)
+        cyclomatic_features = self._extract_cyclomatic_complexity(source_code)
+        abstract_hints = self._extract_abstract_interpretation_hints(source_code)
         verification_features = self._extract_verification_features(
             verification_report,
         )
@@ -62,6 +66,10 @@ class LatentEncoder:
             dependency_features,
             contract_features,
             scope_features,
+            cfg_features,
+            data_flow_features,
+            cyclomatic_features,
+            abstract_hints,
             verification_features,
         )
 
@@ -252,6 +260,165 @@ class LatentEncoder:
             dtype=np.float32,
         )
 
+    def _extract_control_flow_graph_features(self, source_code: str) -> np.ndarray:
+        """Extract approximate control-flow graph shape features."""
+        atom_blocks = self._atom_body_blocks(source_code)
+        branch_count = len(re.findall(r"\b(if|else|match)\b", source_code))
+        loop_count = len(re.findall(r"\b(while|for)\b", source_code))
+        decision_nodes = branch_count + loop_count
+        statement_count = len(
+            re.findall(r"\b(let|return|assert|invariant)\b|;", source_code),
+        )
+        atom_count = len(re.findall(r"\batom\s+[A-Za-z_][A-Za-z0-9_]*", source_code))
+        max_nesting = max((self._max_control_nesting(body) for _, body in atom_blocks), default=0)
+        exits = len(re.findall(r"\breturn\b", source_code)) + len(
+            re.findall(r"\bensures\s*:", source_code),
+        )
+        nodes = atom_count + statement_count + decision_nodes
+        edges = max(0, nodes - atom_count) + branch_count * 2 + loop_count
+        return np.array(
+            [
+                nodes,
+                edges,
+                decision_nodes,
+                loop_count,
+                max_nesting,
+                exits,
+            ],
+            dtype=np.float32,
+        )
+
+    def _extract_data_flow_features(self, source_code: str) -> np.ndarray:
+        """Extract definition/use, shadowing, and dependency flow features."""
+        params = self._parameter_names(source_code)
+        locals_ = re.findall(r"\blet\s+([A-Za-z_][A-Za-z0-9_]*)\b", source_code)
+        assigned_names = params + locals_
+        shadowed = len(assigned_names) - len(set(assigned_names))
+        bodies = " ".join(body for _, body in self._atom_body_blocks(source_code))
+        contracts = " ".join(
+            re.findall(r"(?:requires|ensures)\s*:\s*([^;]+);", source_code),
+        )
+        identifier_uses = [
+            ident
+            for ident in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", bodies)
+            if ident not in MUMEI_KEYWORDS
+        ]
+        assigned_set = set(assigned_names)
+        use_def_edges = sum(1 for ident in identifier_uses if ident in assigned_set)
+        free_uses = sum(
+            1
+            for ident in identifier_uses
+            if ident not in assigned_set
+            and ident not in {"i64", "bool", "Str", "string", "u64", "usize"}
+        )
+        contract_dependencies = sum(
+            1
+            for ident in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", contracts)
+            if ident in assigned_set or ident == "result"
+        )
+        mutation_hints = len(
+            re.findall(
+                r"\b(set|update|write|push|insert|remove)\b",
+                source_code,
+                re.IGNORECASE,
+            ),
+        )
+        return np.array(
+            [
+                len(params),
+                len(locals_),
+                use_def_edges,
+                shadowed,
+                free_uses,
+                contract_dependencies + mutation_hints,
+            ],
+            dtype=np.float32,
+        )
+
+    def _extract_cyclomatic_complexity(self, source_code: str) -> np.ndarray:
+        """Extract aggregate cyclomatic complexity statistics."""
+        blocks = self._atom_body_blocks(source_code)
+        per_atom: list[int] = []
+        for _, body in blocks:
+            decisions = len(
+                re.findall(
+                    r"\b(if|else\s+if|while|for|match|case)\b|&&|\|\|",
+                    body,
+                ),
+            )
+            per_atom.append(1 + decisions)
+        if not per_atom:
+            decisions = len(
+                re.findall(
+                    r"\b(if|else\s+if|while|for|match|case)\b|&&|\|\|",
+                    source_code,
+                ),
+            )
+            per_atom = [1 + decisions] if source_code.strip() else [0]
+        return np.array(
+            [
+                sum(per_atom),
+                max(per_atom, default=0),
+                sum(1 for complexity in per_atom if complexity > 3),
+            ],
+            dtype=np.float32,
+        )
+
+    def _extract_abstract_interpretation_hints(self, source_code: str) -> np.ndarray:
+        """Extract interval, nullability, and invariant synthesis hints."""
+        contracts = " ".join(
+            re.findall(r"(?:requires|ensures)\s*:\s*([^;]+);", source_code),
+        )
+        lower_bounds = len(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\s*(?:>=|>)\s*-?\d+", contracts))
+        upper_bounds = len(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\s*(?:<=|<)\s*-?\d+", contracts))
+        equality_bounds = len(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\s*==\s*-?\d+", contracts))
+        non_zero_guards = len(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\s*!=\s*0", contracts))
+        invariant_hints = len(re.findall(r"\b(invariant|old|forall|exists)\b", source_code))
+        return np.array(
+            [
+                lower_bounds,
+                upper_bounds,
+                equality_bounds,
+                non_zero_guards,
+                invariant_hints,
+            ],
+            dtype=np.float32,
+        )
+
+    def _atom_body_blocks(self, source_code: str) -> list[tuple[str, str]]:
+        return re.findall(
+            r"\batom\s+([A-Za-z_][A-Za-z0-9_]*)[\s\S]*?body\s*:\s*\{([\s\S]*?)\}\s*;",
+            source_code,
+        )
+
+    def _parameter_names(self, source_code: str) -> list[str]:
+        atom_headers = re.findall(
+            r"\batom\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)",
+            source_code,
+        )
+        params: list[str] = []
+        for header in atom_headers:
+            params.extend(
+                match.group(1)
+                for match in re.finditer(
+                    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:",
+                    header,
+                )
+            )
+        return params
+
+    def _max_control_nesting(self, body: str) -> int:
+        max_depth = 0
+        depth = 0
+        for line in body.splitlines():
+            stripped = line.strip()
+            if re.search(r"\b(if|while|for|match)\b", stripped):
+                depth += 1
+                max_depth = max(max_depth, depth)
+            if "}" in stripped and depth:
+                depth = max(0, depth - stripped.count("}"))
+        return max_depth
+
     def _extract_verification_features(
         self,
         verification_report: Mapping[str, object],
@@ -299,6 +466,10 @@ class LatentEncoder:
         dependency: np.ndarray,
         contract: np.ndarray,
         scope: np.ndarray,
+        cfg: np.ndarray,
+        data_flow: np.ndarray,
+        cyclomatic: np.ndarray,
+        abstract_hints: np.ndarray,
         verification: np.ndarray,
     ) -> np.ndarray:
         """Combine extracted feature groups into one vector."""
@@ -310,6 +481,10 @@ class LatentEncoder:
                 dependency,
                 contract,
                 scope,
+                cfg,
+                data_flow,
+                cyclomatic,
+                abstract_hints,
                 verification,
             ],
         )
