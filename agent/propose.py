@@ -205,6 +205,12 @@ def build_spec_from_proposal(
         "source": "analyze_std_gaps",
         "difficulty": str(difficulty),
     }
+    priority_band = proposal.get("priority_band")
+    if isinstance(priority_band, str):
+        spec["priority_band"] = priority_band
+    roadmap_status = proposal.get("roadmap_status")
+    if isinstance(roadmap_status, str):
+        spec["roadmap_status"] = roadmap_status
 
     if depends_on:
         spec["depends_on"] = depends_on
@@ -240,7 +246,7 @@ def build_specs_from_gaps(gaps: dict[str, Any]) -> list[dict[str, Any]]:
         raw_priority = proposal.get("priority")
         spec = build_spec_from_proposal(
             proposal,
-            priority=raw_priority if raw_priority is not None else idx,
+            priority=raw_priority if isinstance(raw_priority, int) else idx,
         )
         specs.append(spec)
     return specs

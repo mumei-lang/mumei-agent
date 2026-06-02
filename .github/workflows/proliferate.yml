@@ -363,6 +363,42 @@ jobs:
             > /tmp/proliferate/pre_health.json
           cat /tmp/proliferate/pre_health.json
 
+      - name: Analyze vStd roadmap forge coverage
+        working-directory: mumei-agent
+        run: |
+          mkdir -p /tmp/proliferate/generated_forge_tasks
+          python -m agent analyze-std-gaps \
+            --std-dir ../mumei/std \
+            --forge-tasks-dir forge_tasks \
+            --output-json /tmp/proliferate/vstd_roadmap_gaps.json
+          python -m agent propose \
+            --gaps-json /tmp/proliferate/vstd_roadmap_gaps.json \
+            --output-dir /tmp/proliferate/generated_forge_tasks \
+            --overwrite
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+import json
+from pathlib import Path
+
+report = json.loads(Path("/tmp/proliferate/vstd_roadmap_gaps.json").read_text())
+metrics = report["metrics"]
+print("### vStd roadmap forge coverage")
+print("")
+print("| metric | value |")
+print("| --- | ---: |")
+for key in (
+    "roadmap_items",
+    "forge_task_specs",
+    "forge_task_conversion_rate",
+    "existing_std_modules",
+    "verification_target_rate",
+    "missing_forge_tasks",
+):
+    value = metrics[key]
+    if isinstance(value, float):
+        value = f"{value:.3f}"
+    print(f"| {key} | {value} |")
+PY
+
       - name: Run proliferate
         id: proliferate
         working-directory: mumei-agent
@@ -621,6 +657,8 @@ PY
             /tmp/proliferate/proliferate.log
             /tmp/proliferate/summary.json
             /tmp/proliferate/benchmark.json
+            /tmp/proliferate/vstd_roadmap_gaps.json
+            /tmp/proliferate/generated_forge_tasks/*.json
 
       - name: Fail on health regression
         if: always() && steps.health_compare.outputs.health_regression == 'true'

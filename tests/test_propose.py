@@ -215,6 +215,25 @@ class TestBuildSpecsFromGaps:
         # 1-based position (idx=2).
         assert by_target["std/beta.mm"]["priority"] == 2
 
+    def test_string_priority_band_is_not_used_as_numeric_priority(self) -> None:
+        gaps = {
+            "proposals": [
+                {
+                    "name": "std/gamma.mm",
+                    "reason": "",
+                    "depends_on": [],
+                    "difficulty": "low",
+                    "priority": "high",
+                    "priority_band": "high",
+                    "roadmap_status": "needs_forge_task",
+                }
+            ]
+        }
+        spec = propose.build_specs_from_gaps(gaps)[0]
+        assert spec["priority"] == 1
+        assert spec["priority_band"] == "high"
+        assert spec["roadmap_status"] == "needs_forge_task"
+
 
 # ---------------------------------------------------------------------------
 # Disk output + CLI integration

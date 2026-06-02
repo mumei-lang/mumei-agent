@@ -267,7 +267,9 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
   - `success_rate` / `avg_code_length` / `avg_time_seconds` を JSON に記録（`generate_code` は retries を返さないため、コード長を品質プロキシとして利用）
   - `.github/workflows/proliferate.yml` の `llm_model` 入力説明に推奨モデルと品質トレードオフを追記
 - ✅ `.github/workflows/proliferate.yml` schedule 実行でも LLM benchmark を自動実行し、`docs/BENCHMARK_HISTORY.md` に `success_rate` / `avg_code_length` の時系列を最大50行で蓄積
-- 📋 vStd ロードマップ残項目の forge タスク化
+- ✅ vStd ロードマップ残項目の forge タスク化
+  - `python -m agent analyze-std-gaps` が `_STD_GAP_RULES` と `forge_tasks/vstd_*.json` を照合し、重複 std module / 未 task 化 / unmet dependency を JSON report 化
+  - `.github/workflows/proliferate.yml` の週次 CI で `vstd_roadmap_gaps.json` と生成候補 task spec を artifact として保存
 
 ### P9-E: Demo Integration Forge Tasks
 
