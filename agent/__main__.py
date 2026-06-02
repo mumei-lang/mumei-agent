@@ -7,6 +7,7 @@ _SUBCOMMANDS = {
     "publish",
     "forge",
     "propose",
+    "analyze-std-gaps",
     "proliferate",
     "health",
     "extract-spec",
@@ -50,6 +51,20 @@ def main() -> None:
         propose_build_parser(parser=parser)
         args = parser.parse_args(argv[1:])
         propose_main(args)
+    elif command == "analyze-std-gaps":
+        import argparse
+        from agent.analyze_std_gaps import (
+            build_parser as analyze_build_parser,
+            main as analyze_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent analyze-std-gaps",
+            description="Analyze vStd roadmap gap coverage for forge automation.",
+        )
+        analyze_build_parser(parser=parser)
+        args = parser.parse_args(argv[1:])
+        analyze_main(args)
     elif command == "publish":
         import argparse
         from agent.publish import build_parser, main as publish_main
