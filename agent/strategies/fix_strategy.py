@@ -35,6 +35,8 @@ _FAILURE_TYPE_MAP = {
     "temporal_effect_violated": temporal_effect,
 }
 
+_SUPPORTED_LOSS_SCHEMA_VERSION = "p9-de/v1"
+
 
 def _nested_dict(value: object) -> dict[str, object] | None:
     if isinstance(value, dict):
@@ -76,6 +78,17 @@ def _loss_counterexample(report_data: dict) -> dict[str, object]:
     ) or {}
 
 
+def _loss_schema_version(report_data: dict) -> str:
+    payload = _reconstruction_loss_payload(report_data)
+    schema_version = payload.get("schema_version")
+    return schema_version if isinstance(schema_version, str) else ""
+
+
+def _loss_schema_supported(report_data: dict) -> bool:
+    schema_version = _loss_schema_version(report_data)
+    return schema_version in {"", _SUPPORTED_LOSS_SCHEMA_VERSION}
+
+
 def _classify_structured_error(report_data: dict) -> str:
     feedback = _structured_feedback(report_data)
     error_type = feedback.get("error_type")
@@ -105,7 +118,7 @@ def _repair_strategy_for_error(error_type: str, vector: list[float]) -> str:
         return "repair_callsite_or_requires"
     if error_type == "invariant_violated":
         return "repair_invariant_constraint"
-    if vector:
+    if any(abs(component) > 0.0 for component in vector):
         return "target_largest_loss_component"
     return "generic_verifier_repair"
 
@@ -123,6 +136,8 @@ def interpret_structured_feedback(report_data: dict) -> dict[str, object]:
         "loss_magnitude": magnitude,
         "repair_strategy": _repair_strategy_for_error(error_type, vector),
         "counterexample": _loss_counterexample(report_data),
+        "schema_version": _loss_schema_version(report_data) or "legacy",
+        "schema_supported": _loss_schema_supported(report_data),
     }
 
 
@@ -237,6 +252,14 @@ def get_fix(
             enable_spec_code_mapping = True
 
     interpretation = interpret_structured_feedback(report_data)
+    if not interpretation["schema_supported"]:
+        report_data["manual_review_required"] = {
+            "status": "manual_review_required",
+            "reason": "unsupported_loss_schema",
+            "schema_version": interpretation["schema_version"],
+        }
+        report_data["loss_vector_interpretation"] = interpretation
+        return ""
     if not report_data.get("failure_type") and interpretation["error_type"] != "unknown":
         report_data["failure_type"] = interpretation["error_type"]
     report_data["loss_vector_interpretation"] = interpretation

@@ -299,6 +299,26 @@ def test_interpret_structured_feedback_classifies_division_by_zero_loss():
     assert interpretation["error_type"] == "division_by_zero"
     assert interpretation["repair_strategy"] == "strengthen_nonzero_precondition"
     assert interpretation["loss_magnitude"] == 10.0
+    assert interpretation["schema_version"] == "legacy"
+    assert interpretation["schema_supported"] is True
+
+
+def test_get_fix_routes_unsupported_loss_schema_to_manual_review():
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {
+        "reconstruction_loss": {
+            "schema_version": "p9-de/v99",
+            "violated_property": "ensures result >= 0",
+            "counter_example": {"x": -1},
+            "loss_vector": [1.0],
+        }
+    }
+
+    result = get_fix(client, "test-model", "source", "error", report)
+
+    assert result == ""
+    assert report["manual_review_required"]["reason"] == "unsupported_loss_schema"
+    assert client.chat.completions.create.call_count == 0
 
 
 def test_temporal_effect_routes_correctly():
