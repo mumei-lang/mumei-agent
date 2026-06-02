@@ -55,7 +55,7 @@ class DensePropertyGenerator:
             model,
         )
         decoded = self._decode_to_properties(compressed)
-        return self._compress_properties(decoded)
+        return self._compress_properties_for_z3(decoded)
 
     def _extract_properties(self, source_code: str) -> dict[str, list[str]]:
         """Extract current requires and ensures clauses."""
@@ -72,25 +72,48 @@ class DensePropertyGenerator:
         model: str,
     ) -> str:
         """Ask an LLM for compact mathematically precise properties."""
-        from agent.prompts.dense_property import build_dense_property_prompt
-
-        prompt = build_dense_property_prompt(spec, current_properties)
+        prompt = self._optimize_prompt(spec, current_properties)
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You synthesize Mumei contracts for Z3. Return only "
-                        "solver-cheap requires/ensures clauses: quantifier-free "
-                        "linear arithmetic first, no redundant predicates, and "
-                        "no prose."
+                        "You synthesize proof-friendly Mumei contracts for Z3. "
+                        "Minimize estimated solver cost by deduplicating "
+                        "predicates, preferring linear arithmetic comparisons, "
+                        "and avoiding quantifiers unless semantically required. "
+                        "Return only requires/ensures clauses."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
         )
         return response.choices[0].message.content or ""
+
+    def _optimize_prompt(
+        self,
+        spec: Mapping[str, object],
+        current_properties: Mapping[str, list[str]],
+    ) -> str:
+        """Build an LLM prompt with Z3-cost and proof-shape guidance."""
+        from agent.prompts.dense_property import build_dense_property_prompt
+
+        current_cost = {
+            kind: sum(self._estimate_z3_cost(clause) for clause in clauses)
+            for kind, clauses in current_properties.items()
+        }
+        return (
+            build_dense_property_prompt(spec, current_properties)
+            + "\n## Existing Z3 Cost Estimate\n"
+            f"Requires cost: {current_cost.get('requires', 0)}\n"
+            f"Ensures cost: {current_cost.get('ensures', 0)}\n"
+            "\n## Compression Target\n"
+            "Emit an equivalent or stronger proof-friendly contract whose estimated "
+            "Z3 cost is lower than the current contract. If a predicate is needed, "
+            "prefer this order: arithmetic comparison, equality, conjunction, "
+            "uninterpreted call, disjunction/implication, quantifier."
+        )
 
     def _decode_to_properties(self, compressed_repr: str) -> dict[str, object]:
         """Decode LLM text into property lists plus raw text."""
@@ -103,7 +126,10 @@ class DensePropertyGenerator:
                 ensures.append(expression)
         return {"requires": requires, "ensures": ensures, "raw": compressed_repr}
 
-    def _compress_properties(self, properties: Mapping[str, object]) -> dict[str, object]:
+    def _compress_properties_for_z3(
+        self,
+        properties: Mapping[str, object],
+    ) -> dict[str, object]:
         """Compress decoded contract predicates using Z3-oriented heuristics."""
         requires = self._coerce_property_list(properties.get("requires"))
         ensures = self._coerce_property_list(properties.get("ensures"))
@@ -123,6 +149,13 @@ class DensePropertyGenerator:
         compressed_chars = sum(
             len(expression) for expression in [*compressed_requires, *compressed_ensures]
         )
+        original_z3_cost = sum(
+            self._estimate_z3_cost(expression) for expression in [*requires, *ensures]
+        )
+        compressed_z3_cost = sum(
+            self._estimate_z3_cost(expression)
+            for expression in [*compressed_requires, *compressed_ensures]
+        )
         stats = DenseCompressionStats(
             original_predicates=original_predicates,
             compressed_predicates=compressed_predicates,
@@ -140,8 +173,19 @@ class DensePropertyGenerator:
                 "original_chars": stats.original_chars,
                 "compressed_chars": stats.compressed_chars,
                 "char_ratio": stats.char_ratio,
+                "original_z3_cost": original_z3_cost,
+                "compressed_z3_cost": compressed_z3_cost,
+                "z3_cost_ratio": (
+                    1.0
+                    if original_z3_cost == 0
+                    else compressed_z3_cost / original_z3_cost
+                ),
             },
         }
+
+    def _compress_properties(self, properties: Mapping[str, object]) -> dict[str, object]:
+        """Backward-compatible wrapper for Z3-oriented compression."""
+        return self._compress_properties_for_z3(properties)
 
     def _coerce_property_list(self, value: object) -> list[str]:
         if not isinstance(value, list):
@@ -268,14 +312,43 @@ class DensePropertyGenerator:
                 return True
         return depth != 0
 
+    def _estimate_z3_cost(self, expression: str) -> int:
+        """Estimate relative Z3 verification cost for a contract expression."""
+        predicates = self._split_conjunction(expression)
+        if len(predicates) > 1:
+            return sum(self._estimate_z3_cost(predicate) for predicate in predicates)
+        predicate = self._normalize_expression(expression)
+        if not predicate or predicate.lower() == "true":
+            return 0
+        cost = 1
+        if not self._is_arithmetic_comparison(predicate):
+            cost += 2
+        if re.search(r"\b(forall|exists)\b", predicate):
+            cost += 20
+        cost += predicate.count("&&")
+        cost += predicate.count("||") * 6
+        cost += predicate.count("=>") * 8
+        cost += len(re.findall(r"\b\w+\s*[*%]\s*\w+\b", predicate)) * 5
+        cost += len(re.findall(r"\b[A-Za-z_]\w*\s*\(", predicate)) * 3
+        cost += predicate.count("[") * 3
+        return cost
+
+    def _is_arithmetic_comparison(self, predicate: str) -> bool:
+        comparison = r"[A-Za-z_][A-Za-z0-9_\.]*\s*(==|!=|>=|>|<=|<)\s*-?\w+"
+        return re.fullmatch(comparison, predicate) is not None
+
     def _z3_cost_key(self, predicate: str) -> tuple[int, int, str]:
-        quantifier_cost = 8 if re.search(r"\b(forall|exists)\b", predicate) else 0
-        boolean_cost = predicate.count("||") * 4 + predicate.count("=>") * 4
-        nonlinear_cost = len(re.findall(r"\b\w+\s*[*%]\s*\w+\b", predicate)) * 3
-        function_cost = len(re.findall(r"\b[A-Za-z_]\w*\s*\(", predicate)) * 2
-        array_cost = predicate.count("[") * 2
+        cost = self._estimate_z3_cost(predicate)
+        priority = 0 if self._is_arithmetic_comparison(predicate) else 1
+        if "&&" in predicate:
+            priority = 2
+        if re.search(r"\b(forall|exists)\b", predicate):
+            priority = 4
+        elif "||" in predicate or "=>" in predicate:
+            priority = 3
         return (
-            quantifier_cost + boolean_cost + nonlinear_cost + function_cost + array_cost,
+            priority,
+            cost,
             len(predicate),
             predicate,
         )

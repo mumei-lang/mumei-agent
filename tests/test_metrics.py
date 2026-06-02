@@ -113,6 +113,7 @@ class TestDensePropertyMetrics:
 
         assert data["dense_property_average_compression_ratio"] == 0.5
         assert data["dense_property_verification_improvement_rate"] == 0.25
+        assert data["dense_property_verification_time"] == 7.5
         assert data["verification_times_seconds"] == [7.5]
         assert data["dense_verification_times_seconds"] == [7.5]
 

@@ -1391,6 +1391,7 @@ def _try_apply_dense_properties(
                     baseline_seconds,
                     dense_seconds,
                 )
+                metrics.record_verification_time(dense_seconds, dense_properties=True)
             if not dense_result.get("success"):
                 return current_code
             if (

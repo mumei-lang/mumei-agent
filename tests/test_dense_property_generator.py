@@ -87,6 +87,34 @@ def test_contract_compression_removes_redundant_bounds_and_orders_for_z3() -> No
     assert compressed["ensures"] == ["result >= a && expensive(result)"]
     assert compressed["compression"]["predicate_ratio"] < 1.0
     assert compressed["compression"]["char_ratio"] < 1.0
+    assert compressed["compression"]["compressed_z3_cost"] < (
+        compressed["compression"]["original_z3_cost"]
+    )
+
+
+def test_estimate_z3_cost_prioritizes_proof_friendly_predicates() -> None:
+    """Z3 cost estimates prefer arithmetic over quantifiers and disjunctions."""
+    generator = DensePropertyGenerator()
+
+    arithmetic_cost = generator._estimate_z3_cost("result >= a")
+    quantified_cost = generator._estimate_z3_cost("forall i. i >= 0")
+    disjunction_cost = generator._estimate_z3_cost("result >= a || fallback(result)")
+
+    assert arithmetic_cost < disjunction_cost < quantified_cost
+
+
+def test_optimize_prompt_includes_cost_and_proof_guidance() -> None:
+    """Dense prompt carries Z3-cost context for LLM contract compression."""
+    generator = DensePropertyGenerator()
+
+    prompt = generator._optimize_prompt(
+        {"name": "test", "params": [], "return_type": "i64"},
+        {"requires": ["a >= 0"], "ensures": ["result >= a"]},
+    )
+
+    assert "Existing Z3 Cost Estimate" in prompt
+    assert "arithmetic comparison" in prompt
+    assert "Proof-Friendly Guidance" in prompt
 
 
 class SequenceVerifier:
