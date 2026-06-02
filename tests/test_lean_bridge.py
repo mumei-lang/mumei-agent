@@ -88,6 +88,7 @@ class TestRunLeanBridgeSubprocess:
         )
         assert result["success"] is False
         assert result["returncode"] == -1
+        assert result["error_code"] == "repo_missing"
         assert "does not exist" in result["stderr"]
 
     def test_missing_bridge_script_returns_failure(self, tmp_path: Path) -> None:
@@ -99,6 +100,7 @@ class TestRunLeanBridgeSubprocess:
             mumei_lean_repo=repo,
         )
         assert result["success"] is False
+        assert result["error_code"] == "bridge_missing"
         assert "bridge.py not found" in result["stderr"]
 
     def test_subprocess_invoked_and_cert_loaded(self, tmp_path: Path) -> None:
@@ -176,6 +178,74 @@ class TestRunLeanBridgeSubprocess:
         assert result["success"] is False
         assert result["returncode"] == 1
         assert result["lean_cert"] is None
+        assert result["error_code"] == "bridge_failed"
+        assert result["diagnostics"]
+
+    def test_lake_missing_returns_diagnostic(self, tmp_path: Path) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        (repo / "lakefile.lean").write_text("-- lake project\n")
+
+        with patch("agent.lean_bridge.shutil.which", return_value=None):
+            result = lean_bridge.run_lean_bridge(
+                cert_path=tmp_path / "in.json",
+                lean_cert_out=tmp_path / "out.json",
+                mumei_lean_repo=repo,
+            )
+
+        assert result["success"] is False
+        assert result["error_code"] == "lake_missing"
+        assert "lake" in result["stderr"]
+
+    def test_partial_translation_failure_is_classified(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        cert_path = tmp_path / "in.json"
+        cert_path.write_text(json.dumps({"atoms": []}))
+
+        with patch("agent.lean_bridge.subprocess.run") as run_mock:
+            run_mock.return_value = MagicMock(
+                returncode=1,
+                stdout="partial_translation: unsupported expression",
+                stderr="manual_review",
+            )
+            result = lean_bridge.run_lean_bridge(
+                cert_path=cert_path,
+                lean_cert_out=tmp_path / "out.json",
+                mumei_lean_repo=repo,
+            )
+
+        assert result["success"] is False
+        assert result["error_code"] == "partial_translation"
+
+    def test_timeout_returns_diagnostic(self, tmp_path: Path) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        cert_path = tmp_path / "in.json"
+        cert_path.write_text(json.dumps({"atoms": []}))
+
+        with patch("agent.lean_bridge.subprocess.run") as run_mock:
+            run_mock.side_effect = lean_bridge.subprocess.TimeoutExpired(
+                cmd=["bridge.py"],
+                timeout=1,
+                output="partial stdout",
+                stderr="partial stderr",
+            )
+            result = lean_bridge.run_lean_bridge(
+                cert_path=cert_path,
+                lean_cert_out=tmp_path / "out.json",
+                mumei_lean_repo=repo,
+                timeout=1,
+            )
+
+        assert result["success"] is False
+        assert result["error_code"] == "timeout"
+        assert "timed out" in result["stderr"]
 
 
 # ---------------------------------------------------------------------------
