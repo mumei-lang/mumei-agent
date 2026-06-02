@@ -411,6 +411,9 @@ class Metrics:
             "dense_property_verification_seconds": (
                 self.dense_property_verification_seconds
             ),
+            "dense_property_verification_time": (
+                self.dense_property_verification_seconds
+            ),
             "dense_property_verification_improvement_rate": (
                 self.dense_property_verification_improvement_rate
             ),
@@ -502,7 +505,8 @@ class Metrics:
                 "dense_property_baseline_verification_seconds", 0.0,
             ),
             dense_property_verification_seconds=data.get(
-                "dense_property_verification_seconds", 0.0,
+                "dense_property_verification_seconds",
+                data.get("dense_property_verification_time", 0.0),
             ),
             extraction_attempts=data.get("extraction_attempts", 0),
             extraction_successes=data.get("extraction_successes", 0),
