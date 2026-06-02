@@ -12,6 +12,9 @@ ENSURES_WEAKEN_INDEX = 6
 EFFECT_ADD_INDEX = 10
 EFFECT_REMOVE_INDEX = 11
 TYPE_REFINE_INDEX = 12
+LOOP_INVARIANT_INDEX = 13
+ASSERTION_ADD_INDEX = 14
+VARIABLE_REFACTOR_INDEX = 15
 
 
 class LatentDecoder:
@@ -44,10 +47,25 @@ class LatentDecoder:
         if len(latent_vector) > EFFECT_REMOVE_INDEX and latent_vector[EFFECT_REMOVE_INDEX] > 0.5:
             effect_name = self._context_string(repair_context, "effect_to_remove")
             return self._remove_first_effect(original_code, atom_name, effect_name)
+        if len(latent_vector) > LOOP_INVARIANT_INDEX and latent_vector[LOOP_INVARIANT_INDEX] > 0.5:
+            invariant = self._context_string(repair_context, "loop_invariant") or "true"
+            return self._insert_loop_invariant(original_code, invariant, atom_name)
+        if len(latent_vector) > ASSERTION_ADD_INDEX and latent_vector[ASSERTION_ADD_INDEX] > 0.5:
+            assertion = self._context_string(repair_context, "assertion") or "true"
+            return self._add_assertion(original_code, assertion, atom_name)
+        if (
+            len(latent_vector) > VARIABLE_REFACTOR_INDEX
+            and latent_vector[VARIABLE_REFACTOR_INDEX] > 0.5
+        ):
+            rename_map = self._context_mapping(repair_context, "rename_map")
+            return self._refactor_variable_names(original_code, rename_map, atom_name)
         if len(latent_vector) > TYPE_REFINE_INDEX and latent_vector[TYPE_REFINE_INDEX] > 0.5:
             target_name = self._context_string(repair_context, "type_target")
             return self._refine_i64_types(original_code, target_name)
-        if len(latent_vector) > REQUIRES_STRENGTHEN_INDEX and latent_vector[REQUIRES_STRENGTHEN_INDEX] > 0.5:
+        if (
+            len(latent_vector) > REQUIRES_STRENGTHEN_INDEX
+            and latent_vector[REQUIRES_STRENGTHEN_INDEX] > 0.5
+        ):
             constraint = self._context_string(repair_context, "requires_constraint")
             return self._strengthen_first_requires(original_code, constraint, atom_name)
         if len(latent_vector) > ENSURES_WEAKEN_INDEX and latent_vector[ENSURES_WEAKEN_INDEX] > 0.5:
@@ -59,6 +77,23 @@ class LatentDecoder:
         if isinstance(value, str):
             return value.strip()
         return ""
+
+    def _context_mapping(
+        self,
+        repair_context: Mapping[str, object],
+        key: str,
+    ) -> dict[str, str]:
+        value = repair_context.get(key)
+        if not isinstance(value, Mapping):
+            return {}
+        mapped: dict[str, str] = {}
+        for old_name, new_name in value.items():
+            if isinstance(old_name, str) and isinstance(new_name, str):
+                clean_old = old_name.strip()
+                clean_new = new_name.strip()
+                if clean_old and clean_new:
+                    mapped[clean_old] = clean_new
+        return mapped
 
     def _strengthen_first_requires(
         self,
@@ -222,6 +257,106 @@ class LatentDecoder:
             return source_code
         pattern = re.compile(rf"\b{re.escape(target_name)}\s*:\s*i64\b")
         return pattern.sub(f"{target_name}: i64 where {target_name} >= 0", source_code, count=1)
+
+    def _insert_loop_invariant(
+        self,
+        source_code: str,
+        invariant: str = "true",
+        atom_name: str = "",
+    ) -> str:
+        """Insert a loop invariant immediately inside the first loop body."""
+        selected = invariant.strip() or "true"
+        scoped = self._scoped_region(source_code, atom_name)
+        if re.search(rf"\binvariant\s*:\s*{re.escape(selected)}\s*;", scoped.text):
+            return source_code
+        loop_match = re.search(r"(?m)^([ \t]*)(while|for)\b[^\n{]*\{?[^\n]*(?:\n|$)", scoped.text)
+        if loop_match is None:
+            return source_code
+        loop_line = loop_match.group(0)
+        loop_indent = loop_match.group(1)
+        invariant_indent = loop_indent + "    "
+        if loop_line.endswith("\n"):
+            insertion = f"{invariant_indent}invariant: {selected};\n"
+        else:
+            insertion = f"\n{invariant_indent}invariant: {selected};"
+        abs_start = scoped.offset + loop_match.end()
+        return source_code[:abs_start] + insertion + source_code[abs_start:]
+
+    def _add_assertion(
+        self,
+        source_code: str,
+        assertion: str = "true",
+        atom_name: str = "",
+    ) -> str:
+        """Add an assertion at the start of the first body block."""
+        selected = assertion.strip() or "true"
+        scoped = self._scoped_region(source_code, atom_name)
+        if re.search(rf"\bassert\s+{re.escape(selected)}\s*;", scoped.text):
+            return source_code
+        body_match = re.search(r"(body\s*:\s*\{)([^\n]*)", scoped.text)
+        if body_match is None:
+            return source_code
+        line_start = scoped.text.rfind("\n", 0, body_match.start())
+        current_indent = ""
+        if line_start >= 0:
+            line_text = scoped.text[line_start + 1:body_match.start()]
+            indent_match = re.match(r"[ \t]*", line_text)
+            if indent_match is not None:
+                current_indent = indent_match.group(0)
+        assertion_indent = current_indent + "    "
+        insertion = f"\n{assertion_indent}assert {selected};"
+        abs_start = scoped.offset + body_match.end(1)
+        return source_code[:abs_start] + insertion + source_code[abs_start:]
+
+    def _refactor_variable_names(
+        self,
+        source_code: str,
+        rename_map: Mapping[str, str] | None = None,
+        atom_name: str = "",
+    ) -> str:
+        """Rename one or more variables with conservative word-boundary edits."""
+        scoped = self._refactor_region(source_code, atom_name)
+        selected = dict(rename_map or {})
+        if not selected:
+            selected = self._infer_variable_rename(scoped.text)
+        updated = scoped.text
+        for old_name, new_name in selected.items():
+            if old_name in {"result", "true", "false"}:
+                continue
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", old_name):
+                continue
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", new_name):
+                continue
+            updated = re.sub(rf"\b{re.escape(old_name)}\b", new_name, updated)
+        if updated == scoped.text:
+            return source_code
+        return source_code[:scoped.offset] + updated + source_code[scoped.end:]
+
+    def _infer_variable_rename(self, scoped_text: str) -> dict[str, str]:
+        names = re.findall(r"\b(?:let\s+)?(tmp|val|flag|data|x)\b", scoped_text)
+        if not names:
+            return {}
+        old_name = names[0]
+        inferred = {
+            "tmp": "tmp_value",
+            "val": "value",
+            "flag": "is_flag",
+            "data": "payload_data",
+            "x": "input_value",
+        }
+        return {old_name: inferred[old_name]}
+
+    def _refactor_region(self, source_code: str, atom_name: str) -> "_ScopedRegion":
+        if not atom_name:
+            return _ScopedRegion(source_code, 0, len(source_code))
+        pattern = re.compile(rf"\batom\s+{re.escape(atom_name)}\s*\(")
+        match = pattern.search(source_code)
+        if match is None:
+            return _ScopedRegion(source_code, 0, len(source_code))
+        rest = source_code[match.end():]
+        next_atom = re.search(r"\natom\s", rest)
+        end = match.end() + next_atom.start() if next_atom is not None else len(source_code)
+        return _ScopedRegion(source_code[match.start():end], match.start(), end)
 
     def _find_clause_span(
         self,
