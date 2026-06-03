@@ -776,6 +776,9 @@ def _run_lean_fallback(
                     "MUMEI_LEAN_REPO is unset or does not point to a checkout "
                     "containing scripts/bridge.py."
                 ],
+                "retryable": False,
+                "duration_seconds": 0.0,
+                "partial_success": False,
             }
             continue
 
@@ -821,7 +824,12 @@ def _run_lean_fallback(
                 "success": bridge_result.get("success", False),
                 "returncode": bridge_result.get("returncode", -1),
                 "error_code": bridge_result.get("error_code"),
+                "primary_error_code": bridge_result.get("primary_error_code"),
+                "retryable": bridge_result.get("retryable", False),
                 "diagnostics": bridge_result.get("diagnostics", []),
+                "duration_seconds": bridge_result.get("duration_seconds"),
+                "partial_success": proved > 0 and failed > 0,
+                "fallback_strategy": bridge_result.get("fallback_strategy"),
             }
             logger.info(
                 "Lean fallback: %d/%d unknown atoms discharged",
@@ -835,10 +843,16 @@ def _lean_fallback_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     attempted = 0
     proved = 0
     failed = 0
+    attempted_specs = 0
+    partial_successes = 0
+    retryable_failures = 0
+    durations: list[float] = []
+    error_code_counts: dict[str, int] = {}
     for result in results:
         fallback = result.get("lean_fallback")
         if not isinstance(fallback, dict) or not fallback.get("attempted"):
             continue
+        attempted_specs += 1
         unknown_count = int(fallback.get("unknown_count") or 0)
         proved_count = int(fallback.get("proved") or 0)
         failed_count = fallback.get("failed")
@@ -848,12 +862,60 @@ def _lean_fallback_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
             failed += failed_count
         else:
             failed += max(unknown_count - proved_count, 0)
+        if fallback.get("partial_success"):
+            partial_successes += 1
+        duration = fallback.get("duration_seconds")
+        if isinstance(duration, int | float):
+            durations.append(float(duration))
+        error_code = fallback.get("error_code")
+        if failed_count or fallback.get("success") is False:
+            key = str(error_code or "unknown")
+            error_code_counts[key] = error_code_counts.get(key, 0) + 1
+            if fallback.get("retryable"):
+                retryable_failures += 1
     success_rate = proved / attempted if attempted else None
+    duration_stats = _duration_distribution(durations)
+    failure_rates = {
+        code: count / attempted_specs if attempted_specs else 0.0
+        for code, count in sorted(error_code_counts.items())
+    }
     return {
         "lean_fallback_attempted": attempted,
         "lean_fallback_proved": proved,
         "lean_fallback_failed": failed,
         "lean_fallback_success_rate": success_rate,
+        "lean_fallback_attempted_specs": attempted_specs,
+        "lean_fallback_partial_successes": partial_successes,
+        "lean_fallback_retryable_failures": retryable_failures,
+        "lean_fallback_error_code_counts": dict(sorted(error_code_counts.items())),
+        "lean_fallback_failure_rate_by_error_code": failure_rates,
+        "lean_fallback_duration_seconds": duration_stats,
+    }
+
+
+def _duration_distribution(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {
+            "count": 0,
+            "min": None,
+            "max": None,
+            "avg": None,
+            "p50": None,
+            "p95": None,
+        }
+    ordered = sorted(values)
+
+    def percentile(frac: float) -> float:
+        index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * frac)))
+        return ordered[index]
+
+    return {
+        "count": len(ordered),
+        "min": ordered[0],
+        "max": ordered[-1],
+        "avg": sum(ordered) / len(ordered),
+        "p50": percentile(0.50),
+        "p95": percentile(0.95),
     }
 
 
