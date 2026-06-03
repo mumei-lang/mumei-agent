@@ -254,6 +254,105 @@ class TestGenerateSpecsFromGaps:
 
 
 # ---------------------------------------------------------------------------
+# forge optimisation helpers
+# ---------------------------------------------------------------------------
+
+
+class TestForgeOptimisationHelpers:
+    def test_forge_cache_path_uses_ignored_mumei_dir(self, tmp_path: Path) -> None:
+        assert proliferate._forge_cache_path(tmp_path) == (
+            tmp_path / ".mumei" / "proliferate_forge_cache.json"
+        )
+
+    def test_detect_diffs_reports_unchanged_and_changed(self, tmp_path: Path) -> None:
+        target = tmp_path / "std" / "math" / "extended.mm"
+        _write_mm(target, "atom same(x: i64) ensures: true; body: x;\n")
+
+        same = proliferate._detect_diffs(
+            tmp_path,
+            "std/math/extended.mm",
+            target.read_text(encoding="utf-8"),
+        )
+        assert same["exists"] is True
+        assert same["changed"] is False
+        assert same["old_sha256"] == same["new_sha256"]
+
+        changed = proliferate._detect_diffs(
+            tmp_path,
+            "std/math/extended.mm",
+            "atom other(x: i64) ensures: true; body: x;\n",
+        )
+        assert changed["changed"] is True
+        assert changed["old_sha256"] != changed["new_sha256"]
+
+    def test_cache_results_round_trips_verified_code(self, tmp_path: Path) -> None:
+        cache_path = tmp_path / "cache.json"
+        spec = {"task_id": "vstd-x", "target_file": "std/x.mm"}
+        code = "atom x(y: i64) ensures: true; body: y;\n"
+
+        assert proliferate._cache_results(cache_path, spec) is None
+        proliferate._cache_results(
+            cache_path,
+            spec,
+            {"code": code, "verified": True},
+        )
+        cached = proliferate._cache_results(cache_path, spec)
+        assert cached is not None
+        assert cached["code"] == code
+        assert cached["verified"] is True
+
+    def test_cache_key_tracks_context_file_changes(self, tmp_path: Path) -> None:
+        _write_mm(tmp_path / "std" / "core.mm", "atom a(x: i64) ensures: true; body: x;\n")
+        spec = {
+            "task_id": "vstd-x",
+            "target_file": "std/x.mm",
+            "context_files": ["std/core.mm"],
+        }
+
+        before = proliferate._spec_cache_key(spec, tmp_path)
+        _write_mm(tmp_path / "std" / "core.mm", "atom b(x: i64) ensures: true; body: x;\n")
+
+        assert proliferate._spec_cache_key(spec, tmp_path) != before
+
+    def test_parallel_forge_preserves_order_and_uses_cache(self, tmp_path: Path) -> None:
+        specs = [
+            {"task_id": "vstd-a", "target_file": "std/a.mm"},
+            {"task_id": "vstd-b", "target_file": "std/b.mm"},
+        ]
+        cache_path = tmp_path / "cache.json"
+        proliferate._cache_results(
+            cache_path,
+            specs[0],
+            {"code": "atom a(x: i64) ensures: true; body: x;\n", "verified": True},
+        )
+        config = MagicMock()
+        config.model = "gpt-test"
+        config.max_retries = 2
+        config.create_client.return_value = MagicMock()
+        harness = proliferate.HarnessMetrics.from_profile("basic")
+
+        def fake_generate_code(**kwargs):
+            spec = kwargs["spec"]
+            name = spec["target_file"].split("/")[-1].replace(".mm", "")
+            return f"atom {name}(x: i64) ensures: true; body: x;\n", True
+
+        with patch("agent.proliferate.generate_code", side_effect=fake_generate_code) as gen_mock:
+            results = proliferate._parallel_forge(
+                specs,
+                config=config,
+                mumei_client=MagicMock(),
+                harness_metrics=harness,
+                cache_path=cache_path,
+                max_workers=2,
+            )
+
+        assert [r["spec"]["task_id"] for r in results] == ["vstd-a", "vstd-b"]
+        assert results[0]["cache_hit"] is True
+        assert results[1]["verified"] is True
+        gen_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # check_blast_radius
 # ---------------------------------------------------------------------------
 
@@ -463,11 +562,23 @@ class TestProliferateDryRun:
             "math/pow.mm",
             "math/factorial.mm",
             "math/fibonacci.mm",
+            "math/extended.mm",
+            "math/extended.mm",
+            "math/extended.mm",
             "container/ring_buffer.mm",
             "container/binary_heap.mm",
+            "crypto/hash.mm",
+            "crypto/primitives.mm",
             "container/bounded_array.mm",
+            "string_utils.mm",
+            "crypto/hash.mm",
+            "crypto/primitives.mm",
             "container/sorted_map.mm",
+            "string_utils.mm",
+            "crypto/hash.mm",
+            "crypto/primitives.mm",
             "string/validator.mm",
+            "string_utils.mm",
         ):
             _write_mm(std / rel, "atom ok(x: i64) ensures: true; body: x;\n")
         _write_mm(
@@ -848,11 +959,15 @@ class TestOutputJson:
             "math/pow.mm",
             "math/factorial.mm",
             "math/fibonacci.mm",
+            "math/extended.mm",
             "container/ring_buffer.mm",
             "container/binary_heap.mm",
             "container/bounded_array.mm",
             "container/sorted_map.mm",
+            "crypto/hash.mm",
+            "crypto/primitives.mm",
             "string/validator.mm",
+            "string_utils.mm",
         ):
             _write_mm(std / rel, "atom ok(x: i64) ensures: true; body: x;\n")
         _write_mm(

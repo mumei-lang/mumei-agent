@@ -1,0 +1,79 @@
+{
+  "task_id": "vstd-crypto-primitives",
+  "target_file": "std/crypto/primitives.mm",
+  "mode": "create",
+  "priority": 10,
+  "max_retries": 8,
+  "auto_commit": false,
+  "description": "Low-level crypto primitive contracts for std/crypto that verify structural safety properties without claiming cryptographic strength. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/crypto/primitives — verified crypto primitives'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm and std/crypto/*.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT model real hashes, signatures, randomness, or timing; expose bounded deterministic witnesses and validation predicates that downstream modules can compose.",
+  "context_files": [
+    "std/core.mm",
+    "std/crypto/hash.mm",
+    "std/crypto/hmac.mm",
+    "std/crypto/signature.mm",
+    "std/string_utils.mm"
+  ],
+  "depends_on": [
+    "std/core.mm",
+    "std/crypto/hash.mm",
+    "std/string_utils.mm"
+  ],
+  "implementation_notes": [
+    "Every predicate result is an i64 boolean constrained to 0 or 1.",
+    "State clearly in comments that these are structural contracts, not cryptographic security proofs.",
+    "Use explicit byte/length bounds and avoid arrays or byte-string internals unless existing std/crypto modules already expose the same syntax."
+  ],
+  "atoms": [
+    {
+      "name": "is_valid_key_len",
+      "description": "Return 1 when a key length is inside caller-approved inclusive bounds, otherwise 0.",
+      "inputs": [
+        {"name": "key_len", "type": "i64"},
+        {"name": "min_len", "type": "i64"},
+        {"name": "max_len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "min_len >= 0 && max_len >= min_len",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_within_range", "safe_truncate"]
+    },
+    {
+      "name": "is_valid_nonce_len",
+      "description": "Validate a nonce length against a positive expected length.",
+      "inputs": [
+        {"name": "nonce_len", "type": "i64"},
+        {"name": "expected_len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "nonce_len >= 0 && expected_len > 0",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["equals", "is_valid_key_len"]
+    },
+    {
+      "name": "constant_time_eq_flag",
+      "description": "Return an i64 boolean equality witness for two bounded scalar digests. The contract is structural and does not model physical timing.",
+      "inputs": [
+        {"name": "left", "type": "i64"},
+        {"name": "right", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "left >= 0 && right >= 0",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["hash_eq_consistent", "equals"]
+    },
+    {
+      "name": "digest_len_ok",
+      "description": "Validate that a digest length is positive and no larger than a protocol cap.",
+      "inputs": [
+        {"name": "digest_len", "type": "i64"},
+        {"name": "max_digest_len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "digest_len >= 0 && max_digest_len > 0",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_valid_key_len", "hash_bucket"]
+    }
+  ],
+  "source": "vstd-roadmap",
+  "difficulty": "medium"
+}

@@ -5,7 +5,7 @@
   "priority": 7,
   "max_retries": 5,
   "auto_commit": false,
-  "description": "Lightweight string utility atoms that keep string contents opaque and expose only Z3-friendly i64 facts. This task deliberately avoids unimplemented string-theory operators: safe_truncate returns a validated length bound supplied by callers, and is_ascii classifies one ASCII code point rather than quantifying over an opaque Str. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/string_utils — verified string utilities'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only conditionals, comparisons, conjunction, disjunction, and integer constants already present in std/core.mm.",
+  "description": "Lightweight string utility atoms that keep string contents opaque and expose only Z3-friendly i64 facts for std/string expansion. This task deliberately avoids unimplemented string-theory operators: safe_truncate returns a validated length bound supplied by callers, character predicates classify one ASCII code point, and length-composition helpers operate only on caller-supplied bounds. The generated file MUST begin with a header comment block (// ======) identifying the module as 'std/string_utils — verified string utilities'. Comments must be in Japanese to match the surrounding std style. Each atom follows the convention used in std/core.mm: `atom name(params) requires: ...; ensures: ...; body: { ... };`. Do NOT invent new operators, types, or syntax — use only conditionals, comparisons, conjunction, disjunction, and integer constants already present in std/core.mm.",
   "context_files": [
     "std/core.mm",
     "std/string/validator.mm"
@@ -16,7 +16,8 @@
   "implementation_notes": [
     "Do not access Str internals or call undefined len/substring methods.",
     "safe_truncate may return max_len directly because callers provide max_len as the bound to be preserved.",
-    "is_ascii should check 0 <= code && code <= 127 and return an i64 boolean."
+    "is_ascii should check 0 <= code && code <= 127 and return an i64 boolean.",
+    "Length helpers must use caller-provided lengths and caps only; never synthesize real string concatenation."
   ],
   "atoms": [
     {
@@ -41,6 +42,32 @@
       "requires": "true",
       "ensures": "((code >= 0 && code <= 127) && result == 1) || ((code < 0 || code > 127) && result == 0)",
       "reference_patterns": ["std/core.equals", "std/string/validator.is_numeric_ascii_code"]
+    },
+    {
+      "name": "is_hex_ascii_code",
+      "description": "Return 1 when an ASCII code is a hexadecimal digit [0-9a-fA-F], otherwise 0. The boolean is encoded as i64 and uses only integer comparisons.",
+      "inputs": [
+        {"name": "code", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "code >= 0 && code <= 127",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_ascii", "is_numeric_ascii_code"]
+    },
+    {
+      "name": "bounded_concat_len",
+      "description": "Combine two caller-provided non-negative string lengths while proving the result remains within the supplied cap.",
+      "inputs": [
+        {"name": "left_len", "type": "i64"},
+        {"name": "right_len", "type": "i64"},
+        {"name": "max_len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "left_len >= 0 && right_len >= 0 && max_len >= 0 && left_len + right_len <= max_len",
+      "ensures": "result >= 0 && result <= max_len",
+      "reference_patterns": ["checked_add", "safe_truncate"]
     }
-  ]
+  ],
+  "source": "vstd-roadmap",
+  "difficulty": "low"
 }

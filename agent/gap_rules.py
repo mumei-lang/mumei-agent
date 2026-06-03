@@ -197,6 +197,50 @@ _STD_GAP_RULES: list[dict[str, Any]] = [
         "difficulty": "low",
         "trigger": {"missing": "std/string/validator.mm"},
     },
+    {
+        "target": "std/math/extended.mm",
+        "reason": (
+            "Extended arithmetic helpers such as signum, bounded square, "
+            "floor mean, and absolute distance."
+        ),
+        "depends_on": [
+            "std/core.mm",
+            "std/math/abs.mm",
+            "std/math/safe_div.mm",
+            "std/math/safe_mul.mm",
+        ],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/math/extended.mm",
+            "requires_present": [
+                "std/core.mm",
+                "std/math/abs.mm",
+                "std/math/safe_div.mm",
+                "std/math/safe_mul.mm",
+            ],
+        },
+    },
+    {
+        "target": "std/crypto/primitives.mm",
+        "reason": (
+            "Structural crypto primitive validators for key, nonce, digest, "
+            "and equality-witness safety contracts."
+        ),
+        "depends_on": [
+            "std/core.mm",
+            "std/crypto/hash.mm",
+            "std/string_utils.mm",
+        ],
+        "difficulty": "medium",
+        "trigger": {
+            "missing": "std/crypto/primitives.mm",
+            "requires_present": [
+                "std/core.mm",
+                "std/crypto/hash.mm",
+                "std/string_utils.mm",
+            ],
+        },
+    },
 ]
 
 
