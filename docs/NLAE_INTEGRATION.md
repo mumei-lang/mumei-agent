@@ -36,11 +36,15 @@ Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
 - `agent/strategies/dense_property_generator.py`: LLM-backed dense contract
   generation.
 - `agent/prompts/dense_property.py`: dense property prompt builder.
-- `agent/latent_protocol.py`: hash-based latent inter-agent protocol.
-- `agent/mcp_server.py`: exposes `send_latent_message` and `get_spec_guidelines`.
-  The latter returns decidable-fragment guidance (`outside_decidable_fragment`,
-  bounded quantifiers, explicit witnesses, and Lean escalation candidates) for
-  MCP clients that want to preflight a spec before generation.
+- `agent/latent_protocol.py`: hash-based latent inter-agent protocol with
+  compression, semantic hashing, versioned envelopes, optional encryption,
+  authentication tags, and privacy-preserving audit metadata.
+- `agent/mcp_server.py`: exposes `send_latent_message`,
+  `send_latent_message_batch`, `async_send_latent_message`, and
+  `get_spec_guidelines`. The latter returns decidable-fragment guidance
+  (`outside_decidable_fragment`, bounded quantifiers, explicit witnesses, and
+  Lean escalation candidates) for MCP clients that want to preflight a spec
+  before generation.
 
 ## Usage
 
@@ -57,12 +61,49 @@ ENABLE_LATENT_DEBUG=false ENABLE_DENSE_PROPERTIES=false python -m agent generate
 ```
 
 `send_latent_message(message, context="{}", verify=true)` accepts JSON object
-strings and returns the latent vector, decoded metadata, and optional verifier
-result.
+strings and returns the latent vector, decoded metadata, authentication status,
+audit event count, and optional verifier result.
+
+`send_latent_message_batch(messages, verify=false)` accepts a JSON array of
+objects shaped as `{"message": {...}, "context": {...}}`. The batch path keeps
+one protocol instance across items, so consecutive messages can use
+`zlib-delta` compression when they share most semantic content. Item failures
+are returned inline without aborting the whole batch.
+
+`async_send_latent_message(message, context="{}", verify=true)` mirrors
+`send_latent_message` but runs the encode/verify work off the async MCP
+transport loop.
 
 `get_spec_guidelines()` returns the proof-friendly specification checklist used
 by the generation prompts. Use it when dense properties or natural-language
 extraction produce contracts that may leave the Z3-stable fragment.
+
+## Latent Protocol Security and Privacy
+
+Latent protocol envelopes use `lp-v2` by default and retain `lp-v1`
+compatibility for older clients. Each envelope includes:
+
+- **Differential compression**: canonical JSON payloads are zlib-compressed;
+  batch and explicit previous-message paths choose `zlib-delta` when the delta
+  is smaller than the full payload. The MCP response reports raw bytes,
+  transfer bytes, and `transfer_reduction_ratio`; large structured messages are
+  expected to exceed the 50% reduction target.
+- **Semantic hash**: stable `blake2b-128` hashes ignore volatile transport
+  fields such as `timestamp`, `trace_id`, `request_id`, and `nonce` while still
+  changing when meaningful fields such as `action`, `target`, or contracts
+  change.
+- **Version management**: encoded metadata records `protocol_version`, and
+  unknown versions fail fast before transfer.
+- **Encryption**: set `LATENT_PROTOCOL_KEY` to encrypt the compressed payload
+  before vectorization. The key is never returned in MCP responses or audit
+  logs.
+- **Authentication**: every envelope is authenticated with `hmac-sha256`;
+  responses include `authentication_verified=true` when the generated vector
+  matches the stored tag.
+- **Audit logging**: set `LATENT_PROTOCOL_AUDIT_LOG=/path/to/audit.jsonl` to
+  append redacted JSONL audit events. Audit entries include protocol version,
+  semantic hash, payload hash, encryption/auth status, and transfer bytes, but
+  never plaintext message or context bodies.
 
 ## Current Scope
 

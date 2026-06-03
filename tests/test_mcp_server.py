@@ -8,6 +8,7 @@ hermetic: no LLM calls, no mumei binary required.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -43,6 +44,8 @@ class TestGetAgentStatus:
             "get_spec_guidelines",
             "extract_spec_from_code",
             "send_latent_message",
+            "send_latent_message_batch",
+            "async_send_latent_message",
         }
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
         assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
@@ -392,3 +395,59 @@ class TestSendLatentMessage:
         assert len(result["latent_vector"]) == 16
         assert result["decoded"]["decoded"] is True
         assert result["verification_result"] is None
+        assert result["authentication_verified"] is True
+
+    def test_batch_sends_messages_and_reports_item_errors(self, monkeypatch) -> None:
+        monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
+        body = "\n".join(
+            f"atom_{index}: requires x >= {index}; ensures result >= {index};"
+            for index in range(120)
+        )
+        batch = [
+            {
+                "message": {
+                    "action": "generate",
+                    "target": "proof_block",
+                    "body": body,
+                },
+                "context": {"domain": "stdlib"},
+            },
+            {
+                "message": {
+                    "action": "generate",
+                    "target": "proof_block",
+                    "body": body.replace(
+                        "ensures result >= 119",
+                        "ensures result >= 120",
+                    ),
+                },
+                "context": {"domain": "stdlib"},
+            },
+            "bad item",
+        ]
+
+        result = _payload(
+            mcp_server.send_latent_message_batch(json.dumps(batch), verify=False)
+        )
+
+        assert result["status"] == "ok"
+        assert result["sent"] == 2
+        assert result["failed"] == 1
+        assert result["results"][1]["decoded"]["compression_mode"] == "zlib-delta"
+        assert result["average_transfer_reduction_ratio"] >= 0.5
+
+    def test_async_send_latent_message(self, monkeypatch) -> None:
+        monkeypatch.setenv("ENABLE_LATENT_PROTOCOL", "true")
+
+        result = _payload(
+            asyncio.run(
+                mcp_server.async_send_latent_message(
+                    json.dumps({"action": "generate"}),
+                    context=json.dumps({"domain": "arithmetic"}),
+                    verify=False,
+                )
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert len(result["latent_vector"]) == 16
