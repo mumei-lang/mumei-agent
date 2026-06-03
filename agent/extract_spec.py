@@ -86,6 +86,15 @@ def _natural_language_contradiction_report(verify_result: dict) -> str:
             for key in ("message", "details", "suggested_fix"):
                 if feedback.get(key):
                     return str(feedback[key])
+        failed = report.get("failed")
+        failed_count = failed if isinstance(failed, int) else 0
+        if report.get("status") == "failed" or failed_count > 0:
+            count = str(failed_count) if failed_count else "one or more"
+            return (
+                "SpecValidation failed for the synthesized specification: "
+                f"Mumei reported {count} failed atom(s) while checking extracted contracts. "
+                "At least one extracted requires/ensures clause is unsatisfiable or internally inconsistent."
+            )
     stderr = str(verify_result.get("stderr") or "").strip()
     stdout = str(verify_result.get("stdout") or "").strip()
     combined = "\n".join(part for part in [stderr, stdout] if part)

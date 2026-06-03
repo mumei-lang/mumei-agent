@@ -67,6 +67,39 @@ def test_check_spec_contradiction_from_spec_builds_temporary_trusted_atoms() -> 
     assert "trusted atom impossible_x" in captured["source"]
 
 
+def test_check_spec_contradiction_from_spec_handles_failed_json_summary() -> None:
+    spec = {
+        "atoms": [
+            {
+                "name": "impossible_x",
+                "inputs": [{"name": "x", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "x > 0 && x < 0",
+                "ensures": "result == x",
+            }
+        ]
+    }
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {
+            "status": "failed",
+            "verified": 0,
+            "failed": 1,
+            "skipped": 0,
+            "escalation_candidates": 0,
+        },
+        "stdout": '{\n  "status": "failed",\n  "failed": 1\n}\n',
+        "stderr": "",
+    }
+
+    result = check_spec_contradiction_from_spec(spec, mumei)
+
+    assert result["contradiction_found"] is True
+    assert "SpecValidation failed" in result["natural_language_explanation"]
+    assert "1 failed atom" in result["natural_language_explanation"]
+
+
 def test_extract_spec_cli_check_contradiction_only_writes_report(tmp_path: Path) -> None:
     output = tmp_path / "contradiction.json"
     spec = {
