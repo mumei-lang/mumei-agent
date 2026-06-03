@@ -71,6 +71,53 @@ def test_update_history_keeps_latest_rows(tmp_path):
     assert "| 2026-05-02 | new-model | 1.000 | 10.0 | 0.500 |" in text
 
 
+def test_update_history_preserves_other_benchmark_sections(tmp_path):
+    benchmark = tmp_path / "benchmark.json"
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    benchmark.write_text(
+        json.dumps({
+            "results": [
+                {
+                    "model": "new-model",
+                    "success_rate": 1,
+                    "avg_code_length": 10,
+                    "avg_time_seconds": 0.5,
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "## Recommended model policy",
+            "",
+            "- Keep this policy note.",
+            "",
+            "## Generation Benchmark Runs",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+            "|------|-------|--------------|-----------------|-------------:|",
+            "| 2026-05-01 | old-model | 0.200 | 2.0 | 2.000 |",
+            "",
+            "## SV-COMP Style Benchmarks",
+            "",
+            "| Date | Model | Success Rate | Avg Time (ms) | Category |",
+            "|------|-------|--------------|---------------|----------|",
+            "| 2026-05-01 | svcomp-model | 0.900 | 100 | svcomp |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    update_history(benchmark, history, date="2026-05-02")
+    text = history.read_text(encoding="utf-8")
+
+    assert "- Keep this policy note." in text
+    assert "| 2026-05-02 | new-model | 1.000 | 10.0 | 0.500 |" in text
+    assert "| 2026-05-01 | svcomp-model | 0.900 | 100 | svcomp |" in text
+
+
 def test_parse_history_rows_unescapes_pipe_cells(tmp_path):
     history = tmp_path / "BENCHMARK_HISTORY.md"
     history.write_text(

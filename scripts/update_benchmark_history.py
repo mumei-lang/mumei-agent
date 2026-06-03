@@ -9,11 +9,13 @@ from typing import Any
 
 DEFAULT_BENCHMARK_PATH = Path("/tmp/proliferate/benchmark.json")
 DEFAULT_HISTORY_PATH = Path(__file__).resolve().parents[1] / "docs" / "BENCHMARK_HISTORY.md"
-HEADER = [
+DOCUMENT_HEADER = [
     "# LLM Benchmark History",
     "",
     "Time-series summary of proliferate LLM benchmark runs. The table is kept to the latest 50 rows.",
     "",
+]
+GENERATION_SECTION_HEADER = [
     "## Generation Benchmark Runs",
     "",
     "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
@@ -99,7 +101,74 @@ def update_history(
 
     rows = (_table_rows(history_path) + new_rows)[-max_rows:]
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    history_path.write_text("\n".join(HEADER + rows) + "\n", encoding="utf-8")
+    generation_section = GENERATION_SECTION_HEADER + rows
+
+    if not history_path.exists():
+        lines = DOCUMENT_HEADER + generation_section
+    else:
+        existing = history_path.read_text(encoding="utf-8").splitlines()
+        try:
+            start = existing.index("## Generation Benchmark Runs")
+        except ValueError:
+            legacy_start = next(
+                (
+                    idx
+                    for idx, line in enumerate(existing)
+                    if line
+                    in {
+                        "| Date | Model | Success Rate | Avg Code Length |",
+                        "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+                    }
+                ),
+                None,
+            )
+            if legacy_start is not None:
+                section_start = legacy_start
+                while section_start > 0 and existing[section_start - 1] == "":
+                    section_start -= 1
+                section_end = next(
+                    (
+                        idx
+                        for idx in range(legacy_start + 1, len(existing))
+                        if existing[idx].startswith("## ")
+                    ),
+                    len(existing),
+                )
+                suffix = existing[section_end:]
+                lines = (
+                    existing[:section_start]
+                    + generation_section
+                    + ([""] if suffix else [])
+                    + suffix
+                )
+            else:
+                insert_at = next(
+                    (idx for idx, line in enumerate(existing) if line.startswith("## ")),
+                    len(existing),
+                )
+                prefix = existing[:insert_at]
+                suffix = existing[insert_at:]
+                if prefix and prefix[-1] != "":
+                    prefix.append("")
+                lines = prefix + generation_section + ([""] if suffix else []) + suffix
+        else:
+            end = next(
+                (
+                    idx
+                    for idx in range(start + 1, len(existing))
+                    if existing[idx].startswith("## ")
+                ),
+                len(existing),
+            )
+            suffix = existing[end:]
+            lines = (
+                existing[:start]
+                + generation_section
+                + ([""] if suffix else [])
+                + suffix
+            )
+
+    history_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return len(new_rows)
 
 
