@@ -133,6 +133,61 @@ def test_mcp_check_spec_contradiction_delegates_to_extract_spec() -> None:
     )
 
 
+def test_mcp_extract_spec_contradiction_only_uses_mumei_repo_binary(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "mumei"
+    debug_bin = repo / "target" / "debug" / "mumei"
+    debug_bin.parent.mkdir(parents=True)
+    debug_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    fake_config = MagicMock()
+    fake_config.model = "m"
+    fake_config.mumei_bin = "configured-mumei"
+    fake_config.create_client.return_value = MagicMock()
+    mumei = MagicMock()
+    spec = {
+        "task_id": "impossible",
+        "target_file": "std/impossible.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "impossible_x",
+                "description": "Impossible bounds",
+                "inputs": [{"name": "x", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "x > 0 && x < 0",
+                "ensures": "result == x",
+                "effects": [],
+            }
+        ],
+    }
+
+    with patch("agent.config.AgentConfig", return_value=fake_config), patch(
+        "agent.mumei_client.create_mumei_client", return_value=mumei
+    ) as mock_create_mumei, patch(
+        "agent.spec_extractor.extract_spec", return_value=spec
+    ), patch(
+        "agent.extract_spec.check_spec_contradiction_from_spec",
+        return_value={
+            "contradiction_found": True,
+            "natural_language_explanation": "The spec is contradictory.",
+            "verification": {"success": False},
+        },
+    ):
+        payload = _payload(
+            mcp_server.extract_spec(
+                "矛盾仕様",
+                mumei_repo=str(repo),
+                check_contradiction_only=True,
+            )
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["contradiction_found"] is True
+    mock_create_mumei.assert_called_once_with(str(debug_bin))
+
+
 def test_mcp_check_cross_spec_consistency_reads_report(tmp_path: Path) -> None:
     first = tmp_path / "a.mm"
     second = tmp_path / "b.mm"

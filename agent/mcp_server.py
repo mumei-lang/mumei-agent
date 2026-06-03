@@ -824,8 +824,9 @@ def extract_spec(
         domain_hint: Optional domain (e.g., "financial", "security").
         generate: When true, also generate and verify the code via the
             configured ``mumei`` binary (``AgentConfig.mumei_bin``).
-        mumei_repo: Path to mumei repo (used when generate=true to prefer
-            a repo-local target/debug or target/release mumei binary).
+        mumei_repo: Path to mumei repo (used by generate=true or
+            check_contradiction_only=true to prefer a repo-local
+            target/debug or target/release mumei binary).
         check_contradiction_only: When true, extract the spec and run only
             direct contradiction detection without code generation.
 
@@ -860,7 +861,7 @@ def extract_spec(
         )
 
     mumei_bin = config.mumei_bin
-    if generate and mumei_repo:
+    if (generate or check_contradiction_only) and mumei_repo:
         repo = _resolve_repo(mumei_repo)
         if not repo.exists():
             return _err(f"mumei_repo does not exist: {repo}")
