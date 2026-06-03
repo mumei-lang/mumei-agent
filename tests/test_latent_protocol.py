@@ -73,6 +73,7 @@ def test_version_aware_encode_reports_compression_and_security_metadata() -> Non
 
     assert decoded["protocol_version"] == "lp-v2"
     assert decoded["encrypted"] is True
+    assert decoded["encryption"] == "aes-256-gcm"
     assert decoded["authentication"] == "hmac-sha256"
     assert protocol.verify_authentication_tag(latent_vector) is True
     assert decoded["transfer_reduction_ratio"] >= 0.5

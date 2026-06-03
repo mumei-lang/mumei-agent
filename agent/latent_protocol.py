@@ -4,12 +4,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import tempfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent.mumei_client import MumeiClient
 
@@ -34,6 +36,7 @@ class LatentProtocol:
     CURRENT_VERSION = "lp-v2"
     SUPPORTED_VERSIONS = {"lp-v1", "lp-v2"}
     VECTOR_DIM = 16
+    AEAD_NONCE_BYTES = 12
     VOLATILE_SEMANTIC_KEYS = {
         "id",
         "request_id",
@@ -158,6 +161,7 @@ class LatentProtocol:
             "body_hash": body_hash,
             "compression_mode": compression.mode,
             "encrypted": self.encryption_key is not None,
+            "encryption": "aes-256-gcm" if self.encryption_key is not None else "none",
             "payload_hash": payload_hash,
             "protocol_version": version,
             "semantic_hash": semantic_hash,
@@ -191,6 +195,7 @@ class LatentProtocol:
             "decoded": True,
             "encoded_frame": encoded_frame,
             "encrypted": self.encryption_key is not None,
+            "encryption": "aes-256-gcm" if self.encryption_key is not None else "none",
             "latent_dim": self.VECTOR_DIM,
             "payload_hash": payload_hash,
             "protocol_version": version,
@@ -308,8 +313,10 @@ atom placeholder() -> bool
     def _encrypt(self, body: bytes) -> bytes:
         if self.encryption_key is None:
             return body
-        key_stream = hashlib.sha256(self.encryption_key).digest()
-        return bytes(byte ^ key_stream[index % len(key_stream)] for index, byte in enumerate(body))
+        aesgcm = AESGCM(hashlib.sha256(self.encryption_key).digest())
+        nonce = os.urandom(self.AEAD_NONCE_BYTES)
+        associated_data = f"mumei-agent:{self.version}".encode("utf-8")
+        return nonce + aesgcm.encrypt(nonce, body, associated_data)
 
     def _auth_key(self) -> bytes:
         if self.encryption_key is not None:
@@ -347,7 +354,9 @@ atom placeholder() -> bool
         return value
 
     def _vector_key(self, latent_vector: np.ndarray) -> str:
-        return hashlib.sha256(np.asarray(latent_vector, dtype=np.float32).tobytes()).hexdigest()
+        return hashlib.sha256(
+            np.asarray(latent_vector, dtype=np.float32).tobytes(),
+        ).hexdigest()
 
     def _common_prefix_len(self, left: bytes, right: bytes) -> int:
         limit = min(len(left), len(right))

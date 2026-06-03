@@ -95,8 +95,8 @@ compatibility for older clients. Each envelope includes:
 - **Version management**: encoded metadata records `protocol_version`, and
   unknown versions fail fast before transfer.
 - **Encryption**: set `LATENT_PROTOCOL_KEY` to encrypt the compressed payload
-  before vectorization. The key is never returned in MCP responses or audit
-  logs.
+  with AES-256-GCM before vectorization. The key is never returned in MCP
+  responses or audit logs.
 - **Authentication**: every envelope is authenticated with `hmac-sha256`;
   responses include `authentication_verified=true` when the generated vector
   matches the stored tag.
