@@ -25,6 +25,7 @@ Running the server::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -553,18 +554,7 @@ def get_agent_status() -> str:
             "mumei_bin": config.mumei_bin,
             "strategy": config.strategy,
             "subcommands": subcommands,
-            "mcp_tools": [
-                "forge_task",
-                "heal_file",
-                "measure_std_health",
-                "propose_forge_tasks",
-                "list_forge_log",
-                "get_agent_status",
-                "get_spec_guidelines",
-                "extract_spec",
-                "extract_spec_from_code",
-                "send_latent_message",
-            ],
+            "mcp_tools": sorted(mcp._tool_manager._tools),
             "feature_flags": {
                 "PREFER_MCP_GAPS": os.environ.get("PREFER_MCP_GAPS", ""),
                 "USE_MCP_CLIENT": os.environ.get("USE_MCP_CLIENT", ""),
@@ -594,58 +584,207 @@ def send_latent_message(
         context: Optional JSON object string for surrounding context.
         verify: When true, verify a Mumei representation of the latent vector.
     """
+    message_dict, message_error = _json_object_arg(message, "message")
+    if message_error is not None:
+        return _err(message_error)
+
+    context_dict, context_error = _json_object_arg(context, "context")
+    if context_error is not None:
+        return _err(context_error)
+
+    runtime, runtime_error = _latent_runtime()
+    if runtime_error is not None:
+        return _err(runtime_error, hint="set ENABLE_LATENT_PROTOCOL=true in .env")
+
+    try:
+        return _ok(
+            _encode_latent_payload(
+                runtime,
+                message_dict,
+                context_dict,
+                verify=verify,
+            )
+        )
+    except Exception as exc:
+        logger.exception("send_latent_message failed")
+        return _err(f"latent send failed: {exc}", error_type=type(exc).__name__)
+
+
+@mcp.tool()
+def send_latent_message_batch(messages: str, verify: bool = False) -> str:
+    """Send multiple latent messages through one protocol instance."""
+    try:
+        batch = json.loads(messages)
+    except json.JSONDecodeError as exc:
+        return _err(f"messages is not valid JSON: {exc}")
+    if not isinstance(batch, list):
+        return _err("messages must decode to a JSON array")
+
+    runtime, runtime_error = _latent_runtime()
+    if runtime_error is not None:
+        return _err(runtime_error, hint="set ENABLE_LATENT_PROTOCOL=true in .env")
+
+    results: list[dict[str, Any]] = []
+    previous_message: dict[str, Any] | None = None
+    previous_context: dict[str, Any] | None = None
+    total_transfer_bytes = 0
+    total_reduction = 0.0
+    sent = 0
+
+    for index, item in enumerate(batch):
+        if not isinstance(item, dict):
+            results.append(
+                {
+                    "index": index,
+                    "status": "error",
+                    "error": "batch item must be a JSON object",
+                }
+            )
+            continue
+
+        raw_message = item.get("message", item)
+        raw_context = item.get("context", {})
+        message_dict, message_error = _json_object_arg(raw_message, "message")
+        context_dict, context_error = _json_object_arg(raw_context, "context")
+        if message_error is not None or context_error is not None:
+            results.append(
+                {
+                    "index": index,
+                    "status": "error",
+                    "error": message_error or context_error,
+                }
+            )
+            continue
+
+        item_verify = bool(item.get("verify", verify))
+        try:
+            payload = _encode_latent_payload(
+                runtime,
+                message_dict,
+                context_dict,
+                verify=item_verify,
+                previous_message=previous_message,
+                previous_context=previous_context,
+            )
+        except Exception as exc:
+            logger.exception("send_latent_message_batch item failed")
+            results.append(
+                {
+                    "index": index,
+                    "status": "error",
+                    "error": f"latent send failed: {exc}",
+                    "error_type": type(exc).__name__,
+                }
+            )
+            continue
+
+        payload["index"] = index
+        results.append(payload)
+        previous_message = message_dict
+        previous_context = context_dict
+        sent += 1
+        decoded = payload["decoded"]
+        total_transfer_bytes += int(decoded["transfer_bytes"])
+        total_reduction += float(decoded["transfer_reduction_ratio"])
+
+    failed = len(batch) - sent
+    average_reduction = total_reduction / sent if sent else 0.0
+    return _ok(
+        {
+            "batch_size": len(batch),
+            "failed": failed,
+            "results": results,
+            "sent": sent,
+            "total_transfer_bytes": total_transfer_bytes,
+            "average_transfer_reduction_ratio": average_reduction,
+        }
+    )
+
+
+@mcp.tool()
+async def async_send_latent_message(
+    message: str,
+    context: str = "{}",
+    verify: bool = True,
+) -> str:
+    """Asynchronously send a latent message without blocking MCP transport."""
+    return await asyncio.to_thread(send_latent_message, message, context, verify)
+
+
+def _json_object_arg(value: Any, name: str) -> tuple[dict[str, Any], str | None]:
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            return {}, f"{name} is not valid JSON: {exc}"
+    else:
+        decoded = value
+    if not isinstance(decoded, dict):
+        return {}, f"{name} must decode to a JSON object"
+    return decoded, None
+
+
+def _latent_runtime() -> tuple[dict[str, Any], str | None]:
     try:
         from agent.config import AgentConfig
         from agent.latent_protocol import LatentProtocol
         from agent.mumei_client import create_mumei_client
     except Exception as exc:
-        return _err(f"failed to import agent modules: {exc}")
-
-    try:
-        message_dict = json.loads(message)
-    except json.JSONDecodeError as exc:
-        return _err(f"message is not valid JSON: {exc}")
-    if not isinstance(message_dict, dict):
-        return _err("message must decode to a JSON object")
-
-    try:
-        context_dict = json.loads(context)
-    except json.JSONDecodeError:
-        context_dict = {}
-    if not isinstance(context_dict, dict):
-        context_dict = {}
+        return {}, f"failed to import agent modules: {exc}"
 
     try:
         config = AgentConfig()
     except Exception as exc:
-        return _err(f"AgentConfig() failed: {exc}")
+        return {}, f"AgentConfig() failed: {exc}"
     if not config.enable_latent_protocol:
-        return _err(
-            "ENABLE_LATENT_PROTOCOL is not enabled",
-            hint="set ENABLE_LATENT_PROTOCOL=true in .env",
-        )
+        return {}, "ENABLE_LATENT_PROTOCOL is not enabled"
 
-    protocol = LatentProtocol()
-    latent_vector = protocol.encode_message(message_dict, context_dict)
+    protocol = LatentProtocol(
+        encryption_key=os.environ.get("LATENT_PROTOCOL_KEY") or None,
+        audit_log_path=os.environ.get("LATENT_PROTOCOL_AUDIT_LOG") or None,
+    )
+    return {
+        "config": config,
+        "create_mumei_client": create_mumei_client,
+        "protocol": protocol,
+    }, None
+
+
+def _encode_latent_payload(
+    runtime: dict[str, Any],
+    message_dict: dict[str, Any],
+    context_dict: dict[str, Any],
+    *,
+    verify: bool,
+    previous_message: dict[str, Any] | None = None,
+    previous_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    protocol = runtime["protocol"]
+    config = runtime["config"]
+    latent_vector = protocol.encode_message(
+        message_dict,
+        context_dict,
+        previous_message=previous_message,
+        previous_context=previous_context,
+    )
 
     verification_result = None
     if verify:
-        try:
-            mumei_client = create_mumei_client(config.mumei_bin)
-            verification_result = protocol.verify_message(
-                latent_vector,
-                mumei_client,
-            )
-        except Exception as exc:
-            return _err(f"verification failed: {exc}")
+        create_mumei_client = runtime["create_mumei_client"]
+        mumei_client = create_mumei_client(config.mumei_bin)
+        verification_result = protocol.verify_message(
+            latent_vector,
+            mumei_client,
+        )
 
-    return _ok(
-        {
-            "latent_vector": latent_vector.tolist(),
-            "decoded": protocol.decode_message(latent_vector),
-            "verification_result": verification_result,
-        }
-    )
+    return {
+        "status": "ok",
+        "latent_vector": latent_vector.tolist(),
+        "decoded": protocol.decode_message(latent_vector),
+        "verification_result": verification_result,
+        "authentication_verified": protocol.verify_authentication_tag(latent_vector),
+        "audit_events": len(protocol.audit_log),
+    }
 
 
 @mcp.tool()
