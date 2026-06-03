@@ -259,11 +259,20 @@ class TestGenerateSpecsFromGaps:
 
 
 class TestForgeOptimisationHelpers:
+    def test_forge_cache_path_uses_ignored_mumei_dir(self, tmp_path: Path) -> None:
+        assert proliferate._forge_cache_path(tmp_path) == (
+            tmp_path / ".mumei" / "proliferate_forge_cache.json"
+        )
+
     def test_detect_diffs_reports_unchanged_and_changed(self, tmp_path: Path) -> None:
         target = tmp_path / "std" / "math" / "extended.mm"
         _write_mm(target, "atom same(x: i64) ensures: true; body: x;\n")
 
-        same = proliferate._detect_diffs(tmp_path, "std/math/extended.mm", target.read_text(encoding="utf-8"))
+        same = proliferate._detect_diffs(
+            tmp_path,
+            "std/math/extended.mm",
+            target.read_text(encoding="utf-8"),
+        )
         assert same["exists"] is True
         assert same["changed"] is False
         assert same["old_sha256"] == same["new_sha256"]
@@ -291,6 +300,19 @@ class TestForgeOptimisationHelpers:
         assert cached is not None
         assert cached["code"] == code
         assert cached["verified"] is True
+
+    def test_cache_key_tracks_context_file_changes(self, tmp_path: Path) -> None:
+        _write_mm(tmp_path / "std" / "core.mm", "atom a(x: i64) ensures: true; body: x;\n")
+        spec = {
+            "task_id": "vstd-x",
+            "target_file": "std/x.mm",
+            "context_files": ["std/core.mm"],
+        }
+
+        before = proliferate._spec_cache_key(spec, tmp_path)
+        _write_mm(tmp_path / "std" / "core.mm", "atom b(x: i64) ensures: true; body: x;\n")
+
+        assert proliferate._spec_cache_key(spec, tmp_path) != before
 
     def test_parallel_forge_preserves_order_and_uses_cache(self, tmp_path: Path) -> None:
         specs = [

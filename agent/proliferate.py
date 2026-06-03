@@ -324,24 +324,61 @@ def attempt_heal(
 # Main proliferate loop
 # ---------------------------------------------------------------------------
 
-def _spec_cache_key(spec: dict[str, Any]) -> str:
-    payload = json.dumps(spec, sort_keys=True, ensure_ascii=False, default=str)
+def _safe_relative_file(repo_dir: Path, rel_path: str) -> Path | None:
+    candidate = (repo_dir / rel_path).resolve()
+    try:
+        candidate.relative_to(repo_dir.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _spec_cache_key(
+    spec: dict[str, Any],
+    mumei_repo_dir: Path | None = None,
+) -> str:
+    payload_obj: dict[str, Any] = {"spec": spec}
+    if mumei_repo_dir is not None:
+        context_hashes: dict[str, str | None] = {}
+        rel_paths: set[str] = set()
+        for key in ("target_file",):
+            value = spec.get(key)
+            if isinstance(value, str):
+                rel_paths.add(value)
+        for key in ("context_files", "depends_on"):
+            value = spec.get(key)
+            if isinstance(value, list):
+                rel_paths.update(item for item in value if isinstance(item, str))
+        for rel_path in sorted(rel_paths):
+            candidate = _safe_relative_file(mumei_repo_dir, rel_path)
+            if candidate is not None and candidate.is_file():
+                try:
+                    context_hashes[rel_path] = hashlib.sha256(
+                        candidate.read_bytes()
+                    ).hexdigest()
+                except OSError:
+                    context_hashes[rel_path] = None
+            else:
+                context_hashes[rel_path] = None
+        payload_obj["context_hashes"] = context_hashes
+    payload = json.dumps(payload_obj, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _forge_cache_path(mumei_repo_dir: Path) -> Path:
-    return mumei_repo_dir / ".mumei_agent" / "proliferate_forge_cache.json"
+    return mumei_repo_dir / ".mumei" / "proliferate_forge_cache.json"
 
 
 def _cache_results(
     cache_path: str | Path,
     spec: dict[str, Any],
     result: dict[str, Any] | None = None,
+    mumei_repo_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Read or write a verified forge result cache entry for *spec*."""
     with _FORGE_CACHE_LOCK:
         path = Path(cache_path)
-        key = _spec_cache_key(spec)
+        key = _spec_cache_key(spec, mumei_repo_dir)
         cache: dict[str, Any] = {}
         if path.exists():
             try:
@@ -428,6 +465,7 @@ def _run_forge_generation(
     config: AgentConfig,
     mumei_client: MumeiClient,
     cache_path: Path,
+    mumei_repo_dir: Path | None = None,
 ) -> tuple[int, dict[str, Any], Metrics]:
     target_file = spec.get("target_file", "unknown.mm")
     thought = ThoughtProcess(target_file=str(target_file))
@@ -438,7 +476,7 @@ def _run_forge_generation(
     }
     generation_metrics = Metrics()
 
-    cached = _cache_results(cache_path, spec)
+    cached = _cache_results(cache_path, spec, mumei_repo_dir=mumei_repo_dir)
     if cached and cached.get("verified") and cached.get("code"):
         spec_result["code"] = cached["code"]
         spec_result["verified"] = True
@@ -481,7 +519,7 @@ def _run_forge_generation(
         _log_info(f"Forged {target_file}: verified=True")
         spec_result["code"] = code
         spec_result["verified"] = verified
-        _cache_results(cache_path, spec, spec_result)
+        _cache_results(cache_path, spec, spec_result, mumei_repo_dir=mumei_repo_dir)
 
     if not spec_result.get("verified"):
         try:
@@ -506,6 +544,7 @@ def _parallel_forge(
     mumei_client: MumeiClient,
     harness_metrics: HarnessMetrics,
     cache_path: str | Path,
+    mumei_repo_dir: Path | None = None,
     max_workers: int | None = None,
 ) -> list[dict[str, Any]]:
     """Generate forge candidates concurrently and preserve input order."""
@@ -521,6 +560,7 @@ def _parallel_forge(
             config=config,
             mumei_client=mumei_client,
             cache_path=path,
+            mumei_repo_dir=mumei_repo_dir,
         )
         success = bool(result.get("verified"))
         harness_metrics.record_result(
@@ -993,6 +1033,7 @@ def proliferate(
         mumei_client=mumei_client,
         harness_metrics=harness_metrics,
         cache_path=_forge_cache_path(mumei_repo),
+        mumei_repo_dir=mumei_repo,
         max_workers=parallel_forge_workers,
     )
 
