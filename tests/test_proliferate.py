@@ -923,12 +923,14 @@ class TestOutputJson:
         assert data["lean_fallback_proved"] == 1
         assert data["lean_fallback_failed"] == 1
         assert data["lean_fallback_success_rate"] == 0.5
-        assert data["lean_fallback_metrics"] == {
-            "lean_fallback_attempted": 2,
-            "lean_fallback_proved": 1,
-            "lean_fallback_failed": 1,
-            "lean_fallback_success_rate": 0.5,
-        }
+        metrics = data["lean_fallback_metrics"]
+        assert metrics["lean_fallback_attempted"] == 2
+        assert metrics["lean_fallback_proved"] == 1
+        assert metrics["lean_fallback_failed"] == 1
+        assert metrics["lean_fallback_success_rate"] == 0.5
+        assert metrics["lean_fallback_attempted_specs"] == 1
+        assert metrics["lean_fallback_error_code_counts"] == {}
+        assert metrics["lean_fallback_duration_seconds"]["count"] == 0
 
     def test_no_std_writes_summary_json(self, tmp_path: Path) -> None:
         out_path = tmp_path / "summary.json"
