@@ -157,8 +157,10 @@ def _classify_bridge_failure(
         or "failed to import" in combined
         or "cannot find module" in combined
         or "unknown module" in combined
-        or ".olean" in combined
-        and ("does not exist" in combined or "no such file" in combined)
+        or (
+            ".olean" in combined
+            and ("does not exist" in combined or "no such file" in combined)
+        )
     ):
         error_code = "import_error"
         diagnostics.append(
@@ -183,8 +185,7 @@ def _classify_bridge_failure(
         or "omega could not" in combined
         or "simp made no progress" in combined
         or "proof search failed" in combined
-        or "mumei_arith" in combined
-        and "failed" in combined
+        or ("mumei_arith" in combined and "failed" in combined)
     ):
         error_code = "tactic_failed"
         diagnostics.append(
@@ -264,6 +265,81 @@ def _load_json_file(path: str | Path) -> dict[str, Any] | None:
 
 def _module_source_path(repo_path: Path, module: str) -> Path:
     return repo_path / Path(*module.split(".")).with_suffix(".lean")
+
+
+def _atom_names_with_result(cert: dict[str, Any], result: str) -> set[str]:
+    names: set[str] = set()
+
+    def _consume(payload: dict[str, Any]) -> None:
+        atoms = payload.get("atoms")
+        if isinstance(atoms, list):
+            for atom in atoms:
+                if (
+                    isinstance(atom, dict)
+                    and atom.get("z3_check_result") == result
+                    and isinstance(atom.get("name"), str)
+                ):
+                    names.add(atom["name"])
+        modules = payload.get("modules")
+        if isinstance(modules, dict):
+            for module_cert in modules.values():
+                if isinstance(module_cert, dict):
+                    _consume(module_cert)
+
+    _consume(cert)
+    return names
+
+
+def _upgrade_atoms_by_name(
+    cert: dict[str, Any],
+    proved_names: set[str],
+    *,
+    strategy: str | None = None,
+) -> dict[str, Any]:
+    upgraded: dict[str, Any] = json.loads(json.dumps(cert))
+
+    def _consume(payload: dict[str, Any]) -> None:
+        atoms = payload.get("atoms")
+        if isinstance(atoms, list):
+            for atom in atoms:
+                if (
+                    isinstance(atom, dict)
+                    and atom.get("name") in proved_names
+                    and atom.get("z3_check_result") == "unknown"
+                ):
+                    atom["z3_check_result"] = "lean_verified"
+                    atom["status"] = "verified"
+                    if strategy is not None:
+                        atom["lean_fallback_strategy"] = strategy
+            if atoms:
+                payload["all_verified"] = all(
+                    isinstance(atom, dict)
+                    and atom.get("z3_check_result") in {"unsat", "lean_verified"}
+                    for atom in atoms
+                )
+        modules = payload.get("modules")
+        if isinstance(modules, dict):
+            for module_cert in modules.values():
+                if isinstance(module_cert, dict):
+                    _consume(module_cert)
+
+    _consume(upgraded)
+    return upgraded
+
+
+def _unknowns_verified_in_cert(
+    original_cert: dict[str, Any] | None,
+    upgraded_cert: dict[str, Any] | None,
+) -> tuple[bool, bool]:
+    if original_cert is None or upgraded_cert is None:
+        return False, False
+    unknown_names = _atom_names_with_result(original_cert, "unknown")
+    if not unknown_names:
+        return False, False
+    verified_names = _atom_names_with_result(upgraded_cert, "lean_verified")
+    proved_any = bool(unknown_names.intersection(verified_names))
+    proved_all = unknown_names.issubset(verified_names)
+    return proved_all, proved_any and not proved_all
 
 
 def _verify_known_witnesses(
@@ -375,23 +451,11 @@ def _verify_known_witnesses(
                 extra={"fallback_strategy": "known_witness_module"},
             )
 
-    witness_cert = json.loads(json.dumps(cert))
-    atoms = witness_cert.get("atoms")
-    if isinstance(atoms, list):
-        for atom in atoms:
-            if (
-                isinstance(atom, dict)
-                and atom.get("name") in witness_names
-                and atom.get("z3_check_result") == "unknown"
-            ):
-                atom["z3_check_result"] = "lean_verified"
-                atom["status"] = "verified"
-                atom["lean_fallback_strategy"] = "known_witness_module"
-        witness_cert["all_verified"] = all(
-            isinstance(atom, dict)
-            and atom.get("z3_check_result") in {"unsat", "lean_verified"}
-            for atom in atoms
-        )
+    witness_cert = _upgrade_atoms_by_name(
+        cert,
+        set(witness_names),
+        strategy="known_witness_module",
+    )
 
     verified_count = len(witness_names)
     diagnostics.append(
@@ -459,26 +523,49 @@ def _combine_with_witness_fallback(
         witness.get("duration_seconds") or 0.0
     )
     witness_success = bool(witness.get("success"))
-    lean_cert = witness.get("lean_cert") or primary.get("lean_cert")
+    primary_cert = primary.get("lean_cert")
+    if not isinstance(primary_cert, dict):
+        primary_cert = _load_json_file(cert_path)
+    witness_cert = witness.get("lean_cert")
+    if isinstance(primary_cert, dict) and isinstance(witness_cert, dict):
+        lean_cert: dict[str, Any] | None = merge_lean_cert_into_proof_cert(
+            primary_cert,
+            witness_cert,
+        )
+    elif isinstance(witness_cert, dict):
+        lean_cert = witness_cert
+    elif isinstance(primary_cert, dict):
+        lean_cert = primary_cert
+    else:
+        lean_cert = None
+    original_cert = _load_json_file(cert_path)
+    combined_success, partial_success = _unknowns_verified_in_cert(
+        original_cert,
+        lean_cert,
+    )
     return _result(
-        success=witness_success,
-        returncode=0 if witness_success else int(primary.get("returncode", -1)),
+        success=combined_success,
+        returncode=0 if combined_success else int(primary.get("returncode", -1)),
         lean_cert_path=None,
-        lean_cert=lean_cert if isinstance(lean_cert, dict) else None,
+        lean_cert=lean_cert,
         stdout=stdout,
         stderr=stderr,
         error_code=(
             None
-            if witness_success
+            if combined_success
             else str(witness.get("error_code") or primary_error)
         ),
         diagnostics=diagnostics,
         duration_seconds=duration,
-        retryable=False if witness_success else bool(primary.get("retryable")),
+        retryable=(
+            False
+            if combined_success
+            else bool(primary.get("retryable") or witness.get("retryable"))
+        ),
         extra={
             "primary_error_code": primary_error,
             "fallback_strategy": witness.get("fallback_strategy"),
-            "partial_success": bool(witness.get("partial_success")),
+            "partial_success": partial_success,
             "strategy_attempts": [
                 {
                     "name": "generated_bridge",
@@ -489,6 +576,7 @@ def _combine_with_witness_fallback(
                     "name": "known_witness_module",
                     "success": witness_success,
                     "error_code": witness.get("error_code"),
+                    "proved": witness.get("known_witness_verified"),
                 },
             ],
         },
@@ -708,34 +796,8 @@ def merge_lean_cert_into_proof_cert(
     ``lean_cert_schema_version`` fields (when present in *lean_cert*)
     and recomputes ``all_verified`` over the upgraded atom list.
     """
-    upgraded: dict[str, Any] = json.loads(json.dumps(original_cert))
-
-    proved_names: set[str] = set()
-    if isinstance(lean_cert, dict):
-        for atom in lean_cert.get("atoms", []) or []:
-            if (
-                isinstance(atom, dict)
-                and atom.get("z3_check_result") == "lean_verified"
-                and isinstance(atom.get("name"), str)
-            ):
-                proved_names.add(atom["name"])
-
-    atoms = upgraded.get("atoms")
-    if isinstance(atoms, list):
-        for atom in atoms:
-            if (
-                isinstance(atom, dict)
-                and atom.get("name") in proved_names
-                and atom.get("z3_check_result") != "lean_verified"
-            ):
-                atom["z3_check_result"] = "lean_verified"
-                atom["status"] = "verified"
-        if atoms:
-            upgraded["all_verified"] = all(
-                isinstance(a, dict)
-                and a.get("z3_check_result") in {"unsat", "lean_verified"}
-                for a in atoms
-            )
+    proved_names = _atom_names_with_result(lean_cert, "lean_verified")
+    upgraded = _upgrade_atoms_by_name(original_cert, proved_names)
 
     if isinstance(lean_cert, dict):
         if "lean_version" in lean_cert:
