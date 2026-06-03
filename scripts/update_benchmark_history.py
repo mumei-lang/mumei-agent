@@ -9,13 +9,17 @@ from typing import Any
 
 DEFAULT_BENCHMARK_PATH = Path("/tmp/proliferate/benchmark.json")
 DEFAULT_HISTORY_PATH = Path(__file__).resolve().parents[1] / "docs" / "BENCHMARK_HISTORY.md"
-HEADER = [
+DOCUMENT_HEADER = [
     "# LLM Benchmark History",
     "",
     "Time-series summary of proliferate LLM benchmark runs. The table is kept to the latest 50 rows.",
     "",
-    "| Date | Model | Success Rate | Avg Code Length |",
-    "|------|-------|--------------|-----------------|",
+]
+GENERATION_SECTION_HEADER = [
+    "## Generation Benchmark Runs",
+    "",
+    "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+    "|------|-------|--------------|-----------------|-------------:|",
 ]
 MAX_ROWS = 50
 
@@ -40,6 +44,13 @@ def _format_length(value: Any) -> str:
         return "0.0"
 
 
+def _format_seconds(value: Any) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "0.000"
+
+
 def _escape_cell(value: Any) -> str:
     return str(value).replace("|", "\\|")
 
@@ -50,14 +61,20 @@ def _table_rows(history_path: Path) -> list[str]:
     rows: list[str] = []
     in_table = False
     for line in history_path.read_text(encoding="utf-8").splitlines():
-        if line == "| Date | Model | Success Rate | Avg Code Length |":
+        if line in {
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+        }:
             in_table = True
             continue
-        if in_table and line == "|------|-------|--------------|-----------------|":
+        if in_table and line.startswith("|------|-------|--------------|"):
             continue
         if in_table:
             if line.startswith("|"):
-                rows.append(line)
+                if line.count("|") == 5:
+                    rows.append(line[:-1].rstrip() + " | 0.000 |")
+                else:
+                    rows.append(line)
             elif rows:
                 break
     return rows
@@ -76,14 +93,82 @@ def update_history(
         (
             f"| {run_date} | {_escape_cell(entry.get('model', 'unknown'))} | "
             f"{_format_rate(entry.get('success_rate'))} | "
-            f"{_format_length(entry.get('avg_code_length'))} |"
+            f"{_format_length(entry.get('avg_code_length'))} | "
+            f"{_format_seconds(entry.get('avg_time_seconds'))} |"
         )
         for entry in results
     ]
 
     rows = (_table_rows(history_path) + new_rows)[-max_rows:]
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    history_path.write_text("\n".join(HEADER + rows) + "\n", encoding="utf-8")
+    generation_section = GENERATION_SECTION_HEADER + rows
+
+    if not history_path.exists():
+        lines = DOCUMENT_HEADER + generation_section
+    else:
+        existing = history_path.read_text(encoding="utf-8").splitlines()
+        try:
+            start = existing.index("## Generation Benchmark Runs")
+        except ValueError:
+            legacy_start = next(
+                (
+                    idx
+                    for idx, line in enumerate(existing)
+                    if line
+                    in {
+                        "| Date | Model | Success Rate | Avg Code Length |",
+                        "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+                    }
+                ),
+                None,
+            )
+            if legacy_start is not None:
+                section_start = legacy_start
+                while section_start > 0 and existing[section_start - 1] == "":
+                    section_start -= 1
+                section_end = next(
+                    (
+                        idx
+                        for idx in range(legacy_start + 1, len(existing))
+                        if existing[idx].startswith("## ")
+                    ),
+                    len(existing),
+                )
+                suffix = existing[section_end:]
+                lines = (
+                    existing[:section_start]
+                    + generation_section
+                    + ([""] if suffix else [])
+                    + suffix
+                )
+            else:
+                insert_at = next(
+                    (idx for idx, line in enumerate(existing) if line.startswith("## ")),
+                    len(existing),
+                )
+                prefix = existing[:insert_at]
+                suffix = existing[insert_at:]
+                if prefix and prefix[-1] != "":
+                    prefix.append("")
+                lines = prefix + generation_section + ([""] if suffix else []) + suffix
+        else:
+            end = next(
+                (
+                    idx
+                    for idx in range(start + 1, len(existing))
+                    if existing[idx].startswith("## ")
+                ),
+                len(existing),
+            )
+            suffix = existing[end:]
+            lines = (
+                existing[:start]
+                + generation_section
+                + ([""] if suffix else [])
+                + suffix
+            )
+
+    history_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return len(new_rows)
 
 
