@@ -5,12 +5,121 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
 from agent.spec_extractor import extract_spec
+
+
+def _mumei_literal_for_type(type_name: str) -> str:
+    normalized = type_name.strip().lower()
+    if normalized in {"bool", "boolean"}:
+        return "true"
+    if normalized in {"str", "string"}:
+        return '""'
+    return "0"
+
+
+def _clean_contract_clause(value: object, default: str = "true") -> str:
+    text = str(value or default).strip()
+    return text[:-1].strip() if text.endswith(";") else text
+
+
+def _atom_params(atom: dict) -> str:
+    params = atom.get("inputs", atom.get("params", []))
+    if not isinstance(params, list):
+        return ""
+    rendered = []
+    for param in params:
+        if not isinstance(param, dict):
+            continue
+        name = str(param.get("name") or "").strip()
+        type_name = str(param.get("type") or "i64").strip() or "i64"
+        if name:
+            rendered.append(f"{name}: {type_name}")
+    return ", ".join(rendered)
+
+
+def _spec_to_contradiction_check_module(spec: dict) -> str:
+    atoms = spec.get("atoms")
+    if not isinstance(atoms, list) or not atoms:
+        raise ValueError("spec must contain a non-empty atoms list")
+
+    blocks: list[str] = []
+    for index, atom in enumerate(atoms):
+        if not isinstance(atom, dict):
+            raise ValueError(f"atoms[{index}] must be an object")
+        name = str(atom.get("name") or f"extracted_atom_{index}").strip()
+        if not name:
+            raise ValueError(f"atoms[{index}].name must be non-empty")
+        return_type = str(atom.get("return_type") or "i64").strip() or "i64"
+        requires = _clean_contract_clause(atom.get("requires"))
+        ensures = _clean_contract_clause(atom.get("ensures"))
+        default_value = _mumei_literal_for_type(return_type)
+        blocks.append(
+            "\n".join(
+                [
+                    f"trusted atom {name}({_atom_params(atom)}) -> {return_type} {{",
+                    f"    requires: {requires};",
+                    f"    ensures: {ensures};",
+                    "    body: {",
+                    f"        {default_value}",
+                    "    }",
+                    "}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks) + "\n"
+
+
+def _natural_language_contradiction_report(verify_result: dict) -> str:
+    report = verify_result.get("report")
+    if isinstance(report, dict):
+        details = report.get("contradiction_details") or report.get("error")
+        if details:
+            return str(details)
+        feedback = report.get("structured_feedback")
+        if isinstance(feedback, dict):
+            for key in ("message", "details", "suggested_fix"):
+                if feedback.get(key):
+                    return str(feedback[key])
+    stderr = str(verify_result.get("stderr") or "").strip()
+    stdout = str(verify_result.get("stdout") or "").strip()
+    combined = "\n".join(part for part in [stderr, stdout] if part)
+    if "Spec contradiction" in combined or "SpecValidation failed" in combined:
+        return combined
+    return ""
+
+
+def check_spec_contradiction_from_spec(spec: dict, mumei_client) -> dict:
+    """Check extracted forge-task specs for direct contract contradictions."""
+    module_source = _spec_to_contradiction_check_module(spec)
+    with tempfile.TemporaryDirectory(prefix="mumei-spec-contradiction-") as tmp:
+        tmp_path = Path(tmp)
+        spec_path = tmp_path / "extracted_spec_contradiction.mm"
+        report_dir = tmp_path / "report"
+        spec_path.write_text(module_source, encoding="utf-8")
+        verify_result = mumei_client.verify(str(spec_path), report_dir=str(report_dir))
+
+    explanation = _natural_language_contradiction_report(verify_result)
+    contradiction_found = not verify_result.get("success", False) and bool(explanation)
+    if contradiction_found:
+        natural_language_explanation = (
+            "The extracted natural-language specification contains a direct contradiction. "
+            + explanation
+        )
+    else:
+        natural_language_explanation = (
+            "No direct contradiction was detected in the extracted specification."
+        )
+    return {
+        "contradiction_found": contradiction_found,
+        "natural_language_explanation": natural_language_explanation,
+        "verification": verify_result,
+    }
 
 
 def _read_text(args: argparse.Namespace) -> str:
@@ -133,6 +242,11 @@ def build_parser(parser=None):
         help="Generate and verify .mm code after extracting the spec",
     )
     parser.add_argument(
+        "--check-contradiction-only",
+        action="store_true",
+        help="Extract specs and run only direct contradiction detection; skip code generation",
+    )
+    parser.add_argument(
         "--generate-output",
         help="Output path for generated .mm code when --generate is set",
     )
@@ -191,6 +305,12 @@ def main(args=None):
     if args.generate and not args.generate_output:
         print("Error: --generate-output is required when --generate is set.", file=sys.stderr)
         sys.exit(1)
+    if args.generate and args.check_contradiction_only:
+        print(
+            "Error: --check-contradiction-only cannot be combined with --generate.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     config = AgentConfig()
     client = config.create_client()
@@ -241,6 +361,20 @@ def main(args=None):
                 f"successes={metrics.extraction_successes}",
                 file=sys.stderr,
             )
+
+        if args.check_contradiction_only:
+            contradiction_report = check_spec_contradiction_from_spec(forge_spec, mumei)
+            output_payload = {
+                "spec": forge_spec,
+                **contradiction_report,
+            }
+            Path(args.output).write_text(
+                json.dumps(output_payload, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            print(contradiction_report["natural_language_explanation"])
+            print(f"Contradiction report written to {args.output}")
+            return
 
         if args.generate:
             from agent.generate import _normalize_forge_task_spec
