@@ -11,12 +11,15 @@ Usage::
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import datetime
+import hashlib
 import json
 import logging
 import os
 import re
 import tempfile
+from threading import Lock
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +49,7 @@ from agent.thought_log import (
 )
 
 logger = logging.getLogger(__name__)
+_FORGE_CACHE_LOCK = Lock()
 
 # ---------------------------------------------------------------------------
 # Gap Analysis (local filesystem, no MCP required)
@@ -319,6 +323,228 @@ def attempt_heal(
 # ---------------------------------------------------------------------------
 # Main proliferate loop
 # ---------------------------------------------------------------------------
+
+def _spec_cache_key(spec: dict[str, Any]) -> str:
+    payload = json.dumps(spec, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _forge_cache_path(mumei_repo_dir: Path) -> Path:
+    return mumei_repo_dir / ".mumei_agent" / "proliferate_forge_cache.json"
+
+
+def _cache_results(
+    cache_path: str | Path,
+    spec: dict[str, Any],
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Read or write a verified forge result cache entry for *spec*."""
+    with _FORGE_CACHE_LOCK:
+        path = Path(cache_path)
+        key = _spec_cache_key(spec)
+        cache: dict[str, Any] = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    cache = loaded
+            except (OSError, json.JSONDecodeError):
+                logger.debug(
+                    "Ignoring unreadable forge cache at %s",
+                    path,
+                    exc_info=True,
+                )
+
+        if result is None:
+            entry = cache.get(key)
+            return entry if isinstance(entry, dict) else None
+
+        if not result.get("verified") or not result.get("code"):
+            return None
+
+        entry = {
+            "target_file": spec.get("target_file"),
+            "code": result["code"],
+            "verified": True,
+            "cached_at": datetime.datetime.now(datetime.timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+        }
+        cache[key] = entry
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            tmp_path.write_text(
+                json.dumps(cache, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+        except OSError:
+            logger.debug("Could not write forge cache at %s", path, exc_info=True)
+        return entry
+
+
+def _detect_diffs(
+    mumei_repo_dir: str | Path,
+    target_file: str | Path,
+    code: str,
+) -> dict[str, Any]:
+    """Return content-level diff metadata for a generated target file."""
+    path = Path(mumei_repo_dir) / target_file
+    existing = path.read_text(encoding="utf-8") if path.exists() else None
+    old_hash = (
+        hashlib.sha256(existing.encode("utf-8")).hexdigest()
+        if existing is not None
+        else None
+    )
+    new_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    return {
+        "target_file": str(target_file),
+        "exists": existing is not None,
+        "changed": existing != code,
+        "old_sha256": old_hash,
+        "new_sha256": new_hash,
+    }
+
+
+def _forge_worker_count(spec_count: int, override: int | None = None) -> int:
+    if spec_count <= 0:
+        return 0
+    if override is not None:
+        return max(1, min(override, spec_count))
+    raw = os.environ.get("PROLIFERATE_FORGE_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(1, min(int(raw), spec_count))
+        except ValueError:
+            logger.warning("Ignoring invalid PROLIFERATE_FORGE_WORKERS=%r", raw)
+    return max(1, min(4, spec_count))
+
+
+def _run_forge_generation(
+    *,
+    index: int,
+    spec: dict[str, Any],
+    config: AgentConfig,
+    mumei_client: MumeiClient,
+    cache_path: Path,
+) -> tuple[int, dict[str, Any], Metrics]:
+    target_file = spec.get("target_file", "unknown.mm")
+    thought = ThoughtProcess(target_file=str(target_file))
+    spec_result: dict[str, Any] = {
+        "spec": spec,
+        "success": False,
+        "thought_process": thought,
+    }
+    generation_metrics = Metrics()
+
+    cached = _cache_results(cache_path, spec)
+    if cached and cached.get("verified") and cached.get("code"):
+        spec_result["code"] = cached["code"]
+        spec_result["verified"] = True
+        spec_result["cache_hit"] = True
+        return index, spec_result, generation_metrics
+
+    try:
+        code, verified = generate_code(
+            client=config.create_client(),
+            model=config.model,
+            spec=spec,
+            config_max_retries=config.max_retries,
+            mumei_client=mumei_client,
+            metrics=generation_metrics,
+            thought_process=thought,
+        )
+    except Exception as exc:
+        logger.error("Code generation failed for %s: %s", target_file, exc)
+        spec_result["reason"] = f"generation_error: {exc}"
+        try:
+            thought.final_success = False
+            thought.total_attempts = len(
+                [
+                    step
+                    for step in thought.steps
+                    if step.action in ("initial_verify", "re_verify")
+                ]
+            )
+        except Exception:
+            pass
+        return index, spec_result, generation_metrics
+
+    if not code:
+        logger.warning("No code generated for %s", target_file)
+        spec_result["reason"] = "empty_code"
+    elif not verified:
+        logger.warning("Generated code for %s did not pass verification", target_file)
+        spec_result["reason"] = "verification_failed"
+    else:
+        _log_info(f"Forged {target_file}: verified=True")
+        spec_result["code"] = code
+        spec_result["verified"] = verified
+        _cache_results(cache_path, spec, spec_result)
+
+    if not spec_result.get("verified"):
+        try:
+            thought.final_success = False
+            thought.total_attempts = len(
+                [
+                    step
+                    for step in thought.steps
+                    if step.action in ("initial_verify", "re_verify")
+                ]
+            )
+        except Exception:
+            pass
+
+    return index, spec_result, generation_metrics
+
+
+def _parallel_forge(
+    specs: list[dict[str, Any]],
+    *,
+    config: AgentConfig,
+    mumei_client: MumeiClient,
+    harness_metrics: HarnessMetrics,
+    cache_path: str | Path,
+    max_workers: int | None = None,
+) -> list[dict[str, Any]]:
+    """Generate forge candidates concurrently and preserve input order."""
+    if not specs:
+        return []
+    workers = _forge_worker_count(len(specs), max_workers)
+    path = Path(cache_path)
+
+    def run(index: int, spec: dict[str, Any]) -> dict[str, Any]:
+        _, result, metrics = _run_forge_generation(
+            index=index,
+            spec=spec,
+            config=config,
+            mumei_client=mumei_client,
+            cache_path=path,
+        )
+        success = bool(result.get("verified"))
+        harness_metrics.record_result(
+            "proliferate_generation",
+            success,
+            retry_class=("cache_hit" if result.get("cache_hit") else "none")
+            if success
+            else str(result.get("reason", "generation_error")).split(":", 1)[0],
+            **_metrics_payload(metrics),
+        )
+        return result
+
+    if workers == 1:
+        return [run(idx, spec) for idx, spec in enumerate(specs, start=1)]
+
+    ordered: dict[int, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(run, idx, spec): idx
+            for idx, spec in enumerate(specs, start=1)
+        }
+        for future in as_completed(futures):
+            ordered[futures[future]] = future.result()
+    return [ordered[idx] for idx in sorted(ordered)]
 
 
 def _log_step(step: int, total: int, message: str) -> None:
@@ -628,6 +854,7 @@ def proliferate(
     output_json: str | Path | None = None,
     enable_lean_fallback: bool = True,
     harness_profile: str = "basic",
+    parallel_forge_workers: int | None = None,
 ) -> list[dict[str, Any]]:
     """Run the autonomous proliferation loop.
 
@@ -757,110 +984,43 @@ def proliferate(
     # ``USE_MCP_CLIENT=true`` opts into richer MCP-backed verification
     # for the proliferate loop; otherwise this is a plain MumeiClient.
     mumei_client = create_mumei_client(effective_mumei_bin)
-    openai_client = config.create_client()
+    openai_client: Any | None = None
+
+    specs = [harness_metrics.apply_to_spec(spec) for spec in specs]
+    forged_results = _parallel_forge(
+        specs,
+        config=config,
+        mumei_client=mumei_client,
+        harness_metrics=harness_metrics,
+        cache_path=_forge_cache_path(mumei_repo),
+        max_workers=parallel_forge_workers,
+    )
 
     results: list[dict[str, Any]] = []
-    for idx, spec in enumerate(specs, start=1):
-        spec = harness_metrics.apply_to_spec(spec)
-        spec_result: dict[str, Any] = {
-            "spec": spec,
-            "success": False,
-        }
+    for idx, spec_result in enumerate(forged_results, start=1):
+        spec = spec_result["spec"]
         target_file = spec.get("target_file", "unknown.mm")
-        thought = ThoughtProcess(target_file=str(target_file))
-        spec_result["thought_process"] = thought
-        _log_step(3, 4, f"Forging proposal {idx}/{len(specs)}: {target_file}")
+        thought = spec_result["thought_process"]
+        _log_step(3, 4, f"Publishing forged proposal {idx}/{len(specs)}: {target_file}")
 
-        # 3a. Generate code
-        generation_metrics = Metrics()
-        try:
-            code, verified = generate_code(
-                client=openai_client,
-                model=config.model,
-                spec=spec,
-                config_max_retries=config.max_retries,
-                mumei_client=mumei_client,
-                metrics=generation_metrics,
-                thought_process=thought,
-            )
-        except Exception as exc:
-            logger.error("Code generation failed for %s: %s", target_file, exc)
-            spec_result["reason"] = f"generation_error: {exc}"
-            harness_metrics.record_result(
-                "proliferate_generation",
-                False,
-                retry_class="generation_error",
-                **_metrics_payload(generation_metrics),
-            )
+        if not spec_result.get("verified"):
+            results.append(spec_result)
+            continue
+
+        code = spec_result["code"]
+        diff = _detect_diffs(mumei_repo, target_file, code)
+        spec_result["diff"] = diff
+        if not diff["changed"]:
+            _log_info(f"Skipping {target_file}: generated code matches existing file")
+            spec_result["success"] = True
+            spec_result["reason"] = "no_diff"
+            spec_result["dry_run"] = dry_run
             try:
-                thought.final_success = False
-                thought.total_attempts = len(
-                    [
-                        s
-                        for s in thought.steps
-                        if s.action in ("initial_verify", "re_verify")
-                    ]
-                )
+                thought.final_success = True
             except Exception:
                 pass
             results.append(spec_result)
             continue
-
-        if not code:
-            logger.warning("No code generated for %s", target_file)
-            spec_result["reason"] = "empty_code"
-            harness_metrics.record_result(
-                "proliferate_generation",
-                False,
-                retry_class="empty_code",
-                **_metrics_payload(generation_metrics),
-            )
-            try:
-                thought.final_success = False
-                thought.total_attempts = len(
-                    [
-                        s
-                        for s in thought.steps
-                        if s.action in ("initial_verify", "re_verify")
-                    ]
-                )
-            except Exception:
-                pass
-            results.append(spec_result)
-            continue
-
-        if not verified:
-            logger.warning("Generated code for %s did not pass verification", target_file)
-            spec_result["reason"] = "verification_failed"
-            harness_metrics.record_result(
-                "proliferate_generation",
-                False,
-                retry_class="verification_failed",
-                **_metrics_payload(generation_metrics),
-            )
-            try:
-                thought.final_success = False
-                thought.total_attempts = len(
-                    [
-                        s
-                        for s in thought.steps
-                        if s.action in ("initial_verify", "re_verify")
-                    ]
-                )
-            except Exception:
-                pass
-            results.append(spec_result)
-            continue
-
-        _log_info(f"Forged {target_file}: verified=True")
-        spec_result["code"] = code
-        spec_result["verified"] = verified
-        harness_metrics.record_result(
-            "proliferate_generation",
-            True,
-            retry_class="none",
-            **_metrics_payload(generation_metrics),
-        )
 
         # 3b. Blast radius check
         _log_step(4, 4, f"Blast-radius check for {target_file}")
@@ -916,6 +1076,8 @@ def proliferate(
 
             all_healed = True
             try:
+                if openai_client is None:
+                    openai_client = config.create_client()
                 for broken in blast["broken_files"]:
                     healed = attempt_heal(
                         client=openai_client,
@@ -1456,6 +1618,15 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
             "enabled only by self_evolution/full."
         ),
     )
+    parser.add_argument(
+        "--parallel-forge-workers",
+        type=int,
+        default=None,
+        help=(
+            "Maximum concurrent forge generations. Defaults to min(4, proposals) "
+            "or PROLIFERATE_FORGE_WORKERS when set."
+        ),
+    )
 
 
 def main(args: argparse.Namespace) -> None:
@@ -1473,6 +1644,9 @@ def main(args: argparse.Namespace) -> None:
     harness_profile = getattr(args, "harness_profile", "basic")
     if isinstance(harness_profile, str) and harness_profile != "basic":
         run_kwargs["harness_profile"] = harness_profile
+    parallel_forge_workers = getattr(args, "parallel_forge_workers", None)
+    if parallel_forge_workers is not None:
+        run_kwargs["parallel_forge_workers"] = parallel_forge_workers
     results = proliferate(**run_kwargs)
 
     succeeded = sum(1 for r in results if r.get("success"))
