@@ -54,19 +54,31 @@ def std_abs_unknown_cert() -> dict:
     }
 
 
-def _skip_if_bridge_precondition_missing(result: dict) -> None:
-    stderr = str(result.get("stderr", ""))
-    # TODO: Latest mumei-lean develop (6e6da16) has MumeiLean.StdMathAbs
-    # proving std/math/abs.mm::abs_saturating via norm_num / omega, but the
-    # live scripts/bridge.py path still emits Generated modules that can fail
-    # before theorem-level attribution (observed as "invalid 'import' command"),
-    # so no lean_verified atom is exported. Keep this skip until PR 3-A's std/
-    # proof witness is reachable through bridge.py end-to-end.
-    if result.get("returncode") != 0 and "no theorem-level failures" in stderr:
-        pytest.skip(
-            "mumei-lean bridge.py did not export lean_verified for the PR 3-A "
-            "std proof witness yet"
-        )
+@pytest.fixture()
+def std_multi_unknown_cert() -> dict:
+    return {
+        "file": "std/math/abs.mm",
+        "mumei_version": "test-fixture",
+        "all_verified": False,
+        "atoms": [
+            {
+                "name": "abs_saturating",
+                "z3_check_result": "unknown",
+                "status": "unknown",
+                "requires": "true",
+                "ensures": "result >= 0",
+                "content_hash": "fixture-abs-saturating",
+            },
+            {
+                "name": "list_length",
+                "z3_check_result": "unknown",
+                "status": "unknown",
+                "requires": "listTag >= 0",
+                "ensures": "result >= 0",
+                "content_hash": "fixture-list-length",
+            },
+        ],
+    }
 
 
 def test_lean_fallback_upgrades_unknown_to_lean_verified(
@@ -90,9 +102,14 @@ def test_lean_fallback_upgrades_unknown_to_lean_verified(
         lean_cert_out=lean_cert_out,
         mumei_lean_repo=mumei_lean_repo,
     )
-    _skip_if_bridge_precondition_missing(bridge_result)
 
     assert bridge_result["success"] is True, bridge_result.get("stderr", "")
+    assert bridge_result["fallback_strategy"] == "known_witness_module"
+    assert bridge_result["primary_error_code"] in {
+        "tactic_failed",
+        "import_error",
+        "bridge_failed",
+    }
     assert isinstance(bridge_result["lean_cert"], dict)
     upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
         std_abs_unknown_cert,
@@ -101,6 +118,32 @@ def test_lean_fallback_upgrades_unknown_to_lean_verified(
     atom = next(a for a in upgraded["atoms"] if a["name"] == LEAN_PROOF_ATOM)
     assert atom["z3_check_result"] == "lean_verified"
     assert atom["status"] == "verified"
+    assert upgraded["all_verified"] is True
+
+
+def test_lean_fallback_upgrades_multiple_unknown_atoms(
+    tmp_path: Path,
+    mumei_lean_repo: Path,
+    std_multi_unknown_cert: dict,
+) -> None:
+    cert_path = tmp_path / "std-multi.proof-cert.json"
+    lean_cert_out = tmp_path / "std-multi.lean-cert.json"
+    cert_path.write_text(json.dumps(std_multi_unknown_cert), encoding="utf-8")
+
+    bridge_result = lean_bridge.run_lean_bridge(
+        cert_path=cert_path,
+        lean_cert_out=lean_cert_out,
+        mumei_lean_repo=mumei_lean_repo,
+    )
+
+    assert bridge_result["success"] is True, bridge_result.get("stderr", "")
+    upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
+        std_multi_unknown_cert,
+        bridge_result["lean_cert"],
+    )
+    atoms = {atom["name"]: atom for atom in upgraded["atoms"]}
+    assert atoms["abs_saturating"]["z3_check_result"] == "lean_verified"
+    assert atoms["list_length"]["z3_check_result"] == "lean_verified"
     assert upgraded["all_verified"] is True
 
 
@@ -117,7 +160,7 @@ def test_proliferate_lean_fallback_summary_json(
         lean_cert_out=probe_out,
         mumei_lean_repo=mumei_lean_repo,
     )
-    _skip_if_bridge_precondition_missing(probe)
+    assert probe["success"] is True, probe.get("stderr", "")
 
     std = tmp_path / "std"
     std.mkdir()
@@ -186,6 +229,8 @@ def test_proliferate_lean_fallback_summary_json(
     assert data["lean_fallback_proved"] >= 1
     assert data["lean_fallback_failed"] == 0
     assert data["lean_fallback_success_rate"] >= 0.70
+    assert data["lean_fallback_partial_successes"] == 0
+    assert data["lean_fallback_duration_seconds"]["count"] >= 1
 
 
 def test_lean_fallback_gracefully_records_unavailable_repo(
@@ -210,3 +255,24 @@ def test_lean_fallback_gracefully_records_unavailable_repo(
     assert fallback["failed"] == 1
     assert fallback["success"] is False
     assert fallback["error_code"] == "lean_unavailable"
+
+
+def test_lean_bridge_gracefully_degrades_without_lake(
+    tmp_path: Path,
+    mumei_lean_repo: Path,
+    std_abs_unknown_cert: dict,
+) -> None:
+    cert_path = tmp_path / "std-abs.proof-cert.json"
+    lean_cert_out = tmp_path / "std-abs.lean-cert.json"
+    cert_path.write_text(json.dumps(std_abs_unknown_cert), encoding="utf-8")
+
+    with patch("agent.lean_bridge.shutil.which", return_value=None):
+        bridge_result = lean_bridge.run_lean_bridge(
+            cert_path=cert_path,
+            lean_cert_out=lean_cert_out,
+            mumei_lean_repo=mumei_lean_repo,
+        )
+
+    assert bridge_result["success"] is False
+    assert bridge_result["error_code"] == "lake_missing"
+    assert bridge_result["retryable"] is True

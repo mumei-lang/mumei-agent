@@ -313,6 +313,15 @@ the working directory is set by the command itself.
 
 P8-C metrics in `agent.metrics.Metrics` track how often new specifications fall outside the decidable fragment (`outside_decidable_fragment_warnings`, `z3_unknowns`, `first_pass_verification_success_rate`, and `by_logic_fragment`) so the guidance can be refreshed quarterly.
 
+### Lean fallback diagnostics
+
+Set `MUMEI_LEAN_REPO=/path/to/mumei-lean` to let `proliferate` escalate
+`z3_check_result == "unknown"` atoms through the Lean bridge. The fallback now
+records retryability, per-error-code failure rates, proof-time distribution, and
+partial-success status in the summary JSON. See
+[`docs/LEAN_FALLBACK.md`](docs/LEAN_FALLBACK.md) for error-code meanings and
+troubleshooting steps.
+
 ### MCP-backed verification (opt-in)
 
 Set `USE_MCP_CLIENT=true` to make forge / heal / proliferate route their

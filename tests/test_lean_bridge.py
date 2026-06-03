@@ -221,6 +221,149 @@ class TestRunLeanBridgeSubprocess:
 
         assert result["success"] is False
         assert result["error_code"] == "partial_translation"
+        assert result["retryable"] is False
+
+    def test_failure_taxonomy_classifies_lean_errors(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        cert_path = tmp_path / "in.json"
+        cert_path.write_text(json.dumps({"atoms": []}))
+
+        cases = [
+            ("error: unknown constant foo_correct", "theorem_not_found", False),
+            ("error: unsolved goals\n⊢ 0 ≤ result", "tactic_failed", False),
+            ("invalid 'import' command: could not find module", "import_error", True),
+        ]
+        for stderr, expected_code, expected_retryable in cases:
+            with patch("agent.lean_bridge.subprocess.run") as run_mock:
+                run_mock.return_value = MagicMock(
+                    returncode=1, stdout="", stderr=stderr
+                )
+                result = lean_bridge.run_lean_bridge(
+                    cert_path=cert_path,
+                    lean_cert_out=tmp_path / f"{expected_code}.json",
+                    mumei_lean_repo=repo,
+                )
+            assert result["success"] is False
+            assert result["error_code"] == expected_code
+            assert result["retryable"] is expected_retryable
+
+    def test_known_witness_fallback_upgrades_std_atoms(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        (repo / "MumeiLean").mkdir()
+        (repo / "MumeiLean" / "StdMathAbs.lean").write_text(
+            "theorem abs_saturating_correct : True := by trivial\n"
+            "theorem list_length_correct : True := by trivial\n",
+            encoding="utf-8",
+        )
+        cert_path = tmp_path / "in.json"
+        cert_path.write_text(
+            json.dumps(
+                {
+                    "all_verified": False,
+                    "atoms": [
+                        {"name": "abs_saturating", "z3_check_result": "unknown"},
+                        {"name": "list_length", "z3_check_result": "unknown"},
+                    ],
+                }
+            )
+        )
+
+        with patch("agent.lean_bridge.subprocess.run") as run_mock, patch(
+            "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
+        ):
+            run_mock.side_effect = [
+                MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="error: unsolved goals\n⊢ 0 ≤ result",
+                ),
+                MagicMock(returncode=0, stdout="built StdMathAbs", stderr=""),
+            ]
+            result = lean_bridge.run_lean_bridge(
+                cert_path=cert_path,
+                lean_cert_out=tmp_path / "out.json",
+                mumei_lean_repo=repo,
+            )
+
+        assert result["success"] is True
+        assert result["error_code"] is None
+        assert result["primary_error_code"] == "tactic_failed"
+        assert result["fallback_strategy"] == "known_witness_module"
+        atoms = result["lean_cert"]["atoms"]
+        assert [a["z3_check_result"] for a in atoms] == [
+            "lean_verified",
+            "lean_verified",
+        ]
+
+    def test_known_witness_fallback_preserves_primary_partial_cert(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        (repo / "MumeiLean").mkdir()
+        (repo / "MumeiLean" / "StdMathAbs.lean").write_text(
+            "theorem abs_saturating_correct : True := by trivial\n",
+            encoding="utf-8",
+        )
+        cert_path = tmp_path / "in.json"
+        cert_path.write_text(
+            json.dumps(
+                {
+                    "all_verified": False,
+                    "atoms": [
+                        {"name": "generated_ok", "z3_check_result": "unknown"},
+                        {"name": "abs_saturating", "z3_check_result": "unknown"},
+                    ],
+                }
+            )
+        )
+        lean_cert_out = tmp_path / "out.json"
+        lean_cert_out.write_text(
+            json.dumps(
+                {
+                    "all_verified": False,
+                    "atoms": [
+                        {
+                            "name": "generated_ok",
+                            "z3_check_result": "lean_verified",
+                        },
+                        {"name": "abs_saturating", "z3_check_result": "unknown"},
+                    ],
+                }
+            )
+        )
+
+        with patch("agent.lean_bridge.subprocess.run") as run_mock, patch(
+            "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
+        ):
+            run_mock.side_effect = [
+                MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="error: unsolved goals\n⊢ 0 ≤ result",
+                ),
+                MagicMock(returncode=0, stdout="built StdMathAbs", stderr=""),
+            ]
+            result = lean_bridge.run_lean_bridge(
+                cert_path=cert_path,
+                lean_cert_out=lean_cert_out,
+                mumei_lean_repo=repo,
+            )
+
+        assert result["success"] is True
+        atoms = {a["name"]: a for a in result["lean_cert"]["atoms"]}
+        assert atoms["generated_ok"]["z3_check_result"] == "lean_verified"
+        assert atoms["abs_saturating"]["z3_check_result"] == "lean_verified"
+        assert result["lean_cert"]["all_verified"] is True
 
     def test_timeout_returns_diagnostic(self, tmp_path: Path) -> None:
         repo = tmp_path / "mumei-lean"
@@ -317,6 +460,25 @@ class TestMergeLeanCert:
         }
         upgraded = lean_bridge.merge_lean_cert_into_proof_cert(original, {})
         assert upgraded["atoms"][0]["z3_check_result"] == "unknown"
+
+    def test_bundle_modules_are_upgraded_recursively(self) -> None:
+        original = {
+            "modules": {
+                "std/foo.mm": {
+                    "atoms": [
+                        {"name": "nested", "z3_check_result": "unknown"}
+                    ],
+                    "all_verified": False,
+                }
+            }
+        }
+        lean = {"atoms": [{"name": "nested", "z3_check_result": "lean_verified"}]}
+
+        upgraded = lean_bridge.merge_lean_cert_into_proof_cert(original, lean)
+
+        module = upgraded["modules"]["std/foo.mm"]
+        assert module["atoms"][0]["z3_check_result"] == "lean_verified"
+        assert module["all_verified"] is True
 
 
 # ---------------------------------------------------------------------------

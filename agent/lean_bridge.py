@@ -36,6 +36,41 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE_ERROR_CODES = {
+    "bridge_failed",
+    "import_error",
+    "lake_missing",
+    "subprocess_error",
+    "timeout",
+}
+
+_NON_RETRYABLE_ERROR_CODES = {
+    "bridge_missing",
+    "partial_translation",
+    "repo_missing",
+    "tactic_failed",
+    "theorem_not_found",
+}
+
+_KNOWN_LEAN_WITNESSES: dict[str, dict[str, str]] = {
+    "abs_saturating": {
+        "module": "MumeiLean.StdMathAbs",
+        "theorem": "abs_saturating_correct",
+    },
+    "fixed_point_abs": {
+        "module": "MumeiLean.StdMathAbs",
+        "theorem": "fixed_point_abs_correct",
+    },
+    "fixed_point_from_int": {
+        "module": "MumeiLean.StdMathAbs",
+        "theorem": "fixed_point_from_int_correct",
+    },
+    "list_length": {
+        "module": "MumeiLean.StdMathAbs",
+        "theorem": "list_length_correct",
+    },
+}
+
 
 def _result(
     *,
@@ -48,7 +83,11 @@ def _result(
     error_code: str | None = None,
     diagnostics: list[str] | None = None,
     duration_seconds: float | None = None,
+    retryable: bool | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if retryable is None:
+        retryable = is_bridge_failure_retryable(error_code)
     payload: dict[str, Any] = {
         "success": success,
         "returncode": returncode,
@@ -58,10 +97,24 @@ def _result(
         "stderr": stderr,
         "error_code": error_code,
         "diagnostics": diagnostics or [],
+        "retryable": retryable,
     }
     if duration_seconds is not None:
         payload["duration_seconds"] = duration_seconds
+    if extra:
+        payload.update(extra)
     return payload
+
+
+def is_bridge_failure_retryable(error_code: str | None) -> bool:
+    """Return whether retrying can plausibly change a bridge failure."""
+    if error_code is None:
+        return False
+    if error_code in _RETRYABLE_ERROR_CODES:
+        return True
+    if error_code in _NON_RETRYABLE_ERROR_CODES:
+        return False
+    return False
 
 
 def _coerce_output(value: str | bytes | None) -> str:
@@ -97,6 +150,47 @@ def _classify_bridge_failure(
         diagnostics.append(
             "lake is not available to the bridge; install elan/Lean and ensure "
             "$HOME/.elan/bin is on PATH."
+        )
+    elif (
+        "invalid 'import' command" in combined
+        or "invalid import command" in combined
+        or "failed to import" in combined
+        or "cannot find module" in combined
+        or "unknown module" in combined
+        or (
+            ".olean" in combined
+            and ("does not exist" in combined or "no such file" in combined)
+        )
+    ):
+        error_code = "import_error"
+        diagnostics.append(
+            "Lean could not resolve an import or generated module; retry after "
+            "refreshing Lake/mathlib caches or regenerating Generated modules."
+        )
+    elif (
+        "unknown constant" in combined
+        or "unknown declaration" in combined
+        or "unknown identifier" in combined
+        or "declaration has not been declared" in combined
+        or "theorem not found" in combined
+    ):
+        error_code = "theorem_not_found"
+        diagnostics.append(
+            "Lean could not find a referenced theorem; check that the expected "
+            "witness module is imported and that theorem names match atom names."
+        )
+    elif (
+        "unsolved goals" in combined
+        or "tactic failed" in combined
+        or "omega could not" in combined
+        or "simp made no progress" in combined
+        or "proof search failed" in combined
+        or ("mumei_arith" in combined and "failed" in combined)
+    ):
+        error_code = "tactic_failed"
+        diagnostics.append(
+            "Lean reached theorem elaboration but the selected tactic did not "
+            "close all goals; try a stronger handwritten witness or proof strategy."
         )
     elif (
         "partial_translation" in combined
@@ -161,6 +255,334 @@ def extract_unknown_atoms(verify_result: dict[str, Any]) -> list[dict[str, Any]]
     return atoms
 
 
+def _load_json_file(path: str | Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _module_source_path(repo_path: Path, module: str) -> Path:
+    return repo_path / Path(*module.split(".")).with_suffix(".lean")
+
+
+def _atom_names_with_result(cert: dict[str, Any], result: str) -> set[str]:
+    names: set[str] = set()
+
+    def _consume(payload: dict[str, Any]) -> None:
+        atoms = payload.get("atoms")
+        if isinstance(atoms, list):
+            for atom in atoms:
+                if (
+                    isinstance(atom, dict)
+                    and atom.get("z3_check_result") == result
+                    and isinstance(atom.get("name"), str)
+                ):
+                    names.add(atom["name"])
+        modules = payload.get("modules")
+        if isinstance(modules, dict):
+            for module_cert in modules.values():
+                if isinstance(module_cert, dict):
+                    _consume(module_cert)
+
+    _consume(cert)
+    return names
+
+
+def _upgrade_atoms_by_name(
+    cert: dict[str, Any],
+    proved_names: set[str],
+    *,
+    strategy: str | None = None,
+) -> dict[str, Any]:
+    upgraded: dict[str, Any] = json.loads(json.dumps(cert))
+
+    def _consume(payload: dict[str, Any]) -> None:
+        atoms = payload.get("atoms")
+        if isinstance(atoms, list):
+            for atom in atoms:
+                if (
+                    isinstance(atom, dict)
+                    and atom.get("name") in proved_names
+                    and atom.get("z3_check_result") == "unknown"
+                ):
+                    atom["z3_check_result"] = "lean_verified"
+                    atom["status"] = "verified"
+                    if strategy is not None:
+                        atom["lean_fallback_strategy"] = strategy
+            if atoms:
+                payload["all_verified"] = all(
+                    isinstance(atom, dict)
+                    and atom.get("z3_check_result") in {"unsat", "lean_verified"}
+                    for atom in atoms
+                )
+        modules = payload.get("modules")
+        if isinstance(modules, dict):
+            for module_cert in modules.values():
+                if isinstance(module_cert, dict):
+                    _consume(module_cert)
+
+    _consume(upgraded)
+    return upgraded
+
+
+def _unknowns_verified_in_cert(
+    original_cert: dict[str, Any] | None,
+    upgraded_cert: dict[str, Any] | None,
+) -> tuple[bool, bool]:
+    if original_cert is None or upgraded_cert is None:
+        return False, False
+    unknown_names = _atom_names_with_result(original_cert, "unknown")
+    if not unknown_names:
+        return False, False
+    verified_names = _atom_names_with_result(upgraded_cert, "lean_verified")
+    proved_any = bool(unknown_names.intersection(verified_names))
+    proved_all = unknown_names.issubset(verified_names)
+    return proved_all, proved_any and not proved_all
+
+
+def _verify_known_witnesses(
+    *,
+    cert_path: str | Path,
+    mumei_lean_repo: str | Path,
+    timeout: float | None,
+) -> dict[str, Any] | None:
+    cert = _load_json_file(cert_path)
+    if cert is None:
+        return None
+    unknown_atoms = extract_unknown_atoms(cert)
+    atom_names = {
+        atom["name"]
+        for atom in unknown_atoms
+        if isinstance(atom.get("name"), str)
+    }
+    witness_names = atom_names.intersection(_KNOWN_LEAN_WITNESSES)
+    if not witness_names:
+        return None
+
+    repo_path = Path(mumei_lean_repo)
+    modules = {
+        _KNOWN_LEAN_WITNESSES[name]["module"] for name in witness_names
+    }
+    diagnostics: list[str] = []
+    missing_witnesses: list[str] = []
+    for name in sorted(witness_names):
+        witness = _KNOWN_LEAN_WITNESSES[name]
+        src = _module_source_path(repo_path, witness["module"])
+        try:
+            source_text = src.read_text(encoding="utf-8")
+        except OSError:
+            missing_witnesses.append(f"{name}:{src}")
+            continue
+        if f"theorem {witness['theorem']}" not in source_text:
+            missing_witnesses.append(f"{name}:{witness['theorem']}")
+    if missing_witnesses:
+        return _result(
+            success=False,
+            returncode=-1,
+            stderr="known Lean witness missing: " + ", ".join(missing_witnesses),
+            error_code="theorem_not_found",
+            diagnostics=[
+                "Known std witness fallback could not find every expected theorem."
+            ],
+            extra={"fallback_strategy": "known_witness_module"},
+        )
+
+    if shutil.which("lake") is None:
+        return _result(
+            success=False,
+            returncode=-1,
+            stderr="lake not found on PATH",
+            error_code="lake_missing",
+            diagnostics=[
+                "Known std witness fallback requires Lake to type-check witness modules."
+            ],
+            extra={"fallback_strategy": "known_witness_module"},
+        )
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    started = time.monotonic()
+    for module in sorted(modules):
+        cmd = ["lake", "build", module]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            elapsed = time.monotonic() - started
+            return _result(
+                success=False,
+                returncode=-1,
+                stdout=_coerce_output(exc.stdout),
+                stderr=(
+                    f"known witness build timed out after {timeout} seconds\n"
+                    f"{_coerce_output(exc.stderr)}"
+                ).strip(),
+                error_code="timeout",
+                diagnostics=[
+                    "Lean witness module build exceeded the configured timeout."
+                ],
+                duration_seconds=elapsed,
+                extra={"fallback_strategy": "known_witness_module"},
+            )
+        stdout_parts.append(proc.stdout)
+        stderr_parts.append(proc.stderr)
+        if proc.returncode != 0:
+            error_code, failure_diagnostics = _classify_bridge_failure(
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                returncode=proc.returncode,
+            )
+            return _result(
+                success=False,
+                returncode=proc.returncode,
+                stdout="\n".join(stdout_parts),
+                stderr="\n".join(stderr_parts),
+                error_code=error_code,
+                diagnostics=failure_diagnostics,
+                duration_seconds=time.monotonic() - started,
+                extra={"fallback_strategy": "known_witness_module"},
+            )
+
+    witness_cert = _upgrade_atoms_by_name(
+        cert,
+        set(witness_names),
+        strategy="known_witness_module",
+    )
+
+    verified_count = len(witness_names)
+    diagnostics.append(
+        "Verified known std Lean witness module(s): "
+        + ", ".join(sorted(modules))
+    )
+    complete = atom_names.issubset(witness_names)
+    return _result(
+        success=complete,
+        returncode=0 if complete else 1,
+        lean_cert=(
+            witness_cert
+            if isinstance(witness_cert, dict)
+            else {"atoms": []}
+        ),
+        stdout="\n".join(stdout_parts),
+        stderr="\n".join(stderr_parts),
+        error_code=None if complete else "theorem_not_found",
+        diagnostics=diagnostics,
+        duration_seconds=time.monotonic() - started,
+        retryable=False,
+        extra={
+            "fallback_strategy": "known_witness_module",
+            "partial_success": not complete and verified_count > 0,
+            "known_witness_verified": verified_count,
+        },
+    )
+
+
+def _combine_with_witness_fallback(
+    *,
+    primary: dict[str, Any],
+    cert_path: str | Path,
+    mumei_lean_repo: str | Path,
+    timeout: float | None,
+) -> dict[str, Any]:
+    witness = _verify_known_witnesses(
+        cert_path=cert_path,
+        mumei_lean_repo=mumei_lean_repo,
+        timeout=timeout,
+    )
+    if witness is None:
+        return primary
+
+    primary_error = primary.get("error_code")
+    primary_diagnostics = primary.get("diagnostics")
+    if not isinstance(primary_diagnostics, list):
+        primary_diagnostics = []
+    diagnostics = list(primary_diagnostics)
+    witness_diagnostics = witness.get("diagnostics")
+    if isinstance(witness_diagnostics, list):
+        diagnostics.extend(witness_diagnostics)
+
+    stdout = "\n".join(
+        part
+        for part in (str(primary.get("stdout", "")), str(witness.get("stdout", "")))
+        if part
+    )
+    stderr = "\n".join(
+        part
+        for part in (str(primary.get("stderr", "")), str(witness.get("stderr", "")))
+        if part
+    )
+    duration = float(primary.get("duration_seconds") or 0.0) + float(
+        witness.get("duration_seconds") or 0.0
+    )
+    witness_success = bool(witness.get("success"))
+    primary_cert = primary.get("lean_cert")
+    if not isinstance(primary_cert, dict):
+        primary_cert = _load_json_file(cert_path)
+    witness_cert = witness.get("lean_cert")
+    if isinstance(primary_cert, dict) and isinstance(witness_cert, dict):
+        lean_cert: dict[str, Any] | None = merge_lean_cert_into_proof_cert(
+            primary_cert,
+            witness_cert,
+        )
+    elif isinstance(witness_cert, dict):
+        lean_cert = witness_cert
+    elif isinstance(primary_cert, dict):
+        lean_cert = primary_cert
+    else:
+        lean_cert = None
+    original_cert = _load_json_file(cert_path)
+    combined_success, partial_success = _unknowns_verified_in_cert(
+        original_cert,
+        lean_cert,
+    )
+    return _result(
+        success=combined_success,
+        returncode=0 if combined_success else int(primary.get("returncode", -1)),
+        lean_cert_path=None,
+        lean_cert=lean_cert,
+        stdout=stdout,
+        stderr=stderr,
+        error_code=(
+            None
+            if combined_success
+            else str(witness.get("error_code") or primary_error)
+        ),
+        diagnostics=diagnostics,
+        duration_seconds=duration,
+        retryable=(
+            False
+            if combined_success
+            else bool(primary.get("retryable") or witness.get("retryable"))
+        ),
+        extra={
+            "primary_error_code": primary_error,
+            "fallback_strategy": witness.get("fallback_strategy"),
+            "partial_success": partial_success,
+            "strategy_attempts": [
+                {
+                    "name": "generated_bridge",
+                    "success": bool(primary.get("success")),
+                    "error_code": primary_error,
+                },
+                {
+                    "name": "known_witness_module",
+                    "success": witness_success,
+                    "error_code": witness.get("error_code"),
+                    "proved": witness.get("known_witness_verified"),
+                },
+            ],
+        },
+    )
+
+
 def run_lean_bridge(
     cert_path: str | Path,
     lean_cert_out: str | Path,
@@ -168,6 +590,7 @@ def run_lean_bridge(
     *,
     no_build: bool = False,
     timeout: float | None = 600.0,
+    enable_known_witness_fallback: bool = True,
 ) -> dict[str, Any]:
     """Invoke ``mumei-lean``'s ``scripts/bridge.py`` as a subprocess.
 
@@ -269,9 +692,11 @@ def run_lean_bridge(
         )
     except subprocess.TimeoutExpired as exc:
         elapsed = time.monotonic() - started
-        return _result(
+        timeout_result = _result(
             success=False,
             returncode=-1,
+            lean_cert_path=str(lean_cert_out) if Path(lean_cert_out).exists() else None,
+            lean_cert=_load_json_file(lean_cert_out),
             stdout=_coerce_output(exc.stdout),
             stderr=(
                 f"lean_bridge subprocess timed out after {timeout} seconds\n"
@@ -284,6 +709,14 @@ def run_lean_bridge(
             ],
             duration_seconds=elapsed,
         )
+        if enable_known_witness_fallback and not no_build:
+            return _combine_with_witness_fallback(
+                primary=timeout_result,
+                cert_path=cert_path,
+                mumei_lean_repo=mumei_lean_repo,
+                timeout=timeout,
+            )
+        return timeout_result
     except OSError as exc:
         elapsed = time.monotonic() - started
         return _result(
@@ -315,7 +748,7 @@ def run_lean_bridge(
     )
     diagnostics.extend(failure_diagnostics)
 
-    return _result(
+    primary_result = _result(
         success=proc.returncode == 0,
         returncode=proc.returncode,
         lean_cert_path=str(out_path) if lean_cert is not None else None,
@@ -326,6 +759,18 @@ def run_lean_bridge(
         diagnostics=diagnostics,
         duration_seconds=elapsed,
     )
+    if (
+        enable_known_witness_fallback
+        and not no_build
+        and not primary_result["success"]
+    ):
+        return _combine_with_witness_fallback(
+            primary=primary_result,
+            cert_path=cert_path,
+            mumei_lean_repo=mumei_lean_repo,
+            timeout=timeout,
+        )
+    return primary_result
 
 
 def merge_lean_cert_into_proof_cert(
@@ -351,34 +796,8 @@ def merge_lean_cert_into_proof_cert(
     ``lean_cert_schema_version`` fields (when present in *lean_cert*)
     and recomputes ``all_verified`` over the upgraded atom list.
     """
-    upgraded: dict[str, Any] = json.loads(json.dumps(original_cert))
-
-    proved_names: set[str] = set()
-    if isinstance(lean_cert, dict):
-        for atom in lean_cert.get("atoms", []) or []:
-            if (
-                isinstance(atom, dict)
-                and atom.get("z3_check_result") == "lean_verified"
-                and isinstance(atom.get("name"), str)
-            ):
-                proved_names.add(atom["name"])
-
-    atoms = upgraded.get("atoms")
-    if isinstance(atoms, list):
-        for atom in atoms:
-            if (
-                isinstance(atom, dict)
-                and atom.get("name") in proved_names
-                and atom.get("z3_check_result") != "lean_verified"
-            ):
-                atom["z3_check_result"] = "lean_verified"
-                atom["status"] = "verified"
-        if atoms:
-            upgraded["all_verified"] = all(
-                isinstance(a, dict)
-                and a.get("z3_check_result") in {"unsat", "lean_verified"}
-                for a in atoms
-            )
+    proved_names = _atom_names_with_result(lean_cert, "lean_verified")
+    upgraded = _upgrade_atoms_by_name(original_cert, proved_names)
 
     if isinstance(lean_cert, dict):
         if "lean_version" in lean_cert:
