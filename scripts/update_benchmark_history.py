@@ -14,8 +14,10 @@ HEADER = [
     "",
     "Time-series summary of proliferate LLM benchmark runs. The table is kept to the latest 50 rows.",
     "",
-    "| Date | Model | Success Rate | Avg Code Length |",
-    "|------|-------|--------------|-----------------|",
+    "## Generation Benchmark Runs",
+    "",
+    "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+    "|------|-------|--------------|-----------------|-------------:|",
 ]
 MAX_ROWS = 50
 
@@ -40,6 +42,13 @@ def _format_length(value: Any) -> str:
         return "0.0"
 
 
+def _format_seconds(value: Any) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "0.000"
+
+
 def _escape_cell(value: Any) -> str:
     return str(value).replace("|", "\\|")
 
@@ -50,14 +59,20 @@ def _table_rows(history_path: Path) -> list[str]:
     rows: list[str] = []
     in_table = False
     for line in history_path.read_text(encoding="utf-8").splitlines():
-        if line == "| Date | Model | Success Rate | Avg Code Length |":
+        if line in {
+            "| Date | Model | Success Rate | Avg Code Length |",
+            "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+        }:
             in_table = True
             continue
-        if in_table and line == "|------|-------|--------------|-----------------|":
+        if in_table and line.startswith("|------|-------|--------------|"):
             continue
         if in_table:
             if line.startswith("|"):
-                rows.append(line)
+                if line.count("|") == 5:
+                    rows.append(line[:-1].rstrip() + " | 0.000 |")
+                else:
+                    rows.append(line)
             elif rows:
                 break
     return rows
@@ -76,7 +91,8 @@ def update_history(
         (
             f"| {run_date} | {_escape_cell(entry.get('model', 'unknown'))} | "
             f"{_format_rate(entry.get('success_rate'))} | "
-            f"{_format_length(entry.get('avg_code_length'))} |"
+            f"{_format_length(entry.get('avg_code_length'))} | "
+            f"{_format_seconds(entry.get('avg_time_seconds'))} |"
         )
         for entry in results
     ]

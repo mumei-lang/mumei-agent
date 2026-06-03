@@ -22,6 +22,7 @@ class BenchmarkRow:
     model: str
     success_rate: float
     avg_code_length: float
+    avg_time_seconds: float
     order: int
 
 
@@ -49,32 +50,63 @@ def parse_history_rows(history_path: Path = DEFAULT_HISTORY_PATH) -> list[Benchm
         return []
 
     rows: list[BenchmarkRow] = []
-    in_table = False
+    header: list[str] | None = None
+    generation_section_seen = False
+    in_generation_section = False
     for line in history_path.read_text(encoding="utf-8").splitlines():
-        if line == "| Date | Model | Success Rate | Avg Code Length |":
-            in_table = True
+        if line.startswith("## "):
+            in_generation_section = line == "## Generation Benchmark Runs"
+            generation_section_seen = generation_section_seen or in_generation_section
+            header = None
             continue
-        if not in_table or line == "|------|-------|--------------|-----------------|":
+        if generation_section_seen and not in_generation_section:
             continue
         if not line.startswith("|"):
-            if rows:
-                break
+            header = None
             continue
 
         cells = _split_markdown_row(line)
-        if len(cells) != 4:
+        normalized = [cell.lower() for cell in cells]
+        if {"date", "model", "success rate"}.issubset(set(normalized)):
+            header = normalized
             continue
+        if header is None or all(set(cell) <= {"-"} for cell in cells):
+            continue
+
         try:
-            success_rate = float(cells[2])
-            avg_code_length = float(cells[3])
+            date_idx = header.index("date")
+            model_idx = header.index("model")
+            success_idx = header.index("success rate")
         except ValueError:
             continue
+
+        try:
+            success_rate = float(cells[success_idx])
+        except (IndexError, ValueError):
+            continue
+
+        def _optional_float(column_names: tuple[str, ...], default: float) -> float:
+            for name in column_names:
+                if name not in header:
+                    continue
+                try:
+                    return float(cells[header.index(name)])
+                except (IndexError, ValueError):
+                    return default
+            return default
+
+        avg_code_length = _optional_float(("avg code length",), float("inf"))
+        avg_time_seconds = _optional_float(("avg time (s)", "avg time seconds"), float("inf"))
+        if "avg time (ms)" in header:
+            avg_time_seconds = _optional_float(("avg time (ms)",), float("inf")) / 1000.0
+
         rows.append(
             BenchmarkRow(
-                date=cells[0],
-                model=cells[1],
+                date=cells[date_idx],
+                model=cells[model_idx],
                 success_rate=success_rate,
                 avg_code_length=avg_code_length,
+                avg_time_seconds=avg_time_seconds,
                 order=len(rows),
             )
         )
@@ -105,6 +137,7 @@ def select_model(
         rows,
         key=lambda row: (
             row.success_rate,
+            -row.avg_time_seconds,
             -row.avg_code_length,
             row.date,
             row.order,

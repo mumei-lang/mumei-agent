@@ -1,13 +1,19 @@
 # LLM Benchmark History
 
-Time-series summary of proliferate LLM benchmark runs. The table is kept to the latest 50 rows.
+Time-series summary of proliferate LLM benchmark runs. The generation table is kept to the latest 50 rows and feeds `scripts/select_benchmark_model.py`.
 
-## Zero-Human Challenge Results
+## Recommended model policy
 
-| Date | Model | Success Rate | Avg Code Length | Avg Attempts |
-|------|-------|--------------|-----------------|--------------|
-| 2026-05-04 | qwen3.5:4b | 0.667 | 163.3 | 2.5 |
-| 2026-05-25 | qwen3.5:4b | 0.857 | 178.2 | 3.1 |
+- **Current recorded local winner:** `qwen3.5:4b` (latest generation benchmark: 0.857 success rate).
+- **Remote profile default:** keep `gpt-4o-mini` until remote benchmark rows are recorded; workflow dispatch can still override `llm_model`.
+- **Tie-breakers:** maximize success rate, then prefer lower average runtime, then shorter generated code.
+
+## Generation Benchmark Runs
+
+| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |
+|------|-------|--------------|-----------------|-------------:|
+| 2026-05-04 | qwen3.5:4b | 0.667 | 163.3 | 0.000 |
+| 2026-05-25 | qwen3.5:4b | 0.857 | 178.2 | 0.000 |
 
 ## SV-COMP Style Benchmarks
 
