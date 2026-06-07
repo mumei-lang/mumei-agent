@@ -14,7 +14,11 @@ from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
-from agent.prompts.report_formatter import format_error_diff, is_contextual_suggestion
+from agent.prompts.report_formatter import (
+    format_error_diff,
+    format_retry_report_context,
+    is_contextual_suggestion,
+)
 from agent.spec_code_mapper import SpecCodeMapper
 from agent.thought_log import (
     ThoughtProcess,
@@ -52,6 +56,15 @@ _ATOM_SIGNATURE_RE = re.compile(
 # Cache the rendered axiom summary keyed by ``(path, mtime)`` so
 # repeated generations do not re-read disk.
 _CORE_AXIOM_CACHE: dict[tuple[str, float], str] = {}
+
+
+def _default_prompt_report_truncate_chars() -> int:
+    try:
+        from agent.config import AgentConfig
+
+        return AgentConfig().prompt_report_truncate_chars
+    except Exception:
+        return 4000
 
 
 def _is_std_module(spec: dict) -> bool:
@@ -568,6 +581,7 @@ def generate_multi_atom(
     thought_process: ThoughtProcess | None = None,
     enable_dense_properties: bool | None = None,
     enable_spec_code_mapping: bool | None = None,
+    prompt_report_truncate_chars: int | None = None,
 ) -> tuple[str, bool]:
     """Generate a multi-atom Mumei module from a specification.
 
@@ -609,6 +623,8 @@ def generate_multi_atom(
             enable_spec_code_mapping = AgentConfig().enable_spec_code_mapping
         except Exception:
             enable_spec_code_mapping = True
+    if prompt_report_truncate_chars is None:
+        prompt_report_truncate_chars = _default_prompt_report_truncate_chars()
 
     # Extract cross_file_context without mutating the caller's spec dict —
     # ``run_refinement_loop`` (and any other caller) may reuse the same
@@ -740,6 +756,7 @@ def generate_multi_atom(
                     client, model, spec_json, current_code, error_log, {},
                     atom_names, metrics, spec=spec_for_json,
                     enable_spec_code_mapping=bool(enable_spec_code_mapping),
+                    prompt_report_truncate_chars=prompt_report_truncate_chars,
                 )
                 continue
 
@@ -822,6 +839,7 @@ def generate_multi_atom(
                 client, model, spec_json, current_code, error_log, report,
                 failing, metrics, spec=spec_for_json,
                 enable_spec_code_mapping=bool(enable_spec_code_mapping),
+                prompt_report_truncate_chars=prompt_report_truncate_chars,
             )
             if thought_process is not None:
                 try:
@@ -910,6 +928,7 @@ def _attempt_multi_atom_fix(
     *,
     spec: dict | None = None,
     enable_spec_code_mapping: bool = True,
+    prompt_report_truncate_chars: int | None = None,
 ) -> str:
     """Attempt to fix specific failing atoms in a multi-atom module."""
     failing_str = ", ".join(failing_atoms)
@@ -919,7 +938,9 @@ def _attempt_multi_atom_fix(
         f"# Verification error:\n{error_log}\n\n"
     )
     if report:
-        fix_prompt += f"# Structured report:\n{json.dumps(report, indent=2)}\n\n"
+        retry_context = format_retry_report_context(report, prompt_report_truncate_chars)
+        if retry_context:
+            fix_prompt += f"{retry_context}\n\n"
     fix_prompt += (
         f"# Failing atom(s): {failing_str}\n"
         f"Fix ONLY the failing atom(s) listed above. "
@@ -962,6 +983,7 @@ def generate_code(
     thought_process: ThoughtProcess | None = None,
     enable_dense_properties: bool | None = None,
     enable_spec_code_mapping: bool | None = None,
+    prompt_report_truncate_chars: int | None = None,
 ) -> tuple[str, bool]:
     """Generate Mumei code from a specification, verify, and fix if needed.
 
@@ -1003,6 +1025,7 @@ def generate_code(
             thought_process=thought_process,
             enable_dense_properties=enable_dense_properties,
             enable_spec_code_mapping=enable_spec_code_mapping,
+            prompt_report_truncate_chars=prompt_report_truncate_chars,
         )
 
     if metrics is None:
@@ -1023,6 +1046,8 @@ def generate_code(
             enable_spec_code_mapping = AgentConfig().enable_spec_code_mapping
         except Exception:
             enable_spec_code_mapping = True
+    if prompt_report_truncate_chars is None:
+        prompt_report_truncate_chars = _default_prompt_report_truncate_chars()
 
     # Extract cross_file_context without mutating the caller's spec dict —
     # ``run_refinement_loop`` (and any other caller) may reuse the same
@@ -1152,6 +1177,7 @@ def generate_code(
                     prompt_module, metrics, inferred_context=inferred_context,
                     prev_report=prev_report, spec=spec_for_json,
                     enable_spec_code_mapping=bool(enable_spec_code_mapping),
+                    prompt_report_truncate_chars=prompt_report_truncate_chars,
                 )
                 continue
 
@@ -1231,6 +1257,7 @@ def generate_code(
                 prompt_module, metrics, inferred_context=inferred_context,
                 prev_report=prev_report, spec=spec_for_json,
                 enable_spec_code_mapping=bool(enable_spec_code_mapping),
+                prompt_report_truncate_chars=prompt_report_truncate_chars,
             )
             if thought_process is not None:
                 try:
@@ -1440,12 +1467,13 @@ def _build_retry_prompt(
     prompt_module,
     inferred_context: dict | None = None,
     prev_report: dict | None = None,
+    prompt_report_truncate_chars: int | None = None,
 ) -> str:
     """Build an optimal retry prompt from a verification failure.
 
     The base prompt is built by the prompt module (``generate_atom`` or
     ``generate_stdlib``), which already includes actionable fix hints,
-    structured unsat core, and data flow trace when ``report`` is non-empty.
+    structured unsat core when ``report`` is non-empty.
     This function adds only the cross-attempt error diff on top.
     """
     combined_source = (
@@ -1455,11 +1483,15 @@ def _build_retry_prompt(
 
     # Start with the base prompt from the appropriate module
     base_prompt = prompt_module.build_prompt(
-        combined_source, error_log, report, inferred_context=inferred_context,
+        combined_source,
+        error_log,
+        report,
+        inferred_context=inferred_context,
+        prompt_report_truncate_chars=prompt_report_truncate_chars,
     )
 
     # Enrich with error diff (cross-attempt context only).
-    # NOTE: actionable fix hints, structured unsat core, and data flow trace
+    # NOTE: actionable fix hints and structured unsat core
     # are already appended by each prompt module's build_prompt(), so we only
     # add the error diff here to avoid duplicate sections.
     extra_sections: list[str] = []
@@ -1498,11 +1530,13 @@ def _attempt_fix(
     prev_report: dict | None = None,
     spec: dict | None = None,
     enable_spec_code_mapping: bool = True,
+    prompt_report_truncate_chars: int | None = None,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
     fix_prompt = _build_retry_prompt(
         spec_json, current_code, error_log, report, prompt_module,
         inferred_context=inferred_context, prev_report=prev_report,
+        prompt_report_truncate_chars=prompt_report_truncate_chars,
     )
 
     fix_response = client.chat.completions.create(

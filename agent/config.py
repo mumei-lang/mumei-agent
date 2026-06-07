@@ -49,6 +49,12 @@ class AgentConfig:
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o"))
     mumei_bin: str = field(default_factory=lambda: os.getenv("MUMEI_BIN", "mumei"))
     max_retries: int = 5
+    max_context_tokens: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CONTEXT_TOKENS", "16000"))
+    )
+    prompt_report_truncate_chars: int = field(
+        default_factory=lambda: int(os.getenv("PROMPT_REPORT_TRUNCATE_CHARS", "4000"))
+    )
     strategy: str = field(default_factory=lambda: os.getenv("AGENT_STRATEGY", "single"))
     visualizer_sync: bool = field(default_factory=lambda: _env_bool("ENABLE_VISUALIZER_SYNC"))
 

@@ -17,6 +17,8 @@ def test_nla_options_default_values(monkeypatch) -> None:
     monkeypatch.delenv("ENABLE_CONTRACT_ISOLATION", raising=False)
     monkeypatch.delenv("CONTRACT_MANIFEST_PATH", raising=False)
     monkeypatch.delenv("INTENT_DRIFT_THRESHOLD", raising=False)
+    monkeypatch.delenv("MAX_CONTEXT_TOKENS", raising=False)
+    monkeypatch.delenv("PROMPT_REPORT_TRUNCATE_CHARS", raising=False)
 
     config = AgentConfig()
 
@@ -31,6 +33,8 @@ def test_nla_options_default_values(monkeypatch) -> None:
     assert config.enable_contract_isolation is True
     assert config.contract_manifest_path is None
     assert config.intent_drift_threshold == 0.7
+    assert config.max_context_tokens == 16000
+    assert config.prompt_report_truncate_chars == 4000
 
 
 def test_nla_options_from_env(monkeypatch) -> None:
@@ -46,6 +50,8 @@ def test_nla_options_from_env(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_CONTRACT_ISOLATION", "false")
     monkeypatch.setenv("CONTRACT_MANIFEST_PATH", "contract-manifest.json")
     monkeypatch.setenv("INTENT_DRIFT_THRESHOLD", "0.9")
+    monkeypatch.setenv("MAX_CONTEXT_TOKENS", "32000")
+    monkeypatch.setenv("PROMPT_REPORT_TRUNCATE_CHARS", "2048")
 
     config = AgentConfig()
 
@@ -60,6 +66,8 @@ def test_nla_options_from_env(monkeypatch) -> None:
     assert config.enable_contract_isolation is False
     assert config.contract_manifest_path == "contract-manifest.json"
     assert config.intent_drift_threshold == 0.9
+    assert config.max_context_tokens == 32000
+    assert config.prompt_report_truncate_chars == 2048
 
 
 def test_nla_options_case_insensitive(monkeypatch) -> None:

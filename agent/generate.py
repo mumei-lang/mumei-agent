@@ -218,6 +218,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         config_max_retries=max_retries,
         mumei_client=mumei,
         metrics=metrics,
+        prompt_report_truncate_chars=config.prompt_report_truncate_chars,
     )
 
     if not generated_code:
