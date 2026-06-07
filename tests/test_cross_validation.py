@@ -81,6 +81,49 @@ def test_validate_foreign_code_adds_division_safety_precondition() -> None:
     assert result.inferred_atoms[0].requires == "b != 0"
 
 
+def test_validate_nl_spec_keeps_llm_non_category_issues() -> None:
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.content = json.dumps(
+        {
+            "atoms": [],
+            "issues": [
+                {
+                    "kind": "verification",
+                    "message": "The inferred contract needs verifier attention.",
+                    "evidence": "unverified temporal claim",
+                }
+            ],
+        }
+    )
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+    config = AgentConfig(api_key="test", model="test-model")
+    config.create_client = MagicMock(return_value=client)
+
+    result = validate_nl_spec(
+        "The function updates state safely.",
+        config=config,
+        use_llm=True,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert result.overconstraints[0].kind == "verification"
+
+
+def test_validate_nl_spec_reports_unsupported_mixed_z3_clauses() -> None:
+    result = validate_nl_spec(
+        "requires: x > 0;\nensures: result == max(x, 0);",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.satisfiable is True
+    assert any("Skipped unsupported Z3 clause" in warning for warning in result.warnings)
+
+
 def test_validate_code_cli_writes_json_report(tmp_path: Path) -> None:
     source = tmp_path / "code.py"
     output = tmp_path / "report.json"

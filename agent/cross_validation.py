@@ -28,7 +28,6 @@ from agent.prompts.cross_validation_nl import (
 
 IssueKind = Literal["contradiction", "ambiguity", "overconstraint", "satisfiability", "llm", "verification"]
 Severity = Literal["warning", "error"]
-SupportedLanguage = Literal["python", "rust", "go"]
 
 
 @dataclass(frozen=True)
@@ -129,7 +128,7 @@ def validate_nl_spec(
     contradictions.extend(issue for issue in llm_issues if issue.kind == "contradiction")
     ambiguities.extend(issue for issue in llm_issues if issue.kind == "ambiguity")
     overconstraints = [
-        issue for issue in llm_issues if issue.kind in {"overconstraint", "satisfiability"}
+        issue for issue in llm_issues if issue.kind not in {"contradiction", "ambiguity"}
     ]
     overconstraints.extend(_detect_overconstraints(spec_text, atoms))
 
@@ -342,7 +341,7 @@ def _infer_contracts_with_llm(
         content = response.choices[0].message.content or ""
         payload = _json_from_text(content)
         return _atoms_from_payload(payload), _issues_from_payload(payload), warnings
-    except (ValueError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+    except Exception as exc:
         warnings.append(f"LLM contract inference skipped or failed: {exc}")
         return [], [], warnings
 
@@ -610,8 +609,8 @@ def _check_atoms_with_z3(
             parsed, clause_warnings = _clause_to_z3(clause, symbols)
             atom_warnings.extend(clause_warnings)
             exprs.extend(parsed)
+        warnings.extend(atom_warnings)
         if not exprs:
-            warnings.extend(atom_warnings)
             continue
         any_checked = True
         solver = z3.Solver()
