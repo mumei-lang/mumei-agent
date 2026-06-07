@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,23 @@ def _ok(payload: dict[str, Any]) -> str:
 def _resolve_repo(path: str) -> Path:
     """Resolve *path* as an absolute Path."""
     return Path(path).expanduser().resolve()
+
+
+def _parse_spec_files(spec_files: Any) -> list[str]:
+    if isinstance(spec_files, list):
+        return [str(item) for item in spec_files if str(item).strip()]
+    if not isinstance(spec_files, str):
+        return []
+    text = spec_files.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed if str(item).strip()]
+    return [part.strip() for part in text.split(",") if part.strip()]
 
 
 _SPEC_GUIDELINES: dict[str, Any] = {
@@ -793,6 +811,7 @@ def extract_spec(
     domain_hint: str = "",
     generate: bool = False,
     mumei_repo: str = "",
+    check_contradiction_only: bool = False,
 ) -> str:
     """Extract a Mumei forge task spec from natural language requirements.
 
@@ -805,8 +824,11 @@ def extract_spec(
         domain_hint: Optional domain (e.g., "financial", "security").
         generate: When true, also generate and verify the code via the
             configured ``mumei`` binary (``AgentConfig.mumei_bin``).
-        mumei_repo: Path to mumei repo (used when generate=true to prefer
-            a repo-local target/debug or target/release mumei binary).
+        mumei_repo: Path to mumei repo (used by generate=true or
+            check_contradiction_only=true to prefer a repo-local
+            target/debug or target/release mumei binary).
+        check_contradiction_only: When true, extract the spec and run only
+            direct contradiction detection without code generation.
 
     Returns:
         JSON string with ``spec`` (the extracted forge task spec),
@@ -814,6 +836,8 @@ def extract_spec(
     """
     if not natural_language.strip():
         return _err("natural_language must be non-empty")
+    if generate and check_contradiction_only:
+        return _err("generate and check_contradiction_only cannot both be true")
 
     try:
         from agent.config import AgentConfig
@@ -823,6 +847,7 @@ def extract_spec(
             extract_and_generate as extract_and_generate_impl,
             extract_spec as extract_spec_impl,
         )
+        from agent.extract_spec import check_spec_contradiction_from_spec
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
 
@@ -836,7 +861,7 @@ def extract_spec(
         )
 
     mumei_bin = config.mumei_bin
-    if generate and mumei_repo:
+    if (generate or check_contradiction_only) and mumei_repo:
         repo = _resolve_repo(mumei_repo)
         if not repo.exists():
             return _err(f"mumei_repo does not exist: {repo}")
@@ -868,6 +893,16 @@ def extract_spec(
             mumei_client=mumei,
             metrics=metrics,
         )
+        if check_contradiction_only:
+            contradiction = check_spec_contradiction_from_spec(spec, mumei)
+            return _ok(
+                {
+                    "spec": spec,
+                    **contradiction,
+                    "extraction_attempts": metrics.extraction_attempts,
+                    "extraction_successes": metrics.extraction_successes,
+                }
+            )
         return _ok(
             {
                 "spec": spec,
@@ -877,6 +912,72 @@ def extract_spec(
         )
     except Exception as exc:
         return _err(f"extract_spec failed: {exc}")
+
+
+@mcp.tool()
+def check_spec_contradiction(natural_language: str, domain_hint: str = "") -> str:
+    """Extract specs from natural language and report direct contradictions only."""
+    return extract_spec(
+        natural_language,
+        domain_hint=domain_hint,
+        check_contradiction_only=True,
+    )
+
+
+@mcp.tool()
+def check_cross_spec_consistency(spec_files: str) -> str:
+    """Run mumei cross-spec verification across one or more .mm files.
+
+    Args:
+        spec_files: JSON array string or comma-separated list of .mm files.
+    """
+    files = _parse_spec_files(spec_files)
+    if not files:
+        return _err("spec_files must contain at least one .mm file")
+
+    try:
+        from agent.config import AgentConfig
+        from agent.mumei_client import create_mumei_client
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    try:
+        config = AgentConfig()
+        mumei = create_mumei_client(config.mumei_bin)
+    except Exception as exc:
+        return _err(f"AgentConfig is unavailable: {exc}")
+
+    for file in files:
+        if not Path(file).expanduser().exists():
+            return _err(f"spec file does not exist: {file}")
+
+    primary, *extra = files
+    with tempfile.TemporaryDirectory(prefix="mumei-cross-spec-") as tmp:
+        report_dir = Path(tmp) / "report"
+        extra_args = ["--cross-spec-verify"]
+        if extra:
+            extra_args.extend(["--cross-spec-files", ",".join(extra)])
+        result = mumei.verify(primary, report_dir=str(report_dir), extra_args=extra_args)
+        report_path = report_dir / "cross_spec.json"
+        cross_spec_report: dict[str, Any] = {}
+        if report_path.exists():
+            try:
+                cross_spec_report = json.loads(report_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                return _err(f"failed to parse cross_spec.json: {exc}")
+
+    return _ok(
+        {
+            "spec_files": files,
+            "consistent": result.get("success", False)
+            and not cross_spec_report.get("summary", {}).get("inconsistent_calls", 0)
+            and not cross_spec_report.get("summary", {}).get(
+                "global_invariant_conflict_count", 0
+            ),
+            "verification": result,
+            "cross_spec": cross_spec_report,
+        }
+    )
 
 
 @mcp.tool()
