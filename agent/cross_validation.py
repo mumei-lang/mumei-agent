@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import ast
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 from typing import Literal
@@ -26,7 +28,17 @@ from agent.prompts.cross_validation_nl import (
 )
 
 
-IssueKind = Literal["contradiction", "ambiguity", "overconstraint", "satisfiability", "llm", "verification"]
+IssueKind = Literal[
+    "contradiction",
+    "ambiguity",
+    "overconstraint",
+    "satisfiability",
+    "llm",
+    "verification",
+    "alignment",
+    "missing_implementation",
+    "drift",
+]
 Severity = Literal["warning", "error"]
 
 
@@ -89,6 +101,45 @@ class ForeignCodeValidationResult:
     issues: list[CrossValidationIssue] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SpecCodeAlignmentResult:
+    """Result of validating that code implements a specification."""
+
+    success: bool
+    code_path: str
+    language: str
+    spec_atoms: list[MumeiContractAtom]
+    code_atoms: list[MumeiContractAtom]
+    missing_constraints: list[CrossValidationIssue]
+    divergences: list[CrossValidationIssue]
+    satisfiable: bool | None
+    report: str = ""
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SpecDriftResult:
+    """Result of validating that a specification still matches code."""
+
+    success: bool
+    code_path: str
+    spec_path: str
+    language: str
+    spec_atoms: list[MumeiContractAtom]
+    code_atoms: list[MumeiContractAtom]
+    drift_issues: list[CrossValidationIssue]
+    changed_hunks: list[str]
+    report: str = ""
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+CrossValidationResult = (
+    NLSpecValidationResult | ForeignCodeValidationResult | SpecCodeAlignmentResult | SpecDriftResult
+)
 
 
 def validate_nl_spec(
@@ -164,6 +215,149 @@ def validate_nl_spec(
         verification=verification,
         warnings=warnings,
         errors=errors,
+    )
+
+
+def validate_spec_to_code(
+    spec: str,
+    code_path: str,
+    *,
+    config: AgentConfig | None = None,
+    language: str | None = None,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+    lang: Literal["en", "ja"] = "en",
+) -> SpecCodeAlignmentResult:
+    """Validate that code implements the requires/ensures constraints in a spec."""
+    config = config or AgentConfig()
+    warnings: list[str] = []
+    errors: list[str] = []
+    code_file = Path(code_path)
+    normalized_language = _infer_language_from_path(code_file, language)
+    try:
+        code = code_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"failed to read code file: {exc}")
+        return _spec_code_result(
+            code_path=code_path,
+            language=normalized_language,
+            spec_atoms=[],
+            code_atoms=[],
+            missing_constraints=[],
+            divergences=[],
+            satisfiable=None,
+            warnings=warnings,
+            errors=errors,
+            lang=lang,
+        )
+
+    spec_result = validate_nl_spec(spec, config=config, use_llm=use_llm, run_mumei=run_mumei)
+    code_result = validate_foreign_code(
+        code,
+        normalized_language,
+        config=config,
+        use_llm=use_llm,
+        run_mumei=run_mumei,
+    )
+    warnings.extend(spec_result.warnings)
+    warnings.extend(code_result.warnings)
+    errors.extend(spec_result.errors)
+    errors.extend(code_result.errors)
+    missing, divergences, compare_warnings = _compare_spec_atoms_to_code_atoms(
+        spec_result.inferred_atoms,
+        code_result.inferred_atoms,
+        direction="spec_to_code",
+    )
+    warnings.extend(compare_warnings)
+    satisfiable = _combine_satisfiability(spec_result.satisfiable, code_result.satisfiable)
+    return _spec_code_result(
+        code_path=code_path,
+        language=normalized_language,
+        spec_atoms=spec_result.inferred_atoms,
+        code_atoms=code_result.inferred_atoms,
+        missing_constraints=_dedupe_issues(missing),
+        divergences=_dedupe_issues(divergences),
+        satisfiable=satisfiable,
+        warnings=warnings,
+        errors=errors,
+        lang=lang,
+    )
+
+
+def validate_code_to_spec(
+    code_path: str,
+    spec_path: str,
+    *,
+    config: AgentConfig | None = None,
+    language: str | None = None,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+    lang: Literal["en", "ja"] = "en",
+) -> SpecDriftResult:
+    """Validate that a specification has not drifted behind code changes."""
+    config = config or AgentConfig()
+    warnings: list[str] = []
+    errors: list[str] = []
+    spec_file = Path(spec_path)
+    try:
+        spec = spec_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"failed to read spec file: {exc}")
+        return _spec_drift_result(
+            code_path=code_path,
+            spec_path=spec_path,
+            language=_infer_language_from_path(Path(code_path), language),
+            spec_atoms=[],
+            code_atoms=[],
+            drift_issues=[],
+            changed_hunks=[],
+            warnings=warnings,
+            errors=errors,
+            lang=lang,
+        )
+
+    alignment = validate_spec_to_code(
+        spec,
+        code_path,
+        config=config,
+        language=language,
+        use_llm=use_llm,
+        run_mumei=run_mumei,
+        lang=lang,
+    )
+    warnings.extend(alignment.warnings)
+    errors.extend(alignment.errors)
+    changed_hunks, diff_warnings = _git_diff_hunks(Path(code_path))
+    warnings.extend(diff_warnings)
+    if not changed_hunks:
+        warnings.append("No git diff hunks found for the code path; comparing current code to spec only.")
+    drift_missing, drift_divergences, drift_warnings = _compare_spec_atoms_to_code_atoms(
+        alignment.spec_atoms,
+        alignment.code_atoms,
+        direction="code_to_spec",
+    )
+    warnings.extend(drift_warnings)
+    drift_issues = [
+        CrossValidationIssue(
+            kind="drift",
+            message=issue.message,
+            evidence=issue.evidence,
+            location=issue.location,
+            severity=issue.severity,
+        )
+        for issue in [*drift_missing, *drift_divergences]
+    ]
+    return _spec_drift_result(
+        code_path=code_path,
+        spec_path=spec_path,
+        language=alignment.language,
+        spec_atoms=alignment.spec_atoms,
+        code_atoms=alignment.code_atoms,
+        drift_issues=_dedupe_issues(drift_issues),
+        changed_hunks=changed_hunks,
+        warnings=warnings,
+        errors=errors,
+        lang=lang,
     )
 
 
@@ -247,6 +441,38 @@ def build_validate_spec_parser(parser: argparse.ArgumentParser | None = None) ->
     return parser
 
 
+def build_validate_spec_to_code_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    """Add validate-spec-to-code arguments to an argparse parser."""
+    parser = parser or argparse.ArgumentParser(description="Validate spec-to-code alignment.")
+    parser.add_argument("--spec", "--input", dest="spec", required=True, help="Path to spec file.")
+    parser.add_argument("--code", required=True, help="Path to source code.")
+    parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
+    parser.add_argument("--lang", choices=["en", "ja"], default="en", help="Report language.")
+    parser.add_argument("--output", help="Optional report path.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown.")
+    parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
+    parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
+    return parser
+
+
+def build_validate_code_to_spec_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    """Add validate-code-to-spec arguments to an argparse parser."""
+    parser = parser or argparse.ArgumentParser(description="Validate code-to-spec drift.")
+    parser.add_argument("--code", required=True, help="Path to source code.")
+    parser.add_argument("--spec", required=True, help="Path to spec file.")
+    parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
+    parser.add_argument("--lang", choices=["en", "ja"], default="en", help="Report language.")
+    parser.add_argument("--output", help="Optional report path.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown.")
+    parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
+    parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
+    return parser
+
+
 def build_validate_code_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     """Add validate-code arguments to an argparse parser."""
     parser = parser or argparse.ArgumentParser(description="Validate foreign-language code.")
@@ -269,6 +495,43 @@ def main_validate_spec(args: argparse.Namespace | None = None) -> NLSpecValidati
         run_mumei=not args.no_mumei,
     )
     _emit_result(result, args.output)
+    if not result.success:
+        sys.exit(1)
+    return result
+
+
+def main_validate_spec_to_code(args: argparse.Namespace | None = None) -> SpecCodeAlignmentResult:
+    """CLI entrypoint for validate-spec-to-code."""
+    if args is None:
+        args = build_validate_spec_to_code_parser().parse_args()
+    spec_text = _read_input_file(args.spec)
+    result = validate_spec_to_code(
+        spec_text,
+        args.code,
+        language=args.language,
+        use_llm=not args.no_llm,
+        run_mumei=not args.no_mumei,
+        lang=args.lang,
+    )
+    _emit_cross_validation_result(result, args.output, json_output=args.json)
+    if not result.success:
+        sys.exit(1)
+    return result
+
+
+def main_validate_code_to_spec(args: argparse.Namespace | None = None) -> SpecDriftResult:
+    """CLI entrypoint for validate-code-to-spec."""
+    if args is None:
+        args = build_validate_code_to_spec_parser().parse_args()
+    result = validate_code_to_spec(
+        args.code,
+        args.spec,
+        language=args.language,
+        use_llm=not args.no_llm,
+        run_mumei=not args.no_mumei,
+        lang=args.lang,
+    )
+    _emit_cross_validation_result(result, args.output, json_output=args.json)
     if not result.success:
         sys.exit(1)
     return result
@@ -299,11 +562,25 @@ def _read_input_file(path: str) -> str:
         sys.exit(2)
 
 
-def _emit_result(result: NLSpecValidationResult | ForeignCodeValidationResult, output: str | None) -> None:
+def _emit_result(result: CrossValidationResult, output: str | None) -> None:
     payload = json.dumps(asdict(result), indent=2, ensure_ascii=False)
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8")
     print(payload)
+
+
+def _emit_cross_validation_result(
+    result: SpecCodeAlignmentResult | SpecDriftResult,
+    output: str | None,
+    *,
+    json_output: bool = False,
+) -> None:
+    if json_output:
+        _emit_result(result, output)
+        return
+    if output:
+        Path(output).write_text(result.report + "\n", encoding="utf-8")
+    print(result.report)
 
 
 def _infer_nl_contracts_with_llm(
@@ -395,7 +672,17 @@ def _issues_from_payload(payload: dict[str, object]) -> list[CrossValidationIssu
     if not isinstance(issues_value, list):
         return []
     issues: list[CrossValidationIssue] = []
-    valid_kinds = {"contradiction", "ambiguity", "overconstraint", "satisfiability", "llm", "verification"}
+    valid_kinds = {
+        "contradiction",
+        "ambiguity",
+        "overconstraint",
+        "satisfiability",
+        "llm",
+        "verification",
+        "alignment",
+        "missing_implementation",
+        "drift",
+    }
     for issue_value in issues_value:
         if not isinstance(issue_value, dict):
             continue
@@ -628,6 +915,310 @@ def _check_atoms_with_z3(
         elif status == z3.unknown:
             warnings.append(f"Z3 returned unknown for atom `{atom.name}`.")
     return (all_satisfiable if any_checked else None), issues, warnings
+
+
+def _compare_spec_atoms_to_code_atoms(
+    spec_atoms: list[MumeiContractAtom],
+    code_atoms: list[MumeiContractAtom],
+    *,
+    direction: Literal["spec_to_code", "code_to_spec"],
+) -> tuple[list[CrossValidationIssue], list[CrossValidationIssue], list[str]]:
+    missing: list[CrossValidationIssue] = []
+    divergences: list[CrossValidationIssue] = []
+    warnings: list[str] = []
+    if not spec_atoms:
+        missing.append(
+            CrossValidationIssue(
+                kind="missing_implementation" if direction == "spec_to_code" else "drift",
+                message="No mumei contract atoms could be extracted from the specification.",
+                evidence="requires/ensures extraction returned no atoms",
+            )
+        )
+        return missing, divergences, warnings
+    if not code_atoms:
+        missing.append(
+            CrossValidationIssue(
+                kind="missing_implementation" if direction == "spec_to_code" else "drift",
+                message="No contract atoms could be inferred from the target code.",
+                evidence="code contract inference returned no atoms",
+            )
+        )
+        return missing, divergences, warnings
+
+    matched_code_names: set[str] = set()
+    for spec_atom in spec_atoms:
+        code_atom = _matching_code_atom(spec_atom, code_atoms)
+        if code_atom is None:
+            missing.append(
+                CrossValidationIssue(
+                    kind="missing_implementation" if direction == "spec_to_code" else "drift",
+                    message=f"Spec atom `{spec_atom.name}` has no matching code implementation.",
+                    evidence=f"spec requires: {spec_atom.requires}; spec ensures: {spec_atom.ensures}",
+                    location=spec_atom.name,
+                )
+            )
+            continue
+        matched_code_names.add(code_atom.name)
+        if direction == "spec_to_code":
+            req_antecedents = [code_atom.requires]
+            req_consequent = spec_atom.requires
+            req_message = f"Spec precondition is not enforced by `{code_atom.name}`."
+        else:
+            req_antecedents = [spec_atom.requires]
+            req_consequent = code_atom.requires
+            req_message = f"Code precondition for `{code_atom.name}` is not documented in the spec."
+        req_implied, req_warnings = _clause_implied(
+            req_antecedents,
+            req_consequent,
+            context=f"{spec_atom.name}.requires",
+        )
+        warnings.extend(req_warnings)
+        if not req_implied:
+            missing.append(
+                CrossValidationIssue(
+                    kind="missing_implementation" if direction == "spec_to_code" else "drift",
+                    message=req_message,
+                    evidence=f"spec requires: {spec_atom.requires}; code requires: {code_atom.requires}",
+                    location=code_atom.name,
+                )
+            )
+
+        ensures_implied, ensures_warnings = _clause_implied(
+            [spec_atom.requires, code_atom.requires, code_atom.ensures],
+            spec_atom.ensures,
+            context=f"{spec_atom.name}.ensures",
+        )
+        warnings.extend(ensures_warnings)
+        if not ensures_implied:
+            divergences.append(
+                CrossValidationIssue(
+                    kind="alignment" if direction == "spec_to_code" else "drift",
+                    message=f"Code behavior for `{code_atom.name}` does not imply the spec postcondition.",
+                    evidence=f"spec ensures: {spec_atom.ensures}; code ensures: {code_atom.ensures}",
+                    location=code_atom.name,
+                )
+            )
+
+    unmatched_code = [
+        code_atom
+        for code_atom in code_atoms
+        if code_atom.name not in matched_code_names and not _spec_has_matching_atom(code_atom, spec_atoms)
+    ]
+    for code_atom in unmatched_code:
+        divergences.append(
+            CrossValidationIssue(
+                kind="alignment" if direction == "spec_to_code" else "drift",
+                message=f"Code atom `{code_atom.name}` is not covered by the specification.",
+                evidence=f"code requires: {code_atom.requires}; code ensures: {code_atom.ensures}",
+                location=code_atom.name,
+                severity="warning",
+            )
+        )
+    return missing, divergences, warnings
+
+
+def _matching_code_atom(
+    spec_atom: MumeiContractAtom,
+    code_atoms: list[MumeiContractAtom],
+) -> MumeiContractAtom | None:
+    for code_atom in code_atoms:
+        if code_atom.name == spec_atom.name:
+            return code_atom
+    if spec_atom.name == "nl_spec_contract" and code_atoms:
+        return code_atoms[0]
+    if len(code_atoms) == 1:
+        return code_atoms[0]
+    return None
+
+
+def _spec_has_matching_atom(code_atom: MumeiContractAtom, spec_atoms: list[MumeiContractAtom]) -> bool:
+    if len(spec_atoms) == 1:
+        return True
+    return any(spec_atom.name == code_atom.name for spec_atom in spec_atoms)
+
+
+def _clause_implied(
+    antecedent_clauses: list[str],
+    consequent_clause: str,
+    *,
+    context: str,
+) -> tuple[bool, list[str]]:
+    symbols: dict[str, z3.IntNumRef | z3.ArithRef] = {}
+    warnings: list[str] = []
+    consequent_exprs, consequent_warnings = _clause_to_z3(consequent_clause, symbols)
+    warnings.extend(f"{context}: {warning}" for warning in consequent_warnings)
+    if not consequent_exprs:
+        return True, warnings
+    antecedent_exprs: list[z3.BoolRef] = []
+    for clause in antecedent_clauses:
+        parsed, clause_warnings = _clause_to_z3(clause, symbols)
+        warnings.extend(f"{context}: {warning}" for warning in clause_warnings)
+        antecedent_exprs.extend(parsed)
+    for consequent in consequent_exprs:
+        solver = z3.Solver()
+        if antecedent_exprs:
+            solver.add(*antecedent_exprs)
+        solver.add(z3.Not(consequent))
+        status = solver.check()
+        if status == z3.sat:
+            return False, warnings
+        if status == z3.unknown:
+            warnings.append(f"{context}: Z3 returned unknown while checking implication.")
+            return False, warnings
+    return True, warnings
+
+
+def _combine_satisfiability(left: bool | None, right: bool | None) -> bool | None:
+    if left is False or right is False:
+        return False
+    if left is True and right is True:
+        return True
+    if left is True or right is True:
+        return True
+    return None
+
+
+def _infer_language_from_path(path: Path, language: str | None) -> str:
+    if language:
+        return language.strip().lower()
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        return "python"
+    if suffix == ".rs":
+        return "rust"
+    if suffix == ".go":
+        return "go"
+    return "python"
+
+
+def _git_diff_hunks(code_path: Path) -> tuple[list[str], list[str]]:
+    warnings: list[str] = []
+    try:
+        root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=code_path.parent,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], [f"git diff skipped: {exc}"]
+    if root_result.returncode != 0:
+        return [], ["git diff skipped: code path is not inside a git repository."]
+    root = Path(root_result.stdout.strip())
+    try:
+        relative = code_path.resolve().relative_to(root.resolve())
+    except ValueError:
+        relative = code_path
+    diff_commands: list[list[str]] = []
+    base_ref = None
+    base_ref = os.environ.get("GITHUB_BASE_REF")
+    if base_ref:
+        diff_commands.append(["git", "diff", f"origin/{base_ref}...HEAD", "--", str(relative)])
+    diff_commands.append(["git", "diff", "HEAD", "--", str(relative)])
+    diff_text = ""
+    for command in diff_commands:
+        try:
+            result = subprocess.run(
+                command,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            warnings.append(f"{' '.join(command)} failed: {exc}")
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            diff_text = result.stdout
+            break
+        if result.returncode != 0 and result.stderr.strip():
+            warnings.append(result.stderr.strip())
+    return _extract_diff_hunks(diff_text), warnings
+
+
+def _extract_diff_hunks(diff_text: str) -> list[str]:
+    hunks: list[str] = []
+    current: list[str] = []
+    for line in diff_text.splitlines():
+        if line.startswith("@@"):
+            if current:
+                hunks.append("\n".join(current[:80]))
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        hunks.append("\n".join(current[:80]))
+    return hunks
+
+
+def _spec_code_result(
+    *,
+    code_path: str,
+    language: str,
+    spec_atoms: list[MumeiContractAtom],
+    code_atoms: list[MumeiContractAtom],
+    missing_constraints: list[CrossValidationIssue],
+    divergences: list[CrossValidationIssue],
+    satisfiable: bool | None,
+    warnings: list[str],
+    errors: list[str],
+    lang: Literal["en", "ja"],
+) -> SpecCodeAlignmentResult:
+    result = SpecCodeAlignmentResult(
+        success=bool(
+            not errors
+            and spec_atoms
+            and code_atoms
+            and not missing_constraints
+            and not divergences
+            and satisfiable is not False
+        ),
+        code_path=code_path,
+        language=language,
+        spec_atoms=spec_atoms,
+        code_atoms=code_atoms,
+        missing_constraints=missing_constraints,
+        divergences=divergences,
+        satisfiable=satisfiable,
+        warnings=warnings,
+        errors=errors,
+    )
+    from agent.report_formatter import format_cross_validation_report
+
+    return replace(result, report=format_cross_validation_report(result, lang=lang))
+
+
+def _spec_drift_result(
+    *,
+    code_path: str,
+    spec_path: str,
+    language: str,
+    spec_atoms: list[MumeiContractAtom],
+    code_atoms: list[MumeiContractAtom],
+    drift_issues: list[CrossValidationIssue],
+    changed_hunks: list[str],
+    warnings: list[str],
+    errors: list[str],
+    lang: Literal["en", "ja"],
+) -> SpecDriftResult:
+    result = SpecDriftResult(
+        success=bool(not errors and spec_atoms and code_atoms and not drift_issues),
+        code_path=code_path,
+        spec_path=spec_path,
+        language=language,
+        spec_atoms=spec_atoms,
+        code_atoms=code_atoms,
+        drift_issues=drift_issues,
+        changed_hunks=changed_hunks,
+        warnings=warnings,
+        errors=errors,
+    )
+    from agent.report_formatter import format_cross_validation_report
+
+    return replace(result, report=format_cross_validation_report(result, lang=lang))
 
 
 def _clause_to_z3(
