@@ -320,6 +320,10 @@ See `.env.example` for configuration details.
 | `validate-code` | Infer Mumei contracts from Python/Rust/Go and verify their logical health | `mumei-agent validate-code --input code.py --language python` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `python -m agent mcp-server` |
 
+## Verification Workflow Guide
+
+ユースケース別の検証手順（自然言語仕様の矛盾チェック、既存コードの検証、仕様↔コード整合性検証、人間向け操作ガイド）は [`docs/VERIFICATION_WORKFLOW_GUIDE.md`](docs/VERIFICATION_WORKFLOW_GUIDE.md) を参照。
+
 ## MCP Server
 
 `python -m agent mcp-server` runs mumei-agent as a `FastMCP("Mumei-Agent")`

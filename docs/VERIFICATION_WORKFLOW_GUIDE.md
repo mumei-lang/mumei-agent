@@ -1,0 +1,377 @@
+# 検証ワークフローガイド
+
+## 前提条件（セットアップ）
+
+```bash
+# mumei インストール
+curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
+# または: brew install mumei-lang/mumei/mumei
+
+# mumei-agent セットアップ
+git clone https://github.com/mumei-lang/mumei-agent
+cd mumei-agent
+cp .env.example .env
+# .env を編集: LLM_BASE_URL / LLM_API_KEY / LLM_MODEL を設定
+pip install -r requirements.txt
+
+# LLM バックエンド起動（Ollama を使う場合）
+docker compose up -d
+docker exec mumei-ollama ollama pull qwen3.5
+```
+
+## ユースケース一覧（早見表）
+
+| やりたいこと | コマンド |
+|---|---|
+| 自然言語仕様の矛盾チェック | `python -m agent extract-spec --text "..." --check-contradiction-only --output report.json` |
+| 仕様ファイルの矛盾チェック | `python -m agent extract-spec --text-file spec.txt --check-contradiction-only --output report.json` |
+| 単一コードファイルの検証 | `python -m agent extract-spec --code-file src/foo.rs --output spec.json` |
+| ディレクトリ単位のコード検証 | `python -m agent extract-spec --code-file src/ --output spec.json` |
+| 仕様→コード整合性検証 | `python -m agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
+| コード→仕様の逆検証 | `python -m agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
+| エディタ統合（LSP） | `mumei lsp` |
+| MCP 経由（Claude Code 等） | `.mcp.json` 設定後、AI エージェントから利用 |
+
+## 1. 自然言語仕様の検証
+
+**目的**: 仕様書・要件定義文書に矛盾・不整合がないかを Z3 で検証する。
+
+### 1-1. インラインテキスト（単一仕様）
+
+```bash
+python -m agent extract-spec \
+  --text "送金額は正の整数のみ。送金後の残高は非負。残高不足はエラー。" \
+  --domain financial \
+  --check-contradiction-only \
+  --output /tmp/spec_report.json
+```
+
+出力例（矛盾なし）:
+
+```text
+No direct contradiction was detected in the extracted specification.
+Contradiction report written to /tmp/spec_report.json
+```
+
+出力例（矛盾あり）:
+
+```text
+The extracted natural-language specification contains a direct contradiction.
+SpecValidation failed for the synthesized specification: ...
+```
+
+### 1-2. テキストファイルから読み込む
+
+```bash
+# spec.txt に仕様を記述
+python -m agent extract-spec \
+  --text-file docs/requirements/payment_spec.txt \
+  --domain financial \
+  --check-contradiction-only \
+  --output reports/payment_contradiction.json
+```
+
+### 1-3. ドメインヒント一覧
+
+`--domain` に指定できる値: `financial`, `compliance`, `regtech`, `security`, `iot`, `web`, `data_structure`, `math`, `general`
+
+### 1-4. MCP 経由（AI エージェントから）
+
+`check_spec_contradiction` ツールを呼ぶ:
+
+```json
+{
+  "natural_language": "x must be greater than 0 and less than 0",
+  "domain_hint": "math"
+}
+```
+
+## 2. 既存コードの検証
+
+**目的**: Rust/C/Go/Python/TypeScript 等の既存コードに論理的な問題がないかを抽出・検証する。
+
+対応言語: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, `java`（拡張子から自動検出）
+
+### 2-1. 単一ファイル
+
+```bash
+python -m agent extract-spec \
+  --code-file src/payment.rs \
+  --domain financial \
+  --output reports/payment_spec.json
+```
+
+言語を明示する場合:
+
+```bash
+python -m agent extract-spec \
+  --code-file src/payment.rs \
+  --code-language rust \
+  --output reports/payment_spec.json
+```
+
+### 2-2. ディレクトリ単位（複数ファイル）
+
+```bash
+python -m agent extract-spec \
+  --code-file src/ \
+  --domain financial \
+  --output reports/src_spec.json
+```
+
+ディレクトリ内の対応拡張子ファイルをすべて処理し、マージされた仕様を出力する。
+出力 JSON の `files[]` に各ファイルの個別結果、`merged_spec` に統合仕様が含まれる。
+
+### 2-3. 矛盾チェックまで一括実行
+
+```bash
+python -m agent extract-spec \
+  --code-file src/ \
+  --check-contradiction-only \
+  --output reports/src_contradiction.json
+```
+
+### 2-4. MCP 経由
+
+`extract_spec` ツールで `code_file` を指定する:
+
+```json
+{
+  "code_file": "/repo/src/payment.rs",
+  "language": "rust",
+  "domain_hint": "financial",
+  "generate": false,
+  "mumei_repo": "/path/to/mumei"
+}
+```
+
+## 3. 自然言語仕様 → 既存コードの整合性検証
+
+**目的**: 仕様書に基づいてコードが正しく実装されているかを検証する。
+
+### 3-1. 仕様からコードを生成して検証（仕様が正しいかの確認）
+
+```bash
+python -m agent extract-spec \
+  --text-file docs/requirements/payment_spec.txt \
+  --domain financial \
+  --generate \
+  --generate-output /tmp/payment_verified.mm \
+  --output /tmp/payment_spec.json
+```
+
+成功時: `Generated verified code written to /tmp/payment_verified.mm`
+失敗時: `Warning: Generated code written to ... but verification failed`
+
+### 3-2. 既存コードと仕様の cross-spec 検証（複数ファイル間）
+
+まず各ファイルから `.mm` 仕様を生成し、cross-spec で整合性を確認する:
+
+```bash
+# 仕様抽出 → .mm 生成
+python -m agent extract-spec \
+  --code-file src/account.rs \
+  --generate \
+  --generate-output /tmp/account.mm \
+  --output /tmp/account_spec.json
+
+python -m agent extract-spec \
+  --code-file src/transfer.rs \
+  --generate \
+  --generate-output /tmp/transfer.mm \
+  --output /tmp/transfer_spec.json
+
+# cross-spec 検証
+mumei verify \
+  --report-dir reports/cross-spec \
+  --cross-spec-files /tmp/account.mm \
+  /tmp/transfer.mm
+```
+
+`reports/cross-spec/cross_spec.json` に以下が出力される:
+
+- `contract_consistency[]`: 呼び出し元/先のコントラクト整合性
+- `global_invariants[]`: 全体で共有される不変条件
+- `global_invariant_conflicts[]`: 矛盾する不変条件
+- `circular_dependencies[]`: 循環依存
+
+### 3-3. MCP 経由（cross-spec）
+
+`check_cross_spec_consistency` ツールを呼ぶ:
+
+```json
+{
+  "spec_files": ["/tmp/account.mm", "/tmp/transfer.mm"]
+}
+```
+
+## 4. 既存コード → 自然言語仕様の逆検証
+
+**目的**: コードから仕様を逆抽出し、元の要件定義と照合する。
+
+### 4-1. コードから仕様を抽出する
+
+```bash
+python -m agent extract-spec \
+  --code-file src/payment.rs \
+  --output reports/extracted_spec.json
+```
+
+出力 JSON の `natural_language_spec` フィールドに自然言語仕様が含まれる。
+
+### 4-2. 抽出仕様の矛盾チェック
+
+```bash
+python -m agent extract-spec \
+  --code-file src/payment.rs \
+  --check-contradiction-only \
+  --output reports/code_contradiction.json
+```
+
+### 4-3. ディレクトリ全体から仕様を逆抽出
+
+```bash
+python -m agent extract-spec \
+  --code-file src/ \
+  --check-contradiction-only \
+  --output reports/src_contradiction.json
+```
+
+`files[].natural_language_spec` に各ファイルの自然言語仕様が含まれる。
+これを元の要件定義と人手で照合するか、さらに `--text-file` で元仕様を渡して比較する。
+
+### 4-4. 既存 .mm ファイルの直接検証
+
+すでに `.mm` ファイルがある場合は mumei CLI を直接使う:
+
+```bash
+# 単一ファイル
+mumei verify src/main.mm
+
+# JSON 出力（AI・スクリプト向け）
+mumei verify --json src/main.mm
+
+# レポートディレクトリ指定
+mumei verify --report-dir reports/ src/main.mm
+
+# 複数ファイル cross-spec
+mumei verify --report-dir reports/ --cross-spec-files src/account.mm src/transfer.mm
+```
+
+## 5. 人間が操作する際のヒント・配慮
+
+### 5-1. エディタ統合（LSP）
+
+```bash
+# LSP サーバー起動
+mumei lsp
+```
+
+VS Code 拡張（`editors/vscode/`）をインストールすると:
+
+- `requires`/`ensures` のインライン表示
+- Intent Drift スコア（0.00〜1.00）の CodeLens 表示
+- カウンター例のゴーストテキスト装飾
+- 複数スパン診断（関連ソース位置の同時表示）
+
+### 5-2. REPL（対話的な検証）
+
+```bash
+mumei repl
+```
+
+小さな仕様を試しながら Z3 検証を確認できる。
+
+### 5-3. MCP 経由（Claude Code / Devin 等）
+
+`mumei-lang/mumei` リポジトリルートで:
+
+```bash
+pip install "mcp[cli]>=1.0"
+python mcp_server.py
+```
+
+`mumei-lang/mumei-agent` で:
+
+```bash
+python -m agent mcp-server
+```
+
+`.mcp.json` 設定例（両サーバーを同時利用）:
+
+```json
+{
+  "mcpServers": {
+    "mumei-forge": {
+      "command": "sh",
+      "args": ["-lc", "cd /path/to/mumei && exec python mcp_server.py"]
+    },
+    "mumei-agent": {
+      "command": "sh",
+      "args": ["-lc", "cd /path/to/mumei-agent && exec python -m agent mcp-server"]
+    }
+  }
+}
+```
+
+### 5-4. 診断出力の読み方
+
+`mumei verify` の出力はバイリンガル（EN/JP）:
+
+```text
+× Verification Error: Postcondition (ensures) is not satisfied.
+  help: ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください
+```
+
+JSON 出力（`--json`）の主要フィールド:
+
+- `failure_type`: エラー種別（`precondition_violated`, `effect_mismatch` 等）
+- `counterexample`: Z3 が見つけた反例の具体値
+- `semantic_feedback.violated_constraints`: 違反した制約の詳細
+- `semantic_feedback.data_flow`: データフロー追跡
+- `suggestion`: 修正提案
+
+### 5-5. 自己修復ループ（繰り返し検証）
+
+```bash
+# 既存 .mm ファイルを自動修復
+python -m agent heal src/main.mm
+
+# 予算制限付き
+python -m agent heal src/main.mm --budget-policy budget_policy.json
+
+# 自己修正プロトコル（収束まで繰り返す）
+python -m agent self-correct src/main.mm --max-repairs 10 --required-successes 3
+```
+
+### 5-6. 仕様の健全性チェック（vacuity）
+
+仕様が弱すぎないかを確認する:
+
+```bash
+MUMEI_ENABLE_VACUITY_CHECK=1 mumei verify spec.mm
+# または
+mumei verify --enable-vacuity-check spec.mm
+```
+
+### 5-7. ドキュメント生成
+
+検証済みコードからドキュメントを生成:
+
+```bash
+mumei doc src/main.mm -o docs/api/ --format html
+mumei doc src/main.mm -o docs/api/ --format markdown
+```
+
+## フィードバックの読み方
+
+| フィールド | 意味 | 対処 |
+|---|---|---|
+| `contradiction_found: true` | 仕様内に矛盾がある | `natural_language_explanation` を読んで仕様を修正 |
+| `precondition_violated` | 事前条件が満たされない | `requires` 節を見直す |
+| `postcondition_violated` | 事後条件が満たされない | `ensures` 節またはロジックを見直す |
+| `effect_mismatch` | 副作用の宣言漏れ | `effects:` 節に不足エフェクトを追加 |
+| `outside_decidable_fragment` | Z3 の決定可能フラグメント外 | 線形算術に書き直すか Lean エスカレーション |
+| `inconsistent_calls` | 呼び出し元/先のコントラクト不整合 | 呼び出し元の `requires` を強化するか呼び出し先の `requires` を緩和 |
+
+詳細は [`docs/REPORT_SCHEMA.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md) および [`docs/SPEC_GUIDE.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/SPEC_GUIDE.md) を参照。
