@@ -2,10 +2,14 @@
 
 import json
 
+from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
+
+
 SPEC_EXTRACTION_SYSTEM_PROMPT = (
     "You are a specification engineer for the Mumei proof-driven language. "
     "Your task is to extract formal specifications from natural language requirements.\n\n"
-    "Mumei atoms have the following structure:\n"
+    + SPEC_GUIDE_DECIDABLE_FRAGMENT
+    + "Mumei atoms have the following structure:\n"
     "- `requires`: preconditions that must hold before execution\n"
     "- `ensures`: postconditions guaranteed after execution\n"
     "- `effects`: side effects the atom performs (e.g., IO, State, Temporal)\n"

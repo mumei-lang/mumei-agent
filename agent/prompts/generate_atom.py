@@ -7,15 +7,9 @@ from agent.prompts.report_formatter import (
     format_retry_report_context,
 )
 
-DECIDABLE_FRAGMENT_GUIDELINES = (
-    "# Z3-stable specification fragment:\n"
-    "- Prefer linear i64/Nat arithmetic: addition, subtraction, comparisons, and constant multiplication.\n"
-    "- Avoid variable multiplication, symbolic division/modulo, exponentiation, and recursive arithmetic invariants unless the task explicitly needs Lean escalation.\n"
-    "- For every array or sequence access `a[i]`, make `0 <= i && i < len(a)` explicit in `requires` or a bounded `forall`.\n"
-    "- Keep `forall` over bounded ranges or finite collections; for `exists`, expose a constructible witness.\n"
-    "- Keep temporal effects as finite state machines with explicit transitions and pre/post states.\n"
-    "- If verification reports `outside_decidable_fragment`, first simplify the spec before changing implementation code."
-)
+from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
+
+DECIDABLE_FRAGMENT_GUIDELINES = "# " + SPEC_GUIDE_DECIDABLE_FRAGMENT
 
 
 # Common mistakes checklist injected into all generation prompts.
