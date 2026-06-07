@@ -364,6 +364,46 @@ class TestExtractSpecFromCode:
         assert result["detected_language"] == "rust"
         assert result["spec"]["task_id"] == "code-simple-add"
 
+    def test_extracts_directory_with_merged_spec(self, tmp_path: Path) -> None:
+        source_dir = tmp_path / "code"
+        source_dir.mkdir()
+        (source_dir / "simple_add.rs").write_text(
+            "pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n",
+            encoding="utf-8",
+        )
+        directory_payload = {
+            "files": [
+                {
+                    "path": str(source_dir / "simple_add.rs"),
+                    "relative_path": "simple_add.rs",
+                    "natural_language_spec": "simple_add returns a + b",
+                    "detected_language": "rust",
+                    "spec": {"task_id": "code-simple-add", "atoms": []},
+                    "warnings": [],
+                }
+            ],
+            "merged_spec": {"task_id": "merged-code-spec", "atoms": []},
+        }
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+        fake_config.max_retries = 2
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+            patch(
+                "agent.extract_spec.extract_spec_from_code_directory",
+                return_value=directory_payload,
+            ) as mock_extract_directory,
+        ):
+            result = _payload(mcp_server.extract_spec_from_code(str(source_dir)))
+
+        assert result["status"] == "ok"
+        assert result["files"][0]["relative_path"] == "simple_add.rs"
+        assert result["merged_spec"]["task_id"] == "merged-code-spec"
+        mock_extract_directory.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # send_latent_message

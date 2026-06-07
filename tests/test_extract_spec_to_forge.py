@@ -62,6 +62,84 @@ def test_extract_spec_code_file_option_parses() -> None:
     assert args.domain == "math"
 
 
+def test_extract_spec_code_directory_merges_file_specs(tmp_path: Path) -> None:
+    source_dir = tmp_path / "code"
+    (source_dir / "src").mkdir(parents=True)
+    (source_dir / "src" / "simple_add.rs").write_text(
+        "pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n",
+        encoding="utf-8",
+    )
+    (source_dir / "lib.py").write_text(
+        "def negate(x: int) -> int:\n    return -x\n",
+        encoding="utf-8",
+    )
+    (source_dir / "README.md").write_text("not source code\n", encoding="utf-8")
+
+    merged_spec = {
+        "task_id": "merged-code-spec",
+        "target_file": "std/math/merged.mm",
+        "mode": "create",
+        "atoms": [],
+    }
+    output_path = tmp_path / "merged.json"
+
+    fake_config = MagicMock()
+    fake_config.model = "test-model"
+    fake_config.max_retries = 2
+    fake_config.mumei_bin = "mumei"
+    fake_config.create_client.return_value = _mock_client(json.dumps(merged_spec))
+
+    fake_extractor = MagicMock()
+    py_result = MagicMock()
+    py_result.success = True
+    py_result.natural_language_spec = "negate returns the additive inverse of x."
+    py_result.forge_task_spec = {"task_id": "code-negate", "atoms": []}
+    py_result.detected_language = "python"
+    py_result.warnings = []
+    py_result.errors = []
+    rs_result = MagicMock()
+    rs_result.success = True
+    rs_result.natural_language_spec = "simple_add returns a + b."
+    rs_result.forge_task_spec = {"task_id": "code-simple-add", "atoms": []}
+    rs_result.detected_language = "rust"
+    rs_result.warnings = []
+    rs_result.errors = []
+    fake_extractor.extract_from_file.side_effect = [py_result, rs_result]
+
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(source_dir),
+            "--domain",
+            "math",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=fake_config),
+        patch("agent.extract_spec.create_mumei_client", return_value=MagicMock()),
+        patch("agent.code_to_spec.CodeToSpecExtractor") as mock_extractor_class,
+        patch("agent.extract_spec.extract_spec", return_value=merged_spec) as mock_merge,
+    ):
+        mock_extractor_class.EXTENSION_MAP = {".rs": "rust", ".py": "python"}
+        mock_extractor_class.return_value = fake_extractor
+        main(args)
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert [file["relative_path"] for file in payload["files"]] == [
+        "lib.py",
+        "src/simple_add.rs",
+    ]
+    assert payload["merged_spec"] == merged_spec
+    assert fake_extractor.extract_from_file.call_count == 2
+    merged_prompt = mock_merge.call_args.args[2]
+    assert "lib.py" in merged_prompt
+    assert "src/simple_add.rs" in merged_prompt
+    assert "simple_add returns a + b" in merged_prompt
+
+
 def test_extract_spec_to_forge_to_verify_with_mocks(tmp_path: Path) -> None:
     spec = {
         "task_id": "nl-abs-i64",

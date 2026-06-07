@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any, Mapping
 
 from agent.config import AgentConfig
 from agent.metrics import Metrics
@@ -101,6 +102,117 @@ def _natural_language_contradiction_report(verify_result: dict) -> str:
     if "Spec contradiction" in combined or "SpecValidation failed" in combined:
         return combined
     return ""
+
+
+def _code_extensions_for_language(
+    extension_map: Mapping[str, str],
+    language: str | None,
+) -> list[str]:
+    if language in {None, "unknown"}:
+        return sorted(extension_map)
+    return sorted(
+        extension
+        for extension, mapped_language in extension_map.items()
+        if mapped_language == language
+    )
+
+
+def _collect_code_files(
+    source_dir: Path,
+    extension_map: Mapping[str, str],
+    language: str | None,
+) -> list[Path]:
+    extensions = set(_code_extensions_for_language(extension_map, language))
+    if not extensions:
+        return []
+    return sorted(
+        (
+            path
+            for path in source_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in extensions
+        ),
+        key=lambda path: path.relative_to(source_dir).as_posix(),
+    )
+
+
+def extract_spec_from_code_directory(
+    config: AgentConfig,
+    source_dir: Path,
+    *,
+    language: str | None = None,
+    domain_hint: str = "",
+    mumei_client=None,
+    max_retries: int = 3,
+    metrics: Metrics | None = None,
+) -> dict[str, Any]:
+    """Extract per-file specs from a source directory and merge them."""
+    from agent.code_to_spec import CodeToSpecExtractor
+
+    source_dir = source_dir.expanduser().resolve()
+    if not source_dir.exists():
+        raise ValueError(f"code_file does not exist: {source_dir}")
+    if not source_dir.is_dir():
+        raise ValueError(f"code_file is not a directory: {source_dir}")
+
+    code_files = _collect_code_files(
+        source_dir,
+        CodeToSpecExtractor.EXTENSION_MAP,
+        language,
+    )
+    if not code_files:
+        raise ValueError(
+            f"no supported source-code files found in directory: {source_dir}"
+        )
+
+    extractor = CodeToSpecExtractor(config)
+    files: list[dict[str, Any]] = []
+    natural_language_sections: list[str] = []
+    for code_path in code_files:
+        result = extractor.extract_from_file(
+            code_path,
+            language=language,
+            domain_hint=domain_hint,
+            mumei_client=mumei_client,
+            max_retries=max_retries,
+        )
+        relative_path = code_path.relative_to(source_dir).as_posix()
+        if not result.success or result.forge_task_spec is None:
+            errors = "; ".join(result.errors) or "unknown error"
+            raise ValueError(f"failed to extract spec from {relative_path}: {errors}")
+
+        files.append(
+            {
+                "path": str(code_path),
+                "relative_path": relative_path,
+                "natural_language_spec": result.natural_language_spec,
+                "detected_language": result.detected_language,
+                "spec": result.forge_task_spec,
+                "warnings": result.warnings,
+            }
+        )
+        natural_language_sections.append(
+            f"## Source file: {relative_path}\n{result.natural_language_spec}"
+        )
+
+    merged_natural_language = "\n\n".join(
+        [
+            "Merge the following source-file requirements into a single coherent "
+            "Mumei forge task specification. Preserve cross-file relationships and "
+            "avoid duplicate atoms.",
+            *natural_language_sections,
+        ]
+    )
+    client = config.create_client()
+    merged_spec = extract_spec(
+        client,
+        config.model,
+        merged_natural_language,
+        domain_hint=domain_hint,
+        mumei_client=mumei_client,
+        max_retries=max_retries,
+        metrics=metrics,
+    )
+    return {"files": files, "merged_spec": merged_spec}
 
 
 def check_spec_contradiction_from_spec(spec: dict, mumei_client) -> dict:
@@ -206,7 +318,7 @@ def build_parser(parser=None):
     text_group.add_argument(
         "--code-file",
         type=str,
-        help="Path to a source-code file to convert into natural language requirements",
+        help="Path to a source-code file or directory to convert into natural language requirements",
     )
     parser.add_argument(
         "--code-language",
@@ -325,34 +437,63 @@ def main(args=None):
     client = config.create_client()
     mumei = create_mumei_client(config.mumei_bin)
     domain_hint = "" if args.domain == "general" else args.domain
+    directory_result: dict[str, Any] | None = None
 
     try:
         if args.code_file:
             from agent.code_to_spec import CodeToSpecExtractor
 
-            code_result = CodeToSpecExtractor(config).extract_from_file(
-                Path(args.code_file),
-                language=args.code_language,
-                domain_hint=domain_hint,
-                mumei_client=mumei,
-                max_retries=args.max_retries,
-            )
-            for warning in code_result.warnings:
-                print(f"Warning: {warning}", file=sys.stderr)
-            if not code_result.success or code_result.forge_task_spec is None:
+            source_path = Path(args.code_file).expanduser()
+            if source_path.is_dir():
+                metrics = Metrics()
+                directory_result = extract_spec_from_code_directory(
+                    config,
+                    source_path,
+                    language=args.code_language,
+                    domain_hint=domain_hint,
+                    mumei_client=mumei,
+                    max_retries=args.max_retries,
+                    metrics=metrics,
+                )
+                for file_result in directory_result["files"]:
+                    for warning in file_result["warnings"]:
+                        print(
+                            f"Warning ({file_result['relative_path']}): {warning}",
+                            file=sys.stderr,
+                        )
                 print(
-                    "Error: failed to extract spec from code: "
-                    + "; ".join(code_result.errors),
+                    f"Code files: {len(directory_result['files'])}",
                     file=sys.stderr,
                 )
-                sys.exit(1)
-            print(
-                f"Code language: {code_result.detected_language}",
-                file=sys.stderr,
-            )
-            natural_language = code_result.natural_language_spec
-            forge_spec = code_result.forge_task_spec
-            metrics = Metrics()
+                natural_language = "\n\n".join(
+                    file_result["natural_language_spec"]
+                    for file_result in directory_result["files"]
+                )
+                forge_spec = directory_result["merged_spec"]
+            else:
+                code_result = CodeToSpecExtractor(config).extract_from_file(
+                    source_path,
+                    language=args.code_language,
+                    domain_hint=domain_hint,
+                    mumei_client=mumei,
+                    max_retries=args.max_retries,
+                )
+                for warning in code_result.warnings:
+                    print(f"Warning: {warning}", file=sys.stderr)
+                if not code_result.success or code_result.forge_task_spec is None:
+                    print(
+                        "Error: failed to extract spec from code: "
+                        + "; ".join(code_result.errors),
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                print(
+                    f"Code language: {code_result.detected_language}",
+                    file=sys.stderr,
+                )
+                natural_language = code_result.natural_language_spec
+                forge_spec = code_result.forge_task_spec
+                metrics = Metrics()
         else:
             natural_language = _read_text(args)
             metrics = Metrics()
@@ -373,10 +514,18 @@ def main(args=None):
 
         if args.check_contradiction_only:
             contradiction_report = check_spec_contradiction_from_spec(forge_spec, mumei)
-            output_payload = {
-                "spec": forge_spec,
-                **contradiction_report,
-            }
+            if directory_result is not None:
+                output_payload = {
+                    "files": directory_result["files"],
+                    "merged_spec": forge_spec,
+                    "spec": forge_spec,
+                    **contradiction_report,
+                }
+            else:
+                output_payload = {
+                    "spec": forge_spec,
+                    **contradiction_report,
+                }
             Path(args.output).write_text(
                 json.dumps(output_payload, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
@@ -413,8 +562,15 @@ def main(args=None):
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    output_payload: dict[str, Any] | None = None
+    if directory_result is not None:
+        output_payload = {
+            "files": directory_result["files"],
+            "merged_spec": spec,
+        }
+
     Path(args.output).write_text(
-        json.dumps(spec, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(output_payload or spec, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     print(f"Extracted spec written to {args.output}")
