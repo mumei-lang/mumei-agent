@@ -68,6 +68,10 @@ def _loss_vector(report_data: dict) -> list[float]:
     for component in raw_vector:
         if isinstance(component, int | float):
             vector.append(float(component))
+        elif isinstance(component, dict):
+            magnitude = component.get("magnitude")
+            if isinstance(magnitude, int | float):
+                vector.append(float(magnitude))
     return vector
 
 

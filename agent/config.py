@@ -90,6 +90,13 @@ class AgentConfig:
     intent_drift_threshold: float = field(
         default_factory=lambda: float(os.getenv("INTENT_DRIFT_THRESHOLD", "0.7"))
     )
+    enable_self_correction: bool = field(default_factory=lambda: _env_bool("ENABLE_SELF_CORRECTION"))
+    self_correction_max_attempts: int = field(
+        default_factory=lambda: int(os.getenv("SELF_CORRECTION_MAX_ATTEMPTS", "10"))
+    )
+    self_correction_convergence_threshold: int = field(
+        default_factory=lambda: int(os.getenv("SELF_CORRECTION_CONVERGENCE_THRESHOLD", "2"))
+    )
 
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)

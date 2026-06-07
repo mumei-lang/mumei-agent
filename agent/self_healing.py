@@ -158,6 +158,30 @@ def main() -> None:
     budget_policy = load_budget_policy(args.budget_policy)
     max_retries = min(max_retries, budget_policy.max_attempts)
 
+    if config.enable_self_correction and args.generate is None:
+        from agent.self_correction import run_self_correction_loop
+
+        initial = mumei.verify(source_file)
+        initial_report = initial["report"] or {}
+        initial_feedback = initial_report.get("structured_feedback")
+        if not isinstance(initial_feedback, dict):
+            initial_feedback = {
+                "status": "verification_failed" if not initial.get("success") else "verification_passed",
+                "error_type": initial_report.get("failure_type"),
+                "location": None,
+                "reconstruction_loss": initial_report.get("reconstruction_loss"),
+                "feedback_instruction": "Use the verifier report to repair the source.",
+            }
+        result = run_self_correction_loop(
+            source_file,
+            initial_feedback,
+            config=config,
+            client=client,
+            mumei_client=mumei,
+        )
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        return
+
     # --- Generate mode (P1-A): generate → verify → fix loop ---
     if args.generate is not None:
         success = True
