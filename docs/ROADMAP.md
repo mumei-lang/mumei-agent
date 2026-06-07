@@ -683,3 +683,62 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 - [mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap (incl. Strategic Initiatives)
 - [mumei-lang/mumei `docs/ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/ROADMAP.md) — Compiler strategic roadmap
 - [mumei-lang/mumei `docs/REPORT_SCHEMA.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md) — report.json schema (consumed by agent)
+
+## P-Deferred-A: heal コマンドの複数ファイル対応 — ⏸️ Deferred (PR #285/#121 完了後)
+
+### 対応しない理由
+
+`heal` の複数ファイル対応は、mumei-lang/mumei PR #285（multi-file cross-spec verification）および mumei-lang/mumei-agent PR #121（spec contradiction MCP tools）の成果物に依存する。
+これらが提供するファイル間依存解決・cross-spec verification の基盤が整ってから設計・実装する。
+
+### 将来の対応詳細
+
+**前提条件**: PR #285 / PR #121 の完了
+
+**実装方針**:
+1. `heal_file` MCP ツール（`agent/mcp_server.py`）にディレクトリ対応を追加
+   - 引数 `code_file` がディレクトリの場合、`.mm` ファイルを再帰収集する
+   - PR #285/#121 が提供するファイル間依存グラフを使って修復順序を決定する（依存先ファイルを先に修復）
+2. `python -m agent heal` CLI サブコマンド（`agent/__main__.py`）もディレクトリを受け付けるよう拡張
+3. 修復ループをファイル間依存グラフに基づいて順序制御する
+   - 依存先ファイルの修復が完了してから依存元ファイルの修復を開始する
+   - 循環依存がある場合は警告を出して手動レビューへ送る
+4. 複数ファイルの修復結果を集約して返す（成功/失敗件数、ファイルごとのサマリ）
+
+**対象ファイル**:
+- `agent/mcp_server.py` — `heal_file` ツールのディレクトリ対応
+- `agent/__main__.py` — `heal` サブコマンドのディレクトリ対応
+- `agent/strategies/fix_strategy.py` — 依存グラフに基づく修復順序制御
+
+**性能上の注意**:
+- ファイル間依存関係がある場合、処理時間は N×（単一ファイル時間）を超える可能性がある
+- 依存解決の追加オーバーヘッドが発生するため、並列化よりも依存順序の正確性を優先する
+
+## P-Deferred-B: extract_spec_from_code の対応言語拡張（Ruby/Swift/Kotlin 等） — ⏸️ Deferred (低優先度)
+
+### 対応しない理由
+
+`extract_spec_from_code` は LLM ベースの処理であるため、未対応言語でも `unknown` として扱うことで一定の動作が保証される。
+精度改善は継続的な作業であり、現時点では他の課題（ディレクトリ対応等）を優先する。
+
+### 将来の対応詳細
+
+**実装方針**:
+1. `agent/extract_spec.py` の `--code-language` オプションの `choices` に以下を段階的に追加する
+   - 優先度高: `ruby`, `swift`, `kotlin`
+   - 優先度中: `scala`, `haskell`, `elixir`
+   - 優先度低: その他の言語
+2. `agent/mcp_server.py` の `extract_spec_from_code` ツールの `language` パラメータの説明を更新する
+3. `agent/code_to_spec.py` の LLM プロンプトに言語固有のヒントを追記する
+   - 型システムの特徴（例: Ruby の duck typing、Swift の Optional、Kotlin の null safety）
+   - 言語固有の慣用句（例: Ruby の block/proc/lambda、Swift の guard let）
+   - 言語固有のエラーハンドリングパターン
+
+**対象ファイル**:
+- `agent/extract_spec.py` — `--code-language` の `choices` 拡張
+- `agent/mcp_server.py` — `extract_spec_from_code` の `language` パラメータ説明更新
+- `agent/code_to_spec.py` — 言語固有プロンプトヒントの追加
+
+**性能上の注意**:
+- 処理時間への影響は小さい（LLM 呼び出し回数は変わらない）
+- 精度（spec 抽出品質）の改善が主な目的
