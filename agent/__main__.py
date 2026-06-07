@@ -13,6 +13,8 @@ _SUBCOMMANDS = {
     "extract-spec",
     "validate-spec",
     "validate-code",
+    "validate-spec-to-code",
+    "validate-code-to-spec",
     "self-correct",
     "mcp-server",
 }
@@ -160,6 +162,34 @@ def main() -> None:
         build_validate_code_parser(parser)
         args = parser.parse_args(argv[1:])
         main_validate_code(args)
+    elif command == "validate-spec-to-code":
+        import argparse
+        from agent.cross_validation import (
+            build_validate_spec_to_code_parser,
+            main_validate_spec_to_code,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent validate-spec-to-code",
+            description="Detect missing implementation constraints by comparing specs to code.",
+        )
+        build_validate_spec_to_code_parser(parser)
+        args = parser.parse_args(argv[1:])
+        main_validate_spec_to_code(args)
+    elif command == "validate-code-to-spec":
+        import argparse
+        from agent.cross_validation import (
+            build_validate_code_to_spec_parser,
+            main_validate_code_to_spec,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent validate-code-to-spec",
+            description="Detect spec drift by comparing changed code to specs.",
+        )
+        build_validate_code_to_spec_parser(parser)
+        args = parser.parse_args(argv[1:])
+        main_validate_code_to_spec(args)
     elif command == "self-correct":
         import argparse
         from agent.strategies.self_correction_strategy import (

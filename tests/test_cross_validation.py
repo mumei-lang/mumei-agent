@@ -7,12 +7,18 @@ from unittest.mock import MagicMock, patch
 
 from agent.config import AgentConfig
 from agent.cross_validation import (
+    build_validate_code_to_spec_parser,
     build_validate_code_parser,
+    build_validate_spec_to_code_parser,
     build_validate_spec_parser,
+    main_validate_spec_to_code,
+    validate_code_to_spec,
     main_validate_code,
     validate_foreign_code,
     validate_nl_spec,
+    validate_spec_to_code,
 )
+from agent.report_formatter import format_cross_validation_report
 from agent.prompts.cross_validation_code import build_code_cross_validation_prompt
 from agent.prompts.cross_validation_nl import build_nl_cross_validation_prompt
 
@@ -160,6 +166,145 @@ def test_validate_spec_and_code_parsers_accept_required_flags() -> None:
     assert spec_args.input == "spec.txt"
     assert spec_args.format == "nl"
     assert code_args.language == "python"
+
+
+def test_validate_spec_to_code_detects_missing_requires(tmp_path: Path) -> None:
+    code_path = tmp_path / "impl.py"
+    code_path.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+    result = validate_spec_to_code(
+        "requires: x > 0;\nensures: result == x;",
+        str(code_path),
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert result.missing_constraints
+    assert result.missing_constraints[0].kind == "missing_implementation"
+    assert "x > 0" in result.missing_constraints[0].evidence
+
+
+def test_validate_spec_to_code_surfaces_spec_validation_issues(tmp_path: Path) -> None:
+    code_path = tmp_path / "impl.py"
+    code_path.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+    result = validate_spec_to_code(
+        "常に残高を更新する、かつ決して残高を更新する。requires: true;\nensures: result == x;",
+        str(code_path),
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert any(issue.message.startswith("Spec validation issue") for issue in result.divergences)
+
+
+def test_validate_code_to_spec_detects_postcondition_drift(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.txt"
+    code_path = tmp_path / "impl.py"
+    spec_path.write_text("requires: true;\nensures: result == x + 1;", encoding="utf-8")
+    code_path.write_text("def inc(x: int) -> int:\n    return x + 2\n", encoding="utf-8")
+
+    result = validate_code_to_spec(
+        str(code_path),
+        str(spec_path),
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert result.drift_issues
+    assert result.drift_issues[0].kind == "drift"
+
+
+def test_validate_code_to_spec_detects_undocumented_code_precondition(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.txt"
+    code_path = tmp_path / "impl.py"
+    spec_path.write_text("requires: true;\nensures: result == a // b;", encoding="utf-8")
+    code_path.write_text("def div(a: int, b: int) -> int:\n    return a // b\n", encoding="utf-8")
+
+    result = validate_code_to_spec(
+        str(code_path),
+        str(spec_path),
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert any("not documented" in issue.message for issue in result.drift_issues)
+
+
+def test_validate_spec_to_code_cli_emits_japanese_report(tmp_path: Path, capsys) -> None:
+    spec_path = tmp_path / "spec.txt"
+    code_path = tmp_path / "impl.py"
+    report_path = tmp_path / "report.md"
+    spec_path.write_text("requires: true;\nensures: result == a + b;", encoding="utf-8")
+    code_path.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+    args = build_validate_spec_to_code_parser().parse_args(
+        [
+            "--spec",
+            str(spec_path),
+            "--code",
+            str(code_path),
+            "--lang",
+            "ja",
+            "--output",
+            str(report_path),
+            "--no-llm",
+            "--no-mumei",
+        ]
+    )
+
+    result = main_validate_spec_to_code(args)
+    captured = capsys.readouterr()
+
+    assert result.success is True
+    assert "仕様→コード整合性レポート" in captured.out
+    assert "実装漏れ・仕様ドリフトは検出されませんでした" in report_path.read_text(encoding="utf-8")
+
+
+def test_new_cross_validation_parsers_accept_lang_and_paths() -> None:
+    spec_to_code_args = build_validate_spec_to_code_parser().parse_args(
+        ["--spec", "spec.txt", "--code", "code.py", "--lang", "ja", "--no-mumei"]
+    )
+    code_to_spec_args = build_validate_code_to_spec_parser().parse_args(
+        ["--code", "code.py", "--spec", "spec.txt", "--lang", "en", "--no-llm"]
+    )
+
+    assert spec_to_code_args.lang == "ja"
+    assert spec_to_code_args.code == "code.py"
+    assert code_to_spec_args.spec == "spec.txt"
+
+
+def test_cross_validation_formatter_highlights_human_review() -> None:
+    result = {
+        "success": False,
+        "code_path": "impl.py",
+        "language": "python",
+        "spec_atoms": [],
+        "code_atoms": [],
+        "drift_issues": [
+            {
+                "kind": "drift",
+                "message": "Spec postcondition is stale.",
+                "evidence": "result == x + 1",
+                "location": "inc",
+            }
+        ],
+        "changed_hunks": ["@@ -1 +1 @@\n-return x + 1\n+return x + 2"],
+        "warnings": [],
+        "errors": [],
+    }
+
+    report = format_cross_validation_report(result, lang="ja")
+
+    assert "コード→仕様ドリフトレポート" in report
+    assert "Human-in-the-Loop" in report
 
 
 def test_cross_validation_prompts_include_json_schema() -> None:
