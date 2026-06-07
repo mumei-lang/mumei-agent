@@ -268,6 +268,7 @@ def validate_spec_to_code(
         code_result.inferred_atoms,
         direction="spec_to_code",
     )
+    divergences.extend(_upstream_validation_issues(spec_result, code_result))
     warnings.extend(compare_warnings)
     satisfiable = _combine_satisfiability(spec_result.satisfiable, code_result.satisfiable)
     return _spec_code_result(
@@ -345,7 +346,15 @@ def validate_code_to_spec(
             location=issue.location,
             severity=issue.severity,
         )
-        for issue in [*drift_missing, *drift_divergences]
+        for issue in [
+            *drift_missing,
+            *drift_divergences,
+            *[
+                issue
+                for issue in alignment.divergences
+                if _is_upstream_alignment_issue(issue)
+            ],
+        ]
     ]
     return _spec_drift_result(
         code_path=code_path,
@@ -1078,6 +1087,42 @@ def _combine_satisfiability(left: bool | None, right: bool | None) -> bool | Non
     return None
 
 
+def _upstream_validation_issues(
+    spec_result: NLSpecValidationResult,
+    code_result: ForeignCodeValidationResult,
+) -> list[CrossValidationIssue]:
+    issues: list[CrossValidationIssue] = []
+    for issue in [
+        *spec_result.contradictions,
+        *spec_result.ambiguities,
+        *spec_result.overconstraints,
+    ]:
+        issues.append(
+            CrossValidationIssue(
+                kind="alignment",
+                message=f"Spec validation issue: {issue.message}",
+                evidence=issue.evidence,
+                location=issue.location,
+                severity=issue.severity,
+            )
+        )
+    for issue in code_result.issues:
+        issues.append(
+            CrossValidationIssue(
+                kind="alignment",
+                message=f"Code contract validation issue: {issue.message}",
+                evidence=issue.evidence,
+                location=issue.location,
+                severity=issue.severity,
+            )
+        )
+    return issues
+
+
+def _is_upstream_alignment_issue(issue: CrossValidationIssue) -> bool:
+    return issue.message.startswith(("Spec validation issue:", "Code contract validation issue:"))
+
+
 def _infer_language_from_path(path: Path, language: str | None) -> str:
     if language:
         return language.strip().lower()
@@ -1112,7 +1157,6 @@ def _git_diff_hunks(code_path: Path) -> tuple[list[str], list[str]]:
     except ValueError:
         relative = code_path
     diff_commands: list[list[str]] = []
-    base_ref = None
     base_ref = os.environ.get("GITHUB_BASE_REF")
     if base_ref:
         diff_commands.append(["git", "diff", f"origin/{base_ref}...HEAD", "--", str(relative)])

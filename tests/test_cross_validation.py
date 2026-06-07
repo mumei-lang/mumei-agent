@@ -186,6 +186,22 @@ def test_validate_spec_to_code_detects_missing_requires(tmp_path: Path) -> None:
     assert "x > 0" in result.missing_constraints[0].evidence
 
 
+def test_validate_spec_to_code_surfaces_spec_validation_issues(tmp_path: Path) -> None:
+    code_path = tmp_path / "impl.py"
+    code_path.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+    result = validate_spec_to_code(
+        "常に残高を更新する、かつ決して残高を更新する。requires: true;\nensures: result == x;",
+        str(code_path),
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert any(issue.message.startswith("Spec validation issue") for issue in result.divergences)
+
+
 def test_validate_code_to_spec_detects_postcondition_drift(tmp_path: Path) -> None:
     spec_path = tmp_path / "spec.txt"
     code_path = tmp_path / "impl.py"
