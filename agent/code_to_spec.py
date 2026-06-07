@@ -153,12 +153,8 @@ class CodeToSpecExtractor:
 
         natural_language_spec = ""
         try:
-            raw_code = code_path.read_bytes()
-            detected = chardet.detect(raw_code)
-            detected_encoding = detected.get("encoding") or "utf-8"
-            with code_path.open(encoding=detected_encoding) as source_file:
-                code = source_file.read()
-        except (OSError, UnicodeError) as exc:
+            raw_bytes = code_path.read_bytes()
+        except OSError as exc:
             return CodeToSpecResult(
                 success=False,
                 natural_language_spec="",
@@ -166,6 +162,12 @@ class CodeToSpecExtractor:
                 detected_language="unknown",
                 errors=[f"Failed to read file: {exc}"],
             )
+        detected = chardet.detect(raw_bytes)
+        detected_encoding = detected.get("encoding") or "utf-8"
+        try:
+            code = raw_bytes.decode(detected_encoding)
+        except (UnicodeDecodeError, LookupError):
+            code = raw_bytes.decode("utf-8", errors="replace")
 
         detected_language = language or self._detect_language(code_path, code)
         warnings: list[str] = []
