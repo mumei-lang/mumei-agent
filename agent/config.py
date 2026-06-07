@@ -97,6 +97,9 @@ class AgentConfig:
     self_correction_convergence_threshold: int = field(
         default_factory=lambda: int(os.getenv("SELF_CORRECTION_CONVERGENCE_THRESHOLD", "2"))
     )
+    self_correction_max_tokens: int = field(
+        default_factory=lambda: int(os.getenv("SELF_CORRECTION_MAX_TOKENS", "10000"))
+    )
 
     # Phase 2-B — std/core.mm core axiom injection for std/ module generation.
     core_axiom_path: str = field(default_factory=_default_core_axiom_path)

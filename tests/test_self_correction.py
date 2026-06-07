@@ -168,3 +168,12 @@ def test_config_exposes_self_correction_flags(monkeypatch) -> None:
     assert config.enable_self_correction is True
     assert config.self_correction_max_attempts == 8
     assert config.self_correction_convergence_threshold == 2
+
+
+def test_config_self_correction_max_tokens_default_and_override(monkeypatch) -> None:
+    config = AgentConfig()
+    assert config.self_correction_max_tokens == 10000
+
+    monkeypatch.setenv("SELF_CORRECTION_MAX_TOKENS", "5000")
+    config2 = AgentConfig()
+    assert config2.self_correction_max_tokens == 5000

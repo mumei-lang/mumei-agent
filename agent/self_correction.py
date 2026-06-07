@@ -248,7 +248,7 @@ def run_self_correction_loop(
         mumei_client or create_mumei_client(effective_config.mumei_bin),
         max_retries=effective_config.self_correction_max_attempts,
         convergence_threshold=effective_config.self_correction_convergence_threshold,
-        max_tokens=effective_config.max_context_tokens,
+        max_tokens=effective_config.self_correction_max_tokens,
         repair_fn=repair_fn,
     )
     return loop.run(source_path, structured_feedback)
@@ -333,9 +333,7 @@ def _reconstruction_loss_empty(
 
 def _dict_get(value: object, key: str) -> object | None:
     if isinstance(value, dict):
-        if key:
-            return value.get(key)
-        return value
+        return value.get(key)
     return None
 
 
