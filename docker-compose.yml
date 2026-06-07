@@ -13,6 +13,11 @@ services:
     container_name: mumei-ollama
     ports:
       - "11434:11434"
+    environment:
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      # Default Ollama context is often 2048; 32768 trades more KV cache
+      # memory for longer prompts. Tune down if GPU/CPU memory is limited.
+      OLLAMA_NUM_CTX: "32768"
     volumes:
       - ollama_models:/root/.ollama
     # Uncomment below for GPU support (requires nvidia-container-toolkit)

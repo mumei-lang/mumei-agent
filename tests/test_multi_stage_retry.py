@@ -103,6 +103,47 @@ class TestReDiagnosisOnRetry:
         assert result == "atom ok() body: 1;"
         assert client.chat.completions.create.call_count == 2
 
+    def test_retry_error_log_is_truncated_for_next_iteration(self):
+        """Validation errors are bounded before becoming retry context."""
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            _make_response(_diagnosis_json("cause1", "approach1")),
+            _make_response("```mumei\natom v1() body: 1;\n```"),
+            _make_response(_diagnosis_json("cause2", "approach2")),
+            _make_response("```mumei\natom v2() body: 2;\n```"),
+        ]
+        long_error = "E" * 120
+        mumei_client = MagicMock()
+        mumei_client.verify.side_effect = [
+            {
+                "success": False,
+                "report": {"failure_type": "precondition_violated"},
+                "stdout": long_error,
+                "stderr": "",
+            },
+            {"success": True, "report": {}, "stdout": "", "stderr": ""},
+        ]
+
+        history = RetryHistory()
+        get_fix_multi_stage(
+            client,
+            "m",
+            "src",
+            "err",
+            {"failure_type": "precondition_violated"},
+            mumei_client,
+            "test.mm",
+            retry_history=history,
+            prompt_report_truncate_chars=40,
+        )
+
+        assert len(history.attempts[0].error_log) == 40
+        diag_prompt = client.chat.completions.create.call_args_list[2].kwargs[
+            "messages"
+        ][1]["content"]
+        assert long_error not in diag_prompt
+        assert "truncated" in diag_prompt
+
 
 # ---------- Error diff in prompts ----------
 

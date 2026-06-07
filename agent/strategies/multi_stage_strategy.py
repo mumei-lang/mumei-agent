@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from agent.mumei_client import MumeiClient
 from agent.pattern_library import PatternLibrary
+from agent.prompts.report_formatter import truncate_prompt_section
 from agent.strategies.fix_strategy import _build_prompt_for_report, response_token_count
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
 
@@ -68,6 +69,15 @@ _APPROACH_SWITCH_INSTRUCTION = (
 )
 
 _MAX_INTERNAL_RETRIES = 2
+
+
+def _default_prompt_report_truncate_chars() -> int:
+    try:
+        from agent.config import AgentConfig
+
+        return AgentConfig().prompt_report_truncate_chars
+    except Exception:
+        return 4000
 
 
 def _extract_code(content: str) -> str:
@@ -180,6 +190,7 @@ def get_fix_multi_stage(
     metrics: Metrics | None = None,  # noqa: ARG001 — reserved for future use
     pattern_library: PatternLibrary | None = None,
     action_class: str = "llm_fix",
+    prompt_report_truncate_chars: int | None = None,
 ) -> str:
     """Generate a fix using a multi-stage LLM pipeline.
 
@@ -199,6 +210,8 @@ def get_fix_multi_stage(
     """
     if retry_history is None:
         retry_history = RetryHistory()
+    if prompt_report_truncate_chars is None:
+        prompt_report_truncate_chars = _default_prompt_report_truncate_chars()
 
     best_fix = ""
     for retry in range(_MAX_INTERNAL_RETRIES + 1):
@@ -287,13 +300,17 @@ def get_fix_multi_stage(
 
             # Record the failed attempt
             new_error_log = validation["stdout"] + validation["stderr"]
+            truncated_error_log = truncate_prompt_section(
+                new_error_log,
+                prompt_report_truncate_chars,
+            )
             new_report = validation["report"] or report_data
 
             retry_history.add(
                 RetryAttempt(
                     attempt_number=len(retry_history.attempts) + 1,
                     source_code=fixed_code,
-                    error_log=new_error_log,
+                    error_log=truncated_error_log,
                     report_data=new_report,
                     diagnosis=diagnosis,
                     action_class=action_class,
@@ -303,7 +320,7 @@ def get_fix_multi_stage(
 
             # Update context for next iteration
             source_code = fixed_code
-            error_log = new_error_log
+            error_log = truncated_error_log
             report_data = new_report
         except Exception:
             _logger.warning(

@@ -16,6 +16,33 @@ _CONTEXTUAL_MARKERS = (
 )
 
 
+def truncate_prompt_section(text: str, max_chars: int | None) -> str:
+    """Return *text* bounded to ``max_chars`` for LLM prompt inclusion."""
+    if max_chars is None or max_chars < 0 or len(text) <= max_chars:
+        return text
+    if max_chars == 0:
+        return ""
+    marker = f"\n...[truncated to {max_chars} chars]"
+    if max_chars <= len(marker):
+        return text[:max_chars]
+    return text[: max_chars - len(marker)] + marker
+
+
+def format_retry_report_context(report: dict, max_chars: int | None = None) -> str:
+    """Format bounded retry context from high-signal report fields only."""
+    parts: list[str] = []
+
+    hint = format_actionable_fix_hint(report)
+    if hint:
+        parts.append(f"# Actionable fix instructions:\n{hint}")
+
+    suc = format_structured_unsat_core(report)
+    if suc:
+        parts.append(f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}")
+
+    return truncate_prompt_section("\n\n".join(parts), max_chars)
+
+
 def format_counterexample(report: dict) -> str:
     """Format counterexample field into human-readable string.
 

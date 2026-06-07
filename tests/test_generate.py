@@ -154,12 +154,33 @@ def test_generate_atom_prompt_produces_valid_string():
 
 
 def test_generate_atom_prompt_with_errors():
-    """Test that generate_atom.build_prompt includes error and report context."""
+    """Test that generate_atom.build_prompt includes compact retry context."""
     spec_json = '{"name": "test"}'
-    report = {"status": "failed", "reason": "postcondition violated"}
+    report = {"failure_type": "postcondition_violated", "counterexample": {"x": "0"}}
     result = generate_atom.build_prompt(spec_json, "Verification Error", report)
     assert "Verification Error" in result
-    assert "postcondition violated" in result
+    assert "Actionable fix instructions" in result
+    assert "ensures" in result.lower()
+    assert "Verification report" not in result
+
+
+def test_generate_atom_prompt_truncates_retry_context():
+    """Retry report context respects the configured character budget."""
+    spec_json = '{"name": "test"}'
+    report = {
+        "failure_type": "postcondition_violated",
+        "suggestion": "When counterexample x=0, " + ("details " * 50),
+    }
+
+    result = generate_atom.build_prompt(
+        spec_json,
+        "Verification Error",
+        report,
+        prompt_report_truncate_chars=80,
+    )
+
+    assert "truncated to 80 chars" in result
+    assert "Verification report" not in result
 
 
 # --- Strategy tests ---

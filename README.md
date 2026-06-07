@@ -118,6 +118,46 @@ python -m agent generate --spec-file examples/spec.json --output out.mm
 streamlit run visualizer/app.py
 ```
 
+## Configuration
+
+Core agent and local Ollama settings are controlled through environment variables
+(`.env` is loaded automatically):
+
+- `LLM_API_KEY` / `OPENAI_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`: select the
+  OpenAI-compatible LLM endpoint. For local Ollama, set `LLM_BASE_URL` to
+  `http://localhost:11434/v1`.
+- `MAX_CONTEXT_TOKENS` (default: `16000`): operator-facing estimate for the
+  maximum prompt budget to send to the LLM. Use this to align prompt construction
+  with the model/context window selected for your backend.
+- `PROMPT_REPORT_TRUNCATE_CHARS` (default: `4000`): maximum number of characters
+  embedded from verifier retry context. Retry prompts prefer actionable fix hints
+  and structured unsat cores instead of raw JSON dumps to keep long-context runs
+  focused on repair-relevant evidence.
+
+### Ollama KV cache and long-context tuning
+
+`docker-compose.yml` configures the Ollama service with:
+
+```yaml
+OLLAMA_KV_CACHE_TYPE: q8_0
+OLLAMA_NUM_CTX: "32768"
+```
+
+`OLLAMA_KV_CACHE_TYPE=q8_0` uses the KV-cache quantization currently available
+through llama.cpp/Ollama-compatible backends, roughly halving KV-cache memory
+versus FP16 and allowing longer context before memory exhaustion. `OLLAMA_NUM_CTX`
+raises the context target from the common 2048 default to 32768; lower it on
+memory-constrained machines or raise it only after confirming enough GPU/CPU RAM.
+
+TurboQuant and PolarQuant show that stronger KV-cache compression is plausible:
+TurboQuant uses randomized rotation plus scalar quantization and reports neutral
+quality at about 3.5 bits/channel for KV cache, while PolarQuant uses random
+preconditioning plus polar-coordinate angle quantization and reports over 4.2x
+KV-cache compression on long-context evaluations. Once those methods are exposed
+by llama.cpp/Ollama as stable cache types, replace `q8_0` with the backend's
+published type name (for example a future `turbo*_0`/`polar*_0` cache type) and
+re-benchmark quality, latency, and maximum context before making it the default.
+
 ## Retry Budget Policy (P8-G)
 
 Self-healing uses a budget-aware loop to avoid unbounded token spend, repeated solver work, and false success from spec weakening. By default it uses a conservative in-code policy; pass `--budget-policy` to load JSON:

@@ -3,10 +3,8 @@
 import json
 
 from agent.prompts.report_formatter import (
-    format_actionable_fix_hint,
     format_for_initial_generate,
-    format_structured_unsat_core,
-    format_data_flow,
+    format_retry_report_context,
 )
 
 DECIDABLE_FRAGMENT_GUIDELINES = (
@@ -56,6 +54,7 @@ def build_prompt(
     report_data: dict,
     *,
     inferred_context: dict | None = None,
+    prompt_report_truncate_chars: int | None = None,
 ) -> str:
     """Build a prompt for generating a Mumei atom from a specification.
 
@@ -108,28 +107,9 @@ def build_prompt(
         sections.append(f"# Previous attempt produced errors. Fix these:\n{error_log}")
 
     if report_data:
-        # Actionable fix hint (human-readable)
-        hint = format_actionable_fix_hint(report_data)
-        if hint:
-            sections.append(f"# Actionable fix instructions:\n{hint}")
-
-        # Structured unsat core
-        suc = format_structured_unsat_core(report_data)
-        if suc:
-            sections.append(
-                f"# Structured Unsat Core (conflicting constraints from Z3):\n{suc}"
-            )
-
-        # Data flow trace
-        df = format_data_flow(report_data)
-        if df:
-            sections.append(f"# {df}")
-
-        # Full report as fallback context
-        sections.append(
-            f"# Verification report from previous attempt:\n"
-            f"{json.dumps(report_data, indent=2, ensure_ascii=False)}"
-        )
+        retry_context = format_retry_report_context(report_data, prompt_report_truncate_chars)
+        if retry_context:
+            sections.append(retry_context)
 
     if inferred_context is not None:
         sections.append(
