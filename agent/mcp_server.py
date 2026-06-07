@@ -988,10 +988,10 @@ def extract_spec_from_code(
     generate: bool = False,
     mumei_repo: str = "",
 ) -> str:
-    """Extract a Mumei forge task spec from an existing source-code file.
+    """Extract a Mumei forge task spec from an existing source-code path.
 
     Args:
-        code_file: Path to a Rust/C/Go/Python/etc. source file.
+        code_file: Path to a source-code file or directory.
         language: Optional language override. If omitted, extension and
             source-content heuristics are used.
         domain_hint: Optional domain hint for forge task extraction.
@@ -1006,15 +1006,17 @@ def extract_spec_from_code(
     source_path = Path(code_file).expanduser().resolve()
     if not source_path.exists():
         return _err(f"code_file does not exist: {source_path}")
-    if not source_path.is_file():
-        return _err(f"code_file is not a file: {source_path}")
 
     try:
         from agent.code_to_spec import CodeToSpecExtractor, Language
         from agent.config import AgentConfig
+        from agent.extract_spec import extract_spec_from_code_directory
         from agent.mumei_client import create_mumei_client
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"failed to import agent modules: {exc}")
+
+    if not source_path.is_file() and not source_path.is_dir():
+        return _err(f"code_file is not a file or directory: {source_path}")
 
     selected_language: Language | None
     if language:
@@ -1042,19 +1044,38 @@ def extract_spec_from_code(
             elif debug_bin.exists():
                 mumei_bin = str(debug_bin)
         mumei = create_mumei_client(mumei_bin)
-        result = CodeToSpecExtractor(config).extract_from_file(
-            source_path,
-            language=selected_language,
-            domain_hint=domain_hint,
-            mumei_client=mumei,
-        )
+        if source_path.is_dir():
+            payload = extract_spec_from_code_directory(
+                config,
+                source_path,
+                language=selected_language,
+                domain_hint=domain_hint,
+                mumei_client=mumei,
+                max_retries=config.max_retries,
+            )
+            forge_task_spec = payload["merged_spec"]
+            result = None
+        else:
+            result = CodeToSpecExtractor(config).extract_from_file(
+                source_path,
+                language=selected_language,
+                domain_hint=domain_hint,
+                mumei_client=mumei,
+            )
+            payload = {
+                "natural_language_spec": result.natural_language_spec,
+                "detected_language": result.detected_language,
+                "spec": result.forge_task_spec,
+                "warnings": result.warnings,
+            }
+            forge_task_spec = result.forge_task_spec
     except Exception as exc:
         return _err(
             f"extract_spec_from_code failed: {exc}",
             hint="set LLM_API_KEY (or OPENAI_API_KEY)",
         )
 
-    if not result.success or result.forge_task_spec is None:
+    if result is not None and (not result.success or result.forge_task_spec is None):
         return _err(
             "code-to-spec extraction failed",
             natural_language_spec=result.natural_language_spec,
@@ -1062,13 +1083,6 @@ def extract_spec_from_code(
             warnings=result.warnings,
             errors=result.errors,
         )
-
-    payload: dict[str, Any] = {
-        "natural_language_spec": result.natural_language_spec,
-        "detected_language": result.detected_language,
-        "spec": result.forge_task_spec,
-        "warnings": result.warnings,
-    }
 
     if generate:
         try:
@@ -1079,7 +1093,7 @@ def extract_spec_from_code(
             code, verified, final_spec = run_refinement_loop(
                 config.create_client(),
                 config.model,
-                _normalize_forge_task_spec(result.forge_task_spec),
+                _normalize_forge_task_spec(forge_task_spec),
                 generate_code,
                 max_refinements=3,
                 config_max_retries=config.max_retries,
