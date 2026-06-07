@@ -67,7 +67,7 @@ class SelfCorrectionStrategy:
         mumei_client: MumeiClient,
         *,
         max_repairs: int = 10,
-        required_successes: int = 3,
+        required_successes: int = 2,
         max_tokens: int = 10000,
         min_success_rate: float = 0.25,
         budget_policy: BudgetPolicy | None = None,
@@ -273,11 +273,19 @@ class SelfCorrectionStrategy:
         if isinstance(loss, list):
             return len(loss) == 0
         if isinstance(loss, dict):
+            is_zero = loss.get("is_zero_loss")
+            if isinstance(is_zero, bool):
+                return is_zero
+            size = loss.get("loss_set_size")
+            if isinstance(size, int):
+                return size == 0
             vector = loss.get("loss_vector")
             if vector is None:
                 return not bool(loss.get("counter_example") or loss.get("counterexample"))
             if isinstance(vector, list):
-                return all(_numeric_zero(item) for item in vector)
+                if all(isinstance(item, int | float) for item in vector):
+                    return all(_numeric_zero(item) for item in vector)
+                return len(vector) == 0
         return False
 
     @staticmethod
@@ -338,7 +346,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--spec-file", help="Optional JSON spec to generate initial source")
     parser.add_argument("--metadata-output", help="Write self-correction metadata JSON")
     parser.add_argument("--max-repairs", type=int, default=10)
-    parser.add_argument("--required-successes", type=int, default=3)
+    parser.add_argument("--required-successes", type=int, default=None)
     parser.add_argument("--max-tokens", type=int, default=10000)
     return parser
 
@@ -347,12 +355,17 @@ def main(args: argparse.Namespace | None = None) -> SelfCorrectionResult:
     if args is None:
         args = build_parser().parse_args()
     config = AgentConfig()
+    required_successes = (
+        args.required_successes
+        if args.required_successes is not None
+        else config.self_correction_convergence_threshold
+    )
     strategy = SelfCorrectionStrategy(
         config.create_client(),
         config.model,
         create_mumei_client(config.mumei_bin),
-        max_repairs=args.max_repairs,
-        required_successes=args.required_successes,
+        max_repairs=args.max_repairs or config.self_correction_max_attempts,
+        required_successes=required_successes,
         max_tokens=args.max_tokens,
     )
     spec = None
