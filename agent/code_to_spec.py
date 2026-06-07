@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import chardet
 from openai import OpenAI
 
 from agent.config import AgentConfig
@@ -152,7 +153,7 @@ class CodeToSpecExtractor:
 
         natural_language_spec = ""
         try:
-            code = code_path.read_text(encoding="utf-8")
+            raw_bytes = code_path.read_bytes()
         except OSError as exc:
             return CodeToSpecResult(
                 success=False,
@@ -161,6 +162,12 @@ class CodeToSpecExtractor:
                 detected_language="unknown",
                 errors=[f"Failed to read file: {exc}"],
             )
+        detected = chardet.detect(raw_bytes)
+        detected_encoding = detected.get("encoding") or "utf-8"
+        try:
+            code = raw_bytes.decode(detected_encoding)
+        except (UnicodeDecodeError, LookupError):
+            code = raw_bytes.decode("utf-8", errors="replace")
 
         detected_language = language or self._detect_language(code_path, code)
         warnings: list[str] = []

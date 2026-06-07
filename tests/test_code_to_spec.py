@@ -78,3 +78,30 @@ def test_extract_from_file_with_mock_llm(tmp_path: Path) -> None:
     client.chat.completions.create.assert_called_once()
     mock_extract.assert_called_once()
     assert mock_extract.call_args.kwargs["domain_hint"] == ""
+
+
+def test_extract_from_shift_jis_file_with_mock_llm(tmp_path: Path) -> None:
+    source = tmp_path / "simple_add.rs"
+    source.write_bytes(
+        "// 日本語コメント\npub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n".encode("cp932")
+    )
+
+    forge_spec = {
+        "task_id": "code-simple-add",
+        "target_file": "std/math/simple_add.mm",
+        "mode": "create",
+        "atoms": [],
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value = _make_response("Add two signed integers.")
+    config = AgentConfig(api_key="test", model="test-model")
+    config.create_client = MagicMock(return_value=client)
+    extractor = CodeToSpecExtractor(config)
+
+    with patch("agent.spec_extractor.extract_spec", return_value=forge_spec):
+        result = extractor.extract_from_file(source)
+
+    assert result.success is True
+    assert result.detected_language == "rust"
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "日本語コメント" in prompt
