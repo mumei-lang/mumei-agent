@@ -2,10 +2,22 @@
 
 import json
 
+SPEC_GUIDE_DECIDABLE_FRAGMENT = (
+    "SPEC_GUIDE.md decidable-fragment rules for generated specs:\n"
+    "- Prefer linear i64/Nat arithmetic: addition, subtraction, comparisons, and constant multiplication.\n"
+    "- Avoid variable-variable multiplication/division/modulo and exponentiation; mark such requirements as Lean escalation candidates if essential.\n"
+    "- For every array access `a[i]`, include `0 <= i && i < len(a)` in `requires` or a bounded `forall`.\n"
+    "- Use `forall` only over bounded ranges or finite collections; avoid `forall exists` / `exists forall` alternation.\n"
+    "- Prefer constructible witnesses over existential postconditions.\n"
+    "- Model temporal behavior as explicit finite-state transitions.\n"
+    "- Avoid nested mutable aliasing and regex constraints unless the requirement explicitly needs them.\n\n"
+)
+
 SPEC_EXTRACTION_SYSTEM_PROMPT = (
     "You are a specification engineer for the Mumei proof-driven language. "
     "Your task is to extract formal specifications from natural language requirements.\n\n"
-    "Mumei atoms have the following structure:\n"
+    + SPEC_GUIDE_DECIDABLE_FRAGMENT
+    + "Mumei atoms have the following structure:\n"
     "- `requires`: preconditions that must hold before execution\n"
     "- `ensures`: postconditions guaranteed after execution\n"
     "- `effects`: side effects the atom performs (e.g., IO, State, Temporal)\n"

@@ -672,6 +672,17 @@ def test_generate_atom_prompt_contains_common_mistakes():
     assert "if cond { a } else { b }" in result
     assert ".unwrap()" in result
     assert "Linearity" in result
+    assert "SPEC_GUIDE.md" in result
+    assert "outside_decidable_fragment" in result
+    assert "regex constraints" in result
+
+
+def test_spec_extraction_prompt_includes_spec_guide_fragment():
+    from agent.prompts import spec_extraction
+
+    assert "SPEC_GUIDE.md" in spec_extraction.SPEC_EXTRACTION_SYSTEM_PROMPT
+    assert "forall exists" in spec_extraction.SPEC_EXTRACTION_SYSTEM_PROMPT
+    assert "regex constraints" in spec_extraction.SPEC_EXTRACTION_SYSTEM_PROMPT
 
 
 def test_generate_atom_prompt_includes_actionable_hints_on_retry():

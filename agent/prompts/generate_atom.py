@@ -8,12 +8,15 @@ from agent.prompts.report_formatter import (
 )
 
 DECIDABLE_FRAGMENT_GUIDELINES = (
-    "# Z3-stable specification fragment:\n"
+    "# SPEC_GUIDE.md — Z3-stable specification fragment:\n"
     "- Prefer linear i64/Nat arithmetic: addition, subtraction, comparisons, and constant multiplication.\n"
-    "- Avoid variable multiplication, symbolic division/modulo, exponentiation, and recursive arithmetic invariants unless the task explicitly needs Lean escalation.\n"
+    "- Avoid variable-variable multiplication/division/modulo, exponentiation, and recursive arithmetic invariants unless the task explicitly needs Lean escalation.\n"
     "- For every array or sequence access `a[i]`, make `0 <= i && i < len(a)` explicit in `requires` or a bounded `forall`.\n"
-    "- Keep `forall` over bounded ranges or finite collections; for `exists`, expose a constructible witness.\n"
+    "- Keep `forall` over bounded ranges or finite collections; avoid `forall exists` / `exists forall` alternation.\n"
+    "- For `exists`, expose a constructible witness as the return value or an explicit helper atom.\n"
     "- Keep temporal effects as finite state machines with explicit transitions and pre/post states.\n"
+    "- Avoid nested mutable aliasing; prefer one mutable owner per atom or split the operation.\n"
+    "- Avoid regex constraints (`regex_match`, `matches`); use prefix/contains/bounded finite cases when possible.\n"
     "- If verification reports `outside_decidable_fragment`, first simplify the spec before changing implementation code."
 )
 
