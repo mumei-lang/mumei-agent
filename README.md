@@ -316,6 +316,8 @@ See `.env.example` for configuration details.
 | `generate` | Generate new .mm code from spec JSON | `python -m agent generate --spec-file spec.json --output out.mm` |
 | `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `python -m agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
 | `forge` | Autonomously extend the mumei std library with verified atoms | `python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
+| `validate-spec` | Cross-validate natural-language specs for contradiction, ambiguity, over-constraint, and Z3 satisfiability | `mumei-agent validate-spec --input spec.txt --format nl` |
+| `validate-code` | Infer Mumei contracts from Python/Rust/Go and verify their logical health | `mumei-agent validate-code --input code.py --language python` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `python -m agent mcp-server` |
 
 ## MCP Server

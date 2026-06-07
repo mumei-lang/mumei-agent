@@ -11,6 +11,8 @@ _SUBCOMMANDS = {
     "proliferate",
     "health",
     "extract-spec",
+    "validate-spec",
+    "validate-code",
     "self-correct",
     "mcp-server",
 }
@@ -130,6 +132,34 @@ def main() -> None:
         extract_build_parser(parser=parser)
         args = parser.parse_args(argv[1:])
         extract_main(args)
+    elif command == "validate-spec":
+        import argparse
+        from agent.cross_validation import (
+            build_validate_spec_parser,
+            main_validate_spec,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent validate-spec",
+            description="Validate natural-language specifications for logical health.",
+        )
+        build_validate_spec_parser(parser)
+        args = parser.parse_args(argv[1:])
+        main_validate_spec(args)
+    elif command == "validate-code":
+        import argparse
+        from agent.cross_validation import (
+            build_validate_code_parser,
+            main_validate_code,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent validate-code",
+            description="Infer and verify contracts from foreign-language code.",
+        )
+        build_validate_code_parser(parser)
+        args = parser.parse_args(argv[1:])
+        main_validate_code(args)
     elif command == "self-correct":
         import argparse
         from agent.strategies.self_correction_strategy import (
@@ -174,5 +204,5 @@ def main() -> None:
         from agent.self_healing import main as heal_main
         heal_main()
 
-
-main()
+if __name__ == "__main__":
+    main()

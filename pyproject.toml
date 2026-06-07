@@ -14,6 +14,7 @@ dependencies = [
     "openai>=1.0",
     "python-dotenv>=1.0",
     "streamlit>=1.30",
+    "z3-solver>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,7 @@ include = ["agent*", "benchmarks*"]
 mumei-heal = "agent.self_healing:main"
 mumei-extract-spec = "agent.extract_spec:main"
 mumei-agent-mcp = "agent.mcp_server:main"
+mumei-agent = "agent.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

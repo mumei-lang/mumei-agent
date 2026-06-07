@@ -2,6 +2,7 @@ openai>=1.0
 chardet>=5.0
 python-dotenv>=1.0
 streamlit>=1.30
+z3-solver>=4.12
 numpy>=1.26
 numpy>=1.26
 # Optional: MCP integration (mcp-server subcommand + USE_MCP_CLIENT).
