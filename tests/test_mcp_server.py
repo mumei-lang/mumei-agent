@@ -43,6 +43,7 @@ class TestGetAgentStatus:
             "get_agent_status",
             "get_spec_guidelines",
             "extract_spec_from_code",
+            "verify_foreign_code",
             "send_latent_message",
             "send_latent_message_batch",
             "async_send_latent_message",
