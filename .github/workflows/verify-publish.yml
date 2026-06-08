@@ -23,7 +23,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          MM_FILES=$(git diff --name-only origin/"$BASE_REF"...HEAD -- '*.mm' ':!examples/challenges/results/' || true)
+          MM_FILES=$(git diff --name-only origin/"$BASE_REF"...HEAD -- '*.mm' ':!examples/challenges/results/' ':!tests/fixtures/' || true)
           if [ -z "$MM_FILES" ]; then
             echo "has_mm=false" >> $GITHUB_OUTPUT
             echo "No .mm files found in this PR — skipping verification."
