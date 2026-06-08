@@ -18,6 +18,7 @@ _SUBCOMMANDS = {
     "self-correct",
     "mcp-server",
     "check-spec-health",
+    "verify-foreign",
 }
 
 
@@ -222,6 +223,20 @@ def main() -> None:
         spec_health_build_parser(parser)
         args = parser.parse_args(argv[1:])
         spec_health_main(args)
+    elif command == "verify-foreign":
+        import argparse
+        from agent.strategies.foreign_code_strategy import (
+            build_parser as foreign_code_build_parser,
+            main as foreign_code_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-foreign",
+            description="Extract foreign-code contracts and verify them as Mumei atoms.",
+        )
+        foreign_code_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        foreign_code_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

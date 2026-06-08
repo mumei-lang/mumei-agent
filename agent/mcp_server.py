@@ -560,6 +560,7 @@ def get_agent_status() -> str:
             "proliferate",
             "health",
             "extract-spec",
+            "verify-foreign",
             "check-spec-health",
             "mcp-server",
         }
@@ -1042,6 +1043,28 @@ def check_spec_health(source_code: str, mumei_repo: str = "") -> str:
 
     report = checker.check_all(verify_result, proof_cert)
     return _ok(report.to_dict())
+
+
+@mcp.tool()
+def verify_foreign_code(source_code: str, language: str) -> str:
+    """Extract Python/TypeScript/Rust function contracts and verify them as atoms."""
+    try:
+        from agent.config import AgentConfig
+        from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    try:
+        config = AgentConfig()
+        result = ForeignCodeVerifier(mumei_bin=config.mumei_bin).verify(
+            source_code,
+            language,
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    except FileNotFoundError as exc:
+        return _err(f"mumei verify failed to start: {exc}")
+    return _ok(result)
 
 
 
