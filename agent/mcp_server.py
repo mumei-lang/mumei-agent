@@ -39,6 +39,7 @@ from mcp.server.fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("Mumei-Agent")
+_active_human_review_tracker = None
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +583,62 @@ def list_forge_log(log_path: str = "forge_log.json") -> str:
             path=str(path),
         )
     return _ok({"entries": entries, "count": len(entries), "path": str(path)})
+
+
+@mcp.tool()
+def get_review_queue(mumei_repo: str) -> str:
+    """Return the human review queue emitted by ``mumei verify``."""
+    global _active_human_review_tracker
+    try:
+        from agent.human_review import HumanReviewTracker
+
+        tracker = HumanReviewTracker.from_repo(mumei_repo)
+        queue = tracker.load()
+    except Exception as exc:
+        return _err(f"failed to load human review queue: {exc}", mumei_repo=mumei_repo)
+
+    _active_human_review_tracker = tracker
+    atoms = queue.get("atoms", [])
+    return _ok(
+        {
+            "queue": queue,
+            "path": str(tracker.queue_path),
+            "count": len(atoms) if isinstance(atoms, list) else 0,
+        }
+    )
+
+
+@mcp.tool()
+def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
+    """Record human approval for one atom in the active review queue."""
+    try:
+        tracker = _human_review_tracker()
+        entry = tracker.approve_review(atom_name, reviewer, notes)
+    except Exception as exc:
+        return _err(f"failed to approve review: {exc}", atom_name=atom_name)
+    return _ok({"atom": entry, "path": str(tracker.queue_path)})
+
+
+@mcp.tool()
+def escalate_to_lean(atom_name: str) -> str:
+    """Run ``mumei verify --escalate-lean`` and mark an atom as escalated."""
+    try:
+        tracker = _human_review_tracker()
+        entry = tracker.escalate_to_lean(atom_name)
+    except Exception as exc:
+        return _err(f"failed to escalate atom to Lean: {exc}", atom_name=atom_name)
+    return _ok({"atom": entry, "path": str(tracker.queue_path)})
+
+
+def _human_review_tracker():
+    global _active_human_review_tracker
+    if _active_human_review_tracker is not None:
+        return _active_human_review_tracker
+    from agent.human_review import HumanReviewTracker
+
+    _active_human_review_tracker = HumanReviewTracker.default()
+    _active_human_review_tracker.load()
+    return _active_human_review_tracker
 
 
 @mcp.tool()
