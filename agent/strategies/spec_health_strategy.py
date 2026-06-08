@@ -21,7 +21,6 @@ import logging
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +64,7 @@ class SpecHealthReport:
     vacuous: list[VacuousInfo] = field(default_factory=list)
     health_score: float = 1.0
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
@@ -76,64 +75,73 @@ class SpecHealthReport:
 class SpecHealthChecker:
     """Analyse ``mumei verify`` output for spec quality issues."""
 
-    # When an atom has more unused hypotheses than this threshold it is
-    # flagged as over-constrained.
-    over_constrained_threshold: int = 0
+    def __init__(self, over_constrained_threshold: int = 0) -> None:
+        self.over_constrained_threshold = over_constrained_threshold
 
-    def check_contradiction(self, atom_cert: dict[str, Any]) -> ContradictionInfo | None:
-        """Return a :class:`ContradictionInfo` if the atom is unsatisfiable."""
-        svr = atom_cert.get("spec_validation_result") or {}
+    def check_contradiction(self, spec_json: dict[str, object]) -> list[ContradictionInfo]:
+        """Return atoms whose ``spec_validation_result`` is unsatisfiable."""
+        contradictions: list[ContradictionInfo] = []
+        for atom_cert in _collect_atoms(spec_json):
+            contradiction = self._check_atom_contradiction(atom_cert)
+            if contradiction:
+                contradictions.append(contradiction)
+        return contradictions
+
+    def _check_atom_contradiction(
+        self,
+        atom_cert: dict[str, object],
+    ) -> ContradictionInfo | None:
+        svr = _as_dict(atom_cert.get("spec_validation_result"))
         if svr.get("is_satisfiable") is False:
             return ContradictionInfo(
-                atom=atom_cert.get("name", "unknown"),
-                details=svr.get("contradiction_details", ""),
+                atom=_string_value(atom_cert.get("name"), "unknown"),
+                details=_string_value(svr.get("contradiction_details")),
             )
         return None
 
-    def check_over_constrained(self, atom_cert: dict[str, Any]) -> OverConstrainedInfo | None:
-        """Return an :class:`OverConstrainedInfo` if unused hypotheses exceed the threshold."""
-        uh = atom_cert.get("unused_hypotheses") or {}
-        unused_req = uh.get("unused_requires") or []
-        unused_inv = uh.get("unused_invariants") or []
-        unused_eff = uh.get("unused_effect_constraints") or []
+    def check_over_constrained(self, spec_json: dict[str, object]) -> list[OverConstrainedInfo]:
+        """Return atoms whose unused hypotheses exceed the threshold."""
+        over_constrained: list[OverConstrainedInfo] = []
+        for atom_cert in _collect_atoms(spec_json):
+            issue = self._check_atom_over_constrained(atom_cert)
+            if issue:
+                over_constrained.append(issue)
+        return over_constrained
+
+    def _check_atom_over_constrained(
+        self,
+        atom_cert: dict[str, object],
+    ) -> OverConstrainedInfo | None:
+        uh = _as_dict(atom_cert.get("unused_hypotheses"))
+        unused_req = _string_list(uh.get("unused_requires"))
+        unused_inv = _string_list(uh.get("unused_invariants"))
+        unused_eff = _string_list(uh.get("unused_effect_constraints"))
         total = len(unused_req) + len(unused_inv) + len(unused_eff)
         if total > self.over_constrained_threshold:
             return OverConstrainedInfo(
-                atom=atom_cert.get("name", "unknown"),
-                unused_requires=list(unused_req),
-                unused_invariants=list(unused_inv),
-                unused_effect_constraints=list(unused_eff),
+                atom=_string_value(atom_cert.get("name"), "unknown"),
+                unused_requires=unused_req,
+                unused_invariants=unused_inv,
+                unused_effect_constraints=unused_eff,
             )
         return None
 
-    def check_vacuity(self, verify_result: dict[str, Any]) -> list[VacuousInfo]:
+    def check_vacuity(self, verify_result: dict[str, object]) -> list[VacuousInfo]:
         """Parse stderr / stdout for vacuity-check failure messages."""
         vacuous: list[VacuousInfo] = []
-        for stream in ("stderr", "stdout"):
-            text = verify_result.get(stream, "") or ""
+        fallback_atom = _string_value(_as_dict(verify_result.get("report")).get("atom"), "unknown")
+        for text in _vacuity_texts(verify_result):
             for line in text.splitlines():
                 lower = line.lower()
                 if "vacuous" in lower and "vacuity check passed" not in lower:
-                    # Try to extract the atom name from
-                    #   "Specification is vacuous: ..." or
-                    #   "Vacuity check failed for 'name': ..."
-                    atom = "unknown"
-                    for marker in ("for '", "for \u2018"):
-                        idx = line.find(marker)
-                        if idx >= 0:
-                            end = line.find("'", idx + len(marker))
-                            if end < 0:
-                                end = line.find("\u2019", idx + len(marker))
-                            if end >= 0:
-                                atom = line[idx + len(marker):end]
-                            break
+                    atom = _extract_atom_from_vacuity_line(line, fallback_atom)
                     vacuous.append(VacuousInfo(atom=atom, message=line.strip()))
         return vacuous
 
     def check_all(
         self,
-        verify_result: dict[str, Any],
-        proof_cert: dict[str, Any] | None = None,
+        verify_result: dict[str, object],
+        proof_cert: dict[str, object] | None = None,
     ) -> SpecHealthReport:
         """Run all checks and produce a combined :class:`SpecHealthReport`.
 
@@ -145,23 +153,11 @@ class SpecHealthChecker:
             Optional proof certificate JSON (from ``--proof-cert``).
             When absent, falls back to ``verify_result["report"]``.
         """
-        atoms = []
-        if proof_cert and isinstance(proof_cert.get("atoms"), list):
-            atoms = proof_cert["atoms"]
-        else:
-            report = verify_result.get("report") or {}
-            if isinstance(report.get("atoms"), list):
-                atoms = report["atoms"]
+        spec_json = proof_cert or _as_dict(verify_result.get("report"))
+        atoms = _collect_atoms(spec_json)
 
-        contradictions: list[ContradictionInfo] = []
-        over_constrained: list[OverConstrainedInfo] = []
-        for atom_cert in atoms:
-            c = self.check_contradiction(atom_cert)
-            if c:
-                contradictions.append(c)
-            o = self.check_over_constrained(atom_cert)
-            if o:
-                over_constrained.append(o)
+        contradictions = self.check_contradiction(spec_json)
+        over_constrained = self.check_over_constrained(spec_json)
 
         vacuous = self.check_vacuity(verify_result)
 
@@ -212,6 +208,68 @@ def build_parser(
         help="Path to the mumei repo (used to locate the mumei binary).",
     )
     return parser
+
+
+def _as_dict(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return {str(k): v for k, v in value.items()}
+    return {}
+
+
+def _string_value(value: object, default: str = "") -> str:
+    if isinstance(value, str):
+        return value
+    return default
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _collect_atoms(spec_json: dict[str, object]) -> list[dict[str, object]]:
+    atoms = spec_json.get("atoms")
+    if isinstance(atoms, list):
+        return [_as_dict(atom) for atom in atoms if isinstance(atom, dict)]
+
+    report = _as_dict(spec_json.get("report"))
+    report_atoms = report.get("atoms")
+    if isinstance(report_atoms, list):
+        return [_as_dict(atom) for atom in report_atoms if isinstance(atom, dict)]
+
+    if "spec_validation_result" in spec_json or "unused_hypotheses" in spec_json:
+        return [spec_json]
+    return []
+
+
+def _vacuity_texts(verify_result: dict[str, object]) -> list[str]:
+    texts: list[str] = []
+    for key in ("stderr", "stdout"):
+        value = verify_result.get(key)
+        if isinstance(value, str) and value:
+            texts.append(value)
+
+    report = _as_dict(verify_result.get("report"))
+    for key in ("reason", "message", "error"):
+        value = report.get(key)
+        if isinstance(value, str) and value:
+            texts.append(value)
+
+    diagnostics = report.get("diagnostics")
+    if isinstance(diagnostics, list):
+        texts.extend(item for item in diagnostics if isinstance(item, str))
+    return texts
+
+
+def _extract_atom_from_vacuity_line(line: str, fallback: str) -> str:
+    for marker, quote in (("for '", "'"), ("for \u2018", "\u2019")):
+        idx = line.find(marker)
+        if idx >= 0:
+            end = line.find(quote, idx + len(marker))
+            if end >= 0:
+                return line[idx + len(marker):end]
+    return fallback
 
 
 def main(args: argparse.Namespace | None = None) -> SpecHealthReport:

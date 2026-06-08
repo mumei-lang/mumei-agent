@@ -39,9 +39,9 @@ class TestCheckContradiction:
         checker = SpecHealthChecker()
         result = checker.check_contradiction(atom_cert)
 
-        assert result is not None
-        assert result.atom == "impossible_x"
-        assert "requires_unsat" in result.details
+        assert len(result) == 1
+        assert result[0].atom == "impossible_x"
+        assert "requires_unsat" in result[0].details
 
     def test_returns_none_for_satisfiable_atom(self) -> None:
         atom_cert = {
@@ -51,12 +51,12 @@ class TestCheckContradiction:
             },
         }
         checker = SpecHealthChecker()
-        assert checker.check_contradiction(atom_cert) is None
+        assert checker.check_contradiction(atom_cert) == []
 
     def test_returns_none_when_no_spec_validation(self) -> None:
         atom_cert = {"name": "no_svr"}
         checker = SpecHealthChecker()
-        assert checker.check_contradiction(atom_cert) is None
+        assert checker.check_contradiction(atom_cert) == []
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +77,10 @@ class TestCheckOverConstrained:
         checker = SpecHealthChecker()
         result = checker.check_over_constrained(atom_cert)
 
-        assert result is not None
-        assert result.atom == "over"
-        assert result.unused_requires == ["x > 0"]
-        assert result.unused_invariants == ["x < 100"]
+        assert len(result) == 1
+        assert result[0].atom == "over"
+        assert result[0].unused_requires == ["x > 0"]
+        assert result[0].unused_invariants == ["x < 100"]
 
     def test_returns_none_when_no_unused(self) -> None:
         atom_cert = {
@@ -92,7 +92,7 @@ class TestCheckOverConstrained:
             },
         }
         checker = SpecHealthChecker()
-        assert checker.check_over_constrained(atom_cert) is None
+        assert checker.check_over_constrained(atom_cert) == []
 
 
 # ---------------------------------------------------------------------------
