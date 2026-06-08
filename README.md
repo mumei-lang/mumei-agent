@@ -318,6 +318,10 @@ See `.env.example` for configuration details.
 | `forge` | Autonomously extend the mumei std library with verified atoms | `python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
 | `validate-spec` | Cross-validate natural-language specs for contradiction, ambiguity, over-constraint, and Z3 satisfiability | `mumei-agent validate-spec --input spec.txt --format nl` |
 | `validate-code` | Infer Mumei contracts from Python/Rust/Go and verify their logical health | `mumei-agent validate-code --input code.py --language python` |
+| `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `python -m agent validate-spec-to-code --spec spec.txt --code-file src/foo.py --language python` |
+| `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `python -m agent validate-code-to-spec --code-file src/foo.py --spec-file spec.txt` |
+| `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `python -m agent check-spec-health spec.mm` |
+| `verify-foreign` | Extract foreign-code contracts and verify them as Mumei atoms | `python -m agent verify-foreign --input code.rs --language rust` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `python -m agent mcp-server` |
 
 ## Verification Workflow Guide

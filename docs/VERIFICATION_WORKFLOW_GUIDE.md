@@ -29,6 +29,12 @@ docker exec mumei-ollama ollama pull qwen3.5
 | ディレクトリ単位のコード検証 | `python -m agent extract-spec --code-file src/ --output spec.json` |
 | 仕様→コード整合性検証 | `python -m agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
 | コード→仕様の逆検証 | `python -m agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
+| 自然言語仕様の詳細検証（矛盾・曖昧さ・過制約） | `python -m agent validate-spec --input spec.txt --format nl` |
+| 外国語コードの詳細検証 | `python -m agent validate-code --input code.py --language python` |
+| 仕様→コードの整合性検証 | `python -m agent validate-spec-to-code --spec spec.txt --code-file src/foo.py --language python` |
+| コード→仕様のドリフト検出 | `python -m agent validate-code-to-spec --code-file src/foo.py --spec-file spec.txt --language python` |
+| 仕様の健全性チェック（vacuity含む） | `python -m agent check-spec-health spec.mm` |
+| 外国語コードのコントラクト抽出・検証 | `python -m agent verify-foreign --input code.rs --language rust` |
 | エディタ統合（LSP） | `mumei lsp` |
 | MCP 経由（Claude Code 等） | `.mcp.json` 設定後、AI エージェントから利用 |
 
@@ -85,6 +91,26 @@ python -m agent extract-spec \
   "domain_hint": "math"
 }
 ```
+
+### 1-5. validate-spec（詳細検証）
+
+`extract-spec --check-contradiction-only` より詳細な検証を行う専用コマンド。矛盾・曖昧さ・過制約・Z3充足可能性を個別に報告する。
+
+#### 単一テキストファイル
+
+```bash
+python -m agent validate-spec \
+  --input docs/requirements/payment_spec.txt \
+  --format nl
+```
+
+#### 出力フィールド
+
+- `contradictions[]`: 論理的矛盾（例: x > 0 かつ x < 0）
+- `ambiguities[]`: 曖昧な記述（複数解釈が可能な箇所）
+- `overconstraints[]`: 過制約（Z3で充足不可能な組み合わせ）
+- `satisfiable`: Z3による充足可能性（true/false/null）
+- `inferred_atoms[]`: 推論されたMumeiコントラクト
 
 ## 2. 既存コードの検証
 
@@ -144,6 +170,29 @@ python -m agent extract-spec \
   "mumei_repo": "/path/to/mumei"
 }
 ```
+
+### 2-5. validate-code（詳細検証）
+
+`extract-spec --code-file` より詳細な検証を行う専用コマンド。コントラクト推論・Z3検証・Mumei検証を統合して実行する。
+
+```bash
+python -m agent validate-code \
+  --input src/payment.py \
+  --language python
+```
+
+言語指定なし（自動検出）:
+
+```bash
+python -m agent validate-code --input src/payment.rs
+```
+
+出力フィールド:
+
+- `inferred_atoms[]`: 推論されたMumeiコントラクト
+- `mumei_source`: 生成されたMumei仕様コード
+- `satisfiable`: Z3による充足可能性
+- `issues[]`: 検出された問題（kind: contradiction/overconstraint/verification等）
 
 ## 3. 自然言語仕様 → 既存コードの整合性検証
 
@@ -205,6 +254,25 @@ mumei verify \
 }
 ```
 
+### 3-4. validate-spec-to-code（専用コマンド）
+
+仕様書に記述された制約がコードに実装されているかを直接検証する。`extract-spec` + cross-spec の2ステップを1コマンドで実行できる。
+
+```bash
+python -m agent validate-spec-to-code \
+  --spec docs/requirements/payment_spec.txt \
+  --code-file src/payment.py \
+  --language python
+```
+
+出力フィールド:
+
+- `missing_constraints[]`: 仕様にあるがコードに実装されていない制約
+- `divergences[]`: 仕様とコードで矛盾する制約
+- `spec_atoms[]`: 仕様から推論されたコントラクト
+- `code_atoms[]`: コードから推論されたコントラクト
+- `satisfiable`: 統合後の充足可能性
+
 ## 4. 既存コード → 自然言語仕様の逆検証
 
 **目的**: コードから仕様を逆抽出し、元の要件定義と照合する。
@@ -257,6 +325,24 @@ mumei verify --report-dir reports/ src/main.mm
 # 複数ファイル cross-spec
 mumei verify --report-dir reports/ --cross-spec-files src/account.mm src/transfer.mm
 ```
+
+### 4-5. validate-code-to-spec（専用コマンド）
+
+コードが変更された際に、仕様書が追従できているかを検証する（仕様ドリフト検出）。
+
+```bash
+python -m agent validate-code-to-spec \
+  --code-file src/payment.py \
+  --spec-file docs/requirements/payment_spec.txt \
+  --language python
+```
+
+出力フィールド:
+
+- `drift_issues[]`: コードと仕様の乖離（kind: drift/alignment）
+- `changed_hunks[]`: コードの変更箇所
+- `spec_atoms[]`: 仕様から推論されたコントラクト
+- `code_atoms[]`: コードから推論されたコントラクト
 
 ## 5. 人間が操作する際のヒント・配慮
 
@@ -363,6 +449,24 @@ mumei doc src/main.mm -o docs/api/ --format html
 mumei doc src/main.mm -o docs/api/ --format markdown
 ```
 
+### 5-8. check-spec-health（仕様の健全性チェック）
+
+既存の `.mm` ファイルの仕様が矛盾・過制約・vacuity（弱すぎる仕様）を含んでいないかを確認する。
+
+```bash
+python -m agent check-spec-health src/main.mm
+```
+
+### 5-9. verify-foreign（外国語コードのコントラクト抽出・検証）
+
+外国語コードからコントラクトを抽出し、Mumei atomとして形式検証する。
+
+```bash
+python -m agent verify-foreign \
+  --input src/payment.rs \
+  --language rust
+```
+
 ## フィードバックの読み方
 
 | フィールド | 意味 | 対処 |
@@ -373,5 +477,9 @@ mumei doc src/main.mm -o docs/api/ --format markdown
 | `effect_mismatch` | 副作用の宣言漏れ | `effects:` 節に不足エフェクトを追加 |
 | `outside_decidable_fragment` | Z3 の決定可能フラグメント外 | 線形算術に書き直すか Lean エスカレーション |
 | `inconsistent_calls` | 呼び出し元/先のコントラクト不整合 | 呼び出し元の `requires` を強化するか呼び出し先の `requires` を緩和 |
+| `ambiguity` | 仕様の記述が曖昧で複数解釈が可能 | 曖昧な箇所を具体的な数値・条件で明確化する |
+| `overconstraint` | 制約が強すぎてZ3で充足不可能 | 制約を緩和するか、条件を分割する |
+| `missing_implementation` | 仕様の制約がコードに実装されていない | コードに対応するバリデーション・ガード節を追加する |
+| `drift` | コードが変更されたが仕様が追従していない | 仕様書を最新のコードに合わせて更新する |
 
 詳細は [`docs/REPORT_SCHEMA.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md) および [`docs/SPEC_GUIDE.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/SPEC_GUIDE.md) を参照。
