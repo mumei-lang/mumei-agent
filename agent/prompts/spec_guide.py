@@ -14,4 +14,6 @@ SPEC_GUIDE_DECIDABLE_FRAGMENT = (
     "- Model temporal behavior as explicit finite-state transitions.\n"
     "- Avoid nested mutable aliasing and regex constraints (`regex_match`, `re_match`) unless the requirement explicitly needs them.\n"
     "- If verification reports `outside_decidable_fragment`, first simplify the spec before changing implementation code.\n"
+    "- Use `mumei verify --escalate-lean` to escalate non-decidable obligations to Lean 4 when simplification is not feasible.\n"
+    "- Keep specs within the decidable fragment for first-pass verification success; escalate intentionally nonlinear/inductive properties to Lean.\n"
 )
