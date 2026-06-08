@@ -587,7 +587,12 @@ def list_forge_log(log_path: str = "forge_log.json") -> str:
 
 @mcp.tool()
 def get_review_queue(mumei_repo: str) -> str:
-    """Return the human review queue emitted by ``mumei verify``."""
+    """Return the human review queue emitted by ``mumei verify``.
+
+    Sets the active tracker for subsequent ``approve_review`` /
+    ``escalate_to_lean`` calls.  Calling again with a different
+    *mumei_repo* replaces the active tracker.
+    """
     global _active_human_review_tracker
     try:
         from agent.human_review import HumanReviewTracker
@@ -629,6 +634,7 @@ def escalate_to_lean(atom_name: str) -> str:
         return _err(f"failed to escalate atom to Lean: {exc}", atom_name=atom_name)
     return _ok({"atom": entry, "path": str(tracker.queue_path)})
 
+# TODO: expose reject_review MCP tool (HumanReviewTracker.reject_review exists)
 
 def _human_review_tracker():
     global _active_human_review_tracker

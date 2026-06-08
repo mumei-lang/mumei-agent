@@ -100,35 +100,24 @@ class HumanReviewTracker:
         return self.data
 
     def approve_review(self, atom_name: str, reviewer: str, notes: str) -> JsonDict:
-        entry = self._find_atom(atom_name)
-        timestamp = _utc_now()
-        entry["status"] = ReviewStatus.APPROVED.value
-        entry["reviewer"] = reviewer
-        entry["notes"] = notes
-        entry["reviewed_at"] = timestamp
-        self._append_history(
-            {
-                "atom_name": atom_name,
-                "status": ReviewStatus.APPROVED.value,
-                "reviewer": reviewer,
-                "notes": notes,
-                "timestamp": timestamp,
-            }
-        )
-        self.save()
-        return entry
+        return self._record_decision(atom_name, ReviewStatus.APPROVED, reviewer, notes)
 
     def reject_review(self, atom_name: str, reviewer: str, notes: str) -> JsonDict:
+        return self._record_decision(atom_name, ReviewStatus.REJECTED, reviewer, notes)
+
+    def _record_decision(
+        self, atom_name: str, status: ReviewStatus, reviewer: str, notes: str,
+    ) -> JsonDict:
         entry = self._find_atom(atom_name)
         timestamp = _utc_now()
-        entry["status"] = ReviewStatus.REJECTED.value
+        entry["status"] = status.value
         entry["reviewer"] = reviewer
         entry["notes"] = notes
         entry["reviewed_at"] = timestamp
         self._append_history(
             {
                 "atom_name": atom_name,
-                "status": ReviewStatus.REJECTED.value,
+                "status": status.value,
                 "reviewer": reviewer,
                 "notes": notes,
                 "timestamp": timestamp,
