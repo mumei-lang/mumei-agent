@@ -19,6 +19,7 @@ _SUBCOMMANDS = {
     "mcp-server",
     "check-spec-health",
     "verify-foreign",
+    "cross-validate",
 }
 
 
@@ -237,6 +238,75 @@ def main() -> None:
         foreign_code_build_parser(parser)
         args = parser.parse_args(argv[1:])
         foreign_code_main(args)
+    elif command == "cross-validate":
+        import argparse
+        from agent.strategies.cross_validation_strategy import (
+            CrossValidator,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent cross-validate",
+            description=(
+                "Cross-validate a Mumei spec (.mm) against implementation code. "
+                "Detects semantic consistency gaps and spec coverage."
+            ),
+        )
+        parser.add_argument("spec", help="Path to the .mm specification file")
+        parser.add_argument("impl", help="Path to the implementation source file")
+        parser.add_argument(
+            "--language", "-l", default="",
+            help="Implementation language (python/rust/typescript). Inferred from extension if omitted.",
+        )
+        parser.add_argument(
+            "--old-cert", default=None,
+            help="Path to old proof certificate for drift detection",
+        )
+        parser.add_argument(
+            "--new-cert", default=None,
+            help="Path to new proof certificate for drift detection",
+        )
+        parser.add_argument("--json", action="store_true", help="Output as JSON")
+        args = parser.parse_args(argv[1:])
+
+        import json as _json
+        from pathlib import Path as _Path
+
+        validator = CrossValidator()
+
+        # Language inference
+        lang = args.language
+        if not lang:
+            ext_map = {".py": "python", ".rs": "rust", ".ts": "typescript", ".tsx": "typescript"}
+            lang = ext_map.get(_Path(args.impl).suffix.lower(), "")
+            if not lang:
+                print(f"Cannot infer language from extension; use --language", file=sys.stderr)
+                sys.exit(1)
+
+        report = validator.validate_spec_vs_impl(
+            spec_path=args.spec, impl_path=args.impl, language=lang,
+        )
+
+        # Optional drift detection
+        if args.old_cert and args.new_cert:
+            old_cert = _json.loads(_Path(args.old_cert).read_text())
+            new_cert = _json.loads(_Path(args.new_cert).read_text())
+            drift = validator.detect_spec_drift(old_cert, new_cert)
+            report.drift_detected = drift.drift_detected
+
+        if args.json:
+            print(_json.dumps(report.to_dict(), indent=2))
+        else:
+            print(f"Coverage: {report.coverage_ratio:.1%}")
+            if report.uncovered_atoms:
+                print(f"Uncovered atoms: {report.uncovered_atoms}")
+            if report.spec_stronger_than_impl:
+                print(f"Spec stronger than impl: {report.spec_stronger_than_impl}")
+            if report.impl_stronger_than_spec:
+                print(f"Impl stronger than spec: {report.impl_stronger_than_spec}")
+            if report.drift_detected:
+                print("⚠️  Spec drift detected!")
+            if report.is_consistent:
+                print("✅ Spec and implementation are consistent.")
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
