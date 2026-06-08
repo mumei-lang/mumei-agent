@@ -17,6 +17,7 @@ _SUBCOMMANDS = {
     "validate-code-to-spec",
     "self-correct",
     "mcp-server",
+    "check-spec-health",
 }
 
 
@@ -204,6 +205,23 @@ def main() -> None:
         build_self_correct_parser(parser)
         args = parser.parse_args(argv[1:])
         main_self_correct(args)
+    elif command == "check-spec-health":
+        import argparse
+        from agent.strategies.spec_health_strategy import (
+            build_parser as spec_health_build_parser,
+            main as spec_health_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent check-spec-health",
+            description=(
+                "Check a Mumei spec for contradictions, over-constraints, "
+                "and vacuity."
+            ),
+        )
+        spec_health_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        spec_health_main(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's

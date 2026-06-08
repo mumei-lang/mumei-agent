@@ -560,6 +560,7 @@ def get_agent_status() -> str:
             "proliferate",
             "health",
             "extract-spec",
+            "check-spec-health",
             "mcp-server",
         }
     )
@@ -978,6 +979,70 @@ def check_cross_spec_consistency(spec_files: str) -> str:
             "cross_spec": cross_spec_report,
         }
     )
+
+
+@mcp.tool()
+def check_spec_health(source_code: str, mumei_repo: str = "") -> str:
+    """Check a Mumei specification for contradictions, over-constraints, and vacuity.
+
+    Writes *source_code* to a temporary ``.mm`` file, runs
+    ``mumei verify --json --enable-vacuity-check --proof-cert`` and
+    analyses the proof certificate with
+    :class:`agent.strategies.spec_health_strategy.SpecHealthChecker`.
+
+    Args:
+        source_code: Mumei source code (``.mm`` content) to check.
+        mumei_repo: Optional path to the mumei repo.  Used to locate a
+            repo-local ``mumei`` binary when ``MUMEI_BIN`` is not set.
+
+    Returns:
+        JSON string with ``contradictions``, ``over_constrained``,
+        ``vacuous``, and ``health_score`` fields.
+    """
+    try:
+        from agent.mumei_client import create_mumei_client
+        from agent.strategies.spec_health_strategy import SpecHealthChecker
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    mumei_bin = os.environ.get("MUMEI_BIN", "")
+    if not mumei_bin and mumei_repo:
+        repo = _resolve_repo(mumei_repo)
+        for profile in ("release", "debug"):
+            candidate = repo / "target" / profile / "mumei"
+            if candidate.exists():
+                mumei_bin = str(candidate)
+                break
+    mumei_bin = mumei_bin or "mumei"
+
+    mumei_client = create_mumei_client(mumei_bin)
+    checker = SpecHealthChecker()
+
+    with tempfile.TemporaryDirectory(prefix="mumei-spec-health-") as tmp:
+        mm_path = Path(tmp) / "spec_health_input.mm"
+        mm_path.write_text(source_code, encoding="utf-8")
+        cert_path = str(Path(tmp) / "health.proof.json")
+        verify_result = mumei_client.verify(
+            str(mm_path),
+            report_dir=tmp,
+            extra_args=[
+                "--enable-vacuity-check",
+                "--proof-cert",
+                "--output",
+                cert_path,
+            ],
+        )
+        cert_file = Path(cert_path)
+        proof_cert = None
+        if cert_file.exists():
+            try:
+                proof_cert = json.loads(cert_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+
+    report = checker.check_all(verify_result, proof_cert)
+    return _ok(report.to_dict())
+
 
 
 @mcp.tool()
