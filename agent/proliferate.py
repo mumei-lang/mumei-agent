@@ -509,6 +509,17 @@ def _run_forge_generation(
             pass
         return index, spec_result, generation_metrics
 
+    if code and not verified and config.enable_self_correction:
+        _try_self_correction_for_forge_failure(
+            spec_result=spec_result,
+            code=code,
+            config=config,
+            mumei_client=mumei_client,
+            cache_path=cache_path,
+            mumei_repo_dir=mumei_repo_dir,
+        )
+        verified = bool(spec_result.get("verified"))
+
     if not code:
         logger.warning("No code generated for %s", target_file)
         spec_result["reason"] = "empty_code"
@@ -517,7 +528,7 @@ def _run_forge_generation(
         spec_result["reason"] = "verification_failed"
     else:
         _log_info(f"Forged {target_file}: verified=True")
-        spec_result["code"] = code
+        spec_result.setdefault("code", code)
         spec_result["verified"] = verified
         _cache_results(cache_path, spec, spec_result, mumei_repo_dir=mumei_repo_dir)
 
@@ -535,6 +546,66 @@ def _run_forge_generation(
             pass
 
     return index, spec_result, generation_metrics
+
+
+def _try_self_correction_for_forge_failure(
+    *,
+    spec_result: dict[str, Any],
+    code: str,
+    config: AgentConfig,
+    mumei_client: MumeiClient,
+    cache_path: str | Path,
+    mumei_repo_dir: Path | None,
+) -> None:
+    spec = spec_result["spec"]
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".mm",
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            tmp_path = tmp.name
+            tmp.write(code)
+
+        verify_result = mumei_client.verify(tmp_path)
+        report = verify_result.get("report")
+        if verify_result.get("success") or not _has_structured_feedback(report):
+            return
+
+        from agent.self_correction import run_self_correction_loop
+
+        sc_result = run_self_correction_loop(
+            source_path=tmp_path,
+            structured_feedback=report if isinstance(report, dict) else {},
+            config=config,
+            mumei_client=mumei_client,
+        )
+        spec_result["self_correction"] = sc_result.to_dict()
+        if not sc_result.converged:
+            return
+
+        verify_after = mumei_client.verify(tmp_path)
+        spec_result["self_correction_reverify"] = {
+            "success": bool(verify_after.get("success")),
+            "report": verify_after.get("report") if isinstance(verify_after.get("report"), dict) else {},
+        }
+        if verify_after.get("success"):
+            spec_result["code"] = Path(tmp_path).read_text(encoding="utf-8")
+            spec_result["verified"] = True
+            spec_result.pop("reason", None)
+            _cache_results(cache_path, spec, spec_result, mumei_repo_dir=mumei_repo_dir)
+    except Exception as exc:
+        logger.warning("Self-correction failed during forge for %s: %s", spec.get("target_file"), exc)
+        spec_result["self_correction_error"] = str(exc)
+    finally:
+        if tmp_path is not None:
+            Path(tmp_path).unlink(missing_ok=True)
+
+
+def _has_structured_feedback(report: object) -> bool:
+    return isinstance(report, dict) and isinstance(report.get("structured_feedback"), dict)
 
 
 def _parallel_forge(
@@ -955,6 +1026,7 @@ def proliferate(
     mumei_bin: str | None = None,
     output_json: str | Path | None = None,
     enable_lean_fallback: bool = True,
+    enable_self_correction: bool | None = None,
     harness_profile: str = "basic",
     parallel_forge_workers: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -1082,6 +1154,8 @@ def proliferate(
 
     # Step 3: Process each spec
     config = AgentConfig()
+    if enable_self_correction is not None:
+        config.enable_self_correction = enable_self_correction
     effective_mumei_bin = mumei_bin or config.mumei_bin
     # ``USE_MCP_CLIENT=true`` opts into richer MCP-backed verification
     # for the proliferate loop; otherwise this is a plain MumeiClient.
@@ -1713,6 +1787,14 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--enable-self-correction",
+        action="store_true",
+        help=(
+            "Run the structured-feedback self-correction loop when forge "
+            "verification fails with structured feedback."
+        ),
+    )
+    parser.add_argument(
         "--harness-profile",
         choices=harness_profile_names(),
         default="basic",
@@ -1747,6 +1829,8 @@ def main(args: argparse.Namespace) -> None:
     harness_profile = getattr(args, "harness_profile", "basic")
     if isinstance(harness_profile, str) and harness_profile != "basic":
         run_kwargs["harness_profile"] = harness_profile
+    if getattr(args, "enable_self_correction", False):
+        run_kwargs["enable_self_correction"] = True
     parallel_forge_workers = getattr(args, "parallel_forge_workers", None)
     if parallel_forge_workers is not None:
         run_kwargs["parallel_forge_workers"] = parallel_forge_workers

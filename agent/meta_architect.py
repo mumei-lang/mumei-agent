@@ -36,6 +36,7 @@ class RefactoringProposal:
     target_atoms: list[str]
     changes: dict[str, Any]
     rationale: str
+    cross_validation_drift: list[dict[str, Any]] | None = None
 
 
 class MetaArchitect:
@@ -64,16 +65,20 @@ class MetaArchitect:
             cross_spec_reports,
             source_files,
         )
+        cross_validation_drift = self._collect_cross_validation_drift(source_files)
+        contract_conflicts.extend(_contract_conflicts_from_drift(cross_validation_drift))
         refactoring_proposals = self._generate_refactoring_proposals(
             dependency_graph,
             circular_dependencies,
             contract_conflicts,
+            cross_validation_drift,
             retry_history,
         )
 
         return {
             "circular_dependencies": circular_dependencies,
             "contract_conflicts": [asdict(conflict) for conflict in contract_conflicts],
+            "cross_validation_drift": cross_validation_drift,
             "dependency_graph": dependency_graph,
             "refactoring_proposals": [
                 asdict(proposal) for proposal in refactoring_proposals
@@ -220,6 +225,7 @@ class MetaArchitect:
         dependency_graph: dict[str, dict[str, list[str]]],
         circular_dependencies: list[list[str]],
         contract_conflicts: list[ContractConflict],
+        cross_validation_drift: list[dict[str, Any]] | None = None,
         retry_history: dict[str, Any] | None = None,
     ) -> list[RefactoringProposal]:
         proposals: list[RefactoringProposal] = []
@@ -256,6 +262,33 @@ class MetaArchitect:
                 )
             )
 
+        for drift in cross_validation_drift or []:
+            issues = drift.get("drift_issues")
+            if not isinstance(issues, list) or not issues:
+                continue
+            code_path = str(drift.get("code_path") or "")
+            spec_path = str(drift.get("spec_path") or "")
+            target_atoms = _as_string_list(drift.get("target_atoms"))
+            proposal_key = Path(code_path).stem or f"drift_{len(proposals) + 1}"
+            proposals.append(
+                RefactoringProposal(
+                    proposal_id=f"resolve_drift_{proposal_key}",
+                    description=f"Resolve spec/code drift between {code_path} and {spec_path}",
+                    refactoring_type="resolve_spec_drift",
+                    target_atoms=target_atoms,
+                    changes={
+                        "code_path": code_path,
+                        "spec_path": spec_path,
+                        "drift_issues": issues,
+                    },
+                    rationale=(
+                        "Cross-validation detected that the implementation and "
+                        "its paired .mm specification no longer describe the same contract."
+                    ),
+                    cross_validation_drift=issues,
+                )
+            )
+
         if retry_history and not proposals:
             attempts = retry_history.get("attempts", [])
             if isinstance(attempts, list) and len(attempts) >= 5 and dependency_graph:
@@ -276,11 +309,96 @@ class MetaArchitect:
 
         return proposals
 
+    def _collect_cross_validation_drift(
+        self,
+        source_files: list[Path],
+    ) -> list[dict[str, Any]]:
+        from agent.cross_validation import validate_code_to_spec, validate_spec_to_code
+
+        _ = validate_spec_to_code
+        drift_entries: list[dict[str, Any]] = []
+        for source_file in source_files:
+            if source_file.suffix not in {".py", ".rs", ".go"}:
+                continue
+            spec_file = source_file.with_suffix(".mm")
+            if not spec_file.exists():
+                continue
+            try:
+                drift_result = validate_code_to_spec(
+                    str(source_file),
+                    str(spec_file),
+                    config=self.config,
+                    run_mumei=False,
+                    use_llm=_llm_enabled(self.config),
+                )
+            except Exception:
+                _logger.warning(
+                    "cross-validation failed for %s against %s",
+                    source_file,
+                    spec_file,
+                    exc_info=True,
+                )
+                continue
+            if not drift_result.drift_issues:
+                continue
+            issues = [asdict(issue) for issue in drift_result.drift_issues]
+            target_atoms = [
+                atom.name
+                for atom in [*drift_result.spec_atoms, *drift_result.code_atoms]
+            ]
+            drift_entries.append(
+                {
+                    "code_path": str(source_file),
+                    "spec_path": str(spec_file),
+                    "language": drift_result.language,
+                    "drift_issues": issues,
+                    "changed_hunks": drift_result.changed_hunks,
+                    "target_atoms": sorted(set(target_atoms)),
+                    "report": drift_result.report,
+                }
+            )
+        return drift_entries
+
 
 def _as_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value]
+
+
+def _llm_enabled(config: AgentConfig) -> bool:
+    try:
+        return bool(config.api_key)
+    except AttributeError:
+        return False
+
+
+def _contract_conflicts_from_drift(
+    cross_validation_drift: list[dict[str, Any]],
+) -> list[ContractConflict]:
+    conflicts: list[ContractConflict] = []
+    for drift in cross_validation_drift:
+        issues = drift.get("drift_issues")
+        if not isinstance(issues, list) or not issues:
+            continue
+        code_path = str(drift.get("code_path") or "")
+        spec_path = str(drift.get("spec_path") or "")
+        conflicts.append(
+            ContractConflict(
+                caller_atom=Path(code_path).stem,
+                callee_atom=Path(spec_path).stem,
+                caller_requires="implementation",
+                caller_ensures="implementation",
+                callee_requires="specification",
+                callee_ensures="specification",
+                violations=[
+                    str(issue.get("message") or issue)
+                    for issue in issues
+                    if isinstance(issue, dict)
+                ],
+            )
+        )
+    return conflicts
 
 
 def _canonical_cycle_key(cycle: list[str]) -> tuple[str, ...]:

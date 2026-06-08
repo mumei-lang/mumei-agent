@@ -192,18 +192,18 @@ def main() -> None:
         main_validate_code_to_spec(args)
     elif command == "self-correct":
         import argparse
-        from agent.strategies.self_correction_strategy import (
-            build_parser as self_correct_build_parser,
-            main as self_correct_main,
+        from agent.self_correction import (
+            build_self_correct_parser,
+            main_self_correct,
         )
 
         parser = argparse.ArgumentParser(
             prog="python -m agent self-correct",
             description="Run the P9-F self-correction protocol.",
         )
-        self_correct_build_parser(parser)
+        build_self_correct_parser(parser)
         args = parser.parse_args(argv[1:])
-        self_correct_main(args)
+        main_self_correct(args)
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
