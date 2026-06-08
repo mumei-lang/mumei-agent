@@ -427,6 +427,64 @@ def measure_std_health(mumei_repo: str) -> str:
 
 
 @mcp.tool()
+def cross_validate(spec_file: str, impl_file: str, language: str = "") -> str:
+    """Cross-validate a Mumei spec (.mm) against its implementation code.
+
+    Detects semantic gaps where the specification is stronger, weaker, or
+    contradicts the implementation.  Also computes coverage of spec atoms
+    against implementation functions.
+
+    Args:
+        spec_file: Path to the .mm specification file.
+        impl_file: Path to the implementation source file.
+        language: Language of the implementation (python/rust/typescript).
+            Inferred from file extension if omitted.
+
+    Returns:
+        JSON string with ``spec_stronger_than_impl``,
+        ``impl_stronger_than_spec``, ``uncovered_atoms``,
+        ``coverage_ratio``, and ``details`` fields.
+    """
+    spec_path = Path(spec_file).expanduser().resolve()
+    impl_path = Path(impl_file).expanduser().resolve()
+
+    if not spec_path.exists():
+        return _err(f"spec_file does not exist: {spec_path}")
+    if not impl_path.exists():
+        return _err(f"impl_file does not exist: {impl_path}")
+
+    if not language:
+        ext = impl_path.suffix.lower()
+        lang_map = {
+            ".py": "python",
+            ".rs": "rust",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".js": "javascript",
+            ".jsx": "javascript",
+        }
+        language = lang_map.get(ext, "")
+        if not language:
+            return _err(
+                f"cannot infer language from extension '{ext}'; please specify explicitly",
+                supported=["python", "rust", "typescript"],
+            )
+
+    try:
+        from agent.strategies.cross_validation_strategy import CrossValidator
+    except Exception as exc:  # pragma: no cover
+        return _err(f"failed to import CrossValidator: {exc}")
+
+    validator = CrossValidator()
+    report = validator.validate_spec_vs_impl(
+        spec_path=str(spec_path),
+        impl_path=str(impl_path),
+        language=language,
+    )
+    return _ok(report.to_dict())
+
+
+@mcp.tool()
 def propose_forge_tasks(mumei_repo: str, max_proposals: int = 3) -> str:
     """Propose new forge task specs from a gap analysis of *mumei_repo*.
 
