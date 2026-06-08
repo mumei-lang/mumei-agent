@@ -748,6 +748,14 @@ class TestBuildParser:
         )
         assert args.enable_lean_fallback is False
 
+    def test_enable_self_correction_flag(self) -> None:
+        parser = argparse.ArgumentParser()
+        proliferate.build_parser(parser)
+        args = parser.parse_args(
+            ["--mumei-repo", "/tmp/m", "--enable-self-correction"]
+        )
+        assert args.enable_self_correction is True
+
     def test_dry_run_flag(self) -> None:
         parser = argparse.ArgumentParser()
         proliferate.build_parser(parser)

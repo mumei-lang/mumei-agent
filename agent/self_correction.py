@@ -1,6 +1,7 @@
 """P9-F structured-feedback self-correction loop."""
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -252,6 +253,47 @@ def run_self_correction_loop(
         repair_fn=repair_fn,
     )
     return loop.run(source_path, structured_feedback)
+
+
+def build_self_correct_parser(
+    parser: argparse.ArgumentParser | None = None,
+) -> argparse.ArgumentParser:
+    parser = parser or argparse.ArgumentParser(
+        description="Run the P9-F structured-feedback self-correction loop."
+    )
+    parser.add_argument("source_file", nargs="?", help="Mumei .mm source to repair")
+    parser.add_argument("--source", help="Mumei .mm source to repair")
+    parser.add_argument(
+        "--feedback",
+        required=True,
+        help="Path to structured feedback JSON, or an inline JSON object.",
+    )
+    parser.add_argument("--metadata-output", help="Write self-correction metadata JSON")
+    return parser
+
+
+def main_self_correct(
+    args: argparse.Namespace | None = None,
+) -> SelfCorrectionLoopResult:
+    if args is None:
+        args = build_self_correct_parser().parse_args()
+    source = args.source or args.source_file
+    if not source:
+        raise SystemExit("--source or source_file is required")
+    config = AgentConfig()
+    result = run_self_correction_loop(
+        source_path=source,
+        structured_feedback=args.feedback,
+        config=config,
+    )
+    payload = result.to_dict()
+    if args.metadata_output:
+        Path(args.metadata_output).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return result
 
 
 def load_structured_feedback(value: dict[str, object] | str | Path) -> dict[str, object]:
