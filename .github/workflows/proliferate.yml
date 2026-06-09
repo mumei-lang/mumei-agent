@@ -4,7 +4,7 @@ name: SI-5 Autonomous Proliferation
 #
 # Workflow:
 #   1. Check out mumei-agent (this repo) and mumei (cross-repo).
-#   2. Build the mumei compiler from source so `python -m agent ...` has a
+#   2. Build the mumei compiler from source so `uv run python -m agent ...` has a
 #      real binary to invoke for verification.
 #   3. Provision the LLM backend according to the selected `llm_profile`:
 #        - ollama-local : spin up an Ollama server on the runner and pull
@@ -18,7 +18,7 @@ name: SI-5 Autonomous Proliferation
 #                         optionally LLM_BASE_URL / LLM_MODEL.
 #   4. Install agent dependencies.
 #   5. Record a pre-flight proof-health snapshot of `mumei/std/`.
-#   6. Run `python -m agent proliferate` which:
+#   6. Run `uv run python -m agent proliferate` which:
 #        analyze gaps -> generate spec -> forge code -> blast-radius check ->
 #        optionally open PR(s) against mumei-lang/mumei.
 #   7. Record a post-flight proof-health snapshot.
@@ -101,7 +101,7 @@ on:
                                      higher avg_retries; prefer the
                                      4b/7b variants for real forging.
 
-          Run ``pytest -m benchmark tests/test_llm_benchmark.py`` with
+          Run ``uv run pytest -m benchmark tests/test_llm_benchmark.py`` with
           ``LLM_BENCHMARK_MODELS`` set to compare several models
           side-by-side. Results are written as JSON with per-model
           ``success_rate`` / ``avg_code_length`` / ``avg_time_seconds``.
@@ -165,6 +165,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install Lean toolchain (best-effort)
         continue-on-error: true
         run: |
@@ -221,9 +224,7 @@ jobs:
 
       - name: Install agent dependencies
         working-directory: mumei-agent
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+        run: uv sync --extra test --frozen
 
       - name: Select benchmark-backed LLM model
         id: model_selection
@@ -250,7 +251,7 @@ jobs:
             SELECTED_MODEL="$REQUESTED_LLM_MODEL"
             MODEL_SOURCE="workflow_dispatch"
           else
-            SELECTED_MODEL="$(python scripts/select_benchmark_model.py --history docs/BENCHMARK_HISTORY.md --fallback "$LLM_MODEL_INPUT" --profile "$LLM_PROFILE" --ollama-models "$OLLAMA_MODEL_ALLOWLIST")"
+            SELECTED_MODEL="$(uv run python scripts/select_benchmark_model.py --history docs/BENCHMARK_HISTORY.md --fallback "$LLM_MODEL_INPUT" --profile "$LLM_PROFILE" --ollama-models "$OLLAMA_MODEL_ALLOWLIST")"
             MODEL_SOURCE="benchmark_history"
           fi
           validate_model_name "$SELECTED_MODEL"
@@ -357,7 +358,7 @@ jobs:
           MUMEI_BIN: mumei
         run: |
           mkdir -p /tmp/proliferate
-          python -m agent health \
+          uv run python -m agent health \
             --mumei-repo ../mumei \
             --format json \
             > /tmp/proliferate/pre_health.json
@@ -367,11 +368,11 @@ jobs:
         working-directory: mumei-agent
         run: |
           mkdir -p /tmp/proliferate/generated_forge_tasks
-          python -m agent analyze-std-gaps \
+          uv run python -m agent analyze-std-gaps \
             --std-dir ../mumei/std \
             --forge-tasks-dir forge_tasks \
             --output-json /tmp/proliferate/vstd_roadmap_gaps.json
-          python -m agent propose \
+          uv run python -m agent propose \
             --gaps-json /tmp/proliferate/vstd_roadmap_gaps.json \
             --output-dir /tmp/proliferate/generated_forge_tasks \
             --overwrite
@@ -453,7 +454,7 @@ PY
           fi
           echo "[PROLIFERATE] profile=${LLM_PROFILE} model=${LLM_MODEL} base_url=${LLM_BASE_URL:-<openai-default>}"
           set -o pipefail
-          python -m agent proliferate \
+          uv run python -m agent proliferate \
             --mumei-repo ../mumei \
             --max-proposals "$MAX_PROPOSALS" \
             --output-json /tmp/proliferate/summary.json \
@@ -467,7 +468,7 @@ PY
           MUMEI_BIN: mumei
         run: |
           mkdir -p /tmp/proliferate
-          python -m agent health \
+          uv run python -m agent health \
             --mumei-repo ../mumei \
             --format json \
             > /tmp/proliferate/post_health.json || true
@@ -557,7 +558,7 @@ PY
           fi
           # SECURITY: pass JSON-derived values via sys.argv rather than
           # interpolating them into the python -c source string. The
-          # health snapshot is currently produced by `python -m agent
+          # health snapshot is currently produced by `uv run python -m agent
           # health` and always emits a numeric score, but treating the
           # value as untrusted keeps this step robust if the JSON shape
           # ever drifts (e.g. score=null or a string sentinel).
@@ -606,14 +607,14 @@ PY
           # low success_rate values unrelated to model quality.
           MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
         run: |
-          pytest -m benchmark tests/test_llm_benchmark.py --tb=short || true
+          uv run pytest -m benchmark tests/test_llm_benchmark.py --tb=short || true
 
       - name: Update benchmark history
         if: always()
         working-directory: mumei-agent
         run: |
           if [ -s /tmp/proliferate/benchmark.json ]; then
-            python scripts/update_benchmark_history.py \
+            uv run python scripts/update_benchmark_history.py \
               --benchmark /tmp/proliferate/benchmark.json \
               --history docs/BENCHMARK_HISTORY.md
           else

@@ -1,6 +1,6 @@
 # Forge Task Specifications
 
-Task specifications consumed by the `forge` mode (`python -m agent forge`).
+Task specifications consumed by the `forge` mode (`uv run python -m agent forge`).
 
 Each `.json` file in this directory describes one forge task: a unit of work
 that extends the mumei standard library (`std/*.mm`) with new verified atoms.
@@ -83,7 +83,7 @@ commits the change to git.
 3. Populate `atoms` with one or more atom specs.
 4. List sibling atoms in `reference_patterns` to keep generation style
    consistent with the existing standard library.
-5. Run `python -m agent forge --task <your_task>.json --dry-run` to preview
+5. Run `uv run python -m agent forge --task <your_task>.json --dry-run` to preview
    the execution plan.
 
 ## Task inventory

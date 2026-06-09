@@ -1,6 +1,6 @@
 ---
 name: forge
-description: Execute Mumei std-library forge tasks with python -m agent forge and inspect forge_log.json.
+description: Execute Mumei std-library forge tasks with uv run python -m agent forge and inspect forge_log.json.
 ---
 
 Given one or more forge task specs, generate verified atoms and append or create target std modules.
@@ -22,20 +22,20 @@ Result:
     Run a dry-run plan before invoking the LLM.
 
 ```bash
-python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
 ```
 
 For a changed task spec, also validate JSON and dry-run that task directly:
 
 ```bash
 python -m json.tool forge_tasks/<task>.json >/dev/null
-python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task forge_tasks/<task>.json --dry-run
+uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task forge_tasks/<task>.json --dry-run
 ```
 
 If the Mumei CLI is not on `PATH`, set `MUMEI_BIN` explicitly:
 
 ```bash
-MUMEI_BIN=/path/to/mumei python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+MUMEI_BIN=/path/to/mumei uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
 ```
 
 # Step 2: Run forge
@@ -50,8 +50,8 @@ Result:
     Successful tasks add verified atoms; failed tasks include structured verifier feedback.
 
 ```bash
-python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1
-python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task path/to/task.json
+uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1
+uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --task path/to/task.json
 ```
 
 If LLM credentials are unavailable, do not claim live-forged output. Report the secret blocker and limit validation to deterministic checks such as task JSON parsing, dry-run plan discovery, and relevant unit tests.
@@ -60,7 +60,7 @@ For validation without touching the real sibling Mumei checkout, copy `std/` int
 
 ```bash
 MUMEI_BIN=/path/to/mumei MUMEI_STD_PATH=/path/to/scratch/std \
-  python -m agent forge --task forge_tasks/example.json \
+  uv run python -m agent forge --task forge_tasks/example.json \
   --mumei-repo /path/to/scratch --log-path /path/to/forge_log.json
 ```
 

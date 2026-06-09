@@ -27,7 +27,7 @@ if view_mode == "Latest Report":
             "```bash\n"
             "mumei build your_file.mm -o katana\n"
             "# or with Visualizer sync:\n"
-            "ENABLE_VISUALIZER_SYNC=true python -m agent.self_healing\n"
+            "ENABLE_VISUALIZER_SYNC=true uv run python -m agent.self_healing\n"
             "```"
         )
         st.stop()

@@ -28,7 +28,7 @@ The `payment_spec.json` defines a `payment` module with three atoms:
 ### Dry-run (no git/PR operations)
 
 ```bash
-python -m agent publish --spec examples/publish_demo/payment_spec.json --dry-run
+uv run python -m agent publish --spec examples/publish_demo/payment_spec.json --dry-run
 ```
 
 This will:
@@ -40,7 +40,7 @@ This will:
 ### Full pipeline
 
 ```bash
-python -m agent publish \
+uv run python -m agent publish \
   --spec examples/publish_demo/payment_spec.json \
   --github-owner <owner> \
   --github-repo <repo>

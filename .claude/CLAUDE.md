@@ -9,7 +9,7 @@ mumei-agent is an AI-driven autonomous repair loop that uses mumei verification 
 The MCP integration is optional. Install the project with the `mcp` extra before using the server:
 
 ```bash
-pip install -e ".[mcp]"
+uv sync --extra mcp
 ```
 
 Claude Code detects `.mcp.json` at the project root. This repository registers both:

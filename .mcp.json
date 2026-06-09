@@ -6,7 +6,7 @@
     },
     "mumei-agent": {
       "command": "sh",
-      "args": ["-lc", "cd . && exec python -m agent mcp-server"]
+      "args": ["-lc", "cd . && exec uv run python -m agent mcp-server"]
     }
   }
 }

@@ -461,7 +461,7 @@ feedback（`semantic_feedback` / `machine_readable` / `counter_example` /
   - `get_agent_status()` — LLM provider / mumei binary / 利用可能サブコマンド一覧
 - ✅`agent/__main__.py` に `mcp-server` サブコマンドを登録
   （`python -m agent mcp-server`）
-- ✅`pyproject.toml` / `requirements.txt` に `mcp[cli]>=1.0` を追加
+- ✅`pyproject.toml` の optional-dependencies に `mcp[cli]>=1.0` を追加
 - ✅`pyproject.toml` の `[project.scripts]` に `mumei-agent-mcp` エントリポイントを追加
 
 - ✅`agent/mcp_client.py` — `MumeiMCPClient`（drop-in `MumeiClient` 互換）
