@@ -19,7 +19,7 @@ Result:
 # Step 2: Run the self-healing loop
 
 Action:
-    Invoke `python -m agent heal`, optionally selecting retry count and strategy.
+    Invoke `uv run python -m agent heal`, optionally selecting retry count and strategy.
 
 Expectation:
     The loop backs up the original file, runs Mumei verification, asks the LLM for a repair using structured feedback, writes the candidate, and re-verifies.
@@ -28,8 +28,8 @@ Result:
     The command exits successfully when the repaired file verifies.
 
 ```bash
-python -m agent heal input.mm --max-retries 3
-python -m agent heal input.mm --strategy multi-stage
+uv run python -m agent heal input.mm --max-retries 3
+uv run python -m agent heal input.mm --strategy multi-stage
 ```
 
 MCP equivalent:

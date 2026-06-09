@@ -13,7 +13,7 @@
 #   - mumei CLI in PATH (or MUMEI_BIN set in .env)
 #   - Ollama running (docker compose up -d)
 #   - Model pulled (docker exec mumei-ollama ollama pull qwen3.5)
-#   - pip install -r requirements.txt
+#   - uv sync
 # =============================================================================
 set -euo pipefail
 
@@ -66,10 +66,10 @@ sleep 2
 # --- Step 4: Run the self-healing loop ---
 echo "━━━ Step 4: Self-Healing Loop ━━━"
 echo ""
-echo "\$ python -m agent.self_healing $DEMO_DIR/sword_test.mm --max-retries 3"
+echo "\$ uv run python -m agent.self_healing $DEMO_DIR/sword_test.mm --max-retries 3"
 echo ""
 HEAL_EXIT=0
-python -m agent.self_healing "$DEMO_DIR/sword_test.mm" --max-retries 3 || HEAL_EXIT=$?
+uv run python -m agent.self_healing "$DEMO_DIR/sword_test.mm" --max-retries 3 || HEAL_EXIT=$?
 echo ""
 sleep 1
 

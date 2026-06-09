@@ -12,7 +12,10 @@ git clone https://github.com/mumei-lang/mumei-agent
 cd mumei-agent
 cp .env.example .env
 # .env を編集: LLM_BASE_URL / LLM_API_KEY / LLM_MODEL を設定
-pip install -r requirements.txt
+brew install uv  # 未インストールの場合
+uv sync
+# 以降は `uv run python -m agent ...` で実行
+# （または `source .venv/bin/activate` 後に `python -m agent ...`）
 
 # LLM バックエンド起動（Ollama を使う場合）
 docker compose up -d
@@ -23,18 +26,18 @@ docker exec mumei-ollama ollama pull qwen3.5
 
 | やりたいこと | コマンド |
 |---|---|
-| 自然言語仕様の矛盾チェック | `python -m agent extract-spec --text "..." --check-contradiction-only --output report.json` |
-| 仕様ファイルの矛盾チェック | `python -m agent extract-spec --text-file spec.txt --check-contradiction-only --output report.json` |
-| 単一コードファイルの検証 | `python -m agent extract-spec --code-file src/foo.rs --output spec.json` |
-| ディレクトリ単位のコード検証 | `python -m agent extract-spec --code-file src/ --output spec.json` |
-| 仕様→コード整合性検証 | `python -m agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
-| コード→仕様の逆検証 | `python -m agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
-| 自然言語仕様の詳細検証（矛盾・曖昧さ・過制約） | `python -m agent validate-spec --input spec.txt --format nl` |
-| 外国語コードの詳細検証 | `python -m agent validate-code --input code.py --language python` |
-| 仕様→コードの整合性検証 | `python -m agent validate-spec-to-code --spec spec.txt --code-file src/foo.py --language python` |
-| コード→仕様のドリフト検出 | `python -m agent validate-code-to-spec --code-file src/foo.py --spec-file spec.txt --language python` |
-| 仕様の健全性チェック（vacuity含む） | `python -m agent check-spec-health spec.mm` |
-| 外国語コードのコントラクト抽出・検証 | `python -m agent verify-foreign --input code.rs --language rust` |
+| 自然言語仕様の矛盾チェック | `uv run python -m agent extract-spec --text "..." --check-contradiction-only --output report.json` |
+| 仕様ファイルの矛盾チェック | `uv run python -m agent extract-spec --text-file spec.txt --check-contradiction-only --output report.json` |
+| 単一コードファイルの検証 | `uv run python -m agent extract-spec --code-file src/foo.rs --output spec.json` |
+| ディレクトリ単位のコード検証 | `uv run python -m agent extract-spec --code-file src/ --output spec.json` |
+| 仕様→コード整合性検証 | `uv run python -m agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
+| コード→仕様の逆検証 | `uv run python -m agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
+| 自然言語仕様の詳細検証（矛盾・曖昧さ・過制約） | `uv run python -m agent validate-spec --input spec.txt --format nl` |
+| 外国語コードの詳細検証 | `uv run python -m agent validate-code --input code.py --language python` |
+| 仕様→コードの整合性検証 | `uv run python -m agent validate-spec-to-code --spec spec.txt --code-file src/foo.py --language python` |
+| コード→仕様のドリフト検出 | `uv run python -m agent validate-code-to-spec --code-file src/foo.py --spec-file spec.txt --language python` |
+| 仕様の健全性チェック（vacuity含む） | `uv run python -m agent check-spec-health spec.mm` |
+| 外国語コードのコントラクト抽出・検証 | `uv run python -m agent verify-foreign --input code.rs --language rust` |
 | エディタ統合（LSP） | `mumei lsp` |
 | MCP 経由（Claude Code 等） | `.mcp.json` 設定後、AI エージェントから利用 |
 
@@ -45,7 +48,7 @@ docker exec mumei-ollama ollama pull qwen3.5
 ### 1-1. インラインテキスト（単一仕様）
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text "送金額は正の整数のみ。送金後の残高は非負。残高不足はエラー。" \
   --domain financial \
   --check-contradiction-only \
@@ -70,7 +73,7 @@ SpecValidation failed for the synthesized specification: ...
 
 ```bash
 # spec.txt に仕様を記述
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text-file docs/requirements/payment_spec.txt \
   --domain financial \
   --check-contradiction-only \
@@ -99,7 +102,7 @@ python -m agent extract-spec \
 #### 単一テキストファイル
 
 ```bash
-python -m agent validate-spec \
+uv run python -m agent validate-spec \
   --input docs/requirements/payment_spec.txt \
   --format nl
 ```
@@ -121,7 +124,7 @@ python -m agent validate-spec \
 ### 2-1. 単一ファイル
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/payment.rs \
   --domain financial \
   --output reports/payment_spec.json
@@ -130,7 +133,7 @@ python -m agent extract-spec \
 言語を明示する場合:
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/payment.rs \
   --code-language rust \
   --output reports/payment_spec.json
@@ -139,7 +142,7 @@ python -m agent extract-spec \
 ### 2-2. ディレクトリ単位（複数ファイル）
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/ \
   --domain financial \
   --output reports/src_spec.json
@@ -151,7 +154,7 @@ python -m agent extract-spec \
 ### 2-3. 矛盾チェックまで一括実行
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/ \
   --check-contradiction-only \
   --output reports/src_contradiction.json
@@ -176,7 +179,7 @@ python -m agent extract-spec \
 `extract-spec --code-file` より詳細な検証を行う専用コマンド。コントラクト推論・Z3検証・Mumei検証を統合して実行する。
 
 ```bash
-python -m agent validate-code \
+uv run python -m agent validate-code \
   --input src/payment.py \
   --language python
 ```
@@ -184,7 +187,7 @@ python -m agent validate-code \
 言語指定なし（自動検出）:
 
 ```bash
-python -m agent validate-code --input src/payment.rs
+uv run python -m agent validate-code --input src/payment.rs
 ```
 
 出力フィールド:
@@ -201,7 +204,7 @@ python -m agent validate-code --input src/payment.rs
 ### 3-1. 仕様からコードを生成して検証（仕様が正しいかの確認）
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text-file docs/requirements/payment_spec.txt \
   --domain financial \
   --generate \
@@ -218,13 +221,13 @@ python -m agent extract-spec \
 
 ```bash
 # 仕様抽出 → .mm 生成
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/account.rs \
   --generate \
   --generate-output /tmp/account.mm \
   --output /tmp/account_spec.json
 
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/transfer.rs \
   --generate \
   --generate-output /tmp/transfer.mm \
@@ -259,7 +262,7 @@ mumei verify \
 仕様書に記述された制約がコードに実装されているかを直接検証する。`extract-spec` + cross-spec の2ステップを1コマンドで実行できる。
 
 ```bash
-python -m agent validate-spec-to-code \
+uv run python -m agent validate-spec-to-code \
   --spec docs/requirements/payment_spec.txt \
   --code-file src/payment.py \
   --language python
@@ -280,7 +283,7 @@ python -m agent validate-spec-to-code \
 ### 4-1. コードから仕様を抽出する
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/payment.rs \
   --output reports/extracted_spec.json
 ```
@@ -290,7 +293,7 @@ python -m agent extract-spec \
 ### 4-2. 抽出仕様の矛盾チェック
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/payment.rs \
   --check-contradiction-only \
   --output reports/code_contradiction.json
@@ -299,7 +302,7 @@ python -m agent extract-spec \
 ### 4-3. ディレクトリ全体から仕様を逆抽出
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --code-file src/ \
   --check-contradiction-only \
   --output reports/src_contradiction.json
@@ -331,7 +334,7 @@ mumei verify --report-dir reports/ --cross-spec-files src/account.mm src/transfe
 コードが変更された際に、仕様書が追従できているかを検証する（仕様ドリフト検出）。
 
 ```bash
-python -m agent validate-code-to-spec \
+uv run python -m agent validate-code-to-spec \
   --code-file src/payment.py \
   --spec-file docs/requirements/payment_spec.txt \
   --language python
@@ -380,7 +383,7 @@ python mcp_server.py
 `mumei-lang/mumei-agent` で:
 
 ```bash
-python -m agent mcp-server
+uv run python -m agent mcp-server
 ```
 
 `.mcp.json` 設定例（両サーバーを同時利用）:
@@ -394,7 +397,7 @@ python -m agent mcp-server
     },
     "mumei-agent": {
       "command": "sh",
-      "args": ["-lc", "cd /path/to/mumei-agent && exec python -m agent mcp-server"]
+      "args": ["-lc", "cd /path/to/mumei-agent && exec uv run python -m agent mcp-server"]
     }
   }
 }
@@ -421,13 +424,13 @@ JSON 出力（`--json`）の主要フィールド:
 
 ```bash
 # 既存 .mm ファイルを自動修復
-python -m agent heal src/main.mm
+uv run python -m agent heal src/main.mm
 
 # 予算制限付き
-python -m agent heal src/main.mm --budget-policy budget_policy.json
+uv run python -m agent heal src/main.mm --budget-policy budget_policy.json
 
 # 自己修正プロトコル（収束まで繰り返す）
-python -m agent self-correct src/main.mm --max-repairs 10 --required-successes 3
+uv run python -m agent self-correct src/main.mm --max-repairs 10 --required-successes 3
 ```
 
 ### 5-6. 仕様の健全性チェック（vacuity）
@@ -454,7 +457,7 @@ mumei doc src/main.mm -o docs/api/ --format markdown
 既存の `.mm` ファイルの仕様が矛盾・過制約・vacuity（弱すぎる仕様）を含んでいないかを確認する。
 
 ```bash
-python -m agent check-spec-health src/main.mm
+uv run python -m agent check-spec-health src/main.mm
 ```
 
 ### 5-9. verify-foreign（外国語コードのコントラクト抽出・検証）
@@ -462,7 +465,7 @@ python -m agent check-spec-health src/main.mm
 外国語コードからコントラクトを抽出し、Mumei atomとして形式検証する。
 
 ```bash
-python -m agent verify-foreign \
+uv run python -m agent verify-foreign \
   --input src/payment.rs \
   --language rust
 ```

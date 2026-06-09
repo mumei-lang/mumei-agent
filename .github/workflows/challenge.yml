@@ -21,10 +21,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+        run: uv sync --extra test --frozen
 
       - name: Install mumei binary
         run: |
@@ -62,7 +63,7 @@ jobs:
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
           LOG_DIR: ${{ github.event.inputs.log_dir }}
         run: |
-          python -m examples.challenges.run_challenge --all --log-dir "$LOG_DIR"
+          uv run python -m examples.challenges.run_challenge --all --log-dir "$LOG_DIR"
 
       - name: Upload results
         if: always()
@@ -76,7 +77,7 @@ jobs:
         env:
           LOG_DIR: ${{ github.event.inputs.log_dir }}
         run: |
-          python -m examples.challenges.benchmark --results-dir "$LOG_DIR" --output benchmark_summary.md
+          uv run python -m examples.challenges.benchmark --results-dir "$LOG_DIR" --output benchmark_summary.md
           cat benchmark_summary.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload benchmark summary

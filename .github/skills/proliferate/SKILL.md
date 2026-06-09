@@ -17,13 +17,13 @@ Result:
     Proceed only when the baseline is captured.
 
 ```bash
-python -m agent health --mumei-repo ../mumei --format json > pre_health.json
+uv run python -m agent health --mumei-repo ../mumei --format json > pre_health.json
 ```
 
 # Step 2: Run proliferation
 
 Action:
-    Invoke `python -m agent proliferate` with a bounded proposal count and output summary JSON.
+    Invoke `uv run python -m agent proliferate` with a bounded proposal count and output summary JSON.
 
 Expectation:
     The agent analyzes gaps, builds specs, generates verified code, checks blast radius across existing std modules, optionally uses Lean fallback, and records results.
@@ -32,7 +32,7 @@ Result:
     `summary.json` captures pre/post health, health delta, processed proposals, and per-proposal details.
 
 ```bash
-python -m agent proliferate \
+uv run python -m agent proliferate \
   --mumei-repo ../mumei \
   --max-proposals 3 \
   --output-json summary.json
@@ -41,7 +41,7 @@ python -m agent proliferate \
 Dry-run preview:
 
 ```bash
-python -m agent proliferate --mumei-repo ../mumei --max-proposals 3 --dry-run --output-json summary.json
+uv run python -m agent proliferate --mumei-repo ../mumei --max-proposals 3 --dry-run --output-json summary.json
 ```
 
 # Step 3: Confirm summary and health delta
@@ -57,7 +57,7 @@ Result:
 
 ```bash
 python -m json.tool summary.json
-python -m agent health --mumei-repo ../mumei --format json > post_health.json
+uv run python -m agent health --mumei-repo ../mumei --format json > post_health.json
 ```
 
 # Parameters

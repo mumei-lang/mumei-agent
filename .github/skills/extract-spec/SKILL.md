@@ -1,6 +1,6 @@
 ---
 name: extract-spec
-description: Extract Mumei forge task specification JSON from natural-language requirements with python -m agent extract-spec.
+description: Extract Mumei forge task specification JSON from natural-language requirements with uv run python -m agent extract-spec.
 ---
 
 Given natural-language requirements, produce a Mumei forge task spec JSON and optionally generate verified `.mm` code.
@@ -19,7 +19,7 @@ Result:
 # Step 2: Run extraction
 
 Action:
-    Invoke `python -m agent extract-spec --text` or `--text-file`, selecting an output JSON path.
+    Invoke `uv run python -m agent extract-spec --text` or `--text-file`, selecting an output JSON path.
 
 Expectation:
     The agent asks the LLM for a forge task spec and validates the result against Mumei spec expectations.
@@ -28,7 +28,7 @@ Result:
     A spec JSON file is written.
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text "amount must be non-negative and result preserves balance conservation" \
   --domain financial \
   --output spec.json
@@ -37,8 +37,8 @@ python -m agent extract-spec \
 Generate in the same flow:
 
 ```bash
-python -m agent extract-spec \
-  --text-file requirements.txt \
+uv run python -m agent extract-spec \
+  --text-file product_requirements.md \
   --output spec.json \
   --generate \
   --generate-output out.mm
@@ -97,7 +97,7 @@ Action:
     Exercise the public CLI with a representative domain hint and validate the output.
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text "安全な銀行送金機能。送金額は正の整数のみ。残高不足は拒否し、送金後の送金元残高と受取人残高の合計は保存される。" \
   --domain financial \
   --output /home/ubuntu/p11_live_cli_financial_spec.json

@@ -1,11 +1,13 @@
 __pycache__/
 *.pyc
 .env
+.venv/
 *.egg-info/
 dist/
 build/
 visualizer/report.json
 visualizer/report_history.json
+visualizer/thought_process.json
 visualizer/.report_history.lock
 *.mm.bak
 *.cast

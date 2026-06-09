@@ -1,6 +1,6 @@
 ---
 name: generate
-description: Generate verified Mumei .mm code from a JSON specification with python -m agent generate --spec-file.
+description: Generate verified Mumei .mm code from a JSON specification with uv run python -m agent generate --spec-file.
 ---
 
 Given a forge task spec or atom specification JSON, generate `.mm` code and verify it with Mumei.
@@ -23,7 +23,7 @@ python -m json.tool spec.json >/dev/null
 # Step 2: Run generation
 
 Action:
-    Invoke `python -m agent generate --spec-file`, selecting an output `.mm` file and retry count.
+    Invoke `uv run python -m agent generate --spec-file`, selecting an output `.mm` file and retry count.
 
 Expectation:
     The agent calls the LLM, runs `mumei check`, runs `mumei verify --json`, and self-heals verification failures up to the retry limit.
@@ -32,7 +32,7 @@ Result:
     Output `.mm` is written. The command exits non-zero if verification does not succeed.
 
 ```bash
-python -m agent generate --spec-file spec.json --output out.mm --metrics
+uv run python -m agent generate --spec-file spec.json --output out.mm --metrics
 ```
 
 # Step 3: Confirm verification

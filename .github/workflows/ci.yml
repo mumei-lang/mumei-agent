@@ -17,15 +17,16 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+        run: uv sync --extra test --frozen
 
       # NOTE: Integration tests (marked @pytest.mark.integration) are excluded
-      # from CI. Run them locally with: pytest -m integration
+      # from CI. Run them locally with: uv run pytest -m integration
       - name: Run tests with coverage
-        run: pytest tests/ -v --tb=short -m "not integration" --cov=agent --cov-report=term-missing --cov-report=xml:coverage.xml
+        run: uv run pytest tests/ -v --tb=short -m "not integration" --cov=agent --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Upload coverage report
         if: always()

@@ -1,6 +1,6 @@
 # P11 Natural Language Specification Extraction Demo
 
-This page records an observed P11 natural-language specification extraction flow. The examples use `python -m agent extract-spec` to turn Japanese requirements into forge task spec JSON, then verify the generated Mumei atoms with `mumei verify`.
+This page records an observed P11 natural-language specification extraction flow. The examples use `uv run python -m agent extract-spec` to turn Japanese requirements into forge task spec JSON, then verify the generated Mumei atoms with `mumei verify`.
 
 Environment used for the demo:
 
@@ -13,7 +13,7 @@ Environment used for the demo:
 ### Command
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text "安全な銀行送金機能。残高不足はエラーにする。送金額は正の整数のみ。送金後の残高は非負。" \
   --domain financial \
   --output /tmp/transfer_spec.json
@@ -92,7 +92,7 @@ atom safe_transfer_balance(from_balance: i64, amount: i64) -> i64
 ### Command
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text "KYC顧客分類。Individual, Corporate, Government, PEP の4タイプ。各タイプにリスクレベルを割り当て。PEPは最高リスク。" \
   --domain regtech \
   --output /tmp/kyc_spec.json
@@ -176,7 +176,7 @@ atom kyc_risk_level(customer_type: i64) -> i64
 ### Command
 
 ```bash
-python -m agent extract-spec \
+uv run python -m agent extract-spec \
   --text "絶対値関数。負の入力は正に変換。ゼロはゼロのまま。結果は常に非負。" \
   --generate \
   --generate-output /tmp/abs.mm \

@@ -37,12 +37,12 @@ A single orchestration agent composes these skills into end-to-end workflows:
 Run individual skills directly:
 
 ```bash
-python -m agent heal examples/sword_test.mm
-python -m agent generate --spec-file examples/spec.json --output out.mm
-python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
-python -m agent extract-spec --text "..." --output spec.json
-python -m agent proliferate --mumei-repo ../mumei --output-json summary.json
-python -m agent health --mumei-repo ../mumei --format json
+uv run python -m agent heal examples/sword_test.mm
+uv run python -m agent generate --spec-file examples/spec.json --output out.mm
+uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+uv run python -m agent extract-spec --text "..." --output spec.json
+uv run python -m agent proliferate --mumei-repo ../mumei --output-json summary.json
+uv run python -m agent health --mumei-repo ../mumei --format json
 ```
 
 Non-dry-run LLM flows require `LLM_API_KEY` or `OPENAI_API_KEY`; `LLM_BASE_URL` and `LLM_MODEL` select the provider/model.

@@ -6,7 +6,7 @@ name: Forge
 #
 # Workflow:
 #   1. Check out mumei-agent (this repo) and mumei (cross-repo).
-#   2. Build the mumei compiler from source so `python -m agent forge`
+#   2. Build the mumei compiler from source so `uv run python -m agent forge`
 #      has a real binary to invoke for verification.
 #   3. Provision the LLM backend according to the selected `llm_profile`:
 #        - ollama-local : spin up an Ollama server on the runner and pull
@@ -18,7 +18,7 @@ name: Forge
 #                         LLM_API_KEY (or legacy OPENAI_API_KEY) and
 #                         optionally LLM_BASE_URL / LLM_MODEL.
 #   4. Install agent dependencies.
-#   5. Run `python -m agent forge` against the selected task specs.
+#   5. Run `uv run python -m agent forge` against the selected task specs.
 #   6. Optionally open a PR against mumei-lang/mumei with the changes.
 #
 # Triggers:
@@ -117,6 +117,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install mumei system dependencies
         run: |
           sudo apt-get update
@@ -158,9 +161,7 @@ jobs:
 
       - name: Install agent dependencies
         working-directory: mumei-agent
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
+        run: uv sync --extra test --frozen
 
       # ----- LLM provisioning: ollama-local -----
 
@@ -286,7 +287,7 @@ jobs:
             DRY_RUN_FLAG="--dry-run"
           fi
           echo "[FORGE] profile=${LLM_PROFILE} model=${LLM_MODEL} base_url=${LLM_BASE_URL:-<openai-default>}"
-          python -m agent forge \
+          uv run python -m agent forge \
             --tasks-dir "$TASKS_DIR" \
             --mumei-repo "$MUMEI_REPO_DIR" \
             --max-tasks "$MAX_TASKS" \

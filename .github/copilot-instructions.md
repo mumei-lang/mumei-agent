@@ -13,19 +13,19 @@ Always reference these instructions first and fall back to search or shell comma
 Validated setup:
 
 ```bash
-python -m pip install -e ".[test]"
+uv sync --extra test
 ```
 
 Optional MCP support:
 
 ```bash
-python -m pip install -e ".[mcp]"
+uv sync --extra mcp
 ```
 
 Run tests:
 
 ```bash
-pytest -v
+uv run pytest -v
 ```
 
 If pre-commit is configured in a future revision, run:
@@ -63,21 +63,21 @@ export LLM_MODEL=qwen2.5:0.5b
 
 ## Subcommands
 
-Run commands through `python -m agent`:
+Run commands through `uv run python -m agent`:
 
 | Command | Purpose |
 | --- | --- |
-| `python -m agent heal [file.mm]` | Self-heal a failing `.mm` source file. |
-| `python -m agent generate --spec-file spec.json --output out.mm` | Generate verified `.mm` code from a spec. |
-| `python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei` | Execute std extension forge tasks. |
-| `python -m agent forge --dry-run` | Preview forge tasks without LLM/API key. |
-| `python -m agent extract-spec --text "..." --output spec.json` | Extract a forge task spec from natural language. |
-| `python -m agent extract-spec --text "..." --output spec.json --generate --generate-output out.mm` | Extract, generate, and verify in one flow. |
-| `python -m agent proliferate --mumei-repo ../mumei --output-json summary.json` | Analyze gaps, generate candidates, run blast-radius checks, and summarize health delta. |
-| `python -m agent health --mumei-repo ../mumei --format json` | Measure std proof health and `health_score`. |
-| `python -m agent propose --mumei-repo ../mumei` | Generate forge task specs from gap analysis. |
-| `python -m agent publish ...` | Generate, verify, emit wrappers, and prepare delivery artifacts. |
-| `python -m agent mcp-server` | Start the mumei-agent MCP server. |
+| `uv run python -m agent heal [file.mm]` | Self-heal a failing `.mm` source file. |
+| `uv run python -m agent generate --spec-file spec.json --output out.mm` | Generate verified `.mm` code from a spec. |
+| `uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei` | Execute std extension forge tasks. |
+| `uv run python -m agent forge --dry-run` | Preview forge tasks without LLM/API key. |
+| `uv run python -m agent extract-spec --text "..." --output spec.json` | Extract a forge task spec from natural language. |
+| `uv run python -m agent extract-spec --text "..." --output spec.json --generate --generate-output out.mm` | Extract, generate, and verify in one flow. |
+| `uv run python -m agent proliferate --mumei-repo ../mumei --output-json summary.json` | Analyze gaps, generate candidates, run blast-radius checks, and summarize health delta. |
+| `uv run python -m agent health --mumei-repo ../mumei --format json` | Measure std proof health and `health_score`. |
+| `uv run python -m agent propose --mumei-repo ../mumei` | Generate forge task specs from gap analysis. |
+| `uv run python -m agent publish ...` | Generate, verify, emit wrappers, and prepare delivery artifacts. |
+| `uv run python -m agent mcp-server` | Start the mumei-agent MCP server. |
 
 ## MCP Servers
 
@@ -92,7 +92,7 @@ Run commands through `python -m agent`:
     },
     "mumei-agent": {
       "command": "sh",
-      "args": ["-lc", "cd . && exec python -m agent mcp-server"]
+      "args": ["-lc", "cd . && exec uv run python -m agent mcp-server"]
     }
   }
 }
@@ -117,7 +117,7 @@ Important mumei-agent MCP tools:
 ### Repair `.mm` Code
 
 ```bash
-python -m agent heal examples/sword_test.mm --max-retries 3
+uv run python -m agent heal examples/sword_test.mm --max-retries 3
 ```
 
 The loop runs `mumei verify --json`, reads structured feedback, asks the LLM for a repair, and verifies again.
@@ -125,7 +125,7 @@ The loop runs `mumei verify --json`, reads structured feedback, asks the LLM for
 ### Generate from Spec
 
 ```bash
-python -m agent generate --spec-file examples/spec.json --output out.mm --metrics
+uv run python -m agent generate --spec-file examples/spec.json --output out.mm --metrics
 ```
 
 The generation strategy runs parse checks and `mumei verify --json`, then self-heals up to the configured retry limit.
@@ -133,8 +133,8 @@ The generation strategy runs parse checks and `mumei verify --json`, then self-h
 ### Extend std/
 
 ```bash
-python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
-python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1
+uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1
 ```
 
 Inspect `forge_log.json` after each run.
@@ -142,8 +142,8 @@ Inspect `forge_log.json` after each run.
 ### Health and Proliferation
 
 ```bash
-python -m agent health --mumei-repo ../mumei --format json
-python -m agent proliferate --mumei-repo ../mumei --max-proposals 3 --output-json summary.json
+uv run python -m agent health --mumei-repo ../mumei --format json
+uv run python -m agent proliferate --mumei-repo ../mumei --max-proposals 3 --output-json summary.json
 ```
 
 Read `health_score`, `pre_health`, `post_health`, and `health_delta` before reporting improvement.

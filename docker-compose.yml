@@ -5,7 +5,7 @@
 #   2. docker exec mumei-ollama ollama pull qwen3.5
 #      (or lightweight: docker exec mumei-ollama ollama pull qwen3.5:small)
 #   3. Configure .env (Pattern 1 is pre-configured)
-#   4. Run: python -m agent.self_healing
+#   4. Run: uv run python -m agent.self_healing
 
 services:
   ollama:
