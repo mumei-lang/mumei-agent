@@ -54,20 +54,64 @@ _NON_RETRYABLE_ERROR_CODES = {
 
 _KNOWN_LEAN_WITNESSES: dict[str, dict[str, str]] = {
     "abs_saturating": {
+        "module_key": "std/math/abs",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "abs_saturating_correct",
     },
     "fixed_point_abs": {
+        "module_key": "std/math/fixed_point",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "fixed_point_abs_correct",
     },
     "fixed_point_from_int": {
+        "module_key": "std/math/fixed_point",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "fixed_point_from_int_correct",
     },
     "list_length": {
+        "module_key": "std/list",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "list_length_correct",
+    },
+    "balance_conservation": {
+        "module_key": "std/finance/settlement",
+        "module": "MumeiLean.Settlement",
+        "theorem": "balance_conservation",
+    },
+    "trace_balance_conservation": {
+        "module_key": "std/finance/settlement",
+        "module": "MumeiLean.Settlement",
+        "theorem": "trace_balance_conservation",
+    },
+    "no_settlement_without_validate": {
+        "module_key": "std/finance/settlement",
+        "module": "MumeiLean.Settlement",
+        "theorem": "no_settlement_without_validate",
+    },
+    "no_reentrancy_after_withdraw": {
+        "module_key": "std/contract/vault",
+        "module": "MumeiLean.SmartContract",
+        "theorem": "no_reentrancy_after_withdraw",
+    },
+    "withdraw_preserves_other_balance": {
+        "module_key": "std/contract/vault",
+        "module": "MumeiLean.SmartContract",
+        "theorem": "withdraw_preserves_other_balance",
+    },
+    "withdraw_amount_nonnegative_bound": {
+        "module_key": "std/contract/vault",
+        "module": "MumeiLean.SmartContract",
+        "theorem": "withdraw_amount_nonnegative_bound",
+    },
+    "add_bounded": {
+        "module_key": "std/math/patterns",
+        "module": "MumeiLean.Patterns",
+        "theorem": "add_bounded",
+    },
+    "transfer_preserves_sum": {
+        "module_key": "std/math/patterns",
+        "module": "MumeiLean.Patterns",
+        "theorem": "transfer_preserves_sum",
     },
 }
 
@@ -362,6 +406,17 @@ def _unknowns_verified_in_cert(
     return proved_all, proved_any and not proved_all
 
 
+def _matches_known_witness(atom: dict[str, Any]) -> bool:
+    name = atom.get("name")
+    if not isinstance(name, str):
+        return False
+    witness = _KNOWN_LEAN_WITNESSES.get(name)
+    if witness is None:
+        return False
+    module_key = atom.get("module_key")
+    return not isinstance(module_key, str) or module_key == witness["module_key"]
+
+
 def _verify_known_witnesses(
     *,
     cert_path: str | Path,
@@ -377,7 +432,9 @@ def _verify_known_witnesses(
         for atom in unknown_atoms
         if isinstance(atom.get("name"), str)
     }
-    witness_names = atom_names.intersection(_KNOWN_LEAN_WITNESSES)
+    witness_names = {
+        atom["name"] for atom in unknown_atoms if _matches_known_witness(atom)
+    }
     if not witness_names:
         return None
 
