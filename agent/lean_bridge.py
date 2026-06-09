@@ -263,6 +263,26 @@ def _load_json_file(path: str | Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _default_lean_cert_out(
+    input_path: Path,
+    *,
+    escalation_bundle: bool,
+) -> Path:
+    name = input_path.name
+    if escalation_bundle:
+        suffix = ".escalation-bundle.json"
+    else:
+        suffix = ".proof-cert.json"
+
+    if name.endswith(suffix):
+        stem = name[: -len(suffix)]
+    elif name.endswith(".json"):
+        stem = name[: -len(".json")]
+    else:
+        stem = input_path.stem
+    return input_path.with_name(f"{stem}.lean-cert.json")
+
+
 def _module_source_path(repo_path: Path, module: str) -> Path:
     return repo_path / Path(*module.split(".")).with_suffix(".lean")
 
@@ -584,23 +604,26 @@ def _combine_with_witness_fallback(
 
 
 def run_lean_bridge(
-    cert_path: str | Path,
-    lean_cert_out: str | Path,
+    cert_path: str | Path | None,
+    lean_cert_out: str | Path | None,
     mumei_lean_repo: str | Path,
     *,
     no_build: bool = False,
     timeout: float | None = 600.0,
     enable_known_witness_fallback: bool = True,
+    escalation_bundle_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Invoke ``mumei-lean``'s ``scripts/bridge.py`` as a subprocess.
 
     Parameters
     ----------
     cert_path:
-        Path to the input mumei ``.proof-cert.json``.
+        Path to the input mumei ``.proof-cert.json``.  May be
+        ``None`` when *escalation_bundle_path* is provided.
     lean_cert_out:
         Path where ``bridge.py`` should write the upgraded
-        ``.lean-cert.json``.  Created lazily by ``bridge.py``.
+        ``.lean-cert.json``.  When ``None``, derived from the selected
+        input path as ``<stem>.lean-cert.json``.
     mumei_lean_repo:
         Filesystem path to a ``mumei-lang/mumei-lean`` checkout.
         Must contain ``scripts/bridge.py`` and ``lakefile.lean``.
@@ -611,6 +634,11 @@ def run_lean_bridge(
     timeout:
         Maximum seconds to wait for the bridge subprocess.  Defaults
         to 10 minutes; pass ``None`` to disable.
+    escalation_bundle_path:
+        Path to a mumei ``.escalation-bundle.json`` emitted by
+        ``mumei verify --escalate-lean --emit escalation-bundle``.
+        When provided, the bridge is invoked with
+        ``--escalation-bundle`` instead of ``--cert``.
 
     Returns
     -------
@@ -668,13 +696,44 @@ def run_lean_bridge(
     # Running the file as a script avoids the package-import
     # requirement while still honouring ``cwd=repo_path`` so
     # bridge-relative imports continue to resolve.
+    if escalation_bundle_path is not None:
+        input_flag = "--escalation-bundle"
+        input_path = Path(escalation_bundle_path)
+        using_escalation_bundle = True
+    elif cert_path is not None:
+        input_flag = "--cert"
+        input_path = Path(cert_path)
+        using_escalation_bundle = False
+    else:
+        return _result(
+            success=False,
+            returncode=-1,
+            stderr=(
+                "cert_path is required unless escalation_bundle_path is provided"
+            ),
+            error_code="input_missing",
+            diagnostics=[
+                "Pass a .proof-cert.json via cert_path or an "
+                "escalation-bundle via escalation_bundle_path."
+            ],
+            retryable=False,
+        )
+
+    out_path = (
+        Path(lean_cert_out)
+        if lean_cert_out is not None
+        else _default_lean_cert_out(
+            input_path,
+            escalation_bundle=using_escalation_bundle,
+        )
+    )
     cmd: list[str] = [
         sys.executable,
         str(bridge_script),
-        "--cert",
-        str(cert_path),
+        input_flag,
+        str(input_path),
         "--lean-cert-out",
-        str(lean_cert_out),
+        str(out_path),
     ]
     if no_build:
         cmd.append("--no-build")
@@ -695,8 +754,8 @@ def run_lean_bridge(
         timeout_result = _result(
             success=False,
             returncode=-1,
-            lean_cert_path=str(lean_cert_out) if Path(lean_cert_out).exists() else None,
-            lean_cert=_load_json_file(lean_cert_out),
+            lean_cert_path=str(out_path) if out_path.exists() else None,
+            lean_cert=_load_json_file(out_path),
             stdout=_coerce_output(exc.stdout),
             stderr=(
                 f"lean_bridge subprocess timed out after {timeout} seconds\n"
@@ -712,7 +771,7 @@ def run_lean_bridge(
         if enable_known_witness_fallback and not no_build:
             return _combine_with_witness_fallback(
                 primary=timeout_result,
-                cert_path=cert_path,
+                cert_path=input_path,
                 mumei_lean_repo=mumei_lean_repo,
                 timeout=timeout,
             )
@@ -732,7 +791,6 @@ def run_lean_bridge(
     elapsed = time.monotonic() - started
 
     lean_cert: dict[str, Any] | None = None
-    out_path = Path(lean_cert_out)
     if out_path.exists():
         try:
             lean_cert = json.loads(out_path.read_text(encoding="utf-8"))
@@ -766,7 +824,7 @@ def run_lean_bridge(
     ):
         return _combine_with_witness_fallback(
             primary=primary_result,
-            cert_path=cert_path,
+            cert_path=input_path,
             mumei_lean_repo=mumei_lean_repo,
             timeout=timeout,
         )
@@ -815,7 +873,8 @@ def lean_fallback_available(mumei_lean_repo: str | Path | None) -> bool:
 
     Returns True only when the Lean repo path looks usable and a
     ``python`` interpreter capable of running the bridge module is
-    discoverable.
+    discoverable for proof-certificate and escalation-bundle bridge
+    modes.
     """
     if not mumei_lean_repo:
         return False

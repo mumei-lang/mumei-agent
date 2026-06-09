@@ -157,6 +157,91 @@ class TestRunLeanBridgeSubprocess:
         assert result["lean_cert"] is not None
         assert result["lean_cert"]["lean_version"] == "4.7.0"
 
+    def test_subprocess_invoked_with_escalation_bundle(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text(
+            "# stub\n", encoding="utf-8"
+        )
+        bundle_path = tmp_path / "std-abs.escalation-bundle.json"
+        bundle_path.write_text(
+            json.dumps({"candidates": [{"name": "abs_saturating"}]}),
+            encoding="utf-8",
+        )
+        lean_cert_out = tmp_path / "std-abs.lean-cert.json"
+        lean_cert_out.write_text(
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "name": "abs_saturating",
+                            "z3_check_result": "lean_verified",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch("agent.lean_bridge.subprocess.run") as run_mock:
+            run_mock.return_value = MagicMock(
+                returncode=0, stdout="ok\n", stderr=""
+            )
+            result = lean_bridge.run_lean_bridge(
+                cert_path=None,
+                lean_cert_out=lean_cert_out,
+                mumei_lean_repo=repo,
+                no_build=True,
+                escalation_bundle_path=bundle_path,
+            )
+
+        run_mock.assert_called_once()
+        cmd = run_mock.call_args.args[0]
+        assert "--escalation-bundle" in cmd
+        assert str(bundle_path) in cmd
+        assert "--cert" not in cmd
+        assert "--lean-cert-out" in cmd
+        assert str(lean_cert_out) in cmd
+        assert result["success"] is True
+        assert result["lean_cert"]["candidates"][0]["name"] == "abs_saturating"
+
+    def test_escalation_bundle_defaults_lean_cert_out(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "scripts" / "bridge.py").write_text(
+            "# stub\n", encoding="utf-8"
+        )
+        bundle_path = tmp_path / "std-abs.escalation-bundle.json"
+        bundle_path.write_text(
+            json.dumps({"candidates": [{"name": "abs_saturating"}]}),
+            encoding="utf-8",
+        )
+        default_out = tmp_path / "std-abs.lean-cert.json"
+        default_out.write_text(
+            json.dumps({"candidates": [{"name": "abs_saturating"}]}),
+            encoding="utf-8",
+        )
+
+        with patch("agent.lean_bridge.subprocess.run") as run_mock:
+            run_mock.return_value = MagicMock(
+                returncode=0, stdout="ok\n", stderr=""
+            )
+            result = lean_bridge.run_lean_bridge(
+                cert_path=None,
+                lean_cert_out=None,
+                mumei_lean_repo=repo,
+                no_build=True,
+                escalation_bundle_path=bundle_path,
+            )
+
+        cmd = run_mock.call_args.args[0]
+        assert str(default_out) in cmd
+        assert result["lean_cert_path"] == str(default_out)
+
     def test_subprocess_failure_propagates_returncode(
         self, tmp_path: Path
     ) -> None:

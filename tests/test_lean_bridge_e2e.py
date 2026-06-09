@@ -121,6 +121,35 @@ def test_lean_fallback_upgrades_unknown_to_lean_verified(
     assert upgraded["all_verified"] is True
 
 
+def test_lean_bridge_accepts_escalation_bundle_fixture(
+    tmp_path: Path,
+    mumei_lean_repo: Path,
+) -> None:
+    bundle_path = (
+        mumei_lean_repo
+        / "tests"
+        / "fixtures"
+        / "abs_saturating.escalation-bundle.json"
+    )
+    if not bundle_path.exists():
+        pytest.skip(f"escalation-bundle fixture not found at {bundle_path}")
+
+    lean_cert_out = tmp_path / "abs_saturating.lean-cert.json"
+    bridge_result = lean_bridge.run_lean_bridge(
+        cert_path=None,
+        lean_cert_out=lean_cert_out,
+        mumei_lean_repo=mumei_lean_repo,
+        escalation_bundle_path=bundle_path,
+    )
+
+    assert bridge_result["success"] is True, bridge_result.get("stderr", "")
+    assert lean_cert_out.exists()
+    assert isinstance(bridge_result["lean_cert"], dict)
+    candidate = bridge_result["lean_cert"]["candidates"][0]
+    assert candidate["name"] == LEAN_PROOF_ATOM
+    assert candidate["z3_check_result"] == "lean_verified"
+
+
 def test_lean_fallback_upgrades_multiple_unknown_atoms(
     tmp_path: Path,
     mumei_lean_repo: Path,
