@@ -392,6 +392,41 @@ class TestRunLeanBridgeSubprocess:
             if atom["z3_check_result"] == "lean_verified"
         } == {name for name, _, _ in witnesses}
 
+    def test_known_witness_fallback_requires_matching_module_key(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "mumei-lean"
+        (repo / "MumeiLean").mkdir(parents=True)
+        (repo / "MumeiLean" / "Settlement.lean").write_text(
+            "theorem balance_conservation : True := by trivial\n",
+            encoding="utf-8",
+        )
+        cert_path = tmp_path / "in.json"
+        cert_path.write_text(
+            json.dumps(
+                {
+                    "all_verified": False,
+                    "atoms": [
+                        {
+                            "name": "balance_conservation",
+                            "module_key": "custom/settlement",
+                            "z3_check_result": "unknown",
+                        }
+                    ],
+                }
+            )
+        )
+
+        with patch("agent.lean_bridge.subprocess.run") as run_mock:
+            result = lean_bridge._verify_known_witnesses(
+                cert_path=cert_path,
+                mumei_lean_repo=repo,
+                timeout=600.0,
+            )
+
+        assert result is None
+        run_mock.assert_not_called()
+
     def test_known_witness_fallback_preserves_primary_partial_cert(
         self, tmp_path: Path
     ) -> None:

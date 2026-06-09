@@ -386,6 +386,17 @@ def _unknowns_verified_in_cert(
     return proved_all, proved_any and not proved_all
 
 
+def _matches_known_witness(atom: dict[str, Any]) -> bool:
+    name = atom.get("name")
+    if not isinstance(name, str):
+        return False
+    witness = _KNOWN_LEAN_WITNESSES.get(name)
+    if witness is None:
+        return False
+    module_key = atom.get("module_key")
+    return not isinstance(module_key, str) or module_key == witness["module_key"]
+
+
 def _verify_known_witnesses(
     *,
     cert_path: str | Path,
@@ -401,7 +412,9 @@ def _verify_known_witnesses(
         for atom in unknown_atoms
         if isinstance(atom.get("name"), str)
     }
-    witness_names = atom_names.intersection(_KNOWN_LEAN_WITNESSES)
+    witness_names = {
+        atom["name"] for atom in unknown_atoms if _matches_known_witness(atom)
+    }
     if not witness_names:
         return None
 
