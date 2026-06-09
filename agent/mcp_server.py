@@ -26,6 +26,7 @@ Running the server::
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 import json
 import logging
 import os
@@ -58,6 +59,11 @@ def _ok(payload: dict[str, Any]) -> str:
     """Return a JSON-encoded ``status: ok`` payload."""
     payload.setdefault("status", "ok")
     return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _ok_dataclass(result: Any) -> str:
+    """Return a dataclass result as a JSON-encoded ``status: ok`` payload."""
+    return _ok(asdict(result))
 
 
 def _resolve_repo(path: str) -> Path:
@@ -1164,6 +1170,116 @@ def check_spec_health(source_code: str, mumei_repo: str = "") -> str:
 
     report = checker.check_all(verify_result, proof_cert)
     return _ok(report.to_dict())
+
+
+@mcp.tool()
+def validate_nl_spec(
+    spec_text: str,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> str:
+    """Validate a natural-language specification for contradictions and ambiguity."""
+    try:
+        from agent import cross_validation
+        from agent.config import AgentConfig
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import cross-validation modules: {exc}")
+
+    try:
+        result = cross_validation.validate_nl_spec(
+            spec_text,
+            config=AgentConfig(),
+            use_llm=use_llm,
+            run_mumei=run_mumei,
+        )
+    except Exception as exc:
+        return _err(f"validate_nl_spec failed: {exc}")
+    return _ok_dataclass(result)
+
+
+@mcp.tool()
+def validate_foreign_code(
+    code: str,
+    language: str,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> str:
+    """Validate Rust, Python, or Go code by inferring Mumei contracts."""
+    try:
+        from agent import cross_validation
+        from agent.config import AgentConfig
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import cross-validation modules: {exc}")
+
+    try:
+        result = cross_validation.validate_foreign_code(
+            code,
+            language,
+            config=AgentConfig(),
+            use_llm=use_llm,
+            run_mumei=run_mumei,
+        )
+    except Exception as exc:
+        return _err(f"validate_foreign_code failed: {exc}")
+    return _ok_dataclass(result)
+
+
+@mcp.tool()
+def validate_spec_to_code(
+    spec: str,
+    code_path: str,
+    language: str | None = None,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> str:
+    """Validate that a natural-language specification aligns with source code."""
+    try:
+        from agent import cross_validation
+        from agent.config import AgentConfig
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import cross-validation modules: {exc}")
+
+    try:
+        result = cross_validation.validate_spec_to_code(
+            spec,
+            code_path,
+            config=AgentConfig(),
+            language=language,
+            use_llm=use_llm,
+            run_mumei=run_mumei,
+        )
+    except Exception as exc:
+        return _err(f"validate_spec_to_code failed: {exc}")
+    return _ok_dataclass(result)
+
+
+@mcp.tool()
+def validate_code_to_spec(
+    code_path: str,
+    spec_path: str,
+    language: str | None = None,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> str:
+    """Detect drift between source code and a natural-language specification."""
+    try:
+        from agent import cross_validation
+        from agent.config import AgentConfig
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import cross-validation modules: {exc}")
+
+    try:
+        result = cross_validation.validate_code_to_spec(
+            code_path,
+            spec_path,
+            config=AgentConfig(),
+            language=language,
+            use_llm=use_llm,
+            run_mumei=run_mumei,
+        )
+    except Exception as exc:
+        return _err(f"validate_code_to_spec failed: {exc}")
+    return _ok_dataclass(result)
 
 
 @mcp.tool()

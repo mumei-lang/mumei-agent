@@ -44,6 +44,10 @@ class TestGetAgentStatus:
             "get_spec_guidelines",
             "extract_spec_from_code",
             "verify_foreign_code",
+            "validate_nl_spec",
+            "validate_foreign_code",
+            "validate_spec_to_code",
+            "validate_code_to_spec",
             "send_latent_message",
             "send_latent_message_batch",
             "async_send_latent_message",
@@ -59,6 +63,98 @@ class TestGetAgentStatus:
         assert "extract_spec_from_code" in registered
         assert "get_spec_guidelines" in registered
         assert "send_latent_message" in registered
+
+
+# ---------------------------------------------------------------------------
+# cross_validation MCP tools
+# ---------------------------------------------------------------------------
+
+
+class TestCrossValidationTools:
+    def test_validate_nl_spec_returns_dataclass_payload(self) -> None:
+        result = _payload(
+            mcp_server.validate_nl_spec(
+                "requires: x >= 0; ensures: result >= x",
+                use_llm=False,
+                run_mumei=False,
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["success"] is True
+        assert result["inferred_atoms"][0]["requires"] == "x >= 0"
+        assert result["verification"] is None
+
+    def test_validate_foreign_code_returns_inferred_contracts(self) -> None:
+        result = _payload(
+            mcp_server.validate_foreign_code(
+                "def add(a: int, b: int) -> int:\n    return a + b\n",
+                "python",
+                use_llm=False,
+                run_mumei=False,
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["success"] is True
+        assert result["language"] == "python"
+        assert result["inferred_atoms"][0]["name"] == "add"
+        assert "trusted atom add" in result["mumei_source"]
+        assert result["verification"] is None
+
+    def test_validate_spec_to_code_returns_alignment_result(
+        self, tmp_path: Path
+    ) -> None:
+        code_path = tmp_path / "calc.py"
+        code_path.write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+            encoding="utf-8",
+        )
+
+        result = _payload(
+            mcp_server.validate_spec_to_code(
+                "requires: a >= 0; ensures: result >= a",
+                str(code_path),
+                language="python",
+                use_llm=False,
+                run_mumei=False,
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["code_path"] == str(code_path)
+        assert result["language"] == "python"
+        assert result["spec_atoms"][0]["name"] == "nl_spec_contract"
+        assert result["code_atoms"][0]["name"] == "add"
+
+    def test_validate_code_to_spec_returns_drift_result(self, tmp_path: Path) -> None:
+        code_path = tmp_path / "calc.py"
+        spec_path = tmp_path / "spec.txt"
+        code_path.write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+            encoding="utf-8",
+        )
+        spec_path.write_text(
+            "requires: a >= 0; ensures: result >= a",
+            encoding="utf-8",
+        )
+
+        result = _payload(
+            mcp_server.validate_code_to_spec(
+                str(code_path),
+                str(spec_path),
+                language="python",
+                use_llm=False,
+                run_mumei=False,
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["code_path"] == str(code_path)
+        assert result["spec_path"] == str(spec_path)
+        assert result["language"] == "python"
+        assert result["spec_atoms"][0]["name"] == "nl_spec_contract"
+        assert result["code_atoms"][0]["name"] == "add"
 
 
 # ---------------------------------------------------------------------------
