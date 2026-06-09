@@ -54,20 +54,64 @@ _NON_RETRYABLE_ERROR_CODES = {
 
 _KNOWN_LEAN_WITNESSES: dict[str, dict[str, str]] = {
     "abs_saturating": {
+        "module_key": "std/math/abs",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "abs_saturating_correct",
     },
     "fixed_point_abs": {
+        "module_key": "std/math/fixed_point",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "fixed_point_abs_correct",
     },
     "fixed_point_from_int": {
+        "module_key": "std/math/fixed_point",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "fixed_point_from_int_correct",
     },
     "list_length": {
+        "module_key": "std/list",
         "module": "MumeiLean.StdMathAbs",
         "theorem": "list_length_correct",
+    },
+    "balance_conservation": {
+        "module_key": "std/finance/settlement",
+        "module": "MumeiLean.Settlement",
+        "theorem": "balance_conservation",
+    },
+    "trace_balance_conservation": {
+        "module_key": "std/finance/settlement",
+        "module": "MumeiLean.Settlement",
+        "theorem": "trace_balance_conservation",
+    },
+    "no_settlement_without_validate": {
+        "module_key": "std/finance/settlement",
+        "module": "MumeiLean.Settlement",
+        "theorem": "no_settlement_without_validate",
+    },
+    "no_reentrancy_after_withdraw": {
+        "module_key": "std/contract/vault",
+        "module": "MumeiLean.SmartContract",
+        "theorem": "no_reentrancy_after_withdraw",
+    },
+    "withdraw_preserves_other_balance": {
+        "module_key": "std/contract/vault",
+        "module": "MumeiLean.SmartContract",
+        "theorem": "withdraw_preserves_other_balance",
+    },
+    "withdraw_amount_nonnegative_bound": {
+        "module_key": "std/contract/vault",
+        "module": "MumeiLean.SmartContract",
+        "theorem": "withdraw_amount_nonnegative_bound",
+    },
+    "add_bounded": {
+        "module_key": "std/math/patterns",
+        "module": "MumeiLean.Patterns",
+        "theorem": "add_bounded",
+    },
+    "transfer_preserves_sum": {
+        "module_key": "std/math/patterns",
+        "module": "MumeiLean.Patterns",
+        "theorem": "transfer_preserves_sum",
     },
 }
 
