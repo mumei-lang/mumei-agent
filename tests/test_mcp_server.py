@@ -49,6 +49,7 @@ class TestGetAgentStatus:
             "validate_foreign_code",
             "validate_spec_to_code",
             "validate_code_to_spec",
+            "scan_and_fix",
             "send_latent_message",
             "send_latent_message_batch",
             "async_send_latent_message",
@@ -438,6 +439,94 @@ class TestListForgeLog:
         log.write_text("not json", encoding="utf-8")
         result = _payload(mcp_server.list_forge_log(str(log)))
         assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# scan_and_fix
+# ---------------------------------------------------------------------------
+
+
+class TestScanAndFix:
+    def test_audits_with_auto_migrate_enabled(self, tmp_path: Path) -> None:
+        from agent.audit import AuditResult
+
+        source = tmp_path / "impl.py"
+        source.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+        audit_result = AuditResult(
+            success=True,
+            source_file=str(source),
+            language="python",
+            spec_extracted=True,
+            migration_hints=[],
+            report="Audit passed",
+        )
+
+        with patch("agent.audit.AuditPipeline") as pipeline_cls:
+            pipeline_cls.return_value.audit_file.return_value = audit_result
+            result = mcp_server.scan_and_fix(
+                str(source),
+                "python",
+                auto_heal=True,
+                heal_output_dir=str(tmp_path / "healed"),
+                domain_hint="finance",
+            )
+
+        assert result["audit"]["success"] is True
+        assert result["spec_alignment"] is None
+        pipeline_cls.assert_called_once_with(heal_output_dir=str(tmp_path / "healed"))
+        pipeline_cls.return_value.audit_file.assert_called_once_with(
+            str(source),
+            "python",
+            domain_hint="finance",
+            auto_migrate=True,
+            auto_heal=True,
+        )
+
+    def test_runs_spec_alignment_when_spec_is_provided(self, tmp_path: Path) -> None:
+        from agent.audit import AuditResult
+        from agent.cross_validation import SpecCodeAlignmentResult
+
+        source = tmp_path / "impl.py"
+        source.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+        spec = tmp_path / "spec.txt"
+        spec.write_text("requires: true; ensures: result == a + b", encoding="utf-8")
+        audit_result = AuditResult(
+            success=True,
+            source_file=str(source),
+            language="python",
+            spec_extracted=True,
+            report="Audit passed",
+        )
+        alignment_result = SpecCodeAlignmentResult(
+            success=True,
+            code_path=str(source),
+            language="python",
+            spec_atoms=[],
+            code_atoms=[],
+            missing_constraints=[],
+            divergences=[],
+            satisfiable=True,
+            report="Aligned",
+        )
+
+        with (
+            patch("agent.audit.AuditPipeline") as pipeline_cls,
+            patch(
+                "agent.cross_validation.validate_spec_to_code",
+                return_value=alignment_result,
+            ) as validate,
+        ):
+            pipeline_cls.return_value.audit_file.return_value = audit_result
+            result = mcp_server.scan_and_fix(str(source), "python", spec=str(spec))
+
+        assert result["audit"]["source_file"] == str(source)
+        assert result["spec_alignment"]["success"] is True
+        assert result["spec_alignment"]["satisfiable"] is True
+        validate.assert_called_once_with(
+            "requires: true; ensures: result == a + b",
+            str(source),
+            language="python",
+        )
 
 
 # ---------------------------------------------------------------------------

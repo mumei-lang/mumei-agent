@@ -400,6 +400,7 @@ Exported tools:
 | `list_forge_log(log_path)` | Read `forge_log.json` |
 | `get_agent_status()` | Report LLM provider, mumei binary, available subcommands |
 | `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
+| `scan_and_fix(code_file, language, spec="", auto_heal=False, ...)` | Audit code, generate .mm skeletons, optionally self-heal |
 | `extract_spec(natural_language, domain_hint="", generate=false, mumei_repo="", check_contradiction_only=false)` | Extract a forge spec, optionally generate code, or run contradiction-only validation |
 | `check_spec_contradiction(natural_language, domain_hint="")` | Extract a natural-language spec and return direct contradiction findings without code generation |
 | `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files |
