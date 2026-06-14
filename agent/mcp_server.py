@@ -1363,6 +1363,25 @@ def verify_foreign_code(source_code: str, language: str) -> str:
 
 
 @mcp.tool()
+def audit_code(source_code: str, language: str, domain_hint: str = "") -> dict:
+    """Audit existing code for bugs by extracting specs and verifying them."""
+    try:
+        from agent.audit import AuditPipeline
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"success": False, "errors": [f"failed to import audit pipeline: {exc}"]}
+
+    try:
+        result = AuditPipeline().audit_source(
+            source_code,
+            language,
+            domain_hint=domain_hint,
+        )
+    except Exception as exc:
+        return {"success": False, "errors": [f"audit_code failed: {exc}"]}
+    return asdict(result)
+
+
+@mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
     """Generate .mm migration skeletons for functions with verification issues.
 
