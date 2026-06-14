@@ -29,6 +29,7 @@ class AuditResult:
     spec_health_issues: list[str] = field(default_factory=list)
     verification_violations: list[str] = field(default_factory=list)
     cross_validation_gaps: list[str] = field(default_factory=list)
+    migration_hints: list[dict] = field(default_factory=list)
     report: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -101,6 +102,7 @@ class AuditPipeline:
         language: str | None = None,
         *,
         domain_hint: str = "",
+        auto_migrate: bool = False,
     ) -> AuditResult:
         source_path = Path(source_file).expanduser().resolve()
         source_label = str(source_path)
@@ -200,6 +202,20 @@ class AuditPipeline:
             cross_validation_gaps=cross_validation_gaps,
             errors=errors,
         )
+        if auto_migrate and (verification_violations or cross_validation_gaps):
+            from agent.mm_migration_advisor import suggest_migration_for_file
+
+            hints = suggest_migration_for_file(
+                source_label,
+                audit_language,
+                {
+                    "issues": _migration_issue_dicts(
+                        verification_violations,
+                        cross_validation_gaps,
+                    )
+                },
+            )
+            result.migration_hints = [asdict(hint) for hint in hints]
         result.report = _build_report(result)
         return result
 
@@ -253,6 +269,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--json", action="store_true", help="Output the full result as JSON.")
     parser.add_argument("--output", help="Optional output path.")
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
+    parser.add_argument(
+        "--auto-migrate",
+        action="store_true",
+        help="Automatically generate .mm migration skeletons for functions with issues.",
+    )
     return parser
 
 
@@ -262,6 +283,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult:
         args.code_file,
         args.language,
         domain_hint=args.domain_hint,
+        auto_migrate=args.auto_migrate,
     )
     payload = (
         json.dumps(asdict(result), ensure_ascii=False, indent=2)
@@ -399,6 +421,30 @@ def _cross_validation_gap_strings(report: CrossValidationReport) -> list[str]:
     return _dedupe_strings(gaps)
 
 
+def _migration_issue_dicts(
+    verification_violations: list[str],
+    cross_validation_gaps: list[str],
+) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    issues.extend(
+        {
+            "kind": "verification",
+            "severity": "error",
+            "message": violation,
+        }
+        for violation in verification_violations
+    )
+    issues.extend(
+        {
+            "kind": "alignment",
+            "severity": "warning",
+            "message": gap,
+        }
+        for gap in cross_validation_gaps
+    )
+    return issues
+
+
 def _diagnostic_strings(report: dict[str, object]) -> list[str]:
     diagnostics = report.get("diagnostics")
     if not isinstance(diagnostics, list):
@@ -483,6 +529,18 @@ def _build_report(result: AuditResult) -> str:
     ]
     if result.errors:
         lines.append(f"errors: {result.errors}")
+    if result.migration_hints:
+        lines.append("migration_hints:")
+        for hint in result.migration_hints:
+            function_name = _string_value(hint.get("function_name"), "unknown")
+            priority = _string_value(hint.get("priority"), "unknown")
+            skeleton = _string_value(hint.get("skeleton"), "")
+            skeleton_preview = skeleton.splitlines()[:3]
+            lines.append(f"  - function_name: {function_name}")
+            lines.append(f"    priority: {priority}")
+            lines.append("    skeleton:")
+            for preview_line in skeleton_preview:
+                lines.append(f"      {preview_line}")
     if result.verification_violations or result.cross_validation_gaps:
         lines.append(
             "next_step: Run `mumei-agent migrate-suggest --code-file <file> --language <lang>` "
