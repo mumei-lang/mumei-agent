@@ -62,7 +62,7 @@ DOMAIN_TEMPLATES: dict[str, str] = {
     "crypto": (
         "Cryptography domain conventions:\n"
         "- Modular arithmetic and exponentiation are outside the Z3-stable fragment; only emit them when explicitly required and mark Lean escalation intent\n"
-        "- Prefer bounded equality/range checks over RSA-style `mod(pow(signature, public_key), n)` formulas in first-pass specs\n"
+        "- Prefer bounded equality/range checks over RSA-style `mod(pow(signature, public_key), n) == mod(message, n)` formulas in first-pass specs\n"
         "- Include modulus preconditions such as `n > 0` before unavoidable modular arithmetic\n"
         "- Finite field operations: bounds are `0 <= x < p` where p is prime\n"
         "- Use effects: [] for pure cryptographic verification helpers\n"
