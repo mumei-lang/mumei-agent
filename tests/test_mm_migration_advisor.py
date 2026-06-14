@@ -62,3 +62,12 @@ def test_suggest_migration_for_file_returns_hints(tmp_path: Path) -> None:
 
     assert [hint.function_name for hint in hints] == ["add"]
     assert hints[0].priority == "high"
+
+
+def test_suggest_migration_for_file_returns_no_hints_without_issues(tmp_path: Path) -> None:
+    source = tmp_path / "code.py"
+    source.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+
+    hints = suggest_migration_for_file(str(source), "python", {"issues": []})
+
+    assert hints == []

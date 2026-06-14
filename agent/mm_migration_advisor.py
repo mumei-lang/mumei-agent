@@ -122,7 +122,7 @@ def _function_names_with_issues(
             names.append(candidate)
     if names:
         return names
-    return spec_names if not issues else spec_names
+    return spec_names if issues else []
 
 
 def _issues_for_function(function_name: str, issues: list[dict]) -> list[dict]:
