@@ -122,6 +122,55 @@ uv run streamlit run visualizer/app.py
 
 You can also run commands as `mumei-agent ...` after activating the uv-managed virtual environment with `source .venv/bin/activate`.
 
+## .mmを書かない入口
+
+既存の Python/Rust/TypeScript コードから始める場合は、まず `.mm` を手で書かずに
+`audit` を実行します。`audit` は `--code-file` だけで対象ファイルを受け取り、
+仕様抽出、spec health、既存コード検証、cross-validation gap 検出までまとめて確認します。
+
+```mermaid
+flowchart TD
+    existing["既存コード"] --> audit["audit"]
+    audit --> ok["問題なし"]
+    ok --> done["完了"]
+    audit --> issue["問題あり"]
+    issue --> migrate["migrate-suggest"]
+    migrate --> skeleton[".mmスケルトン生成"]
+    skeleton --> heal["heal"]
+    heal --> verified["検証済み.mm"]
+    nl["自然言語仕様"] --> validate_spec["validate-spec"]
+    validate_spec --> spec_feedback["矛盾・曖昧さ指摘"]
+    spec_code["仕様+コード"] --> validate_spec_to_code["validate-spec-to-code"]
+    validate_spec_to_code --> missing_constraints["未実装制約の指摘"]
+```
+
+最初の一歩は `--code-file` だけです:
+
+```bash
+mumei-agent audit --code-file src/foo.py
+```
+
+問題がなければ完了です。`verification_violations` や `cross_validation_gaps` が出た場合だけ、
+移行スケルトンを生成します:
+
+```bash
+mumei-agent migrate-suggest --code-file src/foo.py --language python
+```
+
+生成された `.mm` は通常の self-healing loop に渡します:
+
+```bash
+mumei-agent heal generated/foo.mm
+```
+
+`.mm` に入る前の詳細チェックだけを行う場合は、コード単体なら `validate-code`、仕様とコードの
+対応確認なら `validate-spec-to-code` を使います:
+
+```bash
+mumei-agent validate-code --input src/foo.py --language python
+mumei-agent validate-spec-to-code --spec specs/foo.txt --code src/foo.py --language python
+```
+
 ## Configuration
 
 Core agent and local Ollama settings are controlled through environment variables
@@ -318,6 +367,8 @@ See `.env.example` for configuration details.
 |---|---|---|
 | `heal` (default) | Self-healing loop for existing .mm files | `mumei-agent heal examples/sword_test.mm` |
 | `generate` | Generate new .mm code from spec JSON | `mumei-agent generate --spec-file spec.json --output out.mm` |
+| `audit` | Audit existing code: extract spec, check health, verify contracts, detect cross-validation gaps | `mumei-agent audit --code-file src/foo.py` |
+| `migrate-suggest` | Generate .mm migration skeletons for functions with verification issues | `mumei-agent migrate-suggest --code-file src/foo.py --language python` |
 | `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `mumei-agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
 | `forge` | Autonomously extend the mumei std library with verified atoms | `mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
 | `validate-spec` | Cross-validate natural-language specs for contradiction, ambiguity, over-constraint, and Z3 satisfiability | `mumei-agent validate-spec --input spec.txt --format nl` |

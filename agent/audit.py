@@ -483,4 +483,9 @@ def _build_report(result: AuditResult) -> str:
     ]
     if result.errors:
         lines.append(f"errors: {result.errors}")
+    if result.verification_violations or result.cross_validation_gaps:
+        lines.append(
+            "next_step: Run `mumei-agent migrate-suggest --code-file <file> --language <lang>` "
+            "to generate .mm migration skeletons."
+        )
     return "\n".join(lines)
