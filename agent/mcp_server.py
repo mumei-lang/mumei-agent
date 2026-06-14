@@ -1185,8 +1185,9 @@ def validate_nl_spec(
     spec_text: str,
     use_llm: bool = True,
     run_mumei: bool = True,
+    domain_hint: str = "",
 ) -> str:
-    """Validate a natural-language specification for contradictions and ambiguity."""
+    """Validate a natural-language specification for logical health."""
     try:
         from agent import cross_validation
         from agent.config import AgentConfig
@@ -1199,10 +1200,45 @@ def validate_nl_spec(
             config=AgentConfig(),
             use_llm=use_llm,
             run_mumei=run_mumei,
+            domain_hint=domain_hint,
         )
     except Exception as exc:
         return _err(f"validate_nl_spec failed: {exc}")
     return _ok_dataclass(result)
+
+
+@mcp.tool()
+def validate_nl_spec_multi(spec_texts_json: str, domain_hint: str = "") -> str:
+    """Validate multiple NL spec documents for cross-document consistency.
+
+    Args:
+        spec_texts_json: JSON array of spec text strings.
+        domain_hint: Optional domain hint.
+    """
+    try:
+        from agent import cross_validation
+        from agent.config import AgentConfig
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import cross-validation modules: {exc}")
+
+    try:
+        raw = json.loads(spec_texts_json)
+    except json.JSONDecodeError as exc:
+        return _err(f"failed to parse spec_texts_json: {exc}")
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        return _err("spec_texts_json must be a JSON array of strings")
+
+    try:
+        config = AgentConfig()
+        result = cross_validation.validate_nl_spec_multi(
+            raw,
+            config=config,
+            use_llm=False,
+            domain_hint=domain_hint,
+        )
+    except Exception as exc:
+        return _err(f"validate_nl_spec_multi failed: {exc}")
+    return _ok(result)
 
 
 @mcp.tool()
