@@ -76,7 +76,7 @@ graph TD
 
 ### When to Use Which
 
-- **mumei-agent**: Run `uv run python -m agent file.mm` for a fully automated fix loop. LLM provider is configured via `.env` (Ollama, OpenAI, DashScope, etc.). Best when you want a single-command experience.
+- **mumei-agent**: Run `uv run mumei-agent file.mm` for a fully automated fix loop. LLM provider is configured via `.env` (Ollama, OpenAI, DashScope, etc.). Best when you want a single-command experience.
 - **MCP Server**: Start `python mcp_server.py` in the [mumei repository](https://github.com/mumei-lang/mumei) and connect from any MCP-compatible agent. The agent calls tools like `validate_logic`, `forge_blade`, and `get_inferred_effects`, and uses its own LLM to decide how to fix issues. Best when you already use an MCP-capable agent and want to integrate mumei verification into your existing workflow.
 
 Both approaches are **complementary** — choose based on your use case, or combine them as needed.
@@ -102,24 +102,25 @@ cp .env.example .env
 # 3. Install dependencies
 brew install uv  # if not already installed
 uv sync
+# After uv sync, use `uv run mumei-agent <subcommand>` from this checkout.
 
 # 4. Run self-healing loop (uses examples/sword_test.mm by default)
-uv run python -m agent heal
+uv run mumei-agent heal
 
 # Or specify a file explicitly:
-uv run python -m agent heal examples/effect_test.mm
+uv run mumei-agent heal examples/effect_test.mm
 
 # Optional: bound retries with an explicit P8-G budget policy
-uv run python -m agent heal examples/effect_test.mm --budget-policy budget_policy.json
+uv run mumei-agent heal examples/effect_test.mm --budget-policy budget_policy.json
 
 # 5. Generate new code from a specification
-uv run python -m agent generate --spec-file examples/spec.json --output out.mm
+uv run mumei-agent generate --spec-file examples/spec.json --output out.mm
 
 # 6. (Optional) Start Streamlit visualizer
 uv run streamlit run visualizer/app.py
 ```
 
-You can also run commands as `python -m agent ...` after activating the uv-managed virtual environment with `source .venv/bin/activate`.
+You can also run commands as `mumei-agent ...` after activating the uv-managed virtual environment with `source .venv/bin/activate`.
 
 ## Configuration
 
@@ -192,13 +193,13 @@ failures for testing the self-healing loop:
 
 ```bash
 # Demo: precondition fix
-uv run python -m agent heal examples/sword_test.mm
+uv run mumei-agent heal examples/sword_test.mm
 
 # Demo: effect mismatch fix
-uv run python -m agent heal examples/effect_test.mm
+uv run mumei-agent heal examples/effect_test.mm
 
 # Backward compatible (no subcommand = heal mode)
-uv run python -m agent examples/sword_test.mm
+uv run mumei-agent examples/sword_test.mm
 ```
 
 ## Generate Mode
@@ -224,13 +225,13 @@ It uses an LLM to generate code, then verifies it with `mumei check` and
 
 ```bash
 # From a spec file
-uv run python -m agent generate --spec-file spec.json --output out.mm
+uv run mumei-agent generate --spec-file spec.json --output out.mm
 
 # From inline JSON
-uv run python -m agent generate --spec '{"name": "add", "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}], "requires": "true", "ensures": "result == a + b"}' --output add.mm
+uv run mumei-agent generate --spec '{"name": "add", "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}], "requires": "true", "ensures": "result == a + b"}' --output add.mm
 
 # With metrics output
-uv run python -m agent generate --spec-file spec.json --output out.mm --metrics
+uv run mumei-agent generate --spec-file spec.json --output out.mm --metrics
 ```
 
 ### Metrics
@@ -282,12 +283,12 @@ Available spec files:
 
 ### P11 Natural-language Specification Extraction
 
-See [`docs/NL_SPEC_DEMO.md`](docs/NL_SPEC_DEMO.md) for a recorded field demo of `uv run python -m agent extract-spec`, including bank-transfer, RegTech KYC, and spec-extraction-to-code-generation examples with `mumei verify` output.
+See [`docs/NL_SPEC_DEMO.md`](docs/NL_SPEC_DEMO.md) for a recorded field demo of `uv run mumei-agent extract-spec`, including bank-transfer, RegTech KYC, and spec-extraction-to-code-generation examples with `mumei verify` output.
 
 Use contradiction-only mode when you want to validate natural-language requirements before generating code:
 
 ```bash
-uv run python -m agent extract-spec \
+uv run mumei-agent extract-spec \
   --text "x must be greater than 0 and less than 0" \
   --domain math \
   --output contradiction-report.json \
@@ -315,17 +316,17 @@ See `.env.example` for configuration details.
 
 | Command | Description | Example |
 |---|---|---|
-| `heal` (default) | Self-healing loop for existing .mm files | `uv run python -m agent heal examples/sword_test.mm` |
-| `generate` | Generate new .mm code from spec JSON | `uv run python -m agent generate --spec-file spec.json --output out.mm` |
-| `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `uv run python -m agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
-| `forge` | Autonomously extend the mumei std library with verified atoms | `uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
+| `heal` (default) | Self-healing loop for existing .mm files | `mumei-agent heal examples/sword_test.mm` |
+| `generate` | Generate new .mm code from spec JSON | `mumei-agent generate --spec-file spec.json --output out.mm` |
+| `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `mumei-agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
+| `forge` | Autonomously extend the mumei std library with verified atoms | `mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
 | `validate-spec` | Cross-validate natural-language specs for contradiction, ambiguity, over-constraint, and Z3 satisfiability | `mumei-agent validate-spec --input spec.txt --format nl` |
 | `validate-code` | Infer Mumei contracts from Python/Rust/Go and verify their logical health | `mumei-agent validate-code --input code.py --language python` |
-| `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `uv run python -m agent validate-spec-to-code --spec spec.txt --code-file src/foo.py --language python` |
-| `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `uv run python -m agent validate-code-to-spec --code-file src/foo.py --spec-file spec.txt` |
-| `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `uv run python -m agent check-spec-health spec.mm` |
-| `verify-foreign` | Extract foreign-code contracts and verify them as Mumei atoms | `uv run python -m agent verify-foreign --input code.rs --language rust` |
-| `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `uv run python -m agent mcp-server` |
+| `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
+| `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
+| `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `mumei-agent check-spec-health spec.mm` |
+| `verify-foreign` | Extract foreign-code contracts and verify them as Mumei atoms | `mumei-agent verify-foreign --input code.rs --language rust` |
+| `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `mumei-agent mcp-server` |
 
 ## Verification Workflow Guide
 
@@ -333,7 +334,7 @@ See `.env.example` for configuration details.
 
 ## MCP Server
 
-`uv run python -m agent mcp-server` runs mumei-agent as a `FastMCP("Mumei-Agent")`
+`uv run mumei-agent mcp-server` runs mumei-agent as a `FastMCP("Mumei-Agent")`
 server over stdio.  Any MCP-compatible client (Claude Code, Devin,
 Codex, ...) can drive the same forge loop that the CLI exposes.
 
@@ -344,7 +345,7 @@ Exported tools:
 | `forge_task(task_json, mumei_repo, dry_run=true)` | Run a single forge spec (drop-in `MumeiForge.forge_one`) |
 | `heal_file(source_code, error_report)` | Self-heal a `.mm` source via the existing fix-strategy pipeline |
 | `measure_std_health(mumei_repo)` | Delegate to `agent.std_health.measure_health` |
-| `propose_forge_tasks(mumei_repo, max_proposals=3)` | MCP-accessible `uv run python -m agent propose --auto` |
+| `propose_forge_tasks(mumei_repo, max_proposals=3)` | MCP-accessible `uv run mumei-agent propose --auto` |
 | `list_forge_log(log_path)` | Read `forge_log.json` |
 | `get_agent_status()` | Report LLM provider, mumei binary, available subcommands |
 | `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
@@ -365,7 +366,7 @@ Example `.mcp.json` snippet for Claude Code project MCP config:
     },
     "mumei-agent": {
       "command": "sh",
-      "args": ["-lc", "cd . && exec uv run python -m agent mcp-server"]
+      "args": ["-lc", "cd . && exec uv run mumei-agent mcp-server"]
     }
   }
 }
@@ -423,13 +424,13 @@ mumei.
 
 ```bash
 # Preview the execution plan without running anything
-uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
+uv run mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-run
 
 # Run a single spec (path is looked up relative to --tasks-dir)
-uv run python -m agent forge --mumei-repo ../mumei --task vstd_safe_add.json
+uv run mumei-agent forge --mumei-repo ../mumei --task vstd_safe_add.json
 
 # Run the whole queue, capped at 5 tasks per invocation
-uv run python -m agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 5
+uv run mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 5
 ```
 
 Each task spec declares a `target_file` inside the mumei repo, a `mode`
