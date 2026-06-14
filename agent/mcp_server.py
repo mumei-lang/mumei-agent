@@ -37,6 +37,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
+
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("Mumei-Agent")
@@ -158,6 +160,12 @@ _SPEC_GUIDELINES: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_spec_guide_summary() -> str:
+    """Return the agent-facing decidable-fragment guideline summary."""
+    return _ok({"summary": SPEC_GUIDE_DECIDABLE_FRAGMENT})
 
 
 @mcp.tool()

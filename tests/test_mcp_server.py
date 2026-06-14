@@ -41,6 +41,7 @@ class TestGetAgentStatus:
             "propose_forge_tasks",
             "list_forge_log",
             "get_agent_status",
+            "get_spec_guide_summary",
             "get_spec_guidelines",
             "extract_spec_from_code",
             "verify_foreign_code",
@@ -61,6 +62,7 @@ class TestGetAgentStatus:
         registered = set(mcp_server.mcp._tool_manager._tools)
         assert set(result["mcp_tools"]) == registered
         assert "extract_spec_from_code" in registered
+        assert "get_spec_guide_summary" in registered
         assert "get_spec_guidelines" in registered
         assert "send_latent_message" in registered
 
@@ -163,6 +165,12 @@ class TestCrossValidationTools:
 
 
 class TestGetSpecGuidelines:
+    def test_returns_agent_facing_spec_guide_summary(self) -> None:
+        result = _payload(mcp_server.get_spec_guide_summary())
+        assert result["status"] == "ok"
+        assert "outside_decidable_fragment" in result["summary"]
+        assert "Z3-stable specification fragment" in result["summary"]
+
     def test_returns_decidable_fragment_guidance(self) -> None:
         result = _payload(mcp_server.get_spec_guidelines())
         assert result["status"] == "ok"
