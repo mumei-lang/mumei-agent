@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import re
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -30,6 +33,8 @@ class AuditResult:
     verification_violations: list[str] = field(default_factory=list)
     cross_validation_gaps: list[str] = field(default_factory=list)
     migration_hints: list[dict] = field(default_factory=list)
+    healed_files: list[str] = field(default_factory=list)
+    heal_errors: list[str] = field(default_factory=list)
     report: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -86,6 +91,7 @@ class AuditPipeline:
         foreign_code_verifier: ForeignCodeVerifierLike | None = None,
         cross_validator: CrossValidatorLike | None = None,
         mumei_client: MumeiVerifyClientLike | None = None,
+        heal_output_dir: str | None = None,
     ) -> None:
         self.config = config or AgentConfig()
         self.mumei_client = mumei_client or create_mumei_client(self.config.mumei_bin)
@@ -95,6 +101,7 @@ class AuditPipeline:
             mumei_bin=self.config.mumei_bin,
         )
         self.cross_validator = cross_validator or CrossValidator()
+        self.heal_output_dir = Path(heal_output_dir).expanduser() if heal_output_dir else None
 
     def audit_file(
         self,
@@ -103,6 +110,7 @@ class AuditPipeline:
         *,
         domain_hint: str = "",
         auto_migrate: bool = False,
+        auto_heal: bool = False,
     ) -> AuditResult:
         source_path = Path(source_file).expanduser().resolve()
         source_label = str(source_path)
@@ -202,7 +210,7 @@ class AuditPipeline:
             cross_validation_gaps=cross_validation_gaps,
             errors=errors,
         )
-        if auto_migrate and (verification_violations or cross_validation_gaps):
+        if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
 
             hints = suggest_migration_for_file(
@@ -216,8 +224,71 @@ class AuditPipeline:
                 },
             )
             result.migration_hints = [asdict(hint) for hint in hints]
+        if auto_heal and result.migration_hints:
+            healed_files, heal_errors = self._heal_migration_hints(
+                result.migration_hints,
+                source_path,
+            )
+            result.healed_files = healed_files
+            result.heal_errors = heal_errors
         result.report = _build_report(result)
         return result
+
+    def _heal_migration_hints(
+        self,
+        migration_hints: list[dict],
+        source_path: Path,
+    ) -> tuple[list[str], list[str]]:
+        output_dir = (self.heal_output_dir or source_path.parent).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        healed_files: list[str] = []
+        heal_errors: list[str] = []
+        for hint in migration_hints:
+            function_name = _safe_identifier(_string_value(hint.get("function_name"), "audited_atom"))
+            skeleton = _string_value(hint.get("skeleton"), "")
+            if not skeleton.strip():
+                heal_errors.append(f"{function_name}: migration skeleton is empty")
+                continue
+            target = output_dir / f"{function_name}.mm"
+            target.write_text(skeleton.rstrip() + "\n", encoding="utf-8")
+            try:
+                self._run_heal_loop(target)
+            except Exception as exc:
+                heal_errors.append(f"{target}: {exc}")
+                continue
+            healed_files.append(str(target))
+        return healed_files, heal_errors
+
+    def _run_heal_loop(self, source_path: Path) -> None:
+        from agent.self_healing import main as heal_main
+
+        old_argv = sys.argv[:]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        sys.argv = [
+            "mumei-agent",
+            str(source_path),
+            "--max-retries",
+            str(self.config.max_retries),
+        ]
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                heal_main()
+        except SystemExit as exc:
+            if exc.code not in (0, None):
+                output = "\n".join(
+                    part for part in (stdout.getvalue(), stderr.getvalue()) if part
+                )
+                raise RuntimeError(
+                    _shorten(output or f"heal exited with status {exc.code}")
+                ) from exc
+        finally:
+            sys.argv = old_argv
+        backup_path = Path(str(source_path) + ".bak")
+        try:
+            backup_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def audit_source(
         self,
@@ -274,16 +345,27 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         action="store_true",
         help="Automatically generate .mm migration skeletons for functions with issues.",
     )
+    parser.add_argument(
+        "--auto-heal",
+        action="store_true",
+        help="After generating .mm skeletons (--auto-migrate), run the self-healing loop on each skeleton.",
+    )
+    parser.add_argument(
+        "--heal-output-dir",
+        default=None,
+        help="Directory to write healed .mm files (default: same directory as --code-file).",
+    )
     return parser
 
 
 def main(args: argparse.Namespace | None = None) -> AuditResult:
     args = args or build_parser().parse_args()
-    result = AuditPipeline().audit_file(
+    result = AuditPipeline(heal_output_dir=args.heal_output_dir).audit_file(
         args.code_file,
         args.language,
         domain_hint=args.domain_hint,
         auto_migrate=args.auto_migrate,
+        auto_heal=args.auto_heal,
     )
     payload = (
         json.dumps(asdict(result), ensure_ascii=False, indent=2)
@@ -541,6 +623,10 @@ def _build_report(result: AuditResult) -> str:
             lines.append("    skeleton:")
             for preview_line in skeleton_preview:
                 lines.append(f"      {preview_line}")
+    if result.healed_files:
+        lines.append(f"healed_files: {result.healed_files}")
+    if result.heal_errors:
+        lines.append(f"heal_errors: {result.heal_errors}")
     if result.verification_violations or result.cross_validation_gaps:
         lines.append(
             "next_step: Run `mumei-agent migrate-suggest --code-file <file> --language <lang>` "

@@ -27,6 +27,13 @@ mumei-agent migrate-suggest --code-file src/foo.py --language python --output ge
 mumei-agent heal generated/mm/foo.mm
 ```
 
+`--auto-migrate` と `--auto-heal` を併用すると、問題のある関数の `.mm` スケルトン生成から
+`heal` ループによる修正までを 1 コマンドで実行できる。
+
+```bash
+mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal --heal-output-dir out/
+```
+
 `.mm` に入る前の補助チェックとして、コード単体の詳細検証は `validate-code`、自然言語仕様とコードの
 対応確認は `validate-spec-to-code` を使う。
 

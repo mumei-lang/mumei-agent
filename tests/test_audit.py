@@ -195,6 +195,68 @@ def test_audit_pipeline_auto_migrate_adds_migration_hints(tmp_path: Path) -> Non
     assert "}" not in result.report
 
 
+def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "healed"
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw requires balance >= amount",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": False,
+        "errors": ["withdraw can return a negative balance"],
+    }
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        spec_stronger_than_impl=["withdraw"],
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+    hint = MigrationHint(
+        function_name="withdraw",
+        priority="high",
+        reason="verification issue",
+        skeleton=(
+            "atom withdraw(balance: i64, amount: i64) -> i64 {\n"
+            "    requires: balance >= amount;\n"
+            "    ensures: result == balance - amount;\n"
+            "}"
+        ),
+        next_step="save skeleton",
+    )
+
+    with (
+        patch("agent.mm_migration_advisor.suggest_migration_for_file") as suggest,
+        patch("agent.self_healing.main") as heal_main,
+    ):
+        suggest.return_value = [hint]
+        result = AuditPipeline(
+            AgentConfig(api_key="test"),
+            code_to_spec_extractor=extractor,
+            foreign_code_verifier=foreign_verifier,
+            cross_validator=cross_validator,
+            mumei_client=mumei,
+            heal_output_dir=str(output_dir),
+        ).audit_file(source, "python", auto_migrate=True, auto_heal=True)
+
+    healed_path = output_dir / "withdraw.mm"
+    assert result.healed_files == [str(healed_path.resolve())]
+    assert result.heal_errors == []
+    assert healed_path.read_text(encoding="utf-8") == hint.skeleton + "\n"
+    assert "healed_files:" in result.report
+    heal_main.assert_called_once_with()
+
+
 def test_audit_pipeline_auto_migrate_skips_without_violations(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text(
@@ -291,6 +353,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         "python",
         domain_hint="",
         auto_migrate=False,
+        auto_heal=False,
     )
 
 
