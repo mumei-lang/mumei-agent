@@ -10,6 +10,7 @@ _SUBCOMMANDS = {
     "analyze-std-gaps",
     "proliferate",
     "health",
+    "audit",
     "extract-spec",
     "validate-spec",
     "validate-code",
@@ -124,6 +125,17 @@ def main() -> None:
         health_build_parser(parser)
         args = parser.parse_args(argv[1:])
         health_main(args)
+    elif command == "audit":
+        import argparse
+        from agent.audit import build_parser as audit_build_parser, main as audit_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent audit",
+            description="Audit existing code by extracting specs and verifying them.",
+        )
+        audit_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        audit_main(args)
     elif command == "extract-spec":
         import argparse
         from agent.extract_spec import build_parser as extract_build_parser, main as extract_main
