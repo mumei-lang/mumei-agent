@@ -1423,6 +1423,57 @@ def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]")
     return _ok({"migration_hints": [asdict(hint) for hint in hints]})
 
 
+@mcp.tool()
+def scan_and_fix(
+    code_file: str,
+    language: str,
+    spec: str = "",
+    auto_heal: bool = False,
+    heal_output_dir: str = "",
+    domain_hint: str = "",
+) -> dict:
+    """
+    Audit existing code, generate .mm migration skeletons for functions with issues,
+    and optionally run the self-healing loop.
+
+    Steps:
+    1. audit: extract spec, check health, verify contracts
+    2. migrate-suggest: generate .mm skeletons for functions with issues
+    3. (optional) heal: run self-healing loop on each skeleton
+
+    Args:
+        code_file: Path to the source code file.
+        language: Source language (python/rust/typescript).
+        spec: Optional path to a natural-language spec file for validate-spec-to-code.
+        auto_heal: If True, run the self-healing loop on generated .mm skeletons.
+        heal_output_dir: Directory to write healed .mm files.
+        domain_hint: Optional domain hint for spec extraction.
+    """
+    from agent.audit import AuditPipeline
+
+    pipeline = AuditPipeline(heal_output_dir=heal_output_dir or None)
+    result = pipeline.audit_file(
+        code_file,
+        language,
+        domain_hint=domain_hint,
+        auto_migrate=True,
+        auto_heal=auto_heal,
+    )
+
+    spec_alignment = None
+    if spec:
+        from agent.cross_validation import validate_spec_to_code
+
+        spec_text = Path(spec).read_text(encoding="utf-8")
+        alignment = validate_spec_to_code(spec_text, code_file, language=language)
+        spec_alignment = asdict(alignment)
+
+    return {
+        "audit": asdict(result),
+        "spec_alignment": spec_alignment,
+    }
+
+
 
 @mcp.tool()
 def extract_spec_from_code(
