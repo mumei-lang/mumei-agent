@@ -40,6 +40,7 @@ IssueKind = Literal[
     "verification",
     "alignment",
     "missing_implementation",
+    "postcondition_violated",
     "drift",
 ]
 Severity = Literal["warning", "error"]
@@ -54,6 +55,7 @@ class CrossValidationIssue:
     evidence: str = ""
     location: str = ""
     severity: Severity = "error"
+    source_line: int = 0
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,7 @@ class ForeignCodeValidationResult:
     satisfiable: bool | None
     verification: dict[str, object] | None = None
     issues: list[CrossValidationIssue] = field(default_factory=list)
+    source_line_map: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -560,6 +563,7 @@ def validate_foreign_code(
             errors=errors,
         )
 
+    source_line_map = _infer_foreign_source_line_map(code, normalized_language)
     atoms = _infer_foreign_contracts_with_code_to_spec(code, normalized_language, config)
     llm_issues: list[CrossValidationIssue] = []
     if use_llm and config.api_key:
@@ -578,13 +582,13 @@ def validate_foreign_code(
         warnings.append("No functions were inferable from the input code.")
     satisfiable, z3_issues, z3_warnings = _check_atoms_with_z3(atoms)
     warnings.extend(z3_warnings)
-    issues = _dedupe_issues([*llm_issues, *z3_issues])
+    issues = _with_source_lines(_dedupe_issues([*llm_issues, *z3_issues]), source_line_map)
     mumei_source = _atoms_to_mumei_module(atoms) if atoms else ""
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
         verification, mumei_issues, mumei_warnings = _verify_atoms_with_mumei(atoms, config)
         warnings.extend(mumei_warnings)
-        issues = _dedupe_issues([*issues, *mumei_issues])
+        issues = _with_source_lines(_dedupe_issues([*issues, *mumei_issues]), source_line_map)
         if verification is not None and verification.get("success") is False:
             satisfiable = False
 
@@ -597,6 +601,7 @@ def validate_foreign_code(
         satisfiable=satisfiable,
         verification=verification,
         issues=issues,
+        source_line_map=source_line_map,
         warnings=warnings,
         errors=errors,
     )
@@ -633,7 +638,13 @@ def build_validate_spec_to_code_parser(
     parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
     parser.add_argument("--lang", choices=["en", "ja"], default="en", help="Report language.")
     parser.add_argument("--output", help="Optional report path.")
-    parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown.")
+    parser.add_argument(
+        "--format",
+        choices=["human", "json", "markdown"],
+        default="markdown",
+        help="Output format (default: markdown).",
+    )
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
     return parser
@@ -649,7 +660,13 @@ def build_validate_code_to_spec_parser(
     parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
     parser.add_argument("--lang", choices=["en", "ja"], default="en", help="Report language.")
     parser.add_argument("--output", help="Optional report path.")
-    parser.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown.")
+    parser.add_argument(
+        "--format",
+        choices=["human", "json", "markdown"],
+        default="markdown",
+        help="Output format (default: markdown).",
+    )
+    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
     return parser
@@ -746,7 +763,13 @@ def main_validate_spec_to_code(args: argparse.Namespace | None = None) -> SpecCo
         run_mumei=not args.no_mumei,
         lang=args.lang,
     )
-    _emit_cross_validation_result(result, args.output, json_output=args.json)
+    output_format = "json" if getattr(args, "json", False) else args.format
+    _emit_cross_validation_result(
+        result,
+        args.output,
+        output_format=output_format,
+        lang=args.lang,
+    )
     if not result.success:
         sys.exit(1)
     return result
@@ -764,7 +787,13 @@ def main_validate_code_to_spec(args: argparse.Namespace | None = None) -> SpecDr
         run_mumei=not args.no_mumei,
         lang=args.lang,
     )
-    _emit_cross_validation_result(result, args.output, json_output=args.json)
+    output_format = "json" if getattr(args, "json", False) else args.format
+    _emit_cross_validation_result(
+        result,
+        args.output,
+        output_format=output_format,
+        lang=args.lang,
+    )
     if not result.success:
         sys.exit(1)
     return result
@@ -822,14 +851,18 @@ def _emit_cross_validation_result(
     result: SpecCodeAlignmentResult | SpecDriftResult,
     output: str | None,
     *,
-    json_output: bool = False,
+    output_format: str = "markdown",
+    lang: Literal["en", "ja"] = "en",
 ) -> None:
-    if json_output:
+    if output_format == "json":
         _emit_result(result, output)
         return
+    from agent.report_formatter import format_cross_validation_report
+
+    report = format_cross_validation_report(result, lang=lang)
     if output:
-        Path(output).write_text(result.report + "\n", encoding="utf-8")
-    print(result.report)
+        Path(output).write_text(report + "\n", encoding="utf-8")
+    print(report)
 
 
 def _infer_nl_contracts_with_llm(
@@ -930,6 +963,7 @@ def _issues_from_payload(payload: dict[str, object]) -> list[CrossValidationIssu
         "verification",
         "alignment",
         "missing_implementation",
+        "postcondition_violated",
         "drift",
     }
     for issue_value in issues_value:
@@ -946,6 +980,7 @@ def _issues_from_payload(payload: dict[str, object]) -> list[CrossValidationIssu
                 evidence=str(issue_value.get("evidence") or ""),
                 location=str(issue_value.get("location") or ""),
                 severity=severity,
+                source_line=_int_value(issue_value.get("source_line")),
             )
         )
     return issues
@@ -957,6 +992,13 @@ def _string_value(value: dict[object, object], key: str, default: str) -> str:
         return default
     text = str(raw).strip()
     return text or default
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _params_from_value(value: object) -> list[ContractParam]:
@@ -1158,6 +1200,7 @@ def _check_atoms_with_z3(
                         kind="overconstraint",
                         message=f"Precondition for atom `{atom.name}` is unsatisfiable.",
                         evidence=f"requires: {atom.requires}",
+                        location=atom.name,
                     )
                 )
             elif requires_status == z3.unknown:
@@ -1187,6 +1230,7 @@ def _check_atoms_with_z3(
                     kind=kind,
                     message=message,
                     evidence=f"requires: {atom.requires}; ensures: {atom.ensures}",
+                    location=atom.name,
                 )
             )
         elif status == z3.unknown:
@@ -1724,6 +1768,73 @@ def _infer_foreign_contracts_with_patterns(code: str, language: str) -> list[Mum
     return []
 
 
+def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
+    if language == "python":
+        return _infer_python_source_line_map(code)
+    if language == "rust":
+        return _infer_regex_source_line_map(
+            code,
+            re.compile(
+                r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
+                r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?",
+                flags=re.DOTALL,
+            ),
+        )
+    if language == "go":
+        return _infer_regex_source_line_map(
+            code,
+            re.compile(
+                r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+                r"\((?P<params>[^)]*)\)\s*(?P<ret>[A-Za-z0-9_]+)?\s*\{",
+                flags=re.DOTALL,
+            ),
+        )
+    return {}
+
+
+def _infer_python_source_line_map(code: str) -> dict[str, int]:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {}
+    line_map: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            line_map[_safe_identifier(node.name)] = node.lineno
+    return line_map
+
+
+def _infer_regex_source_line_map(code: str, pattern: re.Pattern[str]) -> dict[str, int]:
+    line_map: dict[str, int] = {}
+    for match in pattern.finditer(code):
+        name = _safe_identifier(match.group("name"))
+        line_map[name] = code[: match.start("name")].count("\n") + 1
+    return line_map
+
+
+def _with_source_lines(
+    issues: list[CrossValidationIssue],
+    source_line_map: dict[str, int],
+) -> list[CrossValidationIssue]:
+    if not source_line_map:
+        return issues
+    enriched: list[CrossValidationIssue] = []
+    for issue in issues:
+        if issue.source_line:
+            enriched.append(issue)
+            continue
+        function_name = issue.location or _issue_function_from_text(issue.message)
+        source_line = source_line_map.get(function_name, 0)
+        enriched.append(replace(issue, source_line=source_line) if source_line else issue)
+    return enriched
+
+
+def _issue_function_from_text(text: str) -> str:
+    match = re.search(r"`(?P<name>[A-Za-z_][A-Za-z0-9_]*)`", text)
+    return _safe_identifier(match.group("name")) if match else ""
+
+
 def _infer_foreign_contracts_with_code_to_spec(
     code: str,
     language: str,
@@ -1824,7 +1935,9 @@ def _safety_requires_for_expression(expression: str) -> str:
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     pattern = re.compile(
-        r"fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[A-Za-z0-9_:<>]+))?\s*\{(?P<body>.*?)\}",
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[A-Za-z0-9_:<>]+))?\s*\{(?P<body>.*?)\}",
         flags=re.DOTALL,
     )
     for match in pattern.finditer(code):

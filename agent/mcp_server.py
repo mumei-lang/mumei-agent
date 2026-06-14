@@ -683,23 +683,32 @@ def get_agent_status() -> str:
     except Exception as exc:  # pragma: no cover - defensive
         return _err(f"AgentConfig() failed: {exc}")
 
-    # Hard-coded mirror of ``agent.__main__._SUBCOMMANDS`` — importing
-    # ``agent.__main__`` would execute its top-level ``main()`` call.
-    subcommands = sorted(
-        {
+    try:
+        from agent.__main__ import _SUBCOMMANDS
+
+        subcommands = sorted(_SUBCOMMANDS)
+    except Exception:  # pragma: no cover - defensive
+        subcommands = [
             "heal",
             "generate",
             "publish",
             "forge",
             "propose",
+            "analyze-std-gaps",
             "proliferate",
             "health",
             "extract-spec",
-            "verify-foreign",
-            "check-spec-health",
+            "validate-spec",
+            "validate-code",
+            "validate-spec-to-code",
+            "validate-code-to-spec",
+            "self-correct",
             "mcp-server",
-        }
-    )
+            "check-spec-health",
+            "verify-foreign",
+            "migrate-suggest",
+            "cross-validate",
+        ]
 
     return _ok(
         {
@@ -1351,6 +1360,48 @@ def verify_foreign_code(source_code: str, language: str) -> str:
     except FileNotFoundError as exc:
         return _err(f"mumei verify failed to start: {exc}")
     return _ok(result)
+
+
+@mcp.tool()
+def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
+    """Generate .mm migration skeletons for functions with verification issues.
+
+    Args:
+        code_file: Path to source code file.
+        language: Source language (python/rust/typescript).
+        issues_json: JSON array of issues from validate_foreign_code or verify_foreign_code.
+
+    Returns:
+        JSON with migration_hints[] containing function_name, priority, reason,
+        skeleton, next_step.
+    """
+    try:
+        from agent.mm_migration_advisor import suggest_migration_for_file
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import migration advisor: {exc}")
+
+    source_path = Path(code_file).expanduser().resolve()
+    if not source_path.is_file():
+        return _err(f"code_file does not exist: {source_path}")
+
+    try:
+        issues = json.loads(issues_json)
+    except json.JSONDecodeError as exc:
+        return _err(f"failed to parse issues_json: {exc}")
+    if not isinstance(issues, list):
+        return _err("issues_json must be a JSON array")
+
+    try:
+        hints = suggest_migration_for_file(
+            str(source_path),
+            language,
+            {"issues": issues},
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    except OSError as exc:
+        return _err(f"failed to read code_file: {exc}")
+    return _ok({"migration_hints": [asdict(hint) for hint in hints]})
 
 
 

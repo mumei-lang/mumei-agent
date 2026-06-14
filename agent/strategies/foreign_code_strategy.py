@@ -22,6 +22,7 @@ class ForeignCodeSpec:
     return_type: str
     preconditions: list[str] = field(default_factory=list)
     postconditions: list[str] = field(default_factory=list)
+    source_line: int = 0
 
 
 class ForeignCodeExtractor:
@@ -67,6 +68,7 @@ class ForeignCodeExtractor:
                     return_type=_python_type(node.returns),
                     preconditions=preconditions,
                     postconditions=postconditions,
+                    source_line=node.lineno,
                 )
             )
         return specs
@@ -98,6 +100,7 @@ class ForeignCodeExtractor:
                 seen.add(key)
                 comment = _clean_jsdoc(_preceding_jsdoc(source, match.start()))
                 preconditions, postconditions = _contract_lines(comment)
+                source_line = _line_for_offset(source, match.start("name"))
                 specs.append(
                     ForeignCodeSpec(
                         function_name=_safe_identifier(match.group("name")),
@@ -105,6 +108,7 @@ class ForeignCodeExtractor:
                         return_type=_typescript_type(match.group("ret") or "void"),
                         preconditions=preconditions,
                         postconditions=postconditions,
+                        source_line=source_line,
                     )
                 )
         return specs
@@ -122,6 +126,7 @@ class ForeignCodeExtractor:
         for match in pattern.finditer(source):
             comment = _clean_rust_doc(match.group("comment") or "")
             preconditions, postconditions = _contract_lines(comment)
+            source_line = _line_for_offset(source, match.start("name"))
             specs.append(
                 ForeignCodeSpec(
                     function_name=_safe_identifier(match.group("name")),
@@ -129,6 +134,7 @@ class ForeignCodeExtractor:
                     return_type=_rust_type(match.group("ret") or "()"),
                     preconditions=preconditions,
                     postconditions=postconditions,
+                    source_line=source_line,
                 )
             )
         return specs
@@ -157,6 +163,7 @@ class ForeignCodeVerifier:
                 "language": language,
                 "specs": [],
                 "atoms": [],
+                "source_line_map": {},
                 "mumei_source": "",
                 "verification": None,
                 "errors": ["No function signatures were extracted."],
@@ -177,6 +184,7 @@ class ForeignCodeVerifier:
             "language": language,
             "specs": [asdict(spec) for spec in specs],
             "atoms": atoms,
+            "source_line_map": {spec.function_name: spec.source_line for spec in specs},
             "mumei_source": mumei_source,
             "verification": verification,
             "errors": [] if verification.get("success") else ["mumei verify failed"],
@@ -239,6 +247,10 @@ def main(args: argparse.Namespace | None = None) -> dict[str, object]:
 
 def _python_args(args: ast.arguments) -> Iterable[ast.arg]:
     return [*args.posonlyargs, *args.args, *args.kwonlyargs]
+
+
+def _line_for_offset(source: str, offset: int) -> int:
+    return source[:offset].count("\n") + 1
 
 
 def _python_type(annotation: ast.expr | None) -> str:

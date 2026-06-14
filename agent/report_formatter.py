@@ -227,9 +227,12 @@ def _issue_lines(issues: list[dict[str, object]]) -> list[str]:
         message = issue.get("message", "")
         evidence = issue.get("evidence", "")
         location = issue.get("location", "")
+        source_line = int(issue.get("source_line") or 0)
         prefix = f"{index}. **{kind}**"
         if location:
             prefix += f" (`{location}`)"
+        if source_line:
+            prefix += f" line {source_line}"
         lines.append(f"{prefix}: {message}")
         if evidence:
             lines.append(f"   - Evidence: `{evidence}`")
