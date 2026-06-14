@@ -69,6 +69,7 @@ pub fn widen(x: i64) -> i64 {
             return_type="i64",
             preconditions=["x >= 0"],
             postconditions=["result >= x"],
+            source_line=4,
         )
     ]
 
@@ -107,6 +108,7 @@ def test_verifier_runs_mumei_client_on_extracted_atom() -> None:
 
     assert result["success"] is True
     assert result["specs"][0]["function_name"] == "safe_divide"
+    assert result["source_line_map"] == {"safe_divide": 1}
     assert "trusted atom safe_divide" in result["mumei_source"]
     mumei.verify.assert_called_once()
 

@@ -19,6 +19,7 @@ _SUBCOMMANDS = {
     "mcp-server",
     "check-spec-health",
     "verify-foreign",
+    "migrate-suggest",
     "cross-validate",
 }
 
@@ -238,6 +239,60 @@ def main() -> None:
         foreign_code_build_parser(parser)
         args = parser.parse_args(argv[1:])
         foreign_code_main(args)
+    elif command == "migrate-suggest":
+        import argparse
+        from dataclasses import asdict
+        import json
+        from pathlib import Path
+
+        from agent.cross_validation import validate_foreign_code
+        from agent.mm_migration_advisor import suggest_migration_for_file
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent migrate-suggest",
+            description="Generate .mm migration skeletons for functions with verification issues.",
+        )
+        parser.add_argument("--code-file", required=True, help="Path to source code file.")
+        parser.add_argument(
+            "--language",
+            choices=["python", "rust", "typescript"],
+            required=True,
+            help="Source language.",
+        )
+        parser.add_argument("--issues-json", default="[]", help="JSON issues array.")
+        parser.add_argument("--output", help="Optional output directory for .mm skeletons.")
+        args = parser.parse_args(argv[1:])
+
+        code_path = Path(args.code_file).expanduser().resolve()
+        code = code_path.read_text(encoding="utf-8")
+        try:
+            issues = json.loads(args.issues_json)
+        except json.JSONDecodeError as exc:
+            print(f"Error: failed to parse --issues-json: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(issues, list):
+            print("Error: --issues-json must be a JSON array.", file=sys.stderr)
+            sys.exit(2)
+
+        validation_result: dict[str, object] = {"issues": issues}
+        if not issues and args.language in {"python", "rust"}:
+            validation = validate_foreign_code(
+                code,
+                args.language,
+                use_llm=False,
+                run_mumei=False,
+            )
+            validation_result = asdict(validation)
+        hints = suggest_migration_for_file(str(code_path), args.language, validation_result)
+        if args.output:
+            output_dir = Path(args.output).expanduser().resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for hint in hints:
+                (output_dir / f"{hint.function_name}.mm").write_text(
+                    hint.skeleton + "\n",
+                    encoding="utf-8",
+                )
+        print(json.dumps({"migration_hints": [asdict(hint) for hint in hints]}, indent=2))
     elif command == "cross-validate":
         import argparse
         from agent.strategies.cross_validation_strategy import (

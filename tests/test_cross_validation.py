@@ -270,15 +270,17 @@ def test_validate_spec_to_code_cli_emits_japanese_report(tmp_path: Path, capsys)
 
 def test_new_cross_validation_parsers_accept_lang_and_paths() -> None:
     spec_to_code_args = build_validate_spec_to_code_parser().parse_args(
-        ["--spec", "spec.txt", "--code", "code.py", "--lang", "ja", "--no-mumei"]
+        ["--spec", "spec.txt", "--code", "code.py", "--lang", "ja", "--format", "human", "--no-mumei"]
     )
     code_to_spec_args = build_validate_code_to_spec_parser().parse_args(
-        ["--code", "code.py", "--spec", "spec.txt", "--lang", "en", "--no-llm"]
+        ["--code", "code.py", "--spec", "spec.txt", "--lang", "en", "--format", "json", "--no-llm"]
     )
 
     assert spec_to_code_args.lang == "ja"
+    assert spec_to_code_args.format == "human"
     assert spec_to_code_args.code == "code.py"
     assert code_to_spec_args.spec == "spec.txt"
+    assert code_to_spec_args.format == "json"
 
 
 def test_cross_validation_formatter_highlights_human_review() -> None:
