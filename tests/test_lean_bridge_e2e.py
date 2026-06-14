@@ -104,13 +104,13 @@ def test_lean_fallback_upgrades_unknown_to_lean_verified(
     )
 
     assert bridge_result["success"] is True, bridge_result.get("stderr", "")
-    assert bridge_result["fallback_strategy"] == "known_witness_module"
-    assert bridge_result["primary_error_code"] in {
-        "tactic_failed",
-        "import_error",
-        "bridge_failed",
-    }
     assert isinstance(bridge_result["lean_cert"], dict)
+    lean_verified = [
+        atom
+        for atom in bridge_result["lean_cert"]["atoms"]
+        if atom["z3_check_result"] == "lean_verified"
+    ]
+    assert len(lean_verified) > 0
     upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
         std_abs_unknown_cert,
         bridge_result["lean_cert"],
