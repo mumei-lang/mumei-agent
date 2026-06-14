@@ -105,6 +105,10 @@ def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
         for gap in result.cross_validation_gaps
     )
     assert "verification_violations" in result.report
+    assert (
+        "next_step: Run `mumei-agent migrate-suggest --code-file <file> --language <lang>`"
+        in result.report
+    )
 
 
 def test_audit_pipeline_handles_spec_extraction_failure(tmp_path: Path) -> None:

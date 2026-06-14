@@ -1,5 +1,40 @@
 # 検証ワークフローガイド
 
+## 0. .mmを書かない入口（推奨スタートポイント）
+
+既存コードから検証を始める場合は、まず `.mm` を手で書かずに `audit` を実行する。最初の一歩は
+`--code-file` だけでよい。
+
+```bash
+mumei-agent audit --code-file src/foo.py
+```
+
+`audit` は対象コードから仕様を抽出し、spec health、外国語コードのコントラクト検証、仕様と実装の
+cross-validation をまとめて実行する。出力では次のフィールドを見る。
+
+- `spec_health_issues`: 抽出された Mumei 仕様側の矛盾、過制約、vacuity。ここが空でなければ、
+  生成された仕様そのものを見直す。
+- `verification_violations`: 既存コードをコントラクトとして検証したときの違反。実装が暗黙に許している
+  不正ケースや Z3 counterexample が出る。
+- `cross_validation_gaps`: 抽出仕様と実装のズレ。仕様が実装より強い、または実装が仕様を満たしていない
+  制約が並ぶ。
+
+問題がなければ、そのコードは `.mm` 移行なしで監査完了として扱える。`verification_violations` または
+`cross_validation_gaps` が出た場合は、`migrate-suggest` で移行スケルトンを作り、`heal` に渡す。
+
+```bash
+mumei-agent migrate-suggest --code-file src/foo.py --language python --output generated/mm
+mumei-agent heal generated/mm/foo.mm
+```
+
+`.mm` に入る前の補助チェックとして、コード単体の詳細検証は `validate-code`、自然言語仕様とコードの
+対応確認は `validate-spec-to-code` を使う。
+
+```bash
+mumei-agent validate-code --input src/foo.py --language python
+mumei-agent validate-spec-to-code --spec specs/foo.txt --code src/foo.py --language python
+```
+
 ## 前提条件（セットアップ）
 
 ```bash
