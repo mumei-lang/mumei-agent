@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Literal
+from typing import Literal, cast
 
 import z3
 
@@ -26,6 +26,8 @@ from agent.prompts.cross_validation_nl import (
     CROSS_VALIDATION_NL_SYSTEM_PROMPT,
     build_nl_cross_validation_prompt,
 )
+from agent.intent_tracker import IntentDriftResult, IntentTracker
+from agent.spec_code_mapper import MappingResult, SpecCodeMapper
 
 
 IssueKind = Literal[
@@ -86,6 +88,8 @@ class NLSpecValidationResult:
     verification: dict[str, object] | None = None
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    contradiction_evidence: list[str] = field(default_factory=list)
+    overconstraint_evidence: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -137,8 +141,25 @@ class SpecDriftResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CrossValidationReport:
+    """Integrated intent-drift, spec-code mapping, and verifier report."""
+
+    success: bool
+    drift_detected: bool
+    validation: SpecDriftResult
+    mapping: MappingResult
+    intent_drift: IntentDriftResult
+    issues: list[CrossValidationIssue]
+    report: str = ""
+
+
 CrossValidationResult = (
-    NLSpecValidationResult | ForeignCodeValidationResult | SpecCodeAlignmentResult | SpecDriftResult
+    NLSpecValidationResult
+    | ForeignCodeValidationResult
+    | SpecCodeAlignmentResult
+    | SpecDriftResult
+    | CrossValidationReport
 )
 
 
@@ -185,7 +206,8 @@ def validate_nl_spec(
 
     satisfiable, z3_issues, z3_warnings = _check_atoms_with_z3(atoms)
     warnings.extend(z3_warnings)
-    overconstraints.extend(z3_issues)
+    contradictions.extend(issue for issue in z3_issues if issue.kind == "contradiction")
+    overconstraints.extend(issue for issue in z3_issues if issue.kind != "contradiction")
 
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
@@ -215,6 +237,8 @@ def validate_nl_spec(
         verification=verification,
         warnings=warnings,
         errors=errors,
+        contradiction_evidence=_issue_evidence(contradictions),
+        overconstraint_evidence=_issue_evidence(overconstraints),
     )
 
 
@@ -370,6 +394,104 @@ def validate_code_to_spec(
     )
 
 
+def detect_intent_drift(
+    natural_language_spec: str,
+    generated_code: str,
+    *,
+    config: AgentConfig | None = None,
+    language: str = "python",
+    use_llm: bool = True,
+    run_mumei: bool = True,
+    lang: Literal["en", "ja"] = "en",
+) -> CrossValidationReport:
+    """Detect semantic drift between natural-language intent and generated code."""
+    config = config or AgentConfig()
+    spec_result = validate_nl_spec(
+        natural_language_spec,
+        config=config,
+        use_llm=use_llm,
+        run_mumei=run_mumei,
+    )
+    code_result = validate_foreign_code(
+        generated_code,
+        language,
+        config=config,
+        use_llm=use_llm,
+        run_mumei=run_mumei,
+    )
+    drift_missing, drift_divergences, drift_warnings = _compare_spec_atoms_to_code_atoms(
+        spec_result.inferred_atoms,
+        code_result.inferred_atoms,
+        direction="code_to_spec",
+    )
+    drift_issues = _dedupe_issues(
+        [
+            CrossValidationIssue(
+                kind="drift",
+                message=issue.message,
+                evidence=issue.evidence,
+                location=issue.location,
+                severity=issue.severity,
+            )
+            for issue in [*drift_missing, *drift_divergences]
+        ]
+    )
+    validation = _spec_drift_result(
+        code_path="<generated>",
+        spec_path="<natural-language>",
+        language=language.strip().lower(),
+        spec_atoms=spec_result.inferred_atoms,
+        code_atoms=code_result.inferred_atoms,
+        drift_issues=drift_issues,
+        changed_hunks=[],
+        warnings=[*spec_result.warnings, *code_result.warnings, *drift_warnings],
+        errors=[*spec_result.errors, *code_result.errors],
+        lang=lang,
+    )
+    spec_payload, code_payload = _intent_payloads(
+        spec_result.inferred_atoms,
+        code_result.inferred_atoms,
+    )
+    intent_drift = IntentTracker(config).track_intent_drift(
+        spec_payload,
+        code_payload,
+        natural_language_intent=natural_language_spec,
+    )
+    mapping = SpecCodeMapper(config).build_mapping(
+        spec_payload,
+        generated_code,
+        verification_report=code_result.verification,
+        intent_drift_result=intent_drift,
+    )
+    intent_issues = [
+        CrossValidationIssue(
+            kind="drift",
+            message=f"Intent drift in {change.field}: {change.change_type} ({change.intent_impact}).",
+            evidence=f"original={change.original}; refined={change.refined}",
+            location=change.field,
+            severity="error" if change.intent_impact == "violated" else "warning",
+        )
+        for change in intent_drift.changes
+        if change.intent_impact in {"violated", "weakened", "strengthened"}
+    ]
+    issues = _dedupe_issues([*validation.drift_issues, *intent_issues])
+    success = (
+        validation.success
+        and mapping.success
+        and intent_drift.intent_preserved
+        and not issues
+    )
+    report = CrossValidationReport(
+        success=success,
+        drift_detected=bool(issues) or not intent_drift.intent_preserved,
+        validation=replace(validation, drift_issues=issues),
+        mapping=mapping,
+        intent_drift=intent_drift,
+        issues=issues,
+    )
+    return replace(report, report=_format_intent_drift_report(report, lang=lang))
+
+
 def validate_foreign_code(
     code: str,
     language: str,
@@ -397,7 +519,7 @@ def validate_foreign_code(
             errors=errors,
         )
 
-    atoms = _infer_foreign_contracts_with_patterns(code, normalized_language)
+    atoms = _infer_foreign_contracts_with_code_to_spec(code, normalized_language, config)
     llm_issues: list[CrossValidationIssue] = []
     if use_llm and config.api_key:
         llm_atoms, llm_issues, llm_warnings = _infer_code_contracts_with_llm(
@@ -898,15 +1020,33 @@ def _check_atoms_with_z3(
     any_checked = False
     all_satisfiable = True
     for atom in atoms:
-        exprs: list[z3.BoolRef] = []
         symbols: dict[str, z3.IntNumRef | z3.ArithRef] = {}
-        atom_warnings: list[str] = []
-        for clause in (atom.requires, atom.ensures):
-            parsed, clause_warnings = _clause_to_z3(clause, symbols)
-            atom_warnings.extend(clause_warnings)
-            exprs.extend(parsed)
-        warnings.extend(atom_warnings)
+        requires_exprs, requires_warnings = _clause_to_z3(atom.requires, symbols)
+        ensures_exprs, ensures_warnings = _clause_to_z3(atom.ensures, symbols)
+        warnings.extend(requires_warnings)
+        warnings.extend(ensures_warnings)
+        exprs = [*requires_exprs, *ensures_exprs]
+        requirements_are_satisfiable = True
+        if requires_exprs:
+            any_checked = True
+            requires_solver = z3.Solver()
+            requires_solver.add(*requires_exprs)
+            requires_status = requires_solver.check()
+            if requires_status == z3.unsat:
+                requirements_are_satisfiable = False
+                all_satisfiable = False
+                issues.append(
+                    CrossValidationIssue(
+                        kind="overconstraint",
+                        message=f"Precondition for atom `{atom.name}` is unsatisfiable.",
+                        evidence=f"requires: {atom.requires}",
+                    )
+                )
+            elif requires_status == z3.unknown:
+                warnings.append(f"Z3 returned unknown for precondition `{atom.name}`.")
         if not exprs:
+            continue
+        if not requirements_are_satisfiable:
             continue
         any_checked = True
         solver = z3.Solver()
@@ -914,10 +1054,20 @@ def _check_atoms_with_z3(
         status = solver.check()
         if status == z3.unsat:
             all_satisfiable = False
+            kind: IssueKind = (
+                "contradiction"
+                if requirements_are_satisfiable and ensures_exprs
+                else "satisfiability"
+            )
+            message = (
+                f"`{atom.name}` requires and ensures cannot both hold."
+                if kind == "contradiction"
+                else f"Inferred contract for atom `{atom.name}` is unsatisfiable."
+            )
             issues.append(
                 CrossValidationIssue(
-                    kind="satisfiability",
-                    message=f"Inferred contract for atom `{atom.name}` is unsatisfiable.",
+                    kind=kind,
+                    message=message,
                     evidence=f"requires: {atom.requires}; ensures: {atom.ensures}",
                 )
             )
@@ -1085,6 +1235,102 @@ def _combine_satisfiability(left: bool | None, right: bool | None) -> bool | Non
     if left is True or right is True:
         return True
     return None
+
+
+def _issue_evidence(issues: list[CrossValidationIssue]) -> list[str]:
+    return [issue.evidence for issue in issues if issue.evidence]
+
+
+def _atoms_to_spec_payload(atoms: list[MumeiContractAtom]) -> dict[str, object]:
+    return {
+        "atoms": [
+            {
+                "name": atom.name,
+                "params": [asdict(param) for param in atom.params],
+                "return_type": atom.return_type,
+                "requires": atom.requires,
+                "ensures": atom.ensures,
+                "effects": atom.effects,
+            }
+            for atom in atoms
+        ],
+    }
+
+
+def _intent_payloads(
+    spec_atoms: list[MumeiContractAtom],
+    code_atoms: list[MumeiContractAtom],
+) -> tuple[dict[str, object], dict[str, object]]:
+    aligned_code_atoms: list[MumeiContractAtom] = []
+    used_code_names: set[str] = set()
+    for spec_atom in spec_atoms:
+        code_atom = _matching_code_atom(
+            spec_atom,
+            [atom for atom in code_atoms if atom.name not in used_code_names],
+        )
+        if code_atom is None:
+            continue
+        used_code_names.add(code_atom.name)
+        aligned_code_atoms.append(replace(code_atom, name=spec_atom.name))
+    aligned_code_atoms.extend(
+        atom for atom in code_atoms if atom.name not in used_code_names
+    )
+    return _atoms_to_spec_payload(spec_atoms), _atoms_to_spec_payload(aligned_code_atoms)
+
+
+def _format_intent_drift_report(
+    result: CrossValidationReport,
+    *,
+    lang: Literal["en", "ja"],
+) -> str:
+    if lang == "ja":
+        lines = [
+            "## 仕様↔コード クロス検証レポート",
+            "",
+            f"- Status: **{'合格' if result.success else '要確認'}**",
+            f"- Drift detected: `{str(result.drift_detected).lower()}`",
+            f"- Mapping count: `{len(result.mapping.mappings)}`",
+            f"- Intent drift score: `{result.intent_drift.drift_score:.2f}`",
+            "",
+            "### 検出事項",
+        ]
+        if result.issues:
+            lines.extend(_issue_lines_for_integrated_report(result.issues))
+        else:
+            lines.append("- 仕様ドリフトは検出されませんでした。")
+        lines.append("")
+        lines.append("### Human-in-the-Loop 確認事項")
+        lines.append("- drift / contradiction / overconstraint がある場合は PR マージ前に確認してください。")
+        return "\n".join(lines)
+
+    lines = [
+        "## Spec↔Code Cross-Validation Report",
+        "",
+        f"- Status: **{'Passed' if result.success else 'Needs review'}**",
+        f"- Drift detected: `{str(result.drift_detected).lower()}`",
+        f"- Mapping count: `{len(result.mapping.mappings)}`",
+        f"- Intent drift score: `{result.intent_drift.drift_score:.2f}`",
+        "",
+        "### Findings",
+    ]
+    if result.issues:
+        lines.extend(_issue_lines_for_integrated_report(result.issues))
+    else:
+        lines.append("- No semantic drift detected.")
+    lines.append("")
+    lines.append("### Reviewer action")
+    lines.append("- Review any drift, contradiction, or overconstraint before merging.")
+    return "\n".join(lines)
+
+
+def _issue_lines_for_integrated_report(issues: list[CrossValidationIssue]) -> list[str]:
+    lines: list[str] = []
+    for index, issue in enumerate(issues, start=1):
+        location = f" (`{issue.location}`)" if issue.location else ""
+        lines.append(f"{index}. **{issue.kind}**{location}: {issue.message}")
+        if issue.evidence:
+            lines.append(f"   - Evidence: `{issue.evidence}`")
+    return lines
 
 
 def _upstream_validation_issues(
@@ -1360,6 +1606,22 @@ def _infer_foreign_contracts_with_patterns(code: str, language: str) -> list[Mum
     return []
 
 
+def _infer_foreign_contracts_with_code_to_spec(
+    code: str,
+    language: str,
+    config: AgentConfig,
+) -> list[MumeiContractAtom]:
+    try:
+        from agent.code_to_spec import CodeToSpecConverter
+
+        conversion = CodeToSpecConverter(config).convert_source(code, language)
+    except Exception:
+        return _infer_foreign_contracts_with_patterns(code, language)
+    if conversion.atoms:
+        return cast(list[MumeiContractAtom], conversion.atoms)
+    return _infer_foreign_contracts_with_patterns(code, language)
+
+
 def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     try:
@@ -1369,8 +1631,7 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
             params = [ContractParam(name=arg.arg, type="i64") for arg in node.args.args]
-            return_expr = _single_return_expr(node)
-            ensures = f"result == {return_expr}" if return_expr else "true"
+            ensures, return_expr = _python_function_contract(node)
             requires = _safety_requires_for_expression(return_expr)
             atoms.append(
                 MumeiContractAtom(
@@ -1382,6 +1643,36 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
                 )
             )
     return atoms
+
+
+def _python_function_contract(function_node: ast.FunctionDef) -> tuple[str, str]:
+    abs_param = _absolute_value_param(function_node)
+    if abs_param:
+        return f"result >= 0 && (result == {abs_param} or result == -{abs_param})", abs_param
+    return_expr = _single_return_expr(function_node)
+    return (f"result == {return_expr}" if return_expr else "true", return_expr)
+
+
+def _absolute_value_param(function_node: ast.FunctionDef) -> str:
+    params = [arg.arg for arg in function_node.args.args]
+    if len(params) != 1:
+        return ""
+    param = params[0]
+    return_expr = _single_return_expr(function_node)
+    if return_expr == f"abs({param})":
+        return param
+    returns = [node for node in ast.walk(function_node) if isinstance(node, ast.Return)]
+    returned = {_normalized_python_return(node.value) for node in returns if node.value is not None}
+    if {param, f"-{param}"}.issubset(returned):
+        return param
+    return ""
+
+
+def _normalized_python_return(node: ast.AST) -> str:
+    try:
+        return ast.unparse(node).replace(" ", "")
+    except ValueError:
+        return ""
 
 
 def _single_return_expr(function_node: ast.FunctionDef) -> str:

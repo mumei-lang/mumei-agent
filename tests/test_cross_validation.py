@@ -42,7 +42,7 @@ def test_validate_nl_spec_detects_contradiction_ambiguity_and_unsat_contract() -
     assert result.contradictions
     assert result.ambiguities
     assert result.satisfiable is False
-    assert any(issue.kind == "satisfiability" for issue in result.overconstraints)
+    assert any(issue.kind == "overconstraint" for issue in result.overconstraints)
 
 
 def test_validate_foreign_code_infers_python_contract_and_runs_mumei() -> None:

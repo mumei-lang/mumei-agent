@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import chardet
 from openai import OpenAI
@@ -38,6 +38,80 @@ class CodeToSpecResult:
     detected_language: Language
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+class ContractLike(Protocol):
+    name: str
+    requires: str
+    ensures: str
+
+
+@dataclass
+class CodeToSpecConversionResult:
+    """Deterministic code-to-contract conversion used by cross-validation."""
+
+    success: bool
+    atoms: list[ContractLike]
+    natural_language_spec: str
+    mumei_source: str
+    detected_language: Language
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+class CodeToSpecConverter:
+    """Convert Python/Rust code into Mumei contract atoms for verifier checks."""
+
+    def __init__(self, config: AgentConfig | None = None):
+        self.config = config or AgentConfig()
+
+    def convert_source(self, code: str, language: str) -> CodeToSpecConversionResult:
+        normalized = language.strip().lower()
+        supported_languages = set(CodeToSpecExtractor.EXTENSION_MAP.values())
+        detected_language: Language = (
+            normalized if normalized in supported_languages else "unknown"
+        )
+        if normalized not in {"python", "rust", "go"}:
+            return CodeToSpecConversionResult(
+                success=False,
+                atoms=[],
+                natural_language_spec="",
+                mumei_source="",
+                detected_language=detected_language,
+                errors=["language must be one of: python, rust, go"],
+            )
+        try:
+            from agent.cross_validation import (
+                _atoms_to_mumei_module,
+                _infer_foreign_contracts_with_patterns,
+            )
+
+            atoms = _infer_foreign_contracts_with_patterns(code, normalized)
+            return CodeToSpecConversionResult(
+                success=bool(atoms),
+                atoms=atoms,
+                natural_language_spec=_atoms_to_natural_language(atoms),
+                mumei_source=_atoms_to_mumei_module(atoms),
+                detected_language=detected_language,
+                warnings=[] if atoms else ["No functions were inferable from the input code."],
+                errors=[],
+            )
+        except Exception as exc:
+            return CodeToSpecConversionResult(
+                success=False,
+                atoms=[],
+                natural_language_spec="",
+                mumei_source="",
+                detected_language=detected_language,
+                errors=[str(exc)],
+            )
+
+
+def _atoms_to_natural_language(atoms: list[ContractLike]) -> str:
+    lines: list[str] = []
+    for atom in atoms:
+        lines.append(f"{atom.name}: requires {atom.requires}; ensures {atom.ensures}.")
+    return "\n".join(lines)
 
 
 class CodeToSpecExtractor:

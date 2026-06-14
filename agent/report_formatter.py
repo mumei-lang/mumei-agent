@@ -12,6 +12,47 @@ def format_cross_validation_report(result: object, lang: Literal["en", "ja"] = "
     return _format_ja(payload, is_drift) if lang == "ja" else _format_en(payload, is_drift)
 
 
+def format_human_review_queue(queue: object, lang: str = "en") -> str:
+    """Format contradiction, counterexample, and drift items for human review."""
+    payload = _queue_payload(queue)
+    atoms = _dict_list(payload.get("atoms"))
+    title = "Human-in-the-Loop Review Queue" if lang != "ja" else "Human-in-the-Loop レビューキュー"
+    lines = [
+        f"## {title}",
+        "",
+        f"- Source: `{payload.get('source_file', payload.get('file', '-'))}`",
+        f"- Pending items: `{len(atoms)}`",
+        "",
+        "### Review items" if lang != "ja" else "### 確認項目",
+    ]
+    if not atoms:
+        lines.append("- No pending human-review items." if lang != "ja" else "- 確認待ち項目はありません。")
+        return "\n".join(lines)
+
+    for index, atom in enumerate(atoms, start=1):
+        name = atom.get("name", atom.get("atom_name", f"item_{index}"))
+        reason = atom.get("reason", atom.get("kind", "review"))
+        status = atom.get("status", "pending")
+        priority = atom.get("priority", "medium")
+        lines.append(f"{index}. **{name}** — `{reason}` / `{status}` / priority `{priority}`")
+        for label, key in (
+            ("Summary", "summary"),
+            ("Contradiction", "contradiction"),
+            ("Counterexample", "counterexample"),
+            ("Drift", "drift"),
+            ("Evidence", "evidence"),
+            ("Spec", "spec_text"),
+            ("Suggested action", "suggested_action"),
+        ):
+            value = atom.get(key)
+            if value:
+                lines.append(f"   - {label}: `{_inline_value(value)}`")
+    lines.append("")
+    lines.append("### GitHub PR action" if lang != "ja" else "### GitHub PR 確認アクション")
+    lines.append("- Confirm whether each item is acceptable before merge.")
+    return "\n".join(lines)
+
+
 def _payload(result: object) -> dict[str, object]:
     if is_dataclass(result) and not isinstance(result, type):
         value = asdict(result)
@@ -19,6 +60,16 @@ def _payload(result: object) -> dict[str, object]:
     if isinstance(result, dict):
         return {str(key): item for key, item in result.items()}
     raise TypeError("cross-validation result must be a dataclass or dict")
+
+
+def _queue_payload(queue: object) -> dict[str, object]:
+    if isinstance(queue, dict):
+        return {str(key): value for key, value in queue.items()}
+    payload = _payload(queue)
+    data = payload.get("data")
+    if isinstance(data, dict):
+        return {str(key): item for key, item in data.items()}
+    return payload
 
 
 def _format_en(payload: dict[str, object], is_drift: bool) -> str:
@@ -136,6 +187,11 @@ def _warning_lines(payload: dict[str, object], *, heading: str) -> list[str]:
 
 def _object_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
+
+
+def _inline_value(value: object) -> str:
+    text = str(value).strip().replace("\n", " ")
+    return text[:280] + "…" if len(text) > 280 else text
 
 
 def _dict_list(value: object) -> list[dict[str, object]]:
