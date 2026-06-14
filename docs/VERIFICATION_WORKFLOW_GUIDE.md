@@ -14,8 +14,8 @@ cp .env.example .env
 # .env を編集: LLM_BASE_URL / LLM_API_KEY / LLM_MODEL を設定
 brew install uv  # 未インストールの場合
 uv sync
-# uv sync 後は `uv run mumei-agent <subcommand>` で実行可能
-# （または `source .venv/bin/activate` 後に `mumei-agent <subcommand>`）
+# 以降は `uv run mumei-agent ...` で実行
+# （または `source .venv/bin/activate` 後に `mumei-agent ...`）
 
 # LLM バックエンド起動（Ollama を使う場合）
 docker compose up -d
