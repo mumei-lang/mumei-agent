@@ -8,6 +8,9 @@ from typing import Literal
 def format_cross_validation_report(result: object, lang: Literal["en", "ja"] = "en") -> str:
     """Format spec/code cross-validation output for humans and PR comments."""
     payload = _payload(result)
+    is_nl = "inferred_atoms" in payload and "contradictions" in payload
+    if is_nl:
+        return _format_nl_ja(payload) if lang == "ja" else _format_nl_en(payload)
     is_drift = "drift_issues" in payload
     return _format_ja(payload, is_drift) if lang == "ja" else _format_en(payload, is_drift)
 
@@ -96,6 +99,80 @@ def _format_en(payload: dict[str, object], is_drift: bool) -> str:
         lines.append("- No human intervention required.")
     lines.extend(_hunk_lines(payload, heading="Changed code hunks"))
     lines.extend(_warning_lines(payload, heading="Warnings"))
+    return "\n".join(lines)
+
+
+def _format_nl_en(payload: dict[str, object]) -> str:
+    lines = ["## Natural-Language Spec Validation Report", ""]
+    status = "Passed" if bool(payload.get("success")) else "Needs review"
+    atoms = _dict_list(payload.get("inferred_atoms"))
+    lines.extend(
+        [
+            f"- Status: **{status}**",
+            f"- Inferred atoms: `{len(atoms)}`",
+            f"- Satisfiable: `{payload.get('satisfiable')}`",
+            "",
+            "### Findings",
+        ]
+    )
+    issues = (
+        _dict_list(payload.get("contradictions"))
+        + _dict_list(payload.get("ambiguities"))
+        + _dict_list(payload.get("overconstraints"))
+    )
+    if issues:
+        lines.extend(_issue_lines(issues))
+    else:
+        lines.append("- No contradictions, ambiguities, or overconstraints detected.")
+    warnings = [
+        *[str(item) for item in _object_list(payload.get("completeness_warnings"))],
+        *[str(item) for item in _object_list(payload.get("vacuity_warnings"))],
+        *[str(item) for item in _object_list(payload.get("warnings"))],
+    ]
+    errors = [str(item) for item in _object_list(payload.get("errors"))]
+    if warnings or errors:
+        lines.extend(["", "### Warnings"])
+        for warning in warnings[:10]:
+            lines.append(f"- {warning}")
+        for error in errors[:10]:
+            lines.append(f"- ERROR: {error}")
+    return "\n".join(lines)
+
+
+def _format_nl_ja(payload: dict[str, object]) -> str:
+    lines = ["## 自然言語仕様バリデーションレポート", ""]
+    status = "合格" if bool(payload.get("success")) else "要確認"
+    atoms = _dict_list(payload.get("inferred_atoms"))
+    lines.extend(
+        [
+            f"- Status: **{status}**",
+            f"- 抽出 atom 数: `{len(atoms)}`",
+            f"- Z3 充足可能性: `{payload.get('satisfiable')}`",
+            "",
+            "### 検出事項",
+        ]
+    )
+    issues = (
+        _dict_list(payload.get("contradictions"))
+        + _dict_list(payload.get("ambiguities"))
+        + _dict_list(payload.get("overconstraints"))
+    )
+    if issues:
+        lines.extend(_issue_lines(issues))
+    else:
+        lines.append("- 矛盾・曖昧さ・過制約は検出されませんでした。")
+    warnings = [
+        *[str(item) for item in _object_list(payload.get("completeness_warnings"))],
+        *[str(item) for item in _object_list(payload.get("vacuity_warnings"))],
+        *[str(item) for item in _object_list(payload.get("warnings"))],
+    ]
+    errors = [str(item) for item in _object_list(payload.get("errors"))]
+    if warnings or errors:
+        lines.extend(["", "### 警告"])
+        for warning in warnings[:10]:
+            lines.append(f"- {warning}")
+        for error in errors[:10]:
+            lines.append(f"- ERROR: {error}")
     return "\n".join(lines)
 
 

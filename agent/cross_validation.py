@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, replace
 import json
 import os
@@ -85,6 +86,8 @@ class NLSpecValidationResult:
     overconstraints: list[CrossValidationIssue]
     inferred_atoms: list[MumeiContractAtom]
     satisfiable: bool | None
+    completeness_warnings: list[str] = field(default_factory=list)
+    vacuity_warnings: list[str] = field(default_factory=list)
     verification: dict[str, object] | None = None
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -169,6 +172,7 @@ def validate_nl_spec(
     config: AgentConfig | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
+    domain_hint: str = "",
 ) -> NLSpecValidationResult:
     """Validate a natural-language specification for logical health."""
     config = config or AgentConfig()
@@ -209,6 +213,13 @@ def validate_nl_spec(
     contradictions.extend(issue for issue in z3_issues if issue.kind == "contradiction")
     overconstraints.extend(issue for issue in z3_issues if issue.kind != "contradiction")
 
+    from agent.spec_completeness_checker import check_domain_completeness, check_nl_vacuity
+
+    completeness_warnings = (
+        check_domain_completeness(spec_text, atoms, domain_hint) if domain_hint else []
+    )
+    vacuity_warnings = check_nl_vacuity(atoms)
+
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
         verification, mumei_issues, mumei_warnings = _verify_atoms_with_mumei(atoms, config)
@@ -234,12 +245,42 @@ def validate_nl_spec(
         overconstraints=overconstraints,
         inferred_atoms=atoms,
         satisfiable=satisfiable,
+        completeness_warnings=completeness_warnings,
+        vacuity_warnings=vacuity_warnings,
         verification=verification,
         warnings=warnings,
         errors=errors,
         contradiction_evidence=_issue_evidence(contradictions),
         overconstraint_evidence=_issue_evidence(overconstraints),
     )
+
+
+def validate_nl_spec_multi(
+    spec_texts: list[str],
+    *,
+    config: AgentConfig | None = None,
+    use_llm: bool = True,
+    domain_hint: str = "",
+) -> dict[str, object]:
+    """Validate multiple NL spec documents for cross-document consistency."""
+    config = config or AgentConfig()
+    results = [
+        validate_nl_spec(
+            spec_text,
+            config=config,
+            use_llm=use_llm,
+            run_mumei=False,
+            domain_hint=domain_hint,
+        )
+        for spec_text in spec_texts
+    ]
+    cross_spec_conflicts = _check_nl_result_pairs_for_conflicts(results)
+    return {
+        "success": all(result.success for result in results) and not cross_spec_conflicts,
+        "spec_count": len(spec_texts),
+        "results": [asdict(result) for result in results],
+        "cross_spec_conflicts": [asdict(issue) for issue in cross_spec_conflicts],
+    }
 
 
 def validate_spec_to_code(
@@ -565,7 +606,17 @@ def build_validate_spec_parser(parser: argparse.ArgumentParser | None = None) ->
     """Add validate-spec arguments to an argparse parser."""
     parser = parser or argparse.ArgumentParser(description="Validate natural-language specs.")
     parser.add_argument("--input", required=True, help="Path to the natural-language spec file.")
-    parser.add_argument("--format", choices=["nl"], default="nl", help="Input format.")
+    parser.add_argument(
+        "--format",
+        choices=["nl", "human", "json", "markdown"],
+        default="nl",
+        help="Input format.",
+    )
+    parser.add_argument(
+        "--domain",
+        default="",
+        help="Domain hint (financial/security/crypto/data_structure).",
+    )
     parser.add_argument("--output", help="Optional JSON report path.")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract extraction.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
@@ -624,11 +675,62 @@ def main_validate_spec(args: argparse.Namespace | None = None) -> NLSpecValidati
         spec_text,
         use_llm=not args.no_llm,
         run_mumei=not args.no_mumei,
+        domain_hint=getattr(args, "domain", ""),
     )
-    _emit_result(result, args.output)
+    _emit_validate_spec_result(result, args.output, getattr(args, "format", "nl"))
     if not result.success:
         sys.exit(1)
     return result
+
+
+def _check_nl_result_pairs_for_conflicts(
+    results: list[NLSpecValidationResult],
+) -> list[CrossValidationIssue]:
+    conflicts: list[CrossValidationIssue] = []
+    for left_index, left in enumerate(results):
+        for right_index in range(left_index + 1, len(results)):
+            right = results[right_index]
+            combined_atoms = [*left.inferred_atoms, *right.inferred_atoms]
+            if not combined_atoms:
+                continue
+            params = {
+                param.name: param.type
+                for atom in combined_atoms
+                for param in atom.params
+            }
+            combined = MumeiContractAtom(
+                name=f"nl_spec_{left_index + 1}_vs_{right_index + 1}",
+                params=[
+                    ContractParam(name=name, type=param_type)
+                    for name, param_type in sorted(params.items())
+                ],
+                requires=_join_clauses(atom.requires for atom in combined_atoms),
+                ensures=_join_clauses(atom.ensures for atom in combined_atoms),
+            )
+            _, pair_issues, _ = _check_atoms_with_z3([combined])
+            for issue in pair_issues:
+                conflicts.append(
+                    CrossValidationIssue(
+                        kind=issue.kind,
+                        message=(
+                            f"NL spec documents {left_index + 1} and {right_index + 1} "
+                            f"are inconsistent: {issue.message}"
+                        ),
+                        evidence=issue.evidence,
+                        location=f"spec[{left_index}],spec[{right_index}]",
+                        severity=issue.severity,
+                    )
+                )
+    return _dedupe_issues(conflicts)
+
+
+def _join_clauses(clauses: Iterable[str]) -> str:
+    parts = [
+        str(clause).strip().rstrip(";")
+        for clause in clauses
+        if str(clause).strip() and str(clause).strip().lower() != "true"
+    ]
+    return " && ".join(parts) if parts else "true"
 
 
 def main_validate_spec_to_code(args: argparse.Namespace | None = None) -> SpecCodeAlignmentResult:
@@ -698,6 +800,22 @@ def _emit_result(result: CrossValidationResult, output: str | None) -> None:
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8")
     print(payload)
+
+
+def _emit_validate_spec_result(
+    result: NLSpecValidationResult,
+    output: str | None,
+    output_format: str,
+) -> None:
+    if output_format in {"human", "markdown"}:
+        from agent.report_formatter import format_cross_validation_report
+
+        report = format_cross_validation_report(result)
+        if output:
+            Path(output).write_text(report + "\n", encoding="utf-8")
+        print(report)
+        return
+    _emit_result(result, output)
 
 
 def _emit_cross_validation_result(

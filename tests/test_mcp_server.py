@@ -87,6 +87,23 @@ class TestCrossValidationTools:
         assert result["inferred_atoms"][0]["requires"] == "x >= 0"
         assert result["verification"] is None
 
+    def test_validate_nl_spec_multi_returns_cross_spec_conflicts(self) -> None:
+        result = _payload(
+            mcp_server.validate_nl_spec_multi(
+                json.dumps(
+                    [
+                        "requires: true; ensures: result > 0",
+                        "requires: true; ensures: result < 0",
+                    ]
+                ),
+                use_llm=False,
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["success"] is False
+        assert result["cross_spec_conflicts"]
+
     def test_validate_foreign_code_returns_inferred_contracts(self) -> None:
         result = _payload(
             mcp_server.validate_foreign_code(
