@@ -1208,12 +1208,17 @@ def validate_nl_spec(
 
 
 @mcp.tool()
-def validate_nl_spec_multi(spec_texts_json: str, domain_hint: str = "") -> str:
+def validate_nl_spec_multi(
+    spec_texts_json: str,
+    domain_hint: str = "",
+    use_llm: bool = True,
+) -> str:
     """Validate multiple NL spec documents for cross-document consistency.
 
     Args:
         spec_texts_json: JSON array of spec text strings.
         domain_hint: Optional domain hint.
+        use_llm: Whether to use LLM extraction before cross-document checks.
     """
     try:
         from agent import cross_validation
@@ -1233,7 +1238,7 @@ def validate_nl_spec_multi(spec_texts_json: str, domain_hint: str = "") -> str:
         result = cross_validation.validate_nl_spec_multi(
             raw,
             config=config,
-            use_llm=False,
+            use_llm=use_llm,
             domain_hint=domain_hint,
         )
     except Exception as exc:

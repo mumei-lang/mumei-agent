@@ -1,7 +1,6 @@
 """Domain completeness and NL-spec health checks."""
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -72,11 +71,7 @@ def check_multi_spec_consistency(
     domain_hint: str = "",
 ) -> list[CrossValidationIssue]:
     from agent.cross_validation import (
-        ContractParam,
-        CrossValidationIssue,
-        MumeiContractAtom,
-        _check_atoms_with_z3,
-        _dedupe_issues,
+        _check_nl_result_pairs_for_conflicts,
         validate_nl_spec,
     )
 
@@ -90,48 +85,4 @@ def check_multi_spec_consistency(
         )
         for spec_text in spec_texts
     ]
-    conflicts: list[CrossValidationIssue] = []
-    for left_index, left in enumerate(results):
-        for right_index in range(left_index + 1, len(results)):
-            right = results[right_index]
-            combined_atoms = [*left.inferred_atoms, *right.inferred_atoms]
-            if not combined_atoms:
-                continue
-            params = {
-                param.name: param.type
-                for atom in combined_atoms
-                for param in atom.params
-            }
-            combined = MumeiContractAtom(
-                name=f"nl_spec_{left_index + 1}_vs_{right_index + 1}",
-                params=[
-                    ContractParam(name=name, type=param_type)
-                    for name, param_type in sorted(params.items())
-                ],
-                requires=_join_clauses(atom.requires for atom in combined_atoms),
-                ensures=_join_clauses(atom.ensures for atom in combined_atoms),
-            )
-            _, pair_issues, _ = _check_atoms_with_z3([combined])
-            for issue in pair_issues:
-                conflicts.append(
-                    CrossValidationIssue(
-                        kind=issue.kind,
-                        message=(
-                            f"NL spec documents {left_index + 1} and {right_index + 1} "
-                            f"are inconsistent: {issue.message}"
-                        ),
-                        evidence=issue.evidence,
-                        location=f"spec[{left_index}],spec[{right_index}]",
-                        severity=issue.severity,
-                    )
-                )
-    return _dedupe_issues(conflicts)
-
-
-def _join_clauses(clauses: Iterable[str]) -> str:
-    parts = [
-        str(clause).strip().rstrip(";")
-        for clause in clauses
-        if str(clause).strip() and str(clause).strip().lower() != "true"
-    ]
-    return " && ".join(parts) if parts else "true"
+    return _check_nl_result_pairs_for_conflicts(results)

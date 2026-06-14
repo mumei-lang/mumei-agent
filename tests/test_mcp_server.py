@@ -95,7 +95,8 @@ class TestCrossValidationTools:
                         "requires: true; ensures: result > 0",
                         "requires: true; ensures: result < 0",
                     ]
-                )
+                ),
+                use_llm=False,
             )
         )
 
