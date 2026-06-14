@@ -9,6 +9,7 @@ from agent import mcp_server
 from agent.audit import AuditPipeline, AuditResult, build_parser, main
 from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
+from agent.mm_migration_advisor import MigrationHint
 from agent.strategies.cross_validation_strategy import CrossValidationReport
 
 
@@ -111,6 +112,128 @@ def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
     )
 
 
+def test_audit_pipeline_auto_migrate_adds_migration_hints(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw requires balance >= amount",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": False,
+        "errors": ["withdraw can return a negative balance"],
+    }
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        spec_stronger_than_impl=["withdraw"],
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+    hint = MigrationHint(
+        function_name="withdraw",
+        priority="high",
+        reason="verification issue",
+        skeleton=(
+            "atom withdraw(balance: i64, amount: i64) -> i64 {\n"
+            "    requires: balance >= amount;\n"
+            "    ensures: result == balance - amount;\n"
+            "}"
+        ),
+        next_step="save skeleton",
+    )
+
+    with patch("agent.mm_migration_advisor.suggest_migration_for_file") as suggest:
+        suggest.return_value = [hint]
+        result = AuditPipeline(
+            AgentConfig(api_key="test"),
+            code_to_spec_extractor=extractor,
+            foreign_code_verifier=foreign_verifier,
+            cross_validator=cross_validator,
+            mumei_client=mumei,
+        ).audit_file(source, "python", auto_migrate=True)
+
+    assert result.migration_hints == [
+        {
+            "function_name": "withdraw",
+            "priority": "high",
+            "reason": "verification issue",
+            "skeleton": hint.skeleton,
+            "next_step": "save skeleton",
+        }
+    ]
+    suggest.assert_called_once_with(
+        str(source.resolve()),
+        "python",
+        {
+            "issues": [
+                {
+                    "kind": "verification",
+                    "severity": "error",
+                    "message": "withdraw can return a negative balance",
+                },
+                {
+                    "kind": "alignment",
+                    "severity": "warning",
+                    "message": "spec stronger than implementation: withdraw",
+                },
+            ]
+        },
+    )
+    assert "migration_hints:" in result.report
+    assert "function_name: withdraw" in result.report
+    assert "priority: high" in result.report
+    assert "ensures: result == balance - amount;" in result.report
+    assert "}" not in result.report
+
+
+def test_audit_pipeline_auto_migrate_skips_without_violations(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw preserves balance",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {"success": True, "report": {}}
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    with patch("agent.mm_migration_advisor.suggest_migration_for_file") as suggest:
+        result = AuditPipeline(
+            AgentConfig(api_key="test"),
+            code_to_spec_extractor=extractor,
+            foreign_code_verifier=foreign_verifier,
+            cross_validator=cross_validator,
+            mumei_client=mumei,
+        ).audit_file(source, "python", auto_migrate=True)
+
+    assert result.success is True
+    assert result.verification_violations == []
+    assert result.cross_validation_gaps == []
+    assert result.migration_hints == []
+    suggest.assert_not_called()
+
+
 def test_audit_pipeline_handles_spec_extraction_failure(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw(balance: int, amount: int) -> int:\n    return 0\n", encoding="utf-8")
@@ -167,6 +290,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         str(source),
         "python",
         domain_hint="",
+        auto_migrate=False,
     )
 
 
