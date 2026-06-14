@@ -62,6 +62,21 @@ def test_p14_c_detects_intent_drift_and_returns_integrated_report() -> None:
     assert "Spec↔Code Cross-Validation Report" in report.report
 
 
+def test_p14_c_does_not_flag_drift_only_because_function_name_differs() -> None:
+    report = detect_intent_drift(
+        "requires: true;\nensures: result == x + 1;",
+        "def inc(x: int) -> int:\n    return x + 1\n",
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert report.success is True
+    assert report.drift_detected is False
+    assert report.issues == []
+
+
 def test_p14_d_exports_human_review_markdown(tmp_path: Path) -> None:
     queue_path = tmp_path / "human_review_queue.json"
     queue_path.write_text(

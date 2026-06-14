@@ -67,7 +67,10 @@ class CodeToSpecConverter:
 
     def convert_source(self, code: str, language: str) -> CodeToSpecConversionResult:
         normalized = language.strip().lower()
-        detected_language: Language = normalized if normalized in CodeToSpecExtractor.EXTENSION_MAP.values() else "unknown"
+        supported_languages = set(CodeToSpecExtractor.EXTENSION_MAP.values())
+        detected_language: Language = (
+            normalized if normalized in supported_languages else "unknown"
+        )
         if normalized not in {"python", "rust", "go"}:
             return CodeToSpecConversionResult(
                 success=False,

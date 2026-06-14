@@ -448,8 +448,10 @@ def detect_intent_drift(
         errors=[*spec_result.errors, *code_result.errors],
         lang=lang,
     )
-    spec_payload = _atoms_to_spec_payload(spec_result.inferred_atoms)
-    code_payload = _atoms_to_spec_payload(code_result.inferred_atoms)
+    spec_payload, code_payload = _intent_payloads(
+        spec_result.inferred_atoms,
+        code_result.inferred_atoms,
+    )
     intent_drift = IntentTracker(config).track_intent_drift(
         spec_payload,
         code_payload,
@@ -1035,7 +1037,7 @@ def _check_atoms_with_z3(
                 all_satisfiable = False
                 issues.append(
                     CrossValidationIssue(
-                        kind="satisfiability",
+                        kind="overconstraint",
                         message=f"Precondition for atom `{atom.name}` is unsatisfiable.",
                         evidence=f"requires: {atom.requires}",
                     )
@@ -1043,6 +1045,8 @@ def _check_atoms_with_z3(
             elif requires_status == z3.unknown:
                 warnings.append(f"Z3 returned unknown for precondition `{atom.name}`.")
         if not exprs:
+            continue
+        if not requirements_are_satisfiable:
             continue
         any_checked = True
         solver = z3.Solver()
@@ -1251,6 +1255,27 @@ def _atoms_to_spec_payload(atoms: list[MumeiContractAtom]) -> dict[str, object]:
             for atom in atoms
         ],
     }
+
+
+def _intent_payloads(
+    spec_atoms: list[MumeiContractAtom],
+    code_atoms: list[MumeiContractAtom],
+) -> tuple[dict[str, object], dict[str, object]]:
+    aligned_code_atoms: list[MumeiContractAtom] = []
+    used_code_names: set[str] = set()
+    for spec_atom in spec_atoms:
+        code_atom = _matching_code_atom(
+            spec_atom,
+            [atom for atom in code_atoms if atom.name not in used_code_names],
+        )
+        if code_atom is None:
+            continue
+        used_code_names.add(code_atom.name)
+        aligned_code_atoms.append(replace(code_atom, name=spec_atom.name))
+    aligned_code_atoms.extend(
+        atom for atom in code_atoms if atom.name not in used_code_names
+    )
+    return _atoms_to_spec_payload(spec_atoms), _atoms_to_spec_payload(aligned_code_atoms)
 
 
 def _format_intent_drift_report(
