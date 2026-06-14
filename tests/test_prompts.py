@@ -674,6 +674,8 @@ def test_generate_atom_prompt_contains_common_mistakes():
     assert "Linearity" in result
     assert "SPEC_GUIDE.md" in result
     assert "outside_decidable_fragment" in result
+    assert "a * b" in result
+    assert "forall(i, 0, n" in result
     assert "regex constraints" in result
 
 
@@ -682,6 +684,9 @@ def test_spec_extraction_prompt_includes_spec_guide_fragment():
 
     assert "SPEC_GUIDE.md" in spec_extraction.SPEC_EXTRACTION_SYSTEM_PROMPT
     assert "forall exists" in spec_extraction.SPEC_EXTRACTION_SYSTEM_PROMPT
+    assert "forall(i, 0, n" in spec_extraction.SPEC_EXTRACTION_SYSTEM_PROMPT
+    assert "screened(customers[i])" in spec_extraction.DOMAIN_TEMPLATES["compliance"]
+    assert "mark Lean escalation intent" in spec_extraction.DOMAIN_TEMPLATES["crypto"]
     assert "regex constraints" in spec_extraction.SPEC_EXTRACTION_SYSTEM_PROMPT
 
 

@@ -41,7 +41,7 @@ DOMAIN_TEMPLATES: dict[str, str] = {
         "- RiskLevel outputs should be bounded, e.g. `ensures: result >= Low && result <= Critical`\n"
         "- PEP or sanctions hits imply high risk: `ensures: is_pep == 1 ==> result >= High`\n"
         "- AML screening should preserve auditability and not silently drop flagged customers\n"
-        "- Use forall-style patterns for portfolio rules: `forall customer in customers: screened(customer)`\n"
+        "- Use bounded forall-style portfolio rules: `forall(i, 0, len(customers), screened(customers[i]))`\n"
     ),
     "data_structure": (
         "Data-structure domain conventions:\n"
@@ -61,10 +61,9 @@ DOMAIN_TEMPLATES: dict[str, str] = {
     ),
     "crypto": (
         "Cryptography domain conventions:\n"
-        "- Modular arithmetic: use `mod` for remainder operations\n"
-        "- Exponentiation: use `pow(base, exp)` for power operations\n"
-        "- RSA signatures: verify with `mod(pow(signature, public_key), n) == mod(message, n)`\n"
-        "- Include modulus preconditions such as `n > 0` before modular arithmetic\n"
+        "- Modular arithmetic and exponentiation are outside the Z3-stable fragment; only emit them when explicitly required and mark Lean escalation intent\n"
+        "- Prefer bounded equality/range checks over RSA-style `mod(pow(signature, public_key), n)` formulas in first-pass specs\n"
+        "- Include modulus preconditions such as `n > 0` before unavoidable modular arithmetic\n"
         "- Finite field operations: bounds are `0 <= x < p` where p is prime\n"
         "- Use effects: [] for pure cryptographic verification helpers\n"
     ),
