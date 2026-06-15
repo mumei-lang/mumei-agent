@@ -81,6 +81,9 @@ def _format_en(payload: dict[str, object], is_drift: bool) -> str:
     secondary_key = "" if is_drift else "divergences"
     lines = [f"## {title}", ""]
     lines.extend(_summary_lines(payload, ok_label="Passed", fail_label="Needs review"))
+    ct = str(payload.get("contradiction_type", "") or "")
+    if ct:
+        lines.append(f"- Contradiction type: `{ct}`")
     lines.append("")
     issues = _dict_list(payload.get(issue_key))
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
@@ -115,6 +118,9 @@ def _format_nl_en(payload: dict[str, object]) -> str:
             "### Findings",
         ]
     )
+    ct = str(payload.get("contradiction_type", "") or "")
+    if ct:
+        lines.append(f"- Contradiction type: `{ct}`")
     issues = (
         _dict_list(payload.get("contradictions"))
         + _dict_list(payload.get("ambiguities"))
@@ -152,6 +158,9 @@ def _format_nl_ja(payload: dict[str, object]) -> str:
             "### 検出事項",
         ]
     )
+    ct = str(payload.get("contradiction_type", "") or "")
+    if ct:
+        lines.append(f"- contradiction_type: `{ct}`")
     issues = (
         _dict_list(payload.get("contradictions"))
         + _dict_list(payload.get("ambiguities"))
@@ -182,6 +191,9 @@ def _format_ja(payload: dict[str, object], is_drift: bool) -> str:
     secondary_key = "" if is_drift else "divergences"
     lines = [f"## {title}", ""]
     lines.extend(_summary_lines(payload, ok_label="合格", fail_label="要確認"))
+    ct = str(payload.get("contradiction_type", "") or "")
+    if ct:
+        lines.append(f"- contradiction_type: `{ct}`")
     lines.append("")
     issues = _dict_list(payload.get(issue_key))
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
