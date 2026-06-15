@@ -353,5 +353,4 @@ def test_validate_spec_to_code_sets_spec_vs_code_contradiction_type(tmp_path: Pa
     )
 
     assert result.success is False
-    # The spec has a stronger precondition than the code
-    assert result.contradiction_type in ("spec_stronger", "spec_vs_code")
+    assert result.contradiction_type == "spec_vs_code"

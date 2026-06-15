@@ -83,13 +83,16 @@ def _format_en(payload: dict[str, object], is_drift: bool) -> str:
     lines.extend(_summary_lines(payload, ok_label="Passed", fail_label="Needs review"))
     ct = str(payload.get("contradiction_type", "") or "")
     if ct:
-        lines.append(f"- Contradiction type: `{ct}`")
+        lines.append(f"- contradiction_type: `{ct}`")
     lines.append("")
     issues = _dict_list(payload.get(issue_key))
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
     if issues or secondary:
         lines.append("### Findings")
-        lines.extend(_issue_lines(issues + secondary))
+        if is_drift:
+            lines.extend(_issue_lines(issues + secondary))
+        else:
+            lines.extend(_spec_code_issue_lines(issues, secondary))
         lines.append("")
         lines.append("### Reviewer action")
         lines.append("- Confirm whether each finding is an intentional spec/code change.")
@@ -199,7 +202,10 @@ def _format_ja(payload: dict[str, object], is_drift: bool) -> str:
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
     if issues or secondary:
         lines.append("### 検出事項")
-        lines.extend(_issue_lines(issues + secondary))
+        if is_drift:
+            lines.extend(_issue_lines(issues + secondary))
+        else:
+            lines.extend(_spec_code_issue_lines(issues, secondary))
         lines.append("")
         lines.append("### Human-in-the-Loop 確認事項")
         lines.append("- 各検出事項が意図した仕様変更または実装変更か確認してください。")
@@ -249,6 +255,37 @@ def _issue_lines(issues: list[dict[str, object]]) -> list[str]:
         if evidence:
             lines.append(f"   - Evidence: `{evidence}`")
     return lines
+
+
+def _spec_code_issue_lines(
+    missing_constraints: list[dict[str, object]],
+    divergences: list[dict[str, object]],
+) -> list[str]:
+    typed_issues = [
+        (_spec_code_issue_type(issue, is_missing=True), issue) for issue in missing_constraints
+    ]
+    typed_issues.extend(
+        (_spec_code_issue_type(issue, is_missing=False), issue) for issue in divergences
+    )
+    lines: list[str] = []
+    for index, (issue_type, issue) in enumerate(typed_issues, start=1):
+        typed_issue = dict(issue)
+        typed_issue["kind"] = issue_type
+        issue_lines = _issue_lines([typed_issue])
+        issue_lines[0] = issue_lines[0].replace("1. ", f"{index}. ", 1)
+        lines.extend(issue_lines)
+    return lines
+
+
+def _spec_code_issue_type(issue: dict[str, object], *, is_missing: bool) -> str:
+    message = str(issue.get("message", ""))
+    if message.startswith("Spec validation issue:"):
+        return "spec_internal"
+    if message.startswith("Code atom ") and "not covered by the specification" in message:
+        return "impl_stronger"
+    if is_missing or "does not imply the spec postcondition" in message:
+        return "spec_stronger"
+    return "spec_vs_code"
 
 
 def _hunk_lines(payload: dict[str, object], *, heading: str) -> list[str]:

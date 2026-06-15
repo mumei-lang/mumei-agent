@@ -343,27 +343,10 @@ def validate_spec_to_code(
     warnings.extend(compare_warnings)
     satisfiable = _combine_satisfiability(spec_result.satisfiable, code_result.satisfiable)
 
-    # Determine contradiction_type for the alignment result
     if spec_result.contradiction_type == "spec_internal":
         ct = "spec_internal"
     elif divergences or missing:
-        # Classify divergence direction
-        has_spec_stronger = any(
-            issue.kind == "missing_implementation" for issue in missing
-        )
-        has_impl_stronger = any(
-            issue.kind == "postcondition_violated" for issue in divergences
-        ) or any(
-            "not documented" in issue.message for issue in divergences
-        )
-        if has_spec_stronger and has_impl_stronger:
-            ct = "spec_vs_code"
-        elif has_spec_stronger:
-            ct = "spec_stronger"
-        elif has_impl_stronger:
-            ct = "impl_stronger"
-        else:
-            ct = "spec_vs_code"
+        ct = "spec_vs_code"
     else:
         ct = ""
 
