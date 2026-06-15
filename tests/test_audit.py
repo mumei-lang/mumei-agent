@@ -6,7 +6,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent import mcp_server
-from agent.audit import AuditPipeline, AuditResult, _build_report, build_parser, main
+from agent.audit import (
+    AuditDirectoryResult,
+    AuditPipeline,
+    AuditResult,
+    _build_report,
+    build_parser,
+    main,
+)
 from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
 from agent.mm_migration_advisor import MigrationHint
@@ -400,6 +407,130 @@ def test_audit_pipeline_handles_spec_extraction_failure(tmp_path: Path) -> None:
     assert result.errors == ["LLM returned an empty natural language specification"]
     foreign_verifier.verify.assert_not_called()
     cross_validator.validate_spec_vs_impl.assert_not_called()
+
+
+def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "payment.py").write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    nested = source_dir / "nested"
+    nested.mkdir()
+    (nested / "transfer.rs").write_text(
+        "pub fn transfer(balance: i64, amount: i64) -> i64 { balance - amount }\n",
+        encoding="utf-8",
+    )
+    (source_dir / "ignored.go").write_text("package ignored\n", encoding="utf-8")
+
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw/transfer preserve balances",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.side_effect = [
+        {"success": False, "errors": ["withdraw can return a negative balance"]},
+        {"success": True, "report": {}},
+    ]
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.side_effect = [
+        CrossValidationReport(spec_stronger_than_impl=["withdraw"], coverage_ratio=1.0),
+        CrossValidationReport(coverage_ratio=1.0),
+    ]
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source_dir)
+
+    assert isinstance(result, AuditDirectoryResult)
+    assert result.success is False
+    assert result.total_files == 2
+    assert result.files_with_issues == 1
+    assert sorted(Path(file_result.source_file).name for file_result in result.file_results) == [
+        "payment.py",
+        "transfer.rs",
+    ]
+    assert foreign_verifier.verify.call_count == 2
+
+
+def test_audit_directory_summary_table(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    payment = source_dir / "payment.py"
+    transfer = source_dir / "transfer.py"
+    payment.write_text("def payment() -> int:\n    return 0\n", encoding="utf-8")
+    transfer.write_text("def transfer() -> int:\n    return 0\n", encoding="utf-8")
+
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="payment/transfer preserve balances",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.side_effect = [
+        {"success": False, "errors": ["payment violation"]},
+        {"success": True, "report": {}},
+    ]
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.side_effect = [
+        CrossValidationReport(spec_stronger_than_impl=["payment"], coverage_ratio=1.0),
+        CrossValidationReport(coverage_ratio=1.0),
+    ]
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_directory(source_dir, "python")
+
+    assert "Audit directory:" in result.summary
+    assert "payment.py: 1 violation, 1 gap" in result.summary
+    assert "transfer.py: 0 violations, 0 gaps" in result.summary
+    assert "Summary: 2 files, 1 file with issues" in result.summary
+    assert "next_step: Run `mumei-agent audit --code-file" in result.summary
+
+
+def test_scan_and_fix_handles_directory(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    result = AuditDirectoryResult(
+        success=True,
+        source_dir=str(source_dir),
+        language="python",
+        total_files=0,
+        summary="Audit directory",
+    )
+
+    with patch("agent.audit.AuditPipeline") as pipeline_cls:
+        pipeline_cls.return_value.audit_directory.return_value = result
+        payload = mcp_server.scan_and_fix(str(source_dir), "python", auto_heal=True)
+
+    assert payload["audit"]["success"] is True
+    pipeline_cls.return_value.audit_directory.assert_called_once_with(
+        str(source_dir),
+        "python",
+        domain_hint="",
+        auto_migrate=True,
+        auto_heal=True,
+    )
+    pipeline_cls.return_value.audit_file.assert_not_called()
 
 
 def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
