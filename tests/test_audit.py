@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent import mcp_server
-from agent.audit import AuditPipeline, AuditResult, build_parser, main
+from agent.audit import AuditPipeline, AuditResult, _build_report, build_parser, main
 from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
 from agent.mm_migration_advisor import MigrationHint
@@ -106,10 +106,80 @@ def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
         for gap in result.cross_validation_gaps
     )
     assert "verification_violations" in result.report
-    assert (
-        "next_step: Run `mumei-agent migrate-suggest --code-file <file> --language <lang>`"
-        in result.report
+    assert "next_steps:" in result.report
+    assert "Step 1: Run `mumei-agent migrate-suggest" in result.report
+    assert "Step 2: Run `mumei-agent heal <skeleton.mm>`" in result.report
+    assert "Step 3: Or run `mumei-agent audit" in result.report
+
+
+def test_audit_report_includes_counterexample_values(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
     )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw requires balance >= amount",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": False,
+        "errors": [],
+        "specs": [{"function_name": "withdraw"}],
+        "verification": {
+            "success": False,
+            "report": {
+                "status": "failed",
+                "failed": 1,
+                "counterexample": {"balance": 100, "amount": 150},
+            },
+        },
+    }
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "python")
+
+    assert result.counterexample_values == [
+        {
+            "function_name": "withdraw",
+            "counterexample": {"balance": 100, "amount": 150},
+        }
+    ]
+    assert "Z3 Counter-example: balance=100, amount=150" in result.verification_violations
+    assert "counterexample_values:" in result.report
+
+
+def test_audit_report_includes_step_guidance() -> None:
+    result = AuditResult(
+        success=False,
+        source_file="/tmp/payment.py",
+        language="python",
+        spec_extracted=True,
+        verification_violations=["withdraw can return a negative balance"],
+    )
+
+    report = _build_report(result)
+
+    assert "next_steps:" in report
+    assert "Step 1:" in report
+    assert "Step 2:" in report
+    assert "Step 3:" in report
 
 
 def test_audit_pipeline_auto_migrate_adds_migration_hints(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from typing import Protocol, cast
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
 from agent.mumei_client import create_mumei_client
+from agent.prompts.report_formatter import format_counterexample
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
@@ -31,6 +32,7 @@ class AuditResult:
     spec_extracted: bool
     spec_health_issues: list[str] = field(default_factory=list)
     verification_violations: list[str] = field(default_factory=list)
+    counterexample_values: list[dict] = field(default_factory=list)
     cross_validation_gaps: list[str] = field(default_factory=list)
     migration_hints: list[dict] = field(default_factory=list)
     healed_files: list[str] = field(default_factory=list)
@@ -116,6 +118,12 @@ class AuditPipeline:
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
         errors: list[str] = []
+        show_step_logs = auto_migrate or auto_heal
+        if show_step_logs:
+            print(
+                "[Step 1/3] Extracting spec and verifying contracts...",
+                file=sys.stderr,
+            )
 
         try:
             source_code = source_path.read_text(encoding="utf-8")
@@ -169,6 +177,7 @@ class AuditPipeline:
 
         spec_health_issues: list[str] = []
         verification_violations: list[str] = []
+        counterexample_values: list[dict] = []
         cross_validation_gaps: list[str] = []
 
         with tempfile.TemporaryDirectory(prefix="mumei-audit-") as tmp:
@@ -181,6 +190,7 @@ class AuditPipeline:
             try:
                 foreign_result = self.foreign_code_verifier.verify(source_code, audit_language)
                 verification_violations = _verification_issue_strings(foreign_result)
+                counterexample_values = _counterexample_value_dicts(foreign_result)
             except ValueError as exc:
                 verification_violations.append(str(exc))
             except FileNotFoundError as exc:
@@ -207,24 +217,35 @@ class AuditPipeline:
             spec_extracted=True,
             spec_health_issues=spec_health_issues,
             verification_violations=verification_violations,
+            counterexample_values=counterexample_values,
             cross_validation_gaps=cross_validation_gaps,
             errors=errors,
         )
         if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
 
+            migration_issues = _migration_issue_dicts(
+                verification_violations,
+                cross_validation_gaps,
+            )
+            if show_step_logs:
+                print(
+                    "[Step 2/3] Generating .mm migration skeletons for "
+                    f"{len(migration_issues)} functions with issues...",
+                    file=sys.stderr,
+                )
             hints = suggest_migration_for_file(
                 source_label,
                 audit_language,
-                {
-                    "issues": _migration_issue_dicts(
-                        verification_violations,
-                        cross_validation_gaps,
-                    )
-                },
+                {"issues": migration_issues},
             )
             result.migration_hints = [asdict(hint) for hint in hints]
         if auto_heal and result.migration_hints:
+            if show_step_logs:
+                print(
+                    "[Step 3/3] Running self-healing loop on generated skeletons...",
+                    file=sys.stderr,
+                )
             healed_files, heal_errors = self._heal_migration_hints(
                 result.migration_hints,
                 source_path,
@@ -475,9 +496,15 @@ def _verification_issue_strings(result: dict[str, object]) -> list[str]:
     issues: list[str] = []
     for item in _string_list(result.get("errors")):
         issues.append(item)
+    top_level_counterexample = format_counterexample(result)
+    if top_level_counterexample:
+        issues.append(top_level_counterexample)
     verification = _dict_value(result.get("verification"))
+    report = _dict_value(verification.get("report"))
+    report_counterexample = format_counterexample(report)
+    if report_counterexample:
+        issues.append(report_counterexample)
     if verification and verification.get("success") is False:
-        report = _dict_value(verification.get("report"))
         status = _string_value(report.get("status"), "")
         failed = report.get("failed")
         if status or failed is not None:
@@ -487,6 +514,65 @@ def _verification_issue_strings(result: dict[str, object]) -> list[str]:
         if stderr:
             issues.append(_shorten(stderr))
     return _dedupe_strings(issues)
+
+
+def _counterexample_value_dicts(result: dict[str, object]) -> list[dict]:
+    values: list[dict] = []
+    for report in _counterexample_reports(result):
+        counterexample = report.get("counterexample")
+        if not isinstance(counterexample, dict):
+            continue
+        values.append(
+            {
+                "function_name": _counterexample_function_name(result, report),
+                "counterexample": dict(counterexample),
+            }
+        )
+    return _dedupe_counterexample_values(values)
+
+
+def _counterexample_reports(result: dict[str, object]) -> list[dict[str, object]]:
+    reports: list[dict[str, object]] = []
+    if isinstance(result.get("counterexample"), dict):
+        reports.append(result)
+    verification = _dict_value(result.get("verification"))
+    report = _dict_value(verification.get("report"))
+    if isinstance(report.get("counterexample"), dict):
+        reports.append(report)
+    return reports
+
+
+def _counterexample_function_name(
+    result: dict[str, object],
+    report: dict[str, object],
+) -> str:
+    for source in (report, result):
+        for key in ("function_name", "atom", "name"):
+            value = _string_value(source.get(key), "")
+            if value:
+                return value
+    specs = _dict_list(result.get("specs"))
+    if len(specs) == 1:
+        spec = specs[0]
+        value = _string_value(spec.get("function_name"), "")
+        if value:
+            return value
+        value = _string_value(spec.get("name"), "")
+        if value:
+            return value
+    return "unknown"
+
+
+def _dedupe_counterexample_values(values: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for value in values:
+        marker = json.dumps(value, sort_keys=True, default=str)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(value)
+    return deduped
 
 
 def _cross_validation_gap_strings(report: CrossValidationReport) -> list[str]:
@@ -607,6 +693,7 @@ def _build_report(result: AuditResult) -> str:
         f"spec_extracted: {result.spec_extracted}",
         f"spec_health_issues: {result.spec_health_issues}",
         f"verification_violations: {result.verification_violations}",
+        f"counterexample_values: {result.counterexample_values}",
         f"cross_validation_gaps: {result.cross_validation_gaps}",
     ]
     if result.errors:
@@ -628,8 +715,18 @@ def _build_report(result: AuditResult) -> str:
     if result.heal_errors:
         lines.append(f"heal_errors: {result.heal_errors}")
     if result.verification_violations or result.cross_validation_gaps:
-        lines.append(
-            "next_step: Run `mumei-agent migrate-suggest --code-file <file> --language <lang>` "
-            "to generate .mm migration skeletons."
+        lines.extend(
+            [
+                "next_steps:",
+                (
+                    "  Step 1: Run `mumei-agent migrate-suggest --code-file <file> "
+                    "--language <lang>` to generate .mm skeletons"
+                ),
+                "  Step 2: Run `mumei-agent heal <skeleton.mm>` to self-heal the skeleton",
+                (
+                    "  Step 3: Or run `mumei-agent audit --code-file <file> "
+                    "--auto-migrate --auto-heal` to do all steps at once"
+                ),
+            ]
         )
     return "\n".join(lines)
