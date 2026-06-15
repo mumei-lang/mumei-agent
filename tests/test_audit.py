@@ -265,7 +265,7 @@ def test_audit_pipeline_auto_migrate_adds_migration_hints(tmp_path: Path) -> Non
     assert "}" not in result.report
 
 
-def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path) -> None:
+def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path, capsys) -> None:
     source = tmp_path / "payment.py"
     source.write_text(
         "def withdraw(balance: int, amount: int) -> int:\n"
@@ -324,6 +324,13 @@ def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path) -> None:
     assert result.heal_errors == []
     assert healed_path.read_text(encoding="utf-8") == hint.skeleton + "\n"
     assert "healed_files:" in result.report
+    stderr = capsys.readouterr().err
+    assert "[Step 1/3] Extracting spec and verifying contracts..." in stderr
+    assert (
+        "[Step 2/3] Generating .mm migration skeletons for 1 functions with issues..."
+        in stderr
+    )
+    assert "[Step 3/3] Running self-healing loop on generated skeletons..." in stderr
     heal_main.assert_called_once_with()
 
 

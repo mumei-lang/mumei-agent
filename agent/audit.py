@@ -228,17 +228,17 @@ class AuditPipeline:
                 verification_violations,
                 cross_validation_gaps,
             )
-            if show_step_logs:
-                print(
-                    "[Step 2/3] Generating .mm migration skeletons for "
-                    f"{len(migration_issues)} functions with issues...",
-                    file=sys.stderr,
-                )
             hints = suggest_migration_for_file(
                 source_label,
                 audit_language,
                 {"issues": migration_issues},
             )
+            if show_step_logs:
+                print(
+                    "[Step 2/3] Generating .mm migration skeletons for "
+                    f"{len(hints)} functions with issues...",
+                    file=sys.stderr,
+                )
             result.migration_hints = [asdict(hint) for hint in hints]
         if auto_heal and result.migration_hints:
             if show_step_logs:
