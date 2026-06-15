@@ -1442,7 +1442,7 @@ def scan_and_fix(
     3. (optional) heal: run self-healing loop on each skeleton
 
     Args:
-        code_file: Path to the source code file.
+        code_file: Path to the source code file or directory.
         language: Source language (python/rust/typescript).
         spec: Optional path to a natural-language spec file for validate-spec-to-code.
         auto_heal: If True, run the self-healing loop on generated .mm skeletons.
@@ -1452,16 +1452,26 @@ def scan_and_fix(
     from agent.audit import AuditPipeline
 
     pipeline = AuditPipeline(heal_output_dir=heal_output_dir or None)
-    result = pipeline.audit_file(
-        code_file,
-        language,
-        domain_hint=domain_hint,
-        auto_migrate=True,
-        auto_heal=auto_heal,
-    )
+    code_path = Path(code_file).expanduser().resolve()
+    if code_path.is_dir():
+        result = pipeline.audit_directory(
+            code_file,
+            language,
+            domain_hint=domain_hint,
+            auto_migrate=True,
+            auto_heal=auto_heal,
+        )
+    else:
+        result = pipeline.audit_file(
+            code_file,
+            language,
+            domain_hint=domain_hint,
+            auto_migrate=True,
+            auto_heal=auto_heal,
+        )
 
     spec_alignment = None
-    if spec:
+    if spec and not code_path.is_dir():
         from agent.cross_validation import validate_spec_to_code
 
         spec_text = Path(spec).read_text(encoding="utf-8")

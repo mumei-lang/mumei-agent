@@ -14,6 +14,7 @@ from typing import Protocol, cast
 
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
+from agent.extract_spec import _collect_code_files
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
@@ -22,6 +23,11 @@ from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthR
 
 
 SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript")
+AUDIT_EXTENSION_MAP: dict[str, Language] = {
+    ".py": "python",
+    ".rs": "rust",
+    ".ts": "typescript",
+}
 
 
 @dataclass
@@ -38,6 +44,20 @@ class AuditResult:
     healed_files: list[str] = field(default_factory=list)
     heal_errors: list[str] = field(default_factory=list)
     report: str = ""
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AuditDirectoryResult:
+    """Result of auditing a directory of source files."""
+
+    success: bool
+    source_dir: str
+    language: str
+    file_results: list[AuditResult] = field(default_factory=list)
+    summary: str = ""
+    total_files: int = 0
+    files_with_issues: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -113,8 +133,16 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
-    ) -> AuditResult:
+    ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
+        if source_path.is_dir():
+            return self.audit_directory(
+                source_path,
+                language,
+                domain_hint=domain_hint,
+                auto_migrate=auto_migrate,
+                auto_heal=auto_heal,
+            )
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
         errors: list[str] = []
@@ -255,6 +283,90 @@ class AuditPipeline:
         result.report = _build_report(result)
         return result
 
+    def audit_directory(
+        self,
+        source_dir: str | Path,
+        language: str | None = None,
+        *,
+        domain_hint: str = "",
+        auto_migrate: bool = False,
+        auto_heal: bool = False,
+    ) -> AuditDirectoryResult:
+        """Audit all supported source files in a directory."""
+        source_path = Path(source_dir).expanduser().resolve()
+        source_label = str(source_path)
+        normalized_language = _normalize_language(language)
+        errors: list[str] = []
+
+        if not source_path.exists():
+            errors.append(f"code_file does not exist: {source_label}")
+        elif not source_path.is_dir():
+            errors.append(f"code_file is not a directory: {source_label}")
+
+        if normalized_language and normalized_language not in SUPPORTED_AUDIT_LANGUAGES:
+            errors.append(
+                "language must be one of: " + ", ".join(SUPPORTED_AUDIT_LANGUAGES)
+            )
+
+        if errors:
+            result = AuditDirectoryResult(
+                success=False,
+                source_dir=source_label,
+                language=normalized_language or "mixed",
+                errors=errors,
+            )
+            result.summary = _build_directory_report(result)
+            return result
+
+        code_files = _collect_code_files(
+            source_path,
+            AUDIT_EXTENSION_MAP,
+            normalized_language or None,
+        )
+        if not code_files:
+            errors.append(f"no supported source-code files found in directory: {source_label}")
+
+        file_results: list[AuditResult] = []
+        for code_path in code_files:
+            audit_language = normalized_language or AUDIT_EXTENSION_MAP.get(
+                code_path.suffix.lower(),
+                "",
+            )
+            try:
+                file_result = self.audit_file(
+                    code_path,
+                    audit_language,
+                    domain_hint=domain_hint,
+                    auto_migrate=auto_migrate,
+                    auto_heal=auto_heal,
+                )
+            except Exception as exc:
+                file_result = AuditResult(
+                    success=False,
+                    source_file=str(code_path),
+                    language=audit_language,
+                    spec_extracted=False,
+                    errors=[f"audit failed: {exc}"],
+                )
+                file_result.report = _build_report(file_result)
+            if isinstance(file_result, AuditDirectoryResult):
+                errors.append(f"nested directory returned unexpectedly: {code_path}")
+                continue
+            file_results.append(file_result)
+
+        files_with_issues = sum(1 for file_result in file_results if not file_result.success)
+        result = AuditDirectoryResult(
+            success=not errors and files_with_issues == 0,
+            source_dir=source_label,
+            language=normalized_language or "mixed",
+            file_results=file_results,
+            total_files=len(file_results),
+            files_with_issues=files_with_issues,
+            errors=errors,
+        )
+        result.summary = _build_directory_report(result)
+        return result
+
     def _heal_migration_hints(
         self,
         migration_hints: list[dict],
@@ -352,7 +464,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser = parser or argparse.ArgumentParser(
         description="Audit existing code by extracting specs and verifying them.",
     )
-    parser.add_argument("--code-file", required=True, help="Path to existing source code.")
+    parser.add_argument(
+        "--code-file",
+        required=True,
+        help="Path to existing source code file or directory.",
+    )
     parser.add_argument(
         "--language",
         choices=SUPPORTED_AUDIT_LANGUAGES,
@@ -379,7 +495,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     return parser
 
 
-def main(args: argparse.Namespace | None = None) -> AuditResult:
+def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
     args = args or build_parser().parse_args()
     result = AuditPipeline(heal_output_dir=args.heal_output_dir).audit_file(
         args.code_file,
@@ -391,7 +507,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult:
     payload = (
         json.dumps(asdict(result), ensure_ascii=False, indent=2)
         if args.json
-        else result.report
+        else _result_report(result)
     )
     if args.output:
         Path(args.output).write_text(payload + "\n", encoding="utf-8")
@@ -684,6 +800,51 @@ def _dedupe_strings(items: list[str]) -> list[str]:
         seen.add(item)
         deduped.append(item)
     return deduped
+
+
+def _result_report(result: AuditResult | AuditDirectoryResult) -> str:
+    if isinstance(result, AuditDirectoryResult):
+        return result.summary
+    return result.report
+
+
+def _build_directory_report(result: AuditDirectoryResult) -> str:
+    lines = [f"Audit directory: {result.source_dir}"]
+    for file_result in result.file_results:
+        violations = len(file_result.verification_violations)
+        gaps = len(file_result.cross_validation_gaps)
+        source_label = _directory_file_label(result.source_dir, file_result.source_file)
+        lines.append(
+            "  "
+            f"{source_label}: "
+            f"{violations} {_pluralize('violation', violations)}, "
+            f"{gaps} {_pluralize('gap', gaps)}"
+        )
+    lines.append(
+        "Summary: "
+        f"{result.total_files} {_pluralize('file', result.total_files)}, "
+        f"{result.files_with_issues} {_pluralize('file', result.files_with_issues)} "
+        "with issues"
+    )
+    if result.errors:
+        lines.append(f"errors: {result.errors}")
+    if result.files_with_issues:
+        lines.append(
+            "next_step: Run `mumei-agent audit --code-file "
+            f"{result.source_dir} --auto-migrate --auto-heal` to fix all issues"
+        )
+    return "\n".join(lines)
+
+
+def _pluralize(word: str, count: int) -> str:
+    return word if count == 1 else f"{word}s"
+
+
+def _directory_file_label(source_dir: str, source_file: str) -> str:
+    try:
+        return Path(source_file).relative_to(Path(source_dir)).as_posix()
+    except ValueError:
+        return source_file
 
 
 def _build_report(result: AuditResult) -> str:
