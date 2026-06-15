@@ -95,6 +95,7 @@ class NLSpecValidationResult:
     errors: list[str] = field(default_factory=list)
     contradiction_evidence: list[str] = field(default_factory=list)
     overconstraint_evidence: list[str] = field(default_factory=list)
+    contradiction_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,7 @@ class SpecCodeAlignmentResult:
     report: str = ""
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    contradiction_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -255,6 +257,7 @@ def validate_nl_spec(
         errors=errors,
         contradiction_evidence=_issue_evidence(contradictions),
         overconstraint_evidence=_issue_evidence(overconstraints),
+        contradiction_type="spec_internal" if contradictions else "",
     )
 
 
@@ -339,6 +342,14 @@ def validate_spec_to_code(
     divergences.extend(_upstream_validation_issues(spec_result, code_result))
     warnings.extend(compare_warnings)
     satisfiable = _combine_satisfiability(spec_result.satisfiable, code_result.satisfiable)
+
+    if spec_result.contradiction_type == "spec_internal":
+        ct = "spec_internal"
+    elif divergences or missing:
+        ct = "spec_vs_code"
+    else:
+        ct = ""
+
     return _spec_code_result(
         code_path=code_path,
         language=normalized_language,
@@ -350,6 +361,7 @@ def validate_spec_to_code(
         warnings=warnings,
         errors=errors,
         lang=lang,
+        contradiction_type=ct,
     )
 
 
@@ -1618,6 +1630,7 @@ def _spec_code_result(
     warnings: list[str],
     errors: list[str],
     lang: Literal["en", "ja"],
+    contradiction_type: str = "",
 ) -> SpecCodeAlignmentResult:
     result = SpecCodeAlignmentResult(
         success=bool(
@@ -1637,6 +1650,7 @@ def _spec_code_result(
         satisfiable=satisfiable,
         warnings=warnings,
         errors=errors,
+        contradiction_type=contradiction_type,
     )
     from agent.report_formatter import format_cross_validation_report
 

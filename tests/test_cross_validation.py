@@ -317,3 +317,40 @@ def test_cross_validation_prompts_include_json_schema() -> None:
     assert "ensures" in nl_prompt
     assert "```json" in code_prompt
     assert "def add" in code_prompt
+
+
+def test_validate_nl_spec_sets_spec_internal_contradiction_type() -> None:
+    """Spec-internal contradictions set contradiction_type == 'spec_internal'."""
+    spec = (
+        "常に残高を更新する、かつ決して残高を更新する。"
+        "requires: x > 0 && x < 0;\n"
+        "ensures: result == x;"
+    )
+
+    result = validate_nl_spec(
+        spec,
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert result.contradictions
+    assert result.contradiction_type == "spec_internal"
+
+
+def test_validate_spec_to_code_sets_spec_vs_code_contradiction_type(tmp_path: Path) -> None:
+    """Code comparison divergence sets contradiction_type to a spec_vs_code variant."""
+    code_path = tmp_path / "impl.py"
+    code_path.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+    result = validate_spec_to_code(
+        "requires: x > 0;\nensures: result == x;",
+        str(code_path),
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert result.contradiction_type == "spec_vs_code"
