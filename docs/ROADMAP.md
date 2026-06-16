@@ -142,6 +142,134 @@ PR 上の `.mm` ファイルを自動検証し、結果をコメントとして�
 
 ---
 
+## P14: `.mm`を書かない入口 / Spec-Code Verification Suite ✅ Implemented
+
+P14 は、既存コードまたは自然言語仕様をそのまま監査入口にし、必要な部分だけ
+`.mm` skeleton へ移行するための実装群。2026-06-15 時点では、CLI / MCP / docs / demo
+の導線が揃っている。
+
+### P14-A: 自然言語仕様の健全性検証強化 ✅ Implemented
+
+自然言語仕様を `.mm` 生成前に検査し、矛盾・曖昧さ・過制約・vacuity を spec-only
+feedback として返す。
+
+**実装タスク**:
+
+1. `validate-spec --input spec.txt --format nl` で contradiction / ambiguity /
+   overconstraint / satisfiability を統合検査する。
+2. `extract-spec --check-contradiction-only` で code generation を行わず direct contradiction
+   だけを fail-fast で返す。
+3. `contradiction_type` を `NLSpecValidationResult` / `SpecCodeAlignmentResult` と
+   human / markdown report に含める。
+4. MCP tool `check_spec_contradiction(natural_language, domain_hint="")` を公開する。
+
+**対象ファイル**:
+
+- `agent/cross_validation.py` — `NLSpecValidationResult.contradiction_type`
+- `agent/extract_spec.py` — contradiction-only extraction
+- `agent/report_formatter.py` — `contradiction_type` 表示
+- `agent/mcp_server.py` — `check_spec_contradiction`
+- `tests/test_cross_validation.py`, `tests/test_report_formatter.py`, `tests/test_mcp_server.py`
+
+**成功指標**:
+
+- `.mm` 生成前に直接矛盾を検出できる。
+- CLI / MCP / Markdown report が同じ `contradiction_type` を返す。
+- LLM 生成失敗ではなく仕様側の問題として human review に回せる。
+
+### P14-B: 他言語コードの論理的健全性検証 ✅ Implemented
+
+既存 Python/Rust/TypeScript コードを `.mm` なしで監査し、問題箇所だけ migration hints
+へ送る。
+
+**実装タスク**:
+
+1. `audit --code-file src/foo.py` で code-to-spec extraction、spec health、
+   foreign-code verification、cross-validation を統合実行する。
+2. `audit --code-file src/` でディレクトリ内の対応ファイルを再帰スキャンし、
+   `AuditDirectoryResult` として集約する。
+3. `--auto-migrate` で migration skeleton を生成し、`--auto-heal` で self-healing loop
+   を続けて実行する。
+4. `--heal-output-dir` で生成・修復済み `.mm` の出力先を指定できるようにする。
+
+**対象ファイル**:
+
+- `agent/audit.py` — `AuditPipeline`, directory scan, `--auto-migrate`, `--auto-heal`
+- `agent/extract_spec.py` — `_collect_code_files()` / directory extraction
+- `agent/mm_migration_advisor.py` — migration hints / skeletons
+- `agent/strategies/foreign_code_strategy.py` — foreign-code contract verification
+- `tests/test_audit.py`, `tests/test_extract_spec.py`, `tests/test_mm_migration_advisor.py`
+
+**成功指標**:
+
+- `mumei-agent audit --code-file src/` が複数ファイルを処理し、成功/失敗件数を集約する。
+- 問題ありの関数だけ `.mm` skeleton と self-heal 対象になる。
+- `verification_violations`, `counterexample_values`, `cross_validation_gaps`,
+  `migration_hints`, `healed_files` が機械可読に返る。
+
+### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
+
+自然言語仕様、既存コード、抽出された `.mm` を双方向に照合し、multi-file cross-spec
+基盤へ接続する。
+
+**実装タスク**:
+
+1. `validate-spec-to-code --spec spec.txt --code src/foo.py` で仕様にある制約の未実装と
+   divergence を検出する。
+2. `validate-code-to-spec --code src/foo.py --spec spec.txt` でコード変更に対する仕様 drift
+   を検出する。
+3. `check_cross_spec_consistency(spec_files)` MCP tool で複数 `.mm` を
+   `mumei verify --cross-spec-files` に渡し、`cross_spec.json` を返す。
+4. mumei PR #285 の `contract_consistency[]`, `global_invariant_conflicts[]`,
+   `circular_dependencies[]` を agent の repair / review 判断へ接続する。
+
+**対象ファイル**:
+
+- `agent/cross_validation.py` — `validate_spec_to_code`, `validate_code_to_spec`
+- `agent/spec_code_mapper.py` — spec/code traceability
+- `agent/intent_tracker.py` — drift result
+- `agent/mcp_server.py` — `check_cross_spec_consistency`,
+  `validate_spec_to_code`, `validate_code_to_spec`
+- `tests/test_cross_validation.py`, `tests/test_mcp_server.py`
+
+**成功指標**:
+
+- `missing_constraints[]`, `divergences[]`, `drift_issues[]` が structured JSON で返る。
+- 複数 `.mm` の cross-spec result を MCP client が直接取得できる。
+- `cross_validation_gaps` が `audit` summary に集約され、migration / human review 分岐に使える。
+
+### P14-D: 人間向けUX強化（Human-in-the-Loop）✅ Implemented
+
+自動監査の結果を人間が判断しやすい導線にまとめ、`.mm` を書く前の入口を標準化する。
+
+**実装タスク**:
+
+1. `audit --auto-migrate --auto-heal` を 1 コマンド flow として documentation / CLI summary
+   に明示する。
+2. MCP tool `scan_and_fix(code_file, language, spec="", auto_heal=false, ...)`
+   で audit → migrate → optional heal を外部 agent から実行できるようにする。
+3. `contradiction_type`, `migration_hints`, `cross_validation_gaps`, `heal_errors`
+   を human review の判定材料として出力する。
+4. README の `.mmを書かない入口` flowchart を `scan_and_fix`, `--auto-migrate`,
+   `--auto-heal` を含む最新導線に更新する。
+
+**対象ファイル**:
+
+- `README.md` — no-`.mm` entry flowchart
+- `docs/VERIFICATION_WORKFLOW_GUIDE.md` — audit / directory scan / MCP guide
+- `agent/mcp_server.py` — `scan_and_fix`
+- `agent/human_review.py` — human-review metadata
+- `agent/report_formatter.py` — human / markdown report
+
+**成功指標**:
+
+- 既存コードから `mumei-agent audit --code-file src/ --auto-migrate --auto-heal`
+  だけで監査・移行・修復まで試せる。
+- MCP client は `scan_and_fix` だけで同じ workflow を実行できる。
+- 問題なし / 自動修復可能 / human review の分岐が README と guide で一致する。
+
+---
+
 ## Strategic Initiatives（次期戦略）
 
 mumei エコシステム全体の戦略的イニシアチブ。詳細は [mumei-lang/mumei の docs/CROSS_PROJECT_ROADMAP.md](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) を参照。

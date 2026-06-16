@@ -19,6 +19,13 @@ cross-validation をまとめて実行する。出力では次のフィールド
 - `cross_validation_gaps`: 抽出仕様と実装のズレ。仕様が実装より強い、または実装が仕様を満たしていない
   制約が並ぶ。
 
+`--code-file` には単一ファイルだけでなくディレクトリも渡せる。ディレクトリの場合は対応拡張子
+（Python/Rust/TypeScript）を再帰スキャンし、ファイルごとの結果と集約 summary を返す。
+
+```bash
+mumei-agent audit --code-file src/
+```
+
 問題がなければ、そのコードは `.mm` 移行なしで監査完了として扱える。`verification_violations` または
 `cross_validation_gaps` が出た場合は、`migrate-suggest` で移行スケルトンを作り、`heal` に渡す。
 
@@ -32,7 +39,12 @@ mumei-agent heal generated/mm/foo.mm
 
 ```bash
 mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal --heal-output-dir out/
+mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
+
+この 1 コマンド flow は `audit → migrate-suggest → heal` の順に実行する。`--auto-heal` は
+`--auto-migrate` で生成された skeleton だけを対象にし、成功したファイルは `healed_files[]`、
+失敗したファイルは `heal_errors[]` に記録される。
 
 `.mm` に入る前の補助チェックとして、コード単体の詳細検証は `validate-code`、自然言語仕様とコードの
 対応確認は `validate-spec-to-code` を使う。
@@ -70,6 +82,9 @@ docker exec mumei-ollama ollama pull qwen3.5
 |---|---|
 | 自然言語仕様の矛盾チェック | `mumei-agent extract-spec --text "..." --check-contradiction-only --output report.json` |
 | 仕様ファイルの矛盾チェック | `mumei-agent extract-spec --text-file spec.txt --check-contradiction-only --output report.json` |
+| 既存コードの統合監査 | `mumei-agent audit --code-file src/foo.py` |
+| ディレクトリの統合監査 | `mumei-agent audit --code-file src/` |
+| 監査→移行→自己修復の1コマンド実行 | `mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/` |
 | 単一コードファイルの検証 | `mumei-agent extract-spec --code-file src/foo.rs --output spec.json` |
 | ディレクトリ単位のコード検証 | `mumei-agent extract-spec --code-file src/ --output spec.json` |
 | 仕様→コード整合性検証 | `mumei-agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
@@ -80,6 +95,7 @@ docker exec mumei-ollama ollama pull qwen3.5
 | コード→仕様のドリフト検出 | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
 | 仕様の健全性チェック（vacuity含む） | `mumei-agent check-spec-health spec.mm` |
 | 外国語コードのコントラクト抽出・検証 | `mumei-agent verify-foreign --input code.rs --language rust` |
+| MCP 経由の監査・移行・修復 | `scan_and_fix(code_file="src/", language="python", auto_heal=true)` |
 | エディタ統合（LSP） | `mumei lsp` |
 | MCP 経由（Claude Code 等） | `.mcp.json` 設定後、AI エージェントから利用 |
 
@@ -155,12 +171,33 @@ mumei-agent validate-spec \
 - `contradictions[]`: 論理的矛盾（例: x > 0 かつ x < 0）
 - `ambiguities[]`: 曖昧な記述（複数解釈が可能な箇所）
 - `overconstraints[]`: 過制約（Z3で充足不可能な組み合わせ）
+- `contradiction_type`: 主要な矛盾分類。例: `direct_contradiction`,
+  `overconstraint`, `satisfiability`。CLI / MCP / Markdown report で同じ分類を使う。
 - `satisfiable`: Z3による充足可能性（true/false/null）
 - `inferred_atoms[]`: 推論されたMumeiコントラクト
 
 ## 2. 既存コードの検証
 
 **目的**: Rust/C/Go/Python/TypeScript 等の既存コードに論理的な問題がないかを抽出・検証する。
+
+統合監査には `audit` を使う。`--code-file` は単一ファイルまたはディレクトリを受け付ける。
+ディレクトリの場合は Python/Rust/TypeScript の対応拡張子を再帰スキャンし、問題があるファイルだけ
+`files_with_issues` に集約される。
+
+```bash
+mumei-agent audit --code-file src/foo.py
+mumei-agent audit --code-file src/
+mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
+```
+
+`audit` の主な出力:
+
+- `spec_health_issues`: 抽出仕様の矛盾・過制約・vacuity。
+- `verification_violations`: 既存コードを契約として検証した結果の違反。
+- `counterexample_values`: Z3 counterexample を人間が読める形に整形した値。
+- `cross_validation_gaps`: 仕様と実装のズレ。
+- `migration_hints`: `.mm` に移行すべき関数の skeleton と理由。
+- `healed_files` / `heal_errors`: `--auto-heal` 実行時の self-healing 結果。
 
 `extract-spec --code-file` は単一ファイルとディレクトリの両方を受け付ける。ディレクトリを渡すと対応拡張子のファイルをまとめて処理する。
 `validate-code --input`、`validate-spec-to-code --code`、`validate-code-to-spec --code` は単一コードファイルを指定する。
@@ -317,6 +354,7 @@ mumei-agent validate-spec-to-code \
 
 - `missing_constraints[]`: 仕様にあるがコードに実装されていない制約
 - `divergences[]`: 仕様とコードで矛盾する制約
+- `contradiction_type`: spec/code alignment 全体の主要な矛盾分類。空文字の場合は直接矛盾なし。
 - `spec_atoms[]`: 仕様から推論されたコントラクト
 - `code_atoms[]`: コードから推論されたコントラクト
 - `satisfiable`: 統合後の充足可能性
@@ -450,6 +488,30 @@ uv run mumei-agent mcp-server
 }
 ```
 
+#### scan_and_fix MCP tool
+
+`scan_and_fix` は `audit --auto-migrate` と同等の MCP 入口で、必要に応じて `heal` まで実行する。
+AI agent から既存コードを監査し、`.mm` skeleton を生成し、修復結果を structured JSON として受け取る。
+
+```json
+{
+  "code_file": "/repo/src/",
+  "language": "python",
+  "spec": "/repo/docs/spec.txt",
+  "auto_heal": true,
+  "heal_output_dir": "/repo/out/mm",
+  "domain_hint": "financial"
+}
+```
+
+返り値:
+
+- `audit`: 単一ファイルなら `AuditResult`、ディレクトリなら `AuditDirectoryResult`。
+- `audit.file_results[]`: ディレクトリスキャン時のファイル別監査結果。
+- `audit.migration_hints[]`: `.mm` skeleton と移行理由。
+- `audit.healed_files[]` / `audit.heal_errors[]`: `auto_heal=true` の結果。
+- `spec_alignment`: `spec` を渡した単一ファイル監査時の `validate-spec-to-code` 結果。
+
 ### 5-4. 診断出力の読み方
 
 `mumei verify` の出力はバイリンガル（EN/JP）:
@@ -522,6 +584,7 @@ uv run mumei-agent verify-foreign \
 | フィールド | 意味 | 対処 |
 |---|---|---|
 | `contradiction_found: true` | 仕様内に矛盾がある | `natural_language_explanation` を読んで仕様を修正 |
+| `contradiction_type` | 矛盾の主要分類（例: `direct_contradiction`, `overconstraint`, `satisfiability`） | 分類に応じて仕様修正、制約緩和、または実装修正を選ぶ |
 | `precondition_violated` | 事前条件が満たされない | `requires` 節を見直す |
 | `postcondition_violated` | 事後条件が満たされない | `ensures` 節またはロジックを見直す |
 | `effect_mismatch` | 副作用の宣言漏れ | `effects:` 節に不足エフェクトを追加 |

@@ -131,10 +131,14 @@ You can also run commands as `mumei-agent ...` after activating the uv-managed v
 ```mermaid
 flowchart TD
     existing["既存コード"] --> audit["audit"]
+    existing --> mcp_scan["MCP scan_and_fix"]
+    mcp_scan --> audit
     audit --> ok["問題なし"]
     ok --> done["完了"]
     audit --> issue["問題あり"]
+    issue --> one_cmd["audit --auto-migrate --auto-heal"]
     issue --> migrate["migrate-suggest"]
+    one_cmd --> skeleton[".mmスケルトン生成"]
     migrate --> skeleton[".mmスケルトン生成"]
     skeleton --> heal["heal"]
     heal --> verified["検証済み.mm"]
@@ -148,6 +152,7 @@ flowchart TD
 
 ```bash
 mumei-agent audit --code-file src/foo.py
+mumei-agent audit --code-file src/
 ```
 
 問題がなければ完了です。`verification_violations` や `cross_validation_gaps` が出た場合だけ、
@@ -161,6 +166,23 @@ mumei-agent migrate-suggest --code-file src/foo.py --language python
 
 ```bash
 mumei-agent heal generated/foo.mm
+```
+
+監査から移行スケルトン生成、self-healing までを 1 コマンドで実行する場合:
+
+```bash
+mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
+```
+
+MCP クライアントからは同じ導線を `scan_and_fix` で呼び出せます:
+
+```json
+{
+  "code_file": "src/",
+  "language": "python",
+  "auto_heal": true,
+  "heal_output_dir": "out/"
+}
 ```
 
 `.mm` に入る前の詳細チェックだけを行う場合は、コード単体なら `validate-code`、仕様とコードの
@@ -367,7 +389,7 @@ See `.env.example` for configuration details.
 |---|---|---|
 | `heal` (default) | Self-healing loop for existing .mm files | `mumei-agent heal examples/sword_test.mm` |
 | `generate` | Generate new .mm code from spec JSON | `mumei-agent generate --spec-file spec.json --output out.mm` |
-| `audit` | Audit existing code: extract spec, check health, verify contracts, detect cross-validation gaps | `mumei-agent audit --code-file src/foo.py` |
+| `audit` | Audit existing code or directories: extract spec, check health, verify contracts, detect cross-validation gaps | `mumei-agent audit --code-file src/ --auto-migrate --auto-heal` |
 | `migrate-suggest` | Generate .mm migration skeletons for functions with verification issues | `mumei-agent migrate-suggest --code-file src/foo.py --language python` |
 | `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `mumei-agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
 | `forge` | Autonomously extend the mumei std library with verified atoms | `mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
@@ -400,7 +422,7 @@ Exported tools:
 | `list_forge_log(log_path)` | Read `forge_log.json` |
 | `get_agent_status()` | Report LLM provider, mumei binary, available subcommands |
 | `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
-| `scan_and_fix(code_file, language, spec="", auto_heal=False, ...)` | Audit code, generate .mm skeletons, optionally self-heal |
+| `scan_and_fix(code_file, language, spec="", auto_heal=False, ...)` | Audit a file or directory, generate .mm skeletons, optionally self-heal |
 | `extract_spec(natural_language, domain_hint="", generate=false, mumei_repo="", check_contradiction_only=false)` | Extract a forge spec, optionally generate code, or run contradiction-only validation |
 | `check_spec_contradiction(natural_language, domain_hint="")` | Extract a natural-language spec and return direct contradiction findings without code generation |
 | `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files |
