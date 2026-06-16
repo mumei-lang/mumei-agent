@@ -1,0 +1,31 @@
+# Mumei Agent
+
+> Mumei Agent is an AI-driven autonomous verification and self-healing loop for the Mumei proof-driven programming language. It combines LLM inference (Ollama/OpenAI/DashScope) with Z3 formal verification to automatically detect and fix code issues.
+
+## What Mumei Agent does
+
+- Validates existing Python/Rust/Go code by inferring and verifying contracts
+- Detects spec↔code drift between natural-language requirements and implementations
+- Finds contradictions in natural-language specifications
+- Self-heals `.mm` files using an LLM + Z3 retry loop
+- Runs as an MCP server for integration with Claude Code, Devin, and other AI agents
+
+## Key links
+
+- [GitHub Repository](https://github.com/mumei-lang/mumei-agent)
+- [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md)
+- [Mumei Compiler](https://github.com/mumei-lang/mumei)
+
+## Quick start
+
+```bash
+git clone https://github.com/mumei-lang/mumei-agent
+cd mumei-agent
+cp .env.example .env
+uv sync
+uv run mumei-agent validate-code --input src/payment.py --language python
+```
+
+## License
+
+Apache-2.0
