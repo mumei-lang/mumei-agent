@@ -18,12 +18,25 @@ cross-validation をまとめて実行する。出力では次のフィールド
   不正ケースや Z3 counterexample が出る。
 - `cross_validation_gaps`: 抽出仕様と実装のズレ。仕様が実装より強い、または実装が仕様を満たしていない
   制約が並ぶ。
+- `next_steps`: 監査結果から自動生成された次のアクション。各要素は
+  `priority`（`high`/`medium`/`info`）、`action`、`command` を持ち、たとえば
+  `verification_violations` があれば `mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm`、
+  `cross_validation_gaps` があれば `mumei-agent validate-spec-to-code --spec <spec> --code <file>` を提示する。
 
 `--code-file` には単一ファイルだけでなくディレクトリも渡せる。ディレクトリの場合は対応拡張子
 （Python/Rust/TypeScript）を再帰スキャンし、ファイルごとの結果と集約 summary を返す。
 
 ```bash
 mumei-agent audit --code-file src/
+```
+
+Markdown レポートとして共有したい場合は `--format markdown` を使う。サマリは Markdown テーブル、
+`next_steps` はチェックリストとして出力される。JSON が必要な場合は `--format json` または従来通り
+`--json` を使える。
+
+```bash
+mumei-agent audit --code-file src/foo.py --format markdown --output reports/foo-audit.md
+mumei-agent audit --code-file src/foo.py --format json
 ```
 
 問題がなければ、そのコードは `.mm` 移行なしで監査完了として扱える。`verification_violations` または
@@ -83,6 +96,7 @@ docker exec mumei-ollama ollama pull qwen3.5
 | 自然言語仕様の矛盾チェック | `mumei-agent extract-spec --text "..." --check-contradiction-only --output report.json` |
 | 仕様ファイルの矛盾チェック | `mumei-agent extract-spec --text-file spec.txt --check-contradiction-only --output report.json` |
 | 既存コードの統合監査 | `mumei-agent audit --code-file src/foo.py` |
+| 既存コードの統合監査レポート（Markdown） | `mumei-agent audit --code-file src/foo.py --format markdown --output reports/foo-audit.md` |
 | ディレクトリの統合監査 | `mumei-agent audit --code-file src/` |
 | 監査→移行→自己修復の1コマンド実行 | `mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/` |
 | 単一コードファイルの検証 | `mumei-agent extract-spec --code-file src/foo.rs --output spec.json` |

@@ -43,6 +43,7 @@ class AuditResult:
     migration_hints: list[dict] = field(default_factory=list)
     healed_files: list[str] = field(default_factory=list)
     heal_errors: list[str] = field(default_factory=list)
+    next_steps: list[dict] = field(default_factory=list)
     report: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -58,6 +59,7 @@ class AuditDirectoryResult:
     summary: str = ""
     total_files: int = 0
     files_with_issues: int = 0
+    next_steps: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -156,17 +158,17 @@ class AuditPipeline:
         try:
             source_code = source_path.read_text(encoding="utf-8")
         except OSError as exc:
-            return AuditResult(
+            result = AuditResult(
                 success=False,
                 source_file=source_label,
                 language=normalized_language,
                 spec_extracted=False,
                 errors=[f"Failed to read source file: {exc}"],
-                report="Audit failed before source analysis.",
             )
+            return _finalize_audit_result(result)
 
         if normalized_language and normalized_language not in SUPPORTED_AUDIT_LANGUAGES:
-            return AuditResult(
+            result = AuditResult(
                 success=False,
                 source_file=source_label,
                 language=normalized_language,
@@ -175,8 +177,8 @@ class AuditPipeline:
                     "language must be one of: "
                     + ", ".join(SUPPORTED_AUDIT_LANGUAGES)
                 ],
-                report="Audit failed because the language is unsupported.",
             )
+            return _finalize_audit_result(result)
 
         language_hint = cast(Language | None, normalized_language or None)
         extraction = self.code_to_spec_extractor.extract_from_file(
@@ -196,8 +198,7 @@ class AuditPipeline:
                 spec_extracted=False,
                 errors=errors,
             )
-            result.report = _build_report(result)
-            return result
+            return _finalize_audit_result(result)
 
         spec_source = _forge_task_to_mumei_source(extraction.forge_task_spec)
         if not spec_source:
@@ -280,8 +281,7 @@ class AuditPipeline:
             )
             result.healed_files = healed_files
             result.heal_errors = heal_errors
-        result.report = _build_report(result)
-        return result
+        return _finalize_audit_result(result)
 
     def audit_directory(
         self,
@@ -315,6 +315,7 @@ class AuditPipeline:
                 language=normalized_language or "mixed",
                 errors=errors,
             )
+            result.next_steps = _aggregate_directory_next_steps(result)
             result.summary = _build_directory_report(result)
             return result
 
@@ -348,7 +349,7 @@ class AuditPipeline:
                     spec_extracted=False,
                     errors=[f"audit failed: {exc}"],
                 )
-                file_result.report = _build_report(file_result)
+                file_result = _finalize_audit_result(file_result)
             if isinstance(file_result, AuditDirectoryResult):
                 errors.append(f"nested directory returned unexpectedly: {code_path}")
                 continue
@@ -364,6 +365,7 @@ class AuditPipeline:
             files_with_issues=files_with_issues,
             errors=errors,
         )
+        result.next_steps = _aggregate_directory_next_steps(result)
         result.summary = _build_directory_report(result)
         return result
 
@@ -441,7 +443,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
             )
         result.source_file = f"<inline:{normalized_language}>"
-        result.report = _build_report(result)
+        result = _finalize_audit_result(result)
         return result
 
     def _check_spec_health(self, spec_path: Path, report_dir: str) -> SpecHealthReport:
@@ -475,6 +477,12 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         help="Source language. Inferred from the file extension when omitted.",
     )
     parser.add_argument("--json", action="store_true", help="Output the full result as JSON.")
+    parser.add_argument(
+        "--format",
+        choices=("text", "markdown", "json"),
+        default="text",
+        help="Output format: text (default), markdown, or json.",
+    )
     parser.add_argument("--output", help="Optional output path.")
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
     parser.add_argument(
@@ -504,11 +512,8 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         auto_migrate=args.auto_migrate,
         auto_heal=args.auto_heal,
     )
-    payload = (
-        json.dumps(asdict(result), ensure_ascii=False, indent=2)
-        if args.json
-        else _result_report(result)
-    )
+    output_format = "json" if args.json else args.format
+    payload = _format_result(result, output_format)
     if args.output:
         Path(args.output).write_text(payload + "\n", encoding="utf-8")
     else:
@@ -808,6 +813,99 @@ def _result_report(result: AuditResult | AuditDirectoryResult) -> str:
     return result.report
 
 
+def _format_result(result: AuditResult | AuditDirectoryResult, output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(asdict(result), ensure_ascii=False, indent=2)
+    if output_format == "markdown":
+        return _build_markdown_report(result)
+    return _result_report(result)
+
+
+def _finalize_audit_result(result: AuditResult) -> AuditResult:
+    result.next_steps = _generate_next_steps(result)
+    result.report = _build_report(result)
+    return result
+
+
+def _generate_next_steps(result: AuditResult) -> list[dict]:
+    steps: list[dict] = []
+    if result.verification_violations:
+        steps.append(
+            {
+                "priority": "high",
+                "action": "migrate-suggest で .mm スケルトンを生成",
+                "command": (
+                    "mumei-agent migrate-suggest --code-file <file> "
+                    "--language <lang> --output generated/mm"
+                ),
+            }
+        )
+    if result.cross_validation_gaps:
+        steps.append(
+            {
+                "priority": "high",
+                "action": "validate-spec-to-code で制約の対応を確認",
+                "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file>",
+            }
+        )
+    if result.spec_health_issues:
+        steps.append(
+            {
+                "priority": "medium",
+                "action": "validate-spec で仕様の矛盾を修正",
+                "command": "mumei-agent validate-spec --input <spec>",
+            }
+        )
+    if result.migration_hints:
+        steps.append(
+            {
+                "priority": "medium",
+                "action": "heal で .mm スケルトンを自動修正",
+                "command": "mumei-agent heal <mm_file>",
+            }
+        )
+    if not steps and result.success:
+        steps.append(
+            {
+                "priority": "info",
+                "action": "監査完了。.mm 移行不要",
+                "command": "",
+            }
+        )
+    return steps
+
+
+def _aggregate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
+    aggregated: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for file_result in result.file_results:
+        file_steps = file_result.next_steps or _generate_next_steps(file_result)
+        for step in file_steps:
+            key = (
+                _string_value(step.get("priority"), ""),
+                _string_value(step.get("action"), ""),
+                _string_value(step.get("command"), ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            aggregated.append(step)
+    actionable = [
+        step for step in aggregated if _string_value(step.get("priority"), "") != "info"
+    ]
+    if actionable:
+        return actionable
+    if result.success:
+        return [
+            {
+                "priority": "info",
+                "action": "監査完了。.mm 移行不要",
+                "command": "",
+            }
+        ]
+    return aggregated
+
+
 def _build_directory_report(result: AuditDirectoryResult) -> str:
     lines = [f"Audit directory: {result.source_dir}"]
     for file_result in result.file_results:
@@ -828,11 +926,10 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
     )
     if result.errors:
         lines.append(f"errors: {result.errors}")
-    if result.files_with_issues:
-        lines.append(
-            "next_step: Run `mumei-agent audit --code-file "
-            f"{result.source_dir} --auto-migrate --auto-heal` to fix all issues"
-        )
+    if result.next_steps:
+        lines.append("next_steps:")
+        for step in result.next_steps:
+            _append_text_next_step(lines, step)
     return "\n".join(lines)
 
 
@@ -848,6 +945,7 @@ def _directory_file_label(source_dir: str, source_file: str) -> str:
 
 
 def _build_report(result: AuditResult) -> str:
+    next_steps = result.next_steps or _generate_next_steps(result)
     lines = [
         f"Audit {'passed' if result.success else 'found issues'}: {result.source_file}",
         f"language: {result.language or 'unknown'}",
@@ -875,19 +973,136 @@ def _build_report(result: AuditResult) -> str:
         lines.append(f"healed_files: {result.healed_files}")
     if result.heal_errors:
         lines.append(f"heal_errors: {result.heal_errors}")
-    if result.verification_violations or result.cross_validation_gaps:
+    if next_steps:
+        lines.append("next_steps:")
+        for step in next_steps:
+            _append_text_next_step(lines, step)
+    return "\n".join(lines)
+
+
+def _append_text_next_step(lines: list[str], step: dict) -> None:
+    priority = _string_value(step.get("priority"), "unknown")
+    action = _string_value(step.get("action"), "")
+    command = _string_value(step.get("command"), "")
+    lines.append(f"  - priority: {priority}")
+    lines.append(f"    action: {action}")
+    lines.append(f"    command: {command}")
+
+
+def _build_markdown_report(result: AuditResult | AuditDirectoryResult) -> str:
+    if isinstance(result, AuditDirectoryResult):
+        return _build_directory_markdown_report(result)
+    return _build_file_markdown_report(result)
+
+
+def _build_file_markdown_report(result: AuditResult) -> str:
+    next_steps = result.next_steps or _generate_next_steps(result)
+    lines = [
+        "# Audit Report",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Source | `{_markdown_cell(result.source_file)}` |",
+        f"| Language | {_markdown_cell(result.language or 'unknown')} |",
+        f"| Status | {'passed' if result.success else 'found issues'} |",
+        f"| Spec extracted | {str(result.spec_extracted).lower()} |",
+        "",
+        "## Findings",
+        "",
+        "| Category | Count | Items |",
+        "|---|---:|---|",
+        _markdown_findings_row("spec_health_issues", result.spec_health_issues),
+        _markdown_findings_row(
+            "verification_violations",
+            result.verification_violations,
+        ),
+        _markdown_findings_row("counterexample_values", result.counterexample_values),
+        _markdown_findings_row("cross_validation_gaps", result.cross_validation_gaps),
+    ]
+    if result.errors:
+        lines.append(_markdown_findings_row("errors", result.errors))
+    if result.migration_hints:
+        lines.append(_markdown_findings_row("migration_hints", result.migration_hints))
+    if result.healed_files:
+        lines.append(_markdown_findings_row("healed_files", result.healed_files))
+    if result.heal_errors:
+        lines.append(_markdown_findings_row("heal_errors", result.heal_errors))
+    lines.extend(["", "## Next steps", ""])
+    lines.extend(_markdown_next_step_lines(next_steps))
+    return "\n".join(lines)
+
+
+def _build_directory_markdown_report(result: AuditDirectoryResult) -> str:
+    lines = [
+        "# Audit Directory Report",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Source directory | `{_markdown_cell(result.source_dir)}` |",
+        f"| Language | {_markdown_cell(result.language or 'mixed')} |",
+        f"| Status | {'passed' if result.success else 'found issues'} |",
+        f"| Total files | {result.total_files} |",
+        f"| Files with issues | {result.files_with_issues} |",
+        "",
+        "## File results",
+        "",
+        "| File | Status | Violations | Gaps |",
+        "|---|---|---:|---:|",
+    ]
+    for file_result in result.file_results:
+        source_label = _directory_file_label(result.source_dir, file_result.source_file)
+        lines.append(
+            "| "
+            f"`{_markdown_cell(source_label)}` | "
+            f"{'passed' if file_result.success else 'found issues'} | "
+            f"{len(file_result.verification_violations)} | "
+            f"{len(file_result.cross_validation_gaps)} |"
+        )
+    if result.errors:
         lines.extend(
             [
-                "next_steps:",
-                (
-                    "  Step 1: Run `mumei-agent migrate-suggest --code-file <file> "
-                    "--language <lang>` to generate .mm skeletons"
-                ),
-                "  Step 2: Run `mumei-agent heal <skeleton.mm>` to self-heal the skeleton",
-                (
-                    "  Step 3: Or run `mumei-agent audit --code-file <file> "
-                    "--auto-migrate --auto-heal` to do all steps at once"
-                ),
+                "",
+                "## Errors",
+                "",
+                *_markdown_bullet_lines(result.errors),
             ]
         )
+    lines.extend(["", "## Next steps", ""])
+    lines.extend(_markdown_next_step_lines(result.next_steps))
     return "\n".join(lines)
+
+
+def _markdown_findings_row(category: str, items: list) -> str:
+    return (
+        f"| `{category}` | {len(items)} | "
+        f"{_markdown_cell(_markdown_items_text(items))} |"
+    )
+
+
+def _markdown_items_text(items: list) -> str:
+    if not items:
+        return "—"
+    return "<br>".join(str(item) for item in items)
+
+
+def _markdown_next_step_lines(next_steps: list[dict]) -> list[str]:
+    if not next_steps:
+        return ["- [ ] No recommended next steps."]
+    lines: list[str] = []
+    for step in next_steps:
+        priority = _string_value(step.get("priority"), "unknown")
+        action = _string_value(step.get("action"), "")
+        command = _string_value(step.get("command"), "")
+        checkbox = "x" if priority == "info" and not command else " "
+        lines.append(f"- [{checkbox}] **{priority}**: {action}")
+        if command:
+            lines.append(f"  - Command: `{command}`")
+    return lines
+
+
+def _markdown_bullet_lines(items: list[str]) -> list[str]:
+    return [f"- {_markdown_cell(item)}" for item in items]
+
+
+def _markdown_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", "<br>")
