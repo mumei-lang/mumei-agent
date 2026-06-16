@@ -13,13 +13,12 @@ _SUBCOMMANDS = {
     "audit",
     "extract-spec",
     "validate-spec",
-    "validate-code",
+    "validate-code",  # deprecated verify-foreign is integrated here.
     "validate-spec-to-code",
     "validate-code-to-spec",
     "self-correct",
     "mcp-server",
     "check-spec-health",
-    "verify-foreign",
     "migrate-suggest",
     "cross-validate",
 }
@@ -32,7 +31,13 @@ def main() -> None:
     # `python -m agent examples/sword_test.mm`) fall through to heal
     # mode instead of being rejected as invalid subcommand choices.
     argv = sys.argv[1:]
-    command = argv[0] if argv and argv[0] in _SUBCOMMANDS else None
+    aliases = {
+        "verify-foreign": "validate-code",
+    }
+    command = None
+    if argv:
+        if argv[0] in _SUBCOMMANDS or argv[0] in aliases:
+            command = aliases.get(argv[0], argv[0])
 
     if command == "forge":
         import argparse
@@ -176,7 +181,7 @@ def main() -> None:
 
         parser = argparse.ArgumentParser(
             prog="python -m agent validate-code",
-            description="Infer and verify contracts from foreign-language code.",
+            description="Infer and verify contracts from existing code (Python, Rust, Go).",
         )
         build_validate_code_parser(parser)
         args = parser.parse_args(argv[1:])
@@ -243,20 +248,6 @@ def main() -> None:
         spec_health_build_parser(parser)
         args = parser.parse_args(argv[1:])
         spec_health_main(args)
-    elif command == "verify-foreign":
-        import argparse
-        from agent.strategies.foreign_code_strategy import (
-            build_parser as foreign_code_build_parser,
-            main as foreign_code_main,
-        )
-
-        parser = argparse.ArgumentParser(
-            prog="python -m agent verify-foreign",
-            description="Extract foreign-code contracts and verify them as Mumei atoms.",
-        )
-        foreign_code_build_parser(parser)
-        args = parser.parse_args(argv[1:])
-        foreign_code_main(args)
     elif command == "migrate-suggest":
         import argparse
         from dataclasses import asdict

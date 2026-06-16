@@ -104,11 +104,10 @@ docker exec mumei-ollama ollama pull qwen3.5
 | 仕様→コード整合性検証 | `mumei-agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
 | コード→仕様の逆検証 | `mumei-agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
 | 自然言語仕様の詳細検証（矛盾・曖昧さ・過制約） | `mumei-agent validate-spec --input spec.txt --format nl` |
-| 外国語コードの詳細検証 | `mumei-agent validate-code --input code.py --language python` |
+| 既存コードの詳細検証 | `mumei-agent validate-code --input code.py --language python` |
 | 仕様→コードの整合性検証 | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
 | コード→仕様のドリフト検出 | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
 | 仕様の健全性チェック（vacuity含む） | `mumei-agent check-spec-health spec.mm` |
-| 外国語コードのコントラクト抽出・検証 | `mumei-agent verify-foreign --input code.rs --language rust` |
 | MCP 経由の監査・移行・修復 | `scan_and_fix(code_file="src/", language="python", auto_heal=true)` |
 | エディタ統合（LSP） | `mumei lsp` |
 | MCP 経由（Claude Code 等） | `.mcp.json` 設定後、AI エージェントから利用 |
@@ -294,6 +293,7 @@ mumei-agent validate-code \
 ```
 
 `validate-code` の `--language` は必須。自動検出は行わない。
+`--no-llm` フラグを付けると、正規表現ベースの軽量抽出のみで実行できる。
 
 出力フィールド:
 
@@ -596,16 +596,6 @@ mumei doc src/main.mm -o docs/api/ --format markdown
 
 ```bash
 uv run mumei-agent check-spec-health src/main.mm
-```
-
-### 5-9. verify-foreign（外国語コードのコントラクト抽出・検証）
-
-外国語コードからコントラクトを抽出し、Mumei atomとして形式検証する。
-
-```bash
-uv run mumei-agent verify-foreign \
-  --input src/payment.rs \
-  --language rust
 ```
 
 ## フィードバックの読み方

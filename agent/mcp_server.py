@@ -705,7 +705,6 @@ def get_agent_status() -> str:
             "self-correct",
             "mcp-server",
             "check-spec-health",
-            "verify-foreign",
             "migrate-suggest",
             "cross-validate",
         ]
@@ -1262,14 +1261,14 @@ def validate_nl_spec_multi(
     return _ok(result)
 
 
-@mcp.tool()
-def validate_foreign_code(
+def _validate_existing_code_payload(
     code: str,
     language: str,
+    *,
     use_llm: bool = True,
     run_mumei: bool = True,
+    tool_name: str,
 ) -> str:
-    """Validate Rust, Python, or Go code by inferring Mumei contracts."""
     try:
         from agent import cross_validation
         from agent.config import AgentConfig
@@ -1285,8 +1284,42 @@ def validate_foreign_code(
             run_mumei=run_mumei,
         )
     except Exception as exc:
-        return _err(f"validate_foreign_code failed: {exc}")
+        return _err(f"{tool_name} failed: {exc}")
     return _ok_dataclass(result)
+
+
+@mcp.tool()
+def validate_code(
+    code: str,
+    language: str,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> str:
+    """Infer and verify contracts from existing code (Python, Rust, Go)."""
+    return _validate_existing_code_payload(
+        code,
+        language,
+        use_llm=use_llm,
+        run_mumei=run_mumei,
+        tool_name="validate_code",
+    )
+
+
+@mcp.tool()
+def validate_foreign_code(
+    code: str,
+    language: str,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> str:
+    """Infer and verify contracts from existing code (Python, Rust, Go)."""
+    return _validate_existing_code_payload(
+        code,
+        language,
+        use_llm=use_llm,
+        run_mumei=run_mumei,
+        tool_name="validate_foreign_code",
+    )
 
 
 @mcp.tool()
@@ -1348,25 +1381,20 @@ def validate_code_to_spec(
 
 
 @mcp.tool()
-def verify_foreign_code(source_code: str, language: str) -> str:
-    """Extract Python/TypeScript/Rust function contracts and verify them as atoms."""
-    try:
-        from agent.config import AgentConfig
-        from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import agent modules: {exc}")
-
-    try:
-        config = AgentConfig()
-        result = ForeignCodeVerifier(mumei_bin=config.mumei_bin).verify(
-            source_code,
-            language,
-        )
-    except ValueError as exc:
-        return _err(str(exc))
-    except FileNotFoundError as exc:
-        return _err(f"mumei verify failed to start: {exc}")
-    return _ok(result)
+def verify_foreign_code(
+    source_code: str,
+    language: str,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> str:
+    """Infer and verify contracts from existing code (Python, Rust, Go)."""
+    return _validate_existing_code_payload(
+        source_code,
+        language,
+        use_llm=use_llm,
+        run_mumei=run_mumei,
+        tool_name="verify_foreign_code",
+    )
 
 
 @mcp.tool()
