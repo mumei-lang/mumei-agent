@@ -394,11 +394,10 @@ See `.env.example` for configuration details.
 | `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `mumei-agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
 | `forge` | Autonomously extend the mumei std library with verified atoms | `mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
 | `validate-spec` | Cross-validate natural-language specs for contradiction, ambiguity, over-constraint, and Z3 satisfiability | `mumei-agent validate-spec --input spec.txt --format nl` |
-| `validate-code` | Infer Mumei contracts from Python/Rust/Go and verify their logical health | `mumei-agent validate-code --input code.py --language python` |
+| `validate-code` | Infer and verify contracts from existing code (Python, Rust, Go) | `mumei-agent validate-code --input code.py --language python` |
 | `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
 | `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `mumei-agent check-spec-health spec.mm` |
-| `verify-foreign` | Extract foreign-code contracts and verify them as Mumei atoms | `mumei-agent verify-foreign --input code.rs --language rust` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `mumei-agent mcp-server` |
 
 ## Verification Workflow Guide
@@ -426,6 +425,7 @@ Exported tools:
 | `extract_spec(natural_language, domain_hint="", generate=false, mumei_repo="", check_contradiction_only=false)` | Extract a forge spec, optionally generate code, or run contradiction-only validation |
 | `check_spec_contradiction(natural_language, domain_hint="")` | Extract a natural-language spec and return direct contradiction findings without code generation |
 | `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files |
+| `validate_code(code, language, use_llm=true, run_mumei=true)` | Infer and verify contracts from existing code (Python, Rust, Go) |
 
 `check_cross_spec_consistency` delegates to `mumei verify --cross-spec-files` and returns the parsed `cross_spec.json`, including contract consistency, global invariant conflicts, source file names, and dependency cycles.
 

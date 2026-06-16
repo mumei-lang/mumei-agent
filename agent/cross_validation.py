@@ -1,4 +1,4 @@
-"""Cross-validation for natural-language specs and foreign-language code."""
+"""Cross-validation for natural-language specs and existing code."""
 from __future__ import annotations
 
 import argparse
@@ -101,7 +101,7 @@ class NLSpecValidationResult:
 
 @dataclass(frozen=True)
 class ForeignCodeValidationResult:
-    """Result of foreign-code validation."""
+    """Result of existing-code validation."""
 
     success: bool
     language: str
@@ -720,8 +720,12 @@ def build_validate_code_to_spec_parser(
 
 def build_validate_code_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     """Add validate-code arguments to an argparse parser."""
-    parser = parser or argparse.ArgumentParser(description="Validate foreign-language code.")
-    parser.add_argument("--input", required=True, help="Path to source code.")
+    parser = parser or argparse.ArgumentParser(
+        description="Infer and verify contracts from existing code (Python, Rust, Go)."
+    )
+    source_arg = parser.add_mutually_exclusive_group(required=True)
+    source_arg.add_argument("--input", dest="input", help="Path to source code.")
+    source_arg.add_argument("--file", dest="input", help=argparse.SUPPRESS)
     parser.add_argument("--language", required=True, choices=["python", "rust", "go"])
     parser.add_argument("--output", help="Optional JSON report path.")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")

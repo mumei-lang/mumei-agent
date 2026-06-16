@@ -114,23 +114,18 @@ def test_verifier_runs_mumei_client_on_extracted_atom() -> None:
 
 
 def test_mcp_verify_foreign_code_tool_returns_json_payload() -> None:
-    fake_client = MagicMock()
-    fake_client.verify.return_value = {"success": True, "report": {}, "stdout": "{}", "stderr": ""}
-
-    with patch(
-        "agent.strategies.foreign_code_strategy.create_mumei_client",
-        return_value=fake_client,
-    ):
-        result = _payload(
-            mcp_server.verify_foreign_code(
-                "def add(a: int, b: int) -> int:\n    return a + b\n",
-                "python",
-            )
+    result = _payload(
+        mcp_server.verify_foreign_code(
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+            "python",
+            use_llm=False,
+            run_mumei=False,
         )
+    )
 
     assert result["status"] == "ok"
     assert result["success"] is True
-    assert result["specs"][0]["function_name"] == "add"
+    assert result["inferred_atoms"][0]["name"] == "add"
 
 
 def test_cli_verify_foreign_writes_json_report(tmp_path: Path) -> None:

@@ -44,6 +44,7 @@ class TestGetAgentStatus:
             "get_spec_guide_summary",
             "get_spec_guidelines",
             "extract_spec_from_code",
+            "validate_code",
             "verify_foreign_code",
             "validate_nl_spec",
             "validate_foreign_code",
