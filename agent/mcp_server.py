@@ -1487,6 +1487,7 @@ def scan_and_fix(
 
     return {
         "audit": asdict(result),
+        "next_steps": result.next_steps,
         "spec_alignment": spec_alignment,
     }
 

@@ -114,9 +114,19 @@ def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
     )
     assert "verification_violations" in result.report
     assert "next_steps:" in result.report
-    assert "Step 1: Run `mumei-agent migrate-suggest" in result.report
-    assert "Step 2: Run `mumei-agent heal <skeleton.mm>`" in result.report
-    assert "Step 3: Or run `mumei-agent audit" in result.report
+    assert {
+        "priority": "high",
+        "action": "migrate-suggest で .mm スケルトンを生成",
+        "command": (
+            "mumei-agent migrate-suggest --code-file <file> "
+            "--language <lang> --output generated/mm"
+        ),
+    } in result.next_steps
+    assert {
+        "priority": "high",
+        "action": "validate-spec-to-code で制約の対応を確認",
+        "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file>",
+    } in result.next_steps
 
 
 def test_audit_report_includes_counterexample_values(tmp_path: Path) -> None:
@@ -184,9 +194,8 @@ def test_audit_report_includes_step_guidance() -> None:
     report = _build_report(result)
 
     assert "next_steps:" in report
-    assert "Step 1:" in report
-    assert "Step 2:" in report
-    assert "Step 3:" in report
+    assert "priority: high" in report
+    assert "mumei-agent migrate-suggest --code-file <file>" in report
 
 
 def test_audit_pipeline_auto_migrate_adds_migration_hints(tmp_path: Path) -> None:
@@ -270,6 +279,11 @@ def test_audit_pipeline_auto_migrate_adds_migration_hints(tmp_path: Path) -> Non
     assert "priority: high" in result.report
     assert "ensures: result == balance - amount;" in result.report
     assert "}" not in result.report
+    assert {
+        "priority": "medium",
+        "action": "heal で .mm スケルトンを自動修正",
+        "command": "mumei-agent heal <mm_file>",
+    } in result.next_steps
 
 
 def test_audit_pipeline_auto_heal_records_healed_files(tmp_path: Path, capsys) -> None:
@@ -377,6 +391,13 @@ def test_audit_pipeline_auto_migrate_skips_without_violations(tmp_path: Path) ->
     assert result.verification_violations == []
     assert result.cross_validation_gaps == []
     assert result.migration_hints == []
+    assert result.next_steps == [
+        {
+            "priority": "info",
+            "action": "監査完了。.mm 移行不要",
+            "command": "",
+        }
+    ]
     suggest.assert_not_called()
 
 
@@ -462,6 +483,21 @@ def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
         "transfer.rs",
     ]
     assert foreign_verifier.verify.call_count == 2
+    assert result.next_steps == [
+        {
+            "priority": "high",
+            "action": "migrate-suggest で .mm スケルトンを生成",
+            "command": (
+                "mumei-agent migrate-suggest --code-file <file> "
+                "--language <lang> --output generated/mm"
+            ),
+        },
+        {
+            "priority": "high",
+            "action": "validate-spec-to-code で制約の対応を確認",
+            "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file>",
+        },
+    ]
 
 
 def test_audit_directory_summary_table(tmp_path: Path) -> None:
@@ -504,7 +540,8 @@ def test_audit_directory_summary_table(tmp_path: Path) -> None:
     assert "payment.py: 1 violation, 1 gap" in result.summary
     assert "transfer.py: 0 violations, 0 gaps" in result.summary
     assert "Summary: 2 files, 1 file with issues" in result.summary
-    assert "next_step: Run `mumei-agent audit --code-file" in result.summary
+    assert "next_steps:" in result.summary
+    assert "mumei-agent migrate-suggest --code-file <file>" in result.summary
 
 
 def test_scan_and_fix_handles_directory(tmp_path: Path) -> None:
@@ -523,6 +560,7 @@ def test_scan_and_fix_handles_directory(tmp_path: Path) -> None:
         payload = mcp_server.scan_and_fix(str(source_dir), "python", auto_heal=True)
 
     assert payload["audit"]["success"] is True
+    assert payload["next_steps"] == []
     pipeline_cls.return_value.audit_directory.assert_called_once_with(
         str(source_dir),
         "python",
@@ -556,6 +594,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
     assert returned is result
     assert payload["success"] is False
     assert payload["verification_violations"] == ["balance can go negative"]
+    assert payload["next_steps"] == []
     pipeline_cls.return_value.audit_file.assert_called_once_with(
         str(source),
         "python",
@@ -563,6 +602,61 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         auto_migrate=False,
         auto_heal=False,
     )
+
+
+def test_cli_audit_markdown_output(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n    return balance - amount\n",
+        encoding="utf-8",
+    )
+    result = AuditResult(
+        success=False,
+        source_file=str(source),
+        language="python",
+        spec_extracted=True,
+        verification_violations=["balance can go negative"],
+        next_steps=[
+            {
+                "priority": "high",
+                "action": "migrate-suggest で .mm スケルトンを生成",
+                "command": (
+                    "mumei-agent migrate-suggest --code-file <file> "
+                    "--language <lang> --output generated/mm"
+                ),
+            }
+        ],
+        report="audit report",
+    )
+
+    with patch("agent.audit.AuditPipeline") as pipeline_cls:
+        pipeline_cls.return_value.audit_file.return_value = result
+        args = build_parser().parse_args(
+            ["--code-file", str(source), "--language", "python", "--format", "markdown"]
+        )
+        returned = main(args)
+
+    output = capsys.readouterr().out
+    assert returned is result
+    assert "# Audit Report" in output
+    assert "| Field | Value |" in output
+    assert "- [ ] **high**: migrate-suggest で .mm スケルトンを生成" in output
+    assert "mumei-agent migrate-suggest --code-file <file>" in output
+
+
+def test_audit_report_generates_spec_health_next_step() -> None:
+    result = AuditResult(
+        success=False,
+        source_file="/tmp/payment.py",
+        language="python",
+        spec_extracted=True,
+        spec_health_issues=["requires/ensures are contradictory"],
+    )
+
+    report = _build_report(result)
+
+    assert "validate-spec で仕様の矛盾を修正" in report
+    assert "mumei-agent validate-spec --input <spec>" in report
 
 
 def test_mcp_audit_code_returns_dict() -> None:
@@ -582,4 +676,5 @@ def test_mcp_audit_code_returns_dict() -> None:
 
     assert payload["success"] is True
     assert payload["source_file"] == "<inline:python>"
+    assert payload["next_steps"] == []
     pipeline_cls.return_value.audit_source.assert_called_once()
