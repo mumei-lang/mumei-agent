@@ -9,6 +9,8 @@ import pytest
 
 from agent.config import AgentConfig
 from agent.cross_validation import (
+    CrossValidationIssue,
+    _with_spec_code_source_lines,
     build_validate_code_to_spec_parser,
     build_validate_code_parser,
     build_validate_spec_to_code_parser,
@@ -353,6 +355,25 @@ def test_cross_validation_prompts_include_json_schema() -> None:
     assert "ensures" in nl_prompt
     assert "```json" in code_prompt
     assert "def add" in code_prompt
+    assert "source_line" not in code_prompt
+
+
+def test_spec_to_code_line_mapping_ignores_llm_source_line() -> None:
+    issue = CrossValidationIssue(
+        kind="alignment",
+        message="Code behavior for `identity` does not imply the spec postcondition.",
+        evidence="spec ensures: result == x + 1; code ensures: result == x",
+        location="identity",
+        source_line=99,
+    )
+
+    [mapped] = _with_spec_code_source_lines(
+        [issue],
+        source_line_map={"identity": 2},
+        constraint_to_line={"result == x + 1": 3},
+    )
+
+    assert mapped.source_line == 3
 
 
 def test_validate_nl_spec_sets_spec_internal_contradiction_type() -> None:

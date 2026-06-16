@@ -88,8 +88,9 @@ def _format_en(payload: dict[str, object], is_drift: bool) -> str:
     issues = _dict_list(payload.get(issue_key))
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
     constraint_violations = _dict_list(payload.get("constraint_violations")) if not is_drift else []
+    missing_constraint_strings = _string_list(payload.get("missing_constraints")) if not is_drift else []
     extra_behaviors = [str(item) for item in _object_list(payload.get("extra_behaviors"))]
-    if constraint_violations or issues or secondary or extra_behaviors:
+    if constraint_violations or missing_constraint_strings or issues or secondary or extra_behaviors:
         lines.append("### Findings")
         if constraint_violations:
             lines.extend(_constraint_violation_lines(constraint_violations))
@@ -97,6 +98,13 @@ def _format_en(payload: dict[str, object], is_drift: bool) -> str:
                 lines.append("")
                 lines.append("### Extra behaviors")
                 lines.extend(f"- `{behavior}`" for behavior in extra_behaviors)
+        elif missing_constraint_strings:
+            lines.extend(
+                f"{index}. **spec_stronger**: spec `{constraint}`"
+                for index, constraint in enumerate(missing_constraint_strings, start=1)
+            )
+            if secondary:
+                lines.extend(_issue_lines(secondary))
         elif is_drift:
             lines.extend(_issue_lines(issues + secondary))
         else:
@@ -209,8 +217,9 @@ def _format_ja(payload: dict[str, object], is_drift: bool) -> str:
     issues = _dict_list(payload.get(issue_key))
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
     constraint_violations = _dict_list(payload.get("constraint_violations")) if not is_drift else []
+    missing_constraint_strings = _string_list(payload.get("missing_constraints")) if not is_drift else []
     extra_behaviors = [str(item) for item in _object_list(payload.get("extra_behaviors"))]
-    if constraint_violations or issues or secondary or extra_behaviors:
+    if constraint_violations or missing_constraint_strings or issues or secondary or extra_behaviors:
         lines.append("### 検出事項")
         if constraint_violations:
             lines.extend(_constraint_violation_lines(constraint_violations))
@@ -218,6 +227,13 @@ def _format_ja(payload: dict[str, object], is_drift: bool) -> str:
                 lines.append("")
                 lines.append("### 仕様外のコード動作")
                 lines.extend(f"- `{behavior}`" for behavior in extra_behaviors)
+        elif missing_constraint_strings:
+            lines.extend(
+                f"{index}. **spec_stronger**: spec `{constraint}`"
+                for index, constraint in enumerate(missing_constraint_strings, start=1)
+            )
+            if secondary:
+                lines.extend(_issue_lines(secondary))
         elif is_drift:
             lines.extend(_issue_lines(issues + secondary))
         else:
@@ -293,6 +309,10 @@ def _constraint_violation_lines(violations: list[dict[str, object]]) -> list[str
         if fix_suggestion:
             lines.append(f"   - Fix suggestion: `{fix_suggestion}`")
     return lines
+
+
+def _string_list(value: object) -> list[str]:
+    return [str(item) for item in _object_list(value) if str(item).strip()]
 
 
 def _spec_code_issue_lines(

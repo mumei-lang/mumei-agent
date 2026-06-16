@@ -368,6 +368,7 @@ def validate_spec_to_code(
     constraint_violations = _constraint_violations_from_issues(
         [*missing, *divergences],
         code,
+        code_path,
         mapping.constraint_to_line,
     )
     missing_constraint_texts = _missing_constraint_texts(missing)
@@ -1762,23 +1763,21 @@ def _with_spec_code_source_lines(
     enriched: list[CrossValidationIssue] = []
     fallback_line = next(iter(source_line_map.values()), 0)
     for issue in issues:
-        if issue.source_line:
-            enriched.append(issue)
-            continue
         constraint = _spec_constraint_from_issue(issue)
-        source_line = (
+        system_source_line = (
             constraint_to_line.get(constraint, 0)
             or source_line_map.get(issue.location, 0)
             or source_line_map.get(_issue_function_from_text(issue.message), 0)
             or fallback_line
         )
-        enriched.append(replace(issue, source_line=source_line) if source_line else issue)
+        enriched.append(replace(issue, source_line=system_source_line))
     return enriched
 
 
 def _constraint_violations_from_issues(
     issues: list[CrossValidationIssue],
     code: str,
+    code_path: str,
     constraint_to_line: dict[str, int],
 ) -> list[dict[str, object]]:
     violations: list[dict[str, object]] = []
@@ -1798,6 +1797,7 @@ def _constraint_violations_from_issues(
         violations.append(
             {
                 "spec_constraint": spec_constraint,
+                "code_path": code_path,
                 "code_line": code_line,
                 "code_snippet": _code_snippet_for_line(code, code_line),
                 "contradiction_type": contradiction_type,

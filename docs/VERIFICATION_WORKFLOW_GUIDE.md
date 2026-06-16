@@ -353,7 +353,7 @@ mumei-agent validate-spec-to-code \
 出力フィールド:
 
 - `constraint_violations[]`: 仕様制約とコード行の対応付き違反。各要素は
-  `spec_constraint`, `code_line`, `code_snippet`, `contradiction_type`, `fix_suggestion`
+  `spec_constraint`, `code_path`, `code_line`, `code_snippet`, `contradiction_type`, `fix_suggestion`
   を持ち、「仕様の制約 X がコードの行 Y と矛盾する」を直接確認できる。
 - `missing_constraints[]`: 仕様にあるがコードに実装されていない制約文字列
 - `extra_behaviors[]`: コードにあるが仕様に記載されていない動作
