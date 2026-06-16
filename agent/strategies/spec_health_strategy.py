@@ -65,8 +65,8 @@ class SpecHealthReport:
     contradictions: list[ContradictionInfo] = field(default_factory=list)
     over_constrained: list[OverConstrainedInfo] = field(default_factory=list)
     vacuous: list[VacuousInfo] = field(default_factory=list)
-    fix_suggestions: list[str] = field(default_factory=list)
     health_score: float = 1.0
+    fix_suggestions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -204,12 +204,12 @@ class SpecHealthChecker:
             contradictions=contradictions,
             over_constrained=over_constrained,
             vacuous=vacuous,
+            health_score=round(health_score, 4),
             fix_suggestions=_collect_fix_suggestions(
                 contradictions,
                 over_constrained,
                 vacuous,
             ),
-            health_score=round(health_score, 4),
         )
 
 

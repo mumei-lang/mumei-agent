@@ -1219,9 +1219,7 @@ def validate_nl_spec(
         *result.ambiguities,
         *result.overconstraints,
     ]
-    payload["fix_suggestions"] = [
-        issue.fix_suggestion for issue in issues if issue.fix_suggestion
-    ]
+    payload["fix_suggestions"] = cross_validation._fix_suggestions(issues)
     return _ok(payload)
 
 

@@ -53,10 +53,10 @@ class CrossValidationIssue:
     kind: IssueKind
     message: str
     evidence: str = ""
-    fix_suggestion: str = ""
     location: str = ""
     severity: Severity = "error"
     source_line: int = 0
+    fix_suggestion: str = ""
 
 
 @dataclass(frozen=True)
@@ -628,14 +628,14 @@ def build_validate_spec_parser(parser: argparse.ArgumentParser | None = None) ->
         "--format",
         choices=["nl", "human", "json", "markdown"],
         default="nl",
-        help="Input format.",
+        help="Output format (nl/json default, human, or markdown table).",
     )
     parser.add_argument(
         "--domain",
         default="",
         help="Domain hint (financial/security/crypto/data_structure).",
     )
-    parser.add_argument("--output", help="Optional JSON report path.")
+    parser.add_argument("--output", help="Optional report output path.")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract extraction.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
     return parser
