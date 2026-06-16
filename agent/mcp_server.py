@@ -1213,7 +1213,16 @@ def validate_nl_spec(
         )
     except Exception as exc:
         return _err(f"validate_nl_spec failed: {exc}")
-    return _ok_dataclass(result)
+    payload = asdict(result)
+    issues = [
+        *result.contradictions,
+        *result.ambiguities,
+        *result.overconstraints,
+    ]
+    payload["fix_suggestions"] = [
+        issue.fix_suggestion for issue in issues if issue.fix_suggestion
+    ]
+    return _ok(payload)
 
 
 @mcp.tool()

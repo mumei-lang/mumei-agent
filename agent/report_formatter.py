@@ -254,6 +254,9 @@ def _issue_lines(issues: list[dict[str, object]]) -> list[str]:
         lines.append(f"{prefix}: {message}")
         if evidence:
             lines.append(f"   - Evidence: `{evidence}`")
+        fix_suggestion = issue.get("fix_suggestion", "")
+        if fix_suggestion:
+            lines.append(f"   - Fix suggestion: `{fix_suggestion}`")
     return lines
 
 

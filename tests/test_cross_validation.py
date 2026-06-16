@@ -5,12 +5,15 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agent.config import AgentConfig
 from agent.cross_validation import (
     build_validate_code_to_spec_parser,
     build_validate_code_parser,
     build_validate_spec_to_code_parser,
     build_validate_spec_parser,
+    main_validate_spec,
     main_validate_spec_to_code,
     validate_code_to_spec,
     main_validate_code,
@@ -43,6 +46,9 @@ def test_validate_nl_spec_detects_contradiction_ambiguity_and_unsat_contract() -
     assert result.ambiguities
     assert result.satisfiable is False
     assert any(issue.kind == "overconstraint" for issue in result.overconstraints)
+    issues = [*result.contradictions, *result.ambiguities, *result.overconstraints]
+    assert issues
+    assert all(issue.fix_suggestion for issue in issues)
 
 
 def test_validate_foreign_code_infers_python_contract_and_runs_mumei() -> None:
@@ -166,6 +172,32 @@ def test_validate_spec_and_code_parsers_accept_required_flags() -> None:
     assert spec_args.input == "spec.txt"
     assert spec_args.format == "nl"
     assert code_args.language == "python"
+
+
+def test_validate_spec_cli_markdown_outputs_fix_suggestion_table(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    spec = tmp_path / "spec.txt"
+    spec.write_text("requires: x > 0 && x < 0;\nensures: result == x;", encoding="utf-8")
+    args = build_validate_spec_parser().parse_args(
+        [
+            "--input",
+            str(spec),
+            "--format",
+            "markdown",
+            "--no-llm",
+            "--no-mumei",
+        ]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main_validate_spec(args)
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "| kind | severity | location | message | evidence | fix_suggestion |" in captured.out
+    assert "Weaken the `requires` clause" in captured.out
 
 
 def test_validate_spec_to_code_detects_missing_requires(tmp_path: Path) -> None:
