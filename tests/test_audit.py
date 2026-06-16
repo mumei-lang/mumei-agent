@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -594,6 +595,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
     assert returned is result
     assert payload["success"] is False
     assert payload["verification_violations"] == ["balance can go negative"]
+    assert "next_steps" in payload
     assert payload["next_steps"] == []
     pipeline_cls.return_value.audit_file.assert_called_once_with(
         str(source),
@@ -638,9 +640,14 @@ def test_cli_audit_markdown_output(tmp_path: Path, capsys) -> None:
 
     output = capsys.readouterr().out
     assert returned is result
-    assert "# Audit Report" in output
+    assert f"## Audit: {source}" in output
     assert "| Field | Value |" in output
-    assert "- [ ] **high**: migrate-suggest で .mm スケルトンを生成" in output
+    assert "| language | python |" in output
+    assert "| spec_extracted | True |" in output
+    assert "### Issues" in output
+    assert "- ❌ verification_violations: balance can go negative" in output
+    assert "### Next Steps" in output
+    assert "- [ ] (high) Run `mumei-agent migrate-suggest --code-file <file>" in output
     assert "mumei-agent migrate-suggest --code-file <file>" in output
 
 
@@ -678,3 +685,29 @@ def test_mcp_audit_code_returns_dict() -> None:
     assert payload["source_file"] == "<inline:python>"
     assert payload["next_steps"] == []
     pipeline_cls.return_value.audit_source.assert_called_once()
+
+
+def test_audit_result_asdict_includes_next_steps() -> None:
+    result = AuditResult(
+        success=False,
+        source_file="/tmp/payment.py",
+        language="python",
+        spec_extracted=True,
+        next_steps=[
+            {
+                "priority": "high",
+                "action": "migrate-suggest で .mm スケルトンを生成",
+                "command": "mumei-agent migrate-suggest --code-file <file>",
+            }
+        ],
+    )
+
+    payload = asdict(result)
+
+    assert payload["next_steps"] == [
+        {
+            "priority": "high",
+            "action": "migrate-suggest で .mm スケルトンを生成",
+            "command": "mumei-agent migrate-suggest --code-file <file>",
+        }
+    ]

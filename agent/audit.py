@@ -315,7 +315,7 @@ class AuditPipeline:
                 language=normalized_language or "mixed",
                 errors=errors,
             )
-            result.next_steps = _aggregate_directory_next_steps(result)
+            result.next_steps = _generate_directory_next_steps(result)
             result.summary = _build_directory_report(result)
             return result
 
@@ -365,7 +365,7 @@ class AuditPipeline:
             files_with_issues=files_with_issues,
             errors=errors,
         )
-        result.next_steps = _aggregate_directory_next_steps(result)
+        result.next_steps = _generate_directory_next_steps(result)
         result.summary = _build_directory_report(result)
         return result
 
@@ -479,9 +479,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--json", action="store_true", help="Output the full result as JSON.")
     parser.add_argument(
         "--format",
-        choices=("text", "markdown", "json"),
+        choices=["text", "markdown", "json"],
         default="text",
-        help="Output format: text (default), markdown, or json.",
+        help="Output format (default: text).",
     )
     parser.add_argument("--output", help="Optional output path.")
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
@@ -817,7 +817,7 @@ def _format_result(result: AuditResult | AuditDirectoryResult, output_format: st
     if output_format == "json":
         return json.dumps(asdict(result), ensure_ascii=False, indent=2)
     if output_format == "markdown":
-        return _build_markdown_report(result)
+        return _result_to_markdown(result)
     return _result_report(result)
 
 
@@ -875,7 +875,7 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
     return steps
 
 
-def _aggregate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
+def _generate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
     aggregated: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     for file_result in result.file_results:
@@ -904,6 +904,10 @@ def _aggregate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
             }
         ]
     return aggregated
+
+
+def _aggregate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
+    return _generate_directory_next_steps(result)
 
 
 def _build_directory_report(result: AuditDirectoryResult) -> str:
@@ -989,62 +993,77 @@ def _append_text_next_step(lines: list[str], step: dict) -> None:
     lines.append(f"    command: {command}")
 
 
-def _build_markdown_report(result: AuditResult | AuditDirectoryResult) -> str:
+def _result_to_markdown(result: AuditResult | AuditDirectoryResult) -> str:
     if isinstance(result, AuditDirectoryResult):
-        return _build_directory_markdown_report(result)
-    return _build_file_markdown_report(result)
+        return _directory_result_to_markdown(result)
+    return _file_result_to_markdown(result)
 
 
-def _build_file_markdown_report(result: AuditResult) -> str:
+def _build_markdown_report(result: AuditResult | AuditDirectoryResult) -> str:
+    return _result_to_markdown(result)
+
+
+def _file_result_to_markdown(result: AuditResult) -> str:
     next_steps = result.next_steps or _generate_next_steps(result)
     lines = [
-        "# Audit Report",
+        f"## Audit: {result.source_file}",
         "",
         "| Field | Value |",
         "|---|---|",
-        f"| Source | `{_markdown_cell(result.source_file)}` |",
-        f"| Language | {_markdown_cell(result.language or 'unknown')} |",
-        f"| Status | {'passed' if result.success else 'found issues'} |",
-        f"| Spec extracted | {str(result.spec_extracted).lower()} |",
+        f"| language | {_markdown_cell(result.language or 'unknown')} |",
+        f"| spec_extracted | {result.spec_extracted} |",
+        f"| success | {result.success} |",
         "",
-        "## Findings",
+        "### Issues",
         "",
-        "| Category | Count | Items |",
-        "|---|---:|---|",
-        _markdown_findings_row("spec_health_issues", result.spec_health_issues),
-        _markdown_findings_row(
-            "verification_violations",
-            result.verification_violations,
-        ),
-        _markdown_findings_row("counterexample_values", result.counterexample_values),
-        _markdown_findings_row("cross_validation_gaps", result.cross_validation_gaps),
     ]
-    if result.errors:
-        lines.append(_markdown_findings_row("errors", result.errors))
+    lines.extend(
+        _markdown_issue_lines(
+            [
+                ("⚠️", "spec_health_issues", result.spec_health_issues),
+                ("❌", "verification_violations", result.verification_violations),
+                ("⚠️", "cross_validation_gaps", result.cross_validation_gaps),
+                ("❌", "errors", result.errors),
+            ]
+        )
+    )
+    if result.counterexample_values:
+        lines.append(
+            "- ❌ counterexample_values: "
+            f"{_markdown_cell(_markdown_items_text(result.counterexample_values))}"
+        )
     if result.migration_hints:
-        lines.append(_markdown_findings_row("migration_hints", result.migration_hints))
+        lines.append(
+            "- ⚠️ migration_hints: "
+            f"{_markdown_cell(_markdown_items_text(result.migration_hints))}"
+        )
     if result.healed_files:
-        lines.append(_markdown_findings_row("healed_files", result.healed_files))
+        lines.append(
+            "- ⚠️ healed_files: "
+            f"{_markdown_cell(_markdown_items_text(result.healed_files))}"
+        )
     if result.heal_errors:
-        lines.append(_markdown_findings_row("heal_errors", result.heal_errors))
-    lines.extend(["", "## Next steps", ""])
+        lines.append(
+            "- ❌ heal_errors: "
+            f"{_markdown_cell(_markdown_items_text(result.heal_errors))}"
+        )
+    lines.extend(["", "### Next Steps", ""])
     lines.extend(_markdown_next_step_lines(next_steps))
     return "\n".join(lines)
 
 
-def _build_directory_markdown_report(result: AuditDirectoryResult) -> str:
+def _directory_result_to_markdown(result: AuditDirectoryResult) -> str:
     lines = [
-        "# Audit Directory Report",
+        f"## Audit Directory: {result.source_dir}",
         "",
         "| Field | Value |",
         "|---|---|",
-        f"| Source directory | `{_markdown_cell(result.source_dir)}` |",
-        f"| Language | {_markdown_cell(result.language or 'mixed')} |",
-        f"| Status | {'passed' if result.success else 'found issues'} |",
-        f"| Total files | {result.total_files} |",
-        f"| Files with issues | {result.files_with_issues} |",
+        f"| language | {_markdown_cell(result.language or 'mixed')} |",
+        f"| success | {result.success} |",
+        f"| total_files | {result.total_files} |",
+        f"| files_with_issues | {result.files_with_issues} |",
         "",
-        "## File results",
+        "### Files",
         "",
         "| File | Status | Violations | Gaps |",
         "|---|---|---:|---:|",
@@ -1059,17 +1078,23 @@ def _build_directory_markdown_report(result: AuditDirectoryResult) -> str:
             f"{len(file_result.cross_validation_gaps)} |"
         )
     if result.errors:
-        lines.extend(
-            [
-                "",
-                "## Errors",
-                "",
-                *_markdown_bullet_lines(result.errors),
-            ]
-        )
-    lines.extend(["", "## Next steps", ""])
+        lines.extend(["", "### Issues", "", *_markdown_bullet_lines(result.errors)])
+    lines.extend(["", "### Next Steps", ""])
     lines.extend(_markdown_next_step_lines(result.next_steps))
     return "\n".join(lines)
+
+
+def _markdown_issue_lines(issue_groups: list[tuple[str, str, list]]) -> list[str]:
+    lines: list[str] = []
+    for marker, category, items in issue_groups:
+        if not items:
+            continue
+        lines.append(
+            f"- {marker} {category}: {_markdown_cell(_markdown_items_text(items))}"
+        )
+    if not lines:
+        return ["- No issues found."]
+    return lines
 
 
 def _markdown_findings_row(category: str, items: list) -> str:
@@ -1094,9 +1119,10 @@ def _markdown_next_step_lines(next_steps: list[dict]) -> list[str]:
         action = _string_value(step.get("action"), "")
         command = _string_value(step.get("command"), "")
         checkbox = "x" if priority == "info" and not command else " "
-        lines.append(f"- [{checkbox}] **{priority}**: {action}")
         if command:
-            lines.append(f"  - Command: `{command}`")
+            lines.append(f"- [{checkbox}] ({priority}) Run `{command}`")
+        else:
+            lines.append(f"- [{checkbox}] ({priority}) {action}")
     return lines
 
 
