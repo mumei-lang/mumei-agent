@@ -1784,7 +1784,7 @@ def _constraint_violations_from_issues(
     seen: set[tuple[str, int, str]] = set()
     for issue in issues:
         contradiction_type = _spec_code_contradiction_type(issue)
-        if contradiction_type == "impl_stronger":
+        if contradiction_type in {"impl_stronger", "spec_internal", "code_internal"}:
             continue
         spec_constraint = _spec_constraint_from_issue(issue)
         if not spec_constraint:

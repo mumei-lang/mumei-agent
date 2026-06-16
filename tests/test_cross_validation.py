@@ -238,6 +238,7 @@ def test_validate_spec_to_code_surfaces_spec_validation_issues(tmp_path: Path) -
 
     assert result.success is False
     assert any(issue.message.startswith("Spec validation issue") for issue in result.divergences)
+    assert result.constraint_violations == []
 
 
 def test_validate_code_to_spec_detects_postcondition_drift(tmp_path: Path) -> None:
