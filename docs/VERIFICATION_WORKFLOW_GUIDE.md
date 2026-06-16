@@ -212,6 +212,17 @@ mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir 
 - `cross_validation_gaps`: 仕様と実装のズレ。
 - `migration_hints`: `.mm` に移行すべき関数の skeleton と理由。
 - `healed_files` / `heal_errors`: `--auto-heal` 実行時の self-healing 結果。
+- `next_steps`: `priority`（`high`/`medium`/`info`）、`action`、`command` を持つ
+  dataclass フィールド。`verification_violations` や `cross_validation_gaps` から、
+  `migrate-suggest`、`validate-spec-to-code`、`heal` など次に実行すべきコマンドを提示する。
+
+共有用の監査レポートが必要な場合は `--format markdown` を使う。`next_steps` はチェックリストとして
+出力される。
+
+```bash
+mumei-agent audit --code-file src/foo.py --format markdown --output reports/foo-audit.md
+mumei-agent audit --code-file src/ --format markdown --output reports/src-audit.md
+```
 
 `extract-spec --code-file` は単一ファイルとディレクトリの両方を受け付ける。ディレクトリを渡すと対応拡張子のファイルをまとめて処理する。
 `validate-code --input`、`validate-spec-to-code --code`、`validate-code-to-spec --code` は単一コードファイルを指定する。
