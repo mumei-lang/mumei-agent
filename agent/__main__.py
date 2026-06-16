@@ -187,7 +187,10 @@ def main() -> None:
 
         parser = argparse.ArgumentParser(
             prog="python -m agent validate-spec-to-code",
-            description="Detect missing implementation constraints by comparing specs to code.",
+            description=(
+                "Detect missing implementation constraints and report the "
+                "spec constraint to code line relationship."
+            ),
         )
         build_validate_spec_to_code_parser(parser)
         args = parser.parse_args(argv[1:])

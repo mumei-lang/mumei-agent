@@ -87,9 +87,17 @@ def _format_en(payload: dict[str, object], is_drift: bool) -> str:
     lines.append("")
     issues = _dict_list(payload.get(issue_key))
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
-    if issues or secondary:
+    constraint_violations = _dict_list(payload.get("constraint_violations")) if not is_drift else []
+    extra_behaviors = [str(item) for item in _object_list(payload.get("extra_behaviors"))]
+    if constraint_violations or issues or secondary or extra_behaviors:
         lines.append("### Findings")
-        if is_drift:
+        if constraint_violations:
+            lines.extend(_constraint_violation_lines(constraint_violations))
+            if extra_behaviors:
+                lines.append("")
+                lines.append("### Extra behaviors")
+                lines.extend(f"- `{behavior}`" for behavior in extra_behaviors)
+        elif is_drift:
             lines.extend(_issue_lines(issues + secondary))
         else:
             lines.extend(_spec_code_issue_lines(issues, secondary))
@@ -200,9 +208,17 @@ def _format_ja(payload: dict[str, object], is_drift: bool) -> str:
     lines.append("")
     issues = _dict_list(payload.get(issue_key))
     secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
-    if issues or secondary:
+    constraint_violations = _dict_list(payload.get("constraint_violations")) if not is_drift else []
+    extra_behaviors = [str(item) for item in _object_list(payload.get("extra_behaviors"))]
+    if constraint_violations or issues or secondary or extra_behaviors:
         lines.append("### 検出事項")
-        if is_drift:
+        if constraint_violations:
+            lines.extend(_constraint_violation_lines(constraint_violations))
+            if extra_behaviors:
+                lines.append("")
+                lines.append("### 仕様外のコード動作")
+                lines.extend(f"- `{behavior}`" for behavior in extra_behaviors)
+        elif is_drift:
             lines.extend(_issue_lines(issues + secondary))
         else:
             lines.extend(_spec_code_issue_lines(issues, secondary))
@@ -255,6 +271,25 @@ def _issue_lines(issues: list[dict[str, object]]) -> list[str]:
         if evidence:
             lines.append(f"   - Evidence: `{evidence}`")
         fix_suggestion = issue.get("fix_suggestion", "")
+        if fix_suggestion:
+            lines.append(f"   - Fix suggestion: `{fix_suggestion}`")
+    return lines
+
+
+def _constraint_violation_lines(violations: list[dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for index, violation in enumerate(violations, start=1):
+        spec_constraint = violation.get("spec_constraint", "")
+        code_line = int(violation.get("code_line") or 0)
+        contradiction_type = violation.get("contradiction_type", "spec_vs_code")
+        line_suffix = f" line {code_line}" if code_line else ""
+        lines.append(
+            f"{index}. **{contradiction_type}**{line_suffix}: spec `{spec_constraint}`"
+        )
+        snippet = violation.get("code_snippet", "")
+        if snippet:
+            lines.append(f"   - Code: `{snippet}`")
+        fix_suggestion = violation.get("fix_suggestion", "")
         if fix_suggestion:
             lines.append(f"   - Fix suggestion: `{fix_suggestion}`")
     return lines

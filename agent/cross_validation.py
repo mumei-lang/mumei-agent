@@ -124,13 +124,16 @@ class SpecCodeAlignmentResult:
     language: str
     spec_atoms: list[MumeiContractAtom]
     code_atoms: list[MumeiContractAtom]
-    missing_constraints: list[CrossValidationIssue]
+    missing_constraints: list[str]
     divergences: list[CrossValidationIssue]
     satisfiable: bool | None
     report: str = ""
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     contradiction_type: str = ""
+    constraint_violations: list[dict[str, object]] = field(default_factory=list)
+    extra_behaviors: list[str] = field(default_factory=list)
+    missing_constraint_issues: list[CrossValidationIssue] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -315,8 +318,11 @@ def validate_spec_to_code(
             language=normalized_language,
             spec_atoms=[],
             code_atoms=[],
+            missing_constraint_issues=[],
             missing_constraints=[],
             divergences=[],
+            constraint_violations=[],
+            extra_behaviors=[],
             satisfiable=None,
             warnings=warnings,
             errors=errors,
@@ -343,6 +349,29 @@ def validate_spec_to_code(
     divergences.extend(_upstream_validation_issues(spec_result, code_result))
     warnings.extend(compare_warnings)
     satisfiable = _combine_satisfiability(spec_result.satisfiable, code_result.satisfiable)
+    mapping = SpecCodeMapper(config).build_mapping(
+        _atoms_to_spec_payload(spec_result.inferred_atoms),
+        code,
+        verification_report=code_result.verification,
+    )
+    warnings.extend(mapping.warnings)
+    missing = _with_spec_code_source_lines(
+        _dedupe_issues(missing),
+        code_result.source_line_map,
+        mapping.constraint_to_line,
+    )
+    divergences = _with_spec_code_source_lines(
+        _dedupe_issues(divergences),
+        code_result.source_line_map,
+        mapping.constraint_to_line,
+    )
+    constraint_violations = _constraint_violations_from_issues(
+        [*missing, *divergences],
+        code,
+        mapping.constraint_to_line,
+    )
+    missing_constraint_texts = _missing_constraint_texts(missing)
+    extra_behaviors = _extra_behavior_texts(divergences)
 
     if spec_result.contradiction_type == "spec_internal":
         ct = "spec_internal"
@@ -356,8 +385,11 @@ def validate_spec_to_code(
         language=normalized_language,
         spec_atoms=spec_result.inferred_atoms,
         code_atoms=code_result.inferred_atoms,
-        missing_constraints=_dedupe_issues(missing),
-        divergences=_dedupe_issues(divergences),
+        missing_constraint_issues=missing,
+        missing_constraints=missing_constraint_texts,
+        divergences=divergences,
+        constraint_violations=constraint_violations,
+        extra_behaviors=extra_behaviors,
         satisfiable=satisfiable,
         warnings=warnings,
         errors=errors,
@@ -1712,6 +1744,7 @@ def _upstream_validation_issues(
                 fix_suggestion=issue.fix_suggestion,
                 location=issue.location,
                 severity=issue.severity,
+                source_line=issue.source_line,
             )
         )
     return issues
@@ -1719,6 +1752,123 @@ def _upstream_validation_issues(
 
 def _is_upstream_alignment_issue(issue: CrossValidationIssue) -> bool:
     return issue.message.startswith(("Spec validation issue:", "Code contract validation issue:"))
+
+
+def _with_spec_code_source_lines(
+    issues: list[CrossValidationIssue],
+    source_line_map: dict[str, int],
+    constraint_to_line: dict[str, int],
+) -> list[CrossValidationIssue]:
+    enriched: list[CrossValidationIssue] = []
+    fallback_line = next(iter(source_line_map.values()), 0)
+    for issue in issues:
+        if issue.source_line:
+            enriched.append(issue)
+            continue
+        constraint = _spec_constraint_from_issue(issue)
+        source_line = (
+            constraint_to_line.get(constraint, 0)
+            or source_line_map.get(issue.location, 0)
+            or source_line_map.get(_issue_function_from_text(issue.message), 0)
+            or fallback_line
+        )
+        enriched.append(replace(issue, source_line=source_line) if source_line else issue)
+    return enriched
+
+
+def _constraint_violations_from_issues(
+    issues: list[CrossValidationIssue],
+    code: str,
+    constraint_to_line: dict[str, int],
+) -> list[dict[str, object]]:
+    violations: list[dict[str, object]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for issue in issues:
+        contradiction_type = _spec_code_contradiction_type(issue)
+        if contradiction_type == "impl_stronger":
+            continue
+        spec_constraint = _spec_constraint_from_issue(issue)
+        if not spec_constraint:
+            continue
+        code_line = issue.source_line or constraint_to_line.get(spec_constraint, 0)
+        key = (spec_constraint, code_line, contradiction_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        violations.append(
+            {
+                "spec_constraint": spec_constraint,
+                "code_line": code_line,
+                "code_snippet": _code_snippet_for_line(code, code_line),
+                "contradiction_type": contradiction_type,
+                "fix_suggestion": issue.fix_suggestion
+                or _suggest_fix(issue.kind, issue.message, issue.evidence),
+            }
+        )
+    return violations
+
+
+def _missing_constraint_texts(issues: list[CrossValidationIssue]) -> list[str]:
+    constraints: list[str] = []
+    seen: set[str] = set()
+    for issue in issues:
+        constraint = _spec_constraint_from_issue(issue)
+        if constraint and constraint not in seen:
+            seen.add(constraint)
+            constraints.append(constraint)
+    return constraints
+
+
+def _extra_behavior_texts(issues: list[CrossValidationIssue]) -> list[str]:
+    extras: list[str] = []
+    for issue in issues:
+        if _spec_code_contradiction_type(issue) != "impl_stronger":
+            continue
+        behavior = issue.evidence.strip() or issue.message.strip()
+        if issue.location:
+            behavior = f"{issue.location}: {behavior}"
+        if behavior not in extras:
+            extras.append(behavior)
+    return extras
+
+
+def _spec_constraint_from_issue(issue: CrossValidationIssue) -> str:
+    evidence = issue.evidence.strip()
+    for label in ("spec requires", "spec ensures"):
+        match = re.search(rf"{label}:\s*(.*?)(?:;\s*code\s+\w+:|$)", evidence)
+        if match:
+            constraint = match.group(1).strip()
+            if constraint:
+                return constraint
+    if issue.message.startswith("Spec validation issue:") and evidence:
+        return evidence
+    if evidence and not evidence.startswith("code "):
+        return evidence
+    return issue.message.strip()
+
+
+def _spec_code_contradiction_type(issue: CrossValidationIssue) -> str:
+    message = issue.message
+    if message.startswith("Spec validation issue:"):
+        return "spec_internal"
+    if message.startswith("Code contract validation issue:"):
+        return "code_internal"
+    if message.startswith("Code atom ") and "not covered by the specification" in message:
+        return "impl_stronger"
+    if "does not imply the spec postcondition" in message:
+        return "postcondition_violated"
+    if issue.kind == "missing_implementation":
+        return "spec_stronger"
+    return "spec_vs_code"
+
+
+def _code_snippet_for_line(code: str, line: int) -> str:
+    if line <= 0:
+        return ""
+    lines = code.splitlines()
+    if line > len(lines):
+        return ""
+    return lines[line - 1].strip()
 
 
 def _infer_language_from_path(path: Path, language: str | None) -> str:
@@ -1802,8 +1952,11 @@ def _spec_code_result(
     language: str,
     spec_atoms: list[MumeiContractAtom],
     code_atoms: list[MumeiContractAtom],
-    missing_constraints: list[CrossValidationIssue],
+    missing_constraint_issues: list[CrossValidationIssue],
+    missing_constraints: list[str],
     divergences: list[CrossValidationIssue],
+    constraint_violations: list[dict[str, object]],
+    extra_behaviors: list[str],
     satisfiable: bool | None,
     warnings: list[str],
     errors: list[str],
@@ -1815,7 +1968,7 @@ def _spec_code_result(
             not errors
             and spec_atoms
             and code_atoms
-            and not missing_constraints
+            and not missing_constraint_issues
             and not divergences
             and satisfiable is not False
         ),
@@ -1825,6 +1978,9 @@ def _spec_code_result(
         code_atoms=code_atoms,
         missing_constraints=missing_constraints,
         divergences=divergences,
+        constraint_violations=constraint_violations,
+        extra_behaviors=extra_behaviors,
+        missing_constraint_issues=missing_constraint_issues,
         satisfiable=satisfiable,
         warnings=warnings,
         errors=errors,

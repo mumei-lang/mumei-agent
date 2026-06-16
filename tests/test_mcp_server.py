@@ -160,6 +160,8 @@ class TestCrossValidationTools:
         assert result["language"] == "python"
         assert result["spec_atoms"][0]["name"] == "nl_spec_contract"
         assert result["code_atoms"][0]["name"] == "add"
+        assert "constraint_violations" in result
+        assert "extra_behaviors" in result
 
     def test_validate_code_to_spec_returns_drift_result(self, tmp_path: Path) -> None:
         code_path = tmp_path / "calc.py"

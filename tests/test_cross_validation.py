@@ -214,8 +214,12 @@ def test_validate_spec_to_code_detects_missing_requires(tmp_path: Path) -> None:
 
     assert result.success is False
     assert result.missing_constraints
-    assert result.missing_constraints[0].kind == "missing_implementation"
-    assert "x > 0" in result.missing_constraints[0].evidence
+    assert result.missing_constraints[0] == "x > 0"
+    assert result.missing_constraint_issues[0].kind == "missing_implementation"
+    assert "x > 0" in result.missing_constraint_issues[0].evidence
+    assert result.constraint_violations[0]["spec_constraint"] == "x > 0"
+    assert result.constraint_violations[0]["code_line"] == 1
+    assert "def identity" in str(result.constraint_violations[0]["code_snippet"])
 
 
 def test_validate_spec_to_code_surfaces_spec_validation_issues(tmp_path: Path) -> None:
@@ -386,3 +390,5 @@ def test_validate_spec_to_code_sets_spec_vs_code_contradiction_type(tmp_path: Pa
 
     assert result.success is False
     assert result.contradiction_type == "spec_vs_code"
+    assert result.constraint_violations
+    assert result.constraint_violations[0]["contradiction_type"] == "spec_stronger"
