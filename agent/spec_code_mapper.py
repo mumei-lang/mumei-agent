@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agent.config import AgentConfig
@@ -33,6 +33,7 @@ class MappingResult:
     mappings: list[SpecCodeMapping]
     warnings: list[str]
     errors: list[str]
+    constraint_to_line: dict[str, int] = field(default_factory=dict)
 
 
 class SpecCodeMapper:
@@ -119,6 +120,7 @@ class SpecCodeMapper:
             mappings=mappings,
             warnings=warnings,
             errors=[],
+            constraint_to_line=self._constraint_to_line(mappings),
         )
 
     def map_requires_to_code(
@@ -280,6 +282,15 @@ class SpecCodeMapper:
                     clauses.append(item.strip())
             return clauses
         return [str(raw).strip()] if str(raw).strip() else []
+
+    def _constraint_to_line(self, mappings: list[SpecCodeMapping]) -> dict[str, int]:
+        constraint_to_line: dict[str, int] = {}
+        for mapping in mappings:
+            clause = mapping.spec_clause.strip()
+            line = int(mapping.code_location.get("line", 0) or 0)
+            if clause and line > 0 and clause not in constraint_to_line:
+                constraint_to_line[clause] = line
+        return constraint_to_line
 
     def _find_atom_location(self, code: str, atom_name: str) -> dict[str, int]:
         """Find the line and column of an atom in the code."""

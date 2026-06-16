@@ -9,6 +9,8 @@ import pytest
 
 from agent.config import AgentConfig
 from agent.cross_validation import (
+    CrossValidationIssue,
+    _with_spec_code_source_lines,
     build_validate_code_to_spec_parser,
     build_validate_code_parser,
     build_validate_spec_to_code_parser,
@@ -214,8 +216,12 @@ def test_validate_spec_to_code_detects_missing_requires(tmp_path: Path) -> None:
 
     assert result.success is False
     assert result.missing_constraints
-    assert result.missing_constraints[0].kind == "missing_implementation"
-    assert "x > 0" in result.missing_constraints[0].evidence
+    assert result.missing_constraints[0] == "x > 0"
+    assert result.missing_constraint_issues[0].kind == "missing_implementation"
+    assert "x > 0" in result.missing_constraint_issues[0].evidence
+    assert result.constraint_violations[0]["spec_constraint"] == "x > 0"
+    assert result.constraint_violations[0]["code_line"] == 1
+    assert "def identity" in str(result.constraint_violations[0]["code_snippet"])
 
 
 def test_validate_spec_to_code_surfaces_spec_validation_issues(tmp_path: Path) -> None:
@@ -232,6 +238,7 @@ def test_validate_spec_to_code_surfaces_spec_validation_issues(tmp_path: Path) -
 
     assert result.success is False
     assert any(issue.message.startswith("Spec validation issue") for issue in result.divergences)
+    assert result.constraint_violations == []
 
 
 def test_validate_code_to_spec_detects_postcondition_drift(tmp_path: Path) -> None:
@@ -349,6 +356,25 @@ def test_cross_validation_prompts_include_json_schema() -> None:
     assert "ensures" in nl_prompt
     assert "```json" in code_prompt
     assert "def add" in code_prompt
+    assert "source_line" not in code_prompt
+
+
+def test_spec_to_code_line_mapping_ignores_llm_source_line() -> None:
+    issue = CrossValidationIssue(
+        kind="alignment",
+        message="Code behavior for `identity` does not imply the spec postcondition.",
+        evidence="spec ensures: result == x + 1; code ensures: result == x",
+        location="identity",
+        source_line=99,
+    )
+
+    [mapped] = _with_spec_code_source_lines(
+        [issue],
+        source_line_map={"identity": 2},
+        constraint_to_line={"result == x + 1": 3},
+    )
+
+    assert mapped.source_line == 3
 
 
 def test_validate_nl_spec_sets_spec_internal_contradiction_type() -> None:
@@ -386,3 +412,5 @@ def test_validate_spec_to_code_sets_spec_vs_code_contradiction_type(tmp_path: Pa
 
     assert result.success is False
     assert result.contradiction_type == "spec_vs_code"
+    assert result.constraint_violations
+    assert result.constraint_violations[0]["contradiction_type"] == "spec_stronger"
