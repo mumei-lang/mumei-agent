@@ -56,6 +56,7 @@ class CrossValidationIssue:
     location: str = ""
     severity: Severity = "error"
     source_line: int = 0
+    fix_suggestion: str = ""
 
 
 @dataclass(frozen=True)
@@ -233,9 +234,9 @@ def validate_nl_spec(
         if verification is not None and verification.get("success") is False:
             satisfiable = False
 
-    contradictions = _dedupe_issues(contradictions)
-    ambiguities = _dedupe_issues(ambiguities)
-    overconstraints = _dedupe_issues(overconstraints)
+    contradictions = _dedupe_issues(_with_fix_suggestions(contradictions))
+    ambiguities = _dedupe_issues(_with_fix_suggestions(ambiguities))
+    overconstraints = _dedupe_issues(_with_fix_suggestions(overconstraints))
     success = (
         not errors
         and not contradictions
@@ -627,14 +628,14 @@ def build_validate_spec_parser(parser: argparse.ArgumentParser | None = None) ->
         "--format",
         choices=["nl", "human", "json", "markdown"],
         default="nl",
-        help="Input format.",
+        help="Output format (nl/json default, human, or markdown table).",
     )
     parser.add_argument(
         "--domain",
         default="",
         help="Domain hint (financial/security/crypto/data_structure).",
     )
-    parser.add_argument("--output", help="Optional JSON report path.")
+    parser.add_argument("--output", help="Optional report output path.")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract extraction.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
     return parser
@@ -746,6 +747,7 @@ def _check_nl_result_pairs_for_conflicts(
                             f"are inconsistent: {issue.message}"
                         ),
                         evidence=issue.evidence,
+                        fix_suggestion=_suggest_fix(issue.kind, issue.message, issue.evidence),
                         location=f"spec[{left_index}],spec[{right_index}]",
                         severity=issue.severity,
                     )
@@ -848,7 +850,13 @@ def _emit_validate_spec_result(
     output: str | None,
     output_format: str,
 ) -> None:
-    if output_format in {"human", "markdown"}:
+    if output_format == "markdown":
+        report = _format_validate_spec_markdown(result)
+        if output:
+            Path(output).write_text(report + "\n", encoding="utf-8")
+        print(report)
+        return
+    if output_format == "human":
         from agent.report_formatter import format_cross_validation_report
 
         report = format_cross_validation_report(result)
@@ -990,6 +998,7 @@ def _issues_from_payload(payload: dict[str, object]) -> list[CrossValidationIssu
                 kind=kind,
                 message=str(issue_value.get("message") or "LLM reported a cross-validation issue."),
                 evidence=str(issue_value.get("evidence") or ""),
+                fix_suggestion=str(issue_value.get("fix_suggestion") or ""),
                 location=str(issue_value.get("location") or ""),
                 severity=severity,
                 source_line=_int_value(issue_value.get("source_line")),
@@ -1086,19 +1095,25 @@ def _detect_contradictions(spec_text: str) -> list[CrossValidationIssue]:
         if not normalized:
             continue
         if negated and normalized in seen_positive:
+            evidence = f"{seen_positive[normalized]} / {fragment.strip()}"
+            message = "Requirement states both a condition and its negation."
             issues.append(
                 CrossValidationIssue(
                     kind="contradiction",
-                    message="Requirement states both a condition and its negation.",
-                    evidence=f"{seen_positive[normalized]} / {fragment.strip()}",
+                    message=message,
+                    evidence=evidence,
+                    fix_suggestion=_suggest_fix("contradiction", message, evidence),
                 )
             )
         if not negated and normalized in seen_negative:
+            evidence = f"{fragment.strip()} / {seen_negative[normalized]}"
+            message = "Requirement states both a condition and its negation."
             issues.append(
                 CrossValidationIssue(
                     kind="contradiction",
-                    message="Requirement states both a condition and its negation.",
-                    evidence=f"{fragment.strip()} / {seen_negative[normalized]}",
+                    message=message,
+                    evidence=evidence,
+                    fix_suggestion=_suggest_fix("contradiction", message, evidence),
                 )
             )
         if negated:
@@ -1112,11 +1127,14 @@ def _detect_contradictions(spec_text: str) -> list[CrossValidationIssue]:
         r"must\s+(?P<target>[^.。\n]{1,80}?)(?:\s+and|,)\s+must\s+not\s+(?P=target)",
     ):
         for match in re.finditer(pattern, spec_text, flags=re.IGNORECASE):
+            message = "Requirement combines an always/must condition with a never/must-not condition."
+            evidence = match.group(0)
             issues.append(
                 CrossValidationIssue(
                     kind="contradiction",
-                    message="Requirement combines an always/must condition with a never/must-not condition.",
-                    evidence=match.group(0),
+                    message=message,
+                    evidence=evidence,
+                    fix_suggestion=_suggest_fix("contradiction", message, evidence),
                 )
             )
     return _dedupe_issues(issues)
@@ -1149,6 +1167,11 @@ def _detect_ambiguities(spec_text: str, config: AgentConfig) -> list[CrossValida
             kind="ambiguity",
             message=f"Ambiguous {finding.ambiguity_type}: replace with a concrete condition.",
             evidence=finding.ambiguous_text,
+            fix_suggestion=_suggest_fix(
+                "ambiguity",
+                f"Ambiguous {finding.ambiguity_type}: replace with a concrete condition.",
+                finding.ambiguous_text,
+            ),
             location=finding.location,
             severity="warning",
         )
@@ -1162,21 +1185,26 @@ def _detect_overconstraints(
 ) -> list[CrossValidationIssue]:
     issues: list[CrossValidationIssue] = []
     if re.search(r"\b(impossible|cannot be implemented|実装不可能)\b", spec_text, flags=re.IGNORECASE):
+        message = "The specification explicitly describes an impossible implementation."
+        evidence = "impossible/実装不可能"
         issues.append(
             CrossValidationIssue(
                 kind="overconstraint",
-                message="The specification explicitly describes an impossible implementation.",
-                evidence="impossible/実装不可能",
+                message=message,
+                evidence=evidence,
+                fix_suggestion=_suggest_fix("overconstraint", message, evidence),
             )
         )
     for atom in atoms:
         for label, clause in (("requires", atom.requires), ("ensures", atom.ensures)):
             if clause.strip().lower() == "false":
+                message = f"{atom.name}.{label} is explicitly false."
                 issues.append(
                     CrossValidationIssue(
                         kind="overconstraint",
-                        message=f"{atom.name}.{label} is explicitly false.",
+                        message=message,
                         evidence=clause,
+                        fix_suggestion=_suggest_fix("overconstraint", message, clause),
                     )
                 )
     return issues
@@ -1212,6 +1240,11 @@ def _check_atoms_with_z3(
                         kind="overconstraint",
                         message=f"Precondition for atom `{atom.name}` is unsatisfiable.",
                         evidence=f"requires: {atom.requires}",
+                        fix_suggestion=_suggest_fix(
+                            "overconstraint",
+                            f"Precondition for atom `{atom.name}` is unsatisfiable.",
+                            f"requires: {atom.requires}",
+                        ),
                         location=atom.name,
                     )
                 )
@@ -1242,6 +1275,11 @@ def _check_atoms_with_z3(
                     kind=kind,
                     message=message,
                     evidence=f"requires: {atom.requires}; ensures: {atom.ensures}",
+                    fix_suggestion=_suggest_fix(
+                        kind,
+                        message,
+                        f"requires: {atom.requires}; ensures: {atom.ensures}",
+                    ),
                     location=atom.name,
                 )
             )
@@ -1415,6 +1453,144 @@ def _issue_evidence(issues: list[CrossValidationIssue]) -> list[str]:
     return [issue.evidence for issue in issues if issue.evidence]
 
 
+def _fix_suggestions(issues: Iterable[CrossValidationIssue]) -> list[str]:
+    suggestions: list[str] = []
+    seen: set[str] = set()
+    for issue in issues:
+        suggestion = issue.fix_suggestion.strip() or _suggest_fix(
+            issue.kind,
+            issue.message,
+            issue.evidence,
+        )
+        if suggestion and suggestion not in seen:
+            seen.add(suggestion)
+            suggestions.append(suggestion)
+    return suggestions
+
+
+def _with_fix_suggestions(issues: list[CrossValidationIssue]) -> list[CrossValidationIssue]:
+    return [
+        issue
+        if issue.fix_suggestion
+        else replace(
+            issue,
+            fix_suggestion=_suggest_fix(issue.kind, issue.message, issue.evidence),
+        )
+        for issue in issues
+    ]
+
+
+def _suggest_fix(kind: IssueKind, message: str, evidence: str) -> str:
+    """Generate a concrete remediation hint for a validation issue."""
+    evidence_text = evidence.strip()
+    message_text = message.strip()
+    if kind == "contradiction":
+        if "/" in evidence_text:
+            left, right = (part.strip() for part in evidence_text.split("/", 1))
+            return (
+                "Choose the intended constraint and relax or delete the opposing one: "
+                f"`{left}` conflicts with `{right}`."
+            )
+        if "requires:" in evidence_text and "ensures:" in evidence_text:
+            return (
+                "Z3 found the listed requires/ensures combination inconsistent; "
+                "weaken the stricter precondition or loosen the postcondition so one "
+                f"reachable value can satisfy both. Constraints: `{evidence_text}`."
+            )
+        return (
+            "Remove one side of the mutually exclusive requirement, or rewrite it as an "
+            f"explicit priority/exception rule. Evidence: `{evidence_text or message_text}`."
+        )
+    if kind == "ambiguity":
+        ambiguous = f"`{evidence_text}`" if evidence_text else "the ambiguous phrase"
+        return (
+            f"Replace {ambiguous} with a concrete type, enum, threshold, or numeric range "
+            "(for example `0 <= x <= limit` instead of vague wording)."
+        )
+    if kind == "overconstraint":
+        if "requires:" in evidence_text or ".requires" in message_text:
+            return (
+                "Weaken the `requires` clause by removing the unreachable bound, splitting "
+                "it into narrower cases, or changing an impossible conjunction to an "
+                f"alternative. Constraint: `{evidence_text}`."
+            )
+        if "ensures:" in evidence_text or ".ensures" in message_text:
+            return (
+                "Loosen the `ensures` clause to the property callers actually need, or "
+                f"move implementation-specific details into a separate lemma. Constraint: `{evidence_text}`."
+            )
+        return (
+            "Relax the over-specific requirement, especially unused `requires`, invariants, "
+            f"or effect constraints, until the spec describes only necessary behavior. Evidence: `{evidence_text}`."
+        )
+    if kind == "satisfiability":
+        return (
+            "Z3 reported this constraint set as unsatisfiable; inspect the listed clauses "
+            "as the conflicting set and relax or split at least one constraint: "
+            f"`{evidence_text or message_text}`."
+        )
+    return (
+        "Review the finding and update the spec or implementation so the reported "
+        f"constraint is explicit and verifiable. Evidence: `{evidence_text or message_text}`."
+    )
+
+
+def _format_validate_spec_markdown(result: NLSpecValidationResult) -> str:
+    issues = [
+        *result.contradictions,
+        *result.ambiguities,
+        *result.overconstraints,
+    ]
+    lines = [
+        "## Natural-Language Spec Validation Report",
+        "",
+        f"- Status: **{'Passed' if result.success else 'Needs review'}**",
+        f"- Inferred atoms: `{len(result.inferred_atoms)}`",
+        f"- Satisfiable: `{result.satisfiable}`",
+        "",
+        "| kind | severity | location | message | evidence | fix_suggestion |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    if issues:
+        for issue in issues:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _markdown_cell(issue.kind),
+                        _markdown_cell(issue.severity),
+                        _markdown_cell(issue.location or "-"),
+                        _markdown_cell(issue.message),
+                        _markdown_cell(issue.evidence or "-"),
+                        _markdown_cell(
+                            issue.fix_suggestion
+                            or _suggest_fix(issue.kind, issue.message, issue.evidence)
+                        ),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| - | - | - | No contradictions, ambiguities, or overconstraints detected. | - | - |")
+
+    warnings = [
+        *result.completeness_warnings,
+        *result.vacuity_warnings,
+        *result.warnings,
+        *[f"ERROR: {error}" for error in result.errors],
+    ]
+    if warnings:
+        lines.extend(["", "### Warnings"])
+        lines.extend(f"- {warning}" for warning in warnings[:10])
+    return "\n".join(lines)
+
+
+def _markdown_cell(value: object) -> str:
+    text = str(value).strip().replace("\n", "<br>")
+    text = text.replace("|", "\\|")
+    return text or "-"
+
+
 def _atoms_to_spec_payload(atoms: list[MumeiContractAtom]) -> dict[str, object]:
     return {
         "atoms": [
@@ -1522,6 +1698,7 @@ def _upstream_validation_issues(
                 kind="alignment",
                 message=f"Spec validation issue: {issue.message}",
                 evidence=issue.evidence,
+                fix_suggestion=issue.fix_suggestion,
                 location=issue.location,
                 severity=issue.severity,
             )
@@ -1532,6 +1709,7 @@ def _upstream_validation_issues(
                 kind="alignment",
                 message=f"Code contract validation issue: {issue.message}",
                 evidence=issue.evidence,
+                fix_suggestion=issue.fix_suggestion,
                 location=issue.location,
                 severity=issue.severity,
             )

@@ -88,6 +88,20 @@ class TestCrossValidationTools:
         assert result["inferred_atoms"][0]["requires"] == "x >= 0"
         assert result["verification"] is None
 
+    def test_validate_nl_spec_returns_fix_suggestions(self) -> None:
+        result = _payload(
+            mcp_server.validate_nl_spec(
+                "requires: x > 0 && x < 0; ensures: result == x",
+                use_llm=False,
+                run_mumei=False,
+            )
+        )
+
+        assert result["status"] == "ok"
+        assert result["success"] is False
+        assert result["fix_suggestions"]
+        assert result["overconstraints"][0]["fix_suggestion"]
+
     def test_validate_nl_spec_multi_returns_cross_spec_conflicts(self) -> None:
         result = _payload(
             mcp_server.validate_nl_spec_multi(

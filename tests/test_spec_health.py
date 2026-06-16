@@ -42,6 +42,7 @@ class TestCheckContradiction:
         assert len(result) == 1
         assert result[0].atom == "impossible_x"
         assert "requires_unsat" in result[0].details
+        assert result[0].fix_suggestion
 
     def test_returns_none_for_satisfiable_atom(self) -> None:
         atom_cert = {
@@ -81,6 +82,7 @@ class TestCheckOverConstrained:
         assert result[0].atom == "over"
         assert result[0].unused_requires == ["x > 0"]
         assert result[0].unused_invariants == ["x < 100"]
+        assert result[0].fix_suggestion
 
     def test_returns_none_when_no_unused(self) -> None:
         atom_cert = {
@@ -115,6 +117,7 @@ class TestCheckVacuity:
         assert len(result) == 1
         assert result[0].atom == "weak_spec"
         assert "vacuous" in result[0].message.lower()
+        assert result[0].fix_suggestion
 
     def test_ignores_passed_vacuity(self) -> None:
         verify_result = {
@@ -172,6 +175,7 @@ class TestCheckAll:
         assert report.over_constrained[0].atom == "bad"
         assert len(report.vacuous) == 1
         assert report.vacuous[0].atom == "weak"
+        assert report.fix_suggestions
         assert report.health_score < 1.0
 
     def test_fallback_when_no_atoms_and_failed(self) -> None:
@@ -234,6 +238,7 @@ class TestSpecHealthReport:
         assert d["contradictions"][0]["atom"] == "a"
         assert d["over_constrained"][0]["unused_requires"] == ["r"]
         assert d["vacuous"][0]["message"] == "m"
+        assert "fix_suggestions" in d
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +372,8 @@ class TestMCPCheckSpecHealth:
         assert result["status"] == "ok"
         assert len(result["contradictions"]) == 1
         assert result["contradictions"][0]["atom"] == "impossible"
+        assert result["contradictions"][0]["fix_suggestion"]
+        assert result["fix_suggestions"]
         assert result["health_score"] < 1.0
 
     def test_healthy_spec_returns_perfect_score(self) -> None:

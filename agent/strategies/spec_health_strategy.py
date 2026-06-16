@@ -35,6 +35,7 @@ class ContradictionInfo:
 
     atom: str
     details: str = ""
+    fix_suggestion: str = ""
 
 
 @dataclass
@@ -45,6 +46,7 @@ class OverConstrainedInfo:
     unused_requires: list[str] = field(default_factory=list)
     unused_invariants: list[str] = field(default_factory=list)
     unused_effect_constraints: list[str] = field(default_factory=list)
+    fix_suggestion: str = ""
 
 
 @dataclass
@@ -53,6 +55,7 @@ class VacuousInfo:
 
     atom: str
     message: str = ""
+    fix_suggestion: str = ""
 
 
 @dataclass
@@ -63,6 +66,7 @@ class SpecHealthReport:
     over_constrained: list[OverConstrainedInfo] = field(default_factory=list)
     vacuous: list[VacuousInfo] = field(default_factory=list)
     health_score: float = 1.0
+    fix_suggestions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -96,6 +100,10 @@ class SpecHealthChecker:
             return ContradictionInfo(
                 atom=_string_value(atom_cert.get("name"), "unknown"),
                 details=_string_value(svr.get("contradiction_details")),
+                fix_suggestion=_suggest_health_fix(
+                    "contradiction",
+                    _string_value(svr.get("contradiction_details")),
+                ),
             )
         return None
 
@@ -123,6 +131,11 @@ class SpecHealthChecker:
                 unused_requires=unused_req,
                 unused_invariants=unused_inv,
                 unused_effect_constraints=unused_eff,
+                fix_suggestion=_suggest_overconstrained_fix(
+                    unused_req,
+                    unused_inv,
+                    unused_eff,
+                ),
             )
         return None
 
@@ -135,7 +148,13 @@ class SpecHealthChecker:
                 lower = line.lower()
                 if "vacuous" in lower and "vacuity check passed" not in lower:
                     atom = _extract_atom_from_vacuity_line(line, fallback_atom)
-                    vacuous.append(VacuousInfo(atom=atom, message=line.strip()))
+                    vacuous.append(
+                        VacuousInfo(
+                            atom=atom,
+                            message=line.strip(),
+                            fix_suggestion=_suggest_health_fix("vacuity", line.strip()),
+                        )
+                    )
         return vacuous
 
     def check_all(
@@ -171,6 +190,10 @@ class SpecHealthChecker:
                 contradictions.append(ContradictionInfo(
                     atom="(spec-level)",
                     details=f"Verification failed with {failed_count} failed atom(s)",
+                    fix_suggestion=_suggest_health_fix(
+                        "contradiction",
+                        f"Verification failed with {failed_count} failed atom(s)",
+                    ),
                 ))
 
         total = len(atoms) or 1
@@ -182,6 +205,11 @@ class SpecHealthChecker:
             over_constrained=over_constrained,
             vacuous=vacuous,
             health_score=round(health_score, 4),
+            fix_suggestions=_collect_fix_suggestions(
+                contradictions,
+                over_constrained,
+                vacuous,
+            ),
         )
 
 
@@ -270,6 +298,54 @@ def _extract_atom_from_vacuity_line(line: str, fallback: str) -> str:
             if end >= 0:
                 return line[idx + len(marker):end]
     return fallback
+
+
+def _suggest_health_fix(kind: str, evidence: str) -> str:
+    if kind == "contradiction":
+        return (
+            "Inspect the unsatisfiable constraints and relax one side of the conflict "
+            f"(usually a `requires` bound or an incompatible `ensures` clause): `{evidence}`."
+        )
+    return (
+        "Strengthen the spec so mutated implementations fail verification; add a concrete "
+        f"postcondition, bound, or observable effect for the vacuous behavior: `{evidence}`."
+    )
+
+
+def _suggest_overconstrained_fix(
+    unused_requires: list[str],
+    unused_invariants: list[str],
+    unused_effect_constraints: list[str],
+) -> str:
+    constraints = [*unused_requires, *unused_invariants, *unused_effect_constraints]
+    if not constraints:
+        return "Remove or weaken unused preconditions, invariants, or effect constraints."
+    return (
+        "Remove, weaken, or move these unused constraints to a narrower helper atom: "
+        + ", ".join(f"`{constraint}`" for constraint in constraints[:5])
+    )
+
+
+def _collect_fix_suggestions(
+    contradictions: list[ContradictionInfo],
+    over_constrained: list[OverConstrainedInfo],
+    vacuous: list[VacuousInfo],
+) -> list[str]:
+    suggestions: list[str] = []
+    seen: set[str] = set()
+    for contradiction in contradictions:
+        if contradiction.fix_suggestion and contradiction.fix_suggestion not in seen:
+            seen.add(contradiction.fix_suggestion)
+            suggestions.append(contradiction.fix_suggestion)
+    for issue in over_constrained:
+        if issue.fix_suggestion and issue.fix_suggestion not in seen:
+            seen.add(issue.fix_suggestion)
+            suggestions.append(issue.fix_suggestion)
+    for vacuity in vacuous:
+        if vacuity.fix_suggestion and vacuity.fix_suggestion not in seen:
+            seen.add(vacuity.fix_suggestion)
+            suggestions.append(vacuity.fix_suggestion)
+    return suggestions
 
 
 def main(args: argparse.Namespace | None = None) -> SpecHealthReport:
