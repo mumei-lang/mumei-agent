@@ -265,28 +265,38 @@ def build_self_correct_parser(
     parser.add_argument("--source", help="Mumei .mm source to repair")
     parser.add_argument(
         "--feedback",
-        required=True,
         help="Path to structured feedback JSON, or an inline JSON object.",
     )
+    parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--metadata-output", help="Write self-correction metadata JSON")
     return parser
 
 
 def main_self_correct(
     args: argparse.Namespace | None = None,
-) -> SelfCorrectionLoopResult:
+) -> SelfCorrectionLoopResult | fix_strategy.SelfCorrectionResult:
     if args is None:
         args = build_self_correct_parser().parse_args()
     source = args.source or args.source_file
     if not source:
         raise SystemExit("--source or source_file is required")
     config = AgentConfig()
-    result = run_self_correction_loop(
-        source_path=source,
-        structured_feedback=args.feedback,
-        config=config,
-    )
-    payload = result.to_dict()
+    if args.feedback:
+        result = run_self_correction_loop(
+            source_path=source,
+            structured_feedback=args.feedback,
+            config=config,
+        )
+        payload = result.to_dict()
+    else:
+        mumei_client = create_mumei_client(config.mumei_bin)
+        loop = fix_strategy.SelfCorrectionLoop(
+            max_iterations=args.max_iterations or config.self_correction_max_attempts,
+            convergence_threshold=float(config.self_correction_convergence_threshold),
+        )
+        llm_client = fix_strategy.ConfiguredLossVectorFixClient(config, mumei_client)
+        result = loop.run(Path(source), mumei_client, llm_client)
+        payload = result.to_dict()
     if args.metadata_output:
         Path(args.metadata_output).write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),

@@ -609,6 +609,43 @@ def heal_file(source_code: str = "", error_report: str = "", code_file: str = ""
 
 
 @mcp.tool()
+def self_correct(code_file: str, max_iterations: int = 10) -> str:
+    """P9-F: Self-Correction Protocol - 自己修復ループを実行する."""
+    path = _existing_path_arg(code_file)
+    if path is None or not path.is_file():
+        return _err(f"code_file not found: {code_file}")
+
+    try:
+        from agent.config import AgentConfig
+        from agent.mumei_client import create_mumei_client
+        from agent.strategies.fix_strategy import (
+            ConfiguredLossVectorFixClient,
+            SelfCorrectionLoop,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import self-correction modules: {exc}")
+
+    try:
+        config = AgentConfig()
+        mumei = create_mumei_client(config.mumei_bin)
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY / OPENAI_API_KEY for self_correct",
+        )
+
+    loop = SelfCorrectionLoop(max_iterations=max_iterations)
+    llm = ConfiguredLossVectorFixClient(config, mumei)
+    try:
+        result = loop.run(path, mumei, llm)
+    except Exception as exc:
+        return _err(f"self-correction failed: {exc}")
+    payload = result.to_dict()
+    payload["file"] = str(path)
+    return _ok(payload)
+
+
+@mcp.tool()
 def measure_std_health(mumei_repo: str) -> str:
     """Measure proof-health metrics for the mumei std/ library.
 

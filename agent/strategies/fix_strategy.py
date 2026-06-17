@@ -1,14 +1,17 @@
 """Fix strategy: select prompt template based on violation type and call LLM."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import tempfile
 import warnings
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from openai import OpenAI
 from agent.budget_policy import BudgetPolicy, evaluate_budget
+from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 from agent.pattern_library import PatternLibrary
@@ -37,6 +40,181 @@ _FAILURE_TYPE_MAP = {
 }
 
 _SUPPORTED_LOSS_SCHEMA_VERSION = "p9-de/v1"
+
+
+@dataclass
+class SelfCorrectionResult:
+    success: bool
+    iterations: int
+    stop_reason: str | None = None
+    loss_vector: dict | None = None
+    history: list[dict[str, object]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+class SelfCorrectionLoop:
+    """P9-F generate → verify → loss-vector repair loop."""
+
+    def __init__(
+        self,
+        max_iterations: int = 10,
+        convergence_threshold: float = 0.7,
+    ) -> None:
+        self.max_iterations = max(1, min(max_iterations, 10))
+        self.convergence_threshold = convergence_threshold
+
+    def run(self, code_file: Path, mumei_client, llm_client) -> SelfCorrectionResult:
+        path = Path(code_file)
+        history: list[dict[str, object]] = []
+        last_loss_vector: dict | None = None
+
+        for iteration in range(1, self.max_iterations + 1):
+            verify_result = mumei_client.verify(str(path))
+            all_verified = self._all_verified(verify_result)
+            loss_vector = self._loss_vector(verify_result)
+            last_loss_vector = loss_vector
+            history.append(
+                {
+                    "iteration": iteration,
+                    "all_verified": all_verified,
+                    "has_loss_vector": loss_vector is not None,
+                }
+            )
+            if all_verified:
+                return SelfCorrectionResult(
+                    success=True,
+                    iterations=iteration,
+                    stop_reason="all_verified",
+                    loss_vector=loss_vector,
+                    history=history,
+                )
+            if loss_vector is None:
+                return SelfCorrectionResult(
+                    success=False,
+                    iterations=iteration,
+                    stop_reason="loss_vector_missing",
+                    history=history,
+                )
+            fix = llm_client.fix_with_loss_vector(path, loss_vector)
+            if not fix:
+                return SelfCorrectionResult(
+                    success=False,
+                    iterations=iteration,
+                    stop_reason="no_fix_produced",
+                    loss_vector=loss_vector,
+                    history=history,
+                )
+            path.write_text(fix, encoding="utf-8")
+
+        return SelfCorrectionResult(
+            success=False,
+            iterations=self.max_iterations,
+            stop_reason="max_iterations",
+            loss_vector=last_loss_vector,
+            history=history,
+        )
+
+    @staticmethod
+    def _all_verified(verify_result: dict) -> bool:
+        explicit = verify_result.get("all_verified")
+        if isinstance(explicit, bool):
+            return explicit
+        success = verify_result.get("success")
+        if isinstance(success, bool) and success:
+            return True
+        status = verify_result.get("status")
+        if isinstance(status, str) and status in {
+            "verification_passed",
+            "passed",
+            "success",
+        }:
+            return True
+        report = verify_result.get("report")
+        if isinstance(report, dict):
+            report_status = report.get("status")
+            if isinstance(report_status, str) and report_status in {
+                "verification_passed",
+                "passed",
+                "success",
+            }:
+                return True
+            feedback = report.get("structured_feedback")
+            if isinstance(feedback, dict):
+                feedback_status = feedback.get("status")
+                return feedback_status == "verification_passed"
+        return False
+
+    @staticmethod
+    def _loss_vector(verify_result: dict) -> dict | None:
+        direct = verify_result.get("loss_vector")
+        if isinstance(direct, dict):
+            return direct
+        report = verify_result.get("report")
+        if isinstance(report, dict):
+            report_loss = report.get("loss_vector")
+            if isinstance(report_loss, dict):
+                return report_loss
+            feedback = report.get("structured_feedback")
+            if isinstance(feedback, dict) and feedback.get("status") == "verification_failed":
+                return feedback
+        return None
+
+
+class OpenAILossVectorFixClient:
+    """Adapter exposing ``fix_with_loss_vector`` over the existing get_fix path."""
+
+    def __init__(
+        self,
+        client: OpenAI,
+        model: str,
+        mumei_client: MumeiClient | None = None,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.mumei_client = mumei_client
+
+    def fix_with_loss_vector(self, code_file: Path, loss_vector: dict) -> str:
+        source_code = code_file.read_text(encoding="utf-8")
+        error_log = f"loss_vector:\n{json_dumps_loss_vector(loss_vector)}"
+        report_data = dict(loss_vector)
+        report_data.setdefault("loss_vector", loss_vector)
+        return get_fix(
+            self.client,
+            self.model,
+            source_code,
+            error_log,
+            report_data,
+            mumei_client=self.mumei_client,
+            source_path=str(code_file),
+        )
+
+
+class ConfiguredLossVectorFixClient:
+    """Lazy OpenAI adapter for self-correction loops."""
+
+    def __init__(
+        self,
+        config: AgentConfig,
+        mumei_client: MumeiClient | None = None,
+    ) -> None:
+        self.config = config
+        self.mumei_client = mumei_client
+        self._delegate: OpenAILossVectorFixClient | None = None
+
+    def fix_with_loss_vector(self, code_file: Path, loss_vector: dict) -> str:
+        if self._delegate is None:
+            self._delegate = OpenAILossVectorFixClient(
+                self.config.create_client(),
+                self.config.model,
+                self.mumei_client,
+            )
+        return self._delegate.fix_with_loss_vector(code_file, loss_vector)
+
+
+def json_dumps_loss_vector(loss_vector: dict) -> str:
+    return json.dumps(loss_vector, indent=2, ensure_ascii=False)
 
 
 class CyclicDependencyWarning(UserWarning):

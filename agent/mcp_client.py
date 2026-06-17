@@ -318,6 +318,18 @@ class MumeiMCPClient:
         report = result.get("report") or {}
         if isinstance(report, dict) and (report or spec_code_mapping):
             report.setdefault("spec_code_mapping", spec_code_mapping or [])
+        loss_vector_result: dict[str, Any] = {}
+        if not result.get("success") and isinstance(report, dict):
+            structured_feedback = report.get("structured_feedback")
+            has_loss_vector = isinstance(report.get("loss_vector"), dict) or (
+                isinstance(structured_feedback, dict)
+                and structured_feedback.get("status") == "verification_failed"
+            )
+            if not has_loss_vector:
+                loss_vector_result = self._fallback.verify_loss_vector(source_path)
+                loss_vector = loss_vector_result.get("loss_vector")
+                if isinstance(loss_vector, dict) and loss_vector:
+                    report.setdefault("structured_feedback", loss_vector)
         return {
             "success": result.get("success", False),
             "report": report,
@@ -325,7 +337,12 @@ class MumeiMCPClient:
             "stderr": "" if result.get("success") else result.get("raw", ""),
             "mcp": True,
             "spec_code_mapping": spec_code_mapping or [],
+            "loss_vector": loss_vector_result.get("loss_vector", {}),
         }
+
+    def verify_loss_vector(self, source_path: str) -> dict[str, Any]:
+        """Forward loss-vector verification to the CLI client."""
+        return self._fallback.verify_loss_vector(source_path)
 
     def check(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent)."""

@@ -1,4 +1,5 @@
 """Tests for MumeiClient command construction."""
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from agent.mumei_client import MumeiClient
@@ -95,6 +96,31 @@ def test_verify_includes_spec_code_mapping():
         result = client.verify("test.mm", spec_code_mapping=mapping)
         assert result["spec_code_mapping"] == mapping
         assert result["report"]["spec_code_mapping"] == mapping
+
+
+def test_verify_failure_attaches_loss_vector():
+    """Test verify enriches failed JSON reports with --emit loss-vector output."""
+    client = MumeiClient()
+    loss_vector = {
+        "status": "verification_failed",
+        "error_type": "postcondition_violated",
+        "location": {"file": "test.mm", "line": 1},
+        "reconstruction_loss": {"violated_property": "result > 0"},
+        "feedback_instruction": "repair",
+    }
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout='{"status":"failed"}', stderr="failed"),
+            MagicMock(returncode=1, stdout=json.dumps(loss_vector), stderr="failed"),
+        ]
+        result = client.verify("test.mm")
+        first_call = mock_run.call_args_list[0][0][0]
+        second_call = mock_run.call_args_list[1][0][0]
+        assert first_call == ["mumei", "verify", "--json", "test.mm"]
+        assert second_call == ["mumei", "verify", "--emit", "loss-vector", "test.mm"]
+        assert result["success"] is False
+        assert result["loss_vector"] == loss_vector
+        assert result["report"]["structured_feedback"] == loss_vector
 
 
 def test_verify_command_cargo_run():

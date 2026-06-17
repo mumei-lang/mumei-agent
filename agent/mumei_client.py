@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,6 +15,17 @@ def _decidable_metrics_emit_unsupported(stderr: str) -> bool:
         "invalid value" in text or "unknown" in text or "possible values" in text
     )
     return emit_flag_unsupported or target_unsupported
+
+
+def _report_has_loss_vector(report: dict) -> bool:
+    if not isinstance(report, dict):
+        return False
+    if isinstance(report.get("loss_vector"), dict):
+        return True
+    structured_feedback = report.get("structured_feedback")
+    if isinstance(structured_feedback, dict):
+        return structured_feedback.get("status") == "verification_failed"
+    return False
 
 
 def create_mumei_client(mumei_bin: str = "mumei") -> "MumeiClient":
@@ -121,10 +133,39 @@ class MumeiClient:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
+        if result.returncode != 0 and not _report_has_loss_vector(report):
+            loss_result = self.verify_loss_vector(source_path)
+            loss_vector = loss_result.get("loss_vector")
+            if isinstance(loss_vector, dict) and loss_vector:
+                result_report["loss_vector"] = loss_vector
+                if isinstance(report, dict):
+                    report.setdefault("structured_feedback", loss_vector)
         result_report["spec_code_mapping"] = spec_code_mapping or []
         if isinstance(report, dict) and (report or spec_code_mapping):
             report.setdefault("spec_code_mapping", spec_code_mapping or [])
         return result_report
+
+    def verify_loss_vector(self, source_path: str) -> dict:
+        """Run mumei verify --emit loss-vector and return parsed structured feedback."""
+        cmd = [*self._cmd_prefix, "verify", "--emit", "loss-vector", source_path]
+        env = dict(os.environ)
+        env.setdefault("ENABLE_SELF_CORRECTION", "1")
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        loss_vector = {}
+        if result.stdout.strip():
+            try:
+                parsed = json.loads(result.stdout)
+                if isinstance(parsed, dict):
+                    loss_vector = parsed
+            except json.JSONDecodeError:
+                pass
+        return {
+            "success": result.returncode == 0,
+            "loss_vector": loss_vector,
+            "report": {"structured_feedback": loss_vector} if loss_vector else {},
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
 
     def check(self, source_path: str) -> dict:
         """Run mumei check to verify parsing succeeds.
