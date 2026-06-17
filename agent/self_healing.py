@@ -10,6 +10,7 @@ import sys
 import time
 import datetime
 import fcntl
+import warnings
 from pathlib import Path
 
 from agent.budget_policy import (
@@ -25,7 +26,12 @@ from agent.meta_architect import MetaArchitect
 from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
 from agent.pattern_library import PatternLibrary
-from agent.strategies.fix_strategy import get_fix
+from agent.strategies.fix_strategy import (
+    _aggregate_heal_results,
+    build_dependency_graph,
+    get_fix,
+    topological_sort_files,
+)
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.cegis_loop import (
     CEGISLoop,
@@ -49,6 +55,67 @@ from agent.thought_log import (
 
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
+
+
+def _run_directory_heal(
+    source_path: Path,
+    args: argparse.Namespace,
+    argv0: str,
+) -> dict:
+    mm_files = sorted(source_path.rglob("*.mm"))
+    if not mm_files:
+        return {
+            "success": False,
+            "total_files": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "files": [],
+            "error": f"no .mm files found under {source_path}",
+        }
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        graph = build_dependency_graph(mm_files)
+        ordered_files = topological_sort_files(graph)
+
+    results: list[dict] = []
+    original_argv = list(sys.argv)
+    try:
+        for path in ordered_files:
+            next_argv = [argv0, str(path)]
+            if args.max_retries is not None:
+                next_argv.extend(["--max-retries", str(args.max_retries)])
+            if args.strategy is not None:
+                next_argv.extend(["--strategy", args.strategy])
+            if args.budget_policy is not None:
+                next_argv.extend(["--budget-policy", args.budget_policy])
+            sys.argv = next_argv
+            try:
+                main()
+                results.append({"file": str(path), "success": True, "attempts": 0})
+            except SystemExit as exc:
+                results.append(
+                    {
+                        "file": str(path),
+                        "success": exc.code in (0, None),
+                        "attempts": 0,
+                        "error": (
+                            None if exc.code in (0, None) else f"exit code {exc.code}"
+                        ),
+                    }
+                )
+    finally:
+        sys.argv = original_argv
+
+    payload = _aggregate_heal_results(results)
+    payload["ordered_files"] = [str(path) for path in ordered_files]
+    if captured:
+        payload["warnings"] = [str(item.message) for item in captured]
+        payload["manual_review_required"] = {
+            "reason": "cyclic_dependency",
+            "warnings": payload["warnings"],
+        }
+    return payload
 
 
 def sync_to_visualizer(report_data: dict, *, enabled: bool = True) -> None:
@@ -101,7 +168,12 @@ def main() -> None:
         "source_file",
         nargs="?",
         default="examples/sword_test.mm",
-        help="Path to the .mm source file to heal (default: examples/sword_test.mm)",
+        help=(
+            "Path to a .mm source file or directory to heal "
+            "(default: examples/sword_test.mm). Directories are searched "
+            "recursively and processed in dependency-first order; runtime may "
+            "exceed N× single-file healing due to dependency resolution."
+        ),
     )
     parser.add_argument(
         "--max-retries",
@@ -145,6 +217,13 @@ def main() -> None:
 
     source_file = args.source_file
     source_path = Path(source_file)
+    if args.generate is None and source_path.is_dir():
+        payload = _run_directory_heal(source_path, args, sys.argv[0])
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        if not payload.get("success"):
+            sys.exit(1)
+        return
+
     config = AgentConfig()
     if args.strategy is not None:
         config.strategy = args.strategy

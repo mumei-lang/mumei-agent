@@ -90,6 +90,170 @@ def _parse_spec_files(spec_files: Any) -> list[str]:
     return [part.strip() for part in text.split(",") if part.strip()]
 
 
+def _parse_error_report(error_report: str) -> tuple[dict[str, Any], str]:
+    if not error_report:
+        return {}, ""
+    try:
+        parsed = json.loads(error_report)
+    except json.JSONDecodeError:
+        return {"raw": error_report}, error_report
+    if isinstance(parsed, dict):
+        return parsed, error_report
+    return {"raw": parsed}, error_report
+
+
+def _existing_path_arg(value: str) -> Path | None:
+    if not value or "\n" in value or len(value) > 4096:
+        return None
+    try:
+        candidate = Path(value).expanduser()
+        if candidate.exists():
+            return candidate.resolve()
+    except OSError:
+        return None
+    return None
+
+
+def _heal_single_file(
+    code_file: Path,
+    *,
+    error_report: str = "",
+    config: Any | None = None,
+    client: Any | None = None,
+    mumei: Any | None = None,
+) -> dict[str, Any]:
+    """Heal one on-disk ``.mm`` file and overwrite it with the candidate fix."""
+    try:
+        from agent.config import AgentConfig
+        from agent.mumei_client import create_mumei_client
+        from agent.strategies import fix_strategy
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"file": str(code_file), "success": False, "attempts": 0, "error": str(exc)}
+
+    try:
+        config = config or AgentConfig()
+        client = client or config.create_client()
+        mumei = mumei or create_mumei_client(config.mumei_bin)
+    except Exception as exc:
+        return {
+            "file": str(code_file),
+            "success": False,
+            "attempts": 0,
+            "error": f"AgentConfig is unavailable: {exc}",
+            "hint": "set LLM_API_KEY / OPENAI_API_KEY for heal_file",
+        }
+
+    try:
+        source_code = code_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {"file": str(code_file), "success": False, "attempts": 0, "error": str(exc)}
+
+    report_data, error_log = _parse_error_report(error_report)
+    if not error_report:
+        try:
+            verify = mumei.verify(str(code_file))
+        except Exception as exc:
+            verify = {"success": False, "stdout": "", "stderr": str(exc), "report": {}}
+        report_data = verify.get("report") or {}
+        error_log = verify.get("stderr") or verify.get("stdout") or ""
+        if verify.get("success"):
+            return {
+                "file": str(code_file),
+                "success": True,
+                "attempts": 0,
+                "note": "source already verifies; no heal needed",
+            }
+
+    try:
+        healed = fix_strategy.get_fix(
+            client=client,
+            model=config.model,
+            source_code=source_code,
+            error_log=error_log or "",
+            report_data=report_data,
+            strategy=getattr(config, "strategy", "single"),
+            mumei_client=mumei,
+            source_path=str(code_file),
+        )
+    except Exception as exc:
+        return {"file": str(code_file), "success": False, "attempts": 1, "error": str(exc)}
+
+    if not healed:
+        return {
+            "file": str(code_file),
+            "success": False,
+            "attempts": 1,
+            "error": "fix strategy returned an empty candidate",
+            "manual_review_required": report_data.get("manual_review_required"),
+        }
+
+    try:
+        code_file.write_text(healed, encoding="utf-8")
+    except OSError as exc:
+        return {"file": str(code_file), "success": False, "attempts": 1, "error": str(exc)}
+
+    return {
+        "file": str(code_file),
+        "success": True,
+        "attempts": 1,
+        "healed_code": healed,
+    }
+
+
+def _heal_directory(code_dir: Path, error_report: str = "") -> str:
+    try:
+        from agent.config import AgentConfig
+        from agent.mumei_client import create_mumei_client
+        from agent.strategies.fix_strategy import (
+            _aggregate_heal_results,
+            build_dependency_graph,
+            topological_sort_files,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(f"failed to import agent modules: {exc}")
+
+    mm_files = sorted(code_dir.rglob("*.mm"))
+    if not mm_files:
+        return _err(f"no .mm files found under {code_dir}")
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        graph = build_dependency_graph(mm_files)
+        ordered_files = topological_sort_files(graph)
+
+    try:
+        config = AgentConfig()
+        client = config.create_client()
+        mumei = create_mumei_client(config.mumei_bin)
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY / OPENAI_API_KEY for heal_file",
+        )
+
+    results = [
+        _heal_single_file(
+            path,
+            error_report=error_report,
+            config=config,
+            client=client,
+            mumei=mumei,
+        )
+        for path in ordered_files
+    ]
+    payload = _aggregate_heal_results(results)
+    payload["ordered_files"] = [str(path) for path in ordered_files]
+    if captured:
+        payload["warnings"] = [str(item.message) for item in captured]
+        payload["manual_review_required"] = {
+            "reason": "cyclic_dependency",
+            "warnings": payload["warnings"],
+        }
+    return _ok(payload)
+
+
 _SPEC_GUIDELINES: dict[str, Any] = {
     "summary": "Prefer the Z3-stable decidable fragment before escalating to Lean.",
     "fragment_catalog": [
@@ -295,14 +459,17 @@ def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
 
 
 @mcp.tool()
-def heal_file(source_code: str, error_report: str = "") -> str:
-    """Self-heal mumei source code via the LLM-driven fix strategy.
+def heal_file(source_code: str = "", error_report: str = "", code_file: str = "") -> str:
+    """Self-heal mumei source code or an on-disk file/directory.
 
     Args:
-        source_code: The current ``.mm`` source code to repair.
+        source_code: The current ``.mm`` source code to repair. For backward
+            compatibility, this may also be an existing file or directory path.
         error_report: Optional verification error report to seed the
             prompt.  When omitted, the agent runs ``mumei verify`` first
             and uses the resulting report.
+        code_file: Optional path to a ``.mm`` file or directory. Directories
+            are searched recursively and healed in dependency-first order.
 
     Returns:
         JSON string with ``healed_code``, ``attempts``, ``success``,
@@ -310,6 +477,28 @@ def heal_file(source_code: str, error_report: str = "") -> str:
         to be configured (LLM_API_KEY etc.); errors out cleanly with a
         descriptive ``hint`` field otherwise.
     """
+    target_arg = (code_file or "").strip()
+    if target_arg:
+        target_path = _existing_path_arg(target_arg)
+        if target_path is None:
+            return _err(f"code_file not found: {target_arg}")
+    else:
+        target_path = _existing_path_arg((source_code or "").strip())
+
+    if target_path is not None:
+        if target_path.is_dir():
+            return _heal_directory(target_path, error_report=error_report)
+        if target_path.is_file():
+            result = _heal_single_file(target_path, error_report=error_report)
+            from agent.strategies.fix_strategy import _aggregate_heal_results
+
+            payload = _aggregate_heal_results([result])
+            payload["file"] = str(target_path)
+            if result.get("healed_code"):
+                payload["healed_code"] = result["healed_code"]
+            return _ok(payload)
+        return _err(f"code_file must be a file or directory: {target_path}")
+
     if not source_code or not source_code.strip():
         return _err("source_code must be non-empty")
 
