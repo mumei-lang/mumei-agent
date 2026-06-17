@@ -113,6 +113,9 @@ uv run mumei-agent heal examples/effect_test.mm
 # Optional: bound retries with an explicit P8-G budget policy
 uv run mumei-agent heal examples/effect_test.mm --budget-policy budget_policy.json
 
+# P9-F: repair with mumei Loss Vector feedback
+uv run mumei-agent self-correct examples/effect_test.mm --max-iterations 3
+
 # 5. Generate new code from a specification
 uv run mumei-agent generate --spec-file examples/spec.json --output out.mm
 
@@ -191,6 +194,41 @@ MCP クライアントからは同じ導線を `scan_and_fix` で呼び出せま
 ```bash
 mumei-agent validate-code --input src/foo.py --language python
 mumei-agent validate-spec-to-code --spec specs/foo.txt --code src/foo.py --language python
+```
+
+## P9 NLAE Integration
+
+P9-F and P9-G connect mumei-agent to the four-repository NLAE pipeline:
+
+```text
+spec / intent
+  ↓
+mumei-agent NLAEPipeline (Module A / AV)
+  ↓ generated .mm
+mumei verify --emit loss-vector (Module B / AR)
+  ↓ Loss Vector JSON
+mumei-agent self-correct
+  ↓ proof certificate
+mumei-lean Fidelity Checker
+  ↓
+mumei-demo Evaluation Loop
+```
+
+Run the Loss Vector driven self-correction loop directly:
+
+```bash
+uv run mumei-agent self-correct examples/effect_test.mm --max-iterations 3
+```
+
+MCP clients can run the full P9-G integration with `run_nlae_pipeline`:
+
+```json
+{
+  "spec": "vault withdraw safety",
+  "mumei_lean_repo": "../mumei-lean",
+  "work_dir": ".nlae-work",
+  "no_build": true
+}
 ```
 
 ## Configuration
@@ -388,6 +426,7 @@ See `.env.example` for configuration details.
 | Command | Description | Example |
 |---|---|---|
 | `heal` (default) | Self-healing loop for existing .mm files | `mumei-agent heal examples/sword_test.mm` |
+| `self-correct` | P9-F Loss Vector driven self-correction loop | `mumei-agent self-correct examples/effect_test.mm --max-iterations 3` |
 | `generate` | Generate new .mm code from spec JSON | `mumei-agent generate --spec-file spec.json --output out.mm` |
 | `audit` | Audit existing code or directories: extract spec, check health, verify contracts, detect cross-validation gaps | `mumei-agent audit --code-file src/ --auto-migrate --auto-heal` |
 | `migrate-suggest` | Generate .mm migration skeletons for functions with verification issues | `mumei-agent migrate-suggest --code-file src/foo.py --language python` |
@@ -426,6 +465,8 @@ Exported tools:
 | `check_spec_contradiction(natural_language, domain_hint="")` | Extract a natural-language spec and return direct contradiction findings without code generation |
 | `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files |
 | `validate_code(code, language, use_llm=true, run_mumei=true)` | Infer and verify contracts from existing code (Python, Rust, Go) |
+| `self_correct(code_file, max_iterations=10)` | Run the P9-F Loss Vector self-correction loop for a `.mm` file |
+| `run_nlae_pipeline(spec, mumei_lean_repo="", work_dir="", no_build=false)` | Run the P9-G NLAE pipeline: generate `.mm`, verify with `--emit loss-vector`, self-correct, then call the Lean Fidelity Checker |
 
 `check_cross_spec_consistency` delegates to `mumei verify --cross-spec-files` and returns the parsed `cross_spec.json`, including contract consistency, global invariant conflicts, source file names, and dependency cycles.
 
