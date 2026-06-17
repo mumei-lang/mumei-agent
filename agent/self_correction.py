@@ -274,7 +274,7 @@ def build_self_correct_parser(
 
 def main_self_correct(
     args: argparse.Namespace | None = None,
-) -> SelfCorrectionLoopResult:
+) -> SelfCorrectionLoopResult | fix_strategy.SelfCorrectionResult:
     if args is None:
         args = build_self_correct_parser().parse_args()
     source = args.source or args.source_file
@@ -290,16 +290,11 @@ def main_self_correct(
         payload = result.to_dict()
     else:
         mumei_client = create_mumei_client(config.mumei_bin)
-        client = config.create_client()
         loop = fix_strategy.SelfCorrectionLoop(
             max_iterations=args.max_iterations or config.self_correction_max_attempts,
             convergence_threshold=float(config.self_correction_convergence_threshold),
         )
-        llm_client = fix_strategy.OpenAILossVectorFixClient(
-            client,
-            config.model,
-            mumei_client,
-        )
+        llm_client = fix_strategy.ConfiguredLossVectorFixClient(config, mumei_client)
         result = loop.run(Path(source), mumei_client, llm_client)
         payload = result.to_dict()
     if args.metadata_output:

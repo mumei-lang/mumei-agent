@@ -619,7 +619,7 @@ def self_correct(code_file: str, max_iterations: int = 10) -> str:
         from agent.config import AgentConfig
         from agent.mumei_client import create_mumei_client
         from agent.strategies.fix_strategy import (
-            OpenAILossVectorFixClient,
+            ConfiguredLossVectorFixClient,
             SelfCorrectionLoop,
         )
     except Exception as exc:  # pragma: no cover - defensive
@@ -627,7 +627,6 @@ def self_correct(code_file: str, max_iterations: int = 10) -> str:
 
     try:
         config = AgentConfig()
-        client = config.create_client()
         mumei = create_mumei_client(config.mumei_bin)
     except Exception as exc:
         return _err(
@@ -636,7 +635,7 @@ def self_correct(code_file: str, max_iterations: int = 10) -> str:
         )
 
     loop = SelfCorrectionLoop(max_iterations=max_iterations)
-    llm = OpenAILossVectorFixClient(client, config.model, mumei)
+    llm = ConfiguredLossVectorFixClient(config, mumei)
     try:
         result = loop.run(path, mumei, llm)
     except Exception as exc:

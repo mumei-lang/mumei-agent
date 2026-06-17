@@ -1,16 +1,17 @@
 """Fix strategy: select prompt template based on violation type and call LLM."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import tempfile
 import warnings
-import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from openai import OpenAI
 from agent.budget_policy import BudgetPolicy, evaluate_budget
+from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 from agent.pattern_library import PatternLibrary
@@ -188,6 +189,28 @@ class OpenAILossVectorFixClient:
             mumei_client=self.mumei_client,
             source_path=str(code_file),
         )
+
+
+class ConfiguredLossVectorFixClient:
+    """Lazy OpenAI adapter for self-correction loops."""
+
+    def __init__(
+        self,
+        config: AgentConfig,
+        mumei_client: MumeiClient | None = None,
+    ) -> None:
+        self.config = config
+        self.mumei_client = mumei_client
+        self._delegate: OpenAILossVectorFixClient | None = None
+
+    def fix_with_loss_vector(self, code_file: Path, loss_vector: dict) -> str:
+        if self._delegate is None:
+            self._delegate = OpenAILossVectorFixClient(
+                self.config.create_client(),
+                self.config.model,
+                self.mumei_client,
+            )
+        return self._delegate.fix_with_loss_vector(code_file, loss_vector)
 
 
 def json_dumps_loss_vector(loss_vector: dict) -> str:
