@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from agent.config import AgentConfig
 from agent.self_correction import StructuredFeedbackSelfCorrectionLoop
+from agent.strategies.fix_strategy import SelfCorrectionLoop
 
 
 class FakeMumeiClient:
@@ -17,6 +18,36 @@ class FakeMumeiClient:
         result = self.results[min(self.index, len(self.results) - 1)]
         self.index += 1
         return result
+
+
+class FakeLossVectorLLM:
+    def __init__(self, fixes: list[str]) -> None:
+        self.fixes = fixes
+        self.calls: list[dict[str, object]] = []
+
+    def fix_with_loss_vector(self, code_file: Path, loss_vector: dict) -> str:
+        self.calls.append({"code_file": code_file, "loss_vector": loss_vector})
+        return self.fixes[min(len(self.calls) - 1, len(self.fixes) - 1)]
+
+
+def loss_vector_result(case_id: int = 0) -> dict[str, object]:
+    return {
+        "all_verified": False,
+        "loss_vector": {
+            "status": "verification_failed",
+            "error_type": "postcondition_violated",
+            "location": {"file": "sample.mm", "line": 1},
+            "reconstruction_loss": {
+                "violated_property": "result > 0",
+                "counter_example": {"case": case_id},
+            },
+            "feedback_instruction": "Repair using the counterexample.",
+        },
+    }
+
+
+def all_verified_result() -> dict[str, object]:
+    return {"all_verified": True}
 
 
 def failed_result(case_id: int = 0) -> dict[str, object]:
@@ -63,6 +94,59 @@ def passed_result() -> dict[str, object]:
             }
         },
     }
+
+
+def test_loss_vector_self_correction_loop_stops_when_all_verified(tmp_path: Path) -> None:
+    source = tmp_path / "sample.mm"
+    source.write_text("broken", encoding="utf-8")
+    llm = FakeLossVectorLLM(["fixed"])
+    loop = SelfCorrectionLoop(max_iterations=10)
+
+    result = loop.run(
+        source,
+        FakeMumeiClient([loss_vector_result(), all_verified_result()]),
+        llm,
+    )
+
+    assert result.success
+    assert result.iterations == 2
+    assert result.stop_reason == "all_verified"
+    assert len(llm.calls) == 1
+    assert source.read_text(encoding="utf-8") == "fixed"
+
+
+def test_loss_vector_self_correction_loop_stops_at_max_iterations(tmp_path: Path) -> None:
+    source = tmp_path / "sample.mm"
+    source.write_text("broken", encoding="utf-8")
+    llm = FakeLossVectorLLM(["still broken"])
+    loop = SelfCorrectionLoop(max_iterations=3)
+
+    result = loop.run(
+        source,
+        FakeMumeiClient([loss_vector_result(1), loss_vector_result(2), loss_vector_result(3)]),
+        llm,
+    )
+
+    assert not result.success
+    assert result.iterations == 3
+    assert result.stop_reason == "max_iterations"
+    assert len(llm.calls) == 3
+
+
+def test_loss_vector_self_correction_loop_gracefully_stops_without_loss_vector(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "sample.mm"
+    source.write_text("broken", encoding="utf-8")
+    llm = FakeLossVectorLLM(["unused"])
+    loop = SelfCorrectionLoop(max_iterations=10)
+
+    result = loop.run(source, FakeMumeiClient([{"all_verified": False}]), llm)
+
+    assert not result.success
+    assert result.iterations == 1
+    assert result.stop_reason == "loss_vector_missing"
+    assert len(llm.calls) == 0
 
 
 def test_self_correction_loop_converges_after_two_successes(tmp_path: Path) -> None:

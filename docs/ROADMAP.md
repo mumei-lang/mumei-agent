@@ -410,6 +410,15 @@ Phase 1 統合デモ用の forge タスク。
 - ✅ `forge_tasks/vstd_settlement.json` — RTGS Settlement (Phase 2 Demo, Complete)
 - ✅ `forge_tasks/vstd_regtech.json` — RegTech Compliance (Phase 3 Demo)
 
+### P9-F: Self-Correction Protocol ✅ Implemented
+
+生成 → 検証 → Loss Vector 反例出力 → LLM 修正 → 再検証の自己修復ループ。
+
+- ✅ `agent.strategies.fix_strategy.SelfCorrectionLoop` — `all_verified` 収束、最大イテレーション停止、`loss_vector` 欠落時の graceful stop
+- ✅ `python -m agent self-correct <file.mm>` — P9-F ループ実行 CLI（`--feedback` 指定時は既存 structured-feedback ループも継続利用可）
+- ✅ `self_correct` MCP tool — 外部エージェントから P9-F ループを実行
+- ✅ `tests/test_self_correction.py` — 収束 / 最大イテレーション / `loss_vector is None` の停止条件を fixture で検証
+
 ---
 
 ## SI-5: Self-Improving Standard Library (Phase 2) — ✅ Implemented
