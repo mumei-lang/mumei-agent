@@ -82,6 +82,31 @@ def test_cycle_emits_warning_and_keeps_all_files(tmp_path: Path) -> None:
     assert set(ordered) == {left.resolve(), right.resolve()}
 
 
+def test_directory_heal_routes_cycles_to_manual_review(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    left = tmp_path / "left.mm"
+    right = tmp_path / "right.mm"
+    left.write_text("import right;\n", encoding="utf-8")
+    right.write_text("import left;\n", encoding="utf-8")
+    healed: list[Path] = []
+
+    def fake_heal_single_file(path: Path, **_kwargs) -> dict:
+        healed.append(path)
+        return {"file": str(path), "success": True, "attempts": 1}
+
+    monkeypatch.setattr(mcp_server, "_heal_single_file", fake_heal_single_file)
+
+    result = _payload(mcp_server._heal_directory(tmp_path))
+
+    assert result["status"] == "ok"
+    assert result["success"] is False
+    assert result["failed"] == 2
+    assert result["manual_review_required"]["reason"] == "cyclic_dependency"
+    assert healed == []
+
+
 def test_aggregate_heal_results_formats_summary() -> None:
     result = _aggregate_heal_results(
         [

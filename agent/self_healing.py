@@ -78,6 +78,30 @@ def _run_directory_heal(
         graph = build_dependency_graph(mm_files)
         ordered_files = topological_sort_files(graph)
 
+    if captured:
+        warnings_payload = [str(item.message) for item in captured]
+        results = [
+            {
+                "file": str(path),
+                "success": False,
+                "attempts": 0,
+                "error": "cyclic dependency requires manual review",
+                "manual_review_required": {
+                    "reason": "cyclic_dependency",
+                    "warnings": warnings_payload,
+                },
+            }
+            for path in ordered_files
+        ]
+        payload = _aggregate_heal_results(results)
+        payload["ordered_files"] = [str(path) for path in ordered_files]
+        payload["warnings"] = warnings_payload
+        payload["manual_review_required"] = {
+            "reason": "cyclic_dependency",
+            "warnings": warnings_payload,
+        }
+        return payload
+
     results: list[dict] = []
     original_argv = list(sys.argv)
     try:
@@ -109,12 +133,6 @@ def _run_directory_heal(
 
     payload = _aggregate_heal_results(results)
     payload["ordered_files"] = [str(path) for path in ordered_files]
-    if captured:
-        payload["warnings"] = [str(item.message) for item in captured]
-        payload["manual_review_required"] = {
-            "reason": "cyclic_dependency",
-            "warnings": payload["warnings"],
-        }
     return payload
 
 

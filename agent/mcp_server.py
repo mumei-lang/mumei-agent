@@ -223,6 +223,30 @@ def _heal_directory(code_dir: Path, error_report: str = "") -> str:
         graph = build_dependency_graph(mm_files)
         ordered_files = topological_sort_files(graph)
 
+    if captured:
+        warnings_payload = [str(item.message) for item in captured]
+        results = [
+            {
+                "file": str(path),
+                "success": False,
+                "attempts": 0,
+                "error": "cyclic dependency requires manual review",
+                "manual_review_required": {
+                    "reason": "cyclic_dependency",
+                    "warnings": warnings_payload,
+                },
+            }
+            for path in ordered_files
+        ]
+        payload = _aggregate_heal_results(results)
+        payload["ordered_files"] = [str(path) for path in ordered_files]
+        payload["warnings"] = warnings_payload
+        payload["manual_review_required"] = {
+            "reason": "cyclic_dependency",
+            "warnings": warnings_payload,
+        }
+        return _ok(payload)
+
     try:
         config = AgentConfig()
         client = config.create_client()
@@ -245,12 +269,6 @@ def _heal_directory(code_dir: Path, error_report: str = "") -> str:
     ]
     payload = _aggregate_heal_results(results)
     payload["ordered_files"] = [str(path) for path in ordered_files]
-    if captured:
-        payload["warnings"] = [str(item.message) for item in captured]
-        payload["manual_review_required"] = {
-            "reason": "cyclic_dependency",
-            "warnings": payload["warnings"],
-        }
     return _ok(payload)
 
 
