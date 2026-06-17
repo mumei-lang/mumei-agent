@@ -812,7 +812,7 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 - [mumei-lang/mumei `docs/ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/ROADMAP.md) — Compiler strategic roadmap
 - [mumei-lang/mumei `docs/REPORT_SCHEMA.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md) — report.json schema (consumed by agent)
 
-## P-Deferred-A: heal コマンドの複数ファイル対応 — ⏸️ Deferred (PR #285/#121 完了後)
+## P-Deferred-A: heal コマンドの複数ファイル対応 — ✅ Implemented
 
 ### 対応しない理由
 

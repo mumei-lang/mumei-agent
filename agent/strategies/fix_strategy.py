@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import tempfile
+import warnings
 from pathlib import Path
 
 from openai import OpenAI
@@ -36,6 +37,163 @@ _FAILURE_TYPE_MAP = {
 }
 
 _SUPPORTED_LOSS_SCHEMA_VERSION = "p9-de/v1"
+
+
+class CyclicDependencyWarning(UserWarning):
+    """Dependency graph contains a cycle; order requires manual review."""
+
+
+_IMPORT_RE = re.compile(
+    r"""^\s*(?:import|from|use)\s+(?P<target>["'][^"']+["']|[A-Za-z0-9_./:-]+)"""
+)
+
+
+def _parse_import_targets(source: str) -> list[str]:
+    targets: list[str] = []
+    for line in source.splitlines():
+        code = line.split("//", 1)[0].split("#", 1)[0].strip()
+        if not code:
+            continue
+        match = _IMPORT_RE.match(code)
+        if match is None:
+            continue
+        target = match.group("target").strip().rstrip(";")
+        if (target.startswith('"') and target.endswith('"')) or (
+            target.startswith("'") and target.endswith("'")
+        ):
+            target = target[1:-1]
+        if target:
+            targets.append(target)
+    return targets
+
+
+def _candidate_import_paths(
+    importing_file: Path,
+    target: str,
+    roots: set[Path],
+) -> list[Path]:
+    candidates: list[Path] = []
+    raw = Path(target)
+    if raw.suffix == ".mm" or "/" in target:
+        candidates.append(raw if raw.is_absolute() else importing_file.parent / raw)
+        for root in roots:
+            candidates.append(root / raw)
+
+    module = target.replace("::", ".").replace(".", "/")
+    module_path = Path(module)
+    for root in roots | {importing_file.parent}:
+        candidates.append(root / module_path.with_suffix(".mm"))
+        candidates.append(root / module_path / "mod.mm")
+    return candidates
+
+
+def build_dependency_graph(mm_files: list[Path]) -> dict[Path, list[Path]]:
+    """Build a dependency graph where each file points to imported local files."""
+    files = sorted({path.resolve() for path in mm_files})
+    file_set = set(files)
+    roots = {path.parent for path in files}
+    graph: dict[Path, list[Path]] = {path: [] for path in files}
+
+    for path in files:
+        try:
+            targets = _parse_import_targets(path.read_text(encoding="utf-8"))
+        except OSError:
+            targets = []
+        dependencies: list[Path] = []
+        for target in targets:
+            for candidate in _candidate_import_paths(path, target, roots):
+                resolved = candidate.resolve()
+                if (
+                    resolved in file_set
+                    and resolved != path
+                    and resolved not in dependencies
+                ):
+                    dependencies.append(resolved)
+                    break
+        graph[path] = sorted(dependencies)
+    return graph
+
+
+def topological_sort_files(graph: dict[Path, list[Path]]) -> list[Path]:
+    """Return files in dependency-first order."""
+    permanent: set[Path] = set()
+    temporary: set[Path] = set()
+    ordered: list[Path] = []
+    cycle_nodes: set[Path] = set()
+
+    def visit(node: Path, stack: list[Path]) -> None:
+        if node in permanent:
+            return
+        if node in temporary:
+            if node in stack:
+                cycle_nodes.update(stack[stack.index(node):])
+            else:
+                cycle_nodes.add(node)
+            return
+        temporary.add(node)
+        stack.append(node)
+        for dependency in sorted(graph.get(node, [])):
+            visit(dependency, stack)
+        stack.pop()
+        temporary.remove(node)
+        permanent.add(node)
+        ordered.append(node)
+
+    for node in sorted(graph):
+        visit(node, [])
+
+    if cycle_nodes:
+        cycle = ", ".join(str(path) for path in sorted(cycle_nodes))
+        warnings.warn(
+            f"cyclic .mm dependency detected; manual review required: {cycle}",
+            CyclicDependencyWarning,
+            stacklevel=2,
+        )
+    return ordered
+
+
+def _aggregate_heal_results(results: list[dict]) -> dict:
+    """Aggregate per-file heal results into a stable summary payload."""
+    files: list[dict[str, object]] = []
+    succeeded = 0
+    failed = 0
+    manual_review: list[object] = []
+
+    for result in results:
+        success = bool(result.get("success"))
+        if success:
+            succeeded += 1
+        else:
+            failed += 1
+        entry: dict[str, object] = {
+            "file": str(
+                result.get("file")
+                or result.get("code_file")
+                or result.get("path")
+                or ""
+            ),
+            "success": success,
+            "attempts": int(result.get("attempts") or 0),
+        }
+        if result.get("error"):
+            entry["error"] = str(result["error"])
+        if result.get("note"):
+            entry["note"] = str(result["note"])
+        if result.get("manual_review_required"):
+            entry["manual_review_required"] = result["manual_review_required"]
+            manual_review.append(result["manual_review_required"])
+        files.append(entry)
+
+    payload: dict[str, object] = {
+        "success": failed == 0,
+        "total_files": len(results),
+        "succeeded": succeeded,
+        "failed": failed,
+        "files": files,
+    }
+    if manual_review:
+        payload["manual_review_required"] = manual_review
+    return payload
 
 
 def _nested_dict(value: object) -> dict[str, object] | None:

@@ -392,7 +392,7 @@ def main() -> None:
     elif command == "heal":
         from agent.self_healing import main as heal_main
         # Strip the 'heal' subcommand so self_healing's own argparse
-        # sees only its arguments (e.g. ['agent', 'file.mm', ...]).
+        # sees file or directory targets (e.g. ['agent', 'path/to/std', ...]).
         sys.argv = [sys.argv[0]] + argv[1:]
         heal_main()
     else:
