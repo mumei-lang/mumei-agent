@@ -28,6 +28,28 @@ def _report_has_loss_vector(report: dict) -> bool:
     return False
 
 
+def _parse_json_object_from_output(output: str) -> dict:
+    text = output.strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and not text[index + end:].strip():
+            return parsed
+    return {}
+
+
 def create_mumei_client(mumei_bin: str = "mumei") -> "MumeiClient":
     """Return a verifier client honoring the ``USE_MCP_CLIENT`` flag.
 
@@ -151,14 +173,7 @@ class MumeiClient:
         env = dict(os.environ)
         env.setdefault("ENABLE_SELF_CORRECTION", "1")
         result = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        loss_vector = {}
-        if result.stdout.strip():
-            try:
-                parsed = json.loads(result.stdout)
-                if isinstance(parsed, dict):
-                    loss_vector = parsed
-            except json.JSONDecodeError:
-                pass
+        loss_vector = _parse_json_object_from_output(result.stdout)
         return {
             "success": result.returncode == 0,
             "loss_vector": loss_vector,

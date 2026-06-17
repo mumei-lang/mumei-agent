@@ -419,6 +419,15 @@ Phase 1 統合デモ用の forge タスク。
 - ✅ `self_correct` MCP tool — 外部エージェントから P9-F ループを実行
 - ✅ `tests/test_self_correction.py` — 収束 / 最大イテレーション / `loss_vector is None` の停止条件を fixture で検証
 
+### P9-G: Ecosystem Integration ✅ Implemented
+
+4 リポジトリを NLAE コンポーネントとして接続する E2E pipeline。
+
+- ✅ `agent/nlae_pipeline.py` — Module A (AV) の生成、Module B (AR) の `verify --emit loss-vector`、P9-F 自己修復、mumei-lean Fidelity Checker を順に実行
+- ✅ `run_nlae_pipeline` MCP tool — 外部エージェントから P9-G pipeline を起動
+- ✅ `tests/test_nlae_pipeline.py` — E2E pipeline、Loss Vector 受け渡し、Lean fallback 呼び出しを fixture で検証
+- ✅ P9-D/E/F/G の完了により P9 NLAE integration milestone を完了
+
 ---
 
 ## SI-5: Self-Improving Standard Library (Phase 2) — ✅ Implemented

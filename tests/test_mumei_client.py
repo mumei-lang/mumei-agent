@@ -123,6 +123,23 @@ def test_verify_failure_attaches_loss_vector():
         assert result["report"]["structured_feedback"] == loss_vector
 
 
+def test_verify_loss_vector_parses_json_after_metrics():
+    """Test --emit loss-vector output tolerates compiler metrics prefix."""
+    client = MumeiClient()
+    loss_vector = {
+        "status": "verification_failed",
+        "error_type": "postcondition_violated",
+    }
+    stdout = "  [metrics] atom 'demo' verification phases:\n" + json.dumps(loss_vector)
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=1, stdout=stdout, stderr="")
+
+        result = client.verify_loss_vector("test.mm")
+
+        assert result["success"] is False
+        assert result["loss_vector"] == loss_vector
+
+
 def test_verify_command_cargo_run():
     """Test that cargo run style invocation splits correctly."""
     client = MumeiClient("cargo run --manifest-path /path/Cargo.toml --")

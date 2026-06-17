@@ -54,6 +54,7 @@ class TestGetAgentStatus:
             "send_latent_message",
             "send_latent_message_batch",
             "async_send_latent_message",
+            "run_nlae_pipeline",
         }
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
         assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]

@@ -37,6 +37,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from agent.nlae_pipeline import NLAEPipeline
 from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
 
 logger = logging.getLogger(__name__)
@@ -643,6 +644,38 @@ def self_correct(code_file: str, max_iterations: int = 10) -> str:
     payload = result.to_dict()
     payload["file"] = str(path)
     return _ok(payload)
+
+
+@mcp.tool()
+def run_nlae_pipeline(
+    spec: str,
+    mumei_lean_repo: str = "",
+    work_dir: str = "",
+    no_build: bool = False,
+) -> str:
+    """P9-G: run the four-repository NLAE integration pipeline."""
+    lean_repo = Path(
+        mumei_lean_repo
+        or os.environ.get("MUMEI_LEAN_REPO", "../mumei-lean")
+    ).expanduser().resolve()
+    if not lean_repo.exists():
+        return _err(
+            f"mumei_lean_repo not found: {lean_repo}",
+            hint="pass a mumei-lang/mumei-lean checkout or set MUMEI_LEAN_REPO",
+        )
+    pipeline_work_dir = (
+        Path(work_dir).expanduser().resolve()
+        if work_dir
+        else Path(tempfile.mkdtemp(prefix="mumei-nlae-mcp-"))
+    )
+    try:
+        result = NLAEPipeline(
+            work_dir=pipeline_work_dir,
+            lean_no_build=no_build,
+        ).run_full_pipeline(spec, lean_repo)
+    except Exception as exc:
+        return _err(f"run_nlae_pipeline failed: {exc}")
+    return _ok(result.to_dict())
 
 
 @mcp.tool()
