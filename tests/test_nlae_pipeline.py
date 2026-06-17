@@ -133,7 +133,7 @@ def test_loss_vector_is_passed_to_self_correction(tmp_path: Path) -> None:
 
     result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
 
-    assert result.loss_vector is None
+    assert result.loss_vector == LOSS_VECTOR
     assert fake_correction.received_loss_vector == LOSS_VECTOR
     assert "balance + amount" in fake_correction.received_code
 

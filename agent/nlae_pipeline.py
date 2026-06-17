@@ -11,7 +11,7 @@ from typing import Protocol
 from agent.config import AgentConfig
 from agent.lean_bridge import run_lean_bridge as run_lean_bridge_impl
 from agent.mumei_client import create_mumei_client
-from agent.strategies.fix_strategy import ConfiguredLossVectorFixClient
+from agent.strategies.fix_strategy import ConfiguredLossVectorFixClient, SelfCorrectionLoop
 from agent.strategies.generate_strategy import generate_code
 
 
@@ -101,17 +101,20 @@ class ConfiguredSelfCorrectionRunner:
         code_file = self.work_dir / "nlae_pipeline.mm"
         code_file.write_text(code, encoding="utf-8")
         fixer = ConfiguredLossVectorFixClient(config, self.mumei_client)
-        fixed = fixer.fix_with_loss_vector(code_file, loss_vector)
-        if fixed:
-            code_file.write_text(fixed, encoding="utf-8")
+        correction = SelfCorrectionLoop(max_iterations=self.max_iterations).run(
+            code_file,
+            self.mumei_client,
+            fixer,
+        )
         verify_result = self.mumei_client.verify(str(code_file))
-        return {
+        payload = correction.to_dict()
+        payload.update({
             "success": _all_verified(verify_result),
-            "iterations": 1,
             "code": code_file.read_text(encoding="utf-8"),
             "verify_result": verify_result,
-            "loss_vector": loss_vector,
-        }
+            "loss_vector": correction.loss_vector or loss_vector,
+        })
+        return payload
 
 
 class ConfiguredLeanBridgeRunner:
@@ -168,6 +171,7 @@ class NLAEPipeline:
         code_path = self._write_code(code)
         verify_result = self._verify_with_loss_vector(code_path)
         loss_vector = _extract_loss_vector(verify_result)
+        pipeline_loss_vector = loss_vector
         correction_result: dict[str, object] | None = None
 
         if not _all_verified(verify_result) and loss_vector is not None:
@@ -181,6 +185,8 @@ class NLAEPipeline:
             else:
                 verify_result = self._verify_with_loss_vector(code_path)
             loss_vector = _extract_loss_vector(verify_result)
+            if loss_vector is not None:
+                pipeline_loss_vector = loss_vector
 
         cert_path = self._write_certificate(code, verify_result)
         lean_cert_out = self.work_dir / "nlae_pipeline.lean-cert.json"
@@ -196,7 +202,7 @@ class NLAEPipeline:
             verified=verified,
             lean_verified=lean_verified,
             verify_result=verify_result,
-            loss_vector=loss_vector,
+            loss_vector=pipeline_loss_vector,
             correction_result=correction_result,
             lean_result=lean_result,
             artifacts={
