@@ -832,24 +832,23 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ## P-Deferred-A: heal コマンドの複数ファイル対応 — ✅ Implemented
 
-### 対応しない理由
+### 実装完了サマリ
 
-`heal` の複数ファイル対応は、mumei-lang/mumei PR #285（multi-file cross-spec verification）および mumei-lang/mumei-agent PR #121（spec contradiction MCP tools）の成果物に依存する。
-これらが提供するファイル間依存解決・cross-spec verification の基盤が整ってから設計・実装する。
+`heal` の複数ファイル対応は、mumei-lang/mumei PR #285（multi-file cross-spec verification）および mumei-lang/mumei-agent PR #121（spec contradiction MCP tools）の成果物を前提に実装済み。
+ファイル間依存解決・cross-spec verification の基盤を使い、複数 `.mm` ファイルを依存順に修復できる。
 
-### 将来の対応詳細
+### 実装内容
 
 **前提条件**: PR #285 / PR #121 の完了
 
-**実装方針**:
-1. `heal_file` MCP ツール（`agent/mcp_server.py`）にディレクトリ対応を追加
+1. ✅ `heal_file` MCP ツール（`agent/mcp_server.py`）にディレクトリ対応を追加
    - 引数 `code_file` がディレクトリの場合、`.mm` ファイルを再帰収集する
    - PR #285/#121 が提供するファイル間依存グラフを使って修復順序を決定する（依存先ファイルを先に修復）
-2. `python -m agent heal` CLI サブコマンド（`agent/__main__.py`）もディレクトリを受け付けるよう拡張
-3. 修復ループをファイル間依存グラフに基づいて順序制御する
+2. ✅ `python -m agent heal` CLI サブコマンド（`agent/__main__.py`）もディレクトリを受け付けるよう拡張
+3. ✅ 修復ループをファイル間依存グラフに基づいて順序制御する
    - 依存先ファイルの修復が完了してから依存元ファイルの修復を開始する
    - 循環依存がある場合は警告を出して手動レビューへ送る
-4. 複数ファイルの修復結果を集約して返す（成功/失敗件数、ファイルごとのサマリ）
+4. ✅ 複数ファイルの修復結果を集約して返す（成功/失敗件数、ファイルごとのサマリ）
 
 **対象ファイル**:
 - `agent/mcp_server.py` — `heal_file` ツールのディレクトリ対応
