@@ -73,6 +73,30 @@ class TestExtractUnknownAtoms:
         }
         assert lean_bridge.extract_unknown_atoms(cert) == []
 
+    def test_counts_promoted_unknowns_recursively(self) -> None:
+        original = {
+            "modules": {
+                "std/foo": {
+                    "atoms": [
+                        {"name": "foo", "z3_check_result": "unknown"},
+                        {"name": "bar", "z3_check_result": "unknown"},
+                    ]
+                }
+            }
+        }
+        upgraded = {
+            "modules": {
+                "std/foo": {
+                    "atoms": [
+                        {"name": "foo", "z3_check_result": "lean_verified"},
+                        {"name": "bar", "z3_check_result": "unknown"},
+                    ]
+                }
+            }
+        }
+
+        assert lean_bridge.count_lean_verified_unknowns(original, upgraded) == 1
+
 
 # ---------------------------------------------------------------------------
 # run_lean_bridge (subprocess invocation)

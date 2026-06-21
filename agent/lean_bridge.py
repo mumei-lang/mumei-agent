@@ -420,6 +420,16 @@ def _unknowns_verified_in_cert(
     return proved_all, proved_any and not proved_all
 
 
+def count_lean_verified_unknowns(
+    original_cert: dict[str, Any],
+    upgraded_cert: dict[str, Any],
+) -> int:
+    """Count original Z3-unknown atoms promoted to ``lean_verified``."""
+    unknown_names = _atom_names_with_result(original_cert, "unknown")
+    verified_names = _atom_names_with_result(upgraded_cert, "lean_verified")
+    return len(unknown_names.intersection(verified_names))
+
+
 def _matches_known_witness(atom: dict[str, Any]) -> bool:
     name = atom.get("name")
     if not isinstance(name, str):

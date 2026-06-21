@@ -824,15 +824,24 @@ def _run_lean_fallback(
         )
 
     for spec_result in results:
+        spec_result["lean_fallback"] = _lean_fallback_not_attempted()
         publish_result = spec_result.get("publish_result") or {}
         cert = (
             publish_result.get("proof_certificate")
             or publish_result.get("certificate")
         )
         if not isinstance(cert, dict):
+            spec_result["lean_fallback"] = _lean_fallback_not_attempted(
+                error_code="no_certificate",
+                diagnostics=["No proof certificate was available to inspect."],
+            )
             continue
         unknown_atoms = lean_bridge.extract_unknown_atoms(cert)
         if not unknown_atoms:
+            spec_result["lean_fallback"] = _lean_fallback_not_attempted(
+                success=True,
+                diagnostics=["No Z3 unknown atoms were present."],
+            )
             continue
         if not available:
             spec_result["lean_fallback"] = {
@@ -870,17 +879,9 @@ def _run_lean_fallback(
                 upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
                     cert, lean_cert
                 )
-                unknown_names = {
-                    a["name"]
-                    for a in unknown_atoms
-                    if isinstance(a.get("name"), str)
-                }
-                proved = sum(
-                    1
-                    for a in upgraded.get("atoms", []) or []
-                    if isinstance(a, dict)
-                    and a.get("name") in unknown_names
-                    and a.get("z3_check_result") == "lean_verified"
+                proved = lean_bridge.count_lean_verified_unknowns(
+                    cert,
+                    upgraded,
                 )
             else:
                 upgraded = cert
@@ -911,6 +912,29 @@ def _run_lean_fallback(
             publish_result["proof_certificate"] = upgraded
             if "certificate" in publish_result:
                 publish_result["certificate"] = upgraded
+
+
+def _lean_fallback_not_attempted(
+    *,
+    success: bool = False,
+    error_code: str | None = "not_attempted",
+    diagnostics: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "attempted": False,
+        "unknown_count": 0,
+        "proved": 0,
+        "failed": 0,
+        "success": success,
+        "returncode": None,
+        "error_code": error_code,
+        "primary_error_code": error_code,
+        "retryable": False,
+        "diagnostics": diagnostics or [],
+        "duration_seconds": 0.0,
+        "partial_success": False,
+        "fallback_strategy": None,
+    }
 
 
 def _lean_fallback_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1078,6 +1102,7 @@ def proliferate(
             results=results,
             dry_run=dry_run,
             harness_metrics=harness_metrics,
+            lean_fallback_enabled=enable_lean_fallback,
         )
         return results
 
@@ -1123,6 +1148,7 @@ def proliferate(
             results=results,
             dry_run=dry_run,
             harness_metrics=harness_metrics,
+            lean_fallback_enabled=enable_lean_fallback,
         )
         return results
 
@@ -1147,6 +1173,7 @@ def proliferate(
             results=results,
             dry_run=dry_run,
             harness_metrics=harness_metrics,
+            lean_fallback_enabled=enable_lean_fallback,
         )
         return results
 
@@ -1559,6 +1586,7 @@ def proliferate(
         results=results,
         dry_run=dry_run,
         harness_metrics=harness_metrics,
+        lean_fallback_enabled=enable_lean_fallback,
     )
 
     return results
@@ -1574,6 +1602,7 @@ def _write_output_json(
     dry_run: bool,
     health_delta: float | None = None,
     harness_metrics: HarnessMetrics | None = None,
+    lean_fallback_enabled: bool = False,
 ) -> None:
     """Write a structured summary of the run to *output_json* (if set).
 
@@ -1604,10 +1633,17 @@ def _write_output_json(
         "pre_health": pre_health,
         "post_health": post_health,
         "health_delta": health_delta,
+        "lean_fallback_enabled": bool(lean_fallback_enabled),
         "proposals_processed": processed,
         "proposals_succeeded": succeeded,
         "proposals_failed": processed - succeeded,
-        "details": [_jsonify_result(r) for r in results],
+        "details": [
+            _jsonify_result(
+                r,
+                lean_fallback_enabled=bool(lean_fallback_enabled),
+            )
+            for r in results
+        ],
     }
     lean_metrics = _lean_fallback_metrics(results)
     payload.update(lean_metrics)
@@ -1626,7 +1662,11 @@ def _write_output_json(
         logger.warning("Could not write output JSON %s: %s", path, exc)
 
 
-def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
+def _jsonify_result(
+    result: dict[str, Any],
+    *,
+    lean_fallback_enabled: bool = False,
+) -> dict[str, Any]:
     """Strip non-JSON-serialisable fields from a proliferate result.
 
     Generated code can be large and is already committed (or discarded
@@ -1737,6 +1777,8 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
                 out["publish_result"] = value
         else:
             out[key] = value
+    if lean_fallback_enabled and "lean_fallback" not in out:
+        out["lean_fallback"] = _lean_fallback_not_attempted()
     return out
 
 
