@@ -250,10 +250,20 @@ def test_proliferate_lean_fallback_summary_json(
         )
 
     assert results[0]["success"] is True
+    upgraded_atom = results[0]["publish_result"]["proof_certificate"]["atoms"][0]
+    assert upgraded_atom["z3_check_result"] == "lean_verified"
     data = json.loads(summary_path.read_text(encoding="utf-8"))
     fallback = data["details"][0]["lean_fallback"]
     assert fallback["attempted"] is True
     assert fallback["proved"] > 0
+    cert_summary = data["details"][0]["publish_result"][
+        "proof_certificate_summary"
+    ]
+    assert cert_summary["lean_verified_count"] == 1
+    assert cert_summary["all_verified"] is True
+    assert data["details"][0]["upgraded_cert_summary"][
+        "lean_verified_count"
+    ] == 1
     assert data["lean_fallback_attempted"] >= 1
     assert data["lean_fallback_proved"] >= 1
     assert data["lean_fallback_failed"] == 0

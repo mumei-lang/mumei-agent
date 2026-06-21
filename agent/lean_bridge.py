@@ -345,8 +345,10 @@ def _atom_names_with_result(cert: dict[str, Any], result: str) -> set[str]:
     names: set[str] = set()
 
     def _consume(payload: dict[str, Any]) -> None:
-        atoms = payload.get("atoms")
-        if isinstance(atoms, list):
+        for key in ("atoms", "candidates"):
+            atoms = payload.get(key)
+            if not isinstance(atoms, list):
+                continue
             for atom in atoms:
                 if (
                     isinstance(atom, dict)
@@ -373,8 +375,10 @@ def _upgrade_atoms_by_name(
     upgraded: dict[str, Any] = json.loads(json.dumps(cert))
 
     def _consume(payload: dict[str, Any]) -> None:
-        atoms = payload.get("atoms")
-        if isinstance(atoms, list):
+        for key in ("atoms", "candidates"):
+            atoms = payload.get(key)
+            if not isinstance(atoms, list):
+                continue
             for atom in atoms:
                 if (
                     isinstance(atom, dict)

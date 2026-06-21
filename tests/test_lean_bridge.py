@@ -699,6 +699,23 @@ class TestMergeLeanCert:
         assert module["atoms"][0]["z3_check_result"] == "lean_verified"
         assert module["all_verified"] is True
 
+    def test_escalation_bundle_candidates_are_upgraded(self) -> None:
+        original = {
+            "candidates": [
+                {"name": "candidate", "z3_check_result": "unknown"},
+            ],
+        }
+        lean = {
+            "candidates": [
+                {"name": "candidate", "z3_check_result": "lean_verified"},
+            ],
+        }
+
+        upgraded = lean_bridge.merge_lean_cert_into_proof_cert(original, lean)
+
+        assert upgraded["candidates"][0]["z3_check_result"] == "lean_verified"
+        assert upgraded["candidates"][0]["status"] == "verified"
+
 
 # ---------------------------------------------------------------------------
 # lean_fallback_available helper
