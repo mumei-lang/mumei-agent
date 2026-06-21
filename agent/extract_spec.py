@@ -238,6 +238,7 @@ def check_spec_contradiction_from_spec(spec: dict, mumei_client) -> dict:
         )
     return {
         "contradiction_found": contradiction_found,
+        "contradiction_type": "spec_internal" if contradiction_found else "",
         "natural_language_explanation": natural_language_explanation,
         "verification": verify_result,
     }

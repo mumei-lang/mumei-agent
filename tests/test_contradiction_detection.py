@@ -63,6 +63,7 @@ def test_check_spec_contradiction_from_spec_builds_temporary_trusted_atoms() -> 
     result = check_spec_contradiction_from_spec(spec, mumei)
 
     assert result["contradiction_found"] is True
+    assert result["contradiction_type"] == "spec_internal"
     assert "direct contradiction" in result["natural_language_explanation"]
     assert "trusted atom impossible_x" in captured["source"]
 
@@ -96,6 +97,7 @@ def test_check_spec_contradiction_from_spec_handles_failed_json_summary() -> Non
     result = check_spec_contradiction_from_spec(spec, mumei)
 
     assert result["contradiction_found"] is True
+    assert result["contradiction_type"] == "spec_internal"
     assert "SpecValidation failed" in result["natural_language_explanation"]
     assert "1 failed atom" in result["natural_language_explanation"]
 
@@ -130,6 +132,7 @@ def test_extract_spec_cli_check_contradiction_only_writes_report(tmp_path: Path)
         "agent.extract_spec.check_spec_contradiction_from_spec",
         return_value={
             "contradiction_found": True,
+            "contradiction_type": "spec_internal",
             "natural_language_explanation": "The spec is contradictory.",
             "verification": {"success": False},
         },
@@ -204,6 +207,7 @@ def test_mcp_extract_spec_contradiction_only_uses_mumei_repo_binary(
         "agent.extract_spec.check_spec_contradiction_from_spec",
         return_value={
             "contradiction_found": True,
+            "contradiction_type": "spec_internal",
             "natural_language_explanation": "The spec is contradictory.",
             "verification": {"success": False},
         },
