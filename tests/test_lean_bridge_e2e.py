@@ -253,6 +253,12 @@ def test_proliferate_lean_fallback_summary_json(
     upgraded_atom = results[0]["publish_result"]["proof_certificate"]["atoms"][0]
     assert upgraded_atom["z3_check_result"] == "lean_verified"
     data = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert data["lean_fallback_enabled"] is True
+    assert "lean_fallback_metrics" in data
+    assert all(
+        detail["lean_fallback"]["proved"] > 0
+        for detail in data["details"]
+    )
     fallback = data["details"][0]["lean_fallback"]
     assert fallback["attempted"] is True
     assert fallback["proved"] > 0
@@ -270,6 +276,35 @@ def test_proliferate_lean_fallback_summary_json(
     assert data["lean_fallback_success_rate"] >= 0.70
     assert data["lean_fallback_partial_successes"] == 0
     assert data["lean_fallback_duration_seconds"]["count"] >= 1
+
+
+def test_lean_fallback_summary_records_no_unknowns() -> None:
+    results = [
+        {
+            "success": True,
+            "publish_result": {
+                "success": True,
+                "proof_certificate": {
+                    "atoms": [
+                        {
+                            "name": "already_proved",
+                            "z3_check_result": "unsat",
+                            "status": "verified",
+                        }
+                    ]
+                },
+            },
+        }
+    ]
+
+    proliferate_mod._run_lean_fallback(results, mumei_lean_repo=None)
+
+    fallback = results[0]["lean_fallback"]
+    assert fallback["attempted"] is False
+    assert fallback["unknown_count"] == 0
+    assert fallback["proved"] == 0
+    assert fallback["failed"] == 0
+    assert fallback["success"] is True
 
 
 def test_lean_fallback_gracefully_records_unavailable_repo(

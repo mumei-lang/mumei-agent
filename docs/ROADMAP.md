@@ -514,7 +514,7 @@ mumei 側の `analyze_std_gaps` MCP ツール（提案を吐き出す）と mume
   - Lean toolchain を best-effort で導入し、`lean --version` / `lake --version` を診断出力。`python -m agent proliferate` は Lean fallback がデフォルト有効のため、`MUMEI_LEAN_REPO=${{ github.workspace }}/mumei-lean` 経由で Z3 `unknown` atom の Lean 4 証明を CI 常時試行（Lean/lake 不在時は `lean_unavailable` / `lake_missing` として graceful degrade）
   - `python -m agent health` で pre/post-flight のヘルス JSON を取得
   - `python -m agent proliferate --mumei-repo ../mumei --output-json /tmp/proliferate/summary.json`（Lean fallback は default-on、ローカルデバッグ時のみ `--disable-lean-fallback` で無効化）
-  - `summary.json` に `lean_fallback_attempted` / `lean_fallback_proved` / `lean_fallback_failed` / `lean_fallback_success_rate` を出力し、CI job summary にも同じ metrics を表示。Z3 `unknown` atom がある run では Lean fallback success rate 70%以上をゲートする
+  - `summary.json` に`lean_fallback_enabled`、トップレベルの`lean_fallback_attempted` / `lean_fallback_proved` / `lean_fallback_failed` / `lean_fallback_success_rate`、および各`details[].lean_fallback`を必ず出力し、Z3 `unknown` atom があるrun で`details[].lean_fallback.proved > 0`と Lean fallback success rate 70%以上を示す
   - 生成物: `pre_health.json` / `post_health.json` / `proliferate.log` / `summary.json` を `proliferate-logs` artifact として保存
   - **ハイブリッド LLM プロファイル**（`workflow_dispatch` 入力 `llm_profile` / `llm_model` で切替。cron ではデフォルト `ollama-local` + `qwen3.5:4b` を使用し外部依存ゼロで動作）:
     - `ollama-local`（default）: runner 内で `ollama serve` を起動 → `ollama pull ${llm_model}` → `LLM_BASE_URL=http://localhost:11434/v1` に接続。`~/.ollama/models` を `actions/cache@v4` で `llm_model` 毎にキャッシュ。既定モデルは `qwen3.5:4b`、スモークテストなら軽量な `qwen3.5:0.8b`、品質優先なら `qwen2.5-coder:7b`、予備枠として 1bit 量子化系（例: `bonsai-1bit-qwen`）を `llm_model` 入力で指定可能
