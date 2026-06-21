@@ -908,6 +908,9 @@ def _run_lean_fallback(
                 len(unknown_atoms),
             )
             spec_result["upgraded_cert"] = upgraded
+            publish_result["proof_certificate"] = upgraded
+            if "certificate" in publish_result:
+                publish_result["certificate"] = upgraded
 
 
 def _lean_fallback_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1708,11 +1711,17 @@ def _jsonify_result(result: dict[str, Any]) -> dict[str, Any]:
                 cert = value.get("proof_certificate")
                 if isinstance(cert, dict):
                     cert_atoms = cert.get("atoms")
+                    cert_atom_list = (
+                        cert_atoms if isinstance(cert_atoms, list) else []
+                    )
                     short["proof_certificate_summary"] = {
-                        "atom_count": (
-                            len(cert_atoms)
-                            if isinstance(cert_atoms, list)
-                            else 0
+                        "atom_count": len(cert_atom_list),
+                        "lean_verified_count": sum(
+                            1
+                            for atom in cert_atom_list
+                            if isinstance(atom, dict)
+                            and atom.get("z3_check_result")
+                            == "lean_verified"
                         ),
                         "all_verified": cert.get("all_verified"),
                     }
