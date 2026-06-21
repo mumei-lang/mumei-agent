@@ -8,12 +8,12 @@ Autoencoder (NLAE) concepts into `mumei-agent`.
 NLAE-inspired features add three capabilities:
 
 1. **Latent-space debugging**: try a deterministic latent repair before the
-   existing rule-based and LLM fix pipeline. Enabled by default.
+   existing rule-based and LLM fix pipeline. Opt-in.
 2. **Dense property generation**: synthesize compact `requires` / `ensures`
    clauses after initial generation, biased by proof-friendly specification
-   guidance. Enabled by default.
+   guidance. Opt-in.
 3. **Latent protocol**: encode inter-agent messages as latent vectors exposed
-   through the MCP server. Still opt-in.
+   through the MCP server. Opt-in.
 
 Enabled capabilities fall back to existing behavior on failure.
 
@@ -21,9 +21,9 @@ Enabled capabilities fall back to existing behavior on failure.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ENABLE_LATENT_DEBUG` | `true` | Enable latent-space debugging in fix strategy. |
-| `ENABLE_DENSE_PROPERTIES` | `true` | Enable high-density property generation. |
-| `ENABLE_LATENT_PROTOCOL` | `false` | Enable latent protocol MCP tool usage. |
+| `ENABLE_LATENT_DEBUG` | `false` | Opt in to latent-space debugging in fix strategy. |
+| `ENABLE_DENSE_PROPERTIES` | `false` | Opt in to high-density property generation. |
+| `ENABLE_LATENT_PROTOCOL` | `false` | Opt in to latent protocol MCP tool usage. |
 
 Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
 
@@ -42,9 +42,10 @@ Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
 - `agent/mcp_server.py`: exposes `send_latent_message`,
   `send_latent_message_batch`, `async_send_latent_message`, and
   `get_spec_guidelines`. The latter returns decidable-fragment guidance
-  (`outside_decidable_fragment`, bounded quantifiers, explicit witnesses, and
-  Lean escalation candidates) for MCP clients that want to preflight a spec
-  before generation.
+  covering `linear_arithmetic`, `array_access`, `bounded_quantifiers`,
+  `finite_state_machines`, `common_failure_patterns`, and
+  `recommended_templates` for MCP clients that want to preflight a spec before
+  generation.
 
 ## Usage
 
@@ -54,10 +55,10 @@ python -m agent generate --spec-file examples/spec.json --output out.mm
 ENABLE_LATENT_PROTOCOL=true python -m agent mcp-server
 ```
 
-Disable the default generation/healing helpers with:
+Enable opt-in generation/healing helpers for a single run with:
 
 ```bash
-ENABLE_LATENT_DEBUG=false ENABLE_DENSE_PROPERTIES=false python -m agent generate --spec-file examples/spec.json --output out.mm
+ENABLE_LATENT_DEBUG=true ENABLE_DENSE_PROPERTIES=true python -m agent generate --spec-file examples/spec.json --output out.mm
 ```
 
 `send_latent_message(message, context="{}", verify=true)` accepts JSON object
@@ -108,9 +109,9 @@ compatibility for older clients. Each envelope includes:
 ## Current Scope
 
 This is a clean-room, lightweight implementation inspired by the NLAE concept.
-It does not vendor or depend on `kitft/natural_language_autoencoders`. Before
-integrating that project directly, verify its license compatibility with
-`mumei-agent`.
+It does not vendor or depend on `kitft/natural_language_autoencoders`. Perform
+a license compatibility review only if future work integrates that project
+directly.
 
 ## References
 
