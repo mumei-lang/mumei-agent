@@ -908,10 +908,9 @@ def _run_lean_fallback(
                 len(unknown_atoms),
             )
             spec_result["upgraded_cert"] = upgraded
-            if upgraded is not cert:
-                publish_result["proof_certificate"] = upgraded
-                if "certificate" in publish_result:
-                    publish_result["certificate"] = upgraded
+            publish_result["proof_certificate"] = upgraded
+            if "certificate" in publish_result:
+                publish_result["certificate"] = upgraded
 
 
 def _lean_fallback_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
