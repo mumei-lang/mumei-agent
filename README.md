@@ -129,61 +129,48 @@ uv run streamlit run visualizer/app.py
 
 You can also run commands as `mumei-agent ...` after activating the uv-managed virtual environment with `source .venv/bin/activate`.
 
-## .mmを書かない入口
+## No-.mm entry: one audit contract
 
-既存の Python/Rust/TypeScript コードから始める場合は、まず `.mm` を手で書かずに
-`audit` を実行します。`audit` は `--code-file` だけで対象ファイルを受け取り、
-仕様抽出、spec health、既存コード検証、cross-validation gap 検出までまとめて確認します。
+`mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` are the same contract. They both run the same three-stage path:
+
+1. `audit`: accept existing code only, extract candidate specs, and classify findings.
+2. `migrate-suggest` / `--auto-migrate`: emit `.mm` skeleton guidance only for findings that need migration.
+3. `heal` / `--auto-heal`: run self-healing on those generated skeletons and report the outcome.
+
+Canonical result keys are fixed as follows:
+
+| Key | Meaning |
+| --- | --- |
+| `spec_health_issues` | Spec-only contradictions, overconstraints, vacuity, or ambiguity in extracted/provided specs; these do not require existing-code execution to be meaningful. |
+| `verification_violations` | Existing-code bugs or unsafe paths found before `.mm` migration by checking inferred/extracted contracts against the source. |
+| `cross_validation_gaps` | Spec↔code mismatches: missing constraints, stronger/weaker behavior, or cross-spec drift that still needs migration or review. |
+| `migration_hints` | `.mm` skeleton advice produced by `migrate-suggest` / `--auto-migrate` for functions attached to violations or gaps. |
+| `healed_files` | Generated `.mm` skeleton files that the self-healing loop rewrote or accepted successfully. |
+| `heal_errors` | Per-skeleton self-healing failures and diagnostics; these never change the meaning of the audit findings. |
 
 ```mermaid
 flowchart TD
-    existing["既存コード"] --> audit["audit"]
-    existing --> mcp_scan["MCP scan_and_fix"]
-    mcp_scan --> audit
-    audit --> ok["問題なし"]
-    ok --> done["完了"]
-    audit --> issue["問題あり"]
-    issue --> one_cmd["audit --auto-migrate --auto-heal"]
-    issue --> migrate["migrate-suggest"]
-    one_cmd --> skeleton[".mmスケルトン生成"]
-    migrate --> skeleton[".mmスケルトン生成"]
-    skeleton --> heal["heal"]
-    heal --> verified["検証済み.mm"]
-    nl["自然言語仕様"] --> validate_spec["validate-spec"]
-    validate_spec --> spec_feedback["矛盾・曖昧さ指摘"]
-    spec_code["仕様+コード"] --> validate_spec_to_code["validate-spec-to-code"]
-    validate_spec_to_code --> missing_constraints["未実装制約の指摘"]
+    input["Existing code only"] --> entry["audit --code-file ...<br/>MCP scan_and_fix"]
+    entry --> classify["Classify findings<br/>spec_health_issues<br/>verification_violations<br/>cross_validation_gaps"]
+    classify --> clean["No findings"]
+    clean --> done["Done: no .mm migration required"]
+    classify --> findings["Findings require migration or review"]
+    findings --> migrate["migrate-suggest<br/>--auto-migrate"]
+    migrate --> hints["migration_hints + .mm skeletons"]
+    hints --> heal["heal<br/>--auto-heal"]
+    heal --> healed["healed_files"]
+    heal --> errors["heal_errors"]
+    healed --> review["Review/verify generated .mm"]
+    errors --> review
 ```
 
-最初の一歩は `--code-file` だけです:
-
-```bash
-mumei-agent audit --code-file src/foo.py
-mumei-agent audit --code-file src/
-```
-
-問題がなければ完了です。`verification_violations` や `cross_validation_gaps` が出た場合だけ、
-移行スケルトンを生成します:
-
-```bash
-mumei-agent migrate-suggest --code-file src/foo.py --language python
-```
-
-生成された `.mm` は通常の self-healing loop に渡します:
-
-```bash
-mumei-agent heal generated/foo.mm
-```
-
-監査から移行スケルトン生成、self-healing までを 1 コマンドで実行する場合:
+Use the one-command CLI form when you want audit, skeleton generation, and healing evidence together:
 
 ```bash
 mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
 
-CLI/MCP contract: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` both run audit → migrate-suggest → heal. `scan_and_fix` is the default no-`.mm` MCP entry point for existing code. Both return `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`.
-
-MCP クライアントからは同じ導線を `scan_and_fix` で呼び出せます:
+MCP clients call the same contract with `scan_and_fix`:
 
 ```json
 {
@@ -194,13 +181,19 @@ MCP クライアントからは同じ導線を `scan_and_fix` で呼び出せま
 }
 ```
 
-`.mm` に入る前の詳細チェックだけを行う場合は、コード単体なら `validate-code`、仕様とコードの
-対応確認なら `validate-spec-to-code` を使います:
+For manual review, run the same stages separately:
 
 ```bash
-mumei-agent validate-code --input src/foo.py --language python
-mumei-agent validate-spec-to-code --spec specs/foo.txt --code src/foo.py --language python
+mumei-agent audit --code-file src/foo.py --language python
+mumei-agent migrate-suggest --code-file src/foo.py --language python --output generated/mm
+mumei-agent heal generated/mm/foo.mm
 ```
+
+Demo wording for no-`.mm` user-facing material is fixed to these three phrases:
+
+1. 既存コードを渡すだけでバグ箇所を指摘
+2. 仕様から既存コードとの差分を指摘
+3. 仕様単独でおかしい場合を指摘
 
 ## P9 NLAE Integration
 
