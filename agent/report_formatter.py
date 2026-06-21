@@ -139,7 +139,7 @@ def _format_nl_en(payload: dict[str, object]) -> str:
     )
     ct = str(payload.get("contradiction_type", "") or "")
     if ct:
-        lines.append(f"- Contradiction type: `{ct}`")
+        lines.append(f"- contradiction_type: `{ct}`")
     issues = (
         _dict_list(payload.get("contradictions"))
         + _dict_list(payload.get("ambiguities"))

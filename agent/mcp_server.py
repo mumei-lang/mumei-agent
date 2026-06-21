@@ -1338,7 +1338,7 @@ def extract_spec(
 
 @mcp.tool()
 def check_spec_contradiction(natural_language: str, domain_hint: str = "") -> str:
-    """Extract specs from natural language and report direct contradictions only."""
+    """Extract specs and return contradiction_found plus contradiction_type=spec_internal."""
     return extract_spec(
         natural_language,
         domain_hint=domain_hint,
@@ -1348,7 +1348,7 @@ def check_spec_contradiction(natural_language: str, domain_hint: str = "") -> st
 
 @mcp.tool()
 def check_cross_spec_consistency(spec_files: str) -> str:
-    """Run mumei cross-spec verification across one or more .mm files.
+    """Run mumei cross-spec verification and return cross_validation_gaps evidence.
 
     Args:
         spec_files: JSON array string or comma-separated list of .mm files.
@@ -1745,12 +1745,11 @@ def scan_and_fix(
     domain_hint: str = "",
 ) -> dict:
     """
-    Audit existing code, generate .mm migration skeletons for functions with issues,
-    and optionally run the self-healing loop.
+    Same contract as `mumei-agent audit --code-file ... --auto-migrate --auto-heal`.
 
     Steps:
-    1. audit: extract spec, check health, verify contracts
-    2. migrate-suggest: generate .mm skeletons for functions with issues
+    1. audit: extract spec, check health, verify contracts, emit cross_validation_gaps
+    2. migrate-suggest: generate migration_hints and .mm skeletons for functions with issues
     3. (optional) heal: run self-healing loop on each skeleton
 
     Args:
@@ -1794,6 +1793,11 @@ def scan_and_fix(
         "audit": asdict(result),
         "next_steps": result.next_steps,
         "spec_alignment": spec_alignment,
+        "contract_terms": {
+            "cross_validation_gaps": "audit-time spec/code mismatches",
+            "migration_hints": "auto-migrate .mm skeleton guidance",
+            "contradiction_type": "stable spec contradiction classifier",
+        },
     }
 
 

@@ -29,6 +29,12 @@ AUDIT_EXTENSION_MAP: dict[str, Language] = {
     ".ts": "typescript",
 }
 
+AUDIT_CONTRACT_TERMS = {
+    "cross_validation_gaps": "Spec/code mismatches discovered during audit.",
+    "migration_hints": "Generated .mm skeleton advice from audit --auto-migrate.",
+    "contradiction_type": "Stable contradiction classifier shared with spec tools.",
+}
+
 
 @dataclass
 class AuditResult:
@@ -464,7 +470,15 @@ class AuditPipeline:
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     parser = parser or argparse.ArgumentParser(
-        description="Audit existing code by extracting specs and verifying them.",
+        description=(
+            "Audit existing code by extracting specs, verifying contracts, "
+            "emitting cross_validation_gaps, and optionally producing migration_hints."
+        ),
+        epilog=(
+            "One-command migration/heal contract: "
+            "mumei-agent audit --code-file <file-or-dir> --auto-migrate --auto-heal. "
+            "The MCP scan_and_fix tool uses the same audit -> migrate-suggest -> heal flow."
+        ),
     )
     parser.add_argument(
         "--code-file",
@@ -488,12 +502,12 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument(
         "--auto-migrate",
         action="store_true",
-        help="Automatically generate .mm migration skeletons for functions with issues.",
+        help="Emit migration_hints by generating .mm migration skeletons for functions with issues.",
     )
     parser.add_argument(
         "--auto-heal",
         action="store_true",
-        help="After generating .mm skeletons (--auto-migrate), run the self-healing loop on each skeleton.",
+        help="Run the self-healing loop on each skeleton produced by --auto-migrate.",
     )
     parser.add_argument(
         "--heal-output-dir",

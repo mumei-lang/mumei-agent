@@ -1,5 +1,8 @@
 # 検証ワークフローガイド
 
+> Cross-project contract: `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap. This guide uses the canonical vocabulary `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, `lean_verified`, plus agent audit keys `contradiction_type`, `migration_hints`, and `cross_validation_gaps`.
+
+
 ## 0. .mmを書かない入口（推奨スタートポイント）
 
 既存コードから検証を始める場合は、まず `.mm` を手で書かずに `audit` を実行する。最初の一歩は
@@ -54,6 +57,8 @@ mumei-agent heal generated/mm/foo.mm
 mumei-agent audit --code-file src/payment.py --auto-migrate --auto-heal --heal-output-dir out/
 mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
+
+この 1 コマンド flow は `audit → migrate-suggest → heal` の順に行います。`audit` は `cross_validation_gaps` を返し、`--auto-migrate` は `migration_hints` を生成し、`--auto-heal` はその skeleton だけを対象にします。MCP `scan_and_fix` は同じ契約を使います。
 
 この 1 コマンド flow は `audit → migrate-suggest → heal` の順に実行する。`--auto-heal` は
 `--auto-migrate` で生成された skeleton だけを対象にし、成功したファイルは `healed_files[]`、
@@ -202,6 +207,8 @@ mumei-agent audit --code-file src/foo.py
 mumei-agent audit --code-file src/
 mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
+
+この 1 コマンド flow は `audit → migrate-suggest → heal` の順に行います。`audit` は `cross_validation_gaps` を返し、`--auto-migrate` は `migration_hints` を生成し、`--auto-heal` はその skeleton だけを対象にします。MCP `scan_and_fix` は同じ契約を使います。
 
 `audit` の主な出力:
 

@@ -11,6 +11,10 @@ compiler repository. The self-healing agent and Streamlit visualizer were origin
 developed in-tree and moved here as a standalone project
 (see [mumei-lang/mumei#90](https://github.com/mumei-lang/mumei/pull/90)).
 
+## Cross-project harness vocabulary
+
+`mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap. Agent docs and MCP contracts use the same canonical field names: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Audit/spec tooling additionally uses stable result keys `contradiction_type`, `migration_hints`, and `cross_validation_gaps`; do not introduce aliases in README, CLI help, or MCP tool descriptions.
+
 ## Architecture
 
 ```
@@ -176,6 +180,8 @@ mumei-agent heal generated/foo.mm
 ```bash
 mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
+
+CLI/MCP contract: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` both run audit → migrate-suggest → heal. They return `cross_validation_gaps` for spec/code gaps and `migration_hints` for `.mm` skeleton guidance.
 
 MCP クライアントからは同じ導線を `scan_and_fix` で呼び出せます:
 
@@ -460,10 +466,10 @@ Exported tools:
 | `list_forge_log(log_path)` | Read `forge_log.json` |
 | `get_agent_status()` | Report LLM provider, mumei binary, available subcommands |
 | `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
-| `scan_and_fix(code_file, language, spec="", auto_heal=False, ...)` | Audit a file or directory, generate .mm skeletons, optionally self-heal |
+| `scan_and_fix(code_file, language, spec="", auto_heal=False, ...)` | Same contract as `audit --code-file ... --auto-migrate --auto-heal`: audit a file/directory, return `cross_validation_gaps`, emit `migration_hints`, optionally self-heal |
 | `extract_spec(natural_language, domain_hint="", generate=false, mumei_repo="", check_contradiction_only=false)` | Extract a forge spec, optionally generate code, or run contradiction-only validation |
-| `check_spec_contradiction(natural_language, domain_hint="")` | Extract a natural-language spec and return direct contradiction findings without code generation |
-| `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files |
+| `check_spec_contradiction(natural_language, domain_hint="")` | Extract a natural-language spec and return `contradiction_type=spec_internal` for direct contradictions without code generation |
+| `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files and return cross-validation evidence |
 | `validate_code(code, language, use_llm=true, run_mumei=true)` | Infer and verify contracts from existing code (Python, Rust, Go) |
 | `self_correct(code_file, max_iterations=10)` | Run the P9-F Loss Vector self-correction loop for a `.mm` file |
 | `run_nlae_pipeline(spec, mumei_lean_repo="", work_dir="", no_build=false)` | Run the P9-G NLAE pipeline: generate `.mm`, verify with `--emit loss-vector`, self-correct, then call the Lean Fidelity Checker |
@@ -502,7 +508,7 @@ P8-C metrics in `agent.metrics.Metrics` track how often new specifications fall 
 ### Lean fallback diagnostics
 
 Set `MUMEI_LEAN_REPO=/path/to/mumei-lean` to let `proliferate` escalate
-`z3_check_result == "unknown"` atoms through the Lean bridge. The fallback now
+`z3_check_result == "unknown"` atoms through the Lean bridge. The fallback contract matches `mumei-lean`: live-generated theorem path `Generated.Std.Math.Abs.abs_saturating_correct`, known-witness fallback `MumeiLean.StdMathAbs`, and stable failure classes `lake_missing`, `partial_translation`, and `stale_translator`. The fallback now
 records retryability, per-error-code failure rates, proof-time distribution, and
 partial-success status in the summary JSON. See
 [`docs/LEAN_FALLBACK.md`](docs/LEAN_FALLBACK.md) for error-code meanings and
