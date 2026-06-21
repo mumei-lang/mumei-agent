@@ -189,8 +189,8 @@ mumei-agent validate-spec \
 - `contradictions[]`: 論理的矛盾（例: x > 0 かつ x < 0）
 - `ambiguities[]`: 曖昧な記述（複数解釈が可能な箇所）
 - `overconstraints[]`: 過制約（Z3で充足不可能な組み合わせ）
-- `contradiction_type`: 主要な矛盾分類。例: `direct_contradiction`,
-  `overconstraint`, `satisfiability`。CLI / MCP / Markdown report で同じ分類を使う。
+- `contradiction_type`: 主要な矛盾分類。例: `spec_internal`,
+  `spec_overconstraint`, `spec_vacuity`, `spec_vs_code`。CLI / MCP / Markdown report で同じ分類を使う。
 - `satisfiable`: Z3による充足可能性（true/false/null）
 - `inferred_atoms[]`: 推論されたMumeiコントラクト
 
@@ -610,7 +610,7 @@ uv run mumei-agent check-spec-health src/main.mm
 | フィールド | 意味 | 対処 |
 |---|---|---|
 | `contradiction_found: true` | 仕様内に矛盾がある | `natural_language_explanation` を読んで仕様を修正 |
-| `contradiction_type` | 矛盾の主要分類（例: `direct_contradiction`, `overconstraint`, `satisfiability`） | 分類に応じて仕様修正、制約緩和、または実装修正を選ぶ |
+| `contradiction_type` | 矛盾の主要分類（例: `spec_internal`, `spec_overconstraint`, `spec_vacuity`, `spec_vs_code`） | 分類に応じて仕様修正、制約緩和、または実装修正を選ぶ |
 | `precondition_violated` | 事前条件が満たされない | `requires` 節を見直す |
 | `postcondition_violated` | 事後条件が満たされない | `ensures` 節またはロジックを見直す |
 | `effect_mismatch` | 副作用の宣言漏れ | `effects:` 節に不足エフェクトを追加 |

@@ -31,6 +31,15 @@ from agent.intent_tracker import IntentDriftResult, IntentTracker
 from agent.spec_code_mapper import MappingResult, SpecCodeMapper
 
 
+ContradictionType = Literal[
+    "",
+    "spec_internal",
+    "spec_overconstraint",
+    "spec_vacuity",
+    "spec_vs_code",
+]
+
+
 IssueKind = Literal[
     "contradiction",
     "ambiguity",
@@ -96,7 +105,7 @@ class NLSpecValidationResult:
     errors: list[str] = field(default_factory=list)
     contradiction_evidence: list[str] = field(default_factory=list)
     overconstraint_evidence: list[str] = field(default_factory=list)
-    contradiction_type: str = ""
+    contradiction_type: ContradictionType = ""
 
 
 @dataclass(frozen=True)
@@ -130,7 +139,7 @@ class SpecCodeAlignmentResult:
     report: str = ""
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    contradiction_type: str = ""
+    contradiction_type: ContradictionType = ""
     constraint_violations: list[dict[str, object]] = field(default_factory=list)
     extra_behaviors: list[str] = field(default_factory=list)
     missing_constraint_issues: list[CrossValidationIssue] = field(default_factory=list)
@@ -151,6 +160,7 @@ class SpecDriftResult:
     report: str = ""
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    contradiction_type: ContradictionType = ""
 
 
 @dataclass(frozen=True)
@@ -261,7 +271,11 @@ def validate_nl_spec(
         errors=errors,
         contradiction_evidence=_issue_evidence(contradictions),
         overconstraint_evidence=_issue_evidence(overconstraints),
-        contradiction_type="spec_internal" if contradictions else "",
+        contradiction_type=_classify_nl_contradiction_type(
+            contradictions,
+            overconstraints,
+            vacuity_warnings,
+        ),
     )
 
 
@@ -374,12 +388,10 @@ def validate_spec_to_code(
     missing_constraint_texts = _missing_constraint_texts(missing)
     extra_behaviors = _extra_behavior_texts(divergences)
 
-    if spec_result.contradiction_type == "spec_internal":
-        ct = "spec_internal"
-    elif divergences or missing:
-        ct = "spec_vs_code"
-    else:
-        ct = ""
+    ct = _alignment_contradiction_type(
+        spec_result.contradiction_type,
+        bool(missing or divergences),
+    )
 
     return _spec_code_result(
         code_path=code_path,
@@ -481,6 +493,10 @@ def validate_code_to_spec(
         warnings=warnings,
         errors=errors,
         lang=lang,
+        contradiction_type=_alignment_contradiction_type(
+            alignment.contradiction_type,
+            bool(drift_issues),
+        ),
     )
 
 
@@ -537,6 +553,10 @@ def detect_intent_drift(
         warnings=[*spec_result.warnings, *code_result.warnings, *drift_warnings],
         errors=[*spec_result.errors, *code_result.errors],
         lang=lang,
+        contradiction_type=_alignment_contradiction_type(
+            spec_result.contradiction_type,
+            bool(drift_issues),
+        ),
     )
     spec_payload, code_payload = _intent_payloads(
         spec_result.inferred_atoms,
@@ -1572,6 +1592,31 @@ def _suggest_fix(kind: IssueKind, message: str, evidence: str) -> str:
     )
 
 
+def _classify_nl_contradiction_type(
+    contradictions: list[CrossValidationIssue],
+    overconstraints: list[CrossValidationIssue],
+    vacuity_warnings: list[str],
+) -> ContradictionType:
+    if contradictions:
+        return "spec_internal"
+    if overconstraints:
+        return "spec_overconstraint"
+    if vacuity_warnings:
+        return "spec_vacuity"
+    return ""
+
+
+def _alignment_contradiction_type(
+    upstream_type: str,
+    has_spec_code_gap: bool,
+) -> ContradictionType:
+    if upstream_type in {"spec_internal", "spec_overconstraint", "spec_vacuity"}:
+        return cast(ContradictionType, upstream_type)
+    if has_spec_code_gap:
+        return "spec_vs_code"
+    return ""
+
+
 def _format_validate_spec_markdown(result: NLSpecValidationResult) -> str:
     issues = [
         *result.contradictions,
@@ -1584,6 +1629,7 @@ def _format_validate_spec_markdown(result: NLSpecValidationResult) -> str:
         f"- Status: **{'Passed' if result.success else 'Needs review'}**",
         f"- Inferred atoms: `{len(result.inferred_atoms)}`",
         f"- Satisfiable: `{result.satisfiable}`",
+        f"- contradiction_type: `{result.contradiction_type}`",
         "",
         "| kind | severity | location | message | evidence | fix_suggestion |",
         "| --- | --- | --- | --- | --- | --- |",
@@ -1965,7 +2011,7 @@ def _spec_code_result(
     warnings: list[str],
     errors: list[str],
     lang: Literal["en", "ja"],
-    contradiction_type: str = "",
+    contradiction_type: ContradictionType = "",
 ) -> SpecCodeAlignmentResult:
     result = SpecCodeAlignmentResult(
         success=bool(
@@ -2007,6 +2053,7 @@ def _spec_drift_result(
     warnings: list[str],
     errors: list[str],
     lang: Literal["en", "ja"],
+    contradiction_type: ContradictionType = "",
 ) -> SpecDriftResult:
     result = SpecDriftResult(
         success=bool(not errors and spec_atoms and code_atoms and not drift_issues),
@@ -2019,6 +2066,7 @@ def _spec_drift_result(
         changed_hunks=changed_hunks,
         warnings=warnings,
         errors=errors,
+        contradiction_type=contradiction_type,
     )
     from agent.report_formatter import format_cross_validation_report
 

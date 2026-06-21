@@ -1793,9 +1793,23 @@ def scan_and_fix(
         "audit": asdict(result),
         "next_steps": result.next_steps,
         "spec_alignment": spec_alignment,
+        "audit_schema": [
+            "spec_health_issues",
+            "verification_violations",
+            "cross_validation_gaps",
+            "next_steps",
+            "migration_hints",
+            "healed_files",
+            "heal_errors",
+        ],
         "contract_terms": {
+            "spec_health_issues": "spec-only contradiction, overconstraint, and vacuity findings",
+            "verification_violations": "existing-code bugs found before .mm migration",
             "cross_validation_gaps": "audit-time spec/code mismatches",
+            "next_steps": "ranked commands for audit -> migrate-suggest -> heal",
             "migration_hints": "auto-migrate .mm skeleton guidance",
+            "healed_files": "generated .mm files accepted by the self-healing loop",
+            "heal_errors": "self-healing errors keyed by generated .mm file",
             "contradiction_type": "stable spec contradiction classifier",
         },
     }

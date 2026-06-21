@@ -13,7 +13,7 @@ developed in-tree and moved here as a standalone project
 
 ## Cross-project harness vocabulary
 
-`mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap. Agent docs and MCP contracts use the same canonical field names: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Audit/spec tooling additionally uses stable result keys `contradiction_type`, `migration_hints`, and `cross_validation_gaps`; do not introduce aliases in README, CLI help, or MCP tool descriptions.
+`mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap. Agent docs and MCP contracts use the same canonical field names: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Audit/spec tooling additionally uses the stable audit keys `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`, plus `contradiction_type` values `spec_internal`, `spec_overconstraint`, `spec_vacuity`, and `spec_vs_code`; do not introduce aliases in README, CLI help, or MCP tool descriptions.
 
 ## Architecture
 
@@ -181,7 +181,7 @@ mumei-agent heal generated/foo.mm
 mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
 
-CLI/MCP contract: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` both run audit → migrate-suggest → heal. They return `cross_validation_gaps` for spec/code gaps and `migration_hints` for `.mm` skeleton guidance.
+CLI/MCP contract: `audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` both run audit → migrate-suggest → heal. `scan_and_fix` is the default no-`.mm` MCP entry point for existing code. Both return `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`.
 
 MCP クライアントからは同じ導線を `scan_and_fix` で呼び出せます:
 

@@ -397,6 +397,28 @@ def test_validate_nl_spec_sets_spec_internal_contradiction_type() -> None:
     assert result.contradiction_type == "spec_internal"
 
 
+def test_validate_nl_spec_sets_overconstraint_contradiction_type() -> None:
+    result = validate_nl_spec(
+        "requires: x > 0 && x < 0;\nensures: result == x;",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.contradiction_type == "spec_overconstraint"
+
+
+def test_validate_nl_spec_sets_vacuity_contradiction_type() -> None:
+    result = validate_nl_spec(
+        "requires: true;\nensures: true;",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.contradiction_type == "spec_vacuity"
+
+
 def test_validate_spec_to_code_sets_spec_vs_code_contradiction_type(tmp_path: Path) -> None:
     """Code comparison divergence sets contradiction_type to a spec_vs_code variant."""
     code_path = tmp_path / "impl.py"
@@ -414,3 +436,20 @@ def test_validate_spec_to_code_sets_spec_vs_code_contradiction_type(tmp_path: Pa
     assert result.contradiction_type == "spec_vs_code"
     assert result.constraint_violations
     assert result.constraint_violations[0]["contradiction_type"] == "spec_stronger"
+
+
+def test_validate_code_to_spec_sets_spec_vs_code_contradiction_type(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.txt"
+    code_path = tmp_path / "impl.py"
+    spec_path.write_text("requires: true;\nensures: result == x + 1;", encoding="utf-8")
+    code_path.write_text("def inc(x: int) -> int:\n    return x + 2\n", encoding="utf-8")
+
+    result = validate_code_to_spec(
+        str(code_path),
+        str(spec_path),
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.contradiction_type == "spec_vs_code"

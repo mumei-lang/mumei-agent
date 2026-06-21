@@ -491,6 +491,18 @@ class TestScanAndFix:
 
         assert result["audit"]["success"] is True
         assert result["spec_alignment"] is None
+        assert result["audit_schema"] == [
+            "spec_health_issues",
+            "verification_violations",
+            "cross_validation_gaps",
+            "next_steps",
+            "migration_hints",
+            "healed_files",
+            "heal_errors",
+        ]
+        assert result["contract_terms"]["verification_violations"].startswith(
+            "existing-code bugs"
+        )
         pipeline_cls.assert_called_once_with(heal_output_dir=str(tmp_path / "healed"))
         pipeline_cls.return_value.audit_file.assert_called_once_with(
             str(source),
