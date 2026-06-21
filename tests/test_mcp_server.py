@@ -501,8 +501,18 @@ class TestScanAndFix:
             "heal_errors",
         ]
         assert result["contract_terms"]["verification_violations"].startswith(
-            "existing-code bugs"
+            "existing-code bugs or unsafe paths"
         )
+        assert result["contract_terms"] == {
+            "spec_health_issues": "spec-only contradictions, overconstraints, vacuity, or ambiguity",
+            "verification_violations": "existing-code bugs or unsafe paths found before .mm migration",
+            "cross_validation_gaps": "spec/code mismatches or cross-spec drift discovered during audit",
+            "next_steps": "ranked commands for audit -> migrate-suggest -> heal",
+            "migration_hints": "generated .mm skeleton advice from migrate-suggest or audit --auto-migrate",
+            "healed_files": "generated .mm skeletons accepted or rewritten by the self-healing loop",
+            "heal_errors": "per-skeleton self-healing failures and diagnostics",
+            "contradiction_type": "stable spec contradiction classifier",
+        }
         pipeline_cls.assert_called_once_with(heal_output_dir=str(tmp_path / "healed"))
         pipeline_cls.return_value.audit_file.assert_called_once_with(
             str(source),

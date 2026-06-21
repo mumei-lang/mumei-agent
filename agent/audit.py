@@ -30,8 +30,12 @@ AUDIT_EXTENSION_MAP: dict[str, Language] = {
 }
 
 AUDIT_CONTRACT_TERMS = {
-    "cross_validation_gaps": "Spec/code mismatches discovered during audit.",
-    "migration_hints": "Generated .mm skeleton advice from audit --auto-migrate.",
+    "spec_health_issues": "Spec-only contradictions, overconstraints, vacuity, or ambiguity.",
+    "verification_violations": "Existing-code bugs or unsafe paths found before .mm migration.",
+    "cross_validation_gaps": "Spec/code mismatches or cross-spec drift discovered during audit.",
+    "migration_hints": "Generated .mm skeleton advice from migrate-suggest or audit --auto-migrate.",
+    "healed_files": "Generated .mm skeletons accepted or rewritten by the self-healing loop.",
+    "heal_errors": "Per-skeleton self-healing failures and diagnostics.",
     "contradiction_type": "Stable contradiction classifier shared with spec tools.",
 }
 
