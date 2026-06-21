@@ -49,9 +49,9 @@ The agent uses an OpenAI-compatible client.
 | `USE_MCP_CLIENT` | When true, route verification through the Mumei MCP client before falling back to subprocess verification. |
 | `PREFER_MCP_GAPS` | When true, prefer the Mumei MCP server gap analyzer. |
 | `AGENT_STRATEGY` | Repair strategy: `single` or `multi-stage`. |
-| `ENABLE_LATENT_DEBUG` | When true, enable latent-space debugging in fix strategy (experimental). |
-| `ENABLE_DENSE_PROPERTIES` | When true, enable high-density property generation (experimental). |
-| `ENABLE_LATENT_PROTOCOL` | When true, enable the latent representation MCP protocol (experimental). |
+| `ENABLE_LATENT_DEBUG` | Opt-in experimental latent-space debugging in fix strategy. Leave false for normal runs unless explicitly evaluating NLAE repair behavior. |
+| `ENABLE_DENSE_PROPERTIES` | Opt-in experimental high-density property generation. Leave false for normal runs unless explicitly evaluating dense generated contracts. |
+| `ENABLE_LATENT_PROTOCOL` | Opt-in experimental latent representation MCP protocol. Leave false unless explicitly testing latent inter-agent communication. |
 
 Local Ollama smoke-test example:
 

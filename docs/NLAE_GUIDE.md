@@ -11,17 +11,11 @@ Latent debugging runs at the start of `agent.strategies.fix_strategy.get_fix()` 
 3. `LatentDecoder` applies conservative source edits, such as effect adjustments, tautological requires strengthening, or safe ensures weakening.
 4. If the candidate is empty, unchanged, invalid, or raises an exception, the strategy falls back to the existing rule-based and LLM repair path.
 
-Use it with the normal heal or generate flows:
+Enable it explicitly for a heal or generate run:
 
 ```bash
-python -m agent heal path/to/file.mm
-python -m agent generate --spec-file spec.json --output out.mm
-```
-
-Disable it for a single run:
-
-```bash
-ENABLE_LATENT_DEBUG=false python -m agent heal path/to/file.mm
+ENABLE_LATENT_DEBUG=true python -m agent heal path/to/file.mm
+ENABLE_LATENT_DEBUG=true python -m agent generate --spec-file spec.json --output out.mm
 ```
 
 ## Dense property generation
@@ -33,12 +27,12 @@ Dense property generation runs after initial code generation when `ENABLE_DENSE_
 3. `_apply_dense_properties()` replaces the first generated `requires` and `ensures` clauses with the dense variants.
 4. Failures are logged and the original generated code is used unchanged.
 
-Dense properties improve proof density by replacing broad placeholders such as `true` with contract clauses tied to the task specification. They are intentionally scoped to generated contracts; they do not prove the properties independently and they can still require later verification repair. MCP clients can call `get_spec_guidelines` to inspect the same decidable-fragment guidance (`outside_decidable_fragment`, bounded quantifiers, explicit witnesses) before asking the agent to generate or densify a spec.
+Dense properties improve proof density by replacing broad placeholders such as `true` with contract clauses tied to the task specification. They are intentionally scoped to generated contracts; they do not prove the properties independently and they can still require later verification repair. MCP clients can call `get_spec_guidelines` to inspect the decidable fragment guidelines before asking the agent to generate or densify a spec. Those guidelines are organized around `decidable_fragment` entries such as `linear_arithmetic`, `array_access`, `bounded_quantifiers`, and `finite_state_machines`, plus `common_failure_patterns` and `recommended_templates`.
 
-Disable dense properties for a single run:
+Enable dense properties for a single run:
 
 ```bash
-ENABLE_DENSE_PROPERTIES=false python -m agent generate --spec-file spec.json --output out.mm
+ENABLE_DENSE_PROPERTIES=true python -m agent generate --spec-file spec.json --output out.mm
 ```
 
 ## Performance impact
@@ -61,7 +55,7 @@ Truthy values are `true`, `1`, `yes`, and `on` case-insensitively. Any other set
 
 ## Recommended controls
 
-- Enable `ENABLE_LATENT_DEBUG=true` and `ENABLE_DENSE_PROPERTIES=true` for normal agent generation and healing to benefit from NLAE-inspired features.
-- Set `ENABLE_DENSE_PROPERTIES=false` for low-latency experiments that must avoid the extra LLM call.
-- Set `ENABLE_LATENT_DEBUG=false` when comparing against the legacy repair pipeline.
+- Leave `ENABLE_LATENT_DEBUG=false` and `ENABLE_DENSE_PROPERTIES=false` for normal agent generation and healing unless the run is explicitly evaluating NLAE-inspired behavior.
+- Set `ENABLE_LATENT_DEBUG=true` only when a repair run should try the experimental latent-space pass before the legacy repair pipeline.
+- Set `ENABLE_DENSE_PROPERTIES=true` only when a generation run should spend the extra LLM call to densify generated contracts.
 - Keep `ENABLE_LATENT_PROTOCOL=false` unless explicitly testing latent inter-agent communication.
