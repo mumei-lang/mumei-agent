@@ -18,6 +18,7 @@ Canonical result keys are fixed as follows:
 | `spec_health_issues` | Spec-only contradictions, overconstraints, vacuity, or ambiguity in extracted/provided specs; these do not require existing-code execution to be meaningful. |
 | `verification_violations` | Existing-code bugs or unsafe paths found before `.mm` migration by checking inferred/extracted contracts against the source. |
 | `cross_validation_gaps` | Spec↔code mismatches: missing constraints, stronger/weaker behavior, or cross-spec drift that still needs migration or review. |
+| `next_steps` | The human-review entrypoint: prioritized actions and commands reviewers should run before accepting migration or healing evidence. |
 | `migration_hints` | `.mm` skeleton advice produced by `migrate-suggest` / `--auto-migrate` for functions attached to violations or gaps. |
 | `healed_files` | Generated `.mm` skeleton files that the self-healing loop rewrote or accepted successfully. |
 | `heal_errors` | Per-skeleton self-healing failures and diagnostics; these never change the meaning of the audit findings. |
@@ -25,17 +26,18 @@ Canonical result keys are fixed as follows:
 ```mermaid
 flowchart TD
     input["Existing code only"] --> entry["audit --code-file ...<br/>MCP scan_and_fix"]
-    entry --> classify["Classify findings<br/>spec_health_issues<br/>verification_violations<br/>cross_validation_gaps"]
+    entry --> classify["Classify findings<br/>spec_health_issues<br/>verification_violations<br/>cross_validation_gaps<br/>next_steps"]
     classify --> clean["No findings"]
     clean --> done["Done: no .mm migration required"]
     classify --> findings["Findings require migration or review"]
-    findings --> migrate["migrate-suggest<br/>--auto-migrate"]
+    findings --> review_gate["Human review starts at next_steps"]
+    review_gate --> migrate["migrate-suggest<br/>--auto-migrate"]
     migrate --> hints["migration_hints + .mm skeletons"]
     hints --> heal["heal<br/>--auto-heal"]
     heal --> healed["healed_files"]
     heal --> errors["heal_errors"]
-    healed --> review["Review/verify generated .mm"]
-    errors --> review
+    healed --> final_review["Review/verify generated .mm"]
+    errors --> final_review
 ```
 
 Use the one-command CLI form when you want audit, skeleton generation, and healing evidence together:
@@ -54,6 +56,8 @@ MCP clients call the same contract with `scan_and_fix`:
   "heal_output_dir": "out/"
 }
 ```
+
+`next_steps` is the only handoff into human review. Do not add aliases for `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, or `heal_errors`; downstream docs, MCP responses, and demo JSON should consume those names exactly.
 
 For manual review, run the same stages separately:
 
