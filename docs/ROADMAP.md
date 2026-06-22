@@ -281,9 +281,9 @@ feedback として返す。
 1. `audit --auto-migrate --auto-heal` を 1 コマンド flow として documentation / CLI summary
    に明示する。
 2. MCP tool `scan_and_fix(code_file, language, spec="", auto_heal=false, ...)`
-   で audit → migrate → optional heal を外部 agent から実行できるようにする。
+   で `audit -> migrate-suggest -> heal` を全部 agent から実行できるようにする。
 3. `contradiction_type`, `migration_hints`, `cross_validation_gaps`, `heal_errors`
-   を human review の判定材料として出力する。
+   を `next_steps` 起点の human review 判定材料として出す。
 4. README の `.mmを書かない入口` flowchart を `scan_and_fix`, `--auto-migrate`,
    `--auto-heal` を含む最新導線に更新する。
 

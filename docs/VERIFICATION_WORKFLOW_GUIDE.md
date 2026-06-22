@@ -525,9 +525,7 @@ uv run mumei-agent mcp-server
 
 #### scan_and_fix MCP tool
 
-`scan_and_fix` は `audit --auto-migrate` と同等の MCP 入口で、必要に応じて `heal` まで実行する。
-AI agent から既存コードを監査し、`.mm` skeleton を生成し、修復結果を structured JSON として受け取る。
-`scan_and_fix` は `audit --auto-migrate --auto-heal` と同じ `audit -> migrate-suggest -> heal` 契約を使う MCP 入口です。
+`scan_and_fix` は `audit --auto-migrate --auto-heal` と同じ `audit -> migrate-suggest -> heal` 契約を使う MCP 入口です。AI agent から既存コードを監査し、`.mm` skeleton を生成し、修復結果を structured JSON として受け取れます。
 ```json
 {
   "code_file": "/repo/src/",
