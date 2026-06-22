@@ -1760,7 +1760,11 @@ def scan_and_fix(
         heal_output_dir: Directory to write healed .mm files.
         domain_hint: Optional domain hint for spec extraction.
     """
-    from agent.audit import AuditPipeline
+    from agent.audit import (
+        AUDIT_CONTRACT_TERMS,
+        AUDIT_SCHEMA_KEYS,
+        AuditPipeline,
+    )
 
     pipeline = AuditPipeline(heal_output_dir=heal_output_dir or None)
     code_path = Path(code_file).expanduser().resolve()
@@ -1789,30 +1793,16 @@ def scan_and_fix(
         alignment = validate_spec_to_code(spec_text, code_file, language=language)
         spec_alignment = asdict(alignment)
 
-    return {
+    payload = {
         "audit": asdict(result),
         "next_steps": result.next_steps,
         "spec_alignment": spec_alignment,
-        "audit_schema": [
-            "spec_health_issues",
-            "verification_violations",
-            "cross_validation_gaps",
-            "next_steps",
-            "migration_hints",
-            "healed_files",
-            "heal_errors",
-        ],
-        "contract_terms": {
-            "spec_health_issues": "spec-only contradictions, overconstraints, vacuity, or ambiguity",
-            "verification_violations": "existing-code bugs or unsafe paths found before .mm migration",
-            "cross_validation_gaps": "spec/code mismatches or cross-spec drift discovered during audit",
-            "next_steps": "ranked commands for audit -> migrate-suggest -> heal",
-            "migration_hints": "generated .mm skeleton advice from migrate-suggest or audit --auto-migrate",
-            "healed_files": "generated .mm skeletons accepted or rewritten by the self-healing loop",
-            "heal_errors": "per-skeleton self-healing failures and diagnostics",
-            "contradiction_type": "stable spec contradiction classifier",
-        },
+        "audit_schema": AUDIT_SCHEMA_KEYS,
+        "contract_terms": AUDIT_CONTRACT_TERMS,
     }
+    for key in AUDIT_SCHEMA_KEYS:
+        payload[key] = getattr(result, key, [])
+    return payload
 
 
 

@@ -29,14 +29,25 @@ AUDIT_EXTENSION_MAP: dict[str, Language] = {
     ".ts": "typescript",
 }
 
+AUDIT_SCHEMA_KEYS = [
+    "spec_health_issues",
+    "verification_violations",
+    "cross_validation_gaps",
+    "next_steps",
+    "migration_hints",
+    "healed_files",
+    "heal_errors",
+]
+
 AUDIT_CONTRACT_TERMS = {
-    "spec_health_issues": "Spec-only contradictions, overconstraints, vacuity, or ambiguity.",
-    "verification_violations": "Existing-code bugs or unsafe paths found before .mm migration.",
-    "cross_validation_gaps": "Spec/code mismatches or cross-spec drift discovered during audit.",
-    "migration_hints": "Generated .mm skeleton advice from migrate-suggest or audit --auto-migrate.",
-    "healed_files": "Generated .mm skeletons accepted or rewritten by the self-healing loop.",
-    "heal_errors": "Per-skeleton self-healing failures and diagnostics.",
-    "contradiction_type": "Stable contradiction classifier shared with spec tools.",
+    "spec_health_issues": "spec-only contradictions, overconstraints, vacuity, or ambiguity",
+    "verification_violations": "existing-code bugs or unsafe paths found before .mm migration",
+    "cross_validation_gaps": "spec/code mismatches or cross-spec drift discovered during audit",
+    "next_steps": "ranked commands for audit -> migrate-suggest -> heal",
+    "migration_hints": "generated .mm skeleton advice from migrate-suggest or audit --auto-migrate",
+    "healed_files": "generated .mm skeletons accepted or rewritten by the self-healing loop",
+    "heal_errors": "per-skeleton self-healing failures and diagnostics",
+    "contradiction_type": "stable spec contradiction classifier",
 }
 
 
@@ -979,8 +990,8 @@ def _build_report(result: AuditResult) -> str:
     ]
     if result.errors:
         lines.append(f"errors: {result.errors}")
+    lines.append("migration_hints:")
     if result.migration_hints:
-        lines.append("migration_hints:")
         for hint in result.migration_hints:
             function_name = _string_value(hint.get("function_name"), "unknown")
             priority = _string_value(hint.get("priority"), "unknown")
@@ -991,10 +1002,10 @@ def _build_report(result: AuditResult) -> str:
             lines.append("    skeleton:")
             for preview_line in skeleton_preview:
                 lines.append(f"      {preview_line}")
-    if result.healed_files:
-        lines.append(f"healed_files: {result.healed_files}")
-    if result.heal_errors:
-        lines.append(f"heal_errors: {result.heal_errors}")
+    else:
+        lines.append("  []")
+    lines.append(f"healed_files: {result.healed_files}")
+    lines.append(f"heal_errors: {result.heal_errors}")
     if next_steps:
         lines.append("next_steps:")
         for step in next_steps:
