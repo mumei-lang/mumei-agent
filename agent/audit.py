@@ -43,7 +43,7 @@ AUDIT_CONTRACT_TERMS = {
     "spec_health_issues": "spec-only contradictions, overconstraints, vacuity, or ambiguity",
     "verification_violations": "existing-code bugs or unsafe paths found before .mm migration",
     "cross_validation_gaps": "spec/code mismatches or cross-spec drift discovered during audit",
-    "next_steps": "ranked commands for audit -> migrate-suggest -> heal",
+    "next_steps": "human-review entrypoint for audit -> migrate-suggest -> heal",
     "migration_hints": "generated .mm skeleton advice from migrate-suggest or audit --auto-migrate",
     "healed_files": "generated .mm skeletons accepted or rewritten by the self-healing loop",
     "heal_errors": "per-skeleton self-healing failures and diagnostics",

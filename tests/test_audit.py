@@ -574,6 +574,56 @@ def test_scan_and_fix_handles_directory(tmp_path: Path) -> None:
     pipeline_cls.return_value.audit_file.assert_not_called()
 
 
+def test_scan_and_fix_shares_audit_contract_and_next_steps_review_gate(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    next_steps = [
+        {
+            "priority": "high",
+            "action": "migrate-suggest で.mm スケルトン生成",
+            "command": (
+                "mumei-agent migrate-suggest --code-file <file> "
+                "--language <lang> --output generated/mm"
+            ),
+        }
+    ]
+    audit_result = AuditResult(
+        success=False,
+        source_file=str(source),
+        language="python",
+        spec_extracted=True,
+        spec_health_issues=["requires balance >= amount and amount > balance"],
+        verification_violations=["balance can go negative"],
+        cross_validation_gaps=["spec requires a guard missing from code"],
+        next_steps=next_steps,
+        migration_hints=[{"function_name": "withdraw"}],
+        healed_files=[str(tmp_path / "withdraw.mm")],
+        heal_errors=["withdraw.mm: proof still failing"],
+    )
+
+    with patch("agent.audit.AuditPipeline") as pipeline_cls:
+        pipeline_cls.return_value.audit_file.return_value = audit_result
+        payload = mcp_server.scan_and_fix(str(source), "python", auto_heal=True)
+
+    for key in AUDIT_SCHEMA_KEYS:
+        assert key in payload
+        assert payload[key] == getattr(audit_result, key)
+        assert payload["audit"][key] == getattr(audit_result, key)
+    assert payload["next_steps"] == next_steps
+    assert "human-review entrypoint" in payload["contract_terms"]["next_steps"]
+    assert "recommendations" not in payload
+    assert "actions" not in payload
+    assert "review_actions" not in payload
+    assert "human_review" not in payload
+    assert "repair_hints" not in payload
+
+
 def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
     source = tmp_path / "payment.py"
     source.write_text("def withdraw(balance: int, amount: int) -> int:\n    return balance - amount\n", encoding="utf-8")

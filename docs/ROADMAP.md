@@ -21,7 +21,7 @@ Audit/spec/MCP vocabulary is fixed as:
 | `healed_files` | Generated `.mm` skeletons accepted or rewritten by the self-healing loop. | `audit --auto-heal`, `scan_and_fix` |
 | `heal_errors` | Per-skeleton self-healing failures and diagnostics. | `audit --auto-heal`, `scan_and_fix` |
 
-`scan_and_fix` is the MCP spelling of `audit --code-file ... --auto-migrate --auto-heal`; README flowchart, guide steps, CLI help, MCP docstrings, and this roadmap must describe the same audit → migrate-suggest → heal contract and the seven fixed keys above without aliases.
+`scan_and_fix` is the MCP spelling of `audit --code-file ... --auto-migrate --auto-heal`; README flowchart, guide steps, CLI help, MCP docstrings, and this roadmap must describe the same `audit -> migrate-suggest -> heal` contract and the seven fixed keys above without aliases.
 
 ### Single audit contract and review handoff
 
