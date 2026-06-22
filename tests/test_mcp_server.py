@@ -513,6 +513,8 @@ class TestScanAndFix:
             "heal_errors": "per-skeleton self-healing failures and diagnostics",
             "contradiction_type": "stable spec contradiction classifier",
         }
+        for key in result["audit_schema"]:
+            assert key in result
         pipeline_cls.assert_called_once_with(heal_output_dir=str(tmp_path / "healed"))
         pipeline_cls.return_value.audit_file.assert_called_once_with(
             str(source),
@@ -521,6 +523,41 @@ class TestScanAndFix:
             auto_migrate=True,
             auto_heal=True,
         )
+
+    def test_exposes_fixed_audit_keys_without_aliases(self, tmp_path: Path) -> None:
+        from agent.audit import AuditResult
+
+        source = tmp_path / "impl.py"
+        source.write_text("def sub(a: int, b: int) -> int:\n    return a - b\n", encoding="utf-8")
+        audit_result = AuditResult(
+            success=False,
+            source_file=str(source),
+            language="python",
+            spec_extracted=True,
+            verification_violations=["balance can go negative"],
+            next_steps=[
+                {
+                    "priority": "high",
+                    "action": "migrate-suggest で.mm skeleton 生",
+                    "command": "mumei-agent migrate-suggest --code-file <file>",
+                }
+            ],
+            migration_hints=[{"function_name": "sub"}],
+            healed_files=[str(tmp_path / "sub.mm")],
+            heal_errors=[],
+        )
+
+        with patch("agent.audit.AuditPipeline") as pipeline_cls:
+            pipeline_cls.return_value.audit_file.return_value = audit_result
+            result = mcp_server.scan_and_fix(str(source), "python", auto_heal=True)
+
+        assert result["verification_violations"] == ["balance can go negative"]
+        assert result["migration_hints"] == [{"function_name": "sub"}]
+        assert result["healed_files"] == [str(tmp_path / "sub.mm")]
+        assert result["heal_errors"] == []
+        assert result["next_steps"] == audit_result.next_steps
+        assert "recommendations" not in result
+        assert "repair_hints" not in result
 
     def test_runs_spec_alignment_when_spec_is_provided(self, tmp_path: Path) -> None:
         from agent.audit import AuditResult

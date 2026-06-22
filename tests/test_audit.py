@@ -8,10 +8,12 @@ from unittest.mock import MagicMock, patch
 
 from agent import mcp_server
 from agent.audit import (
+    AUDIT_SCHEMA_KEYS,
     AuditDirectoryResult,
     AuditPipeline,
     AuditResult,
     _build_report,
+    _format_result,
     build_parser,
     main,
 )
@@ -711,3 +713,32 @@ def test_audit_result_asdict_includes_next_steps() -> None:
             "command": "mumei-agent migrate-suggest --code-file <file>",
         }
     ]
+
+
+def test_cli_json_contract_keeps_scan_and_fix_schema_keys() -> None:
+    result = AuditResult(
+        success=False,
+        source_file="payment.py",
+        language="python",
+        spec_extracted=True,
+        spec_health_issues=["requires and ensures conflict"],
+        verification_violations=["balance can go negative"],
+        cross_validation_gaps=["spec/code mismatch"],
+        migration_hints=[],
+        healed_files=[],
+        heal_errors=[],
+    )
+    result.next_steps = [
+        {
+            "priority": "high",
+            "action": "migrate-suggest で.mm skeleton 生",
+            "command": "mumei-agent migrate-suggest --code-file <file>",
+        }
+    ]
+
+    payload = json.loads(_format_result(result, "json"))
+
+    assert [key for key in AUDIT_SCHEMA_KEYS if key in payload] == AUDIT_SCHEMA_KEYS
+    assert payload["next_steps"] == result.next_steps
+    assert "recommendations" not in payload
+    assert "repair_hints" not in payload

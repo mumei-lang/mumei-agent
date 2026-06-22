@@ -1,6 +1,6 @@
 # 検証ワークフローガイド
 
-> Cross-project contract: `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap. This guide uses the canonical vocabulary `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, `lean_verified`, plus agent audit keys `contradiction_type`, `migration_hints`, and `cross_validation_gaps`.
+> Cross-project contract: `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap. This guide uses the canonical vocabulary `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, `lean_verified`, plus agent audit keys `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors`, and `contradiction_type`.
 
 
 ## 0. No-.mm entry: one audit contract

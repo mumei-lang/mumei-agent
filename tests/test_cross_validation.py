@@ -453,3 +453,13 @@ def test_validate_code_to_spec_sets_spec_vs_code_contradiction_type(tmp_path: Pa
     )
 
     assert result.contradiction_type == "spec_vs_code"
+
+
+def test_no_mm_audit_terms_do_not_alias_cross_validation_keys() -> None:
+    from agent.audit import AUDIT_SCHEMA_KEYS
+
+    assert "cross_validation_gaps" in AUDIT_SCHEMA_KEYS
+    assert "next_steps" in AUDIT_SCHEMA_KEYS
+    assert "missing_constraints" not in AUDIT_SCHEMA_KEYS
+    assert "divergences" not in AUDIT_SCHEMA_KEYS
+    assert "repair_hints" not in AUDIT_SCHEMA_KEYS
