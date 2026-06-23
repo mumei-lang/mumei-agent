@@ -324,7 +324,7 @@ def validate_spec_to_code(
     language: str | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
-    lang: Literal["en", "ja"] = "en",
+    lang: Literal["auto", "en", "ja"] = "auto",
 ) -> SpecCodeAlignmentResult:
     """Validate that code implements the requires/ensures constraints in a spec."""
     config = config or AgentConfig()
@@ -428,7 +428,7 @@ def validate_code_to_spec(
     language: str | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
-    lang: Literal["en", "ja"] = "en",
+    lang: Literal["auto", "en", "ja"] = "auto",
 ) -> SpecDriftResult:
     """Validate that a specification has not drifted behind code changes."""
     config = config or AgentConfig()
@@ -745,7 +745,12 @@ def build_validate_spec_to_code_parser(
     parser.add_argument("--spec", "--input", dest="spec", required=True, help="Path to spec file.")
     parser.add_argument("--code", required=True, help="Path to source code.")
     parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
-    parser.add_argument("--lang", choices=["en", "ja"], default="en", help="Report language.")
+    parser.add_argument(
+        "--lang",
+        choices=["auto", "en", "ja"],
+        default="auto",
+        help="Report language.",
+    )
     parser.add_argument("--output", help="Optional report path.")
     parser.add_argument(
         "--format",
@@ -767,7 +772,12 @@ def build_validate_code_to_spec_parser(
     parser.add_argument("--code", required=True, help="Path to source code.")
     parser.add_argument("--spec", required=True, help="Path to spec file.")
     parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
-    parser.add_argument("--lang", choices=["en", "ja"], default="en", help="Report language.")
+    parser.add_argument(
+        "--lang",
+        choices=["auto", "en", "ja"],
+        default="auto",
+        help="Report language.",
+    )
     parser.add_argument("--output", help="Optional report path.")
     parser.add_argument(
         "--format",
@@ -972,14 +982,14 @@ def _emit_cross_validation_result(
     output: str | None,
     *,
     output_format: str = "markdown",
-    lang: Literal["en", "ja"] = "en",
+    lang: Literal["auto", "en", "ja"] = "auto",
 ) -> None:
     if output_format == "json":
         _emit_result(result, output)
         return
     from agent.report_formatter import format_cross_validation_report
 
-    report = format_cross_validation_report(result, lang=lang)
+    report = format_cross_validation_report(result, lang=lang, output_format=output_format)
     if output:
         Path(output).write_text(report + "\n", encoding="utf-8")
     print(report)
@@ -1757,7 +1767,7 @@ def _intent_payloads(
 def _format_intent_drift_report(
     result: CrossValidationReport,
     *,
-    lang: Literal["en", "ja"],
+    lang: Literal["auto", "en", "ja"],
 ) -> str:
     if lang == "ja":
         lines = [
@@ -1987,10 +1997,16 @@ def _generate_cross_validation_next_steps(
         return []
     if command_name == "validate-code-to-spec":
         action = "Update the natural-language spec or justify the extra implementation."
-        command = f"mumei-agent validate-code-to-spec --code {code_path} --spec {spec_path}"
+        command = (
+            f"mumei-agent validate-code-to-spec --code {code_path} "
+            f"--spec {spec_path} --format human"
+        )
     else:
         action = "Update the implementation or refine the natural-language spec."
-        command = f"mumei-agent validate-spec-to-code --spec {spec_path} --code {code_path}"
+        command = (
+            f"mumei-agent validate-spec-to-code --spec {spec_path} "
+            f"--code {code_path} --format human"
+        )
     return [
         {
             "priority": "high",
@@ -2141,7 +2157,7 @@ def _spec_code_result(
     satisfiable: bool | None,
     warnings: list[str],
     errors: list[str],
-    lang: Literal["en", "ja"],
+    lang: Literal["auto", "en", "ja"],
     contradiction_type: ContradictionType = "",
 ) -> SpecCodeAlignmentResult:
     cross_validation_gaps = _cross_validation_gap_strings(

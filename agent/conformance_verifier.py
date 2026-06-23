@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ast
 import re
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -108,44 +108,9 @@ def verify_conformance(
 
 
 def format_conformance_report(result: ConformanceVerificationResult) -> str:
-    payload = asdict(result)
-    lines = [
-        "## Conformance Verification",
-        "",
-        f"- Status: **{'Passed' if result.success else 'Needs review'}**",
-        f"- Code: `{result.code_path}`",
-        f"- Language: `{result.language}`",
-        "",
-        "### structured_json_keys",
-        "- unimplemented_conditions",
-        "- hidden_specifications",
-        "- traceability_matrix",
-        "- verification_violations",
-        "- cross_validation_gaps",
-        "- next_steps",
-        "",
-        "### Findings",
-    ]
-    if not result.unimplemented_conditions and not result.hidden_specifications:
-        lines.append("- No conformance gaps detected.")
-    for finding in [*result.unimplemented_conditions, *result.hidden_specifications]:
-        suffix = f" line {finding.code_line}" if finding.code_line else ""
-        lines.append(
-            f"- **{finding.status}** `{finding.implementation_symbol}`{suffix}: "
-            f"{finding.condition}"
-        )
-        if finding.evidence:
-            lines.append(f"  - evidence: `{finding.evidence}`")
-    lines.append("")
-    lines.append("### next_steps")
-    if payload["next_steps"]:
-        for step in result.next_steps:
-            lines.append(f"- priority: `{step['priority']}`")
-            lines.append(f"  action: {step['action']}")
-            lines.append(f"  command: `{step['command']}`")
-    else:
-        lines.append("- []")
-    return "\n".join(lines)
+    from agent.report_formatter import format_result_report
+
+    return format_result_report(result, "human")
 
 
 def _read_code(code_path: str) -> str:

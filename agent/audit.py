@@ -508,9 +508,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--json", action="store_true", help="Output the full result as JSON.")
     parser.add_argument(
         "--format",
-        choices=["text", "markdown", "json"],
-        default="text",
-        help="Output format (default: text).",
+        choices=["human", "markdown", "json", "text"],
+        default="human",
+        help="Output format (default: human).",
     )
     parser.add_argument("--output", help="Optional output path.")
     parser.add_argument("--domain-hint", default="", help="Optional domain hint for spec extraction.")
@@ -845,9 +845,11 @@ def _result_report(result: AuditResult | AuditDirectoryResult) -> str:
 def _format_result(result: AuditResult | AuditDirectoryResult, output_format: str) -> str:
     if output_format == "json":
         return json.dumps(asdict(result), ensure_ascii=False, indent=2)
-    if output_format == "markdown":
-        return _result_to_markdown(result)
-    return _result_report(result)
+    if output_format == "text":
+        return _result_report(result)
+    from agent.report_formatter import format_result_report
+
+    return format_result_report(result, "markdown" if output_format == "markdown" else "human")
 
 
 def _finalize_audit_result(result: AuditResult) -> AuditResult:
@@ -874,7 +876,7 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
             {
                 "priority": "high",
                 "action": "validate-spec-to-code で制約の対応を確認",
-                "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file>",
+                "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file> --format human",
             }
         )
     if result.spec_health_issues:
@@ -882,7 +884,7 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
             {
                 "priority": "medium",
                 "action": "validate-spec で仕様の矛盾を修正",
-                "command": "mumei-agent validate-spec --input <spec>",
+                "command": "mumei-agent validate-spec --input <spec> --format human",
             }
         )
     if result.migration_hints:
@@ -897,7 +899,7 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
         steps.append(
             {
                 "priority": "info",
-                "action": "監査完了。.mm 移行不要",
+                "action": "監査完了。追加の .mm 移行は不要",
                 "command": "",
             }
         )
@@ -928,7 +930,7 @@ def _generate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
         return [
             {
                 "priority": "info",
-                "action": "監査完了。.mm 移行不要",
+                "action": "監査完了。追加の .mm 移行は不要",
                 "command": "",
             }
         ]

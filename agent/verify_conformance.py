@@ -9,7 +9,6 @@ from pathlib import Path
 
 from agent.conformance_verifier import (
     ConformanceVerificationResult,
-    format_conformance_report,
     verify_conformance,
 )
 from agent.config import AgentConfig
@@ -23,9 +22,15 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--output", help="Optional output path.")
     parser.add_argument(
         "--format",
-        choices=["json", "markdown"],
+        choices=["human", "json", "markdown"],
         default="json",
         help="Output format (default: json).",
+    )
+    parser.add_argument(
+        "--lang",
+        choices=["auto", "en", "ja"],
+        default="auto",
+        help="Report language.",
     )
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
@@ -44,17 +49,25 @@ def main(args: argparse.Namespace | None = None) -> ConformanceVerificationResul
         use_llm=not args.no_llm,
         run_mumei=not args.no_mumei,
     )
-    _emit(result, args.output, args.format)
+    _emit(result, args.output, args.format, args.lang)
     if not result.success:
         sys.exit(1)
     return result
 
 
-def _emit(result: ConformanceVerificationResult, output: str | None, output_format: str) -> None:
-    if output_format == "markdown":
-        payload = format_conformance_report(result)
-    else:
+def _emit(
+    result: ConformanceVerificationResult,
+    output: str | None,
+    output_format: str,
+    lang: str,
+) -> None:
+    if output_format == "json":
         payload = json.dumps(asdict(result), indent=2, ensure_ascii=False)
+    else:
+        from agent.report_formatter import format_result_report
+
+        report_format = "markdown" if output_format == "markdown" else "human"
+        payload = format_result_report(result, report_format, lang=lang)
     if output:
         Path(output).write_text(payload + "\n", encoding="utf-8")
     print(payload)

@@ -1774,6 +1774,7 @@ def scan_and_fix(
     auto_heal: bool = False,
     heal_output_dir: str = "",
     domain_hint: str = "",
+    output_format: str = "json",
 ) -> dict:
     """
     Same contract as `mumei-agent audit --code-file ... --auto-migrate --auto-heal`.
@@ -1791,6 +1792,7 @@ def scan_and_fix(
         auto_heal: If True, run the self-healing loop on generated .mm skeletons.
         heal_output_dir: Directory to write healed .mm files.
         domain_hint: Optional domain hint for spec extraction.
+        output_format: json, human, or markdown formatted_report sidecar.
     """
     from agent.audit import (
         AUDIT_CONTRACT_TERMS,
@@ -1844,6 +1846,10 @@ def scan_and_fix(
     }
     for key in AUDIT_SCHEMA_KEYS:
         payload[key] = getattr(result, key, [])
+    if output_format in {"human", "markdown"}:
+        from agent.report_formatter import format_scan_and_fix_report
+
+        payload["formatted_report"] = format_scan_and_fix_report(payload)
     return payload
 
 
