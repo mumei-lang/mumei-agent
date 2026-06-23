@@ -491,6 +491,7 @@ class TestScanAndFix:
 
         assert result["audit"]["success"] is True
         assert result["spec_alignment"] is None
+        assert result["conformance_verification"] is None
         assert result["audit_schema"] == [
             "spec_health_issues",
             "verification_violations",
@@ -604,11 +605,34 @@ class TestScanAndFix:
         assert result["audit"]["source_file"] == str(source)
         assert result["spec_alignment"]["success"] is True
         assert result["spec_alignment"]["satisfiable"] is True
+        assert result["conformance_verification"]["success"] is True
+        assert result["conformance_verification"]["next_steps"] == []
         validate.assert_called_once_with(
             "requires: true; ensures: result == a + b",
             str(source),
             language="python",
         )
+
+    def test_verify_conformance_exposes_next_steps_without_aliases(self, tmp_path: Path) -> None:
+        source = tmp_path / "impl.py"
+        source.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+        result = mcp_server.verify_conformance(
+            "requires: true;\nensures: result == x + 1;",
+            str(source),
+            language="python",
+            use_llm=False,
+            run_mumei=False,
+        )
+
+        assert result["status"] == "needs_review"
+        assert result["unimplemented_conditions"]
+        assert result["verification_violations"]
+        assert result["cross_validation_gaps"]
+        assert result["next_steps"]
+        assert "human_review" not in result
+        assert "recommendations" not in result
+        assert "review_actions" not in result
 
 
 # ---------------------------------------------------------------------------

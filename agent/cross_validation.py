@@ -18,6 +18,7 @@ import z3
 
 from agent.ambiguity_detector import AmbiguityDetector
 from agent.config import AgentConfig
+from agent.code_to_spec import CodeToSpecConverter
 from agent.mumei_client import create_mumei_client
 from agent.prompts.cross_validation_code import (
     CROSS_VALIDATION_CODE_SYSTEM_PROMPT,
@@ -27,7 +28,7 @@ from agent.prompts.cross_validation_nl import (
     CROSS_VALIDATION_NL_SYSTEM_PROMPT,
     build_nl_cross_validation_prompt,
 )
-from agent.intent_tracker import IntentDriftResult, IntentTracker
+from agent.intent_tracker import IntentChange, IntentDriftResult, IntentTracker
 from agent.spec_code_mapper import MappingResult, SpecCodeMapper
 
 
@@ -143,6 +144,8 @@ class SpecCodeAlignmentResult:
     constraint_violations: list[dict[str, object]] = field(default_factory=list)
     extra_behaviors: list[str] = field(default_factory=list)
     missing_constraint_issues: list[CrossValidationIssue] = field(default_factory=list)
+    cross_validation_gaps: list[str] = field(default_factory=list)
+    next_steps: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -161,6 +164,12 @@ class SpecDriftResult:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     contradiction_type: ContradictionType = ""
+    extracted_spec: str = ""
+    spec_gaps: list[str] = field(default_factory=list)
+    implementation_overages: list[str] = field(default_factory=list)
+    cross_validation_gaps: list[str] = field(default_factory=list)
+    next_steps: list[dict[str, str]] = field(default_factory=list)
+    intent_drift: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -458,6 +467,17 @@ def validate_code_to_spec(
     warnings.extend(diff_warnings)
     if not changed_hunks:
         warnings.append("No git diff hunks found for the code path; comparing current code to spec only.")
+    extracted_spec = ""
+    try:
+        code_text = Path(code_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        code_text = ""
+        errors.append(f"failed to read code file for code-to-spec extraction: {exc}")
+    if code_text:
+        conversion = CodeToSpecConverter(config).convert_source(code_text, alignment.language)
+        extracted_spec = conversion.natural_language_spec
+        warnings.extend(conversion.warnings)
+        errors.extend(conversion.errors)
     drift_missing, drift_divergences, drift_warnings = _compare_spec_atoms_to_code_atoms(
         alignment.spec_atoms,
         alignment.code_atoms,
@@ -482,21 +502,40 @@ def validate_code_to_spec(
             ],
         ]
     ]
+    spec_gaps = _code_to_spec_gap_strings([*drift_missing, *drift_divergences])
+    implementation_overages = _implementation_overage_strings(
+        [*drift_missing, *drift_divergences],
+    )
+    intent_drift_payload: dict[str, object] | None = None
+    if alignment.spec_atoms or alignment.code_atoms:
+        intent_drift = IntentTracker(config).track_intent_drift(
+            _atoms_to_spec_payload(alignment.spec_atoms),
+            _atoms_to_spec_payload(alignment.code_atoms),
+            natural_language_intent=spec,
+        )
+        intent_drift_payload = asdict(intent_drift)
+        warnings.extend(intent_drift.warnings)
+        spec_gaps.extend(_intent_gap_strings(intent_drift.changes))
+    deduped_drift_issues = _dedupe_issues(drift_issues)
     return _spec_drift_result(
         code_path=code_path,
         spec_path=spec_path,
         language=alignment.language,
         spec_atoms=alignment.spec_atoms,
         code_atoms=alignment.code_atoms,
-        drift_issues=_dedupe_issues(drift_issues),
+        drift_issues=deduped_drift_issues,
         changed_hunks=changed_hunks,
         warnings=warnings,
         errors=errors,
         lang=lang,
         contradiction_type=_alignment_contradiction_type(
             alignment.contradiction_type,
-            bool(drift_issues),
+            bool(deduped_drift_issues),
         ),
+        extracted_spec=extracted_spec or _atoms_to_summary(alignment.code_atoms),
+        spec_gaps=_dedupe_strings(spec_gaps),
+        implementation_overages=_dedupe_strings(implementation_overages),
+        intent_drift=intent_drift_payload,
     )
 
 
@@ -1869,6 +1908,82 @@ def _missing_constraint_texts(issues: list[CrossValidationIssue]) -> list[str]:
     return constraints
 
 
+def _code_to_spec_gap_strings(issues: list[CrossValidationIssue]) -> list[str]:
+    gaps: list[str] = []
+    for issue in issues:
+        if "not documented in the spec" in issue.message:
+            gaps.append(issue.evidence)
+        elif "not covered by the specification" in issue.message:
+            gaps.append(issue.message)
+        elif issue.kind == "drift":
+            gaps.append(issue.evidence or issue.message)
+    return _dedupe_strings(gaps)
+
+
+def _cross_validation_gap_strings(issues: list[CrossValidationIssue]) -> list[str]:
+    return _dedupe_strings(
+        [issue.evidence or issue.message for issue in issues if issue.severity == "error"]
+    )
+
+
+def _implementation_overage_strings(issues: list[CrossValidationIssue]) -> list[str]:
+    overages: list[str] = []
+    for issue in issues:
+        if "not covered by the specification" in issue.message:
+            overages.append(issue.evidence or issue.message)
+    return _dedupe_strings(overages)
+
+
+def _intent_gap_strings(changes: list[IntentChange]) -> list[str]:
+    return _dedupe_strings(
+        [
+            f"{change.field}: {change.original} -> {change.refined}"
+            for change in changes
+            if change.intent_impact == "violated"
+        ]
+    )
+
+
+def _atoms_to_summary(atoms: list[MumeiContractAtom]) -> str:
+    return "\n".join(
+        f"{atom.name}: requires {atom.requires}; ensures {atom.ensures}."
+        for atom in atoms
+    )
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        stripped = value.strip()
+        if stripped and stripped not in deduped:
+            deduped.append(stripped)
+    return deduped
+
+
+def _generate_cross_validation_next_steps(
+    command_name: str,
+    *,
+    code_path: str,
+    spec_path: str,
+    gaps: list[str],
+) -> list[dict[str, str]]:
+    if not gaps:
+        return []
+    if command_name == "validate-code-to-spec":
+        action = "Update the natural-language spec or justify the extra implementation."
+        command = f"mumei-agent validate-code-to-spec --code {code_path} --spec {spec_path}"
+    else:
+        action = "Update the implementation or refine the natural-language spec."
+        command = f"mumei-agent validate-spec-to-code --spec {spec_path} --code {code_path}"
+    return [
+        {
+            "priority": "high",
+            "action": action,
+            "command": command,
+        }
+    ]
+
+
 def _extra_behavior_texts(issues: list[CrossValidationIssue]) -> list[str]:
     extras: list[str] = []
     for issue in issues:
@@ -2013,6 +2128,9 @@ def _spec_code_result(
     lang: Literal["en", "ja"],
     contradiction_type: ContradictionType = "",
 ) -> SpecCodeAlignmentResult:
+    cross_validation_gaps = _cross_validation_gap_strings(
+        [*missing_constraint_issues, *divergences],
+    )
     result = SpecCodeAlignmentResult(
         success=bool(
             not errors
@@ -2035,6 +2153,13 @@ def _spec_code_result(
         warnings=warnings,
         errors=errors,
         contradiction_type=contradiction_type,
+        cross_validation_gaps=cross_validation_gaps,
+        next_steps=_generate_cross_validation_next_steps(
+            "validate-spec-to-code",
+            code_path=code_path,
+            spec_path="<spec>",
+            gaps=cross_validation_gaps,
+        ),
     )
     from agent.report_formatter import format_cross_validation_report
 
@@ -2054,7 +2179,20 @@ def _spec_drift_result(
     errors: list[str],
     lang: Literal["en", "ja"],
     contradiction_type: ContradictionType = "",
+    extracted_spec: str = "",
+    spec_gaps: list[str] | None = None,
+    implementation_overages: list[str] | None = None,
+    intent_drift: dict[str, object] | None = None,
 ) -> SpecDriftResult:
+    gap_values = _dedupe_strings(spec_gaps or [])
+    overage_values = _dedupe_strings(implementation_overages or [])
+    cross_validation_gaps = _dedupe_strings(
+        [
+            *gap_values,
+            *overage_values,
+            *[issue.evidence or issue.message for issue in drift_issues],
+        ]
+    )
     result = SpecDriftResult(
         success=bool(not errors and spec_atoms and code_atoms and not drift_issues),
         code_path=code_path,
@@ -2067,6 +2205,17 @@ def _spec_drift_result(
         warnings=warnings,
         errors=errors,
         contradiction_type=contradiction_type,
+        extracted_spec=extracted_spec,
+        spec_gaps=gap_values,
+        implementation_overages=overage_values,
+        cross_validation_gaps=cross_validation_gaps,
+        next_steps=_generate_cross_validation_next_steps(
+            "validate-code-to-spec",
+            code_path=code_path,
+            spec_path=spec_path,
+            gaps=cross_validation_gaps,
+        ),
+        intent_drift=intent_drift,
     )
     from agent.report_formatter import format_cross_validation_report
 

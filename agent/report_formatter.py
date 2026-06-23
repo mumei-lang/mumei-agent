@@ -110,15 +110,14 @@ def _format_en(payload: dict[str, object], is_drift: bool) -> str:
         else:
             lines.extend(_spec_code_issue_lines(issues, secondary))
         lines.append("")
-        lines.append("### Reviewer action")
-        lines.append("- Confirm whether each finding is an intentional spec/code change.")
-        lines.append("- Update the implementation or the specification before merging if it is drift.")
+        lines.append("### next_steps")
+        lines.extend(_next_step_lines(payload))
     else:
         lines.append("### Findings")
         lines.append("- No spec drift or missing implementation constraints detected.")
         lines.append("")
-        lines.append("### Reviewer action")
-        lines.append("- No human intervention required.")
+        lines.append("### next_steps")
+        lines.extend(_next_step_lines(payload))
     lines.extend(_hunk_lines(payload, heading="Changed code hunks"))
     lines.extend(_warning_lines(payload, heading="Warnings"))
     return "\n".join(lines)
@@ -239,15 +238,14 @@ def _format_ja(payload: dict[str, object], is_drift: bool) -> str:
         else:
             lines.extend(_spec_code_issue_lines(issues, secondary))
         lines.append("")
-        lines.append("### Human-in-the-Loop 確認事項")
-        lines.append("- 各検出事項が意図した仕様変更または実装変更か確認してください。")
-        lines.append("- 仕様ドリフトの場合は、マージ前に実装または仕様を更新してください。")
+        lines.append("### next_steps")
+        lines.extend(_next_step_lines(payload))
     else:
         lines.append("### 検出事項")
         lines.append("- 実装漏れ・仕様ドリフトは検出されませんでした。")
         lines.append("")
-        lines.append("### Human-in-the-Loop 確認事項")
-        lines.append("- 追加の確認は不要です。")
+        lines.append("### next_steps")
+        lines.extend(_next_step_lines(payload))
     lines.extend(_hunk_lines(payload, heading="変更差分"))
     lines.extend(_warning_lines(payload, heading="警告"))
     return "\n".join(lines)
@@ -344,6 +342,23 @@ def _spec_code_issue_type(issue: dict[str, object], *, is_missing: bool) -> str:
     if is_missing or "does not imply the spec postcondition" in message:
         return "spec_stronger"
     return "spec_vs_code"
+
+
+def _next_step_lines(payload: dict[str, object]) -> list[str]:
+    steps = _dict_list(payload.get("next_steps"))
+    if not steps:
+        return ["- []"]
+    lines: list[str] = []
+    for step in steps:
+        priority = step.get("priority", "medium")
+        action = step.get("action", "")
+        command = step.get("command", "")
+        lines.append(f"- priority: `{priority}`")
+        if action:
+            lines.append(f"  action: {action}")
+        if command:
+            lines.append(f"  command: `{command}`")
+    return lines
 
 
 def _hunk_lines(payload: dict[str, object], *, heading: str) -> list[str]:
