@@ -1835,6 +1835,10 @@ def scan_and_fix(
             alignment=alignment,
         )
         conformance_verification = asdict(conformance)
+        if not conformance_verification.get("report"):
+            from agent.report_formatter import format_result_report
+
+            conformance_verification["report"] = format_result_report(conformance, "human")
 
     payload = {
         "audit": asdict(result),

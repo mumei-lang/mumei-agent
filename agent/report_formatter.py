@@ -101,6 +101,10 @@ def _format_markdown(payload: dict[str, object], lang: Literal["en", "ja"]) -> s
     labels = _labels(lang)
     lines = [f"## {title}", ""]
     lines.extend(_status_lines(payload, lang))
+    role_lines = _scan_and_fix_role_lines(payload, lang)
+    if role_lines:
+        lines.append("")
+        lines.extend(role_lines)
     lines.append("")
     lines.append(f"### {labels['next_steps']} (V1-E-1)")
     lines.extend(_next_step_lines(payload, lang))
@@ -273,6 +277,56 @@ def _status_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list
     return lines
 
 
+def _scan_and_fix_role_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
+    if _kind(payload) != "scan_and_fix":
+        return []
+    if lang == "ja":
+        heading = "### scan_and_fix の役割分担"
+        labels = {
+            "audit": "既存コード監査と no-.mm migration/heal の入口",
+            "spec_alignment": "spec→code の差分検出",
+            "conformance_verification": "traceability と `next_steps` 起点の human review",
+            "emits": "emits",
+        }
+    else:
+        heading = "### scan_and_fix role split"
+        labels = {
+            "audit": "existing-code audit and no-.mm migration/heal entrypoint",
+            "spec_alignment": "spec-to-code gap detection",
+            "conformance_verification": "traceability plus `next_steps`-first human review",
+            "emits": "emits",
+        }
+    audit_terms = (
+        "`spec_health_issues`, `verification_violations`, `cross_validation_gaps`, "
+        "`next_steps`, `migration_hints`, `healed_files`, `heal_errors`"
+    )
+    lines = [heading]
+    audit_status = _component_status(payload.get("audit"), lang)
+    alignment_status = _component_status(payload.get("spec_alignment"), lang)
+    conformance_status = _component_status(payload.get("conformance_verification"), lang)
+    lines.append(
+        f"- `audit`: {audit_status} — {labels['audit']}; "
+        f"{labels['emits']} {audit_terms}."
+    )
+    lines.append(
+        f"- `spec_alignment`: {alignment_status} — {labels['spec_alignment']}."
+    )
+    lines.append(
+        f"- `conformance_verification`: {conformance_status} — "
+        f"{labels['conformance_verification']}."
+    )
+    return lines
+
+
+def _component_status(value: object, lang: Literal["en", "ja"]) -> str:
+    if not isinstance(value, dict):
+        return "未実行" if lang == "ja" else "not requested"
+    labels = _labels(lang)
+    if "success" not in value:
+        return labels["needs_review"]
+    return labels["passed"] if bool(value["success"]) else labels["needs_review"]
+
+
 def _payload_success(payload: dict[str, object]) -> bool:
     if "success" in payload:
         return bool(payload["success"])
@@ -312,6 +366,12 @@ def _next_step_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> l
 
 def _collect_next_steps(payload: dict[str, object]) -> list[dict[str, object]]:
     steps = _dict_list(payload.get("next_steps"))
+    if _kind(payload) == "scan_and_fix":
+        for key in ("audit", "spec_alignment", "conformance_verification"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                steps.extend(_dict_list(nested.get("next_steps")))
+        return _dedupe_steps(steps)
     if steps:
         return steps
     audit = payload.get("audit")
@@ -352,9 +412,30 @@ def _human_review_entrypoint_lines(payload: dict[str, object], lang: Literal["en
         entries.extend(
             [
                 ("audit.cross_validation_gaps", labels["gaps"], _string_list(audit.get("cross_validation_gaps"))),
-                ("audit.verification_violations", labels["violations"], _object_list(audit.get("verification_violations"))),
+                (
+                    "audit.verification_violations",
+                    labels["violations"],
+                    _object_list(audit.get("verification_violations")),
+                ),
             ]
         )
+    for nested_key in ("spec_alignment", "conformance_verification"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            entries.extend(
+                [
+                    (
+                        f"{nested_key}.cross_validation_gaps",
+                        labels["gaps"],
+                        _string_list(nested.get("cross_validation_gaps")),
+                    ),
+                    (
+                        f"{nested_key}.verification_violations",
+                        labels["violations"],
+                        _object_list(nested.get("verification_violations")),
+                    ),
+                ]
+            )
     for _key, prefix, values in entries:
         if values:
             lines.append(prefix + _inline_value(values[:3]))
@@ -396,6 +477,13 @@ def _finding_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> lis
         if audit_lines and audit_lines != ["- No findings."] and audit_lines != ["- 検出事項はありません。"]:
             items.append("- `audit`")
             items.extend(f"  {line}" for line in audit_lines)
+    for nested_key in ("spec_alignment", "conformance_verification"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            nested_lines = _finding_lines({str(key): value for key, value in nested.items()}, lang)
+            if nested_lines and nested_lines != ["- No findings."] and nested_lines != ["- 検出事項はありません。"]:
+                items.append(f"- `{nested_key}`")
+                items.extend(f"  {line}" for line in nested_lines)
     if not items:
         return ["- No findings." if lang == "en" else "- 検出事項はありません。"]
     return items
@@ -508,6 +596,18 @@ def _dict_list(value: object) -> list[dict[str, object]]:
         if isinstance(item, dict):
             items.append({str(key): val for key, val in item.items()})
     return items
+
+
+def _dedupe_steps(steps: list[dict[str, object]]) -> list[dict[str, object]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, object]] = []
+    for step in steps:
+        marker = json.dumps(step, ensure_ascii=False, sort_keys=True, default=str)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(step)
+    return deduped
 
 
 def _dedupe(values: list[str]) -> list[str]:

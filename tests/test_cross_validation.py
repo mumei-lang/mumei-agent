@@ -25,6 +25,10 @@ from agent.cross_validation import (
 )
 from agent.conformance_verifier import verify_conformance
 from agent.report_formatter import format_cross_validation_report
+from agent.verify_conformance import (
+    _emit as emit_conformance_report,
+    build_parser as build_verify_conformance_parser,
+)
 from agent.prompts.conformance_verification import build_conformance_verification_prompt
 from agent.prompts.cross_validation_code import build_code_cross_validation_prompt
 from agent.prompts.cross_validation_nl import build_nl_cross_validation_prompt
@@ -569,6 +573,59 @@ def test_verify_conformance_human_report_keeps_next_steps_first_and_review_keys(
     )
     assert "`cross_validation_gaps`" in result.report
     assert "```bash" in result.report
+
+
+def test_verify_conformance_cli_formats_keep_next_steps_and_fixed_keys(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = tmp_path / "impl.py"
+    json_output = tmp_path / "conformance.json"
+    code.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+    args = build_verify_conformance_parser().parse_args(
+        [
+            "--spec",
+            "spec.txt",
+            "--code",
+            str(code),
+            "--format",
+            "markdown",
+            "--lang",
+            "en",
+            "--no-mumei",
+        ]
+    )
+
+    result = verify_conformance(
+        "requires: x >= 0;\nensures: result == x + 1;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert args.format == "markdown"
+    assert args.lang == "en"
+    for output_format in ("human", "markdown"):
+        emit_conformance_report(result, None, output_format, "en")
+        report = capsys.readouterr().out
+        assert report.index("### next_steps (V1-E-1)") < report.index(
+            "### Human review entrypoints"
+        )
+        assert "`cross_validation_gaps`" in report
+        assert "recommendations" not in report
+        assert "review_actions" not in report
+        assert "human_review" not in report
+
+    emit_conformance_report(result, str(json_output), "json", "en")
+    payload = json.loads(json_output.read_text(encoding="utf-8"))
+    assert payload["next_steps"] == result.next_steps
+    assert payload["verification_violations"] == result.verification_violations
+    assert payload["cross_validation_gaps"] == result.cross_validation_gaps
+    assert "recommendations" not in payload
+    assert "review_actions" not in payload
+    assert "human_review" not in payload
 
 
 def test_validate_code_to_spec_human_report_preserves_drift_review_entrypoint(
