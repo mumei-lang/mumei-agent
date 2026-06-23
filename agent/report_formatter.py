@@ -248,27 +248,47 @@ def _kind(payload: dict[str, object]) -> str:
 
 def _status_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
     labels = _labels(lang)
-    success = bool(payload.get("success"))
+    success = _payload_success(payload)
     status = labels["passed"] if success else labels["needs_review"]
     lines = [f"- {labels['status']}: **{status}**"]
+    source_payload = _source_payload(payload)
     for label_key, keys in (
         ("code", ("code_path", "source_file")),
         ("spec", ("spec_path",)),
         ("language", ("language",)),
     ):
         for key in keys:
-            value = payload.get(key)
+            value = payload.get(key) or source_payload.get(key)
             if value:
                 lines.append(f"- {labels[label_key]}: `{value}`")
                 break
-    if "source_dir" in payload:
-        lines.append(f"- Source: `{payload['source_dir']}`")
+    source_dir = payload.get("source_dir") or source_payload.get("source_dir")
+    if source_dir:
+        lines.append(f"- Source: `{source_dir}`")
     if "contradiction_type" in payload and payload.get("contradiction_type"):
         lines.append(f"- contradiction_type: `{payload['contradiction_type']}`")
     summary = payload.get("summary")
     if summary:
         lines.append(f"- Summary: {_inline_value(summary)}")
     return lines
+
+
+def _payload_success(payload: dict[str, object]) -> bool:
+    if "success" in payload:
+        return bool(payload["success"])
+    nested_successes: list[bool] = []
+    for key in ("audit", "spec_alignment", "conformance_verification"):
+        value = payload.get(key)
+        if isinstance(value, dict) and "success" in value:
+            nested_successes.append(bool(value["success"]))
+    return all(nested_successes) if nested_successes else False
+
+
+def _source_payload(payload: dict[str, object]) -> dict[str, object]:
+    audit = payload.get("audit")
+    if isinstance(audit, dict):
+        return {str(key): value for key, value in audit.items()}
+    return {}
 
 
 def _next_step_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:

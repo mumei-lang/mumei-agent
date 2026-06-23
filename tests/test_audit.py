@@ -543,10 +543,17 @@ def test_scan_and_fix_handles_directory(tmp_path: Path) -> None:
 
     with patch("agent.audit.AuditPipeline") as pipeline_cls:
         pipeline_cls.return_value.audit_directory.return_value = result
-        payload = mcp_server.scan_and_fix(str(source_dir), "python", auto_heal=True)
+        payload = mcp_server.scan_and_fix(
+            str(source_dir),
+            "python",
+            auto_heal=True,
+            output_format="human",
+        )
 
     assert payload["audit"]["success"] is True
     assert payload["next_steps"] == []
+    assert "- Status: **Passed**" in payload["formatted_report"]
+    assert f"- Source: `{source_dir}`" in payload["formatted_report"]
     pipeline_cls.return_value.audit_directory.assert_called_once_with(
         str(source_dir),
         "python",
@@ -592,13 +599,22 @@ def test_scan_and_fix_shares_audit_contract_and_next_steps_review_gate(
 
     with patch("agent.audit.AuditPipeline") as pipeline_cls:
         pipeline_cls.return_value.audit_file.return_value = audit_result
-        payload = mcp_server.scan_and_fix(str(source), "python", auto_heal=True)
+        payload = mcp_server.scan_and_fix(
+            str(source),
+            "python",
+            auto_heal=True,
+            output_format="human",
+        )
 
     for key in AUDIT_SCHEMA_KEYS:
         assert key in payload
         assert payload[key] == getattr(audit_result, key)
         assert payload["audit"][key] == getattr(audit_result, key)
     assert payload["next_steps"] == next_steps
+    report = payload["formatted_report"]
+    assert "- ステータス: **要レビュー**" in report
+    assert f"- コード: `{source}`" in report
+    assert report.index("### 次の手順 (V1-E-1)") < report.index("### 検出事項")
     assert "human-review entrypoint" in payload["contract_terms"]["next_steps"]
     assert "recommendations" not in payload
     assert "actions" not in payload
