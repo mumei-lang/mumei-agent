@@ -16,6 +16,7 @@ _SUBCOMMANDS = {
     "validate-code",  # deprecated verify-foreign is integrated here.
     "validate-spec-to-code",
     "validate-code-to-spec",
+    "verify-conformance",
     "self-correct",
     "mcp-server",
     "check-spec-health",
@@ -217,6 +218,20 @@ def main() -> None:
         build_validate_code_to_spec_parser(parser)
         args = parser.parse_args(argv[1:])
         main_validate_code_to_spec(args)
+    elif command == "verify-conformance":
+        import argparse
+        from agent.verify_conformance import (
+            build_parser as conformance_build_parser,
+            main as conformance_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-conformance",
+            description="Return structured JSON for natural-language spec to code conformance.",
+        )
+        conformance_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        conformance_main(args)
     elif command == "self-correct":
         import argparse
         from agent.self_correction import (

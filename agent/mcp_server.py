@@ -1658,6 +1658,37 @@ def validate_code_to_spec(
 
 
 @mcp.tool()
+def verify_conformance(
+    spec: str,
+    code_path: str,
+    language: str | None = None,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> dict:
+    """Return structured spec-to-code conformance JSON with next_steps handoff."""
+    try:
+        from agent.config import AgentConfig
+        from agent.conformance_verifier import verify_conformance as run_verification
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"status": "error", "error": f"failed to import conformance modules: {exc}"}
+
+    try:
+        result = run_verification(
+            spec,
+            code_path,
+            config=AgentConfig(),
+            language=language,
+            use_llm=use_llm,
+            run_mumei=run_mumei,
+        )
+    except Exception as exc:
+        return {"status": "error", "error": f"verify_conformance failed: {exc}"}
+    payload = asdict(result)
+    payload["status"] = "ok" if result.success else "needs_review"
+    return payload
+
+
+@mcp.tool()
 def verify_foreign_code(
     source_code: str,
     language: str,
@@ -1787,17 +1818,27 @@ def scan_and_fix(
         )
 
     spec_alignment = None
+    conformance_verification = None
     if spec and not code_path.is_dir():
         from agent.cross_validation import validate_spec_to_code
+        from agent.conformance_verifier import verify_conformance
 
         spec_text = Path(spec).read_text(encoding="utf-8")
         alignment = validate_spec_to_code(spec_text, code_file, language=language)
         spec_alignment = asdict(alignment)
+        conformance = verify_conformance(
+            spec_text,
+            code_file,
+            language=language,
+            alignment=alignment,
+        )
+        conformance_verification = asdict(conformance)
 
     payload = {
         "audit": asdict(result),
         "next_steps": result.next_steps,
         "spec_alignment": spec_alignment,
+        "conformance_verification": conformance_verification,
         "audit_schema": AUDIT_SCHEMA_KEYS,
         "contract_terms": AUDIT_CONTRACT_TERMS,
     }

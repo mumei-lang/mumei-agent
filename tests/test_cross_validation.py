@@ -23,7 +23,9 @@ from agent.cross_validation import (
     validate_nl_spec,
     validate_spec_to_code,
 )
+from agent.conformance_verifier import verify_conformance
 from agent.report_formatter import format_cross_validation_report
+from agent.prompts.conformance_verification import build_conformance_verification_prompt
 from agent.prompts.cross_validation_code import build_code_cross_validation_prompt
 from agent.prompts.cross_validation_nl import build_nl_cross_validation_prompt
 
@@ -345,16 +347,24 @@ def test_cross_validation_formatter_highlights_human_review() -> None:
     report = format_cross_validation_report(result, lang="ja")
 
     assert "コード→仕様ドリフトレポート" in report
-    assert "Human-in-the-Loop" in report
+    assert "next_steps" in report
+    assert "Human-in-the-Loop" not in report
 
 
 def test_cross_validation_prompts_include_json_schema() -> None:
-    nl_prompt = build_nl_cross_validation_prompt("常にXかつ決してX")
+    nl_prompt = build_nl_cross_validation_prompt("常Xか決て")
     code_prompt = build_code_cross_validation_prompt("def add(a, b): return a + b", "python")
+    conformance_prompt = build_conformance_verification_prompt(
+        "requires: true; ensures: result == a + b",
+        "def add(a, b): return a + b",
+        "python",
+    )
 
     assert "requires" in nl_prompt
     assert "ensures" in nl_prompt
     assert "```json" in code_prompt
+    assert "traceability_matrix" in conformance_prompt
+    assert "next_steps" in conformance_prompt
     assert "def add" in code_prompt
     assert "source_line" not in code_prompt
 
@@ -463,3 +473,76 @@ def test_no_mm_audit_terms_do_not_alias_cross_validation_keys() -> None:
     assert "missing_constraints" not in AUDIT_SCHEMA_KEYS
     assert "divergences" not in AUDIT_SCHEMA_KEYS
     assert "repair_hints" not in AUDIT_SCHEMA_KEYS
+
+
+def test_verify_conformance_returns_structured_json_keys(tmp_path: Path) -> None:
+    code = tmp_path / "impl.py"
+    code.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+    result = verify_conformance(
+        "requires: x >= 0;\nensures: result == x + 1;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+    )
+    payload = result.__dict__
+
+    assert result.success is False
+    assert result.unimplemented_conditions
+    assert result.verification_violations
+    assert result.cross_validation_gaps
+    assert result.next_steps
+    assert result.traceability_matrix
+    assert "human_review" not in payload
+    assert "recommendations" not in payload
+
+
+def test_verify_conformance_detects_hidden_specifications(tmp_path: Path) -> None:
+    code = tmp_path / "impl.py"
+    code.write_text("def divide(a: int, b: int) -> int:\n    return a // b\n", encoding="utf-8")
+
+    result = verify_conformance(
+        "requires: true;\nensures: result == a / b;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.hidden_specifications
+    assert result.hidden_specifications[0].condition == "b != 0"
+    assert result.cross_validation_gaps
+    assert result.next_steps
+
+
+def test_validate_code_to_spec_reports_spec_gaps_and_next_steps(tmp_path: Path) -> None:
+    code = tmp_path / "impl.py"
+    spec = tmp_path / "spec.txt"
+    code.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+    spec.write_text("requires: true;\nensures: result == x + 1;", encoding="utf-8")
+
+    result = validate_code_to_spec(
+        str(code),
+        str(spec),
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+    )
+    payload = result.__dict__
+
+    assert result.extracted_spec
+    assert result.spec_gaps
+    assert result.cross_validation_gaps
+    assert result.next_steps == [
+        {
+            "priority": "high",
+            "action": "Update the natural-language spec or justify the extra implementation.",
+            "command": f"mumei-agent validate-code-to-spec --code {code} --spec {spec}",
+        }
+    ]
+    assert "human_review" not in payload
+    assert "review_actions" not in payload
