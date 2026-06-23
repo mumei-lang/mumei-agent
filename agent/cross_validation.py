@@ -508,9 +508,13 @@ def validate_code_to_spec(
     )
     intent_drift_payload: dict[str, object] | None = None
     if alignment.spec_atoms or alignment.code_atoms:
+        original_intent, refined_intent = _intent_payloads_for_atoms(
+            alignment.spec_atoms,
+            alignment.code_atoms,
+        )
         intent_drift = IntentTracker(config).track_intent_drift(
-            _atoms_to_spec_payload(alignment.spec_atoms),
-            _atoms_to_spec_payload(alignment.code_atoms),
+            original_intent,
+            refined_intent,
             natural_language_intent=spec,
         )
         intent_drift_payload = asdict(intent_drift)
@@ -1949,6 +1953,18 @@ def _atoms_to_summary(atoms: list[MumeiContractAtom]) -> str:
         f"{atom.name}: requires {atom.requires}; ensures {atom.ensures}."
         for atom in atoms
     )
+
+
+def _intent_payloads_for_atoms(
+    spec_atoms: list[MumeiContractAtom],
+    code_atoms: list[MumeiContractAtom],
+) -> tuple[dict[str, object], dict[str, object]]:
+    if len(spec_atoms) == 1 and len(code_atoms) == 1:
+        return (
+            _atoms_to_spec_payload(spec_atoms),
+            _atoms_to_spec_payload([replace(code_atoms[0], name=spec_atoms[0].name)]),
+        )
+    return _atoms_to_spec_payload(spec_atoms), _atoms_to_spec_payload(code_atoms)
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:
