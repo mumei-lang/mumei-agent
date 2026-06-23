@@ -305,8 +305,8 @@ def test_validate_spec_to_code_cli_emits_japanese_report(tmp_path: Path, capsys)
     captured = capsys.readouterr()
 
     assert result.success is True
-    assert "仕様→コード整合性レポート" in captured.out
-    assert "実装漏れ・仕様ドリフトは検出されませんでした" in report_path.read_text(encoding="utf-8")
+    assert "仕様→コード適合レポート" in captured.out
+    assert "次の手順 (V1-E-1)" in report_path.read_text(encoding="utf-8")
 
 
 def test_new_cross_validation_parsers_accept_lang_and_paths() -> None:
@@ -347,7 +347,7 @@ def test_cross_validation_formatter_highlights_human_review() -> None:
     report = format_cross_validation_report(result, lang="ja")
 
     assert "コード→仕様ドリフトレポート" in report
-    assert "next_steps" in report
+    assert "次の手順 (V1-E-1)" in report
     assert "Human-in-the-Loop" not in report
 
 
@@ -541,8 +541,58 @@ def test_validate_code_to_spec_reports_spec_gaps_and_next_steps(tmp_path: Path) 
         {
             "priority": "high",
             "action": "Update the natural-language spec or justify the extra implementation.",
-            "command": f"mumei-agent validate-code-to-spec --code {code} --spec {spec}",
+            "command": f"mumei-agent validate-code-to-spec --code {code} --spec {spec} --format human",
         }
     ]
     assert "human_review" not in payload
     assert "review_actions" not in payload
+
+def test_verify_conformance_human_report_keeps_next_steps_first_and_review_keys(
+    tmp_path: Path,
+) -> None:
+    code = tmp_path / "impl.py"
+    code.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+    result = verify_conformance(
+        "requires: x >= 0;\nensures: result == x + 1;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.next_steps
+    assert result.cross_validation_gaps
+    assert result.report.index("### next_steps (V1-E-1)") < result.report.index(
+        "### Human review entrypoints"
+    )
+    assert "`cross_validation_gaps`" in result.report
+    assert "```bash" in result.report
+
+
+def test_validate_code_to_spec_human_report_preserves_drift_review_entrypoint(
+    tmp_path: Path,
+) -> None:
+    code = tmp_path / "impl.py"
+    spec = tmp_path / "spec.txt"
+    code.write_text("def inc(x: int) -> int:\n    return x + 2\n", encoding="utf-8")
+    spec.write_text("requires: true;\nensures: result == x + 1;", encoding="utf-8")
+
+    result = validate_code_to_spec(
+        str(code),
+        str(spec),
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.next_steps
+    assert result.drift_issues
+    assert result.cross_validation_gaps
+    assert result.report.index("### next_steps (V1-E-1)") < result.report.index(
+        "### Human review entrypoints"
+    )
+    assert "`drift_issues`" in result.report
+    assert "```bash" in result.report

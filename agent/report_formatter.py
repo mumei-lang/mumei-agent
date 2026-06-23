@@ -1,59 +1,127 @@
-"""Human-facing cross-validation report formatting."""
+"""Human-facing validation and no-.mm audit report formatting."""
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+import json
+import re
 from typing import Literal
 
+ReportFormat = Literal["human", "json", "markdown"]
+ReportLang = Literal["auto", "en", "ja"]
 
-def format_cross_validation_report(result: object, lang: Literal["en", "ja"] = "en") -> str:
+_JA_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+
+
+def format_result_report(
+    result: object,
+    output_format: ReportFormat = "human",
+    *,
+    lang: ReportLang = "auto",
+) -> str:
+    """Format audit, conformance, cross-validation, and scan_and_fix results."""
+    payload = _payload(result)
+    if output_format == "json":
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    resolved_lang = _resolve_lang(payload, lang)
+    return _format_markdown(payload, resolved_lang)
+
+
+def format_cross_validation_report(
+    result: object,
+    lang: ReportLang = "auto",
+    output_format: Literal["human", "markdown"] = "human",
+) -> str:
     """Format spec/code cross-validation output for humans and PR comments."""
     payload = _payload(result)
-    is_nl = "inferred_atoms" in payload and "contradictions" in payload
-    if is_nl:
-        return _format_nl_ja(payload) if lang == "ja" else _format_nl_en(payload)
-    is_drift = "drift_issues" in payload
-    return _format_ja(payload, is_drift) if lang == "ja" else _format_en(payload, is_drift)
+    resolved_lang = _resolve_lang(payload, lang)
+    return _format_markdown(payload, resolved_lang)
 
 
-def format_human_review_queue(queue: object, lang: str = "en") -> str:
+def format_human_review_queue(queue: object, lang: ReportLang = "auto") -> str:
     """Format contradiction, counterexample, and drift items for human review."""
     payload = _queue_payload(queue)
+    resolved_lang = _resolve_lang(payload, lang)
     atoms = _dict_list(payload.get("atoms"))
-    title = "Human-in-the-Loop Review Queue" if lang != "ja" else "Human-in-the-Loop レビューキュー"
+    if resolved_lang == "ja":
+        title = "Human-in-the-Loop レビューキュー"
+        review_heading = "レビュー項目"
+        empty = "- 人手レビュー待ちの項目はありません。"
+        action_heading = "GitHub PR 確認アクション"
+        confirm = "- マージ前に各項目を受け入れるか確認してください。"
+    else:
+        title = "Human-in-the-Loop Review Queue"
+        review_heading = "Review items"
+        empty = "- No pending human-review items."
+        action_heading = "GitHub PR action"
+        confirm = "- Confirm whether each item is acceptable before merge."
     lines = [
         f"## {title}",
         "",
         f"- Source: `{payload.get('source_file', payload.get('file', '-'))}`",
         f"- Pending items: `{len(atoms)}`",
         "",
-        "### Review items" if lang != "ja" else "### 確認項目",
+        f"### {review_heading}",
     ]
     if not atoms:
-        lines.append("- No pending human-review items." if lang != "ja" else "- 確認待ち項目はありません。")
+        lines.append(empty)
         return "\n".join(lines)
 
+    labels = _labels(resolved_lang)
     for index, atom in enumerate(atoms, start=1):
         name = atom.get("name", atom.get("atom_name", f"item_{index}"))
         reason = atom.get("reason", atom.get("kind", "review"))
         status = atom.get("status", "pending")
-        priority = atom.get("priority", "medium")
-        lines.append(f"{index}. **{name}** — `{reason}` / `{status}` / priority `{priority}`")
-        for label, key in (
-            ("Summary", "summary"),
-            ("Contradiction", "contradiction"),
-            ("Counterexample", "counterexample"),
-            ("Drift", "drift"),
-            ("Evidence", "evidence"),
-            ("Spec", "spec_text"),
-            ("Suggested action", "suggested_action"),
+        priority = _priority(atom)
+        lines.append(f"{index}. **{name}** — `{reason}` / `{status}` / {_importance_badge(priority, resolved_lang)}")
+        for label_key, key in (
+            ("summary", "summary"),
+            ("contradiction", "contradiction"),
+            ("counterexample", "counterexample"),
+            ("drift", "drift"),
+            ("evidence", "evidence"),
+            ("spec", "spec_text"),
+            ("fix", "suggested_action"),
         ):
             value = atom.get(key)
             if value:
-                lines.append(f"   - {label}: `{_inline_value(value)}`")
+                lines.append(f"   - {labels[label_key]}: `{_inline_value(value)}`")
     lines.append("")
-    lines.append("### GitHub PR action" if lang != "ja" else "### GitHub PR 確認アクション")
-    lines.append("- Confirm whether each item is acceptable before merge.")
+    lines.append(f"### {action_heading}")
+    lines.append(confirm)
     return "\n".join(lines)
+
+
+def format_scan_and_fix_report(payload: object, lang: ReportLang = "auto") -> str:
+    """Format MCP scan_and_fix payloads without changing their JSON contract."""
+    return format_result_report(payload, "human", lang=lang)
+
+
+def _format_markdown(payload: dict[str, object], lang: Literal["en", "ja"]) -> str:
+    title = _title(payload, lang)
+    labels = _labels(lang)
+    lines = [f"## {title}", ""]
+    lines.extend(_status_lines(payload, lang))
+    lines.append("")
+    lines.append(f"### {labels['next_steps']} (V1-E-1)")
+    lines.extend(_next_step_lines(payload, lang))
+    lines.append("")
+    lines.append(f"### {labels['human_review_entrypoints']}")
+    lines.extend(_human_review_entrypoint_lines(payload, lang))
+    findings = _finding_lines(payload, lang)
+    lines.append("")
+    lines.append(f"### {labels['findings']}")
+    lines.extend(findings)
+    fixes = _copy_paste_fix_lines(payload, lang)
+    if fixes:
+        lines.append("")
+        lines.append(f"### {labels['copy_paste_fixes']}")
+        lines.extend(fixes)
+    warnings = _warning_lines(payload, lang)
+    if warnings:
+        lines.append("")
+        lines.append(f"### {labels['warnings']}")
+        lines.extend(warnings)
+    return "\n".join(lines).rstrip()
 
 
 def _payload(result: object) -> dict[str, object]:
@@ -62,7 +130,7 @@ def _payload(result: object) -> dict[str, object]:
         return {str(key): item for key, item in value.items()}
     if isinstance(result, dict):
         return {str(key): item for key, item in result.items()}
-    raise TypeError("cross-validation result must be a dataclass or dict")
+    raise TypeError("result must be a dataclass or dict")
 
 
 def _queue_payload(queue: object) -> dict[str, object]:
@@ -75,332 +143,360 @@ def _queue_payload(queue: object) -> dict[str, object]:
     return payload
 
 
-def _format_en(payload: dict[str, object], is_drift: bool) -> str:
-    title = "Code-to-Spec Drift Report" if is_drift else "Spec-to-Code Alignment Report"
-    issue_key = "drift_issues" if is_drift else "missing_constraints"
-    secondary_key = "" if is_drift else "divergences"
-    lines = [f"## {title}", ""]
-    lines.extend(_summary_lines(payload, ok_label="Passed", fail_label="Needs review"))
-    ct = str(payload.get("contradiction_type", "") or "")
-    if ct:
-        lines.append(f"- contradiction_type: `{ct}`")
-    lines.append("")
-    issues = _dict_list(payload.get(issue_key))
-    secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
-    constraint_violations = _dict_list(payload.get("constraint_violations")) if not is_drift else []
-    missing_constraint_strings = _string_list(payload.get("missing_constraints")) if not is_drift else []
-    extra_behaviors = [str(item) for item in _object_list(payload.get("extra_behaviors"))]
-    if constraint_violations or missing_constraint_strings or issues or secondary or extra_behaviors:
-        lines.append("### Findings")
-        if constraint_violations:
-            lines.extend(_constraint_violation_lines(constraint_violations))
-            if extra_behaviors:
-                lines.append("")
-                lines.append("### Extra behaviors")
-                lines.extend(f"- `{behavior}`" for behavior in extra_behaviors)
-        elif missing_constraint_strings:
-            lines.extend(
-                f"{index}. **spec_stronger**: spec `{constraint}`"
-                for index, constraint in enumerate(missing_constraint_strings, start=1)
-            )
-            if secondary:
-                lines.extend(_issue_lines(secondary))
-        elif is_drift:
-            lines.extend(_issue_lines(issues + secondary))
-        else:
-            lines.extend(_spec_code_issue_lines(issues, secondary))
-        lines.append("")
-        lines.append("### next_steps")
-        lines.extend(_next_step_lines(payload))
-    else:
-        lines.append("### Findings")
-        lines.append("- No spec drift or missing implementation constraints detected.")
-        lines.append("")
-        lines.append("### next_steps")
-        lines.extend(_next_step_lines(payload))
-    lines.extend(_hunk_lines(payload, heading="Changed code hunks"))
-    lines.extend(_warning_lines(payload, heading="Warnings"))
-    return "\n".join(lines)
+def _resolve_lang(payload: dict[str, object], lang: ReportLang) -> Literal["en", "ja"]:
+    if lang in {"en", "ja"}:
+        return lang
+    return "ja" if _contains_japanese(payload) else "en"
 
 
-def _format_nl_en(payload: dict[str, object]) -> str:
-    lines = ["## Natural-Language Spec Validation Report", ""]
-    status = "Passed" if bool(payload.get("success")) else "Needs review"
-    atoms = _dict_list(payload.get("inferred_atoms"))
-    lines.extend(
-        [
-            f"- Status: **{status}**",
-            f"- Inferred atoms: `{len(atoms)}`",
-            f"- Satisfiable: `{payload.get('satisfiable')}`",
-            "",
-            "### Findings",
-        ]
-    )
-    ct = str(payload.get("contradiction_type", "") or "")
-    if ct:
-        lines.append(f"- contradiction_type: `{ct}`")
-    issues = (
-        _dict_list(payload.get("contradictions"))
-        + _dict_list(payload.get("ambiguities"))
-        + _dict_list(payload.get("overconstraints"))
-    )
-    if issues:
-        lines.extend(_issue_lines(issues))
-    else:
-        lines.append("- No contradictions, ambiguities, or overconstraints detected.")
-    warnings = [
-        *[str(item) for item in _object_list(payload.get("completeness_warnings"))],
-        *[str(item) for item in _object_list(payload.get("vacuity_warnings"))],
-        *[str(item) for item in _object_list(payload.get("warnings"))],
-    ]
-    errors = [str(item) for item in _object_list(payload.get("errors"))]
-    if warnings or errors:
-        lines.extend(["", "### Warnings"])
-        for warning in warnings[:10]:
-            lines.append(f"- {warning}")
-        for error in errors[:10]:
-            lines.append(f"- ERROR: {error}")
-    return "\n".join(lines)
+def _contains_japanese(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(_JA_RE.search(value))
+    if isinstance(value, dict):
+        return any(_contains_japanese(item) for item in value.values())
+    if isinstance(value, list | tuple | set):
+        return any(_contains_japanese(item) for item in value)
+    return False
 
 
-def _format_nl_ja(payload: dict[str, object]) -> str:
-    lines = ["## 自然言語仕様バリデーションレポート", ""]
-    status = "合格" if bool(payload.get("success")) else "要確認"
-    atoms = _dict_list(payload.get("inferred_atoms"))
-    lines.extend(
-        [
-            f"- Status: **{status}**",
-            f"- 抽出 atom 数: `{len(atoms)}`",
-            f"- Z3 充足可能性: `{payload.get('satisfiable')}`",
-            "",
-            "### 検出事項",
-        ]
-    )
-    ct = str(payload.get("contradiction_type", "") or "")
-    if ct:
-        lines.append(f"- contradiction_type: `{ct}`")
-    issues = (
-        _dict_list(payload.get("contradictions"))
-        + _dict_list(payload.get("ambiguities"))
-        + _dict_list(payload.get("overconstraints"))
-    )
-    if issues:
-        lines.extend(_issue_lines(issues))
-    else:
-        lines.append("- 矛盾・曖昧さ・過制約は検出されませんでした。")
-    warnings = [
-        *[str(item) for item in _object_list(payload.get("completeness_warnings"))],
-        *[str(item) for item in _object_list(payload.get("vacuity_warnings"))],
-        *[str(item) for item in _object_list(payload.get("warnings"))],
-    ]
-    errors = [str(item) for item in _object_list(payload.get("errors"))]
-    if warnings or errors:
-        lines.extend(["", "### 警告"])
-        for warning in warnings[:10]:
-            lines.append(f"- {warning}")
-        for error in errors[:10]:
-            lines.append(f"- ERROR: {error}")
-    return "\n".join(lines)
+def _labels(lang: Literal["en", "ja"]) -> dict[str, str]:
+    if lang == "ja":
+        return {
+            "status": "ステータス",
+            "passed": "合格",
+            "needs_review": "要レビュー",
+            "code": "コード",
+            "spec": "仕様",
+            "language": "言語",
+            "next_steps": "次の手順",
+            "human_review_entrypoints": "人手レビュー入口",
+            "findings": "検出事項",
+            "copy_paste_fixes": "コピペ可能な修正提案",
+            "warnings": "警告",
+            "summary": "概要",
+            "contradiction": "矛盾",
+            "counterexample": "反例",
+            "drift": "ドリフト",
+            "evidence": "根拠",
+            "fix": "修正提案",
+        }
+    return {
+        "status": "Status",
+        "passed": "Passed",
+        "needs_review": "Needs review",
+        "code": "Code",
+        "spec": "Spec",
+        "language": "Language",
+        "next_steps": "next_steps",
+        "human_review_entrypoints": "Human review entrypoints",
+        "findings": "Findings",
+        "copy_paste_fixes": "Copy-pasteable fix suggestions",
+        "warnings": "Warnings",
+        "summary": "Summary",
+        "contradiction": "Contradiction",
+        "counterexample": "Counterexample",
+        "drift": "Drift",
+        "evidence": "Evidence",
+        "fix": "Fix suggestion",
+    }
 
 
-def _format_ja(payload: dict[str, object], is_drift: bool) -> str:
-    title = "コード→仕様ドリフトレポート" if is_drift else "仕様→コード整合性レポート"
-    issue_key = "drift_issues" if is_drift else "missing_constraints"
-    secondary_key = "" if is_drift else "divergences"
-    lines = [f"## {title}", ""]
-    lines.extend(_summary_lines(payload, ok_label="合格", fail_label="要確認"))
-    ct = str(payload.get("contradiction_type", "") or "")
-    if ct:
-        lines.append(f"- contradiction_type: `{ct}`")
-    lines.append("")
-    issues = _dict_list(payload.get(issue_key))
-    secondary = _dict_list(payload.get(secondary_key)) if secondary_key else []
-    constraint_violations = _dict_list(payload.get("constraint_violations")) if not is_drift else []
-    missing_constraint_strings = _string_list(payload.get("missing_constraints")) if not is_drift else []
-    extra_behaviors = [str(item) for item in _object_list(payload.get("extra_behaviors"))]
-    if constraint_violations or missing_constraint_strings or issues or secondary or extra_behaviors:
-        lines.append("### 検出事項")
-        if constraint_violations:
-            lines.extend(_constraint_violation_lines(constraint_violations))
-            if extra_behaviors:
-                lines.append("")
-                lines.append("### 仕様外のコード動作")
-                lines.extend(f"- `{behavior}`" for behavior in extra_behaviors)
-        elif missing_constraint_strings:
-            lines.extend(
-                f"{index}. **spec_stronger**: spec `{constraint}`"
-                for index, constraint in enumerate(missing_constraint_strings, start=1)
-            )
-            if secondary:
-                lines.extend(_issue_lines(secondary))
-        elif is_drift:
-            lines.extend(_issue_lines(issues + secondary))
-        else:
-            lines.extend(_spec_code_issue_lines(issues, secondary))
-        lines.append("")
-        lines.append("### next_steps")
-        lines.extend(_next_step_lines(payload))
-    else:
-        lines.append("### 検出事項")
-        lines.append("- 実装漏れ・仕様ドリフトは検出されませんでした。")
-        lines.append("")
-        lines.append("### next_steps")
-        lines.extend(_next_step_lines(payload))
-    lines.extend(_hunk_lines(payload, heading="変更差分"))
-    lines.extend(_warning_lines(payload, heading="警告"))
-    return "\n".join(lines)
+def _title(payload: dict[str, object], lang: Literal["en", "ja"]) -> str:
+    kind = _kind(payload)
+    titles = {
+        "ja": {
+            "scan_and_fix": "scan_and_fix レポート",
+            "audit_directory": "No-.mm ディレクトリ監査レポート",
+            "audit": "No-.mm 監査レポート",
+            "conformance": "Conformance 検証レポート",
+            "nl": "自然言語仕様検証レポート",
+            "drift": "コード→仕様ドリフトレポート",
+            "alignment": "仕様→コード適合レポート",
+            "generic": "Mumei レポート",
+        },
+        "en": {
+            "scan_and_fix": "scan_and_fix Report",
+            "audit_directory": "No-.mm Directory Audit Report",
+            "audit": "No-.mm Audit Report",
+            "conformance": "Conformance Verification Report",
+            "nl": "Natural-Language Spec Validation Report",
+            "drift": "Code-to-Spec Drift Report",
+            "alignment": "Spec-to-Code Alignment Report",
+            "generic": "Mumei Report",
+        },
+    }
+    return titles[lang][kind]
 
 
-def _summary_lines(payload: dict[str, object], *, ok_label: str, fail_label: str) -> list[str]:
-    status = ok_label if bool(payload.get("success")) else fail_label
-    lines = [
-        f"- Status: **{status}**",
-        f"- Code: `{payload.get('code_path', '-')}`",
-        f"- Language: `{payload.get('language', '-')}`",
-    ]
-    spec_path = payload.get("spec_path")
-    if spec_path:
-        lines.append(f"- Spec: `{spec_path}`")
-    spec_atoms = _dict_list(payload.get("spec_atoms"))
-    code_atoms = _dict_list(payload.get("code_atoms"))
-    if spec_atoms or code_atoms:
-        lines.append(f"- Compared atoms: spec={len(spec_atoms)}, code={len(code_atoms)}")
+def _kind(payload: dict[str, object]) -> str:
+    if "audit" in payload and "contract_terms" in payload:
+        return "scan_and_fix"
+    if "file_results" in payload and "source_dir" in payload:
+        return "audit_directory"
+    if "source_file" in payload and "verification_violations" in payload:
+        return "audit"
+    if "unimplemented_conditions" in payload and "hidden_specifications" in payload:
+        return "conformance"
+    if "inferred_atoms" in payload and "contradictions" in payload:
+        return "nl"
+    if "drift_issues" in payload:
+        return "drift"
+    if "missing_constraints" in payload or "divergences" in payload:
+        return "alignment"
+    return "generic"
+
+
+def _status_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
+    labels = _labels(lang)
+    success = bool(payload.get("success"))
+    status = labels["passed"] if success else labels["needs_review"]
+    lines = [f"- {labels['status']}: **{status}**"]
+    for label_key, keys in (
+        ("code", ("code_path", "source_file")),
+        ("spec", ("spec_path",)),
+        ("language", ("language",)),
+    ):
+        for key in keys:
+            value = payload.get(key)
+            if value:
+                lines.append(f"- {labels[label_key]}: `{value}`")
+                break
+    if "source_dir" in payload:
+        lines.append(f"- Source: `{payload['source_dir']}`")
+    if "contradiction_type" in payload and payload.get("contradiction_type"):
+        lines.append(f"- contradiction_type: `{payload['contradiction_type']}`")
+    summary = payload.get("summary")
+    if summary:
+        lines.append(f"- Summary: {_inline_value(summary)}")
     return lines
 
 
-def _issue_lines(issues: list[dict[str, object]]) -> list[str]:
+def _next_step_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
+    steps = _collect_next_steps(payload)
+    if not steps:
+        return ["- []"]
     lines: list[str] = []
-    for index, issue in enumerate(issues, start=1):
-        kind = issue.get("kind", "issue")
-        message = issue.get("message", "")
-        evidence = issue.get("evidence", "")
-        location = issue.get("location", "")
-        source_line = int(issue.get("source_line") or 0)
-        prefix = f"{index}. **{kind}**"
-        if location:
-            prefix += f" (`{location}`)"
-        if source_line:
-            prefix += f" line {source_line}"
-        lines.append(f"{prefix}: {message}")
-        if evidence:
-            lines.append(f"   - Evidence: `{evidence}`")
-        fix_suggestion = issue.get("fix_suggestion", "")
-        if fix_suggestion:
-            lines.append(f"   - Fix suggestion: `{fix_suggestion}`")
+    for index, step in enumerate(steps, start=1):
+        priority = _priority(step)
+        action = str(step.get("action", "")).strip()
+        command = str(step.get("command", "")).strip()
+        suffix = "human review first" if lang == "en" else "人手レビュー優先"
+        lines.append(f"{index}. {_importance_badge(priority, lang)} {action or suffix}")
+        if command:
+            lines.extend(_fenced_block(command, "bash", indent="   "))
+        fix = str(step.get("fix_suggestion", step.get("suggested_action", ""))).strip()
+        if fix:
+            lines.extend(_fenced_block(fix, "text", indent="   "))
     return lines
 
 
-def _constraint_violation_lines(violations: list[dict[str, object]]) -> list[str]:
-    lines: list[str] = []
-    for index, violation in enumerate(violations, start=1):
-        spec_constraint = violation.get("spec_constraint", "")
-        code_line = int(violation.get("code_line") or 0)
-        contradiction_type = violation.get("contradiction_type", "spec_vs_code")
-        line_suffix = f" line {code_line}" if code_line else ""
-        lines.append(
-            f"{index}. **{contradiction_type}**{line_suffix}: spec `{spec_constraint}`"
+def _collect_next_steps(payload: dict[str, object]) -> list[dict[str, object]]:
+    steps = _dict_list(payload.get("next_steps"))
+    if steps:
+        return steps
+    audit = payload.get("audit")
+    if isinstance(audit, dict):
+        return _dict_list(audit.get("next_steps"))
+    conformance = payload.get("conformance_verification")
+    if isinstance(conformance, dict):
+        return _dict_list(conformance.get("next_steps"))
+    spec_alignment = payload.get("spec_alignment")
+    if isinstance(spec_alignment, dict):
+        return _dict_list(spec_alignment.get("next_steps"))
+    return []
+
+
+def _human_review_entrypoint_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
+    labels = {
+        "ja": {
+            "intro": "- `next_steps` が human review の最初の入口です。",
+            "gaps": "- `cross_validation_gaps`: ",
+            "drift": "- `drift_issues`: ",
+            "violations": "- `verification_violations`: ",
+        },
+        "en": {
+            "intro": "- `next_steps` is the first human-review entrypoint.",
+            "gaps": "- `cross_validation_gaps`: ",
+            "drift": "- `drift_issues`: ",
+            "violations": "- `verification_violations`: ",
+        },
+    }[lang]
+    lines = [labels["intro"]]
+    entries = [
+        ("cross_validation_gaps", labels["gaps"], _string_list(payload.get("cross_validation_gaps"))),
+        ("drift_issues", labels["drift"], _object_list(payload.get("drift_issues"))),
+        ("verification_violations", labels["violations"], _object_list(payload.get("verification_violations"))),
+    ]
+    audit = payload.get("audit")
+    if isinstance(audit, dict):
+        entries.extend(
+            [
+                ("audit.cross_validation_gaps", labels["gaps"], _string_list(audit.get("cross_validation_gaps"))),
+                ("audit.verification_violations", labels["violations"], _object_list(audit.get("verification_violations"))),
+            ]
         )
-        snippet = violation.get("code_snippet", "")
-        if snippet:
-            lines.append(f"   - Code: `{snippet}`")
-        fix_suggestion = violation.get("fix_suggestion", "")
-        if fix_suggestion:
-            lines.append(f"   - Fix suggestion: `{fix_suggestion}`")
+    for _key, prefix, values in entries:
+        if values:
+            lines.append(prefix + _inline_value(values[:3]))
+    if len(lines) == 1:
+        lines.append("- No review-only gaps were emitted." if lang == "en" else "- レビュー専用のギャップはありません。")
     return lines
+
+
+def _finding_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
+    items: list[str] = []
+    for key in (
+        "unimplemented_conditions",
+        "hidden_specifications",
+        "verification_violations",
+        "cross_validation_gaps",
+        "spec_health_issues",
+        "constraint_violations",
+        "missing_constraints",
+        "divergences",
+        "missing_constraint_issues",
+        "extra_behaviors",
+        "drift_issues",
+        "spec_gaps",
+        "implementation_overages",
+        "contradictions",
+        "ambiguities",
+        "overconstraints",
+        "migration_hints",
+        "healed_files",
+        "heal_errors",
+    ):
+        values = _object_list(payload.get(key))
+        if values:
+            items.append(f"- `{key}`")
+            items.extend(f"  - {_item_line(value)}" for value in values[:10])
+    audit = payload.get("audit")
+    if isinstance(audit, dict):
+        audit_lines = _finding_lines({str(key): value for key, value in audit.items()}, lang)
+        if audit_lines and audit_lines != ["- No findings."] and audit_lines != ["- 検出事項はありません。"]:
+            items.append("- `audit`")
+            items.extend(f"  {line}" for line in audit_lines)
+    if not items:
+        return ["- No findings." if lang == "en" else "- 検出事項はありません。"]
+    return items
+
+
+def _copy_paste_fix_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
+    suggestions: list[str] = []
+    _collect_fix_suggestions(payload, suggestions)
+    if not suggestions:
+        return []
+    lines: list[str] = []
+    for index, suggestion in enumerate(_dedupe(suggestions), start=1):
+        lines.append(f"{index}.")
+        lines.extend(_fenced_block(suggestion, "text", indent="   "))
+    return lines
+
+
+def _collect_fix_suggestions(value: object, suggestions: list[str]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"fix_suggestion", "suggested_action"} and item:
+                suggestions.append(str(item))
+            else:
+                _collect_fix_suggestions(item, suggestions)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            _collect_fix_suggestions(item, suggestions)
+
+
+def _warning_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list[str]:
+    warnings = [
+        *_string_list(payload.get("warnings")),
+        *_string_list(payload.get("errors")),
+        *_string_list(payload.get("completeness_warnings")),
+        *_string_list(payload.get("vacuity_warnings")),
+    ]
+    return [f"- {warning}" for warning in warnings[:20]]
+
+
+def _priority(step: dict[str, object]) -> str:
+    raw = str(step.get("priority", step.get("severity", "medium"))).strip().lower()
+    if raw in {"critical", "blocker"}:
+        return "critical"
+    if raw in {"high", "error", "important"}:
+        return "high"
+    if raw in {"low", "info", "warning", "medium"}:
+        return raw
+    return "medium"
+
+
+def _importance_badge(priority: str, lang: Literal["en", "ja"]) -> str:
+    labels = {
+        "critical": ("critical", "最重要"),
+        "high": ("high", "重要"),
+        "medium": ("medium", "通常"),
+        "warning": ("warning", "注意"),
+        "low": ("low", "低"),
+        "info": ("info", "情報"),
+    }
+    en_label, ja_label = labels.get(priority, labels["medium"])
+    label = ja_label if lang == "ja" else en_label
+    return f"**[V1-E-1:{label}]**"
+
+
+def _fenced_block(text: str, language: str, *, indent: str = "") -> list[str]:
+    return [f"{indent}```{language}", *[f"{indent}{line}" for line in text.splitlines()], f"{indent}```"]
+
+
+def _item_line(value: object) -> str:
+    if isinstance(value, dict):
+        kind = value.get("kind", value.get("status", value.get("priority", "item")))
+        message = value.get("message", value.get("condition", value.get("evidence", value)))
+        location = value.get("location", value.get("implementation_symbol", ""))
+        prefix = f"**{kind}**"
+        if location:
+            prefix += f" `{location}`"
+        return f"{prefix}: {_inline_value(message)}"
+    return _inline_value(value)
+
+
+def _inline_value(value: object) -> str:
+    if isinstance(value, str):
+        return value.replace("\n", "\\n")
+    if isinstance(value, dict | list | tuple):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
 
 
 def _string_list(value: object) -> list[str]:
     return [str(item) for item in _object_list(value) if str(item).strip()]
 
 
-def _spec_code_issue_lines(
-    missing_constraints: list[dict[str, object]],
-    divergences: list[dict[str, object]],
-) -> list[str]:
-    typed_issues = [
-        (_spec_code_issue_type(issue, is_missing=True), issue) for issue in missing_constraints
-    ]
-    typed_issues.extend(
-        (_spec_code_issue_type(issue, is_missing=False), issue) for issue in divergences
-    )
-    lines: list[str] = []
-    for index, (issue_type, issue) in enumerate(typed_issues, start=1):
-        typed_issue = dict(issue)
-        typed_issue["kind"] = issue_type
-        issue_lines = _issue_lines([typed_issue])
-        issue_lines[0] = issue_lines[0].replace("1. ", f"{index}. ", 1)
-        lines.extend(issue_lines)
-    return lines
-
-
-def _spec_code_issue_type(issue: dict[str, object], *, is_missing: bool) -> str:
-    message = str(issue.get("message", ""))
-    if message.startswith("Spec validation issue:"):
-        return "spec_internal"
-    if message.startswith("Code atom ") and "not covered by the specification" in message:
-        return "impl_stronger"
-    if is_missing or "does not imply the spec postcondition" in message:
-        return "spec_stronger"
-    return "spec_vs_code"
-
-
-def _next_step_lines(payload: dict[str, object]) -> list[str]:
-    steps = _dict_list(payload.get("next_steps"))
-    if not steps:
-        return ["- []"]
-    lines: list[str] = []
-    for step in steps:
-        priority = step.get("priority", "medium")
-        action = step.get("action", "")
-        command = step.get("command", "")
-        lines.append(f"- priority: `{priority}`")
-        if action:
-            lines.append(f"  action: {action}")
-        if command:
-            lines.append(f"  command: `{command}`")
-    return lines
-
-
-def _hunk_lines(payload: dict[str, object], *, heading: str) -> list[str]:
-    hunks = [str(item) for item in _object_list(payload.get("changed_hunks")) if str(item).strip()]
-    if not hunks:
-        return []
-    lines = ["", f"### {heading}"]
-    for hunk in hunks[:3]:
-        lines.append("")
-        lines.append("```diff")
-        lines.append(hunk)
-        lines.append("```")
-    return lines
-
-
-def _warning_lines(payload: dict[str, object], *, heading: str) -> list[str]:
-    warnings = [str(item) for item in _object_list(payload.get("warnings")) if str(item).strip()]
-    errors = [str(item) for item in _object_list(payload.get("errors")) if str(item).strip()]
-    if not warnings and not errors:
-        return []
-    lines = ["", f"### {heading}"]
-    for warning in warnings[:10]:
-        lines.append(f"- {warning}")
-    for error in errors[:10]:
-        lines.append(f"- ERROR: {error}")
-    return lines
-
-
 def _object_list(value: object) -> list[object]:
-    return value if isinstance(value, list) else []
-
-
-def _inline_value(value: object) -> str:
-    text = str(value).strip().replace("\n", " ")
-    return text[:280] + "…" if len(text) > 280 else text
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, set):
+        return list(value)
+    return [value]
 
 
 def _dict_list(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    dicts: list[dict[str, object]] = []
-    for item in value:
+    items: list[dict[str, object]] = []
+    for item in _object_list(value):
+        if is_dataclass(item) and not isinstance(item, type):
+            item = asdict(item)
         if isinstance(item, dict):
-            dicts.append({str(key): val for key, val in item.items()})
-    return dicts
+            items.append({str(key): val for key, val in item.items()})
+    return items
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped

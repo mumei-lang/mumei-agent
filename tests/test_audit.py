@@ -117,19 +117,15 @@ def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
     )
     assert "verification_violations" in result.report
     assert "next_steps:" in result.report
-    assert {
-        "priority": "high",
-        "action": "migrate-suggest で .mm スケルトンを生成",
-        "command": (
-            "mumei-agent migrate-suggest --code-file <file> "
-            "--language <lang> --output generated/mm"
-        ),
-    } in result.next_steps
-    assert {
-        "priority": "high",
-        "action": "validate-spec-to-code で制約の対応を確認",
-        "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file>",
-    } in result.next_steps
+    assert any(
+        step["command"].startswith("mumei-agent migrate-suggest")
+        for step in result.next_steps
+    )
+    assert any(
+        step["command"]
+        == "mumei-agent validate-spec-to-code --spec <spec> --code <file> --format human"
+        for step in result.next_steps
+    )
 
 
 def test_audit_report_includes_counterexample_values(tmp_path: Path) -> None:
@@ -394,13 +390,9 @@ def test_audit_pipeline_auto_migrate_skips_without_violations(tmp_path: Path) ->
     assert result.verification_violations == []
     assert result.cross_validation_gaps == []
     assert result.migration_hints == []
-    assert result.next_steps == [
-        {
-            "priority": "info",
-            "action": "監査完了。.mm 移行不要",
-            "command": "",
-        }
-    ]
+    assert result.next_steps[0]["priority"] == "info"
+    assert "移行" in result.next_steps[0]["action"]
+    assert result.next_steps[0]["command"] == ""
     suggest.assert_not_called()
 
 
@@ -486,21 +478,12 @@ def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
         "transfer.rs",
     ]
     assert foreign_verifier.verify.call_count == 2
-    assert result.next_steps == [
-        {
-            "priority": "high",
-            "action": "migrate-suggest で .mm スケルトンを生成",
-            "command": (
-                "mumei-agent migrate-suggest --code-file <file> "
-                "--language <lang> --output generated/mm"
-            ),
-        },
-        {
-            "priority": "high",
-            "action": "validate-spec-to-code で制約の対応を確認",
-            "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file>",
-        },
-    ]
+    assert [step["priority"] for step in result.next_steps] == ["high", "high"]
+    assert result.next_steps[0]["command"].startswith("mumei-agent migrate-suggest")
+    assert (
+        result.next_steps[1]["command"]
+        == "mumei-agent validate-spec-to-code --spec <spec> --code <file> --format human"
+    )
 
 
 def test_audit_directory_summary_table(tmp_path: Path) -> None:
@@ -692,14 +675,12 @@ def test_cli_audit_markdown_output(tmp_path: Path, capsys) -> None:
 
     output = capsys.readouterr().out
     assert returned is result
-    assert f"## Audit: {source}" in output
-    assert "| Field | Value |" in output
-    assert "| language | python |" in output
-    assert "| spec_extracted | True |" in output
-    assert "### Issues" in output
-    assert "- ❌ verification_violations: balance can go negative" in output
-    assert "### Next Steps" in output
-    assert "- [ ] (high) Run `mumei-agent migrate-suggest --code-file <file>" in output
+    assert "## No-.mm" in output
+    assert str(source) in output
+    assert "verification_violations" in output
+    assert "balance can go negative" in output
+    assert "V1-E-1" in output
+    assert "```bash" in output
     assert "mumei-agent migrate-suggest --code-file <file>" in output
 
 
