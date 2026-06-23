@@ -1748,7 +1748,8 @@ def scan_and_fix(
     Same contract as `mumei-agent audit --code-file ... --auto-migrate --auto-heal`.
 
     Steps:
-    1. audit: extract spec, check health, verify contracts, emit cross_validation_gaps
+    1. audit: extract spec, check health, verify contracts, emit spec_health_issues,
+       verification_violations, cross_validation_gaps, and next_steps
     2. migrate-suggest: generate migration_hints and .mm skeletons for functions with issues
     3. (optional) heal: run self-healing loop on each skeleton
 

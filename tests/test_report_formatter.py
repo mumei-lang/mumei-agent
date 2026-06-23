@@ -68,4 +68,4 @@ def test_contract_terms_cover_schema_keys() -> None:
 
     assert set(AUDIT_SCHEMA_KEYS).issubset(payload)
     assert set(AUDIT_SCHEMA_KEYS).issubset(AUDIT_CONTRACT_TERMS)
-    assert AUDIT_CONTRACT_TERMS["next_steps"].startswith("ranked commands")
+    assert AUDIT_CONTRACT_TERMS["next_steps"].startswith("human-review entrypoint")

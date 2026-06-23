@@ -21,7 +21,7 @@ Audit/spec/MCP vocabulary is fixed as:
 | `healed_files` | Generated `.mm` skeletons accepted or rewritten by the self-healing loop. | `audit --auto-heal`, `scan_and_fix` |
 | `heal_errors` | Per-skeleton self-healing failures and diagnostics. | `audit --auto-heal`, `scan_and_fix` |
 
-`scan_and_fix` is the MCP spelling of `audit --code-file ... --auto-migrate --auto-heal`; README flowchart, guide steps, CLI help, MCP docstrings, and this roadmap must describe the same audit → migrate-suggest → heal contract and the seven fixed keys above without aliases.
+`scan_and_fix` is the MCP spelling of `audit --code-file ... --auto-migrate --auto-heal`; README flowchart, guide steps, CLI help, MCP docstrings, and this roadmap must describe the same `audit -> migrate-suggest -> heal` contract and the seven fixed keys above without aliases.
 
 ### Single audit contract and review handoff
 
@@ -281,9 +281,9 @@ feedback として返す。
 1. `audit --auto-migrate --auto-heal` を 1 コマンド flow として documentation / CLI summary
    に明示する。
 2. MCP tool `scan_and_fix(code_file, language, spec="", auto_heal=false, ...)`
-   で audit → migrate → optional heal を外部 agent から実行できるようにする。
+   で `audit -> migrate-suggest -> heal` を全部 agent から実行できるようにする。
 3. `contradiction_type`, `migration_hints`, `cross_validation_gaps`, `heal_errors`
-   を human review の判定材料として出力する。
+   を `next_steps` 起点の human review 判定材料として出す。
 4. README の `.mmを書かない入口` flowchart を `scan_and_fix`, `--auto-migrate`,
    `--auto-heal` を含む最新導線に更新する。
 

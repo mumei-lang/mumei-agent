@@ -209,7 +209,7 @@ mumei-agent audit --code-file src/
 mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
 
-この 1 コマンド flow は `audit → migrate-suggest → heal` の順に行います。`audit` は `cross_validation_gaps` を返し、`--auto-migrate` は `migration_hints` を生成し、`--auto-heal` はその skeleton だけを対象にします。MCP `scan_and_fix` は同じ契約を使います。
+この 1 コマンド flow は `audit -> migrate-suggest -> heal` の順に従います。`audit` は `spec_health_issues` / `verification_violations` / `cross_validation_gaps` / `next_steps` を返し、`migrate-suggest` / `--auto-migrate` は `migration_hints`、`heal` / `--auto-heal` は `healed_files` / `heal_errors` だけを返します。MCP `scan_and_fix` は同じ契約を使います。
 
 `audit` の主な出力:
 
@@ -217,11 +217,9 @@ mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir 
 - `verification_violations`: 既存コードを契約として検証した結果の違反。
 - `counterexample_values`: Z3 counterexample を人間が読める形に整形した値。
 - `cross_validation_gaps`: 仕様と実装のズレ。
-- `migration_hints`: `.mm` に移行すべき関数の skeleton と理由。
-- `healed_files` / `heal_errors`: `--auto-heal` 実行時の self-healing 結果。
-- `next_steps`: `priority`（`high`/`medium`/`info`）、`action`、`command` を持つ
-  dataclass フィールド。`verification_violations` や `cross_validation_gaps` から、
-  `migrate-suggest`、`validate-spec-to-code`、`heal` など次に実行すべきコマンドを提示する。
+- `next_steps`: `priority`（`high`/`medium`/`info`）、`action`、`command` を持つ dataclass フィールド。human review の唯一の入口として、`migrate-suggest` や `validate-spec-to-code` など次に実行すべきコマンドを提示します。
+- `migration_hints`: `.mm` に移行すべき skeleton と理由。
+- `healed_files` / `heal_errors`: `heal` / `--auto-heal` 実行時の self-healing 結果。
 
 共有用の監査レポートが必要な場合は `--format markdown` を使う。`next_steps` はチェックリストとして
 出力される。
@@ -527,9 +525,7 @@ uv run mumei-agent mcp-server
 
 #### scan_and_fix MCP tool
 
-`scan_and_fix` は `audit --auto-migrate` と同等の MCP 入口で、必要に応じて `heal` まで実行する。
-AI agent から既存コードを監査し、`.mm` skeleton を生成し、修復結果を structured JSON として受け取る。
-
+`scan_and_fix` は `audit --auto-migrate --auto-heal` と同じ `audit -> migrate-suggest -> heal` 契約を使う MCP 入口です。AI agent から既存コードを監査し、`.mm` skeleton を生成し、修復結果を structured JSON として受け取れます。
 ```json
 {
   "code_file": "/repo/src/",
