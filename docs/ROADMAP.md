@@ -260,19 +260,24 @@ feedback として返す。
    `mumei verify --cross-spec-files` に渡し、`cross_spec.json` を返す。
 4. mumei PR #285 の `contract_consistency[]`, `global_invariant_conflicts[]`,
    `circular_dependencies[]` を agent の repair / review 判断へ接続する。
+5. V1-D-3 `verify-traceability` / `verify_code_spec_traceability` で V1-C の `conformance` と
+   V1-D の `drift` を統合し、`cross_validation_gaps`, `drift_score`, `next_steps` を固定キーで返す。
 
 **対象ファイル**:
 
 - `agent/cross_validation.py` — `validate_spec_to_code`, `validate_code_to_spec`
+- `agent/conformance_verifier.py`, `agent/traceability_verifier.py` — V1-C/V1-D summary
 - `agent/spec_code_mapper.py` — spec/code traceability
 - `agent/intent_tracker.py` — drift result
 - `agent/mcp_server.py` — `check_cross_spec_consistency`,
-  `validate_spec_to_code`, `validate_code_to_spec`
-- `tests/test_cross_validation.py`, `tests/test_mcp_server.py`
+  `validate_spec_to_code`, `validate_code_to_spec`, `verify_code_spec_traceability`
+- `agent/verify_traceability.py`, `tests/test_traceability.py`, `tests/test_cross_validation.py`,
+  `tests/test_mcp_server.py`
 
 **成功指標**:
 
 - `missing_constraints[]`, `divergences[]`, `drift_issues[]` が structured JSON で返る。
+- V1-D-3 は `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, `next_steps` だけを使い、`recommendations` などの alias を出さない。
 - 複数 `.mm` の cross-spec result を MCP client が直接取得できる。
 - `cross_validation_gaps` が `audit` summary に集約され、migration / human review 分岐に使える。
 

@@ -46,6 +46,7 @@ class TestGetAgentStatus:
             "extract_spec_from_code",
             "validate_code",
             "verify_foreign_code",
+            "verify_code_spec_traceability",
             "validate_nl_spec",
             "validate_foreign_code",
             "validate_spec_to_code",
@@ -68,6 +69,7 @@ class TestGetAgentStatus:
         assert "get_spec_guide_summary" in registered
         assert "get_spec_guidelines" in registered
         assert "send_latent_message" in registered
+        assert "verify_code_spec_traceability" in registered
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +654,31 @@ class TestScanAndFix:
         assert "human_review" not in result
         assert "recommendations" not in result
         assert "review_actions" not in result
+
+    def test_verify_code_spec_traceability_exposes_next_steps_without_aliases(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "impl.py"
+        source.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+        result = mcp_server.verify_code_spec_traceability(
+            str(source),
+            "requires: x >= 0;\nensures: result == x + 1;",
+            language="python",
+            use_llm=False,
+            run_mumei=False,
+        )
+        serialized = json.dumps(result)
+
+        assert result["status"] == "needs_review"
+        assert result["conformance"]["unimplemented_conditions"]
+        assert result["drift"]["spec_gaps"]
+        assert result["cross_validation_gaps"]
+        assert result["next_steps"]
+        assert "human_review" not in result
+        assert "recommendations" not in serialized
+        assert "review_actions" not in serialized
 
 
 # ---------------------------------------------------------------------------

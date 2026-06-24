@@ -17,6 +17,7 @@ _SUBCOMMANDS = {
     "validate-spec-to-code",
     "validate-code-to-spec",
     "verify-conformance",
+    "verify-traceability",
     "self-correct",
     "mcp-server",
     "check-spec-health",
@@ -232,6 +233,20 @@ def main() -> None:
         conformance_build_parser(parser)
         args = parser.parse_args(argv[1:])
         conformance_main(args)
+    elif command == "verify-traceability":
+        import argparse
+        from agent.verify_traceability import (
+            build_parser as traceability_build_parser,
+            main as traceability_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent verify-traceability",
+            description="Return structured JSON for bidirectional spec/code traceability.",
+        )
+        traceability_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        traceability_main(args)
     elif command == "self-correct":
         import argparse
         from agent.self_correction import (

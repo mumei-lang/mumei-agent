@@ -213,6 +213,7 @@ def _title(payload: dict[str, object], lang: Literal["en", "ja"]) -> str:
             "audit_directory": "No-.mm ディレクトリ監査レポート",
             "audit": "No-.mm 監査レポート",
             "conformance": "Conformance 検証レポート",
+            "traceability": "双方向トレーサビリティレポート",
             "nl": "自然言語仕様検証レポート",
             "drift": "コード→仕様ドリフトレポート",
             "alignment": "仕様→コード適合レポート",
@@ -223,6 +224,7 @@ def _title(payload: dict[str, object], lang: Literal["en", "ja"]) -> str:
             "audit_directory": "No-.mm Directory Audit Report",
             "audit": "No-.mm Audit Report",
             "conformance": "Conformance Verification Report",
+            "traceability": "Bidirectional Traceability Report",
             "nl": "Natural-Language Spec Validation Report",
             "drift": "Code-to-Spec Drift Report",
             "alignment": "Spec-to-Code Alignment Report",
@@ -239,6 +241,8 @@ def _kind(payload: dict[str, object]) -> str:
         return "audit_directory"
     if "source_file" in payload and "verification_violations" in payload:
         return "audit"
+    if "conformance" in payload and "drift" in payload and "drift_score" in payload:
+        return "traceability"
     if "unimplemented_conditions" in payload and "hidden_specifications" in payload:
         return "conformance"
     if "inferred_atoms" in payload and "contradictions" in payload:
@@ -419,7 +423,7 @@ def _human_review_entrypoint_lines(payload: dict[str, object], lang: Literal["en
                 ),
             ]
         )
-    for nested_key in ("spec_alignment", "conformance_verification"):
+    for nested_key in ("spec_alignment", "conformance_verification", "conformance", "drift"):
         nested = payload.get(nested_key)
         if isinstance(nested, dict):
             entries.extend(
@@ -477,7 +481,7 @@ def _finding_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> lis
         if audit_lines and audit_lines != ["- No findings."] and audit_lines != ["- 検出事項はありません。"]:
             items.append("- `audit`")
             items.extend(f"  {line}" for line in audit_lines)
-    for nested_key in ("spec_alignment", "conformance_verification"):
+    for nested_key in ("spec_alignment", "conformance_verification", "conformance", "drift"):
         nested = payload.get(nested_key)
         if isinstance(nested, dict):
             nested_lines = _finding_lines({str(key): value for key, value in nested.items()}, lang)

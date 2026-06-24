@@ -63,6 +63,8 @@ When MCP `scan_and_fix` is called with a natural-language `spec`, it may include
 
 Use `verify-conformance --format human|json|markdown` for the same conformance view outside MCP. The human and markdown formats are `next_steps`-first review reports; JSON keeps the fixed structured keys.
 
+Use `verify-traceability --code src/foo.py --spec spec.txt --format human` when reviewers need the V1-C/V1-D bidirectional summary in one place. It calls the V1-C conformance engine and the V1-D drift engine, then returns `conformance` (`unimplemented_conditions`, `hidden_specifications`, `traceability_matrix`), `drift` (`spec_gaps`, `drift_issues`), the unified `cross_validation_gaps`, `drift_score`, and `next_steps`. MCP clients call `verify_code_spec_traceability(code_file, spec_text, language)` for the same contract. `next_steps` remains the only human-review entrypoint; do not expose `recommendations`, `review_actions`, or other aliases.
+
 For manual review, run the same stages separately:
 
 ```bash
