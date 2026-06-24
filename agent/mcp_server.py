@@ -979,6 +979,8 @@ def get_agent_status() -> str:
             "validate-code",
             "validate-spec-to-code",
             "validate-code-to-spec",
+            "verify-conformance",
+            "verify-traceability",
             "self-correct",
             "mcp-server",
             "check-spec-health",
@@ -1683,6 +1685,37 @@ def verify_conformance(
         )
     except Exception as exc:
         return {"status": "error", "error": f"verify_conformance failed: {exc}"}
+    payload = asdict(result)
+    payload["status"] = "ok" if result.success else "needs_review"
+    return payload
+
+
+@mcp.tool()
+def verify_code_spec_traceability(
+    code_file: str,
+    spec_text: str,
+    language: str | None = None,
+    use_llm: bool = True,
+    run_mumei: bool = True,
+) -> dict:
+    """Return bidirectional spec/code traceability JSON with next_steps handoff."""
+    try:
+        from agent.config import AgentConfig
+        from agent.traceability_verifier import verify_traceability as run_verification
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"status": "error", "error": f"failed to import traceability modules: {exc}"}
+
+    try:
+        result = run_verification(
+            spec_text,
+            code_file,
+            config=AgentConfig(),
+            language=language,
+            use_llm=use_llm,
+            run_mumei=run_mumei,
+        )
+    except Exception as exc:
+        return {"status": "error", "error": f"verify_code_spec_traceability failed: {exc}"}
     payload = asdict(result)
     payload["status"] = "ok" if result.success else "needs_review"
     return payload

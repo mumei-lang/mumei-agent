@@ -441,6 +441,8 @@ See `.env.example` for configuration details.
 | `validate-code` | Infer and verify contracts from existing code (Python, Rust, Go) | `mumei-agent validate-code --input code.py --language python` |
 | `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
 | `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
+| `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` |
+| `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` |
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `mumei-agent check-spec-health spec.mm` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `mumei-agent mcp-server` |
 
@@ -470,6 +472,8 @@ Exported tools:
 | `check_spec_contradiction(natural_language, domain_hint="")` | Extract a natural-language spec and return `contradiction_type=spec_internal` for direct contradictions without code generation |
 | `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files and return cross-validation evidence |
 | `validate_code(code, language, use_llm=true, run_mumei=true)` | Infer and verify contracts from existing code (Python, Rust, Go) |
+| `verify_conformance(spec, code_path, language, use_llm=true, run_mumei=true)` | Return the V1-C conformance JSON with `next_steps` and no review aliases |
+| `verify_code_spec_traceability(code_file, spec_text, language, use_llm=true, run_mumei=true)` | Return the V1-C/V1-D bidirectional traceability summary with `cross_validation_gaps`, `drift_score`, and `next_steps` |
 | `self_correct(code_file, max_iterations=10)` | Run the P9-F Loss Vector self-correction loop for a `.mm` file |
 | `run_nlae_pipeline(spec, mumei_lean_repo="", work_dir="", no_build=false)` | Run the P9-G NLAE pipeline: generate `.mm`, verify with `--emit loss-vector`, self-correct, then call the Lean Fidelity Checker |
 
