@@ -600,13 +600,32 @@ class TestScanAndFix:
             ) as validate,
         ):
             pipeline_cls.return_value.audit_file.return_value = audit_result
-            result = mcp_server.scan_and_fix(str(source), "python", spec=str(spec))
+            result = mcp_server.scan_and_fix(
+                str(source),
+                "python",
+                spec=str(spec),
+                output_format="human",
+            )
 
         assert result["audit"]["source_file"] == str(source)
         assert result["spec_alignment"]["success"] is True
         assert result["spec_alignment"]["satisfiable"] is True
         assert result["conformance_verification"]["success"] is True
         assert result["conformance_verification"]["next_steps"] == []
+        assert "### next_steps (V1-E-1)" in result["conformance_verification"]["report"]
+        assert "scan_and_fix role split" in result["formatted_report"]
+        assert "`audit`" in result["formatted_report"]
+        assert "`spec_alignment`" in result["formatted_report"]
+        assert "`conformance_verification`" in result["formatted_report"]
+        assert result["formatted_report"].index("### next_steps (V1-E-1)") < result[
+            "formatted_report"
+        ].index("### Human review entrypoints")
+        assert "recommendations" not in result["formatted_report"]
+        assert "review_actions" not in result["formatted_report"]
+        assert "human_review" not in result["formatted_report"]
+        assert "recommendations" not in result["conformance_verification"]
+        assert "review_actions" not in result["conformance_verification"]
+        assert "human_review" not in result["conformance_verification"]
         validate.assert_called_once_with(
             "requires: true; ensures: result == a + b",
             str(source),

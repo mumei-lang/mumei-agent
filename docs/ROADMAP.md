@@ -23,6 +23,8 @@ Audit/spec/MCP vocabulary is fixed as:
 
 `scan_and_fix` is the MCP spelling of `audit --code-file ... --auto-migrate --auto-heal`; README flowchart, guide steps, CLI help, MCP docstrings, and this roadmap must describe the same `audit -> migrate-suggest -> heal` contract and the seven fixed keys above without aliases.
 
+If `scan_and_fix` also receives `spec`, its response may include `spec_alignment` and `conformance_verification` sidecars. These do not rename or replace the audit contract: `audit` owns no-`.mm` findings and migration/heal artifacts, `spec_alignment` owns spec→code comparison, and `conformance_verification` owns traceability plus human/markdown report text. `V1-E` is only `next_steps`-origin human review across those surfaces; do not add alternate review keys such as `recommendations` or `review_actions`.
+
 ### Single audit contract and review handoff
 
 `audit -> migrate-suggest -> heal` is one contract, whether invoked as one command or as separated review gates:
@@ -37,6 +39,8 @@ The names above are the public MCP/report schema. Do not document synonyms such 
 ### V1 priority alignment
 
 This repository owns V1-A/V1-B/V1-C/V1-D agent surfaces while `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` owns the global order: land V1-A spec health and V1-B code audit in parallel, then V1-C spec→code and V1-D code→spec conformance, then V1-E human review. PRs that update this roadmap should review the cross-project roadmap in the same diff and record relevant MCP/audit/spec regression commands from `tests/`.
+
+For V1-E user-facing output, `verify-conformance --format human|json|markdown` and MCP `scan_and_fix(..., output_format="human"|"markdown")` must keep `next_steps` before findings/reports, while JSON preserves `next_steps`, `verification_violations`, and `cross_validation_gaps` exactly.
 
 ## 現状
 
