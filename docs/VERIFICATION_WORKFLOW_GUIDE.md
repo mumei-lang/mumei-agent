@@ -65,6 +65,8 @@ Use `verify-conformance --format human|json|markdown` for the same conformance v
 
 Use `verify-traceability --code src/foo.py --spec spec.txt --format human` when reviewers need the V1-C/V1-D bidirectional summary in one place. It calls the V1-C conformance engine and the V1-D drift engine, then returns `conformance` (`unimplemented_conditions`, `hidden_specifications`, `traceability_matrix`), `drift` (`spec_gaps`, `drift_issues`), the unified `cross_validation_gaps`, `drift_score`, and `next_steps`. MCP clients call `verify_code_spec_traceability(code_file, spec_text, language)` for the same contract. `next_steps` remains the only human-review entrypoint; do not expose `recommendations`, `review_actions`, or other aliases.
 
+Phase 7 in `mumei-demo/scenarios/spec_code_verification_suite` is the reference demo for showing V1-A through V1-D as one no-`.mm` flow. It maps `mode_a` to spec health (`verify-spec` / `validate-spec`), `mode_b` to existing-code audit (`verify-code` / `validate-code`), `mode_c` to spec→code conformance (`verify-conformance --spec ... --code ... --format human`), and `mode_d` to code→spec drift (`validate-code-to-spec` / `verify-traceability`). Run it from `mumei-demo` with `CI_FIXTURE_MODE=1 make demo-spec-code` when docs or demos need deterministic evidence without LLM credentials.
+
 For manual review, run the same stages separately:
 
 ```bash
@@ -119,6 +121,7 @@ docker exec mumei-ollama ollama pull qwen3.5
 | 既存コードの詳細検証 | `mumei-agent validate-code --input code.py --language python` |
 | 仕様→コードの整合性検証 | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
 | コード→仕様のドリフト検出 | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
+| 4モード no-.mm 参照デモ | `cd ../mumei-demo && CI_FIXTURE_MODE=1 make demo-spec-code` |
 | 仕様の健全性チェック（vacuity含む） | `mumei-agent check-spec-health spec.mm` |
 | MCP 経由の監査・移行・修復 | `scan_and_fix(code_file="src/", language="python", auto_heal=true)` |
 | エディタ統合（LSP） | `mumei lsp` |
