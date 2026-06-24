@@ -66,7 +66,7 @@ def verify_traceability(
         lang=lang,
     )
     gaps = _combined_gaps(conformance, drift)
-    resolved_spec_path = spec_path or drift.spec_path
+    resolved_spec_path = spec_path or "<spec>"
     result = TraceabilityResult(
         next_steps=_next_steps(code_path, resolved_spec_path, gaps),
         success=conformance.success and drift.success and not gaps,

@@ -676,6 +676,10 @@ class TestScanAndFix:
         assert result["drift"]["spec_gaps"]
         assert result["cross_validation_gaps"]
         assert result["next_steps"]
+        assert result["spec_path"] == "<spec>"
+        assert "--spec <spec>" in result["next_steps"][0]["command"]
+        assert "- Spec: `<spec>`" in result["report"]
+        assert "--spec /tmp/" not in result["report"]
         assert "human_review" not in result
         assert "recommendations" not in serialized
         assert "review_actions" not in serialized

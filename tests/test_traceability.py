@@ -102,3 +102,27 @@ def test_verify_traceability_cli_json_keeps_next_steps_first(
     assert "recommendations" not in payload
     assert "review_actions" not in payload
     assert "human_review" not in payload
+
+
+def test_verify_traceability_inline_spec_uses_placeholder_in_next_steps(
+    tmp_path: Path,
+) -> None:
+    code = tmp_path / "impl.py"
+    code.write_text("def identity(x: int) -> int:\n    return x\n", encoding="utf-8")
+
+    result = verify_traceability(
+        "requires: x >= 0;\nensures: result == x + 1;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="python",
+        use_llm=False,
+        run_mumei=False,
+        lang="en",
+    )
+
+    assert result.spec_path == "<spec>"
+    assert result.next_steps[0]["command"] == (
+        f"mumei-agent verify-traceability --code {code} --spec <spec> --format human"
+    )
+    assert "- Spec: `<spec>`" in result.report
+    assert "--spec /tmp/" not in result.report
