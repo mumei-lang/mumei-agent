@@ -58,10 +58,11 @@ The reference generated-module path is no longer a skip precondition:
 `Generated.Std.Math.Abs.abs_saturating_correct`, and exports `lean_verified`
 with `known_witness_used = false`.
 
-Known witness modules remain an explicitly attributed fallback for std atoms
-that cannot yet be discharged by generated theorem output:
+Known witness modules remain an explicitly attributed fallback. For
+`abs_saturating`, this fallback is used only when the source certificate lacks
+complete body semantics; the live generated path above is canonical when
+`body_expr` is present. Other current witness-backed std atoms include:
 
-- `abs_saturating`
 - `fixed_point_abs`
 - `fixed_point_from_int`
 - `list_length`
