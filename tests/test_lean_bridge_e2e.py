@@ -16,7 +16,10 @@ pytestmark = pytest.mark.integration
 
 
 LEAN_PROOF_ATOM = "abs_saturating"
-LEAN_PROOF_TACTICS = ("norm_num", "omega")
+ABS_SATURATING_BODY = (
+    "if x == (0 - 9223372036854775807 - 1) then 9223372036854775807 "
+    "else if x >= 0 then x else 0 - x"
+)
 
 
 @pytest.fixture()
@@ -48,6 +51,9 @@ def std_abs_unknown_cert() -> dict:
                 "status": "unknown",
                 "requires": "true",
                 "ensures": "result >= 0",
+                "body_expr": ABS_SATURATING_BODY,
+                "z3_result_class": "unknown",
+                "escalation_reason": "timeout",
                 "content_hash": "fixture-abs-saturating",
             }
         ],
@@ -67,6 +73,9 @@ def std_multi_unknown_cert() -> dict:
                 "status": "unknown",
                 "requires": "true",
                 "ensures": "result >= 0",
+                "body_expr": ABS_SATURATING_BODY,
+                "z3_result_class": "unknown",
+                "escalation_reason": "timeout",
                 "content_hash": "fixture-abs-saturating",
             },
             {
@@ -75,6 +84,9 @@ def std_multi_unknown_cert() -> dict:
                 "status": "unknown",
                 "requires": "listTag >= 0",
                 "ensures": "result >= 0",
+                "body_expr": "listTag",
+                "z3_result_class": "unknown",
+                "escalation_reason": "timeout",
                 "content_hash": "fixture-list-length",
             },
         ],
@@ -86,13 +98,6 @@ def test_lean_fallback_upgrades_unknown_to_lean_verified(
     mumei_lean_repo: Path,
     std_abs_unknown_cert: dict,
 ) -> None:
-    src = (mumei_lean_repo / "MumeiLean" / "StdMathAbs.lean").read_text(
-        encoding="utf-8"
-    )
-    assert f"theorem {LEAN_PROOF_ATOM}_correct" in src
-    for tactic in LEAN_PROOF_TACTICS:
-        assert tactic in src
-
     cert_path = tmp_path / "std-abs.proof-cert.json"
     lean_cert_out = tmp_path / "std-abs.lean-cert.json"
     cert_path.write_text(json.dumps(std_abs_unknown_cert), encoding="utf-8")
@@ -118,6 +123,10 @@ def test_lean_fallback_upgrades_unknown_to_lean_verified(
     atom = next(a for a in upgraded["atoms"] if a["name"] == LEAN_PROOF_ATOM)
     assert atom["z3_check_result"] == "lean_verified"
     assert atom["status"] == "verified"
+    assert atom["lean_metadata"]["lean_theorem_name"] == (
+        "Generated.Std.Math.Abs.abs_saturating_correct"
+    )
+    assert atom["lean_metadata"]["known_witness_used"] is False
     assert upgraded["all_verified"] is True
 
 
@@ -148,6 +157,7 @@ def test_lean_bridge_accepts_escalation_bundle_fixture(
     candidate = bridge_result["lean_cert"]["candidates"][0]
     assert candidate["name"] == LEAN_PROOF_ATOM
     assert candidate["z3_check_result"] == "lean_verified"
+    assert candidate["lean_metadata"]["known_witness_used"] is False
 
 
 def test_lean_fallback_upgrades_multiple_unknown_atoms(
@@ -172,6 +182,7 @@ def test_lean_fallback_upgrades_multiple_unknown_atoms(
     )
     atoms = {atom["name"]: atom for atom in upgraded["atoms"]}
     assert atoms["abs_saturating"]["z3_check_result"] == "lean_verified"
+    assert atoms["abs_saturating"]["lean_metadata"]["known_witness_used"] is False
     assert atoms["list_length"]["z3_check_result"] == "lean_verified"
     assert upgraded["all_verified"] is True
 
@@ -252,6 +263,7 @@ def test_proliferate_lean_fallback_summary_json(
     assert results[0]["success"] is True
     upgraded_atom = results[0]["publish_result"]["proof_certificate"]["atoms"][0]
     assert upgraded_atom["z3_check_result"] == "lean_verified"
+    assert upgraded_atom["lean_metadata"]["known_witness_used"] is False
     data = json.loads(summary_path.read_text(encoding="utf-8"))
     assert data["lean_fallback_enabled"] is True
     assert "lean_fallback_metrics" in data

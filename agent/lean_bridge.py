@@ -366,11 +366,40 @@ def _atom_names_with_result(cert: dict[str, Any], result: str) -> set[str]:
     return names
 
 
+def _lean_atom_records_with_result(
+    cert: dict[str, Any],
+    result: str,
+) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+
+    def _consume(payload: dict[str, Any]) -> None:
+        for key in ("atoms", "candidates"):
+            atoms = payload.get(key)
+            if not isinstance(atoms, list):
+                continue
+            for atom in atoms:
+                if (
+                    isinstance(atom, dict)
+                    and atom.get("z3_check_result") == result
+                    and isinstance(atom.get("name"), str)
+                ):
+                    records[atom["name"]] = atom
+        modules = payload.get("modules")
+        if isinstance(modules, dict):
+            for module_cert in modules.values():
+                if isinstance(module_cert, dict):
+                    _consume(module_cert)
+
+    _consume(cert)
+    return records
+
+
 def _upgrade_atoms_by_name(
     cert: dict[str, Any],
     proved_names: set[str],
     *,
     strategy: str | None = None,
+    lean_atom_records: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     upgraded: dict[str, Any] = json.loads(json.dumps(cert))
 
@@ -387,6 +416,22 @@ def _upgrade_atoms_by_name(
                 ):
                     atom["z3_check_result"] = "lean_verified"
                     atom["status"] = "verified"
+                    lean_atom = (
+                        (lean_atom_records or {}).get(str(atom.get("name")))
+                    )
+                    if isinstance(lean_atom, dict):
+                        for field in (
+                            "translator_version",
+                            "bridge_lemma_hash",
+                            "lean_metadata",
+                            "lean_result_metadata",
+                            "unknown_obligation_domain",
+                            "escalation_reason",
+                        ):
+                            if field in lean_atom:
+                                atom[field] = json.loads(
+                                    json.dumps(lean_atom[field])
+                                )
                     if strategy is not None:
                         atom["lean_fallback_strategy"] = strategy
             if atoms:
@@ -935,8 +980,13 @@ def merge_lean_cert_into_proof_cert(
     ``lean_cert_schema_version`` fields (when present in *lean_cert*)
     and recomputes ``all_verified`` over the upgraded atom list.
     """
-    proved_names = _atom_names_with_result(lean_cert, "lean_verified")
-    upgraded = _upgrade_atoms_by_name(original_cert, proved_names)
+    lean_atom_records = _lean_atom_records_with_result(lean_cert, "lean_verified")
+    proved_names = set(lean_atom_records)
+    upgraded = _upgrade_atoms_by_name(
+        original_cert,
+        proved_names,
+        lean_atom_records=lean_atom_records,
+    )
 
     if isinstance(lean_cert, dict):
         if "lean_version" in lean_cert:
