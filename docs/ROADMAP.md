@@ -840,9 +840,9 @@ python -m agent proliferate \
 
 ### E2E 検証メモ
 
-- `tests/test_lean_bridge_e2e.py` now fixes the path `_run_lean_fallback()` → `publish_result.proof_certificate.atoms[].z3_check_result == "lean_verified"` → `summary.json.details[].publish_result.proof_certificate_summary.lean_verified_count`.
-- PR 3-A の Lean 側実 std/ proof witness として `std/math/abs.mm::abs_saturating` を使用。Lean 証明は `MumeiLean.StdMathAbs.abs_saturating_correct` で、`norm_num` / `omega` により i64::MIN 飽和分岐・非負分岐・負値分岐を閉じる。
-- 最新 `mumei-lang/mumei-lean` `develop` (`6e6da16ae64d6a46b720a4b6190806228c85a568`) では `lake build MumeiLean.StdMathAbs` は成功する一方、`scripts/bridge.py --cert ... --lean-cert-out ...` 経由の live generated theorem path は `Generated.Std.Math.Abs` で theorem-level attribution 前に失敗し、`lean_verified` をまだ export できない。そのため integration test はこの precondition を検出した場合 skip し、bridge 経由で PR 3-A proof witness が到達可能になった時点で同じテストが `lean_verified` 昇格を検証する。
+- `tests/test_lean_bridge_e2e.py` now verifies the live path `_run_lean_fallback()` → `publish_result.proof_certificate.atoms[].z3_check_result == "lean_verified"` → `summary.json.details[].publish_result.proof_certificate_summary.lean_verified_count`.
+- The reference proof witness is `std/math/abs.mm::abs_saturating`. With Lake available, `scripts/bridge.py --cert ... --lean-cert-out ...` now emits and builds `Generated.Std.Math.Abs.abs_saturating_correct` from body semantics, exports `lean_verified`, and carries `known_witness_used = false`.
+- The integration tests skip only when the `mumei-lean` checkout or Lake toolchain is unavailable. The former precondition skip for generated theorem-path failure is removed; stale `translator_version` / `bridge_lemma_hash` output remains unpromoted as `stale_translator`.
 
 ---
 

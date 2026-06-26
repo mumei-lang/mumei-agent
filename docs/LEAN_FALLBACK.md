@@ -9,10 +9,13 @@ contains `scripts/bridge.py`.
 1. Unknown atoms are copied into a temporary `.proof-cert.json`.
 2. `agent.lean_bridge.run_lean_bridge()` invokes
    `python <mumei-lean>/scripts/bridge.py --cert ... --lean-cert-out ...`.
-3. If the generated Lean module fails but a known std witness exists, the agent
-   builds the witness module, such as `MumeiLean.StdMathAbs`, and merges the
-   proved atoms into the Lean certificate.
-4. `proliferate` records per-spec fallback diagnostics and aggregate metrics in
+3. For `std/math/abs.mm::abs_saturating`, the standard live generated path emits
+   `Generated.Std.Math.Abs.abs_saturating_correct`, builds it with Lake, and
+   merges `lean_verified` metadata with `known_witness_used = false`.
+4. If another generated Lean module fails but a known std witness exists, the
+   agent can still build that witness module and report the explicit fallback
+   strategy.
+5. `proliferate` records per-spec fallback diagnostics and aggregate metrics in
    the output summary JSON.
 
 ## Error codes
@@ -48,14 +51,18 @@ Per-spec `details[*].lean_fallback` also records `error_code`,
 `primary_error_code`, `retryable`, `fallback_strategy`, `duration_seconds`, and
 `partial_success`.
 
-## Generated-module workaround
+## Generated-module and witness paths
 
-Some std atoms already have body-semantics witnesses in mumei-lean but still
-fail through generated modules because the generated theorem lacks the body
-semantics hypothesis. For those atoms, the agent verifies the known witness
-module directly and upgrades only the matching atoms:
+The reference generated-module path is no longer a skip precondition:
+`abs_saturating` carries body semantics, builds as
+`Generated.Std.Math.Abs.abs_saturating_correct`, and exports `lean_verified`
+with `known_witness_used = false`.
 
-- `abs_saturating`
+Known witness modules remain an explicitly attributed fallback. For
+`abs_saturating`, this fallback is used only when the source certificate lacks
+complete body semantics; the live generated path above is canonical when
+`body_expr` is present. Other current witness-backed std atoms include:
+
 - `fixed_point_abs`
 - `fixed_point_from_int`
 - `list_length`
