@@ -366,6 +366,11 @@ class TestRunLeanBridgeSubprocess:
         repo = tmp_path / "mumei-lean"
         (repo / "scripts").mkdir(parents=True)
         (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        (repo / "scripts" / "export_cert.py").write_text(
+            'TRANSLATOR_VERSION = "mumei-lean-translator-ir-v1"\n'
+            'BRIDGE_LEMMA_HASH = "hash-for-test"\n',
+            encoding="utf-8",
+        )
         (repo / "MumeiLean").mkdir()
         (repo / "MumeiLean" / "StdMathAbs.lean").write_text(
             "theorem abs_saturating_correct : True := by trivial\n"
@@ -378,7 +383,12 @@ class TestRunLeanBridgeSubprocess:
                 {
                     "all_verified": False,
                     "atoms": [
-                        {"name": "abs_saturating", "z3_check_result": "unknown"},
+                        {
+                            "name": "abs_saturating",
+                            "z3_check_result": "unknown",
+                            "z3_result_class": "unknown",
+                            "escalation_reason": "timeout",
+                        },
                         {"name": "list_length", "z3_check_result": "unknown"},
                     ],
                 }
@@ -411,6 +421,21 @@ class TestRunLeanBridgeSubprocess:
             "lean_verified",
             "lean_verified",
         ]
+        abs_atom = next(a for a in atoms if a["name"] == "abs_saturating")
+        assert abs_atom["translator_version"] == "mumei-lean-translator-ir-v1"
+        assert abs_atom["bridge_lemma_hash"] == "hash-for-test"
+        assert abs_atom["lean_metadata"]["known_witness_used"] is True
+        assert abs_atom["lean_metadata"]["lean_module"] == "MumeiLean.StdMathAbs"
+        assert (
+            abs_atom["lean_metadata"]["lean_theorem_name"]
+            == "abs_saturating_correct"
+        )
+        assert abs_atom["lean_metadata"]["z3_result_class"] == "unknown"
+        assert abs_atom["lean_metadata"]["escalation_reason"] == "timeout"
+        assert (
+            abs_atom["lean_result_metadata"]["fallback_strategy"]
+            == "known_witness_module"
+        )
 
     def test_known_witness_fallback_upgrades_domain_atoms(
         self, tmp_path: Path
@@ -552,6 +577,11 @@ class TestRunLeanBridgeSubprocess:
         repo = tmp_path / "mumei-lean"
         (repo / "scripts").mkdir(parents=True)
         (repo / "scripts" / "bridge.py").write_text("# stub\n")
+        (repo / "scripts" / "export_cert.py").write_text(
+            'TRANSLATOR_VERSION = "mumei-lean-translator-ir-v1"\n'
+            'BRIDGE_LEMMA_HASH = "hash-for-test"\n',
+            encoding="utf-8",
+        )
         (repo / "MumeiLean").mkdir()
         (repo / "MumeiLean" / "StdMathAbs.lean").write_text(
             "theorem abs_saturating_correct : True := by trivial\n",
@@ -606,6 +636,14 @@ class TestRunLeanBridgeSubprocess:
         atoms = {a["name"]: a for a in result["lean_cert"]["atoms"]}
         assert atoms["generated_ok"]["z3_check_result"] == "lean_verified"
         assert atoms["abs_saturating"]["z3_check_result"] == "lean_verified"
+        assert (
+            atoms["abs_saturating"]["lean_metadata"]["known_witness_used"]
+            is True
+        )
+        assert (
+            atoms["abs_saturating"]["lean_metadata"]["lean_module"]
+            == "MumeiLean.StdMathAbs"
+        )
         assert result["lean_cert"]["all_verified"] is True
 
     def test_timeout_returns_diagnostic(self, tmp_path: Path) -> None:
