@@ -841,8 +841,8 @@ python -m agent proliferate \
 ### E2E 検証メモ
 
 - `tests/test_lean_bridge_e2e.py` now verifies the live path `_run_lean_fallback()` → `publish_result.proof_certificate.atoms[].z3_check_result == "lean_verified"` → `summary.json.details[].publish_result.proof_certificate_summary.lean_verified_count`.
-- The reference proof witness is `std/math/abs.mm::abs_saturating`. With Lake available, `scripts/bridge.py --cert ... --lean-cert-out ...` now emits and builds `Generated.Std.Math.Abs.abs_saturating_correct` from body semantics, exports `lean_verified`, and carries `known_witness_used = false`.
-- The integration tests skip only when the `mumei-lean` checkout or Lake toolchain is unavailable. The former precondition skip for generated theorem-path failure is removed; stale `translator_version` / `bridge_lemma_hash` output remains unpromoted as `stale_translator`.
+- The reference body-semantics obligation is `std/math/abs.mm::abs_saturating`. With Lake available, `scripts/bridge.py --cert ... --lean-cert-out ...` now emits and builds `Generated.Std.Math.Abs.abs_saturating_correct`, exports `lean_verified`, and carries `known_witness_used = false`.
+- `tests/test_lean_bridge_e2e.py` no longer skips because the generated theorem path is unavailable: it verifies promotion when Lake is present and uses graceful skip only when the `mumei-lean` checkout or Lake toolchain is unavailable. Stale `translator_version` / `bridge_lemma_hash` output remains unpromoted as `stale_translator`.
 
 ---
 
