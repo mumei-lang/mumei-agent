@@ -25,6 +25,7 @@ purely as a subprocess so the agent's runtime dependencies stay light.
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import shutil
@@ -486,6 +487,143 @@ def _matches_known_witness(atom: dict[str, Any]) -> bool:
     return not isinstance(module_key, str) or module_key == witness["module_key"]
 
 
+def _mumei_lean_bridge_contract(
+    mumei_lean_repo: str | Path,
+) -> dict[str, str]:
+    repo_path = Path(mumei_lean_repo)
+    contract: dict[str, str] = {}
+    for relative in ("scripts/export_cert.py", "scripts/expr_translator.py"):
+        path = repo_path / relative
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            stripped = line.strip()
+            for key in ("TRANSLATOR_VERSION", "BRIDGE_LEMMA_HASH"):
+                prefix = f"{key} = "
+                if not stripped.startswith(prefix):
+                    continue
+                try:
+                    value = ast.literal_eval(stripped[len(prefix) :])
+                except (SyntaxError, ValueError):
+                    continue
+                if isinstance(value, str):
+                    contract[key] = value
+        if {
+            "TRANSLATOR_VERSION",
+            "BRIDGE_LEMMA_HASH",
+        }.issubset(contract):
+            break
+    return contract
+
+
+def _known_witness_atom_records(
+    cert: dict[str, Any],
+    witness_names: set[str],
+    *,
+    mumei_lean_repo: str | Path,
+) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    bridge_contract = _mumei_lean_bridge_contract(mumei_lean_repo)
+
+    def _record_for_atom(atom: dict[str, Any]) -> dict[str, Any] | None:
+        name = atom.get("name")
+        if not isinstance(name, str) or name not in witness_names:
+            return None
+        witness = _KNOWN_LEAN_WITNESSES.get(name)
+        if witness is None:
+            return None
+
+        existing_metadata = atom.get("lean_metadata")
+        metadata = (
+            dict(existing_metadata)
+            if isinstance(existing_metadata, dict)
+            else {}
+        )
+        existing_diagnostics = metadata.get("diagnostics")
+        diagnostics = (
+            list(existing_diagnostics)
+            if isinstance(existing_diagnostics, list)
+            else []
+        )
+        if "known_witness_module" not in diagnostics:
+            diagnostics.append("known_witness_module")
+        metadata.update(
+            {
+                "status": "lean_verified",
+                "theorem_name": witness["theorem"],
+                "lean_module": witness["module"],
+                "lean_theorem_name": witness["theorem"],
+                "known_witness_used": True,
+                "proof_path": str(
+                    Path(*witness["module"].split("."))
+                    .with_suffix(".lean")
+                    .as_posix()
+                ),
+                "diagnostics": diagnostics,
+                "proof_strategy": {
+                    "strategy": "known_witness_module",
+                    "module": witness["module"],
+                    "theorem": witness["theorem"],
+                },
+            }
+        )
+        for source_field, metadata_field in (
+            ("z3_result_class", "z3_result_class"),
+            ("escalation_reason", "escalation_reason"),
+            ("logic_fragment_tag", "logic_fragment_tag"),
+            ("logic_fragment_tags", "logic_fragment_tags"),
+            ("unknown_obligation_domain", "unknown_obligation_domain"),
+        ):
+            value = atom.get(source_field)
+            if value:
+                metadata.setdefault(metadata_field, value)
+
+        record = json.loads(json.dumps(atom))
+        record["z3_check_result"] = "lean_verified"
+        record["status"] = "verified"
+        for const_key, field in (
+            ("TRANSLATOR_VERSION", "translator_version"),
+            ("BRIDGE_LEMMA_HASH", "bridge_lemma_hash"),
+        ):
+            value = bridge_contract.get(const_key)
+            if value:
+                record[field] = value
+                metadata[field] = value
+            elif isinstance(atom.get(field), str):
+                record[field] = atom[field]
+                metadata.setdefault(field, atom[field])
+        record["lean_metadata"] = metadata
+        record["lean_result_metadata"] = {
+            "fallback_strategy": "known_witness_module",
+            "known_witness_used": True,
+        }
+        return record
+
+    def _consume(payload: dict[str, Any]) -> None:
+        for key in ("atoms", "candidates"):
+            atoms = payload.get(key)
+            if not isinstance(atoms, list):
+                continue
+            for atom in atoms:
+                if not isinstance(atom, dict):
+                    continue
+                record = _record_for_atom(atom)
+                if record is not None:
+                    records[record["name"]] = record
+        modules = payload.get("modules")
+        if isinstance(modules, dict):
+            for module_cert in modules.values():
+                if isinstance(module_cert, dict):
+                    _consume(module_cert)
+
+    _consume(cert)
+    return records
+
+
 def _verify_known_witnesses(
     *,
     cert_path: str | Path,
@@ -597,10 +735,16 @@ def _verify_known_witnesses(
                 extra={"fallback_strategy": "known_witness_module"},
             )
 
+    lean_atom_records = _known_witness_atom_records(
+        cert,
+        set(witness_names),
+        mumei_lean_repo=mumei_lean_repo,
+    )
     witness_cert = _upgrade_atoms_by_name(
         cert,
         set(witness_names),
         strategy="known_witness_module",
+        lean_atom_records=lean_atom_records,
     )
 
     verified_count = len(witness_names)
