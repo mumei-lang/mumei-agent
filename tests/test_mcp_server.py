@@ -384,7 +384,10 @@ class TestHealFile:
             )
 
         fake_ctx = SimpleNamespace(
-            session=SimpleNamespace(create_message=create_message)
+            session=SimpleNamespace(
+                create_message=create_message,
+                _client_params={"capabilities": {"sampling": {}}},
+            )
         )
 
         with (

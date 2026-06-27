@@ -45,30 +45,33 @@ For V1-E user-facing output, `verify-conformance --format human|json|markdown` a
 ### MCP sampling compatibility follow-up
 
 `USE_MCP_SAMPLING=true` is an opt-in compatibility path for MCP clients that can
-serve as the LLM provider via standard sampling.  The first implementation is
-limited to basic text `sampling/createMessage` requests:
+serve as the LLM provider via standard sampling.  The current implementation is
+aligned with the MCP 2025-11-25 sampling specification and is limited to basic
+text `sampling/createMessage` requests:
 
 - convert OpenAI-style `messages[]` into MCP `SamplingMessage` text content
 - map `role=system` messages to `systemPrompt`
 - pass the configured model as `modelPreferences.hints[].name`
-- omit `includeContext` because the draft deprecates `"thisServer"` and
-  `"allServers"` and requires explicit `sampling.context` capability
-- omit sampling `tools` because the draft requires explicit `sampling.tools`
+- check initialization `capabilities.sampling` before sending sampling requests
+- omit `includeContext`; 2025-11-25 marks `"thisServer"` and `"allServers"`
+  as soft-deprecated and requires explicit `sampling.context` capability before
+  using them
+- omit sampling `tools` because 2025-11-25 requires explicit `sampling.tools`
   capability before sending tool-enabled sampling requests
 
 Future work:
 
-1. Add an MCP SDK compatibility shim for the draft
-   `_meta.io.modelcontextprotocol/clientCapabilities.sampling` request metadata
-   once FastMCP exposes it directly; continue falling back to OpenAI-compatible
-   providers when sampling is absent.
-2. Add optional tool-enabled sampling only after capability detection is covered
-   by tests, and keep tool definitions scoped to each sampling request.
+1. Keep capability detection synchronized with FastMCP/MCP SDK initialization
+   metadata and continue falling back to OpenAI-compatible providers when
+   sampling is absent.
+2. Add optional tool-enabled sampling only after `sampling.tools` capability
+   detection is covered by tests, and keep tool definitions scoped to each
+   sampling request.
 3. Preserve the current text-only path as the default; add multimodal
    image/audio request support only if a concrete forge/heal use case appears.
-4. Track the draft sampling deprecation (`2026-07-28`, SEP-2577) and prefer a
-   direct LLM-provider abstraction for new deployments while keeping the sampling
-   path for existing MCP clients such as Devin.
+4. Monitor MCP spec releases for sampling changes, especially `includeContext`
+   soft-deprecation and client capability shape changes, while keeping the
+   direct `LLMProvider` abstraction and OpenAI-compatible fallback stable.
 
 ## 現状
 

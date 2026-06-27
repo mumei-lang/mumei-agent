@@ -214,10 +214,16 @@ def _client_supports_basic_sampling(ctx: Context) -> bool:
     client_params = getattr(session, "_client_params", None)
     if client_params is None:
         return True
-    capabilities = getattr(client_params, "capabilities", None)
+    capabilities = _field_value(client_params, "capabilities")
     if capabilities is None:
         return True
-    return getattr(capabilities, "sampling", None) is not None
+    return _field_value(capabilities, "sampling") is not None
+
+
+def _field_value(value: Any, name: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name)
+    return getattr(value, name, None)
 
 
 def _message_content_to_text(content: Any) -> str:
