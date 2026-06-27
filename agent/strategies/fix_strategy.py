@@ -12,6 +12,7 @@ from pathlib import Path
 from openai import OpenAI
 from agent.budget_policy import BudgetPolicy, evaluate_budget
 from agent.config import AgentConfig
+from agent.llm_provider import LLMProvider, complete_response
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 from agent.pattern_library import PatternLibrary
@@ -167,7 +168,7 @@ class OpenAILossVectorFixClient:
 
     def __init__(
         self,
-        client: OpenAI,
+        client: OpenAI | LLMProvider,
         model: str,
         mumei_client: MumeiClient | None = None,
     ) -> None:
@@ -198,15 +199,17 @@ class ConfiguredLossVectorFixClient:
         self,
         config: AgentConfig,
         mumei_client: MumeiClient | None = None,
+        llm_provider: LLMProvider | None = None,
     ) -> None:
         self.config = config
         self.mumei_client = mumei_client
+        self.llm_provider = llm_provider
         self._delegate: OpenAILossVectorFixClient | None = None
 
     def fix_with_loss_vector(self, code_file: Path, loss_vector: dict) -> str:
         if self._delegate is None:
             self._delegate = OpenAILossVectorFixClient(
-                self.config.create_client(),
+                self.llm_provider or self.config.create_client(),
                 self.config.model,
                 self.mumei_client,
             )
@@ -539,7 +542,7 @@ def _build_prompt_for_report(source_code: str, error_log: str, report_data: dict
 
 
 def get_fix(
-    client: OpenAI,
+    client: OpenAI | LLMProvider,
     model: str,
     source_code: str,
     error_log: str,
@@ -560,7 +563,7 @@ def get_fix(
     """Generate a fix using the appropriate prompt template.
 
     Args:
-        client: OpenAI-compatible client.
+        client: LLMProvider or OpenAI-compatible client.
         model: Model name.
         source_code: Current source code.
         error_log: Verification error output.
@@ -834,9 +837,9 @@ def get_fix(
         if few_shot:
             prompt += f"\n\n{few_shot}"
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    response = complete_response(
+        client,
+        [
             {
                 "role": "system",
                 "content": (
@@ -846,14 +849,15 @@ def get_fix(
             },
             {"role": "user", "content": prompt},
         ],
+        model,
     )
     llm_tokens_used = response_token_count(response)
     if metrics is not None:
         metrics.record_tokens(llm_tokens_used)
     report_data["llm_tokens_used"] = llm_tokens_used
 
-    content = response.choices[0].message.content or ""
     # Extract code block (handles various LLM fence labels)
+    content = response.choices[0].message.content or ""
     code_match = re.search(
         r'```\w*\s*\n(.*?)```',
         content,

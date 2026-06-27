@@ -42,6 +42,34 @@ This repository owns V1-A/V1-B/V1-C/V1-D agent surfaces while `mumei-lang/mumei/
 
 For V1-E user-facing output, `verify-conformance --format human|json|markdown` and MCP `scan_and_fix(..., output_format="human"|"markdown")` must keep `next_steps` before findings/reports, while JSON preserves `next_steps`, `verification_violations`, and `cross_validation_gaps` exactly.
 
+### MCP sampling compatibility follow-up
+
+`USE_MCP_SAMPLING=true` is an opt-in compatibility path for MCP clients that can
+serve as the LLM provider via standard sampling.  The first implementation is
+limited to basic text `sampling/createMessage` requests:
+
+- convert OpenAI-style `messages[]` into MCP `SamplingMessage` text content
+- map `role=system` messages to `systemPrompt`
+- pass the configured model as `modelPreferences.hints[].name`
+- omit `includeContext` because the draft deprecates `"thisServer"` and
+  `"allServers"` and requires explicit `sampling.context` capability
+- omit sampling `tools` because the draft requires explicit `sampling.tools`
+  capability before sending tool-enabled sampling requests
+
+Future work:
+
+1. Add an MCP SDK compatibility shim for the draft
+   `_meta.io.modelcontextprotocol/clientCapabilities.sampling` request metadata
+   once FastMCP exposes it directly; continue falling back to OpenAI-compatible
+   providers when sampling is absent.
+2. Add optional tool-enabled sampling only after capability detection is covered
+   by tests, and keep tool definitions scoped to each sampling request.
+3. Preserve the current text-only path as the default; add multimodal
+   image/audio request support only if a concrete forge/heal use case appears.
+4. Track the draft sampling deprecation (`2026-07-28`, SEP-2577) and prefer a
+   direct LLM-provider abstraction for new deployments while keeping the sampling
+   path for existing MCP clients such as Devin.
+
 ## 現状
 
 - mumeiリポジトリから分離直後（[mumei-lang/mumei#90](https://github.com/mumei-lang/mumei/pull/90)）
