@@ -35,7 +35,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from agent.nlae_pipeline import NLAEPipeline
 from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
@@ -115,6 +115,34 @@ def _existing_path_arg(value: str) -> Path | None:
     return None
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _sampling_enabled(config: Any) -> bool:
+    return bool(getattr(config, "use_mcp_sampling", False)) or _env_bool("USE_MCP_SAMPLING")
+
+
+def _llm_provider_for_context(config: Any, ctx: Context | None) -> Any | None:
+    if not _sampling_enabled(config) or ctx is None:
+        return None
+    from agent.llm_provider import McpSamplingLLMProvider, OpenAILLMProvider
+
+    return McpSamplingLLMProvider(ctx, fallback=OpenAILLMProvider(config))
+
+
+def _llm_client_for_context(config: Any, ctx: Context | None) -> Any:
+    provider = _llm_provider_for_context(config, ctx)
+    if provider is None:
+        return config.create_client()
+    from agent.llm_provider import openai_client_adapter
+
+    return openai_client_adapter(provider)
+
+
 def _heal_single_file(
     code_file: Path,
     *,
@@ -122,6 +150,7 @@ def _heal_single_file(
     config: Any | None = None,
     client: Any | None = None,
     mumei: Any | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Heal one on-disk ``.mm`` file and overwrite it with the candidate fix."""
     try:
@@ -133,7 +162,7 @@ def _heal_single_file(
 
     try:
         config = config or AgentConfig()
-        client = client or config.create_client()
+        client = client or _llm_client_for_context(config, ctx)
         mumei = mumei or create_mumei_client(config.mumei_bin)
     except Exception as exc:
         return {
@@ -141,7 +170,7 @@ def _heal_single_file(
             "success": False,
             "attempts": 0,
             "error": f"AgentConfig is unavailable: {exc}",
-            "hint": "set LLM_API_KEY / OPENAI_API_KEY for heal_file",
+            "hint": "set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
         }
 
     try:
@@ -201,7 +230,11 @@ def _heal_single_file(
     }
 
 
-def _heal_directory(code_dir: Path, error_report: str = "") -> str:
+def _heal_directory(
+    code_dir: Path,
+    error_report: str = "",
+    ctx: Context | None = None,
+) -> str:
     try:
         from agent.config import AgentConfig
         from agent.mumei_client import create_mumei_client
@@ -250,12 +283,12 @@ def _heal_directory(code_dir: Path, error_report: str = "") -> str:
 
     try:
         config = AgentConfig()
-        client = config.create_client()
+        client = _llm_client_for_context(config, ctx)
         mumei = create_mumei_client(config.mumei_bin)
     except Exception as exc:
         return _err(
             f"AgentConfig is unavailable: {exc}",
-            hint="set LLM_API_KEY / OPENAI_API_KEY for heal_file",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
         )
 
     results = [
@@ -265,6 +298,7 @@ def _heal_directory(code_dir: Path, error_report: str = "") -> str:
             config=config,
             client=client,
             mumei=mumei,
+            ctx=ctx,
         )
         for path in ordered_files
     ]
@@ -358,7 +392,12 @@ def get_spec_guidelines() -> str:
 
 
 @mcp.tool()
-def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
+def forge_task(
+    task_json: str,
+    mumei_repo: str,
+    dry_run: bool = True,
+    ctx: Context | None = None,
+) -> str:
     """Run a single forge task spec via :class:`agent.forge.MumeiForge`.
 
     Args:
@@ -393,16 +432,17 @@ def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
         return _err(f"failed to import agent modules: {exc}")
 
     config: AgentConfig | None = None
+    llm_provider = None
     if not dry_run:
         try:
             config = AgentConfig()
-            # Force eager validation so misconfigured callers fail fast
-            # with a clear error instead of crashing inside the LLM call.
-            config.create_client()
+            llm_provider = _llm_provider_for_context(config, ctx)
+            if llm_provider is None:
+                config.create_client()
         except Exception as exc:
             return _err(
                 f"AgentConfig is unavailable: {exc}",
-                hint="set LLM_API_KEY (or run with dry_run=true)",
+                hint="set LLM_API_KEY, enable USE_MCP_SAMPLING from an MCP client, or run with dry_run=true",
             )
 
     mumei_bin = (config.mumei_bin if config else None) or os.environ.get(
@@ -420,6 +460,7 @@ def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
         mumei_client=mumei_client,
         mumei_repo_dir=repo,
         forge_tasks_dir=forge_tasks_dir,
+        llm_provider=llm_provider,
     )
 
     if dry_run:
@@ -478,7 +519,12 @@ def forge_task(task_json: str, mumei_repo: str, dry_run: bool = True) -> str:
 
 
 @mcp.tool()
-def heal_file(source_code: str = "", error_report: str = "", code_file: str = "") -> str:
+def heal_file(
+    source_code: str = "",
+    error_report: str = "",
+    code_file: str = "",
+    ctx: Context | None = None,
+) -> str:
     """Self-heal mumei source code or an on-disk file/directory.
 
     Args:
@@ -506,9 +552,9 @@ def heal_file(source_code: str = "", error_report: str = "", code_file: str = ""
 
     if target_path is not None:
         if target_path.is_dir():
-            return _heal_directory(target_path, error_report=error_report)
+            return _heal_directory(target_path, error_report=error_report, ctx=ctx)
         if target_path.is_file():
-            result = _heal_single_file(target_path, error_report=error_report)
+            result = _heal_single_file(target_path, error_report=error_report, ctx=ctx)
             from agent.strategies.fix_strategy import _aggregate_heal_results
 
             payload = _aggregate_heal_results([result])
@@ -530,11 +576,11 @@ def heal_file(source_code: str = "", error_report: str = "", code_file: str = ""
 
     try:
         config = AgentConfig()
-        client = config.create_client()
+        client = _llm_client_for_context(config, ctx)
     except Exception as exc:
         return _err(
             f"AgentConfig is unavailable: {exc}",
-            hint="set LLM_API_KEY / OPENAI_API_KEY for heal_file",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
         )
 
     report_data: dict[str, Any] = {}
@@ -610,7 +656,11 @@ def heal_file(source_code: str = "", error_report: str = "", code_file: str = ""
 
 
 @mcp.tool()
-def self_correct(code_file: str, max_iterations: int = 10) -> str:
+def self_correct(
+    code_file: str,
+    max_iterations: int = 10,
+    ctx: Context | None = None,
+) -> str:
     """P9-F: Self-Correction Protocol - 自己修復ループを実行する."""
     path = _existing_path_arg(code_file)
     if path is None or not path.is_file():
@@ -629,14 +679,17 @@ def self_correct(code_file: str, max_iterations: int = 10) -> str:
     try:
         config = AgentConfig()
         mumei = create_mumei_client(config.mumei_bin)
+        llm_provider = _llm_provider_for_context(config, ctx)
+        if llm_provider is None:
+            config.create_client()
     except Exception as exc:
         return _err(
             f"AgentConfig is unavailable: {exc}",
-            hint="set LLM_API_KEY / OPENAI_API_KEY for self_correct",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
         )
 
     loop = SelfCorrectionLoop(max_iterations=max_iterations)
-    llm = ConfiguredLossVectorFixClient(config, mumei)
+    llm = ConfiguredLossVectorFixClient(config, mumei, llm_provider=llm_provider)
     try:
         result = loop.run(path, mumei, llm)
     except Exception as exc:
@@ -990,7 +1043,7 @@ def get_agent_status() -> str:
 
     return _ok(
         {
-            "llm_provider": "openai-compatible",
+            "llm_provider": "mcp-sampling" if _sampling_enabled(config) else "openai-compatible",
             "model": config.model,
             "base_url": config.base_url,
             "mumei_bin": config.mumei_bin,
@@ -1000,6 +1053,7 @@ def get_agent_status() -> str:
             "feature_flags": {
                 "PREFER_MCP_GAPS": os.environ.get("PREFER_MCP_GAPS", ""),
                 "USE_MCP_CLIENT": os.environ.get("USE_MCP_CLIENT", ""),
+                "USE_MCP_SAMPLING": os.environ.get("USE_MCP_SAMPLING", ""),
                 "INJECT_CORE_AXIOMS": os.environ.get("INJECT_CORE_AXIOMS", ""),
                 "ENABLE_LATENT_DEBUG": os.environ.get("ENABLE_LATENT_DEBUG", ""),
                 "ENABLE_DENSE_PROPERTIES": os.environ.get(
@@ -1236,6 +1290,7 @@ def extract_spec(
     generate: bool = False,
     mumei_repo: str = "",
     check_contradiction_only: bool = False,
+    ctx: Context | None = None,
 ) -> str:
     """Extract a Mumei forge task spec from natural language requirements.
 
@@ -1277,11 +1332,11 @@ def extract_spec(
 
     try:
         config = AgentConfig()
-        client = config.create_client()
+        client = _llm_client_for_context(config, ctx)
     except Exception as exc:
         return _err(
             f"AgentConfig is unavailable: {exc}",
-            hint="set LLM_API_KEY (or OPENAI_API_KEY)",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
         )
 
     mumei_bin = config.mumei_bin
@@ -1339,12 +1394,21 @@ def extract_spec(
 
 
 @mcp.tool()
-def check_spec_contradiction(natural_language: str, domain_hint: str = "") -> str:
+def check_spec_contradiction(
+    natural_language: str,
+    domain_hint: str = "",
+    ctx: Context | None = None,
+) -> str:
     """Extract specs and return contradiction_found plus contradiction_type=spec_internal."""
+    kwargs: dict[str, Any] = {
+        "domain_hint": domain_hint,
+        "check_contradiction_only": True,
+    }
+    if ctx is not None:
+        kwargs["ctx"] = ctx
     return extract_spec(
         natural_language,
-        domain_hint=domain_hint,
-        check_contradiction_only=True,
+        **kwargs,
     )
 
 

@@ -19,6 +19,7 @@ import z3
 from agent.ambiguity_detector import AmbiguityDetector
 from agent.config import AgentConfig
 from agent.code_to_spec import CodeToSpecConverter
+from agent.llm_provider import OpenAILLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.cross_validation_code import (
     CROSS_VALIDATION_CODE_SYSTEM_PROMPT,
@@ -1019,15 +1020,13 @@ def _infer_contracts_with_llm(
 ) -> tuple[list[MumeiContractAtom], list[CrossValidationIssue], list[str]]:
     warnings: list[str] = []
     try:
-        client = config.create_client()
-        response = client.chat.completions.create(
-            model=config.model,
-            messages=[
+        content = OpenAILLMProvider(config).complete(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            config.model,
         )
-        content = response.choices[0].message.content or ""
         payload = _json_from_text(content)
         return _atoms_from_payload(payload), _issues_from_payload(payload), warnings
     except Exception as exc:

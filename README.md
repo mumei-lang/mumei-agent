@@ -75,10 +75,25 @@ graph TD
         D1 -.->|"MCP"| MCPA["agent/mcp_server.py (Mumei-Agent)"]
         D2 -.->|"MCP"| MCPA
         D3 -.->|"MCP"| MCPA
+        MCPA -.->|"USE_MCP_SAMPLING=true (sampling)"| D2
         MCPF -->|"subprocess"| CLI2["mumei CLI"]
         MCPA -->|"forge / heal / health"| MA
     end
 ```
+
+By default, `agent/mcp_server.py` uses the same OpenAI-compatible LLM endpoint
+as the CLI.  Set `USE_MCP_SAMPLING=true` to make LLM-backed MCP tools such as
+`heal_file`, `forge_task`, `extract_spec`, and `self_correct` request
+completion through standard MCP sampling (`Context.session.create_message`) from
+the connected client instead.  This lets Devin or another MCP client provide the
+LLM role without configuring `LLM_API_KEY` in mumei-agent.  If the connected
+client does not support sampling, or sampling fails, the agent falls back to the
+existing OpenAI-compatible path.
+
+The `mumei/mcp_server.py` **Mumei-Forge** server remains verification-only and
+does not need an LLM provider; sampling is implemented only in
+`mumei-agent` so the forge/heal autonomous loop is not duplicated in the compiler
+repository.
 
 ### When to Use Which
 
@@ -244,6 +259,9 @@ Core agent and local Ollama settings are controlled through environment variable
 - `LLM_API_KEY` / `OPENAI_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`: select the
   OpenAI-compatible LLM endpoint. For local Ollama, set `LLM_BASE_URL` to
   `http://localhost:11434/v1`.
+- `USE_MCP_SAMPLING` (default: `false`): for `agent/mcp_server.py` tool calls,
+  ask the connected MCP client (for example Devin) to provide completions via
+  MCP sampling. OpenAI-compatible settings remain the fallback path.
 - `MAX_CONTEXT_TOKENS` (default: `16000`): operator-facing estimate for the
   maximum prompt budget to send to the LLM. Use this to align prompt construction
   with the model/context window selected for your backend.

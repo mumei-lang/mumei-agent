@@ -32,6 +32,7 @@ from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.forge_discovery import discover_tasks, filter_completed_tasks
 from agent.harness_metrics import HarnessMetrics, harness_profile_names
+from agent.llm_provider import LLMProvider, complete_text
 from agent.metrics import (
     Metrics,
     decidable_fragment_tags_from_verify_result,
@@ -291,7 +292,8 @@ class MumeiForge:
         forge_tasks_dir: Path,
         *,
         log_path: Path | None = None,
-        openai_client: OpenAI | None = None,
+        openai_client: OpenAI | LLMProvider | None = None,
+        llm_provider: LLMProvider | None = None,
         harness_metrics: HarnessMetrics | None = None,
     ) -> None:
         # ``config`` may be ``None`` for dry-run usage, where the forge
@@ -304,7 +306,8 @@ class MumeiForge:
         self.forge_tasks_dir = Path(forge_tasks_dir).resolve()
         self.log_path = Path(log_path) if log_path else self.forge_tasks_dir.parent / "forge_log.json"
         self.metrics_path = self.log_path.with_name("p8_decidable_metrics.json")
-        self._client: OpenAI | None = openai_client
+        self._client: OpenAI | LLMProvider | None = openai_client
+        self._llm_provider = llm_provider
         self.harness_metrics = harness_metrics or HarnessMetrics.from_profile("basic")
 
     # ------------------------------------------------------------------
@@ -675,28 +678,17 @@ class MumeiForge:
             cross_file_context=cross_file_context or None,
         )
         try:
-            response = client.chat.completions.create(
-                model=self.config.model,
-                messages=[
+            content = complete_text(
+                client,
+                [
                     {"role": "system", "content": FORGE_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
+                self.config.model,
             )
         except Exception as exc:
             _logger.warning("LLM call failed: %s", exc)
             return ""
-
-        try:
-            content = response.choices[0].message.content or ""
-        except (AttributeError, IndexError):
-            return ""
-        if metrics is not None:
-            usage = getattr(response, "usage", None)
-            total_tokens = getattr(usage, "total_tokens", 0)
-            try:
-                metrics.record_tokens(int(total_tokens or 0))
-            except (TypeError, ValueError):
-                pass
 
         return _extract_code(content)
 
@@ -792,13 +784,15 @@ class MumeiForge:
             + "\n\n".join(sections)
         )
 
-    def _ensure_openai_client(self) -> OpenAI:
+    def _ensure_openai_client(self) -> OpenAI | LLMProvider:
         if self.config is None:
             raise RuntimeError(
                 "MumeiForge was constructed without an AgentConfig; "
                 "cannot create an OpenAI client. This path is only "
                 "reachable outside of --dry-run mode."
             )
+        if self._llm_provider is not None:
+            return self._llm_provider
         if self._client is None:
             self._client = self.config.create_client()
         return self._client

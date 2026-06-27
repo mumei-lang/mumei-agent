@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Literal
 
 from agent.config import AgentConfig
+from agent import cross_validation
 from agent.cross_validation import (
     CrossValidationIssue,
     MumeiContractAtom,
     SpecCodeAlignmentResult,
-    validate_spec_to_code,
 )
 
 
@@ -69,7 +69,7 @@ def verify_conformance(
 ) -> ConformanceVerificationResult:
     config = config or AgentConfig()
     if alignment is None:
-        alignment = validate_spec_to_code(
+        alignment = cross_validation.validate_spec_to_code(
             spec,
             code_path,
             config=config,

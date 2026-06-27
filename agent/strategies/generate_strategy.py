@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from openai import OpenAI
 
+from agent.llm_provider import complete_text
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
 from agent.prompts.report_formatter import (
@@ -561,14 +562,15 @@ def _regenerate_for_health(
         "using the skeleton and current requirements as the source of truth.\n"
         f"Health warnings: {health_warnings}"
     )
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    content = complete_text(
+        client,
+        [
             {"role": "system", "content": system_content},
             {"role": "user", "content": retry_prompt},
         ],
+        model,
     )
-    return _extract_code(response.choices[0].message.content or "")
+    return _extract_code(content)
 
 
 def generate_multi_atom(
@@ -678,15 +680,16 @@ def generate_multi_atom(
         "in the Mumei language with its effect system and Z3 formal verification. "
         "Generate a complete module with multiple atoms."
     )
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    content = complete_text(
+        client,
+        [
             {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ],
+        model,
     )
 
-    generated_code = _extract_code(response.choices[0].message.content or "")
+    generated_code = _extract_code(content)
     if not generated_code:
         _logger.warning("LLM returned empty multi-atom generation result")
         return "", False
@@ -948,9 +951,9 @@ def _attempt_multi_atom_fix(
         f"Return the COMPLETE .mm file with all atoms."
     )
 
-    fix_response = client.chat.completions.create(
-        model=model,
-        messages=[
+    fix_content = complete_text(
+        client,
+        [
             {
                 "role": "system",
                 "content": (
@@ -961,9 +964,10 @@ def _attempt_multi_atom_fix(
             },
             {"role": "user", "content": fix_prompt},
         ],
+        model,
     )
 
-    fixed_code = _extract_code(fix_response.choices[0].message.content or "")
+    fixed_code = _extract_code(fix_content)
     if not fixed_code:
         return current_code
     if enable_spec_code_mapping and spec:
@@ -1097,15 +1101,16 @@ def generate_code(
         "You are a helpful programming assistant specializing "
         "in the Mumei language with its effect system and Z3 formal verification."
     )
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    content = complete_text(
+        client,
+        [
             {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ],
+        model,
     )
 
-    generated_code = _extract_code(response.choices[0].message.content or "")
+    generated_code = _extract_code(content)
     if not generated_code:
         _logger.warning("LLM returned empty generation result")
         return "", False
@@ -1539,9 +1544,9 @@ def _attempt_fix(
         prompt_report_truncate_chars=prompt_report_truncate_chars,
     )
 
-    fix_response = client.chat.completions.create(
-        model=model,
-        messages=[
+    fix_content = complete_text(
+        client,
+        [
             {
                 "role": "system",
                 "content": (
@@ -1552,9 +1557,10 @@ def _attempt_fix(
             },
             {"role": "user", "content": fix_prompt},
         ],
+        model,
     )
 
-    fixed_code = _extract_code(fix_response.choices[0].message.content or "")
+    fixed_code = _extract_code(fix_content)
     if not fixed_code:
         return current_code
     if enable_spec_code_mapping and spec:

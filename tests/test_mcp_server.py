@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from mcp import types as mcp_types
 
 from agent import mcp_server
 
@@ -60,6 +63,7 @@ class TestGetAgentStatus:
         assert "PREFER_MCP_GAPS" in result["feature_flags"]
         assert "ENABLE_LATENT_PROTOCOL" in result["feature_flags"]
         assert "ENABLE_CODE_TO_SPEC" in result["feature_flags"]
+        assert "USE_MCP_SAMPLING" in result["feature_flags"]
 
     def test_status_tools_match_registered_tools(self) -> None:
         result = _payload(mcp_server.get_agent_status())
@@ -354,6 +358,98 @@ class TestHealFile:
         assert result["status"] == "ok"
         assert result["success"] is True
         assert "atom fixed" in result["healed_code"]
+
+    def test_uses_mcp_sampling_without_openai_client(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+        fake_config.model = "gpt-4o"
+        fake_config.strategy = "single"
+        fake_config.use_mcp_sampling = True
+        fake_config.create_client.side_effect = AssertionError("OpenAI fallback was used")
+
+        async def create_message(messages, **kwargs):
+            assert messages[0].role == "user"
+            assert kwargs["model_preferences"].hints[0].name == "gpt-4o"
+            return mcp_types.CreateMessageResult(
+                role="assistant",
+                content=mcp_types.TextContent(
+                    type="text",
+                    text="```mumei\natom fixed() ensures: true; body: 0;\n```",
+                ),
+                model="client-model",
+            )
+
+        fake_ctx = SimpleNamespace(
+            session=SimpleNamespace(create_message=create_message)
+        )
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.heal_file(
+                    "atom broken() ensures: false; body: 0;",
+                    error_report=json.dumps({"failure_type": "postcondition"}),
+                    ctx=fake_ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert result["success"] is True
+        assert "atom fixed" in result["healed_code"]
+        fake_config.create_client.assert_not_called()
+
+    def test_sampling_failure_falls_back_to_openai_client(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+
+        fake_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="```mumei\natom fallback() ensures: true; body: 0;\n```"
+                    )
+                )
+            ]
+        )
+        fake_openai = MagicMock()
+        fake_openai.chat.completions.create.return_value = fake_response
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+        fake_config.model = "gpt-4o"
+        fake_config.strategy = "single"
+        fake_config.use_mcp_sampling = True
+        fake_config.create_client.return_value = fake_openai
+
+        async def create_message(*args, **kwargs):
+            raise RuntimeError("sampling unsupported")
+
+        fake_ctx = SimpleNamespace(
+            session=SimpleNamespace(create_message=create_message)
+        )
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.heal_file(
+                    "atom broken() ensures: false; body: 0;",
+                    error_report=json.dumps({"failure_type": "postcondition"}),
+                    ctx=fake_ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert result["success"] is True
+        assert "atom fallback" in result["healed_code"]
+        fake_config.create_client.assert_called_once()
+        fake_openai.chat.completions.create.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
