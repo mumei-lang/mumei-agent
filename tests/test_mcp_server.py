@@ -451,6 +451,53 @@ class TestHealFile:
         fake_config.create_client.assert_called_once()
         fake_openai.chat.completions.create.assert_called_once()
 
+    def test_missing_sampling_capability_falls_back_to_openai_client(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+
+        fake_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="```mumei\natom fallback() ensures: true; body: 0;\n```"
+                    )
+                )
+            ]
+        )
+        fake_openai = MagicMock()
+        fake_openai.chat.completions.create.return_value = fake_response
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+        fake_config.model = "gpt-4o"
+        fake_config.strategy = "single"
+        fake_config.use_mcp_sampling = True
+        fake_config.create_client.return_value = fake_openai
+
+        fake_session = SimpleNamespace(
+            create_message=MagicMock(side_effect=AssertionError("sampling was called")),
+            _client_params=SimpleNamespace(
+                capabilities=SimpleNamespace(sampling=None),
+            ),
+        )
+        fake_ctx = SimpleNamespace(session=fake_session)
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.heal_file(
+                    "atom broken() ensures: false; body: 0;",
+                    error_report=json.dumps({"failure_type": "postcondition"}),
+                    ctx=fake_ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert "atom fallback" in result["healed_code"]
+        fake_session.create_message.assert_not_called()
+        fake_openai.chat.completions.create.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # measure_std_health

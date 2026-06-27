@@ -90,6 +90,15 @@ LLM role without configuring `LLM_API_KEY` in mumei-agent.  If the connected
 client does not support sampling, or sampling fails, the agent falls back to the
 existing OpenAI-compatible path.
 
+The implementation follows the MCP draft sampling shape for basic text
+generations: user/assistant chat messages are converted to `SamplingMessage`
+text content, system messages become `systemPrompt`, model names are passed as
+`modelPreferences.hints`, `maxTokens` is bounded by `MCP_SAMPLING_MAX_TOKENS`,
+and `includeContext`, sampling tools, images, and audio are intentionally omitted
+until the server can verify the corresponding client capabilities.  The draft
+spec marks sampling deprecated as of protocol version `2026-07-28`; keep this
+mode opt-in and prefer direct LLM provider APIs for new non-MCP deployments.
+
 The `mumei/mcp_server.py` **Mumei-Forge** server remains verification-only and
 does not need an LLM provider; sampling is implemented only in
 `mumei-agent` so the forge/heal autonomous loop is not duplicated in the compiler

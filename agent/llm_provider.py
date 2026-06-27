@@ -86,6 +86,9 @@ class McpSamplingLLMProvider:
     def _complete_via_sampling(self, messages: Sequence[Message], model: str) -> str:
         from mcp import types as mcp_types
 
+        if not _client_supports_basic_sampling(self.ctx):
+            raise RuntimeError("connected MCP client did not declare sampling capability")
+
         sampling_messages, system_prompt = _to_sampling_messages(messages)
 
         async def call_sampling() -> Any:
@@ -204,6 +207,17 @@ def _to_sampling_messages(
             )
         )
     return sampling_messages, "\n\n".join(system_parts)
+
+
+def _client_supports_basic_sampling(ctx: Context) -> bool:
+    session = getattr(ctx, "session", None)
+    client_params = getattr(session, "_client_params", None)
+    if client_params is None:
+        return True
+    capabilities = getattr(client_params, "capabilities", None)
+    if capabilities is None:
+        return True
+    return getattr(capabilities, "sampling", None) is not None
 
 
 def _message_content_to_text(content: Any) -> str:
