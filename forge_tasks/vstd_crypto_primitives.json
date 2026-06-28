@@ -21,59 +21,104 @@
   "implementation_notes": [
     "Every predicate result is an i64 boolean constrained to 0 or 1.",
     "State clearly in comments that these are structural contracts, not cryptographic security proofs.",
-    "Use explicit byte/length bounds and avoid arrays or byte-string internals unless existing std/crypto modules already expose the same syntax."
+    "Use explicit byte/length bounds and avoid arrays or byte-string internals unless existing std/crypto modules already expose the same syntax.",
+    "Bodies are explicit so forge can render this module deterministically when LLM credentials are unavailable."
   ],
   "atoms": [
     {
       "name": "is_valid_key_len",
       "description": "Return 1 when a key length is inside caller-approved inclusive bounds, otherwise 0.",
       "inputs": [
-        {"name": "key_len", "type": "i64"},
-        {"name": "min_len", "type": "i64"},
-        {"name": "max_len", "type": "i64"}
+        {
+          "name": "key_len",
+          "type": "i64"
+        },
+        {
+          "name": "min_len",
+          "type": "i64"
+        },
+        {
+          "name": "max_len",
+          "type": "i64"
+        }
       ],
       "return_type": "i64",
       "requires": "min_len >= 0 && max_len >= min_len",
       "ensures": "result == 0 || result == 1",
-      "reference_patterns": ["is_within_range", "safe_truncate"]
+      "reference_patterns": [
+        "is_within_range",
+        "safe_truncate"
+      ],
+      "body": "if key_len >= min_len { if key_len <= max_len { 1 } else { 0 } } else { 0 }"
     },
     {
       "name": "is_valid_nonce_len",
       "description": "Validate a nonce length against a positive expected length.",
       "inputs": [
-        {"name": "nonce_len", "type": "i64"},
-        {"name": "expected_len", "type": "i64"}
+        {
+          "name": "nonce_len",
+          "type": "i64"
+        },
+        {
+          "name": "expected_len",
+          "type": "i64"
+        }
       ],
       "return_type": "i64",
       "requires": "nonce_len >= 0 && expected_len > 0",
       "ensures": "result == 0 || result == 1",
-      "reference_patterns": ["equals", "is_valid_key_len"]
+      "reference_patterns": [
+        "equals",
+        "is_valid_key_len"
+      ],
+      "body": "if nonce_len == expected_len { 1 } else { 0 }"
     },
     {
       "name": "constant_time_eq_flag",
       "description": "Return an i64 boolean equality witness for two bounded scalar digests. The contract is structural and does not model physical timing.",
       "inputs": [
-        {"name": "left", "type": "i64"},
-        {"name": "right", "type": "i64"}
+        {
+          "name": "left",
+          "type": "i64"
+        },
+        {
+          "name": "right",
+          "type": "i64"
+        }
       ],
       "return_type": "i64",
       "requires": "left >= 0 && right >= 0",
       "ensures": "result == 0 || result == 1",
-      "reference_patterns": ["hash_eq_consistent", "equals"]
+      "reference_patterns": [
+        "hash_eq_consistent",
+        "equals"
+      ],
+      "body": "if left == right { 1 } else { 0 }"
     },
     {
       "name": "digest_len_ok",
       "description": "Validate that a digest length is positive and no larger than a protocol cap.",
       "inputs": [
-        {"name": "digest_len", "type": "i64"},
-        {"name": "max_digest_len", "type": "i64"}
+        {
+          "name": "digest_len",
+          "type": "i64"
+        },
+        {
+          "name": "max_digest_len",
+          "type": "i64"
+        }
       ],
       "return_type": "i64",
       "requires": "digest_len >= 0 && max_digest_len > 0",
       "ensures": "result == 0 || result == 1",
-      "reference_patterns": ["is_valid_key_len", "hash_bucket"]
+      "reference_patterns": [
+        "is_valid_key_len",
+        "hash_bucket"
+      ],
+      "body": "if digest_len > 0 { if digest_len <= max_digest_len { 1 } else { 0 } } else { 0 }"
     }
   ],
   "source": "vstd-roadmap",
-  "difficulty": "medium"
+  "difficulty": "medium",
+  "deterministic_bodies": true
 }

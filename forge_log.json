@@ -97,6 +97,25 @@
       "timestamp": "2026-06-02T07:48:35.809536+00:00",
       "task_spec_path": "forge_tasks/vstd_math_fibonacci.json",
       "note": "Live forge generation hit the generation health gate; the existing target module was retained and passed mumei verify --proof-cert."
+    },
+    {
+      "task_id": "vstd-crypto-primitives",
+      "status": "success",
+      "attempts": 1,
+      "target_file": "std/crypto/primitives.mm",
+      "atoms_added": [
+        "is_valid_key_len",
+        "is_valid_nonce_len",
+        "constant_time_eq_flag",
+        "digest_len_ok"
+      ],
+      "logic_fragment_tags": [],
+      "outside_decidable_fragment": false,
+      "metrics_quarter": "2026-Q2",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-06-28T13:49:35.008633+00:00",
+      "task_spec_path": "/home/ubuntu/repos/mumei-agent/forge_tasks/vstd_crypto_primitives.json"
     }
   ]
 }
