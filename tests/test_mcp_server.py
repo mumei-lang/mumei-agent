@@ -25,6 +25,33 @@ def _payload(raw: str) -> dict:
     return json.loads(raw)
 
 
+def _healthy_verify(source_path, report_dir=None, extra_args=None, **kwargs):
+    if extra_args:
+        for index, arg in enumerate(extra_args):
+            if arg == "--output" and index + 1 < len(extra_args):
+                Path(extra_args[index + 1]).write_text(
+                    json.dumps(
+                        {
+                            "atoms": [
+                                {
+                                    "name": "foreign",
+                                    "spec_validation_result": {
+                                        "is_satisfiable": True,
+                                    },
+                                    "unused_hypotheses": {
+                                        "unused_requires": [],
+                                        "unused_invariants": [],
+                                        "unused_effect_constraints": [],
+                                    },
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+    return {"success": True, "report": {}, "stdout": "", "stderr": ""}
+
+
 # ---------------------------------------------------------------------------
 # get_agent_status
 # ---------------------------------------------------------------------------
@@ -712,6 +739,87 @@ class TestScanAndFix:
         assert "review_actions" not in result
         assert "human_review" not in result
         assert "repair_hints" not in result
+
+    def test_multilanguage_scan_and_fix_keeps_gate_order_and_schema(
+        self, tmp_path: Path
+    ) -> None:
+        from agent.audit import AUDIT_SCHEMA_KEYS
+
+        fixtures = {
+            "rust": (
+                "calc.rs",
+                (
+                    "pub fn add(a: i64, b: i64) -> i64 { a + b }\n"
+                    "pub fn nth(values: Vec<i64>, idx: i64) -> i64 { values[idx] }\n"
+                ),
+                ("can overflow", "bounds contract"),
+            ),
+            "typescript": (
+                "names.ts",
+                "export function len(name?: string): number { return name!.length; }\n",
+                ("non-null contract",),
+            ),
+            "go": (
+                "lists.go",
+                "package lists\nfunc nth(values []int, idx int) int { return values[idx] }\n",
+                ("bounds contract",),
+            ),
+        }
+        forbidden_aliases = {
+            "recommendations",
+            "actions",
+            "audit_issues",
+            "verification_gaps",
+            "repair_hints",
+            "review_actions",
+            "human_review",
+        }
+
+        for language, (filename, source_text, expected_violations) in fixtures.items():
+            source = tmp_path / filename
+            source.write_text(source_text, encoding="utf-8")
+            mumei = MagicMock()
+            mumei.verify.side_effect = _healthy_verify
+
+            with (
+                patch("agent.audit.create_mumei_client", return_value=mumei),
+                patch(
+                    "agent.strategies.foreign_code_strategy.create_mumei_client",
+                    return_value=mumei,
+                ),
+            ):
+                result = mcp_server.scan_and_fix(str(source), language)
+
+            assert result["audit_schema"] == AUDIT_SCHEMA_KEYS
+            assert [key for key in AUDIT_SCHEMA_KEYS if key in result] == AUDIT_SCHEMA_KEYS
+            assert [key for key in AUDIT_SCHEMA_KEYS if key in result["audit"]] == AUDIT_SCHEMA_KEYS
+            assert forbidden_aliases.isdisjoint(result)
+            assert forbidden_aliases.isdisjoint(result["audit"])
+            assert result["verification_violations"]
+            assert result["migration_hints"]
+            assert result["healed_files"] == []
+            assert result["heal_errors"] == []
+            assert result["next_steps"] == result["audit"]["next_steps"]
+            assert result["contract_terms"]["next_steps"].startswith(
+                "human-review entrypoint"
+            )
+            for expected_violation in expected_violations:
+                assert any(
+                    expected_violation in issue
+                    for issue in result["verification_violations"]
+                )
+            assert all(
+                "Z3 counterexample" in issue
+                or issue.startswith("Z3 Counter-example")
+                for issue in result["verification_violations"]
+            )
+            assert result["audit_schema"].index(
+                "verification_violations"
+            ) < result["audit_schema"].index("migration_hints")
+            assert result["audit_schema"].index(
+                "migration_hints"
+            ) < result["audit_schema"].index("healed_files")
+            assert "human_review" not in json.dumps(result)
 
     def test_runs_spec_alignment_when_spec_is_provided(self, tmp_path: Path) -> None:
         from agent.audit import AuditResult

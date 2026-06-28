@@ -804,23 +804,45 @@ def test_audit_pipeline_reports_multilanguage_no_mm_violations(
     fixtures = {
         "rust": (
             "calc.rs",
-            "pub fn add(a: i64, b: i64) -> i64 { a + b }\n",
-            "can overflow",
+            (
+                "pub fn add(a: i64, b: i64) -> i64 { a + b }\n"
+                "pub fn nth(values: Vec<i64>, idx: i64) -> i64 { values[idx] }\n"
+            ),
+            ("can overflow", "bounds contract"),
+            {"a", "b"},
         ),
         "typescript": (
             "names.ts",
             "export function len(name?: string): number { return name!.length; }\n",
-            "non-null contract",
+            ("non-null contract",),
+            {"name_is_null"},
         ),
         "go": (
             "lists.go",
             "package lists\nfunc nth(values []int, idx int) int { return values[idx] }\n",
-            "bounds contract",
+            ("bounds contract",),
+            {"idx", "len_values"},
         ),
     }
-    forbidden_aliases = {"recommendations", "repair_hints", "review_actions"}
+    forbidden_aliases = {
+        "recommendations",
+        "actions",
+        "audit_issues",
+        "verification_gaps",
+        "repair_hints",
+        "review_actions",
+        "human_review",
+    }
 
-    for language, (filename, source_text, expected_violation) in fixtures.items():
+    for (
+        language,
+        (
+            filename,
+            source_text,
+            expected_violations,
+            expected_counterexample_keys,
+        ),
+    ) in fixtures.items():
         source = tmp_path / filename
         source.write_text(source_text, encoding="utf-8")
         mumei = MagicMock()
@@ -839,8 +861,18 @@ def test_audit_pipeline_reports_multilanguage_no_mm_violations(
         assert [key for key in AUDIT_SCHEMA_KEYS if key in payload] == AUDIT_SCHEMA_KEYS
         assert forbidden_aliases.isdisjoint(payload)
         assert result.next_steps
-        assert any(expected_violation in issue for issue in result.verification_violations)
+        assert all(
+            "Z3 counterexample" in issue
+            or issue.startswith("Z3 Counter-example")
+            for issue in result.verification_violations
+        )
+        for expected_violation in expected_violations:
+            assert any(expected_violation in issue for issue in result.verification_violations)
         assert result.counterexample_values
+        counterexample = result.counterexample_values[0]["counterexample"]
+        assert expected_counterexample_keys.issubset(counterexample)
+        assert set(result.next_steps[0]) == {"priority", "action", "command"}
+        assert result.next_steps[0]["command"].startswith("mumei-agent migrate-suggest")
 
 
 def test_audit_pipeline_reports_go_representative_violations(tmp_path: Path) -> None:

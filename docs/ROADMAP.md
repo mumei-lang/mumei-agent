@@ -280,6 +280,7 @@ feedback として返す。
 - `verification_violations`, `counterexample_values`, `cross_validation_gaps`,
   `migration_hints`, `healed_files` が機械可読に返る。
 - Rust / TypeScript / Go 入力でも `AUDIT_SCHEMA_KEYS` が alias なしで揃い、`next_steps` が唯一の人間レビュー入口として返る。
+- 回帰テストは Rust `a + b` overflow と `values[idx]` bounds、TypeScript `name!.length` null/undefined、Go `values[idx]` bounds を deterministic/no-LLM fixture と MCP `scan_and_fix` の両方で固定し、Z3 counterexample を `verification_violations` に集約する。
 
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 
@@ -463,6 +464,7 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ `forge_tasks/vstd_math_pow_nat.json` — `std/math/pow_nat.mm` small-domain natural power helpers（`pow2` / `pow_nat`）
 - ✅ `forge_tasks/vstd_math_safe_div.json` — `std/math/safe_div.mm` safe division / modulo helpers
 - ✅ `forge_tasks/vstd_math_safe_mul.json` — `std/math/safe_mul.mm` safe multiplication helpers
+- ✅ `forge_tasks/vstd_crypto_primitives.json` — `std/crypto/primitives.mm` structural crypto predicates（`is_valid_key_len` / `is_valid_nonce_len` / `constant_time_eq_flag` / `digest_len_ok`）を Z3 decidable fragment 内で proof certificate 検証し、Lean escalation 不要として `forge_log.json` に記録
 - ✅ Phase 4 high-priority expansion checkpoint（2026-Q2）
   - `vstd_aviation_control.json` — `std/concurrency/aviation.mm` に runway resource hierarchy と `RunwayAllocation` temporal effect を追加
   - `vstd_container_sorted_map.json` — `std/container/sorted_map.mm` の挿入位置 / 長さ更新 / key ordering witness を forge log 上で完了扱いに更新

@@ -398,6 +398,33 @@ class TestForgeOneModule:
         assert target.exists()
         assert "atom f" in target.read_text(encoding="utf-8")
 
+    def test_create_renders_deterministic_module_without_llm(self, tmp_path):
+        forge = _make_forge(tmp_path)
+        forge.config.create_client.side_effect = AssertionError("LLM not needed")
+        task = {
+            "task_id": "new-mod",
+            "target_file": "std/newmod.mm",
+            "mode": "create",
+            "deterministic_bodies": True,
+            "atoms": [
+                {
+                    "name": "f",
+                    "inputs": [{"name": "x", "type": "i64"}],
+                    "requires": "x >= 0",
+                    "ensures": "result >= 0",
+                    "body": "x",
+                }
+            ],
+            "max_retries": 2,
+        }
+
+        result = forge.forge_one(task)
+
+        assert result.status == "success"
+        target = forge.mumei_repo_dir / "std" / "newmod.mm"
+        assert "atom f(x: i64)" in target.read_text(encoding="utf-8")
+        assert forge.config.create_client.call_count == 0
+
     def test_create_refuses_if_exists(self, tmp_path):
         forge = _make_forge(tmp_path)
         target = forge.mumei_repo_dir / "std" / "existing.mm"

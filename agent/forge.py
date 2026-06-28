@@ -59,6 +59,32 @@ _CODE_FENCE_RE = re.compile(r"```\w*\s*\n(.*?)```", re.DOTALL)
 _SAFE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 
 
+def _render_deterministic_atom(atom: dict[str, Any]) -> list[str]:
+    name = str(atom.get("name", "generated_atom"))
+    params = atom.get("inputs") or atom.get("params") or []
+    param_text = ", ".join(
+        f"{param.get('name', 'arg')}: {param.get('type', 'i64')}"
+        for param in params
+        if isinstance(param, dict)
+    )
+    requires = str(atom.get("requires", "true"))
+    ensures = str(atom.get("ensures", "true"))
+    body = str(atom.get("body") or atom.get("body_expr") or "0").strip()
+    lines: list[str] = [f"// --- {name} ---"]
+    lines.extend(
+        [
+            f"atom {name}({param_text})",
+            f"    requires: {requires};",
+            f"    ensures: {ensures};",
+            "    body: {",
+        ]
+    )
+    for body_line in body.splitlines():
+        lines.append(f"        {body_line.strip()}")
+    lines.append("    };")
+    return lines
+
+
 def _count_mapping(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
@@ -629,6 +655,12 @@ class MumeiForge:
                 f"create mode requires a non-existent target: {target_path}"
             )
 
+        deterministic_code = self._render_deterministic_module(task)
+        if deterministic_code:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(deterministic_code, encoding="utf-8")
+            return deterministic_code, 1
+
         spec = self._task_to_generate_spec(task)
         client = self._ensure_openai_client()
 
@@ -736,6 +768,42 @@ class MumeiForge:
             spec["target_file"] = target_file
 
         return spec
+
+    def _render_deterministic_module(self, task: dict[str, Any]) -> str:
+        """Render create/replace module tasks that provide explicit atom bodies."""
+        if task.get("deterministic_bodies") is not True:
+            return ""
+        atoms = task.get("atoms") or []
+        if not atoms or any(not isinstance(atom, dict) for atom in atoms):
+            return ""
+        if any(not (atom.get("body") or atom.get("body_expr")) for atom in atoms):
+            return ""
+
+        target_file = str(task.get("target_file", "std/generated.mm"))
+        module_name = target_file.removeprefix("std/").removesuffix(".mm")
+        alias = module_name.split("/")[-1].replace("-", "_")
+        module_title = str(
+            task.get("module_title") or f"{target_file} — deterministic forge output"
+        )
+        lines = [
+            "// =============================================================",
+            f"// {module_title}",
+            "// =============================================================",
+            "// 明示 body を持つ forge task から決定的に生成した検証対象。",
+            "// LLM 呼び出しなしで forge できる構造的契約のみを含む。",
+        ]
+        lines.extend(
+            [
+                "//",
+                "// Usage:",
+                f'//   import "{module_name}" as {alias};',
+                "",
+            ]
+        )
+        for atom in atoms:
+            lines.extend(_render_deterministic_atom(atom))
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
 
     def _load_context_files(self, task: dict[str, Any]) -> str:
         """Load contents of ``context_files`` specified in the task spec.
