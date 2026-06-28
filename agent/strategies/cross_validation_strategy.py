@@ -88,6 +88,10 @@ _TS_ARROW_RE = re.compile(
     r"(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?\(",
     re.MULTILINE,
 )
+_GO_FUNC_RE = re.compile(
+    r"func\s+(\w+)\s*\(([^)]*)\)",
+    re.MULTILINE,
+)
 
 
 def _extract_functions(source: str, language: str) -> list[str]:
@@ -101,6 +105,8 @@ def _extract_functions(source: str, language: str) -> list[str]:
         names = [m.group(1) for m in _TS_FUNC_RE.finditer(source)]
         names.extend(m.group(1) for m in _TS_ARROW_RE.finditer(source))
         return names
+    if lang == "go":
+        return [m.group(1) for m in _GO_FUNC_RE.finditer(source)]
     return []
 
 
@@ -166,7 +172,7 @@ class CrossValidator:
         Args:
             spec_path: Path to .mm specification file.
             impl_path: Path to implementation source file.
-            language: Language of the implementation (python/rust/typescript).
+            language: Language of the implementation (python/rust/typescript/go).
 
         Returns:
             CrossValidationReport with semantic gap analysis.
@@ -210,18 +216,9 @@ class CrossValidator:
                 continue
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
             if has_complex_contract:
-                # Check if impl has corresponding validation
-                func_pattern = re.compile(
-                    rf"(?:fn|def|function)\s+{re.escape(atom['name'])}\s*\([^)]*\)\s*[^{{]*\{{?"
-                    rf"([\s\S]*?)(?=(?:fn|def|function)\s+\w|\Z)",
-                    re.MULTILINE,
-                )
-                func_match = func_pattern.search(impl_source)
-                if func_match:
-                    body = func_match.group(1)
-                    # If body is very short relative to spec complexity, flag it
-                    if len(body.strip()) < len(atom["requires"]):
-                        report.spec_stronger_than_impl.append(atom["name"])
+                body = _extract_function_body(impl_source, language, atom["name"])
+                if body and len(body.strip()) < len(atom["requires"]):
+                    report.spec_stronger_than_impl.append(atom["name"])
 
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec
@@ -308,3 +305,48 @@ class CrossValidator:
             "extra_in_impl": extra,
             "ratio": ratio,
         }
+
+
+def _extract_function_body(source: str, language: str, function_name: str) -> str:
+    escaped = re.escape(function_name)
+    lang = language.strip().lower()
+    patterns: list[re.Pattern[str]] = []
+    if lang == "python":
+        patterns.append(
+            re.compile(
+                rf"def\s+{escaped}\s*\([^)]*\):(?P<body>[\s\S]*?)(?=^\s*def\s+\w|\Z)",
+                re.MULTILINE,
+            )
+        )
+    elif lang == "rust":
+        patterns.append(
+            re.compile(
+                rf"(?:pub\s+)?(?:async\s+)?fn\s+{escaped}\s*(?:<[^>]*>)?\s*\([^)]*\)[^\{{]*\{{(?P<body>[\s\S]*?)\}}",
+                re.MULTILINE,
+            )
+        )
+    elif lang in {"typescript", "ts", "javascript", "js"}:
+        patterns.extend(
+            [
+                re.compile(
+                    rf"(?:export\s+)?(?:async\s+)?function\s+{escaped}\s*(?:<[^>]*>)?\s*\([^)]*\)[^\{{]*\{{(?P<body>[\s\S]*?)\}}",
+                    re.MULTILINE,
+                ),
+                re.compile(
+                    rf"(?:export\s+)?(?:const|let)\s+{escaped}\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>\s*(?P<body>\{{[\s\S]*?\}}|[^;\n]+)",
+                    re.MULTILINE,
+                ),
+            ]
+        )
+    elif lang == "go":
+        patterns.append(
+            re.compile(
+                rf"func\s+{escaped}\s*\([^)]*\)[^\{{]*\{{(?P<body>[\s\S]*?)\}}",
+                re.MULTILINE,
+            )
+        )
+    for pattern in patterns:
+        match = pattern.search(source)
+        if match:
+            return match.group("body")
+    return ""

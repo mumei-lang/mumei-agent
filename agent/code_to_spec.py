@@ -60,25 +60,25 @@ class CodeToSpecConversionResult:
 
 
 class CodeToSpecConverter:
-    """Convert Python/Rust code into Mumei contract atoms for verifier checks."""
+    """Convert foreign-language code into Mumei contract atoms for verifier checks."""
 
     def __init__(self, config: AgentConfig | None = None):
         self.config = config or AgentConfig()
 
     def convert_source(self, code: str, language: str) -> CodeToSpecConversionResult:
-        normalized = language.strip().lower()
+        normalized = _normalize_language_name(language)
         supported_languages = set(CodeToSpecExtractor.EXTENSION_MAP.values())
         detected_language: Language = (
             normalized if normalized in supported_languages else "unknown"
         )
-        if normalized not in {"python", "rust", "go"}:
+        if normalized not in {"python", "rust", "typescript", "go"}:
             return CodeToSpecConversionResult(
                 success=False,
                 atoms=[],
                 natural_language_spec="",
                 mumei_source="",
                 detected_language=detected_language,
-                errors=["language must be one of: python, rust, go"],
+                errors=["language must be one of: python, rust, typescript, go"],
             )
         try:
             from agent.cross_validation import (
@@ -112,6 +112,46 @@ def _atoms_to_natural_language(atoms: list[ContractLike]) -> str:
     for atom in atoms:
         lines.append(f"{atom.name}: requires {atom.requires}; ensures {atom.ensures}.")
     return "\n".join(lines)
+
+
+def _normalize_language_name(language: str) -> str:
+    aliases = {
+        "py": "python",
+        "rs": "rust",
+        "ts": "typescript",
+        "tsx": "typescript",
+        "javascript": "typescript",
+        "js": "typescript",
+        "jsx": "typescript",
+        "golang": "go",
+    }
+    return aliases.get(language.strip().lower(), language.strip().lower())
+
+
+def _forge_task_spec_from_atoms(
+    code_path: Path,
+    atoms: list[ContractLike],
+) -> dict[str, object]:
+    safe_stem = code_path.stem.replace("-", "_")
+    return {
+        "task_id": f"code-{safe_stem}",
+        "target_file": f"audit/{safe_stem}.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": atom.name,
+                "inputs": [
+                    {"name": param.name, "type": param.type}
+                    for param in getattr(atom, "params", [])
+                ],
+                "return_type": atom.return_type,
+                "requires": atom.requires,
+                "ensures": atom.ensures,
+                "effects": list(getattr(atom, "effects", [])),
+            }
+            for atom in atoms
+        ],
+    }
 
 
 class CodeToSpecExtractor:
@@ -243,10 +283,31 @@ class CodeToSpecExtractor:
         except (UnicodeDecodeError, LookupError):
             code = raw_bytes.decode("utf-8", errors="replace")
 
-        detected_language = language or self._detect_language(code_path, code)
+        detected_language = _normalize_language_name(
+            str(language or self._detect_language(code_path, code))
+        )
         warnings: list[str] = []
         if detected_language == "unknown":
             warnings.append("language could not be detected; using generic code analysis")
+
+        deterministic = CodeToSpecConverter(self.config).convert_source(
+            code,
+            detected_language,
+        )
+        if deterministic.success and not self.config.api_key:
+            warnings.extend(deterministic.warnings)
+            warnings.append("LLM extraction skipped because LLM_API_KEY/OPENAI_API_KEY is not set.")
+            return CodeToSpecResult(
+                success=True,
+                natural_language_spec=deterministic.natural_language_spec,
+                forge_task_spec=_forge_task_spec_from_atoms(
+                    code_path,
+                    deterministic.atoms,
+                ),
+                detected_language=detected_language,
+                warnings=warnings,
+                errors=[],
+            )
 
         try:
             client = self.config.create_client()
@@ -285,6 +346,20 @@ class CodeToSpecExtractor:
                 errors=[],
             )
         except Exception as exc:
+            if deterministic.success:
+                warnings.extend(deterministic.warnings)
+                warnings.append(f"LLM extraction failed; used deterministic code parser: {exc}")
+                return CodeToSpecResult(
+                    success=True,
+                    natural_language_spec=deterministic.natural_language_spec,
+                    forge_task_spec=_forge_task_spec_from_atoms(
+                        code_path,
+                        deterministic.atoms,
+                    ),
+                    detected_language=detected_language,
+                    warnings=warnings,
+                    errors=[],
+                )
             return CodeToSpecResult(
                 success=False,
                 natural_language_spec=natural_language_spec,

@@ -101,6 +101,89 @@ def test_validate_foreign_code_adds_division_safety_precondition() -> None:
     assert result.inferred_atoms[0].requires == "b != 0"
 
 
+def test_validate_foreign_code_infers_multilanguage_safety_contracts() -> None:
+    fixtures = [
+        (
+            "rust",
+            "pub fn add(a: i64, b: i64) -> i64 { a + b }\n",
+            "a + b <= 9223372036854775807",
+        ),
+        (
+            "typescript",
+            "export function len(name?: string): number { return name!.length; }\n",
+            "name != null",
+        ),
+        (
+            "go",
+            "package lists\nfunc nth(values []int, idx int) int { return values[idx] }\n",
+            "idx < len_values",
+        ),
+    ]
+
+    for language, code, expected_requires in fixtures:
+        result = validate_foreign_code(
+            code,
+            language,
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=False,
+        )
+
+        assert result.success is True
+        assert result.language == language
+        assert result.inferred_atoms
+        assert expected_requires in result.inferred_atoms[0].requires
+
+
+def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
+    result = validate_foreign_code(
+        "export function isEmpty(name?: string): boolean { return name!.length == 0; }\n",
+        "typescript",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].params[0].type == "string"
+    assert result.inferred_atoms[0].return_type == "bool"
+
+
+@pytest.mark.parametrize(
+    ("language", "filename", "source"),
+    [
+        ("rust", "impl.rs", "pub fn identity(x: i64) -> i64 { x }\n"),
+        (
+            "typescript",
+            "impl.ts",
+            "export function identity(x: number): number { return x; }\n",
+        ),
+        ("go", "impl.go", "package demo\nfunc identity(x int) int { return x }\n"),
+    ],
+)
+def test_validate_spec_to_code_detects_multilanguage_missing_requires(
+    tmp_path: Path,
+    language: str,
+    filename: str,
+    source: str,
+) -> None:
+    code_path = tmp_path / filename
+    code_path.write_text(source, encoding="utf-8")
+
+    result = validate_spec_to_code(
+        "requires: x > 0;\nensures: result == x;",
+        str(code_path),
+        config=AgentConfig(api_key=""),
+        language=language,
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert result.language == language
+    assert "x > 0" in result.missing_constraints
+
+
 def test_validate_nl_spec_keeps_llm_non_category_issues() -> None:
     response = MagicMock()
     response.choices = [MagicMock()]

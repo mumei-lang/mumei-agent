@@ -33,6 +33,23 @@ from agent.intent_tracker import IntentChange, IntentDriftResult, IntentTracker
 from agent.spec_code_mapper import MappingResult, SpecCodeMapper
 
 
+SUPPORTED_FOREIGN_CODE_LANGUAGES = {"python", "rust", "typescript", "go"}
+
+
+def _normalize_foreign_language(language: str) -> str:
+    aliases = {
+        "py": "python",
+        "rs": "rust",
+        "ts": "typescript",
+        "tsx": "typescript",
+        "javascript": "typescript",
+        "js": "typescript",
+        "jsx": "typescript",
+        "golang": "go",
+    }
+    return aliases.get(language.strip().lower(), language.strip().lower())
+
+
 ContradictionType = Literal[
     "",
     "spec_internal",
@@ -654,13 +671,13 @@ def validate_foreign_code(
     use_llm: bool = True,
     run_mumei: bool = True,
 ) -> ForeignCodeValidationResult:
-    """Validate Rust, Python, or Go code by inferring and verifying contracts."""
+    """Validate Python, Rust, TypeScript, or Go code by inferring contracts."""
     config = config or AgentConfig()
-    normalized_language = language.strip().lower()
+    normalized_language = _normalize_foreign_language(language)
     warnings: list[str] = []
     errors: list[str] = []
-    if normalized_language not in {"python", "rust", "go"}:
-        errors.append("language must be one of: python, rust, go")
+    if normalized_language not in SUPPORTED_FOREIGN_CODE_LANGUAGES:
+        errors.append("language must be one of: python, rust, typescript, go")
     if not code.strip():
         errors.append("code must be non-empty")
     if errors:
@@ -745,7 +762,11 @@ def build_validate_spec_to_code_parser(
     parser = parser or argparse.ArgumentParser(description="Validate spec-to-code alignment.")
     parser.add_argument("--spec", "--input", dest="spec", required=True, help="Path to spec file.")
     parser.add_argument("--code", required=True, help="Path to source code.")
-    parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
+    parser.add_argument(
+        "--language",
+        choices=["python", "rust", "typescript", "go"],
+        help="Source language.",
+    )
     parser.add_argument(
         "--lang",
         choices=["auto", "en", "ja"],
@@ -772,7 +793,11 @@ def build_validate_code_to_spec_parser(
     parser = parser or argparse.ArgumentParser(description="Validate code-to-spec drift.")
     parser.add_argument("--code", required=True, help="Path to source code.")
     parser.add_argument("--spec", required=True, help="Path to spec file.")
-    parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
+    parser.add_argument(
+        "--language",
+        choices=["python", "rust", "typescript", "go"],
+        help="Source language.",
+    )
     parser.add_argument(
         "--lang",
         choices=["auto", "en", "ja"],
@@ -795,12 +820,16 @@ def build_validate_code_to_spec_parser(
 def build_validate_code_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     """Add validate-code arguments to an argparse parser."""
     parser = parser or argparse.ArgumentParser(
-        description="Infer and verify contracts from existing code (Python, Rust, Go)."
+        description="Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."
     )
     source_arg = parser.add_mutually_exclusive_group(required=True)
     source_arg.add_argument("--input", dest="input", help="Path to source code.")
     source_arg.add_argument("--file", dest="input", help=argparse.SUPPRESS)
-    parser.add_argument("--language", required=True, choices=["python", "rust", "go"])
+    parser.add_argument(
+        "--language",
+        required=True,
+        choices=["python", "rust", "typescript", "go"],
+    )
     parser.add_argument("--output", help="Optional JSON report path.")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
@@ -2069,12 +2098,14 @@ def _code_snippet_for_line(code: str, line: int) -> str:
 
 def _infer_language_from_path(path: Path, language: str | None) -> str:
     if language:
-        return language.strip().lower()
+        return _normalize_foreign_language(language)
     suffix = path.suffix.lower()
     if suffix == ".py":
         return "python"
     if suffix == ".rs":
         return "rust"
+    if suffix in {".ts", ".tsx", ".js", ".jsx"}:
+        return "typescript"
     if suffix == ".go":
         return "go"
     return "python"
@@ -2339,16 +2370,20 @@ def _ast_arith_to_z3(
 
 
 def _infer_foreign_contracts_with_patterns(code: str, language: str) -> list[MumeiContractAtom]:
+    language = _normalize_foreign_language(language)
     if language == "python":
         return _infer_python_contracts(code)
     if language == "rust":
         return _infer_rust_contracts(code)
+    if language == "typescript":
+        return _infer_typescript_contracts(code)
     if language == "go":
         return _infer_go_contracts(code)
     return []
 
 
 def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
+    language = _normalize_foreign_language(language)
     if language == "python":
         return _infer_python_source_line_map(code)
     if language == "rust":
@@ -2370,6 +2405,29 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
                 flags=re.DOTALL,
             ),
         )
+    if language == "typescript":
+        line_map = _infer_regex_source_line_map(
+            code,
+            re.compile(
+                r"(?:export\s+)?(?:async\s+)?function\s+"
+                r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
+                r"\((?P<params>[^)]*)\)\s*(?:[:{])",
+                flags=re.DOTALL,
+            ),
+        )
+        line_map.update(
+            _infer_regex_source_line_map(
+                code,
+                re.compile(
+                    r"(?:export\s+)?(?:const|let)\s+"
+                    r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+                    r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
+                    r"(?::\s*(?P<ret>[^=]+?))?\s*=>",
+                    flags=re.DOTALL,
+                ),
+            )
+        )
+        return line_map
     return {}
 
 
@@ -2508,8 +2566,31 @@ def _safety_requires_for_expression(expression: str) -> str:
                 divisor = ast.unparse(node.right)
                 requirements.append(f"{divisor} != 0")
     except (SyntaxError, ValueError):
-        return "true"
-    return " && ".join(requirements) if requirements else "true"
+        requirements.extend(_generic_safety_requires_for_expression(expression))
+        return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+    requirements.extend(_generic_safety_requires_for_expression(expression))
+    return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+
+
+def _generic_safety_requires_for_expression(expression: str) -> list[str]:
+    requirements: list[str] = []
+    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:/|%)\s*([A-Za-z_][A-Za-z0-9_]*)", expression):
+        requirements.append(f"{match.group(2)} != 0")
+    for match in re.finditer(
+        r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
+        expression,
+    ):
+        container = match.group("container")
+        index = match.group("index")
+        requirements.append(f"{index} >= 0")
+        requirements.append(f"{index} < len_{container}")
+    for match in re.finditer(
+        r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
+        expression,
+    ):
+        requirements.append(f"{match.group('value')} != null")
+        requirements.append(f"{match.group('value')} != undefined")
+    return requirements
 
 
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
@@ -2528,10 +2609,67 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
                 name=_safe_identifier(match.group("name")),
                 params=params,
                 return_type="i64" if match.group("ret") else "bool",
-                requires=_safety_requires_for_expression(return_expr),
+                requires=_rust_safety_requires_for_expression(return_expr),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
         )
+    return atoms
+
+
+def _rust_safety_requires_for_expression(expression: str) -> str:
+    requirements = []
+    base = _safety_requires_for_expression(expression)
+    if base != "true":
+        requirements.extend(part.strip() for part in base.split("&&") if part.strip())
+    for match in re.finditer(
+        r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+        expression,
+    ):
+        left = match.group("left")
+        right = match.group("right")
+        requirements.append(f"{left} + {right} <= 9223372036854775807")
+        requirements.append(f"{left} + {right} >= -9223372036854775808")
+    return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+
+
+def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
+    atoms: list[MumeiContractAtom] = []
+    patterns = [
+        re.compile(
+            r"(?:export\s+)?(?:async\s+)?function\s+"
+            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
+            r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?\s*"
+            r"\{(?P<body>.*?)\}",
+            flags=re.DOTALL,
+        ),
+        re.compile(
+            r"(?:export\s+)?(?:const|let)\s+"
+            r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+            r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
+            r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*"
+            r"(?P<body>\{.*?\}|[^;\n]+)",
+            flags=re.DOTALL,
+        ),
+    ]
+    seen: set[tuple[str, int]] = set()
+    for pattern in patterns:
+        for match in pattern.finditer(code):
+            key = (match.group("name"), match.start())
+            if key in seen:
+                continue
+            seen.add(key)
+            body = match.group("body") or ""
+            raw_return_expr = _typescript_raw_return_expression(body)
+            return_expr = _normalize_foreign_expression(raw_return_expr)
+            atoms.append(
+                MumeiContractAtom(
+                    name=_safe_identifier(match.group("name")),
+                    params=_params_from_signature(match.group("params")),
+                    return_type=_typescript_return_type(match.group("ret") or "number"),
+                    requires=_safety_requires_for_expression(raw_return_expr),
+                    ensures=f"result == {return_expr}" if return_expr else "true",
+                )
+            )
     return atoms
 
 
@@ -2560,9 +2698,32 @@ def _params_from_signature(params_text: str) -> list[ContractParam]:
     params: list[ContractParam] = []
     for index, raw in enumerate(part.strip() for part in params_text.split(",") if part.strip()):
         pieces = raw.split(":")
-        name = pieces[0].strip().split()[0] if pieces[0].strip() else f"arg{index}"
-        params.append(ContractParam(name=_safe_identifier(name), type="i64"))
+        name = pieces[0].strip().split()[0].rstrip("?") if pieces[0].strip() else f"arg{index}"
+        type_text = pieces[1].strip() if len(pieces) > 1 else "i64"
+        params.append(
+            ContractParam(
+                name=_safe_identifier(name),
+                type=_foreign_signature_type(type_text),
+            )
+        )
     return params
+
+
+def _foreign_signature_type(type_text: str) -> str:
+    normalized = type_text.strip().split("|", 1)[0].strip()
+    normalized = normalized.removeprefix("&").removeprefix("mut ").strip()
+    normalized = normalized.removeprefix("Promise<").removesuffix(">")
+    normalized = normalized.removesuffix("[]")
+    lowered = normalized.lower()
+    if lowered in {"string", "str", "&str"}:
+        return "string"
+    if lowered in {"bool", "boolean"}:
+        return "bool"
+    if lowered in {"float", "double", "f32", "f64"}:
+        return "f64"
+    if lowered in {"uint", "usize", "u8", "u16", "u32", "u64"}:
+        return "u64"
+    return "i64"
 
 
 def _last_expression(body: str) -> str:
@@ -2580,8 +2741,34 @@ def _return_statement_expression(body: str) -> str:
     return _normalize_foreign_expression(match.group(1).strip()) if match else ""
 
 
+def _typescript_raw_return_expression(body: str) -> str:
+    stripped = body.strip()
+    if stripped.startswith("{"):
+        match = re.search(r"\breturn\s+([^;\n}]+)", stripped)
+        return match.group(1).strip() if match else ""
+    if stripped.startswith("return "):
+        return stripped.removeprefix("return ").rstrip(";").strip()
+    return stripped.rstrip(";")
+
+
+def _typescript_return_type(type_text: str) -> str:
+    normalized = type_text.strip()
+    if "|" in normalized:
+        normalized = normalized.split("|", 1)[0].strip()
+    lowered = normalized.lower().removeprefix("promise<").removesuffix(">")
+    if lowered in {"boolean", "bool"}:
+        return "bool"
+    if lowered in {"string", "str"}:
+        return "string"
+    return "i64"
+
+
 def _normalize_foreign_expression(expression: str) -> str:
-    return expression.replace("&&", "and").replace("||", "or")
+    normalized = expression.replace("&&", "and").replace("||", "or")
+    normalized = normalized.replace("===", "==").replace("!==", "!=")
+    normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\.length\b", r"len_\1", normalized)
+    normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)!?\.", r"\1_", normalized)
+    return normalized
 
 
 def _verify_atoms_with_mumei(
