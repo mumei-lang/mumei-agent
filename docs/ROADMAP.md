@@ -466,6 +466,7 @@ mumei-agent が mumei コードを書く → 検証 → Rust/Python ラッパー
 - ✅ `forge_tasks/vstd_math_safe_mul.json` — `std/math/safe_mul.mm` safe multiplication helpers
 - ✅ `forge_tasks/vstd_crypto_primitives.json` — `std/crypto/primitives.mm` structural crypto predicates（`is_valid_key_len` / `is_valid_nonce_len` / `constant_time_eq_flag` / `digest_len_ok`）を Z3 decidable fragment 内で proof certificate 検証し、Lean escalation 不要として `forge_log.json` に記録
 - ✅ `forge_tasks/vstd_core_predicates.json` — `std/core_predicates.mm` core-seeded predicate helpers（`safe_index_or_zero` / `is_nonzero_flag` / `preserve_safe_index`）を明示 body + `deterministic_bodies: true` で LLM credential なしにレンダリングし、Z3 decidable fragment 内で検証
+- ✅ `forge_tasks/vstd_core_guards.json` — `std/core_guards.mm` core-seeded defensive guard predicates（`is_in_bounds` / `safe_abs_diff` / `clamp_to_positive` / `both_positive`）を明示 body + `deterministic_bodies: true` で LLM credential なしにレンダリングし、Z3 decidable fragment 内で proof certificate 検証
 - ✅ Phase 4 high-priority expansion checkpoint（2026-Q2）
   - `vstd_aviation_control.json` — `std/concurrency/aviation.mm` に runway resource hierarchy と `RunwayAllocation` temporal effect を追加
   - `vstd_container_sorted_map.json` — `std/container/sorted_map.mm` の挿入位置 / 長さ更新 / key ordering witness を forge log 上で完了扱いに更新

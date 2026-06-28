@@ -1,0 +1,115 @@
+{
+  "task_id": "vstd-core-guards",
+  "target_file": "std/core_guards.mm",
+  "mode": "replace",
+  "priority": 4,
+  "max_retries": 6,
+  "auto_commit": false,
+  "description": "Core-seeded defensive guard atoms anchored on std/core.mm safety primitives (safe_to_index, is_nonzero, checked_add). Each atom provides a structural predicate or bounded-safe operation useful for downstream container/math modules. All bodies are explicit linear integer constraints with 0/1 witnesses, remaining entirely within the Z3 decidable fragment.",
+  "context_files": [
+    "std/core.mm",
+    "std/core_predicates.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "implementation_notes": [
+    "Each atom has an explicit body so deterministic forge rendering never needs an LLM credential.",
+    "Use only linear integer constraints and 0/1 witnesses.",
+    "Anchor the contracts on std/core.mm concepts such as safe_to_index, is_nonzero, and checked_sub without importing new trusted atoms."
+  ],
+  "atoms": [
+    {
+      "name": "is_in_bounds",
+      "description": "Return a 0/1 witness for whether val is inside the inclusive range [lo, hi].",
+      "inputs": [
+        {
+          "name": "val",
+          "type": "i64"
+        },
+        {
+          "name": "lo",
+          "type": "i64"
+        },
+        {
+          "name": "hi",
+          "type": "i64"
+        }
+      ],
+      "return_type": "i64",
+      "requires": "lo <= hi",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": [
+        "safe_to_index",
+        "safe_narrow"
+      ],
+      "body": "if val >= lo { if val <= hi { 1 } else { 0 } } else { 0 }"
+    },
+    {
+      "name": "safe_abs_diff",
+      "description": "Compute the absolute difference of two non-negative integers, guaranteed non-negative.",
+      "inputs": [
+        {
+          "name": "a",
+          "type": "i64"
+        },
+        {
+          "name": "b",
+          "type": "i64"
+        }
+      ],
+      "return_type": "i64",
+      "requires": "a >= 0 && b >= 0",
+      "ensures": "result >= 0",
+      "reference_patterns": [
+        "checked_sub",
+        "safe_to_non_negative"
+      ],
+      "body": "if a >= b { a - b } else { b - a }"
+    },
+    {
+      "name": "clamp_to_positive",
+      "description": "Clamp a value to at least 1, useful for division denominators and loop bounds.",
+      "inputs": [
+        {
+          "name": "x",
+          "type": "i64"
+        }
+      ],
+      "return_type": "i64",
+      "requires": "true",
+      "ensures": "result >= 1",
+      "reference_patterns": [
+        "is_nonzero",
+        "safe_to_non_negative"
+      ],
+      "body": "if x >= 1 { x } else { 1 }"
+    },
+    {
+      "name": "both_positive",
+      "description": "Return a 0/1 witness for whether both inputs are strictly positive.",
+      "inputs": [
+        {
+          "name": "a",
+          "type": "i64"
+        },
+        {
+          "name": "b",
+          "type": "i64"
+        }
+      ],
+      "return_type": "i64",
+      "requires": "true",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": [
+        "is_nonzero",
+        "equals"
+      ],
+      "body": "if a >= 1 { if b >= 1 { 1 } else { 0 } } else { 0 }"
+    }
+  ],
+  "source": "vstd-roadmap-core-seed",
+  "difficulty": "low",
+  "deterministic_bodies": true,
+  "module_title": "std/core_guards \u2014 core-seeded defensive guard predicates"
+}

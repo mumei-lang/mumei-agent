@@ -445,6 +445,28 @@ class TestForgeOneModule:
         assert "atom preserve_safe_index(idx: i64, len: i64)" in text
         assert forge.config.create_client.call_count == 0
 
+    def test_core_guards_task_uses_deterministic_bodies(self, tmp_path):
+        forge = _make_forge(tmp_path)
+        forge.config.create_client.side_effect = AssertionError("LLM not needed")
+        task_path = (
+            Path(__file__).resolve().parents[1]
+            / "forge_tasks"
+            / "vstd_core_guards.json"
+        )
+        task = json.loads(task_path.read_text(encoding="utf-8"))
+        task["mode"] = "create"
+
+        result = forge.forge_one(task)
+
+        assert result.status == "success"
+        target = forge.mumei_repo_dir / "std" / "core_guards.mm"
+        text = target.read_text(encoding="utf-8")
+        assert "atom is_in_bounds(val: i64, lo: i64, hi: i64)" in text
+        assert "atom safe_abs_diff(a: i64, b: i64)" in text
+        assert "atom clamp_to_positive(x: i64)" in text
+        assert "atom both_positive(a: i64, b: i64)" in text
+        assert forge.config.create_client.call_count == 0
+
     def test_create_refuses_if_exists(self, tmp_path):
         forge = _make_forge(tmp_path)
         target = forge.mumei_repo_dir / "std" / "existing.mm"
