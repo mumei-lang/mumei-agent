@@ -250,8 +250,8 @@ feedback として返す。
 
 ### P14-B: 他言語コードの論理的健全性検証 ✅ Implemented
 
-既存 Python/Rust/TypeScript コードを `.mm` なしで監査し、問題箇所だけ migration hints
-へ送る。
+既存 Python/Rust/TypeScript/Go コードを `.mm` なしで監査し、問題箇所だけ migration hints
+へ送る。V1-B の新規スコープとして、Python 以外の no-`.mm` 入口を Rust / TypeScript / Go まで拡張し、固定語彙と `audit -> migrate-suggest -> heal` の順序は変更しない。
 
 **実装タスク**:
 
@@ -262,6 +262,8 @@ feedback として返す。
 3. `--auto-migrate` で migration skeleton を生成し、`--auto-heal` で self-healing loop
    を続けて実行する。
 4. `--heal-output-dir` で生成・修復済み `.mm` の出力先を指定できるようにする。
+5. Rust / TypeScript / Go の決定的 parser 経路で関数シグネチャ、pre/postcondition 候補、分岐・安全性条件を抽出し、Rust overflow/bounds、TypeScript null/undefined、Go bounds の代表ケースを Z3 counterexample 付き `verification_violations` に接続する。
+6. `validate-code`, `validate-spec-to-code`, `validate-code-to-spec`, MCP `scan_and_fix` の対応言語を Python / Rust / TypeScript / Go に揃え、LLM credential なしの fixture 経路を維持する。
 
 **対象ファイル**:
 
@@ -269,7 +271,7 @@ feedback として返す。
 - `agent/extract_spec.py` — `_collect_code_files()` / directory extraction
 - `agent/mm_migration_advisor.py` — migration hints / skeletons
 - `agent/strategies/foreign_code_strategy.py` — foreign-code contract verification
-- `tests/test_audit.py`, `tests/test_extract_spec.py`, `tests/test_mm_migration_advisor.py`
+- `tests/test_audit.py`, `tests/test_cross_validation.py`, `tests/test_extract_spec.py`, `tests/test_mm_migration_advisor.py`
 
 **成功指標**:
 
@@ -277,6 +279,7 @@ feedback として返す。
 - 問題ありの関数だけ `.mm` skeleton と self-heal 対象になる。
 - `verification_violations`, `counterexample_values`, `cross_validation_gaps`,
   `migration_hints`, `healed_files` が機械可読に返る。
+- Rust / TypeScript / Go 入力でも `AUDIT_SCHEMA_KEYS` が alias なしで揃い、`next_steps` が唯一の人間レビュー入口として返る。
 
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 

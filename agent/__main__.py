@@ -183,7 +183,7 @@ def main() -> None:
 
         parser = argparse.ArgumentParser(
             prog="python -m agent validate-code",
-            description="Infer and verify contracts from existing code (Python, Rust, Go).",
+            description="Infer and verify contracts from existing code (Python, Rust, TypeScript, Go).",
         )
         build_validate_code_parser(parser)
         args = parser.parse_args(argv[1:])
@@ -294,7 +294,7 @@ def main() -> None:
         parser.add_argument("--code-file", required=True, help="Path to source code file.")
         parser.add_argument(
             "--language",
-            choices=["python", "rust", "typescript"],
+            choices=["python", "rust", "typescript", "go"],
             required=True,
             help="Source language.",
         )
@@ -314,7 +314,7 @@ def main() -> None:
             sys.exit(2)
 
         validation_result: dict[str, object] = {"issues": issues}
-        if not issues and args.language in {"python", "rust"}:
+        if not issues and args.language in {"python", "rust", "typescript", "go"}:
             validation = validate_foreign_code(
                 code,
                 args.language,
@@ -349,7 +349,7 @@ def main() -> None:
         parser.add_argument("impl", help="Path to the implementation source file")
         parser.add_argument(
             "--language", "-l", default="",
-            help="Implementation language (python/rust/typescript). Inferred from extension if omitted.",
+            help="Implementation language (python/rust/typescript/go). Inferred from extension if omitted.",
         )
         parser.add_argument(
             "--old-cert", default=None,
@@ -370,7 +370,13 @@ def main() -> None:
         # Language inference
         lang = args.language
         if not lang:
-            ext_map = {".py": "python", ".rs": "rust", ".ts": "typescript", ".tsx": "typescript"}
+            ext_map = {
+                ".py": "python",
+                ".rs": "rust",
+                ".ts": "typescript",
+                ".tsx": "typescript",
+                ".go": "go",
+            }
             lang = ext_map.get(_Path(args.impl).suffix.lower(), "")
             if not lang:
                 print(f"Cannot infer language from extension; use --language", file=sys.stderr)

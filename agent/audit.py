@@ -22,11 +22,13 @@ from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
 
 
-SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript")
+SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript", "go")
 AUDIT_EXTENSION_MAP: dict[str, Language] = {
     ".py": "python",
     ".rs": "rust",
     ".ts": "typescript",
+    ".tsx": "typescript",
+    ".go": "go",
 }
 
 AUDIT_SCHEMA_KEYS = [
@@ -558,8 +560,11 @@ def _normalize_language(language: str | None) -> str:
         "py": "python",
         "rs": "rust",
         "ts": "typescript",
+        "tsx": "typescript",
         "javascript": "typescript",
         "js": "typescript",
+        "jsx": "typescript",
+        "golang": "go",
     }
     return aliases.get(normalized, normalized)
 

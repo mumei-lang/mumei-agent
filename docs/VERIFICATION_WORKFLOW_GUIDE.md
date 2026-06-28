@@ -13,6 +13,8 @@
 
 Canonical result keys are fixed as follows:
 
+Supported no-`.mm` source languages are Python, Rust, TypeScript, and Go. The language changes only the parser path; `audit`, `validate-code`, and MCP `scan_and_fix` still return `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors` without aliases. In deterministic/no-LLM mode, Rust overflow/bounds, TypeScript null/undefined, and Go bounds fixtures are handled by the parser and Z3 counterexample path.
+
 | Key | Meaning |
 | --- | --- |
 | `spec_health_issues` | Spec-only contradictions, overconstraints, vacuity, or ambiguity in extracted/provided specs; these do not require existing-code execution to be meaningful. |

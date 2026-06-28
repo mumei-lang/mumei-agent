@@ -10,6 +10,8 @@ import re
 import tempfile
 from typing import Iterable
 
+import z3
+
 from agent.mumei_client import create_mumei_client
 
 
@@ -25,10 +27,17 @@ class ForeignCodeSpec:
     source_line: int = 0
 
 
+@dataclass(frozen=True)
+class ForeignSafetyIssue:
+    function_name: str
+    message: str
+    counterexample: dict[str, object] = field(default_factory=dict)
+
+
 class ForeignCodeExtractor:
     """Extract function signatures and comment contracts from foreign code."""
 
-    SUPPORTED_LANGUAGES = {"python", "typescript", "rust"}
+    SUPPORTED_LANGUAGES = {"python", "typescript", "rust", "go"}
 
     def extract(self, source: str, language: str) -> list[ForeignCodeSpec]:
         normalized = language.strip().lower()
@@ -38,6 +47,8 @@ class ForeignCodeExtractor:
             return self.extract_typescript(source)
         if normalized == "rust":
             return self.extract_rust(source)
+        if normalized == "go":
+            return self.extract_go(source)
         raise ValueError(
             "language must be one of: "
             + ", ".join(sorted(self.SUPPORTED_LANGUAGES))
@@ -69,6 +80,30 @@ class ForeignCodeExtractor:
                     preconditions=preconditions,
                     postconditions=postconditions,
                     source_line=node.lineno,
+                )
+            )
+        return specs
+
+    def extract_go(self, source: str) -> list[ForeignCodeSpec]:
+        """Extract Go ``func`` declarations and preceding ``//`` contracts."""
+        pattern = re.compile(
+            r"(?P<comment>(?:\s*//[^\n]*\n)*)\s*"
+            r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+            r"\((?P<params>[^)]*)\)\s*(?P<ret>[A-Za-z0-9_]+)?",
+            re.DOTALL,
+        )
+        specs: list[ForeignCodeSpec] = []
+        for match in pattern.finditer(source):
+            comment = _clean_go_doc(match.group("comment") or "")
+            preconditions, postconditions = _contract_lines(comment)
+            specs.append(
+                ForeignCodeSpec(
+                    function_name=_safe_identifier(match.group("name")),
+                    params=_go_params(match.group("params")),
+                    return_type=_go_type(match.group("ret") or "bool"),
+                    preconditions=preconditions,
+                    postconditions=postconditions,
+                    source_line=_line_for_offset(source, match.start("name")),
                 )
             )
         return specs
@@ -154,20 +189,26 @@ class ForeignCodeVerifier:
         self.extractor = extractor or ForeignCodeExtractor()
 
     def verify(self, source_code: str, language: str) -> dict[str, object]:
-        specs = self.extractor.extract(source_code, language)
+        normalized_language = _normalize_language(language)
+        specs = self.extractor.extract(source_code, normalized_language)
+        safety_issues = _detect_safety_issues(source_code, normalized_language)
         atoms = [to_mumei_atom(spec) for spec in specs]
         mumei_source = "\n\n".join(atoms) + ("\n" if atoms else "")
         if not specs:
             return {
                 "success": False,
-                "language": language,
+                "language": normalized_language,
                 "specs": [],
                 "atoms": [],
                 "source_line_map": {},
                 "mumei_source": "",
                 "verification": None,
-                "errors": ["No function signatures were extracted."],
+                "errors": [
+                    "No function signatures were extracted.",
+                    *[issue.message for issue in safety_issues],
+                ],
                 "warnings": [],
+                **_first_counterexample_payload(safety_issues),
             }
 
         with tempfile.TemporaryDirectory(prefix="mumei-foreign-code-") as tmp:
@@ -180,15 +221,19 @@ class ForeignCodeVerifier:
             )
 
         return {
-            "success": bool(verification.get("success")),
-            "language": language,
+            "success": bool(verification.get("success")) and not safety_issues,
+            "language": normalized_language,
             "specs": [asdict(spec) for spec in specs],
             "atoms": atoms,
             "source_line_map": {spec.function_name: spec.source_line for spec in specs},
             "mumei_source": mumei_source,
             "verification": verification,
-            "errors": [] if verification.get("success") else ["mumei verify failed"],
+            "errors": [
+                *[issue.message for issue in safety_issues],
+                *([] if verification.get("success") else ["mumei verify failed"]),
+            ],
             "warnings": [],
+            **_first_counterexample_payload(safety_issues),
         }
 
 
@@ -217,7 +262,11 @@ def to_mumei_atom(spec: ForeignCodeSpec) -> str:
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     parser = parser or argparse.ArgumentParser(description="Verify foreign code as Mumei atoms.")
-    parser.add_argument("--file", required=True, help="Path to Python/TypeScript/Rust source.")
+    parser.add_argument(
+        "--file",
+        required=True,
+        help="Path to Python/TypeScript/Rust/Go source.",
+    )
     parser.add_argument(
         "--language",
         required=True,
@@ -289,6 +338,21 @@ def _rust_params(params_text: str) -> dict[str, str]:
     return params
 
 
+def _go_params(params_text: str) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for index, raw in enumerate(_split_params(params_text)):
+        raw = raw.strip()
+        if not raw:
+            continue
+        pieces = raw.split()
+        if len(pieces) >= 2:
+            name_text, type_text = pieces[0], pieces[-1]
+        else:
+            name_text, type_text = raw, "int"
+        params[_safe_identifier(name_text or f"arg{index}")] = _go_type(type_text)
+    return params
+
+
 def _split_params(params_text: str) -> list[str]:
     params: list[str] = []
     current: list[str] = []
@@ -337,6 +401,17 @@ def _clean_rust_doc(comment: str) -> str:
         stripped = line.strip()
         if stripped.startswith("///"):
             stripped = stripped[3:].strip()
+        if stripped:
+            lines.append(stripped)
+    return "\n".join(lines)
+
+
+def _clean_go_doc(comment: str) -> str:
+    lines: list[str] = []
+    for line in comment.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            stripped = stripped[2:].strip()
         if stripped:
             lines.append(stripped)
     return "\n".join(lines)
@@ -392,6 +467,10 @@ def _rust_type(type_name: str) -> str:
     return _mumei_type(normalized)
 
 
+def _go_type(type_name: str) -> str:
+    return _mumei_type(type_name.strip().lstrip("*"))
+
+
 def _mumei_type(type_name: str) -> str:
     normalized = _python_type_name(type_name).strip()
     normalized = normalized.removeprefix("Promise<").removesuffix(">")
@@ -431,3 +510,253 @@ def _safe_identifier(value: str) -> str:
     if safe[0].isdigit():
         return f"atom_{safe}"
     return safe
+
+
+def _normalize_language(language: str) -> str:
+    aliases = {
+        "py": "python",
+        "rs": "rust",
+        "ts": "typescript",
+        "tsx": "typescript",
+        "javascript": "typescript",
+        "js": "typescript",
+        "jsx": "typescript",
+        "golang": "go",
+    }
+    return aliases.get(language.strip().lower(), language.strip().lower())
+
+
+def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
+    normalized = _normalize_language(language)
+    if normalized == "rust":
+        return _detect_block_safety_issues(source, _rust_function_blocks(source), "Rust")
+    if normalized == "typescript":
+        return _detect_block_safety_issues(
+            source,
+            _typescript_function_blocks(source),
+            "TypeScript",
+        )
+    if normalized == "go":
+        return _detect_block_safety_issues(source, _go_function_blocks(source), "Go")
+    if normalized == "python":
+        return _detect_python_safety_issues(source)
+    return []
+
+
+def _first_counterexample_payload(
+    issues: list[ForeignSafetyIssue],
+) -> dict[str, object]:
+    for issue in issues:
+        if issue.counterexample:
+            return {
+                "function_name": issue.function_name,
+                "counterexample": issue.counterexample,
+            }
+    return {}
+
+
+def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for expr in [ret.value for ret in ast.walk(node) if isinstance(ret, ast.Return) and ret.value is not None]:
+            try:
+                text = ast.unparse(expr)
+            except ValueError:
+                continue
+            issues.extend(_issues_for_expression(_safe_identifier(node.name), text, "Python"))
+    return issues
+
+
+def _detect_block_safety_issues(
+    source: str,
+    blocks: list[tuple[str, str]],
+    label: str,
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for name, body in blocks:
+        expressions = _return_expressions(body)
+        if not expressions and label == "Rust":
+            expressions = [_last_rust_expression(body)]
+        for expression in expressions:
+            issues.extend(_issues_for_expression(name, expression, label))
+    return issues
+
+
+def _issues_for_expression(
+    function_name: str,
+    expression: str,
+    label: str,
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for match in re.finditer(
+        r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
+        expression,
+    ):
+        container = match.group("container")
+        index = match.group("index")
+        counterexample = _z3_index_counterexample(index, f"len_{container}")
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` can index `{container}[{index}]` "
+                    f"without a bounds contract (Z3 counterexample: "
+                    + ", ".join(f"{key}={value}" for key, value in counterexample.items())
+                    + ")"
+                ),
+                counterexample=counterexample,
+            )
+        )
+    for match in re.finditer(
+        r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
+        expression,
+    ):
+        value = match.group("value")
+        counterexample = {f"{value}_is_null": True}
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` can dereference `{value}` "
+                    "without a non-null contract "
+                    f"(Z3 counterexample: {value}_is_null=true)"
+                ),
+                counterexample=counterexample,
+            )
+        )
+    for match in re.finditer(
+        r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+        expression,
+    ):
+        divisor = match.group("right")
+        counterexample = {divisor: 0}
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` can divide by `{divisor}` "
+                    f"without a non-zero contract (Z3 counterexample: {divisor}=0)"
+                ),
+                counterexample=counterexample,
+            )
+        )
+    if label == "Rust":
+        for match in re.finditer(
+            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+            expression,
+        ):
+            left = match.group("left")
+            right = match.group("right")
+            counterexample = _z3_i64_overflow_counterexample(left, right)
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` can overflow `{left} + {right}` "
+                        "without an arithmetic bounds contract "
+                        "(Z3 counterexample: "
+                        + ", ".join(f"{key}={value}" for key, value in counterexample.items())
+                        + ")"
+                    ),
+                    counterexample=counterexample,
+                )
+            )
+    return issues
+
+
+def _z3_index_counterexample(index_name: str, length_name: str) -> dict[str, int]:
+    index = z3.Int(index_name)
+    length = z3.Int(length_name)
+    solver = z3.Solver()
+    solver.add(length >= 0, z3.Or(index < 0, index >= length))
+    if solver.check() == z3.sat:
+        model = solver.model()
+        return {
+            index_name: model.eval(index, model_completion=True).as_long(),
+            length_name: model.eval(length, model_completion=True).as_long(),
+        }
+    return {index_name: 0, length_name: 0}
+
+
+def _z3_i64_overflow_counterexample(left_name: str, right_name: str) -> dict[str, int]:
+    left = z3.Int(left_name)
+    right = z3.Int(right_name)
+    solver = z3.Solver()
+    max_i64 = 9_223_372_036_854_775_807
+    min_i64 = -9_223_372_036_854_775_808
+    solver.add(left >= min_i64, left <= max_i64, right >= min_i64, right <= max_i64)
+    solver.add(z3.Or(left + right > max_i64, left + right < min_i64))
+    if solver.check() == z3.sat:
+        model = solver.model()
+        return {
+            left_name: model.eval(left, model_completion=True).as_long(),
+            right_name: model.eval(right, model_completion=True).as_long(),
+        }
+    return {left_name: max_i64, right_name: 1}
+
+
+def _rust_function_blocks(source: str) -> list[tuple[str, str]]:
+    pattern = re.compile(
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
+        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?\s*\{(?P<body>.*?)\}",
+        re.DOTALL,
+    )
+    return [(_safe_identifier(match.group("name")), match.group("body")) for match in pattern.finditer(source)]
+
+
+def _go_function_blocks(source: str) -> list[tuple[str, str]]:
+    pattern = re.compile(
+        r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+        r"\((?P<params>[^)]*)\)\s*(?P<ret>[A-Za-z0-9_]+)?\s*\{(?P<body>.*?)\}",
+        re.DOTALL,
+    )
+    return [(_safe_identifier(match.group("name")), match.group("body")) for match in pattern.finditer(source)]
+
+
+def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
+    blocks: list[tuple[str, str]] = []
+    function_pattern = re.compile(
+        r"(?:export\s+)?(?:async\s+)?function\s+"
+        r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
+        r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?\s*"
+        r"\{(?P<body>.*?)\}",
+        re.DOTALL,
+    )
+    arrow_pattern = re.compile(
+        r"(?:export\s+)?(?:const|let)\s+"
+        r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+        r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
+        r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*(?P<body>\{.*?\}|[^;\n]+)",
+        re.DOTALL,
+    )
+    blocks.extend(
+        (_safe_identifier(match.group("name")), match.group("body"))
+        for match in function_pattern.finditer(source)
+    )
+    blocks.extend(
+        (_safe_identifier(match.group("name")), match.group("body"))
+        for match in arrow_pattern.finditer(source)
+    )
+    return blocks
+
+
+def _return_expressions(body: str) -> list[str]:
+    stripped = body.strip()
+    if stripped.startswith("{"):
+        stripped = stripped[1:-1]
+    expressions = [match.group(1).strip() for match in re.finditer(r"\breturn\s+([^;\n}]+)", stripped)]
+    if not expressions and stripped and "\n" not in stripped:
+        expressions.append(stripped.rstrip(";"))
+    return expressions
+
+
+def _last_rust_expression(body: str) -> str:
+    lines = [line.strip().rstrip(";") for line in body.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else ""

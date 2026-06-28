@@ -21,6 +21,7 @@ from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
 from agent.mm_migration_advisor import MigrationHint
 from agent.strategies.cross_validation_strategy import CrossValidationReport
+from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 
 
 def _forge_spec() -> dict[str, object]:
@@ -439,7 +440,10 @@ def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
         "pub fn transfer(balance: i64, amount: i64) -> i64 { balance - amount }\n",
         encoding="utf-8",
     )
-    (source_dir / "ignored.go").write_text("package ignored\n", encoding="utf-8")
+    (source_dir / "covered.go").write_text(
+        "package covered\nfunc balance(x int) int { return x }\n",
+        encoding="utf-8",
+    )
 
     extractor = MagicMock()
     extractor.extract_from_file.return_value = CodeToSpecResult(
@@ -452,10 +456,12 @@ def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
     foreign_verifier.verify.side_effect = [
         {"success": False, "errors": ["withdraw can return a negative balance"]},
         {"success": True, "report": {}},
+        {"success": True, "report": {}},
     ]
     cross_validator = MagicMock()
     cross_validator.validate_spec_vs_impl.side_effect = [
         CrossValidationReport(spec_stronger_than_impl=["withdraw"], coverage_ratio=1.0),
+        CrossValidationReport(coverage_ratio=1.0),
         CrossValidationReport(coverage_ratio=1.0),
     ]
     mumei = MagicMock()
@@ -471,13 +477,14 @@ def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
 
     assert isinstance(result, AuditDirectoryResult)
     assert result.success is False
-    assert result.total_files == 2
+    assert result.total_files == 3
     assert result.files_with_issues == 1
     assert sorted(Path(file_result.source_file).name for file_result in result.file_results) == [
+        "covered.go",
         "payment.py",
         "transfer.rs",
     ]
-    assert foreign_verifier.verify.call_count == 2
+    assert foreign_verifier.verify.call_count == 3
     assert [step["priority"] for step in result.next_steps] == ["high", "high"]
     assert result.next_steps[0]["command"].startswith("mumei-agent migrate-suggest")
     assert (
@@ -789,3 +796,48 @@ def test_cli_json_contract_keeps_scan_and_fix_schema_keys() -> None:
     assert payload["next_steps"] == result.next_steps
     assert "recommendations" not in payload
     assert "repair_hints" not in payload
+
+
+def test_audit_pipeline_reports_multilanguage_no_mm_violations(
+    tmp_path: Path,
+) -> None:
+    fixtures = {
+        "rust": (
+            "calc.rs",
+            "pub fn add(a: i64, b: i64) -> i64 { a + b }\n",
+            "can overflow",
+        ),
+        "typescript": (
+            "names.ts",
+            "export function len(name?: string): number { return name!.length; }\n",
+            "non-null contract",
+        ),
+        "go": (
+            "lists.go",
+            "package lists\nfunc nth(values []int, idx int) int { return values[idx] }\n",
+            "bounds contract",
+        ),
+    }
+    forbidden_aliases = {"recommendations", "repair_hints", "review_actions"}
+
+    for language, (filename, source_text, expected_violation) in fixtures.items():
+        source = tmp_path / filename
+        source.write_text(source_text, encoding="utf-8")
+        mumei = MagicMock()
+        mumei.verify.side_effect = _healthy_verify
+
+        result = AuditPipeline(
+            AgentConfig(api_key=""),
+            foreign_code_verifier=ForeignCodeVerifier(mumei_client=mumei),
+            mumei_client=mumei,
+        ).audit_file(source, language)
+        payload = asdict(result)
+
+        assert result.spec_extracted is True
+        assert result.success is False
+        assert result.language == language
+        assert [key for key in AUDIT_SCHEMA_KEYS if key in payload] == AUDIT_SCHEMA_KEYS
+        assert forbidden_aliases.isdisjoint(payload)
+        assert result.next_steps
+        assert any(expected_violation in issue for issue in result.verification_violations)
+        assert result.counterexample_values

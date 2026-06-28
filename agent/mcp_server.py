@@ -782,7 +782,7 @@ def cross_validate(spec_file: str, impl_file: str, language: str = "") -> str:
     Args:
         spec_file: Path to the .mm specification file.
         impl_file: Path to the implementation source file.
-        language: Language of the implementation (python/rust/typescript).
+        language: Language of the implementation (python/rust/typescript/go).
             Inferred from file extension if omitted.
 
     Returns:
@@ -807,12 +807,13 @@ def cross_validate(spec_file: str, impl_file: str, language: str = "") -> str:
             ".tsx": "typescript",
             ".js": "javascript",
             ".jsx": "javascript",
+            ".go": "go",
         }
         language = lang_map.get(ext, "")
         if not language:
             return _err(
                 f"cannot infer language from extension '{ext}'; please specify explicitly",
-                supported=["python", "rust", "typescript"],
+                supported=["python", "rust", "typescript", "go"],
             )
 
     try:
@@ -1638,7 +1639,7 @@ def validate_code(
     use_llm: bool = True,
     run_mumei: bool = True,
 ) -> str:
-    """Infer and verify contracts from existing code (Python, Rust, Go)."""
+    """Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."""
     return _validate_existing_code_payload(
         code,
         language,
@@ -1655,7 +1656,7 @@ def validate_foreign_code(
     use_llm: bool = True,
     run_mumei: bool = True,
 ) -> str:
-    """Infer and verify contracts from existing code (Python, Rust, Go)."""
+    """Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."""
     return _validate_existing_code_payload(
         code,
         language,
@@ -1792,7 +1793,7 @@ def verify_foreign_code(
     use_llm: bool = True,
     run_mumei: bool = True,
 ) -> str:
-    """Infer and verify contracts from existing code (Python, Rust, Go)."""
+    """Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."""
     return _validate_existing_code_payload(
         source_code,
         language,
@@ -1827,7 +1828,7 @@ def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]")
 
     Args:
         code_file: Path to source code file.
-        language: Source language (python/rust/typescript).
+        language: Source language (python/rust/typescript/go).
         issues_json: JSON array of issues from validate_foreign_code or verify_foreign_code.
 
     Returns:
@@ -1884,7 +1885,7 @@ def scan_and_fix(
 
     Args:
         code_file: Path to the source code file or directory.
-        language: Source language (python/rust/typescript).
+        language: Source language (python/rust/typescript/go).
         spec: Optional path to a natural-language spec file for validate-spec-to-code.
         auto_heal: If True, run the self-healing loop on generated .mm skeletons.
         heal_output_dir: Directory to write healed .mm files.
