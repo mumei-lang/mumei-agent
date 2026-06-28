@@ -116,6 +116,24 @@
       "error": null,
       "timestamp": "2026-06-28T15:40:11.143703+00:00",
       "task_spec_path": "/home/ubuntu/repos/mumei-agent/forge_tasks/vstd_crypto_primitives.json"
+    },
+    {
+      "task_id": "vstd-core-predicates",
+      "status": "success",
+      "attempts": 1,
+      "target_file": "std/core_predicates.mm",
+      "atoms_added": [
+        "safe_index_or_zero",
+        "is_nonzero_flag",
+        "preserve_safe_index"
+      ],
+      "logic_fragment_tags": [],
+      "outside_decidable_fragment": false,
+      "metrics_quarter": "2026-Q2",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-06-28T16:12:31.136330+00:00",
+      "task_spec_path": "/home/ubuntu/repos/mumei-agent/forge_tasks/vstd_core_predicates.json"
     }
   ]
 }

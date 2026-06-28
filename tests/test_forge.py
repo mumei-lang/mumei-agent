@@ -425,6 +425,26 @@ class TestForgeOneModule:
         assert "atom f(x: i64)" in target.read_text(encoding="utf-8")
         assert forge.config.create_client.call_count == 0
 
+    def test_core_predicates_task_uses_deterministic_bodies(self, tmp_path):
+        forge = _make_forge(tmp_path)
+        forge.config.create_client.side_effect = AssertionError("LLM not needed")
+        task_path = (
+            Path(__file__).resolve().parents[1]
+            / "forge_tasks"
+            / "vstd_core_predicates.json"
+        )
+        task = json.loads(task_path.read_text(encoding="utf-8"))
+
+        result = forge.forge_one(task)
+
+        assert result.status == "success"
+        target = forge.mumei_repo_dir / "std" / "core_predicates.mm"
+        text = target.read_text(encoding="utf-8")
+        assert "atom safe_index_or_zero(idx: i64, len: i64)" in text
+        assert "atom is_nonzero_flag(value: i64)" in text
+        assert "atom preserve_safe_index(idx: i64, len: i64)" in text
+        assert forge.config.create_client.call_count == 0
+
     def test_create_refuses_if_exists(self, tmp_path):
         forge = _make_forge(tmp_path)
         target = forge.mumei_repo_dir / "std" / "existing.mm"
