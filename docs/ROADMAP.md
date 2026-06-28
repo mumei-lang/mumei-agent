@@ -6,6 +6,8 @@
 
 ## Roadmap authority and vocabulary
 
+Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
+
 `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap. This file only records mumei-agent-local acceptance details and must keep terminology aligned to `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Current priority is docs-sync and harness-contract regression prevention, not new portability/runtime scope.
 
 Audit/spec/MCP vocabulary is fixed as:
@@ -23,7 +25,7 @@ Audit/spec/MCP vocabulary is fixed as:
 
 `scan_and_fix` is the MCP spelling of `audit --code-file ... --auto-migrate --auto-heal`; README flowchart, guide steps, CLI help, MCP docstrings, and this roadmap must describe the same `audit -> migrate-suggest -> heal` contract and the seven fixed keys above without aliases.
 
-If `scan_and_fix` also receives `spec`, its response may include `spec_alignment` and `conformance_verification` sidecars. These do not rename or replace the audit contract: `audit` owns no-`.mm` findings and migration/heal artifacts, `spec_alignment` owns spec→code comparison, and `conformance_verification` owns traceability plus human/markdown report text. `V1-E` is only `next_steps`-origin human review across those surfaces; do not add alternate review keys such as `recommendations` or `review_actions`.
+If `scan_and_fix` also receives `spec`, its response may include `spec_alignment` and `conformance_verification` sidecars. These do not rename or replace the audit contract: `audit` owns no-`.mm` findings and migration/heal artifacts, `spec_alignment` owns spec→code comparison, and `conformance_verification` owns traceability plus human/markdown report text. `V1-E` is only `next_steps`-origin human review across those surfaces; do not add alternate review keys.
 
 ### Single audit contract and review handoff
 
@@ -308,7 +310,7 @@ feedback として返す。
 **成功指標**:
 
 - `missing_constraints[]`, `divergences[]`, `drift_issues[]` が structured JSON で返る。
-- V1-D-3 は `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, `next_steps` だけを使い、`recommendations` などの alias を出さない。
+- V1-D-3 は `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, `next_steps` だけを使い、別名 alias を出さない。
 - 複数 `.mm` の cross-spec result を MCP client が直接取得できる。
 - `cross_validation_gaps` が `audit` summary に集約され、migration / human review 分岐に使える。
 
