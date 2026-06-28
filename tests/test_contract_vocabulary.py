@@ -33,11 +33,11 @@ FORBIDDEN_ALIASES = [
 def _alias_key_patterns(alias: str) -> list[re.Pattern[str]]:
     escaped = re.escape(alias)
     return [
-        re.compile(rf"`{escaped}`"),
-        re.compile(rf'"{escaped}"\s*:'),
-        re.compile(rf"'{escaped}'\s*:"),
-        re.compile(rf"(?m)^\s*[-*]?\s*{escaped}\s*:"),
-        re.compile(rf"\b{escaped}\[\]\b"),
+        re.compile(rf"`{escaped}(?:\[\])?`"),
+        re.compile(rf'"{escaped}(?:\[\])?"\s*:'),
+        re.compile(rf"'{escaped}(?:\[\])?'\s*:"),
+        re.compile(rf"(?m)^\s*[-*]?\s*{escaped}(?:\[\])?\s*:"),
+        re.compile(rf"\b{escaped}\[\]"),
     ]
 
 
