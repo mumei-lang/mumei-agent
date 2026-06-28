@@ -31,6 +31,7 @@ class ForeignCodeSpec:
 class ForeignSafetyIssue:
     function_name: str
     message: str
+    required_contracts: tuple[str, ...] = ()
     counterexample: dict[str, object] = field(default_factory=dict)
 
 
@@ -191,7 +192,10 @@ class ForeignCodeVerifier:
     def verify(self, source_code: str, language: str) -> dict[str, object]:
         normalized_language = _normalize_language(language)
         specs = self.extractor.extract(source_code, normalized_language)
-        safety_issues = _detect_safety_issues(source_code, normalized_language)
+        safety_issues = _filter_covered_safety_issues(
+            _detect_safety_issues(source_code, normalized_language),
+            specs,
+        )
         atoms = [to_mumei_atom(spec) for spec in specs]
         mumei_source = "\n\n".join(atoms) + ("\n" if atoms else "")
         if not specs:
@@ -610,6 +614,10 @@ def _issues_for_expression(
                     + ", ".join(f"{key}={value}" for key, value in counterexample.items())
                     + ")"
                 ),
+                required_contracts=(
+                    f"{index} >= 0",
+                    f"{index} < len_{container}",
+                ),
                 counterexample=counterexample,
             )
         )
@@ -627,6 +635,10 @@ def _issues_for_expression(
                     "without a non-null contract "
                     f"(Z3 counterexample: {value}_is_null=true)"
                 ),
+                required_contracts=(
+                    f"{value} != null",
+                    f"{value} != undefined",
+                ),
                 counterexample=counterexample,
             )
         )
@@ -643,6 +655,7 @@ def _issues_for_expression(
                     f"{label} function `{function_name}` can divide by `{divisor}` "
                     f"without a non-zero contract (Z3 counterexample: {divisor}=0)"
                 ),
+                required_contracts=(f"{divisor} != 0",),
                 counterexample=counterexample,
             )
         )
@@ -664,10 +677,58 @@ def _issues_for_expression(
                         + ", ".join(f"{key}={value}" for key, value in counterexample.items())
                         + ")"
                     ),
+                    required_contracts=(
+                        f"{left} + {right} <= 9223372036854775807",
+                        f"{left} + {right} >= -9223372036854775808",
+                    ),
                     counterexample=counterexample,
                 )
             )
     return issues
+
+
+def _filter_covered_safety_issues(
+    issues: list[ForeignSafetyIssue],
+    specs: list[ForeignCodeSpec],
+) -> list[ForeignSafetyIssue]:
+    contract_by_function = {
+        spec.function_name: _normalize_contract_text(" && ".join(spec.preconditions))
+        for spec in specs
+    }
+    return [
+        issue
+        for issue in issues
+        if not _contracts_cover_issue(
+            contract_by_function.get(issue.function_name, ""),
+            issue.required_contracts,
+        )
+    ]
+
+
+def _contracts_cover_issue(contract_text: str, required_contracts: tuple[str, ...]) -> bool:
+    if not required_contracts:
+        return False
+    normalized_required = tuple(
+        _normalize_contract_text(requirement) for requirement in required_contracts
+    )
+    if any("!=null" in requirement for requirement in normalized_required):
+        symbol = normalized_required[0].split("!=", 1)[0]
+        return (
+            f"{symbol}!=null" in contract_text
+            or (
+                f"{symbol}!==null" in contract_text
+                and f"{symbol}!==undefined" in contract_text
+            )
+            or (
+                f"{symbol}!=null" in contract_text
+                and f"{symbol}!=undefined" in contract_text
+            )
+        )
+    return all(requirement in contract_text for requirement in normalized_required)
+
+
+def _normalize_contract_text(text: str) -> str:
+    return re.sub(r"\s+", "", text.lower()).replace("&&", "and")
 
 
 def _z3_index_counterexample(index_name: str, length_name: str) -> dict[str, int]:

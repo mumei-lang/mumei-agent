@@ -135,6 +135,20 @@ def test_validate_foreign_code_infers_multilanguage_safety_contracts() -> None:
         assert expected_requires in result.inferred_atoms[0].requires
 
 
+def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
+    result = validate_foreign_code(
+        "export function isEmpty(name?: string): boolean { return name!.length == 0; }\n",
+        "typescript",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].params[0].type == "string"
+    assert result.inferred_atoms[0].return_type == "bool"
+
+
 @pytest.mark.parametrize(
     ("language", "filename", "source"),
     [

@@ -113,6 +113,29 @@ def test_verifier_runs_mumei_client_on_extracted_atom() -> None:
     mumei.verify.assert_called_once()
 
 
+def test_verifier_does_not_report_covered_safety_contracts() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(
+        "/**\n"
+        " * requires: name != null\n"
+        " * ensures: result >= 0\n"
+        " */\n"
+        "export function len(name?: string): number { return name!.length; }\n",
+        "typescript",
+    )
+
+    assert result["success"] is True
+    assert result["errors"] == []
+    assert "counterexample" not in result
+
+
 def test_mcp_verify_foreign_code_tool_returns_json_payload() -> None:
     result = _payload(
         mcp_server.verify_foreign_code(

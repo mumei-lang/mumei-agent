@@ -2699,8 +2699,31 @@ def _params_from_signature(params_text: str) -> list[ContractParam]:
     for index, raw in enumerate(part.strip() for part in params_text.split(",") if part.strip()):
         pieces = raw.split(":")
         name = pieces[0].strip().split()[0].rstrip("?") if pieces[0].strip() else f"arg{index}"
-        params.append(ContractParam(name=_safe_identifier(name), type="i64"))
+        type_text = pieces[1].strip() if len(pieces) > 1 else "i64"
+        params.append(
+            ContractParam(
+                name=_safe_identifier(name),
+                type=_foreign_signature_type(type_text),
+            )
+        )
     return params
+
+
+def _foreign_signature_type(type_text: str) -> str:
+    normalized = type_text.strip().split("|", 1)[0].strip()
+    normalized = normalized.removeprefix("&").removeprefix("mut ").strip()
+    normalized = normalized.removeprefix("Promise<").removesuffix(">")
+    normalized = normalized.removesuffix("[]")
+    lowered = normalized.lower()
+    if lowered in {"string", "str", "&str"}:
+        return "string"
+    if lowered in {"bool", "boolean"}:
+        return "bool"
+    if lowered in {"float", "double", "f32", "f64"}:
+        return "f64"
+    if lowered in {"uint", "usize", "u8", "u16", "u32", "u64"}:
+        return "u64"
+    return "i64"
 
 
 def _last_expression(body: str) -> str:
