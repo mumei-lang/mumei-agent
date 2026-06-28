@@ -262,7 +262,7 @@ feedback として返す。
 3. `--auto-migrate` で migration skeleton を生成し、`--auto-heal` で self-healing loop
    を続けて実行する。
 4. `--heal-output-dir` で生成・修復済み `.mm` の出力先を指定できるようにする。
-5. Rust / TypeScript / Go の決定的 parser 経路で関数シグネチャ、pre/postcondition 候補、分岐・安全性条件を抽出し、Rust overflow/bounds、TypeScript null/undefined、Go bounds の代表ケースを Z3 counterexample 付き `verification_violations` に接続する。
+5. Rust / TypeScript / Go の決定的 parser 経路で関数シグネチャ、pre/postcondition 候補、分岐・安全性条件を抽出し、Rust overflow/bounds、TypeScript null/undefined、Go bounds/nil/overflow の代表ケースを Z3 counterexample 付き `verification_violations` に接続する。
 6. `validate-code`, `validate-spec-to-code`, `validate-code-to-spec`, MCP `scan_and_fix` の対応言語を Python / Rust / TypeScript / Go に揃え、LLM credential なしの fixture 経路を維持する。
 
 **対象ファイル**:

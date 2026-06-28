@@ -841,3 +841,46 @@ def test_audit_pipeline_reports_multilanguage_no_mm_violations(
         assert result.next_steps
         assert any(expected_violation in issue for issue in result.verification_violations)
         assert result.counterexample_values
+
+
+def test_audit_pipeline_reports_go_representative_violations(tmp_path: Path) -> None:
+    fixtures = [
+        (
+            "lists.go",
+            "package lists\nfunc nth(values []int, idx int) int { return values[idx] }\n",
+            "bounds contract",
+        ),
+        (
+            "users.go",
+            "package users\nfunc age(user *User) int { return user.Age }\n",
+            "non-nil contract",
+        ),
+        (
+            "calc.go",
+            "package calc\nfunc add(a int, b int) int { return a + b }\n",
+            "can overflow",
+        ),
+    ]
+    forbidden_aliases = {"recommendations", "repair_hints", "review_actions"}
+
+    for filename, source_text, expected_violation in fixtures:
+        source = tmp_path / filename
+        source.write_text(source_text, encoding="utf-8")
+        mumei = MagicMock()
+        mumei.verify.side_effect = _healthy_verify
+
+        result = AuditPipeline(
+            AgentConfig(api_key=""),
+            foreign_code_verifier=ForeignCodeVerifier(mumei_client=mumei),
+            mumei_client=mumei,
+        ).audit_file(source, "go")
+        payload = asdict(result)
+
+        assert result.spec_extracted is True
+        assert result.success is False
+        assert result.language == "go"
+        assert [key for key in AUDIT_SCHEMA_KEYS if key in payload] == AUDIT_SCHEMA_KEYS
+        assert forbidden_aliases.isdisjoint(payload)
+        assert result.next_steps
+        assert any(expected_violation in issue for issue in result.verification_violations)
+        assert result.counterexample_values

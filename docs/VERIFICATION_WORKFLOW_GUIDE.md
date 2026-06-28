@@ -13,9 +13,9 @@
 
 Canonical result keys are fixed as follows:
 
-Supported no-`.mm` source languages are Python, Rust, TypeScript, and Go. The language changes only the parser path; `audit`, `validate-code`, and MCP `scan_and_fix` still return `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors` without aliases. In deterministic/no-LLM mode, Rust overflow/bounds, TypeScript null/undefined, and Go bounds fixtures are handled by the parser and Z3 counterexample path.
+Supported no-`.mm` source languages are Python, Rust, TypeScript, and Go. The language changes only the parser path; `audit`, `validate-code`, and MCP `scan_and_fix` still return `spec_health_issues`, `verification_violations`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors` without aliases. In deterministic/no-LLM mode, Rust overflow/bounds, TypeScript null/undefined, and Go bounds/nil/overflow fixtures are handled by the parser and Z3 counterexample path.
 
-The cross-project reference demo is `mumei-demo/scenarios/no_mm_audit` (Phase 7 front door). Run `CI_FIXTURE_MODE=1 make demo-no-mm` there to see Python negative balance, Rust `a + b` i64 overflow, TypeScript `name!.length` null/undefined, and Go `values[idx]` bounds produce `verification_violations` with `next_steps` as the only human-review entrypoint. The demo stops at `audit -> migrate-suggest -> heal` before Lean escalation, so it does not expect `lean_verified`.
+The cross-project reference demo is `mumei-demo/scenarios/no_mm_audit` (Phase 7 front door). Run `CI_FIXTURE_MODE=1 make demo-no-mm` there to see Python negative balance, Rust `a + b` i64 overflow, TypeScript `name!.length` null/undefined, and Go `values[idx]` bounds / `user.Name` nil / `a + b` overflow produce `verification_violations` with `next_steps` as the only human-review entrypoint. The demo stops at `audit -> migrate-suggest -> heal` before Lean escalation, so it does not expect `lean_verified`.
 
 | Key | Meaning |
 | --- | --- |

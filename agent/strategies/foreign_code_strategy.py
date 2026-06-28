@@ -12,6 +12,11 @@ from typing import Iterable
 
 import z3
 
+from agent.cross_validation import (
+    _dedupe_strings,
+    _infer_foreign_source_line_map,
+    _infer_go_contracts,
+)
 from agent.mumei_client import create_mumei_client
 
 
@@ -86,25 +91,44 @@ class ForeignCodeExtractor:
         return specs
 
     def extract_go(self, source: str) -> list[ForeignCodeSpec]:
-        """Extract Go ``func`` declarations and preceding ``//`` contracts."""
+        """Extract Go ``func`` declarations, ``//`` contracts, and safe-path hints."""
         pattern = re.compile(
             r"(?P<comment>(?:\s*//[^\n]*\n)*)\s*"
             r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-            r"\((?P<params>[^)]*)\)\s*(?P<ret>[A-Za-z0-9_]+)?",
+            r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?",
             re.DOTALL,
         )
+        inferred_atoms = {atom.name: atom for atom in _infer_go_contracts(source)}
+        source_lines = _infer_foreign_source_line_map(source, "go")
         specs: list[ForeignCodeSpec] = []
         for match in pattern.finditer(source):
+            function_name = _safe_identifier(match.group("name"))
             comment = _clean_go_doc(match.group("comment") or "")
             preconditions, postconditions = _contract_lines(comment)
+            inferred = inferred_atoms.get(function_name)
+            if inferred is not None:
+                if inferred.ensures != "true":
+                    postconditions = _dedupe_strings([*postconditions, inferred.ensures])
             specs.append(
                 ForeignCodeSpec(
-                    function_name=_safe_identifier(match.group("name")),
-                    params=_go_params(match.group("params")),
-                    return_type=_go_type(match.group("ret") or "bool"),
+                    function_name=function_name,
+                    params={
+                        param.name: param.type
+                        for param in inferred.params
+                    }
+                    if inferred is not None
+                    else _go_params(match.group("params")),
+                    return_type=(
+                        inferred.return_type
+                        if inferred is not None
+                        else _go_type(match.group("ret") or "bool")
+                    ),
                     preconditions=preconditions,
                     postconditions=postconditions,
-                    source_line=_line_for_offset(source, match.start("name")),
+                    source_line=source_lines.get(
+                        function_name,
+                        _line_for_offset(source, match.start("name")),
+                    ),
                 )
             )
         return specs
@@ -621,27 +645,43 @@ def _issues_for_expression(
                 counterexample=counterexample,
             )
         )
-    for match in re.finditer(
-        r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
-        expression,
-    ):
-        value = match.group("value")
-        counterexample = {f"{value}_is_null": True}
-        issues.append(
-            ForeignSafetyIssue(
-                function_name=function_name,
-                message=(
-                    f"{label} function `{function_name}` can dereference `{value}` "
-                    "without a non-null contract "
-                    f"(Z3 counterexample: {value}_is_null=true)"
-                ),
-                required_contracts=(
-                    f"{value} != null",
-                    f"{value} != undefined",
-                ),
-                counterexample=counterexample,
+    if label == "Go":
+        for value in _go_nil_dereference_values(expression):
+            counterexample = {f"{value}_is_nil": True}
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` can dereference `{value}` "
+                        "without a non-nil contract "
+                        f"(Z3 counterexample: {value}_is_nil=true)"
+                    ),
+                    required_contracts=(f"{value} != nil",),
+                    counterexample=counterexample,
+                )
             )
-        )
+    else:
+        for match in re.finditer(
+            r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
+            expression,
+        ):
+            value = match.group("value")
+            counterexample = {f"{value}_is_null": True}
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` can dereference `{value}` "
+                        "without a non-null contract "
+                        f"(Z3 counterexample: {value}_is_null=true)"
+                    ),
+                    required_contracts=(
+                        f"{value} != null",
+                        f"{value} != undefined",
+                    ),
+                    counterexample=counterexample,
+                )
+            )
     for match in re.finditer(
         r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
         expression,
@@ -659,7 +699,7 @@ def _issues_for_expression(
                 counterexample=counterexample,
             )
         )
-    if label == "Rust":
+    if label in {"Go", "Rust"}:
         for match in re.finditer(
             r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
             expression,
@@ -724,11 +764,26 @@ def _contracts_cover_issue(contract_text: str, required_contracts: tuple[str, ..
                 and f"{symbol}!=undefined" in contract_text
             )
         )
+    if any("!=nil" in requirement for requirement in normalized_required):
+        symbol = normalized_required[0].split("!=", 1)[0]
+        return f"{symbol}!=nil" in contract_text
     return all(requirement in contract_text for requirement in normalized_required)
 
 
 def _normalize_contract_text(text: str) -> str:
     return re.sub(r"\s+", "", text.lower()).replace("&&", "and")
+
+
+def _go_nil_dereference_values(expression: str) -> list[str]:
+    values: list[str] = []
+    for match in re.finditer(r"\*\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)", expression):
+        values.append(match.group("value"))
+    for match in re.finditer(
+        r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*\.",
+        expression,
+    ):
+        values.append(match.group("value"))
+    return _dedupe_strings(values)
 
 
 def _z3_index_counterexample(index_name: str, length_name: str) -> dict[str, int]:
@@ -775,10 +830,27 @@ def _rust_function_blocks(source: str) -> list[tuple[str, str]]:
 def _go_function_blocks(source: str) -> list[tuple[str, str]]:
     pattern = re.compile(
         r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-        r"\((?P<params>[^)]*)\)\s*(?P<ret>[A-Za-z0-9_]+)?\s*\{(?P<body>.*?)\}",
+        r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?\s*\{",
         re.DOTALL,
     )
-    return [(_safe_identifier(match.group("name")), match.group("body")) for match in pattern.finditer(source)]
+    blocks: list[tuple[str, str]] = []
+    for match in pattern.finditer(source):
+        body = _balanced_brace_body(source, match.end() - 1)
+        blocks.append((_safe_identifier(match.group("name")), body))
+    return blocks
+
+
+def _balanced_brace_body(source: str, opening_brace: int) -> str:
+    depth = 0
+    for index in range(opening_brace, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening_brace + 1 : index]
+    return source[opening_brace + 1 :]
 
 
 def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:

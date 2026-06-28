@@ -2593,6 +2593,29 @@ def _generic_safety_requires_for_expression(expression: str) -> list[str]:
     return requirements
 
 
+def _go_safety_requires_for_expression(expression: str) -> str:
+    requirements: list[str] = []
+    base = _safety_requires_for_expression(expression)
+    if base != "true":
+        requirements.extend(part.strip() for part in base.split("&&") if part.strip())
+    for value in _go_nil_dereference_values(expression):
+        requirements.append(f"{value} != nil")
+    requirements.extend(_integer_overflow_requires_for_expression(expression))
+    return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+
+
+def _go_nil_dereference_values(expression: str) -> list[str]:
+    values: list[str] = []
+    for match in re.finditer(r"\*\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)", expression):
+        values.append(match.group("value"))
+    for match in re.finditer(
+        r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*\.",
+        expression,
+    ):
+        values.append(match.group("value"))
+    return _dedupe_strings(values)
+
+
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     pattern = re.compile(
@@ -2621,6 +2644,12 @@ def _rust_safety_requires_for_expression(expression: str) -> str:
     base = _safety_requires_for_expression(expression)
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
+    requirements.extend(_integer_overflow_requires_for_expression(expression))
+    return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+
+
+def _integer_overflow_requires_for_expression(expression: str) -> list[str]:
+    requirements: list[str] = []
     for match in re.finditer(
         r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
         expression,
@@ -2629,7 +2658,7 @@ def _rust_safety_requires_for_expression(expression: str) -> str:
         right = match.group("right")
         requirements.append(f"{left} + {right} <= 9223372036854775807")
         requirements.append(f"{left} + {right} >= -9223372036854775808")
-    return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+    return requirements
 
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
@@ -2675,23 +2704,53 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
 
 def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
-    pattern = re.compile(
-        r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\((?P<params>[^)]*)\)\s*(?P<ret>[A-Za-z0-9_]+)?\s*\{(?P<body>.*?)\}",
-        flags=re.DOTALL,
-    )
-    for match in pattern.finditer(code):
-        params = _params_from_signature(match.group("params"))
-        return_expr = _return_statement_expression(match.group("body"))
+    for name, params_text, return_type, body in _go_function_declarations(code):
+        params = _params_from_signature(params_text)
+        raw_return_expr = _raw_return_statement_expression(body)
+        return_expr = _normalize_foreign_expression(raw_return_expr)
         atoms.append(
             MumeiContractAtom(
-                name=_safe_identifier(match.group("name")),
+                name=_safe_identifier(name),
                 params=params,
-                return_type="i64" if match.group("ret") else "bool",
-                requires=_safety_requires_for_expression(return_expr),
+                return_type="i64" if return_type else "bool",
+                requires=_go_safety_requires_for_expression(raw_return_expr),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
         )
     return atoms
+
+
+def _go_function_declarations(code: str) -> list[tuple[str, str, str, str]]:
+    pattern = re.compile(
+        r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+        r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?\s*\{",
+        flags=re.DOTALL,
+    )
+    declarations: list[tuple[str, str, str, str]] = []
+    for match in pattern.finditer(code):
+        body = _balanced_brace_body(code, match.end() - 1)
+        declarations.append(
+            (
+                match.group("name"),
+                match.group("params"),
+                match.group("ret") or "",
+                body,
+            )
+        )
+    return declarations
+
+
+def _balanced_brace_body(source: str, opening_brace: int) -> str:
+    depth = 0
+    for index in range(opening_brace, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening_brace + 1 : index]
+    return source[opening_brace + 1 :]
 
 
 def _params_from_signature(params_text: str) -> list[ContractParam]:
@@ -2737,8 +2796,13 @@ def _last_expression(body: str) -> str:
 
 
 def _return_statement_expression(body: str) -> str:
-    match = re.search(r"\breturn\s+([^;\n}]+)", body)
-    return _normalize_foreign_expression(match.group(1).strip()) if match else ""
+    raw = _raw_return_statement_expression(body)
+    return _normalize_foreign_expression(raw) if raw else ""
+
+
+def _raw_return_statement_expression(body: str) -> str:
+    matches = list(re.finditer(r"\breturn\s+([^;\n}]+)", body))
+    return matches[-1].group(1).strip() if matches else ""
 
 
 def _typescript_raw_return_expression(body: str) -> str:

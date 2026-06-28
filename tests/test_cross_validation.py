@@ -118,6 +118,16 @@ def test_validate_foreign_code_infers_multilanguage_safety_contracts() -> None:
             "package lists\nfunc nth(values []int, idx int) int { return values[idx] }\n",
             "idx < len_values",
         ),
+        (
+            "go",
+            "package calc\nfunc add(a int, b int) int { return a + b }\n",
+            "a + b <= 9223372036854775807",
+        ),
+        (
+            "go",
+            "package users\nfunc age(user *User) int { return user.Age }\n",
+            "user != nil",
+        ),
     ]
 
     for language, code, expected_requires in fixtures:
@@ -345,6 +355,30 @@ def test_validate_code_to_spec_detects_postcondition_drift(tmp_path: Path) -> No
     )
 
     assert result.success is False
+    assert result.drift_issues
+    assert result.drift_issues[0].kind == "drift"
+
+
+def test_validate_code_to_spec_detects_go_postcondition_drift(tmp_path: Path) -> None:
+    spec_path = tmp_path / "spec.txt"
+    code_path = tmp_path / "impl.go"
+    spec_path.write_text("requires: true;\nensures: result == x + 1;", encoding="utf-8")
+    code_path.write_text(
+        "package demo\nfunc inc(x int) int { return x + 2 }\n",
+        encoding="utf-8",
+    )
+
+    result = validate_code_to_spec(
+        str(code_path),
+        str(spec_path),
+        config=AgentConfig(api_key=""),
+        language="go",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is False
+    assert result.language == "go"
     assert result.drift_issues
     assert result.drift_issues[0].kind == "drift"
 

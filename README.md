@@ -168,7 +168,7 @@ You can also run commands as `mumei-agent ...` after activating the uv-managed v
 
 Canonical result keys are fixed as follows:
 
-Supported no-`.mm` source languages are Python, Rust, TypeScript, and Go. `audit`, `validate-code`, `validate-spec-to-code`, `validate-code-to-spec`, and MCP `scan_and_fix` use the same fixed keys for all four languages; Rust overflow/bounds findings, TypeScript null/undefined findings, and Go bounds findings appear in `verification_violations` with Z3 counterexamples when the deterministic parser can prove an unsafe path. LLM credentials are optional: when no key is configured, the deterministic parser still extracts signatures, safety preconditions, and postcondition candidates.
+Supported no-`.mm` source languages are Python, Rust, TypeScript, and Go. `audit`, `validate-code`, `validate-spec-to-code`, `validate-code-to-spec`, and MCP `scan_and_fix` use the same fixed keys for all four languages; Rust overflow/bounds findings, TypeScript null/undefined findings, and Go bounds/nil/overflow findings appear in `verification_violations` with Z3 counterexamples when the deterministic parser can prove an unsafe path. LLM credentials are optional: when no key is configured, the deterministic parser still extracts signatures, safety preconditions, and postcondition candidates.
 
 | Key | Meaning |
 | --- | --- |
