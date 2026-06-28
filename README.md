@@ -596,6 +596,11 @@ drives `generate_code()` + `mumei verify --json` + self-healing, appends
 change, and records the outcome to `forge_log.json`.  Already-completed
 `task_id`s are automatically skipped on subsequent runs.
 
+Create/replace tasks whose atoms provide explicit `body` values and set
+`deterministic_bodies: true` are rendered deterministically without requiring an
+LLM credential; `vstd_core_predicates.json` and `vstd_crypto_primitives.json`
+exercise this no-LLM path.
+
 See [`forge_tasks/README.md`](forge_tasks/README.md) for the full task
 spec schema.
 

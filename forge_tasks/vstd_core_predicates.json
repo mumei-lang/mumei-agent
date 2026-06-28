@@ -1,0 +1,65 @@
+{
+  "task_id": "vstd-core-predicates",
+  "target_file": "std/core_predicates.mm",
+  "mode": "create",
+  "priority": 4,
+  "max_retries": 6,
+  "auto_commit": false,
+  "description": "Core-seeded structural predicate helpers anchored on std/core.mm safety atoms. The generated module must remain in the Z3-decidable fragment and avoid Lean escalation.",
+  "context_files": [
+    "std/core.mm",
+    "std/contracts.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "implementation_notes": [
+    "Each atom has an explicit body so deterministic forge rendering never needs an LLM credential.",
+    "Use only linear integer constraints and 0/1 witnesses.",
+    "Anchor the contracts on std/core.mm concepts such as safe_to_index and is_nonzero without importing new trusted atoms."
+  ],
+  "atoms": [
+    {
+      "name": "safe_index_or_zero",
+      "description": "Return idx when it is inside an inclusive non-negative bound, otherwise 0.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "len >= 0",
+      "ensures": "result >= 0 && result <= len",
+      "reference_patterns": ["safe_to_index", "safe_narrow"],
+      "body": "if idx >= 0 { if idx <= len { idx } else { 0 } } else { 0 }"
+    },
+    {
+      "name": "is_nonzero_flag",
+      "description": "Return a 0/1 witness for nonzero scalar values.",
+      "inputs": [
+        {"name": "value", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "true",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_nonzero"],
+      "body": "if value != 0 { 1 } else { 0 }"
+    },
+    {
+      "name": "preserve_safe_index",
+      "description": "Expose an already-safe index unchanged while preserving its bound evidence.",
+      "inputs": [
+        {"name": "idx", "type": "i64"},
+        {"name": "len", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "idx >= 0 && len >= 0 && idx <= len",
+      "ensures": "result >= 0 && result <= len",
+      "reference_patterns": ["safe_to_index", "BoundedIndex"],
+      "body": "idx"
+    }
+  ],
+  "source": "vstd-roadmap-core-seed",
+  "difficulty": "low",
+  "deterministic_bodies": true,
+  "module_title": "std/core_predicates — core-seeded predicate helpers"
+}
