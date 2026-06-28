@@ -405,6 +405,7 @@ class TestForgeOneModule:
             "task_id": "new-mod",
             "target_file": "std/newmod.mm",
             "mode": "create",
+            "deterministic_bodies": True,
             "atoms": [
                 {
                     "name": "f",

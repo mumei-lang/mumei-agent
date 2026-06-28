@@ -120,5 +120,6 @@
   ],
   "source": "vstd-roadmap",
   "difficulty": "medium",
-  "deterministic_bodies": true
+  "deterministic_bodies": true,
+  "module_title": "std/crypto/primitives — verified crypto primitives"
 }

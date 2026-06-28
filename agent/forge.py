@@ -771,6 +771,8 @@ class MumeiForge:
 
     def _render_deterministic_module(self, task: dict[str, Any]) -> str:
         """Render create/replace module tasks that provide explicit atom bodies."""
+        if task.get("deterministic_bodies") is not True:
+            return ""
         atoms = task.get("atoms") or []
         if not atoms or any(not isinstance(atom, dict) for atom in atoms):
             return ""
@@ -780,9 +782,12 @@ class MumeiForge:
         target_file = str(task.get("target_file", "std/generated.mm"))
         module_name = target_file.removeprefix("std/").removesuffix(".mm")
         alias = module_name.split("/")[-1].replace("-", "_")
+        module_title = str(
+            task.get("module_title") or f"{target_file} — deterministic forge output"
+        )
         lines = [
             "// =============================================================",
-            f"// {target_file} — deterministic forge output",
+            f"// {module_title}",
             "// =============================================================",
             "// 明示 body を持つ forge task から決定的に生成した検証対象。",
             "// LLM 呼び出しなしで forge できる構造的契約のみを含む。",
