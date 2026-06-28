@@ -15,6 +15,7 @@ import z3
 from agent.cross_validation import (
     _dedupe_strings,
     _infer_foreign_source_line_map,
+    _go_function_declarations,
     _infer_go_contracts,
 )
 from agent.mumei_client import create_mumei_client
@@ -94,7 +95,7 @@ class ForeignCodeExtractor:
         """Extract Go ``func`` declarations, ``//`` contracts, and safe-path hints."""
         pattern = re.compile(
             r"(?P<comment>(?:\s*//[^\n]*\n)*)\s*"
-            r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+            r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
             r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?",
             re.DOTALL,
         )
@@ -565,7 +566,7 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             "TypeScript",
         )
     if normalized == "go":
-        return _detect_block_safety_issues(source, _go_function_blocks(source), "Go")
+        return _detect_go_safety_issues(source)
     if normalized == "python":
         return _detect_python_safety_issues(source)
     return []
@@ -616,10 +617,28 @@ def _detect_block_safety_issues(
     return issues
 
 
+def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for name, params_text, _return_type, body in _go_function_declarations(source):
+        param_names = set(_go_params(params_text))
+        for expression in _return_expressions(body):
+            issues.extend(
+                _issues_for_expression(
+                    _safe_identifier(name),
+                    expression,
+                    "Go",
+                    dereference_values=param_names,
+                )
+            )
+    return issues
+
+
 def _issues_for_expression(
     function_name: str,
     expression: str,
     label: str,
+    *,
+    dereference_values: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for match in re.finditer(
@@ -646,7 +665,7 @@ def _issues_for_expression(
             )
         )
     if label == "Go":
-        for value in _go_nil_dereference_values(expression):
+        for value in _go_nil_dereference_values(expression, dereference_values):
             counterexample = {f"{value}_is_nil": True}
             issues.append(
                 ForeignSafetyIssue(
@@ -774,15 +793,22 @@ def _normalize_contract_text(text: str) -> str:
     return re.sub(r"\s+", "", text.lower()).replace("&&", "and")
 
 
-def _go_nil_dereference_values(expression: str) -> list[str]:
+def _go_nil_dereference_values(
+    expression: str,
+    eligible_values: set[str] | None = None,
+) -> list[str]:
     values: list[str] = []
     for match in re.finditer(r"\*\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)", expression):
-        values.append(match.group("value"))
+        value = match.group("value")
+        if eligible_values is None or value in eligible_values:
+            values.append(value)
     for match in re.finditer(
         r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*\.",
         expression,
     ):
-        values.append(match.group("value"))
+        value = match.group("value")
+        if eligible_values is None or value in eligible_values:
+            values.append(value)
     return _dedupe_strings(values)
 
 

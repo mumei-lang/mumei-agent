@@ -884,3 +884,15 @@ def test_audit_pipeline_reports_go_representative_violations(tmp_path: Path) -> 
         assert result.next_steps
         assert any(expected_violation in issue for issue in result.verification_violations)
         assert result.counterexample_values
+
+
+def test_foreign_go_verifier_does_not_treat_package_selector_as_nil() -> None:
+    code = 'package demo\nimport "math"\nfunc abs(x int) int { return math.Abs(x) }\n'
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(code, "go")
+
+    assert result["success"] is True
+    assert result["errors"] == []
+    assert all("math" not in message for message in result["errors"])

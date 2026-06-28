@@ -159,6 +159,35 @@ def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
     assert result.inferred_atoms[0].return_type == "bool"
 
 
+def test_validate_foreign_code_go_ignores_package_selector_for_nil_contract() -> None:
+    result = validate_foreign_code(
+        'package demo\nimport "math"\nfunc abs(x int) int { return math.Abs(x) }\n',
+        "go",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].requires == "true"
+    assert "math != nil" not in result.mumei_source
+
+
+def test_validate_foreign_code_go_extracts_method_receiver() -> None:
+    result = validate_foreign_code(
+        "package users\nfunc (u *User) Age() int { return u.Age }\n",
+        "go",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].name == "Age"
+    assert result.inferred_atoms[0].params[0].name == "u"
+    assert result.inferred_atoms[0].requires == "u != nil"
+
+
 @pytest.mark.parametrize(
     ("language", "filename", "source"),
     [

@@ -2400,8 +2400,8 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
         return _infer_regex_source_line_map(
             code,
             re.compile(
-                r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-                r"\((?P<params>[^)]*)\)\s*(?P<ret>[A-Za-z0-9_]+)?\s*\{",
+                r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+                r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?\s*\{",
                 flags=re.DOTALL,
             ),
         )
@@ -2593,26 +2593,36 @@ def _generic_safety_requires_for_expression(expression: str) -> list[str]:
     return requirements
 
 
-def _go_safety_requires_for_expression(expression: str) -> str:
+def _go_safety_requires_for_expression(
+    expression: str,
+    param_names: Iterable[str] = (),
+) -> str:
     requirements: list[str] = []
     base = _safety_requires_for_expression(expression)
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
-    for value in _go_nil_dereference_values(expression):
+    for value in _go_nil_dereference_values(expression, set(param_names)):
         requirements.append(f"{value} != nil")
     requirements.extend(_integer_overflow_requires_for_expression(expression))
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
 
 
-def _go_nil_dereference_values(expression: str) -> list[str]:
+def _go_nil_dereference_values(
+    expression: str,
+    eligible_values: set[str] | None = None,
+) -> list[str]:
     values: list[str] = []
     for match in re.finditer(r"\*\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)", expression):
-        values.append(match.group("value"))
+        value = match.group("value")
+        if eligible_values is None or value in eligible_values:
+            values.append(value)
     for match in re.finditer(
         r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*\.",
         expression,
     ):
-        values.append(match.group("value"))
+        value = match.group("value")
+        if eligible_values is None or value in eligible_values:
+            values.append(value)
     return _dedupe_strings(values)
 
 
@@ -2713,7 +2723,10 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
                 name=_safe_identifier(name),
                 params=params,
                 return_type="i64" if return_type else "bool",
-                requires=_go_safety_requires_for_expression(raw_return_expr),
+                requires=_go_safety_requires_for_expression(
+                    raw_return_expr,
+                    [param.name for param in params],
+                ),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
         )
@@ -2722,17 +2735,25 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
 
 def _go_function_declarations(code: str) -> list[tuple[str, str, str, str]]:
     pattern = re.compile(
-        r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+        r"func\s+(?:(?P<receiver>\([^)]*\))\s*)?"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
         r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?\s*\{",
         flags=re.DOTALL,
     )
     declarations: list[tuple[str, str, str, str]] = []
     for match in pattern.finditer(code):
         body = _balanced_brace_body(code, match.end() - 1)
+        receiver = (match.group("receiver") or "").strip()
+        receiver = receiver.removeprefix("(").removesuffix(")").strip()
+        params = ", ".join(
+            part
+            for part in (receiver, match.group("params"))
+            if part
+        )
         declarations.append(
             (
                 match.group("name"),
-                match.group("params"),
+                params,
                 match.group("ret") or "",
                 body,
             )
