@@ -74,7 +74,6 @@ class CodeToSpecConverter:
         )
         layer_b_languages = {"python", "rust", "typescript", "go"}
         if normalized not in layer_b_languages:
-            layer_a_languages = sorted(set(CodeToSpecExtractor.EXTENSION_MAP.values()))
             is_layer_a = normalized in set(CodeToSpecExtractor.EXTENSION_MAP.values())
             if is_layer_a:
                 hint = (
@@ -83,11 +82,14 @@ class CodeToSpecConverter:
                     f"{', '.join(sorted(layer_b_languages))}."
                 )
             else:
+                layer_a_only = sorted(
+                    set(CodeToSpecExtractor.EXTENSION_MAP.values()) - layer_b_languages
+                )
                 hint = (
                     f"language must be one of: {', '.join(sorted(layer_b_languages))} "
                     f"(Z3 strict verification). "
                     f"Spec extraction (Layer A) also supports: "
-                    f"{', '.join(layer_a_languages)}."
+                    f"{', '.join(layer_a_only)}."
                 )
             return CodeToSpecConversionResult(
                 success=False,
