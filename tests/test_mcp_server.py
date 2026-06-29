@@ -528,6 +528,186 @@ class TestHealFile:
         fake_session.create_message.assert_not_called()
         fake_openai.chat.completions.create.assert_called_once()
 
+    # -- public API capability detection tests ------------------------------
+
+    def test_public_api_sampling_declared_uses_sampling(self, monkeypatch) -> None:
+        """Public client_params + check_client_capability declares sampling."""
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+        fake_config.model = "gpt-4o"
+        fake_config.strategy = "single"
+        fake_config.use_mcp_sampling = True
+        fake_config.create_client.side_effect = AssertionError("OpenAI used")
+
+        async def create_message(messages, **kwargs):
+            return mcp_types.CreateMessageResult(
+                role="assistant",
+                content=mcp_types.TextContent(
+                    type="text",
+                    text="```mumei\natom pub_ok() ensures: true; body: 0;\n```",
+                ),
+                model="client-model",
+            )
+
+        class _Session:
+            def __init__(self):
+                self.create_message = create_message
+                self._check_called = False
+
+            @property
+            def client_params(self):
+                return SimpleNamespace(
+                    capabilities=SimpleNamespace(sampling=SimpleNamespace())
+                )
+
+            def check_client_capability(self, cap):
+                self._check_called = True
+                return True
+
+        session = _Session()
+        fake_ctx = SimpleNamespace(session=session)
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.heal_file(
+                    "atom broken() ensures: false; body: 0;",
+                    error_report=json.dumps({"failure_type": "postcondition"}),
+                    ctx=fake_ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert result["success"] is True
+        assert "atom pub_ok" in result["healed_code"]
+        assert session._check_called, "check_client_capability not invoked"
+        fake_config.create_client.assert_not_called()
+
+    def test_public_api_no_sampling_falls_back_to_openai(self, monkeypatch) -> None:
+        """Public API declares no sampling → OpenAI fallback."""
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+
+        fake_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="```mumei\natom pub_fb() ensures: true; body: 0;\n```"
+                    )
+                )
+            ]
+        )
+        fake_openai = MagicMock()
+        fake_openai.chat.completions.create.return_value = fake_response
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+        fake_config.model = "gpt-4o"
+        fake_config.strategy = "single"
+        fake_config.use_mcp_sampling = True
+        fake_config.create_client.return_value = fake_openai
+
+        class _Session:
+            def __init__(self):
+                self.create_message = MagicMock(
+                    side_effect=AssertionError("sampling was called")
+                )
+                self._check_called = False
+
+            @property
+            def client_params(self):
+                return SimpleNamespace(
+                    capabilities=SimpleNamespace(sampling=None)
+                )
+
+            def check_client_capability(self, cap):
+                self._check_called = True
+                return False
+
+        session = _Session()
+        fake_ctx = SimpleNamespace(session=session)
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.heal_file(
+                    "atom broken() ensures: false; body: 0;",
+                    error_report=json.dumps({"failure_type": "postcondition"}),
+                    ctx=fake_ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert "atom pub_fb" in result["healed_code"]
+        assert session._check_called, "check_client_capability not invoked"
+        session.create_message.assert_not_called()
+        fake_openai.chat.completions.create.assert_called_once()
+
+    def test_public_api_preferred_over_private_attr(self, monkeypatch) -> None:
+        """Public API (True) wins when private _client_params says no sampling."""
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+        fake_config.model = "gpt-4o"
+        fake_config.strategy = "single"
+        fake_config.use_mcp_sampling = True
+        fake_config.create_client.side_effect = AssertionError("OpenAI used")
+
+        async def create_message(messages, **kwargs):
+            return mcp_types.CreateMessageResult(
+                role="assistant",
+                content=mcp_types.TextContent(
+                    type="text",
+                    text="```mumei\natom priority() ensures: true; body: 0;\n```",
+                ),
+                model="client-model",
+            )
+
+        class _Session:
+            def __init__(self):
+                self.create_message = create_message
+                # Private attr says no sampling — should be ignored.
+                self._client_params = SimpleNamespace(
+                    capabilities=SimpleNamespace(sampling=None)
+                )
+
+            @property
+            def client_params(self):
+                return SimpleNamespace(
+                    capabilities=SimpleNamespace(sampling=SimpleNamespace())
+                )
+
+            def check_client_capability(self, cap):
+                return True
+
+        fake_ctx = SimpleNamespace(session=_Session())
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.heal_file(
+                    "atom broken() ensures: false; body: 0;",
+                    error_report=json.dumps({"failure_type": "postcondition"}),
+                    ctx=fake_ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert "atom priority" in result["healed_code"]
+        fake_config.create_client.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # measure_std_health

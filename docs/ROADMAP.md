@@ -55,7 +55,10 @@ text `sampling/createMessage` requests:
 - map `role=system` messages to `systemPrompt`
 - pass the configured model as `modelPreferences.hints[].name`
 - bound `maxTokens` by `MCP_SAMPLING_MAX_TOKENS` (default `4096`)
-- check initialization `capabilities.sampling` before sending sampling requests
+- check initialization `capabilities.sampling` before sending sampling requests,
+  preferring the public `session.client_params` property and
+  `session.check_client_capability()` method, with `session._client_params`
+  retained as a fallback for older SDK versions
 - omit `includeContext`; 2025-11-25 marks `"thisServer"` and `"allServers"`
   as soft-deprecated and requires explicit `sampling.context` capability before
   using them
@@ -64,9 +67,14 @@ text `sampling/createMessage` requests:
 
 Future work:
 
-1. Keep capability detection synchronized with FastMCP/MCP SDK initialization
-   metadata and continue falling back to OpenAI-compatible providers when
-   sampling is absent.
+1. ✅ **Complete** — capability detection now uses the public
+   `session.client_params` property and `session.check_client_capability()`
+   method (MCP SDK ≥ 1.28) as the primary path.  `session._client_params` is
+   retained as a fallback for older SDK versions.  Resolution order:
+   (a) public `client_params` + `check_client_capability()`,
+   (b) private `_client_params` attribute,
+   (c) unknown → assume capable (backward-compat).
+   OpenAI-compatible fallback when sampling is absent is unchanged.
 2. Add optional tool-enabled sampling only after `sampling.tools` capability
    detection is covered by tests, and keep tool definitions scoped to each
    sampling request.
