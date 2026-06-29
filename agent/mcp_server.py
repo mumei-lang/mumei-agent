@@ -1607,6 +1607,13 @@ def validate_nl_spec_multi(
     try:
         config = AgentConfig()
         llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+        )
+
+    try:
         result = cross_validation.validate_nl_spec_multi(
             raw,
             config=config,

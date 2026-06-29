@@ -1161,7 +1161,10 @@ def _fallback_ctx():
         raise RuntimeError("sampling unsupported")
 
     return SimpleNamespace(
-        session=SimpleNamespace(create_message=create_message)
+        session=SimpleNamespace(
+            create_message=create_message,
+            _client_params={"capabilities": {"sampling": {}}},
+        )
     )
 
 
