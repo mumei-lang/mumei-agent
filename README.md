@@ -100,7 +100,9 @@ text generations: user/assistant chat messages are converted to
 `SamplingMessage` text content, system messages become `systemPrompt`, model
 names are passed as `modelPreferences.hints`, and `maxTokens` is bounded by
 `MCP_SAMPLING_MAX_TOKENS`.  The server checks the client's initialization
-`capabilities.sampling` before sending sampling requests.  It intentionally omits
+`capabilities.sampling` before sending sampling requests — preferring the public
+`session.client_params` / `session.check_client_capability()` API and falling
+back to the private `session._client_params` attribute for older SDK versions.  It intentionally omits
 `includeContext`, sampling tools, images, and audio until the corresponding
 client capabilities (`sampling.context` or `sampling.tools`) and concrete
 forge/heal use cases are covered by tests.  The `includeContext` values

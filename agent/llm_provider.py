@@ -209,8 +209,57 @@ def _to_sampling_messages(
     return sampling_messages, "\n\n".join(system_parts)
 
 
+_SENTINEL = object()
+
+
 def _client_supports_basic_sampling(ctx: Context) -> bool:
+    """Check whether the connected MCP client declared sampling capability.
+
+    Resolution order:
+      (a) Public API – ``session.client_params`` property +
+          ``session.check_client_capability()``.
+      (b) Private attribute fallback – ``session._client_params`` (kept for
+          older SDK versions that lack the public property).
+      (c) Unknown – return ``True`` (optimistic; preserves backward-compat
+          behaviour where an uninitialised session is assumed capable).
+    """
     session = getattr(ctx, "session", None)
+    if session is None:
+        return True
+
+    # (a) Public API ---------------------------------------------------------
+    cp = getattr(session, "client_params", _SENTINEL)
+    if cp is not _SENTINEL:
+        if cp is None:
+            # Session exists but no initialisation params yet – optimistic.
+            return True
+        check = getattr(session, "check_client_capability", None)
+        if callable(check):
+            try:
+                from mcp import types as mcp_types
+
+                return check(
+                    mcp_types.ClientCapabilities(
+                        sampling=mcp_types.SamplingCapability(),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "check_client_capability raised; "
+                    "falling back to private attribute"
+                )
+        # client_params exists but check_client_capability does not – inspect
+        # the value directly via _field_value.
+        capabilities = _field_value(cp, "capabilities")
+        if capabilities is None:
+            return True
+        return _field_value(capabilities, "sampling") is not None
+
+    # (b) Private attribute fallback -----------------------------------------
+    logger.debug(
+        "public client_params property not found on session; "
+        "falling back to private _client_params"
+    )
     client_params = getattr(session, "_client_params", None)
     if client_params is None:
         return True
