@@ -62,3 +62,46 @@ test "$failures" -eq 0
 
 - This is shell-only runtime testing; do not record the browser.
 - In the PR test comment, list proof-cert verification, forge-log validation, full std regression, and current CI status.
+
+
+## Deterministic Forge Task Regression
+
+For a focused deterministic-body forge regression, collect the exact pytest node first if unsure:
+
+```bash
+cd /home/ubuntu/repos/mumei-agent
+uv run pytest tests/test_forge.py --collect-only -q | grep core_guards
+```
+
+For `vstd_core_guards.json`, the verified focused node is:
+
+```bash
+cd /home/ubuntu/repos/mumei-agent
+uv run pytest tests/test_forge.py::TestForgeOneModule::test_core_guards_task_uses_deterministic_bodies -q
+```
+
+Expected assertions:
+
+- The rendered module contains the expected atom signatures.
+- `forge.config.create_client.call_count == 0`, proving no LLM client was used.
+
+## Forge Log and Certificate Schema Notes
+
+`forge_log.json` uses a top-level `runs` array. For deterministic stdlib forge tasks, validate the matching run rather than looking for an `entries` key:
+
+```python
+runs = [r for r in log["runs"] if r["task_id"] == "vstd-core-guards"]
+assert len(runs) == 1
+assert runs[0]["status"] == "success"
+assert runs[0]["error"] is None
+assert runs[0]["outside_decidable_fragment"] is False
+```
+
+When checking proof certificates for Z3-proven generated std atoms, assert the solver result and status separately:
+
+- `z3_check_result == "unsat"`
+- `z3_result_class == "unsat"`
+- `status == "verified"`
+- no atom has `z3_check_result` equal to `sat` or `unknown`
+
+Do not expect `z3_result_class == "verified"`; `verified` is the certificate atom `status`.
