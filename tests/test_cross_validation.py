@@ -291,6 +291,65 @@ def test_validate_code_cli_writes_json_report(tmp_path: Path) -> None:
     assert payload["inferred_atoms"][0]["name"] == "add"
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected_language", "code"),
+    [
+        ("impl.py", "python", "def add(a: int, b: int) -> int:\n    return a + b\n"),
+        ("lib.rs", "rust", "pub fn add(a: i64, b: i64) -> i64 { a + b }\n"),
+        ("app.ts", "typescript", "export function add(a: number, b: number): number { return a + b; }\n"),
+        ("app.tsx", "typescript", "export function add(a: number, b: number): number { return a + b; }\n"),
+        ("main.go", "go", "package demo\nfunc add(a int, b int) int { return a + b }\n"),
+    ],
+)
+def test_validate_code_cli_infers_language_from_extension(
+    tmp_path: Path,
+    filename: str,
+    expected_language: str,
+    code: str,
+) -> None:
+    """--language omitted: language is inferred from the file extension."""
+    source = tmp_path / filename
+    output = tmp_path / "report.json"
+    source.write_text(code, encoding="utf-8")
+    args = build_validate_code_parser().parse_args(
+        ["--input", str(source), "--output", str(output), "--no-llm", "--no-mumei"]
+    )
+
+    result = main_validate_code(args)
+
+    assert result.language == expected_language
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["language"] == expected_language
+
+
+def test_validate_code_cli_unsupported_extension_exits(tmp_path: Path) -> None:
+    """Unsupported extension without --language exits with a clear error."""
+    source = tmp_path / "data.csv"
+    source.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
+    args = build_validate_code_parser().parse_args(
+        ["--input", str(source), "--no-llm", "--no-mumei"]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main_validate_code(args)
+
+    assert exc.value.code == 1
+
+
+def test_validate_code_cli_explicit_language_overrides_extension(tmp_path: Path) -> None:
+    """Explicit --language takes precedence over the file extension."""
+    source = tmp_path / "code.py"
+    output = tmp_path / "report.json"
+    source.write_text("pub fn add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")
+    args = build_validate_code_parser().parse_args(
+        ["--input", str(source), "--language", "rust", "--output", str(output), "--no-llm", "--no-mumei"]
+    )
+
+    result = main_validate_code(args)
+
+    assert result.language == "rust"
+
+
 def test_validate_spec_and_code_parsers_accept_required_flags() -> None:
     spec_args = build_validate_spec_parser().parse_args(
         ["--input", "spec.txt", "--format", "nl", "--no-llm"]

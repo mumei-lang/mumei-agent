@@ -122,7 +122,7 @@ docker exec mumei-ollama ollama pull qwen3.5
 | 仕様→コード整合性検証 | `mumei-agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
 | コード→仕様の逆検証 | `mumei-agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
 | 自然言語仕様の詳細検証（矛盾・曖昧さ・過制約） | `mumei-agent validate-spec --input spec.txt --format nl` |
-| 既存コードの詳細検証 | `mumei-agent validate-code --input code.py --language python` |
+| 既存コードの詳細検証 | `mumei-agent validate-code --input code.py` （`--language` 省略時は拡張子から自動推定） |
 | 仕様→コードの整合性検証 | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
 | コード→仕様のドリフト検出 | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
 | 4モード no-.mm 参照デモ | `cd ../mumei-demo && CI_FIXTURE_MODE=1 make demo-spec-code` |
@@ -246,7 +246,16 @@ mumei-agent audit --code-file src/ --format markdown --output reports/src-audit.
 `validate-code --input`、`validate-spec-to-code --code`、`validate-code-to-spec --code` は単一コードファイルを指定する。
 
 `extract-spec` の対応言語: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, `java`（拡張子から自動検出）。
-`validate-code` の `--language` は必須で、`python|rust|typescript|go` のいずれかを指定する。`validate-spec-to-code` / `validate-code-to-spec` の `--language` は任意で、省略時はコードファイルの拡張子から推定する。
+`validate-code` の `--language` は任意で、`python|rust|typescript|go` のいずれかを指定する。省略時は `--input` の拡張子から自動推定する（`.py`→python, `.rs`→rust, `.ts`/`.tsx`→typescript, `.go`→go）。`validate-spec-to-code` / `validate-code-to-spec` の `--language` も同様に任意。
+
+#### 対応レベル
+
+| レベル | 対象 | 対応言語 |
+|--------|------|----------|
+| 層A（spec 抽出） | `extract-spec --code-file`, `extract_spec_from_code` MCP | `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, `java` |
+| 層B（Z3 厳密検証） | `validate-code`, `validate-spec-to-code`, `validate-code-to-spec`, `convert_source` | `python`, `rust`, `typescript`, `go` |
+
+層A は LLM/正規表現ベースの自然言語仕様抽出で、8言語に対応する。層B は Z3 SMT ソルバによる厳密検証で、4言語のみ対応する。層A のみ対応する言語（`c`, `cpp`, `java`, `javascript`）で `convert_source` を呼ぶと、「spec 抽出には対応するが Z3 厳密検証は未対応」のエラーを返す。
 
 ### 2-1. 単一ファイル
 
@@ -307,11 +316,11 @@ mumei-agent extract-spec \
 
 ```bash
 mumei-agent validate-code \
-  --input src/payment.py \
-  --language python  # 必須: python|rust|typescript|go
+  --input src/payment.py
+  # --language 省略時は拡張子から自動推定（python|rust|typescript|go）
 ```
 
-`validate-code` の `--language` は必須。自動検出は行わない。
+`validate-code` の `--language` は省略可能。省略時は `--input` の拡張子から推定し、対応外拡張子の場合はエラーで終了する。
 `--no-llm` フラグを付けると、正規表現ベースの軽量抽出のみで実行できる。
 
 出力フィールド:

@@ -75,6 +75,8 @@ canonical roadmap の V1-A〜V1-E 達成基準を箇条書きで抽出し、mume
 | 7固定キー alias 禁止テスト | `tests/test_audit.py:574` `test_scan_and_fix_shares_audit_contract_and_next_steps_review_gate` |
 | `cross_validation.py` 4言語対応 | `agent/cross_validation.py:36` `SUPPORTED_FOREIGN_CODE_LANGUAGES = {"python", "rust", "typescript", "go"}` |
 | TS infer contracts | `agent/cross_validation.py:2702` `_infer_typescript_contracts()` 実装済み |
+| `validate-code --language` 省略可 | `build_validate_code_parser` で `required=True` を削除、`_infer_validate_code_language` で拡張子から自動推定 |
+| 層A/層B 対応レベル分離 | 層A（spec 抽出）は8言語、層B（Z3 厳密検証）は4言語。`convert_source` は層A-only 言語に対し明示エラーを返す |
 
 **ギャップ: なし**
 

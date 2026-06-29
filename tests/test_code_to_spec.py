@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agent.code_to_spec import CodeToSpecExtractor
+from agent.code_to_spec import CodeToSpecConverter, CodeToSpecExtractor
 from agent.config import AgentConfig
 
 
@@ -105,3 +105,80 @@ def test_extract_from_shift_jis_file_with_mock_llm(tmp_path: Path) -> None:
     assert result.detected_language == "rust"
     prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert "日本語コメント" in prompt
+
+
+def test_detect_language_from_extension_java_cpp() -> None:
+    """Layer A languages: Java and C++ are detected from extensions."""
+    extractor = CodeToSpecExtractor(AgentConfig(api_key="test"))
+
+    assert extractor._detect_language(Path("Main.java"), "") == "java"
+    assert extractor._detect_language(Path("lib.cpp"), "") == "cpp"
+    assert extractor._detect_language(Path("lib.cc"), "") == "cpp"
+    assert extractor._detect_language(Path("lib.cxx"), "") == "cpp"
+    assert extractor._detect_language(Path("header.hpp"), "") == "cpp"
+    assert extractor._detect_language(Path("app.js"), "") == "javascript"
+    assert extractor._detect_language(Path("app.jsx"), "") == "javascript"
+
+
+def test_detect_language_from_content_java_cpp() -> None:
+    """Layer A languages: Java and C++ are detected from content heuristics."""
+    extractor = CodeToSpecExtractor(AgentConfig(api_key="test"))
+
+    assert extractor._detect_language(
+        Path("unknown"),
+        "public static void main(String[] args) {}",
+    ) == "java"
+    assert extractor._detect_language(
+        Path("unknown"),
+        '#include <vector>\nstd::vector<int> v;\nnamespace demo {}',
+    ) == "cpp"
+
+
+def test_extract_from_file_layer_a_java(tmp_path: Path) -> None:
+    """Layer A extraction works for Java (no LLM, deterministic fallback)."""
+    source = tmp_path / "Main.java"
+    source.write_text(
+        "public class Main {\n"
+        "    public static int add(int a, int b) { return a + b; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    config = AgentConfig(api_key="")
+    extractor = CodeToSpecExtractor(config)
+
+    result = extractor.extract_from_file(source)
+
+    assert result.detected_language == "java"
+
+
+def test_convert_source_layer_b_unsupported_returns_layer_a_hint() -> None:
+    """convert_source for a Layer-A-only language returns a helpful error."""
+    converter = CodeToSpecConverter(AgentConfig())
+    result = converter.convert_source("class Main {}", "java")
+
+    assert result.success is False
+    assert "spec extraction (Layer A)" in result.errors[0]
+    assert "Z3 strict verification (Layer B)" in result.errors[0]
+    assert result.detected_language == "java"
+
+
+def test_convert_source_layer_b_supported_succeeds() -> None:
+    """convert_source for a Layer B language succeeds."""
+    converter = CodeToSpecConverter(AgentConfig())
+    result = converter.convert_source(
+        "def add(a: int, b: int) -> int:\n    return a + b\n",
+        "python",
+    )
+
+    assert result.success is True
+    assert result.detected_language == "python"
+
+
+def test_extension_map_matches_language_type() -> None:
+    """EXTENSION_MAP values are a subset of the Language literal."""
+    from agent.code_to_spec import Language
+    import typing
+
+    allowed = set(typing.get_args(Language))
+    ext_languages = set(CodeToSpecExtractor.EXTENSION_MAP.values())
+    assert ext_languages <= allowed, f"EXTENSION_MAP has languages not in Language type: {ext_languages - allowed}"
