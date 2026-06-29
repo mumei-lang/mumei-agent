@@ -219,6 +219,12 @@ canonical roadmap の V1-A〜V1-E 達成基準を箇条書きで抽出し、mume
 
 ---
 
+## mumei 本体 TypeScript 追従
+
+mumei 本体（`mumei-lang/mumei`）の `src/agent.rs` `infer_code_language` に `.ts` / `.tsx` → `"typescript"` マッピングが追加され、REPL `:verify-code` と LSP foreign-code diagnostics が Python / Rust / TypeScript / Go の4言語を均一にサポートするようになった。これにより `mumei-agent` 側で PR #207 により解消された TypeScript 非対称が mumei 本体側でも閉じ、canonical roadmap の no-`.mm` 4言語契約が end-to-end で整合する。
+
+---
+
 ## 推奨次タスク候補
 
 1. ~~MCP sampling の後回し項目（tool-enabled sampling / multimodal）~~ — 対象外
