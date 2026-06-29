@@ -1251,6 +1251,91 @@ class TestMcpSamplingValidateNlSpec:
 
         assert result["status"] == "ok"
 
+    def test_validate_nl_spec_missing_capability(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+
+        fake_config, fake_openai = _fallback_sampling_config()
+        ctx = _no_capability_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_nl_spec(
+                    "requires: x >= 0; ensures: result >= x",
+                    use_llm=True,
+                    run_mumei=False,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        ctx.session.create_message.assert_not_called()
+
+
+class TestMcpSamplingValidateNlSpecMulti:
+    def test_validate_nl_spec_multi_uses_sampling(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        specs = json.dumps(["requires: x >= 0", "ensures: result > 0"])
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_nl_spec_multi(
+                    specs,
+                    use_llm=True,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert result["spec_count"] == 2
+        fake_config.create_client.assert_not_called()
+
+    def test_validate_nl_spec_multi_sampling_fallback(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+
+        fake_config, fake_openai = _fallback_sampling_config()
+        ctx = _fallback_ctx()
+
+        specs = json.dumps(["requires: x >= 0", "ensures: result > 0"])
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_nl_spec_multi(
+                    specs,
+                    use_llm=True,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert result["spec_count"] == 2
+
+    def test_validate_nl_spec_multi_missing_capability(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+
+        fake_config, fake_openai = _fallback_sampling_config()
+        ctx = _no_capability_ctx()
+
+        specs = json.dumps(["requires: x >= 0", "ensures: result > 0"])
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_nl_spec_multi(
+                    specs,
+                    use_llm=True,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert result["spec_count"] == 2
+        ctx.session.create_message.assert_not_called()
+
 
 class TestMcpSamplingValidateForeignCode:
     def test_validate_foreign_code_uses_sampling(self, monkeypatch) -> None:
