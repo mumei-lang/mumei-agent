@@ -246,7 +246,7 @@ def _client_supports_basic_sampling(ctx: Context) -> bool:
             except Exception:
                 logger.debug(
                     "check_client_capability raised; "
-                    "falling back to private attribute"
+                    "falling back to direct client_params inspection"
                 )
         # client_params exists but check_client_capability does not – inspect
         # the value directly via _field_value.
