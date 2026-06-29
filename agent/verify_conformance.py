@@ -18,7 +18,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser = parser or argparse.ArgumentParser(description="Verify spec-to-code conformance.")
     parser.add_argument("--spec", required=True, help="Path to natural-language spec file.")
     parser.add_argument("--code", required=True, help="Path to source code.")
-    parser.add_argument("--language", choices=["python", "rust", "go"], help="Source language.")
+    parser.add_argument("--language", choices=["python", "rust", "typescript", "go"], help="Source language.")
     parser.add_argument("--output", help="Optional output path.")
     parser.add_argument(
         "--format",

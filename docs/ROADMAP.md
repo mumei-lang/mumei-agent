@@ -327,10 +327,6 @@ feedback として返す。
 - 複数 `.mm` の cross-spec result を MCP client が直接取得できる。
 - `cross_validation_gaps` が `audit` summary に集約され、migration / human review 分岐に使える。
 
-**既知の制限**:
-
-- `verify-conformance` / `verify-traceability` CLI の `--language` choices は `["python", "rust", "go"]` のみ（TypeScript は `audit` / `validate-spec-to-code` / `validate-code-to-spec` / MCP 経由では対応済みだが、conformance/traceability 単体 CLI は未対応）。
-
 ### P14-D: 人間向けUX強化（Human-in-the-Loop）✅ Implemented
 
 自動監査の結果を人間が判断しやすい導線にまとめ、`.mm` を書く前の入口を標準化する。

@@ -483,8 +483,8 @@ See `.env.example` for configuration details.
 | `validate-code` | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go) | `mumei-agent validate-code --input code.ts --language typescript` |
 | `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
 | `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
-| `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` |
-| `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` |
+| `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` (python\|rust\|typescript\|go) |
+| `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` (python\|rust\|typescript\|go) |
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `mumei-agent check-spec-health spec.mm` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `mumei-agent mcp-server` |
 
