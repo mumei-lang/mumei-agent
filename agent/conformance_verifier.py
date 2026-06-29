@@ -14,6 +14,7 @@ from agent.cross_validation import (
     MumeiContractAtom,
     SpecCodeAlignmentResult,
 )
+from agent.llm_provider import LLMProvider
 
 
 ConformanceStatus = Literal["implemented", "missing", "violated", "undocumented"]
@@ -66,6 +67,7 @@ def verify_conformance(
     use_llm: bool = True,
     run_mumei: bool = True,
     alignment: SpecCodeAlignmentResult | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> ConformanceVerificationResult:
     config = config or AgentConfig()
     if alignment is None:
@@ -76,6 +78,7 @@ def verify_conformance(
             language=language,
             use_llm=use_llm,
             run_mumei=run_mumei,
+            llm_provider=llm_provider,
         )
     code = _read_code(code_path)
     source_lines = _source_line_map(code, alignment.language)

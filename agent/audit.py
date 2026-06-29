@@ -139,10 +139,13 @@ class AuditPipeline:
         cross_validator: CrossValidatorLike | None = None,
         mumei_client: MumeiVerifyClientLike | None = None,
         heal_output_dir: str | None = None,
+        client: object | None = None,
     ) -> None:
         self.config = config or AgentConfig()
         self.mumei_client = mumei_client or create_mumei_client(self.config.mumei_bin)
-        self.code_to_spec_extractor = code_to_spec_extractor or CodeToSpecExtractor(self.config)
+        self.code_to_spec_extractor = code_to_spec_extractor or CodeToSpecExtractor(
+            self.config, client=client,
+        )
         self.spec_health_checker = spec_health_checker or SpecHealthChecker()
         self.foreign_code_verifier = foreign_code_verifier or ForeignCodeVerifier(
             mumei_bin=self.config.mumei_bin,

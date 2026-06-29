@@ -1538,6 +1538,7 @@ def validate_nl_spec(
     use_llm: bool = True,
     run_mumei: bool = True,
     domain_hint: str = "",
+    ctx: Context | None = None,
 ) -> str:
     """Validate a natural-language specification for logical health."""
     try:
@@ -1547,12 +1548,22 @@ def validate_nl_spec(
         return _err(f"failed to import cross-validation modules: {exc}")
 
     try:
+        config = AgentConfig()
+        llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+        )
+
+    try:
         result = cross_validation.validate_nl_spec(
             spec_text,
-            config=AgentConfig(),
+            config=config,
             use_llm=use_llm,
             run_mumei=run_mumei,
             domain_hint=domain_hint,
+            llm_provider=llm_provider,
         )
     except Exception as exc:
         return _err(f"validate_nl_spec failed: {exc}")
@@ -1571,6 +1582,7 @@ def validate_nl_spec_multi(
     spec_texts_json: str,
     domain_hint: str = "",
     use_llm: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Validate multiple NL spec documents for cross-document consistency.
 
@@ -1594,11 +1606,13 @@ def validate_nl_spec_multi(
 
     try:
         config = AgentConfig()
+        llm_provider = _llm_provider_for_context(config, ctx)
         result = cross_validation.validate_nl_spec_multi(
             raw,
             config=config,
             use_llm=use_llm,
             domain_hint=domain_hint,
+            llm_provider=llm_provider,
         )
     except Exception as exc:
         return _err(f"validate_nl_spec_multi failed: {exc}")
@@ -1612,6 +1626,7 @@ def _validate_existing_code_payload(
     use_llm: bool = True,
     run_mumei: bool = True,
     tool_name: str,
+    ctx: Context | None = None,
 ) -> str:
     try:
         from agent import cross_validation
@@ -1620,12 +1635,22 @@ def _validate_existing_code_payload(
         return _err(f"failed to import cross-validation modules: {exc}")
 
     try:
+        config = AgentConfig()
+        llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+        )
+
+    try:
         result = cross_validation.validate_foreign_code(
             code,
             language,
-            config=AgentConfig(),
+            config=config,
             use_llm=use_llm,
             run_mumei=run_mumei,
+            llm_provider=llm_provider,
         )
     except Exception as exc:
         return _err(f"{tool_name} failed: {exc}")
@@ -1638,6 +1663,7 @@ def validate_code(
     language: str,
     use_llm: bool = True,
     run_mumei: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."""
     return _validate_existing_code_payload(
@@ -1646,6 +1672,7 @@ def validate_code(
         use_llm=use_llm,
         run_mumei=run_mumei,
         tool_name="validate_code",
+        ctx=ctx,
     )
 
 
@@ -1655,6 +1682,7 @@ def validate_foreign_code(
     language: str,
     use_llm: bool = True,
     run_mumei: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."""
     return _validate_existing_code_payload(
@@ -1663,6 +1691,7 @@ def validate_foreign_code(
         use_llm=use_llm,
         run_mumei=run_mumei,
         tool_name="validate_foreign_code",
+        ctx=ctx,
     )
 
 
@@ -1673,6 +1702,7 @@ def validate_spec_to_code(
     language: str | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Validate that a natural-language specification aligns with source code."""
     try:
@@ -1682,13 +1712,23 @@ def validate_spec_to_code(
         return _err(f"failed to import cross-validation modules: {exc}")
 
     try:
+        config = AgentConfig()
+        llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+        )
+
+    try:
         result = cross_validation.validate_spec_to_code(
             spec,
             code_path,
-            config=AgentConfig(),
+            config=config,
             language=language,
             use_llm=use_llm,
             run_mumei=run_mumei,
+            llm_provider=llm_provider,
         )
     except Exception as exc:
         return _err(f"validate_spec_to_code failed: {exc}")
@@ -1702,6 +1742,7 @@ def validate_code_to_spec(
     language: str | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Detect drift between source code and a natural-language specification."""
     try:
@@ -1711,13 +1752,23 @@ def validate_code_to_spec(
         return _err(f"failed to import cross-validation modules: {exc}")
 
     try:
+        config = AgentConfig()
+        llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception as exc:
+        return _err(
+            f"AgentConfig is unavailable: {exc}",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+        )
+
+    try:
         result = cross_validation.validate_code_to_spec(
             code_path,
             spec_path,
-            config=AgentConfig(),
+            config=config,
             language=language,
             use_llm=use_llm,
             run_mumei=run_mumei,
+            llm_provider=llm_provider,
         )
     except Exception as exc:
         return _err(f"validate_code_to_spec failed: {exc}")
@@ -1731,6 +1782,7 @@ def verify_conformance(
     language: str | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
+    ctx: Context | None = None,
 ) -> dict:
     """Return structured spec-to-code conformance JSON with next_steps handoff."""
     try:
@@ -1740,13 +1792,24 @@ def verify_conformance(
         return {"status": "error", "error": f"failed to import conformance modules: {exc}"}
 
     try:
+        config = AgentConfig()
+        llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"AgentConfig is unavailable: {exc}",
+            "hint": "set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+        }
+
+    try:
         result = run_verification(
             spec,
             code_path,
-            config=AgentConfig(),
+            config=config,
             language=language,
             use_llm=use_llm,
             run_mumei=run_mumei,
+            llm_provider=llm_provider,
         )
     except Exception as exc:
         return {"status": "error", "error": f"verify_conformance failed: {exc}"}
@@ -1762,6 +1825,7 @@ def verify_code_spec_traceability(
     language: str | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
+    ctx: Context | None = None,
 ) -> dict:
     """Return bidirectional spec/code traceability JSON with next_steps handoff."""
     try:
@@ -1771,13 +1835,24 @@ def verify_code_spec_traceability(
         return {"status": "error", "error": f"failed to import traceability modules: {exc}"}
 
     try:
+        config = AgentConfig()
+        llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"AgentConfig is unavailable: {exc}",
+            "hint": "set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+        }
+
+    try:
         result = run_verification(
             spec_text,
             code_file,
-            config=AgentConfig(),
+            config=config,
             language=language,
             use_llm=use_llm,
             run_mumei=run_mumei,
+            llm_provider=llm_provider,
         )
     except Exception as exc:
         return {"status": "error", "error": f"verify_code_spec_traceability failed: {exc}"}
@@ -1792,6 +1867,7 @@ def verify_foreign_code(
     language: str,
     use_llm: bool = True,
     run_mumei: bool = True,
+    ctx: Context | None = None,
 ) -> str:
     """Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."""
     return _validate_existing_code_payload(
@@ -1800,19 +1876,33 @@ def verify_foreign_code(
         use_llm=use_llm,
         run_mumei=run_mumei,
         tool_name="verify_foreign_code",
+        ctx=ctx,
     )
 
 
 @mcp.tool()
-def audit_code(source_code: str, language: str, domain_hint: str = "") -> dict:
+def audit_code(
+    source_code: str,
+    language: str,
+    domain_hint: str = "",
+    ctx: Context | None = None,
+) -> dict:
     """Audit existing code for bugs by extracting specs and verifying them."""
     try:
         from agent.audit import AuditPipeline
+        from agent.config import AgentConfig
     except Exception as exc:  # pragma: no cover - defensive
         return {"success": False, "errors": [f"failed to import audit pipeline: {exc}"]}
 
     try:
-        result = AuditPipeline().audit_source(
+        config = AgentConfig()
+        client = _llm_client_for_context(config, ctx)
+    except Exception:
+        config = None
+        client = None
+
+    try:
+        result = AuditPipeline(config=config, client=client).audit_source(
             source_code,
             language,
             domain_hint=domain_hint,
@@ -1873,6 +1963,7 @@ def scan_and_fix(
     heal_output_dir: str = "",
     domain_hint: str = "",
     output_format: str = "json",
+    ctx: Context | None = None,
 ) -> dict:
     """
     Same contract as `mumei-agent audit --code-file ... --auto-migrate --auto-heal`.
@@ -1897,8 +1988,20 @@ def scan_and_fix(
         AUDIT_SCHEMA_KEYS,
         AuditPipeline,
     )
+    from agent.config import AgentConfig
 
-    pipeline = AuditPipeline(heal_output_dir=heal_output_dir or None)
+    try:
+        config = AgentConfig()
+        client = _llm_client_for_context(config, ctx)
+        llm_provider = _llm_provider_for_context(config, ctx)
+    except Exception:
+        config = None
+        client = None
+        llm_provider = None
+
+    pipeline = AuditPipeline(
+        config=config, heal_output_dir=heal_output_dir or None, client=client,
+    )
     code_path = Path(code_file).expanduser().resolve()
     if code_path.is_dir():
         result = pipeline.audit_directory(
@@ -1920,17 +2023,22 @@ def scan_and_fix(
     spec_alignment = None
     conformance_verification = None
     if spec and not code_path.is_dir():
-        from agent.cross_validation import validate_spec_to_code
-        from agent.conformance_verifier import verify_conformance
+        from agent.cross_validation import validate_spec_to_code as cv_validate_spec_to_code
+        from agent.conformance_verifier import verify_conformance as cv_verify_conformance
 
         spec_text = Path(spec).read_text(encoding="utf-8")
-        alignment = validate_spec_to_code(spec_text, code_file, language=language)
+        alignment = cv_validate_spec_to_code(
+            spec_text, code_file, language=language,
+            config=config, llm_provider=llm_provider,
+        )
         spec_alignment = asdict(alignment)
-        conformance = verify_conformance(
+        conformance = cv_verify_conformance(
             spec_text,
             code_file,
             language=language,
             alignment=alignment,
+            config=config,
+            llm_provider=llm_provider,
         )
         conformance_verification = asdict(conformance)
         if not conformance_verification.get("report"):
@@ -1963,6 +2071,7 @@ def extract_spec_from_code(
     domain_hint: str = "",
     generate: bool = False,
     mumei_repo: str = "",
+    ctx: Context | None = None,
 ) -> str:
     """Extract a Mumei forge task spec from an existing source-code path.
 
@@ -2008,6 +2117,7 @@ def extract_spec_from_code(
 
     try:
         config = AgentConfig()
+        llm_client = _llm_client_for_context(config, ctx)
         mumei_bin = config.mumei_bin
         if generate and mumei_repo:
             repo = _resolve_repo(mumei_repo)
@@ -2028,11 +2138,12 @@ def extract_spec_from_code(
                 domain_hint=domain_hint,
                 mumei_client=mumei,
                 max_retries=config.max_retries,
+                client=llm_client,
             )
             forge_task_spec = payload["merged_spec"]
             result = None
         else:
-            result = CodeToSpecExtractor(config).extract_from_file(
+            result = CodeToSpecExtractor(config, client=llm_client).extract_from_file(
                 source_path,
                 language=selected_language,
                 domain_hint=domain_hint,
@@ -2048,7 +2159,7 @@ def extract_spec_from_code(
     except Exception as exc:
         return _err(
             f"extract_spec_from_code failed: {exc}",
-            hint="set LLM_API_KEY (or OPENAI_API_KEY)",
+            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
         )
 
     if result is not None and (not result.success or result.forge_task_spec is None):
@@ -2067,7 +2178,7 @@ def extract_spec_from_code(
             from agent.strategies.spec_refinement import run_refinement_loop
 
             code, verified, final_spec = run_refinement_loop(
-                config.create_client(),
+                llm_client,
                 config.model,
                 _normalize_forge_task_spec(forge_task_spec),
                 generate_code,

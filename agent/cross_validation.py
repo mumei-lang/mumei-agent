@@ -19,7 +19,7 @@ import z3
 from agent.ambiguity_detector import AmbiguityDetector
 from agent.config import AgentConfig
 from agent.code_to_spec import CodeToSpecConverter
-from agent.llm_provider import OpenAILLMProvider
+from agent.llm_provider import LLMProvider, OpenAILLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.cross_validation_code import (
     CROSS_VALIDATION_CODE_SYSTEM_PROMPT,
@@ -219,6 +219,7 @@ def validate_nl_spec(
     use_llm: bool = True,
     run_mumei: bool = True,
     domain_hint: str = "",
+    llm_provider: LLMProvider | None = None,
 ) -> NLSpecValidationResult:
     """Validate a natural-language specification for logical health."""
     config = config or AgentConfig()
@@ -239,8 +240,10 @@ def validate_nl_spec(
     ambiguities = _detect_ambiguities(spec_text, config)
     atoms = _extract_inline_contract_atoms(spec_text)
     llm_issues: list[CrossValidationIssue] = []
-    if use_llm and config.api_key:
-        llm_atoms, llm_issues, llm_warnings = _infer_nl_contracts_with_llm(spec_text, config)
+    if use_llm and (config.api_key or llm_provider):
+        llm_atoms, llm_issues, llm_warnings = _infer_nl_contracts_with_llm(
+            spec_text, config, llm_provider=llm_provider,
+        )
         warnings.extend(llm_warnings)
         if llm_atoms:
             atoms = llm_atoms
@@ -312,6 +315,7 @@ def validate_nl_spec_multi(
     config: AgentConfig | None = None,
     use_llm: bool = True,
     domain_hint: str = "",
+    llm_provider: LLMProvider | None = None,
 ) -> dict[str, object]:
     """Validate multiple NL spec documents for cross-document consistency."""
     config = config or AgentConfig()
@@ -322,6 +326,7 @@ def validate_nl_spec_multi(
             use_llm=use_llm,
             run_mumei=False,
             domain_hint=domain_hint,
+            llm_provider=llm_provider,
         )
         for spec_text in spec_texts
     ]
@@ -343,6 +348,7 @@ def validate_spec_to_code(
     use_llm: bool = True,
     run_mumei: bool = True,
     lang: Literal["auto", "en", "ja"] = "auto",
+    llm_provider: LLMProvider | None = None,
 ) -> SpecCodeAlignmentResult:
     """Validate that code implements the requires/ensures constraints in a spec."""
     config = config or AgentConfig()
@@ -370,13 +376,17 @@ def validate_spec_to_code(
             lang=lang,
         )
 
-    spec_result = validate_nl_spec(spec, config=config, use_llm=use_llm, run_mumei=run_mumei)
+    spec_result = validate_nl_spec(
+        spec, config=config, use_llm=use_llm, run_mumei=run_mumei,
+        llm_provider=llm_provider,
+    )
     code_result = validate_foreign_code(
         code,
         normalized_language,
         config=config,
         use_llm=use_llm,
         run_mumei=run_mumei,
+        llm_provider=llm_provider,
     )
     warnings.extend(spec_result.warnings)
     warnings.extend(code_result.warnings)
@@ -447,6 +457,7 @@ def validate_code_to_spec(
     use_llm: bool = True,
     run_mumei: bool = True,
     lang: Literal["auto", "en", "ja"] = "auto",
+    llm_provider: LLMProvider | None = None,
 ) -> SpecDriftResult:
     """Validate that a specification has not drifted behind code changes."""
     config = config or AgentConfig()
@@ -478,6 +489,7 @@ def validate_code_to_spec(
         use_llm=use_llm,
         run_mumei=run_mumei,
         lang=lang,
+        llm_provider=llm_provider,
     )
     warnings.extend(alignment.warnings)
     errors.extend(alignment.errors)
@@ -570,6 +582,7 @@ def detect_intent_drift(
     use_llm: bool = True,
     run_mumei: bool = True,
     lang: Literal["en", "ja"] = "en",
+    llm_provider: LLMProvider | None = None,
 ) -> CrossValidationReport:
     """Detect semantic drift between natural-language intent and generated code."""
     config = config or AgentConfig()
@@ -578,6 +591,7 @@ def detect_intent_drift(
         config=config,
         use_llm=use_llm,
         run_mumei=run_mumei,
+        llm_provider=llm_provider,
     )
     code_result = validate_foreign_code(
         generated_code,
@@ -585,6 +599,7 @@ def detect_intent_drift(
         config=config,
         use_llm=use_llm,
         run_mumei=run_mumei,
+        llm_provider=llm_provider,
     )
     drift_missing, drift_divergences, drift_warnings = _compare_spec_atoms_to_code_atoms(
         spec_result.inferred_atoms,
@@ -670,6 +685,7 @@ def validate_foreign_code(
     config: AgentConfig | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
+    llm_provider: LLMProvider | None = None,
 ) -> ForeignCodeValidationResult:
     """Validate Python, Rust, TypeScript, or Go code by inferring contracts."""
     config = config or AgentConfig()
@@ -693,11 +709,12 @@ def validate_foreign_code(
     source_line_map = _infer_foreign_source_line_map(code, normalized_language)
     atoms = _infer_foreign_contracts_with_code_to_spec(code, normalized_language, config)
     llm_issues: list[CrossValidationIssue] = []
-    if use_llm and config.api_key:
+    if use_llm and (config.api_key or llm_provider):
         llm_atoms, llm_issues, llm_warnings = _infer_code_contracts_with_llm(
             code,
             normalized_language,
             config,
+            llm_provider=llm_provider,
         )
         warnings.extend(llm_warnings)
         if llm_atoms:
@@ -1028,28 +1045,39 @@ def _emit_cross_validation_result(
 def _infer_nl_contracts_with_llm(
     spec_text: str,
     config: AgentConfig,
+    *,
+    llm_provider: LLMProvider | None = None,
 ) -> tuple[list[MumeiContractAtom], list[CrossValidationIssue], list[str]]:
     prompt = build_nl_cross_validation_prompt(spec_text)
-    return _infer_contracts_with_llm(config, CROSS_VALIDATION_NL_SYSTEM_PROMPT, prompt)
+    return _infer_contracts_with_llm(
+        config, CROSS_VALIDATION_NL_SYSTEM_PROMPT, prompt, llm_provider=llm_provider,
+    )
 
 
 def _infer_code_contracts_with_llm(
     code: str,
     language: str,
     config: AgentConfig,
+    *,
+    llm_provider: LLMProvider | None = None,
 ) -> tuple[list[MumeiContractAtom], list[CrossValidationIssue], list[str]]:
     prompt = build_code_cross_validation_prompt(code, language)
-    return _infer_contracts_with_llm(config, CROSS_VALIDATION_CODE_SYSTEM_PROMPT, prompt)
+    return _infer_contracts_with_llm(
+        config, CROSS_VALIDATION_CODE_SYSTEM_PROMPT, prompt, llm_provider=llm_provider,
+    )
 
 
 def _infer_contracts_with_llm(
     config: AgentConfig,
     system_prompt: str,
     user_prompt: str,
+    *,
+    llm_provider: LLMProvider | None = None,
 ) -> tuple[list[MumeiContractAtom], list[CrossValidationIssue], list[str]]:
     warnings: list[str] = []
     try:
-        content = OpenAILLMProvider(config).complete(
+        provider = llm_provider or OpenAILLMProvider(config)
+        content = provider.complete(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

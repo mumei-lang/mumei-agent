@@ -82,13 +82,18 @@ graph TD
 ```
 
 By default, `agent/mcp_server.py` uses the same OpenAI-compatible LLM endpoint
-as the CLI.  Set `USE_MCP_SAMPLING=true` to make LLM-backed MCP tools such as
-`heal_file`, `forge_task`, `extract_spec`, and `self_correct` request
-completion through standard MCP sampling (`Context.session.create_message`) from
-the connected client instead.  This lets Devin or another MCP client provide the
-LLM role without configuring `LLM_API_KEY` in mumei-agent.  If the connected
-client does not support sampling, or sampling fails, the agent falls back to the
-existing OpenAI-compatible path.
+as the CLI.  Set `USE_MCP_SAMPLING=true` to make all LLM-backed MCP tools
+request completion through standard MCP sampling
+(`Context.session.create_message`) from the connected client instead.  This
+lets Devin or another MCP client provide the LLM role without configuring
+`LLM_API_KEY` in mumei-agent.  If the connected client does not support
+sampling, or sampling fails, the agent falls back to the existing
+OpenAI-compatible path.  Tools that support this path include `heal_file`,
+`forge_task`, `extract_spec`, `self_correct`, `validate_nl_spec`,
+`validate_nl_spec_multi`, `validate_code`, `validate_foreign_code`,
+`verify_foreign_code`, `validate_spec_to_code`, `validate_code_to_spec`,
+`verify_conformance`, `verify_code_spec_traceability`, `audit_code`,
+`scan_and_fix`, and `extract_spec_from_code`.
 
 The implementation follows the MCP 2025-11-25 sampling specification for basic
 text generations: user/assistant chat messages are converted to
@@ -275,7 +280,10 @@ Core agent and local Ollama settings are controlled through environment variable
   `http://localhost:11434/v1`.
 - `USE_MCP_SAMPLING` (default: `false`): for `agent/mcp_server.py` tool calls,
   ask the connected MCP client (for example Devin) to provide completions via
-  MCP sampling. OpenAI-compatible settings remain the fallback path.
+  MCP sampling. All LLM-backed MCP tools support this path; OpenAI-compatible
+  settings remain the fallback.
+- `MCP_SAMPLING_MAX_TOKENS` (default: `4096`): maximum `maxTokens` sent in MCP
+  sampling requests.
 - `MAX_CONTEXT_TOKENS` (default: `16000`): operator-facing estimate for the
   maximum prompt budget to send to the LLM. Use this to align prompt construction
   with the model/context window selected for your backend.

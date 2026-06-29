@@ -14,6 +14,7 @@ from agent.conformance_verifier import (
 )
 from agent.config import AgentConfig
 from agent.cross_validation import CrossValidationIssue, SpecDriftResult, validate_code_to_spec
+from agent.llm_provider import LLMProvider
 
 ReportLang = Literal["auto", "en", "ja"]
 
@@ -44,6 +45,7 @@ def verify_traceability(
     run_mumei: bool = True,
     spec_path: str | None = None,
     lang: ReportLang = "auto",
+    llm_provider: LLMProvider | None = None,
 ) -> TraceabilityResult:
     """Combine V1-C spec→code conformance and V1-D code→spec drift checks."""
     config = config or AgentConfig()
@@ -54,6 +56,7 @@ def verify_traceability(
         language=language,
         use_llm=use_llm,
         run_mumei=run_mumei,
+        llm_provider=llm_provider,
     )
     drift = _validate_drift(
         spec,
@@ -64,6 +67,7 @@ def verify_traceability(
         run_mumei=run_mumei,
         spec_path=spec_path,
         lang=lang,
+        llm_provider=llm_provider,
     )
     gaps = _combined_gaps(conformance, drift)
     resolved_spec_path = spec_path or "<spec>"
@@ -100,6 +104,7 @@ def _validate_drift(
     run_mumei: bool,
     spec_path: str | None,
     lang: ReportLang,
+    llm_provider: LLMProvider | None = None,
 ) -> SpecDriftResult:
     if spec_path:
         return validate_code_to_spec(
@@ -110,6 +115,7 @@ def _validate_drift(
             use_llm=use_llm,
             run_mumei=run_mumei,
             lang=lang,
+            llm_provider=llm_provider,
         )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as tmp:
         tmp.write(spec)
@@ -123,6 +129,7 @@ def _validate_drift(
             use_llm=use_llm,
             run_mumei=run_mumei,
             lang=lang,
+            llm_provider=llm_provider,
         )
     finally:
         try:
