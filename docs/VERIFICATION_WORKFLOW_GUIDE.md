@@ -246,7 +246,7 @@ mumei-agent audit --code-file src/ --format markdown --output reports/src-audit.
 `validate-code --input`、`validate-spec-to-code --code`、`validate-code-to-spec --code` は単一コードファイルを指定する。
 
 `extract-spec` の対応言語: `rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, `java`（拡張子から自動検出）。
-`validate-code` の `--language` は必須で、`python|rust|go` のいずれかを指定する。`validate-spec-to-code` / `validate-code-to-spec` の `--language` は任意で、省略時はコードファイルの拡張子から推定する。
+`validate-code` の `--language` は必須で、`python|rust|typescript|go` のいずれかを指定する。`validate-spec-to-code` / `validate-code-to-spec` の `--language` は任意で、省略時はコードファイルの拡張子から推定する。
 
 ### 2-1. 単一ファイル
 
@@ -308,7 +308,7 @@ mumei-agent extract-spec \
 ```bash
 mumei-agent validate-code \
   --input src/payment.py \
-  --language python  # 必須: python|rust|go
+  --language python  # 必須: python|rust|typescript|go
 ```
 
 `validate-code` の `--language` は必須。自動検出は行わない。
@@ -389,7 +389,7 @@ mumei verify \
 mumei-agent validate-spec-to-code \
   --spec docs/requirements/payment_spec.txt \
   --code src/payment.py \
-  --language python  # 任意: python|rust|go
+  --language python  # 任意: python|rust|typescript|go
 ```
 
 `--spec` は仕様ファイル、`--code` は単一コードファイルを指定する。
@@ -468,7 +468,7 @@ mumei verify --report-dir reports/ --cross-spec-files src/account.mm src/transfe
 mumei-agent validate-code-to-spec \
   --code src/payment.py \
   --spec docs/requirements/payment_spec.txt \
-  --language python  # 任意: python|rust|go
+  --language python  # 任意: python|rust|typescript|go
 ```
 
 `--code` は単一コードファイル、`--spec` は仕様ファイルを指定する。

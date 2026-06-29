@@ -126,3 +126,78 @@ def test_verify_traceability_inline_spec_uses_placeholder_in_next_steps(
     )
     assert "- Spec: `<spec>`" in result.report
     assert "--spec /tmp/" not in result.report
+
+
+def test_verify_traceability_accepts_typescript_language(tmp_path: Path) -> None:
+    code = tmp_path / "impl.ts"
+    spec = tmp_path / "spec.txt"
+    code.write_text(
+        "export function identity(x: number): number { return x; }\n",
+        encoding="utf-8",
+    )
+    spec.write_text("requires: x >= 0;\nensures: result == x + 1;", encoding="utf-8")
+
+    result = verify_traceability(
+        spec.read_text(encoding="utf-8"),
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="typescript",
+        use_llm=False,
+        run_mumei=False,
+        spec_path=str(spec),
+        lang="en",
+    )
+
+    assert result.success is False
+    assert result.conformance["traceability_matrix"]
+    assert result.cross_validation_gaps
+    assert 0.0 <= result.drift_score <= 1.0
+
+
+def test_verify_traceability_typescript_source_line_map_populated(tmp_path: Path) -> None:
+    ts_code = "export function add(a: number, b: number): number {\n  return a + b;\n}\n"
+    code = tmp_path / "math.ts"
+    spec = tmp_path / "spec.txt"
+    code.write_text(ts_code, encoding="utf-8")
+    spec.write_text("requires: true;\nensures: result == a + b;", encoding="utf-8")
+
+    result = verify_traceability(
+        spec.read_text(encoding="utf-8"),
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="typescript",
+        use_llm=False,
+        run_mumei=False,
+        spec_path=str(spec),
+        lang="en",
+    )
+
+    matrix = result.conformance["traceability_matrix"]
+    lines = [row.code_line for row in matrix if row.code_line > 0]
+    assert lines, "traceability_matrix should have non-zero code_line entries for TypeScript"
+
+
+def test_verify_traceability_typescript_next_steps_before_findings(tmp_path: Path) -> None:
+    code = tmp_path / "impl.ts"
+    spec = tmp_path / "spec.txt"
+    code.write_text(
+        "export function identity(x: number): number { return x; }\n",
+        encoding="utf-8",
+    )
+    spec.write_text("requires: x >= 0;\nensures: result == x + 1;", encoding="utf-8")
+
+    result = verify_traceability(
+        spec.read_text(encoding="utf-8"),
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="typescript",
+        use_llm=False,
+        run_mumei=False,
+        spec_path=str(spec),
+        lang="en",
+    )
+
+    assert "## Bidirectional Traceability Report" in result.report
+    assert result.report.index("### next_steps (V1-E-1)") < result.report.index(
+        "### Findings"
+    )

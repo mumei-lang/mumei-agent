@@ -799,3 +799,64 @@ def test_validate_code_to_spec_human_report_preserves_drift_review_entrypoint(
     )
     assert "`drift_issues`" in result.report
     assert "```bash" in result.report
+
+
+def test_verify_conformance_accepts_typescript_language(tmp_path: Path) -> None:
+    code = tmp_path / "impl.ts"
+    code.write_text(
+        "export function identity(x: number): number { return x; }\n",
+        encoding="utf-8",
+    )
+
+    result = verify_conformance(
+        "requires: x > 0;\nensures: result == x;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="typescript",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.language == "typescript"
+    assert result.traceability_matrix
+
+
+def test_verify_conformance_typescript_source_line_map(tmp_path: Path) -> None:
+    ts_code = "export function add(a: number, b: number): number {\n  return a + b;\n}\n"
+    code = tmp_path / "math.ts"
+    code.write_text(ts_code, encoding="utf-8")
+
+    result = verify_conformance(
+        "requires: true;\nensures: result == a + b;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="typescript",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.language == "typescript"
+    matrix_lines = [row.code_line for row in result.traceability_matrix if row.code_line > 0]
+    assert matrix_lines, "traceability_matrix should have non-zero code_line entries for TypeScript"
+
+
+def test_verify_conformance_typescript_next_steps_before_findings(tmp_path: Path) -> None:
+    code = tmp_path / "impl.ts"
+    code.write_text(
+        "export function identity(x: number): number { return x; }\n",
+        encoding="utf-8",
+    )
+
+    result = verify_conformance(
+        "requires: x > 0;\nensures: result == x;",
+        str(code),
+        config=AgentConfig(api_key=""),
+        language="typescript",
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.next_steps
+    assert result.report.index("### next_steps (V1-E-1)") < result.report.index(
+        "### Human review entrypoints"
+    )

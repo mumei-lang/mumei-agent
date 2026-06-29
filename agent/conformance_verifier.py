@@ -345,7 +345,30 @@ def _source_line_map(code: str, language: str) -> dict[str, int]:
         return _regex_source_line_map(code, r"(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")
     if language == "go":
         return _regex_source_line_map(code, r"func\s+([A-Za-z_][A-Za-z0-9_]*)")
+    if language == "typescript":
+        return _typescript_source_line_map(code)
     return {}
+
+
+def _typescript_source_line_map(code: str) -> dict[str, int]:
+    line_map: dict[str, int] = {}
+    _TS_FUNCTION_DECL = re.compile(
+        r"(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)"
+    )
+    _TS_ARROW_ASSIGN = re.compile(
+        r"(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)"
+        r"\s*(?::\s*[^=]+?)?\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*(?::\s*[^=]+?)?\s*=>"
+    )
+    _TS_CLASS_METHOD = re.compile(
+        r"(?:public\s+|private\s+|protected\s+|static\s+|async\s+|readonly\s+)*"
+        r"([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^)]*\)\s*(?::\s*[^{]+?)?\s*\{"
+    )
+    for pattern in (_TS_FUNCTION_DECL, _TS_ARROW_ASSIGN, _TS_CLASS_METHOD):
+        for match in re.finditer(pattern, code):
+            name = match.group(1)
+            if name not in line_map:
+                line_map[name] = code[: match.start()].count("\n") + 1
+    return line_map
 
 
 def _python_source_line_map(code: str) -> dict[str, int]:

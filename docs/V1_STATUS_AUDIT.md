@@ -97,7 +97,7 @@ canonical roadmap の V1-A〜V1-E 達成基準を箇条書きで抽出し、mume
 - V1-D-3 は `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, `next_steps` だけを使う
 - 複数 `.mm` の cross-spec result を MCP client が直接取得できる
 
-### 実コード裏取り結果: **⚠️ 部分実装**
+### 実コード裏取り結果: **✅ 完了**
 
 | 基準 | 状態 | 根拠 |
 |------|------|------|
@@ -109,31 +109,10 @@ canonical roadmap の V1-A〜V1-E 達成基準を箇条書きで抽出し、mume
 | `cross_validation_gaps` | ✅ | `agent/conformance_verifier.py:53` |
 | `next_steps` first 順序テスト | ✅ | `tests/test_cross_validation.py:700` `test_verify_conformance_human_report_keeps_next_steps_first_and_review_keys` |
 | `--format human\|json\|markdown` | ✅ | `agent/verify_conformance.py:23-28` |
-| **CLI `--language` 4言語** | **❌** | `agent/verify_conformance.py:21` `choices=["python", "rust", "go"]` — **TypeScript が欠落** |
-| **`_source_line_map` TypeScript** | **❌** | `agent/conformance_verifier.py:341-347` — Python/Rust/Go のみ実装、TypeScript は `{}` を返す（line 348 の暗黙 fallback） |
+| CLI `--language` 4言語 | ✅ | `agent/verify_conformance.py:21` `choices=["python", "rust", "typescript", "go"]` |
+| `_source_line_map` TypeScript | ✅ | `agent/conformance_verifier.py` `_typescript_source_line_map()` — function decl / arrow assign / class method 対応 |
 
-### ギャップ詳細
-
-1. **CLI `--language` choices にTypeScript がない** (`agent/verify_conformance.py:21`)
-   - canonical roadmap は V1-B と同じ4言語カバレッジを要求
-   - `audit --code-file` (V1-B) は `["python", "rust", "typescript", "go"]` で正しく4言語
-   - `validate-spec-to-code` / `validate-code-to-spec` (cross_validation.py) も `["python", "rust", "typescript", "go"]` で正しい
-   - しかし `verify-conformance` CLI のみ3言語に制限されている
-
-2. **`conformance_verifier.py` の `_source_line_map()` に TypeScript パスがない** (line 341-347)
-   - Python: `_python_source_line_map()`
-   - Rust: regex `(?:pub\s+)?fn\s+(...)`
-   - Go: regex `func\s+(...)`
-   - TypeScript: 未実装 → 空の `{}` を返す
-   - これにより、TypeScript コードに対する conformance 検証の traceability_matrix が関数行番号なしになる
-
-3. **MCP `verify_conformance` ツールの `language` パラメータ**: 型は `str | None` で runtime 制限なし。TypeScript を渡すこと自体は可能だが、CLI からは入力不可。
-
-### 推奨対応
-
-- **オプション A（コード修正）**: `verify_conformance.py:21` の choices に `"typescript"` を追加し、`conformance_verifier.py` の `_source_line_map()` に TypeScript 用 regex（例: `(?:export\s+)?(?:async\s+)?function\s+(...)` / arrow function 等）を追加する。
-- **オプション B（docs 修正のみ）**: ROADMAP.md の P14-C 成功指標に「V1-C の対応言語は Python/Rust/Go（TypeScript は V1-B audit 経由で間接カバー、conformance 単体は未対応）」と実態を反映する注記を追加。
-- **推奨**: オプション A が canonical roadmap の意図に合致する。修正は小規模（argparse choices 追加 + regex 1行）。
+**ギャップ: なし**
 
 ---
 
@@ -148,7 +127,7 @@ canonical roadmap の V1-A〜V1-E 達成基準を箇条書きで抽出し、mume
 - MCP: `verify_code_spec_traceability`
 - 出力: `conformance`, `drift`, `cross_validation_gaps`, `drift_score`, `next_steps`
 
-### 実コード裏取り結果: **⚠️ 部分実装**
+### 実コード裏取り結果: **✅ 完了**
 
 | 基準 | 状態 | 根拠 |
 |------|------|------|
@@ -159,17 +138,9 @@ canonical roadmap の V1-A〜V1-E 達成基準を箇条書きで抽出し、mume
 | `cross_validation_gaps` 統合 | ✅ | `agent/traceability_verifier.py:141` `_combined_gaps()` |
 | `next_steps` first 順序テスト | ✅ | `tests/test_traceability.py:49` `test_verify_traceability_report_keeps_next_steps_before_findings` |
 | `next_steps` JSON key first テスト | ✅ | `tests/test_traceability.py:74` `test_verify_traceability_cli_json_keeps_next_steps_first` |
-| **CLI `--language` 4言語** | **❌** | `agent/verify_traceability.py:18` `choices=["python", "rust", "go"]` — **TypeScript が欠落** |
+| CLI `--language` 4言語 | ✅ | `agent/verify_traceability.py:18` `choices=["python", "rust", "typescript", "go"]` |
 
-### ギャップ詳細
-
-`verify-traceability` CLI の `--language` choices が V1-C と同様に `["python", "rust", "go"]` の3言語のみ。TypeScript が欠落。
-
-`traceability_verifier.py` のコアロジック自体は `verify_conformance()` を呼ぶため、conformance 側の TypeScript gap がそのまま伝搬する。
-
-### 推奨対応
-
-V1-C と同時に修正する。`verify_traceability.py:18` の choices に `"typescript"` を追加するだけで完了（コアロジックは `cross_validation.py` 経由で TypeScript 対応済み。conformance 側の `_source_line_map` 追加と合わせれば完全対応）。
+**ギャップ: なし**
 
 ---
 
@@ -236,27 +207,19 @@ V1-C と同時に修正する。`verify_traceability.py:18` の choices に `"ty
 |------------|------|------------------|
 | V1-A | ✅ 完了 | — |
 | V1-B | ✅ 完了 | — |
-| V1-C | ⚠️ 部分実装 | CLI `--language` に TypeScript 欠落; `_source_line_map()` に TS パスなし |
-| V1-D | ⚠️ 部分実装 | CLI `--language` に TypeScript 欠落（V1-C gap の伝搬） |
+| V1-C | ✅ 完了 | — |
+| V1-D | ✅ 完了 | — |
 | V1-E | ✅ 完了 | — |
 
 ---
 
 ## ROADMAP.md 自己申告との食い違い
 
-`mumei-agent/docs/ROADMAP.md` の P14-C は「✅ Implemented」と表記しているが、実際には TypeScript の CLI 言語カバレッジが V1-B / `cross_validation.py` と非対称であり、canonical roadmap が要求する4言語均一カバレッジを満たしていない。
-
-ただし以下の点で実質的影響は限定的:
-- MCP `verify_conformance` / `verify_code_spec_traceability` は `language: str | None` で TypeScript を受け付ける（runtime 制限なし）
-- TypeScript コードを `audit --code-file ... --language typescript` → `scan_and_fix` 経由で検証することは可能
-- 不足しているのは `verify-conformance` / `verify-traceability` **単体 CLI** の argparse choices のみ
+`mumei-agent/docs/ROADMAP.md` の P14-C「✅ Implemented」表記は実態と一致する。`verify-conformance` / `verify-traceability` CLI の `--language` choices に `"typescript"` が追加され、`conformance_verifier.py` の `_source_line_map()` に TypeScript 用パス（function decl / arrow assign / class method）が実装された。canonical roadmap が要求する Python / Rust / TypeScript / Go の4言語均一カバレッジを V1-C / V1-D が満たしている。
 
 ---
 
-## 推奨次タスク候補（本タスクでは着手しない）
+## 推奨次タスク候補
 
-1. **V1-C/V1-D TypeScript CLI choices 追加** (小規模: `verify_conformance.py:21`, `verify_traceability.py:18` に `"typescript"` 追加)
-2. **`conformance_verifier.py` `_source_line_map()` TypeScript regex** (TypeScript function/arrow function/class method の行番号マッピング追加)
-3. **回帰テスト追加**: `tests/test_cross_validation.py` に TypeScript 用 conformance テスト
-4. ~~MCP sampling の後回し項目（tool-enabled sampling / multimodal）~~ — 本タスク非対象
-5. ~~新機能実装・リファクタリング~~ — 本タスク非対象
+1. ~~MCP sampling の後回し項目（tool-enabled sampling / multimodal）~~ — 対象外
+2. ~~新機能実装・リファクタリング~~ — 対象外
