@@ -491,17 +491,22 @@ class AuditPipeline:
 
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
+    _epilog = (
+        "One-command migration/heal contract: "
+        "mumei-agent audit --code-file <file-or-dir> --auto-migrate --auto-heal. "
+        "The MCP scan_and_fix tool uses the same audit -> migrate-suggest -> heal flow. "
+        "Fixed output keys: spec_health_issues, verification_violations, "
+        "cross_validation_gaps, next_steps, migration_hints, healed_files, heal_errors."
+    )
     parser = parser or argparse.ArgumentParser(
         description=(
             "Audit existing code by extracting specs, verifying contracts, "
             "emitting cross_validation_gaps, and optionally producing migration_hints."
         ),
-        epilog=(
-            "One-command migration/heal contract: "
-            "mumei-agent audit --code-file <file-or-dir> --auto-migrate --auto-heal. "
-            "The MCP scan_and_fix tool uses the same audit -> migrate-suggest -> heal flow."
-        ),
+        epilog=_epilog,
     )
+    if not parser.epilog:
+        parser.epilog = _epilog
     parser.add_argument(
         "--code-file",
         required=True,
