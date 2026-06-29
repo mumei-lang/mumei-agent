@@ -1904,7 +1904,7 @@ def audit_code(
     try:
         config = AgentConfig()
         llm_provider = _llm_provider_for_context(config, ctx)
-        client = _llm_client_for_context(config, ctx)
+        client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
     except Exception:
         config = None
         llm_provider = None
@@ -2003,12 +2003,12 @@ def scan_and_fix(
 
     try:
         config = AgentConfig()
-        client = _llm_client_for_context(config, ctx)
         llm_provider = _llm_provider_for_context(config, ctx)
+        client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
     except Exception:
         config = None
-        client = None
         llm_provider = None
+        client = None
 
     pipeline = AuditPipeline(
         config=config, heal_output_dir=heal_output_dir or None, client=client,
@@ -2130,7 +2130,7 @@ def extract_spec_from_code(
     try:
         config = AgentConfig()
         llm_provider = _llm_provider_for_context(config, ctx)
-        llm_client = _llm_client_for_context(config, ctx)
+        llm_client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
         mumei_bin = config.mumei_bin
         if generate and mumei_repo:
             repo = _resolve_repo(mumei_repo)
@@ -2151,8 +2151,7 @@ def extract_spec_from_code(
                 domain_hint=domain_hint,
                 mumei_client=mumei,
                 max_retries=config.max_retries,
-                client=llm_client,
-                llm_provider=llm_provider,
+                client=llm_client, llm_provider=llm_provider,
             )
             forge_task_spec = payload["merged_spec"]
             result = None

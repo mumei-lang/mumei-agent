@@ -1451,9 +1451,10 @@ class TestMcpSamplingExtractSpecFromCode:
 
         assert result["status"] == "ok"
         assert result["detected_language"] == "rust"
-        # Verify CodeToSpecExtractor was called with an injected client
+        # Verify CodeToSpecExtractor was called with llm_provider (not client)
         call_args = extractor_cls.call_args
-        assert call_args.kwargs.get("client") is not None or len(call_args.args) > 1
+        assert call_args.kwargs.get("llm_provider") is not None
+        fake_config.create_client.assert_not_called()
 
 
 class TestMcpSamplingAuditCode:
