@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from agent.config import AgentConfig
+from agent.llm_provider import LLMProvider
 from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
 from agent.spec_extractor import extract_spec
@@ -145,9 +146,15 @@ def extract_spec_from_code_directory(
     max_retries: int = 3,
     metrics: Metrics | None = None,
     client: object | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> dict[str, Any]:
     """Extract per-file specs from a source directory and merge them."""
     from agent.code_to_spec import CodeToSpecExtractor
+
+    if llm_provider is not None and client is None:
+        from agent.llm_provider import openai_client_adapter
+
+        client = openai_client_adapter(llm_provider)
 
     source_dir = source_dir.expanduser().resolve()
     if not source_dir.exists():

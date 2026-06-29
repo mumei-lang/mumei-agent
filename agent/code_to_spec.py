@@ -9,6 +9,7 @@ import chardet
 from openai import OpenAI
 
 from agent.config import AgentConfig
+from agent.llm_provider import LLMProvider
 from agent.mumei_client import MumeiClient
 from agent.prompts.code_to_spec import (
     CODE_TO_SPEC_SYSTEM_PROMPT,
@@ -174,8 +175,18 @@ class CodeToSpecExtractor:
         ".hpp": "cpp",
     }
 
-    def __init__(self, config: AgentConfig, client: object | None = None):
+    def __init__(
+        self,
+        config: AgentConfig,
+        client: object | None = None,
+        *,
+        llm_provider: LLMProvider | None = None,
+    ):
         self.config = config
+        if llm_provider is not None and client is None:
+            from agent.llm_provider import openai_client_adapter
+
+            client = openai_client_adapter(llm_provider)
         self._injected_client = client
 
     def _detect_language(self, code_path: Path, code: str) -> Language:

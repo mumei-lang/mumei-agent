@@ -14,6 +14,7 @@ from typing import Protocol, cast
 
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
+from agent.llm_provider import LLMProvider
 from agent.extract_spec import _collect_code_files
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
@@ -140,11 +141,12 @@ class AuditPipeline:
         mumei_client: MumeiVerifyClientLike | None = None,
         heal_output_dir: str | None = None,
         client: object | None = None,
+        llm_provider: LLMProvider | None = None,
     ) -> None:
         self.config = config or AgentConfig()
         self.mumei_client = mumei_client or create_mumei_client(self.config.mumei_bin)
         self.code_to_spec_extractor = code_to_spec_extractor or CodeToSpecExtractor(
-            self.config, client=client,
+            self.config, client=client, llm_provider=llm_provider,
         )
         self.spec_health_checker = spec_health_checker or SpecHealthChecker()
         self.foreign_code_verifier = foreign_code_verifier or ForeignCodeVerifier(
