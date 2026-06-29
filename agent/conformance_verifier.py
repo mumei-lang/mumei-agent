@@ -350,6 +350,9 @@ def _source_line_map(code: str, language: str) -> dict[str, int]:
     return {}
 
 
+_TS_STMT_KEYWORDS = frozenset({"if", "for", "while", "switch", "catch", "with"})
+
+
 def _typescript_source_line_map(code: str) -> dict[str, int]:
     line_map: dict[str, int] = {}
     _TS_FUNCTION_DECL = re.compile(
@@ -366,8 +369,10 @@ def _typescript_source_line_map(code: str) -> dict[str, int]:
     for pattern in (_TS_FUNCTION_DECL, _TS_ARROW_ASSIGN, _TS_CLASS_METHOD):
         for match in re.finditer(pattern, code):
             name = match.group(1)
+            if name in _TS_STMT_KEYWORDS:
+                continue
             if name not in line_map:
-                line_map[name] = code[: match.start()].count("\n") + 1
+                line_map[name] = code[: match.start(1)].count("\n") + 1
     return line_map
 
 
