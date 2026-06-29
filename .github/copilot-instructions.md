@@ -47,7 +47,8 @@ The agent uses an OpenAI-compatible client.
 | `MUMEI_REPO` | Mumei compiler checkout for std/ health, forge, and proliferate flows. |
 | `MUMEI_LEAN_REPO` | Optional mumei-lean checkout for Lean fallback in proliferate. |
 | `USE_MCP_CLIENT` | When true, route verification through the Mumei MCP client before falling back to subprocess verification. |
-| `USE_MCP_SAMPLING` | When true in `agent/mcp_server.py`, let the connected MCP client (for example Devin) serve LLM completions through standard MCP sampling; OpenAI-compatible settings remain the fallback. |
+| `USE_MCP_SAMPLING` | When true, let the connected MCP client (for example Devin) serve LLM completions through standard MCP sampling (`Context.session.create_message`). All LLM-backed MCP tools route through this path; OpenAI-compatible settings remain the automatic fallback. |
+| `MCP_SAMPLING_MAX_TOKENS` | Maximum `maxTokens` sent in MCP sampling requests. Default `4096`. |
 | `PREFER_MCP_GAPS` | When true, prefer the Mumei MCP server gap analyzer. |
 | `AGENT_STRATEGY` | Repair strategy: `single` or `multi-stage`. |
 | `ENABLE_LATENT_DEBUG` | Opt-in experimental latent-space debugging in fix strategy. Leave false for normal runs unless explicitly evaluating NLAE repair behavior. |

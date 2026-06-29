@@ -144,6 +144,7 @@ def extract_spec_from_code_directory(
     mumei_client=None,
     max_retries: int = 3,
     metrics: Metrics | None = None,
+    client: object | None = None,
 ) -> dict[str, Any]:
     """Extract per-file specs from a source directory and merge them."""
     from agent.code_to_spec import CodeToSpecExtractor
@@ -164,7 +165,7 @@ def extract_spec_from_code_directory(
             f"no supported source-code files found in directory: {source_dir}"
         )
 
-    extractor = CodeToSpecExtractor(config)
+    extractor = CodeToSpecExtractor(config, client=client)
     files: list[dict[str, Any]] = []
     natural_language_sections: list[str] = []
     for code_path in code_files:
@@ -202,9 +203,9 @@ def extract_spec_from_code_directory(
             *natural_language_sections,
         ]
     )
-    client = config.create_client()
+    merge_client = client or config.create_client()
     merged_spec = extract_spec(
-        client,
+        merge_client,
         config.model,
         merged_natural_language,
         domain_hint=domain_hint,

@@ -693,7 +693,8 @@ class TestScanAndFix:
             assert key in result
             assert key in result["audit"]
         assert "human-review entrypoint" in result["contract_terms"]["next_steps"]
-        pipeline_cls.assert_called_once_with(heal_output_dir=str(tmp_path / "healed"))
+        call_kwargs = pipeline_cls.call_args
+        assert call_kwargs.kwargs["heal_output_dir"] == str(tmp_path / "healed")
         pipeline_cls.return_value.audit_file.assert_called_once_with(
             str(source),
             "python",
@@ -882,11 +883,12 @@ class TestScanAndFix:
         assert "recommendations" not in result["conformance_verification"]
         assert "review_actions" not in result["conformance_verification"]
         assert "human_review" not in result["conformance_verification"]
-        validate.assert_called_once_with(
+        assert validate.call_count == 1
+        assert validate.call_args.args == (
             "requires: true; ensures: result == a + b",
             str(source),
-            language="python",
         )
+        assert validate.call_args.kwargs["language"] == "python"
 
     def test_verify_conformance_exposes_next_steps_without_aliases(self, tmp_path: Path) -> None:
         source = tmp_path / "impl.py"
@@ -1112,3 +1114,345 @@ class TestSendLatentMessage:
 
         assert result["status"] == "ok"
         assert len(result["latent_vector"]) == 16
+
+
+# ---------------------------------------------------------------------------
+# MCP Sampling — ctx-wired tools
+# ---------------------------------------------------------------------------
+
+
+def _fake_config_sampling():
+    """Return a fake config with use_mcp_sampling=True and no OpenAI key."""
+    fake = MagicMock()
+    fake.mumei_bin = "mumei"
+    fake.model = "gpt-4o"
+    fake.strategy = "single"
+    fake.use_mcp_sampling = True
+    fake.api_key = None
+    fake.enable_code_to_spec = True
+    fake.max_retries = 2
+    fake.intent_drift_threshold = 0.7
+    fake.create_client.side_effect = AssertionError("OpenAI fallback was used")
+    return fake
+
+
+def _sampling_ctx(response_text: str = '{"atoms":[],"contracts":[]}'):
+    """Return a fake MCP ctx that responds with *response_text* via sampling."""
+
+    async def create_message(messages, **kwargs):
+        return mcp_types.CreateMessageResult(
+            role="assistant",
+            content=mcp_types.TextContent(type="text", text=response_text),
+            model="client-model",
+        )
+
+    return SimpleNamespace(
+        session=SimpleNamespace(
+            create_message=create_message,
+            _client_params={"capabilities": {"sampling": {}}},
+        )
+    )
+
+
+def _fallback_ctx():
+    """Return a fake MCP ctx whose sampling always fails."""
+
+    async def create_message(*args, **kwargs):
+        raise RuntimeError("sampling unsupported")
+
+    return SimpleNamespace(
+        session=SimpleNamespace(
+            create_message=create_message,
+            _client_params={"capabilities": {"sampling": {}}},
+        )
+    )
+
+
+class TestMcpSamplingValidateNlSpec:
+    def test_validate_nl_spec_uses_sampling(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_nl_spec(
+                    "requires: x >= 0; ensures: result >= x",
+                    use_llm=True,
+                    run_mumei=False,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        fake_config.create_client.assert_not_called()
+
+    def test_validate_nl_spec_sampling_fallback(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+
+        fake_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"atoms":[]}'))]
+        )
+        fake_openai = MagicMock()
+        fake_openai.chat.completions.create.return_value = fake_response
+
+        fake_config = _fake_config_sampling()
+        fake_config.api_key = "test-key"
+        fake_config.create_client.side_effect = None
+        fake_config.create_client.return_value = fake_openai
+        ctx = _fallback_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_nl_spec(
+                    "requires: x >= 0; ensures: result >= x",
+                    use_llm=True,
+                    run_mumei=False,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+
+
+class TestMcpSamplingValidateForeignCode:
+    def test_validate_foreign_code_uses_sampling(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_foreign_code(
+                    "def add(a: int, b: int) -> int:\n    return a + b\n",
+                    "python",
+                    use_llm=True,
+                    run_mumei=False,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert result["language"] == "python"
+        fake_config.create_client.assert_not_called()
+
+
+class TestMcpSamplingValidateSpecToCode:
+    def test_validate_spec_to_code_uses_sampling(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        code_path = tmp_path / "calc.py"
+        code_path.write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+            encoding="utf-8",
+        )
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_spec_to_code(
+                    "requires: a >= 0; ensures: result >= a",
+                    str(code_path),
+                    language="python",
+                    use_llm=True,
+                    run_mumei=False,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        fake_config.create_client.assert_not_called()
+
+
+class TestMcpSamplingValidateCodeToSpec:
+    def test_validate_code_to_spec_uses_sampling(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        code_path = tmp_path / "calc.py"
+        spec_path = tmp_path / "spec.txt"
+        code_path.write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+            encoding="utf-8",
+        )
+        spec_path.write_text(
+            "requires: a >= 0; ensures: result >= a",
+            encoding="utf-8",
+        )
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = _payload(
+                mcp_server.validate_code_to_spec(
+                    str(code_path),
+                    str(spec_path),
+                    language="python",
+                    use_llm=True,
+                    run_mumei=False,
+                    ctx=ctx,
+                )
+            )
+
+        assert result["status"] == "ok"
+        fake_config.create_client.assert_not_called()
+
+
+class TestMcpSamplingVerifyConformance:
+    def test_verify_conformance_uses_sampling(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        code_path = tmp_path / "impl.py"
+        code_path.write_text(
+            "def identity(x: int) -> int:\n    return x\n",
+            encoding="utf-8",
+        )
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = mcp_server.verify_conformance(
+                "requires: true;\nensures: result == x;",
+                str(code_path),
+                language="python",
+                use_llm=True,
+                run_mumei=False,
+                ctx=ctx,
+            )
+
+        assert result["status"] in {"ok", "needs_review"}
+        fake_config.create_client.assert_not_called()
+
+
+class TestMcpSamplingVerifyTraceability:
+    def test_verify_code_spec_traceability_uses_sampling(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        code_path = tmp_path / "impl.py"
+        code_path.write_text(
+            "def identity(x: int) -> int:\n    return x\n",
+            encoding="utf-8",
+        )
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        with patch("agent.config.AgentConfig", return_value=fake_config):
+            result = mcp_server.verify_code_spec_traceability(
+                str(code_path),
+                "requires: x >= 0;\nensures: result == x;",
+                language="python",
+                use_llm=True,
+                run_mumei=False,
+                ctx=ctx,
+            )
+
+        assert result["status"] in {"ok", "needs_review"}
+        fake_config.create_client.assert_not_called()
+
+
+class TestMcpSamplingExtractSpecFromCode:
+    def test_extract_spec_from_code_uses_sampling(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        source = tmp_path / "simple_add.rs"
+        source.write_text(
+            "pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n",
+            encoding="utf-8",
+        )
+
+        fake_result = MagicMock()
+        fake_result.success = True
+        fake_result.natural_language_spec = "simple_add returns a + b"
+        fake_result.forge_task_spec = {"task_id": "code-simple-add", "atoms": []}
+        fake_result.detected_language = "rust"
+        fake_result.warnings = []
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        fake_extractor = MagicMock()
+        fake_extractor.extract_from_file.return_value = fake_result
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch(
+                "agent.code_to_spec.CodeToSpecExtractor",
+                return_value=fake_extractor,
+            ) as extractor_cls,
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.extract_spec_from_code(str(source), ctx=ctx)
+            )
+
+        assert result["status"] == "ok"
+        assert result["detected_language"] == "rust"
+        # Verify CodeToSpecExtractor was called with an injected client
+        call_args = extractor_cls.call_args
+        assert call_args.kwargs.get("client") is not None or len(call_args.args) > 1
+
+
+class TestMcpSamplingAuditCode:
+    def test_audit_code_uses_sampling(self, monkeypatch) -> None:
+        monkeypatch.setenv("USE_MCP_SAMPLING", "true")
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        from agent.audit import AuditResult
+
+        audit_result = AuditResult(
+            success=True,
+            source_file="<source>",
+            language="python",
+            spec_extracted=True,
+            report="Audit passed",
+        )
+
+        fake_config = _fake_config_sampling()
+        ctx = _sampling_ctx()
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch("agent.audit.AuditPipeline") as pipeline_cls,
+        ):
+            pipeline_cls.return_value.audit_source.return_value = audit_result
+            result = mcp_server.audit_code(
+                "def add(a: int, b: int) -> int:\n    return a + b\n",
+                "python",
+                ctx=ctx,
+            )
+
+        assert result["success"] is True
+        # Verify pipeline was created with a client (from MCP sampling)
+        call_kwargs = pipeline_cls.call_args.kwargs
+        assert "client" in call_kwargs

@@ -174,8 +174,9 @@ class CodeToSpecExtractor:
         ".hpp": "cpp",
     }
 
-    def __init__(self, config: AgentConfig):
+    def __init__(self, config: AgentConfig, client: object | None = None):
         self.config = config
+        self._injected_client = client
 
     def _detect_language(self, code_path: Path, code: str) -> Language:
         """Detect the source language from file extension or code content."""
@@ -294,7 +295,7 @@ class CodeToSpecExtractor:
             code,
             detected_language,
         )
-        if deterministic.success and not self.config.api_key:
+        if deterministic.success and not self.config.api_key and self._injected_client is None:
             warnings.extend(deterministic.warnings)
             warnings.append("LLM extraction skipped because LLM_API_KEY/OPENAI_API_KEY is not set.")
             return CodeToSpecResult(
@@ -310,7 +311,7 @@ class CodeToSpecExtractor:
             )
 
         try:
-            client = self.config.create_client()
+            client = self._injected_client or self.config.create_client()
             natural_language_spec = self._extract_spec_with_llm(
                 client,
                 code,
