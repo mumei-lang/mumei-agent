@@ -72,14 +72,30 @@ class CodeToSpecConverter:
         detected_language: Language = (
             normalized if normalized in supported_languages else "unknown"
         )
-        if normalized not in {"python", "rust", "typescript", "go"}:
+        layer_b_languages = {"python", "rust", "typescript", "go"}
+        if normalized not in layer_b_languages:
+            layer_a_languages = sorted(set(CodeToSpecExtractor.EXTENSION_MAP.values()))
+            is_layer_a = normalized in set(CodeToSpecExtractor.EXTENSION_MAP.values())
+            if is_layer_a:
+                hint = (
+                    f"'{normalized}' is supported for spec extraction (Layer A) "
+                    f"but Z3 strict verification (Layer B) requires one of: "
+                    f"{', '.join(sorted(layer_b_languages))}."
+                )
+            else:
+                hint = (
+                    f"language must be one of: {', '.join(sorted(layer_b_languages))} "
+                    f"(Z3 strict verification). "
+                    f"Spec extraction (Layer A) also supports: "
+                    f"{', '.join(layer_a_languages)}."
+                )
             return CodeToSpecConversionResult(
                 success=False,
                 atoms=[],
                 natural_language_spec="",
                 mumei_source="",
                 detected_language=detected_language,
-                errors=["language must be one of: python, rust, typescript, go"],
+                errors=[hint],
             )
         try:
             from agent.cross_validation import (

@@ -291,6 +291,17 @@ feedback として返す。
 - Rust / TypeScript / Go 入力でも `AUDIT_SCHEMA_KEYS` が alias なしで揃い、`next_steps` が唯一の人間レビュー入口として返る。
 - 回帰テストは Rust `a + b` overflow と `values[idx]` bounds、TypeScript `name!.length` null/undefined、Go `values[idx]` bounds を deterministic/no-LLM fixture と MCP `scan_and_fix` の両方で固定し、Z3 counterexample を `verification_violations` に集約する。
 
+#### 対応レベル分離方針
+
+言語対応は二層に分離する:
+
+- **層A（spec 抽出）**: LLM/正規表現ベースの自然言語仕様抽出。`CodeToSpecExtractor.EXTENSION_MAP` を単一真実源とし、`rust`, `c`, `cpp`, `go`, `python`, `javascript`, `typescript`, `java` の8言語をサポートする。
+- **層B（Z3 厳密検証）**: `CodeToSpecConverter.convert_source` および `validate_foreign_code` が対応する `python`, `rust`, `typescript`, `go` の4言語のみ。外部コードパーサ（`_python_params`, `_rust_params`, `_typescript_params`, `_go_params`）は層B対応言語に限定する。
+
+層A のみ対応の言語（`c`, `cpp`, `java`, `javascript`）で `convert_source` を呼ぶと「spec 抽出には対応するが Z3 厳密検証は未対応」のエラーを返す。層B の対応言語拡張（C/C++/Java パーサの追加等）は次タスク候補として残す。
+
+`validate-code` CLI の `--language` は省略可能とし、`--input` の拡張子から自動推定する。対応外拡張子の場合はエラーで終了する。
+
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 
 自然言語仕様、既存コード、抽出された `.mm` を双方向に照合し、multi-file cross-spec

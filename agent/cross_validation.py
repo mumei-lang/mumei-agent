@@ -844,8 +844,9 @@ def build_validate_code_parser(parser: argparse.ArgumentParser | None = None) ->
     source_arg.add_argument("--file", dest="input", help=argparse.SUPPRESS)
     parser.add_argument(
         "--language",
-        required=True,
         choices=["python", "rust", "typescript", "go"],
+        default=None,
+        help="Target language. 省略時は --input の拡張子から推定する。",
     )
     parser.add_argument("--output", help="Optional JSON report path.")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
@@ -970,14 +971,47 @@ def main_validate_code_to_spec(args: argparse.Namespace | None = None) -> SpecDr
     return result
 
 
+def _infer_validate_code_language(input_path: str, language: str | None) -> str:
+    """Infer language for validate-code from the file extension.
+
+    Unlike ``_infer_language_from_path`` (which falls back to ``python``),
+    this helper raises a clear error for unsupported extensions so that
+    users are never silently assigned a wrong language.
+    """
+    if language:
+        return _normalize_foreign_language(language)
+    suffix = Path(input_path).suffix.lower()
+    ext_map: dict[str, str] = {
+        ".py": "python",
+        ".rs": "rust",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "typescript",
+        ".jsx": "typescript",
+        ".go": "go",
+    }
+    detected = ext_map.get(suffix)
+    if detected is None:
+        supported = sorted(SUPPORTED_FOREIGN_CODE_LANGUAGES)
+        print(
+            f"Error: cannot infer language from extension '{suffix}'. "
+            f"Supported languages: {', '.join(supported)}. "
+            f"Use --language to specify explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return detected
+
+
 def main_validate_code(args: argparse.Namespace | None = None) -> ForeignCodeValidationResult:
     """CLI entrypoint for validate-code."""
     if args is None:
         args = build_validate_code_parser().parse_args()
+    language = _infer_validate_code_language(args.input, args.language)
     code = _read_input_file(args.input)
     result = validate_foreign_code(
         code,
-        args.language,
+        language,
         use_llm=not args.no_llm,
         run_mumei=not args.no_mumei,
     )
