@@ -1903,13 +1903,17 @@ def audit_code(
 
     try:
         config = AgentConfig()
-        client = _llm_client_for_context(config, ctx)
+        llm_provider = _llm_provider_for_context(config, ctx)
+        client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
     except Exception:
         config = None
+        llm_provider = None
         client = None
 
     try:
-        result = AuditPipeline(config=config, client=client).audit_source(
+        result = AuditPipeline(
+            config=config, client=client, llm_provider=llm_provider,
+        ).audit_source(
             source_code,
             language,
             domain_hint=domain_hint,
@@ -1999,15 +2003,16 @@ def scan_and_fix(
 
     try:
         config = AgentConfig()
-        client = _llm_client_for_context(config, ctx)
         llm_provider = _llm_provider_for_context(config, ctx)
+        client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
     except Exception:
         config = None
-        client = None
         llm_provider = None
+        client = None
 
     pipeline = AuditPipeline(
         config=config, heal_output_dir=heal_output_dir or None, client=client,
+        llm_provider=llm_provider,
     )
     code_path = Path(code_file).expanduser().resolve()
     if code_path.is_dir():
@@ -2124,7 +2129,8 @@ def extract_spec_from_code(
 
     try:
         config = AgentConfig()
-        llm_client = _llm_client_for_context(config, ctx)
+        llm_provider = _llm_provider_for_context(config, ctx)
+        llm_client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
         mumei_bin = config.mumei_bin
         if generate and mumei_repo:
             repo = _resolve_repo(mumei_repo)
@@ -2145,12 +2151,14 @@ def extract_spec_from_code(
                 domain_hint=domain_hint,
                 mumei_client=mumei,
                 max_retries=config.max_retries,
-                client=llm_client,
+                client=llm_client, llm_provider=llm_provider,
             )
             forge_task_spec = payload["merged_spec"]
             result = None
         else:
-            result = CodeToSpecExtractor(config, client=llm_client).extract_from_file(
+            result = CodeToSpecExtractor(
+                config, client=llm_client, llm_provider=llm_provider,
+            ).extract_from_file(
                 source_path,
                 language=selected_language,
                 domain_hint=domain_hint,

@@ -54,6 +54,7 @@ text `sampling/createMessage` requests:
 - convert OpenAI-style `messages[]` into MCP `SamplingMessage` text content
 - map `role=system` messages to `systemPrompt`
 - pass the configured model as `modelPreferences.hints[].name`
+- bound `maxTokens` by `MCP_SAMPLING_MAX_TOKENS` (default `4096`)
 - check initialization `capabilities.sampling` before sending sampling requests
 - omit `includeContext`; 2025-11-25 marks `"thisServer"` and `"allServers"`
   as soft-deprecated and requires explicit `sampling.context` capability before
