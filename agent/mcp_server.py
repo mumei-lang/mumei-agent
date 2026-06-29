@@ -1983,7 +1983,8 @@ def scan_and_fix(
     1. audit: extract spec, check health, verify contracts, emit spec_health_issues,
        verification_violations, cross_validation_gaps, and next_steps
     2. migrate-suggest: generate migration_hints and .mm skeletons for functions with issues
-    3. (optional) heal: run self-healing loop on each skeleton
+    3. (optional) heal: run self-healing loop on each skeleton, recording healed_files
+       and heal_errors
 
     Args:
         code_file: Path to the source code file or directory.

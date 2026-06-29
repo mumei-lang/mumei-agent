@@ -139,8 +139,8 @@ def main() -> None:
         parser = argparse.ArgumentParser(
             prog="python -m agent audit",
             description=(
-                "Audit existing code by extracting specs, verifying them, "
-                "and reporting next steps."
+                "Audit existing code by extracting specs, verifying contracts, "
+                "emitting cross_validation_gaps, and optionally producing migration_hints."
             ),
         )
         audit_build_parser(parser)
