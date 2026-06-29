@@ -298,6 +298,8 @@ def test_validate_code_cli_writes_json_report(tmp_path: Path) -> None:
         ("lib.rs", "rust", "pub fn add(a: i64, b: i64) -> i64 { a + b }\n"),
         ("app.ts", "typescript", "export function add(a: number, b: number): number { return a + b; }\n"),
         ("app.tsx", "typescript", "export function add(a: number, b: number): number { return a + b; }\n"),
+        ("app.js", "typescript", "function add(a, b) { return a + b; }\n"),
+        ("app.jsx", "typescript", "function add(a, b) { return a + b; }\n"),
         ("main.go", "go", "package demo\nfunc add(a int, b int) int { return a + b }\n"),
     ],
 )

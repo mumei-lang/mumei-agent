@@ -986,6 +986,8 @@ def _infer_validate_code_language(input_path: str, language: str | None) -> str:
         ".rs": "rust",
         ".ts": "typescript",
         ".tsx": "typescript",
+        ".js": "typescript",
+        ".jsx": "typescript",
         ".go": "go",
     }
     detected = ext_map.get(suffix)

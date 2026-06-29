@@ -1,10 +1,11 @@
 """Tests for source-code to natural-language spec extraction."""
 from __future__ import annotations
 
+import typing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agent.code_to_spec import CodeToSpecConverter, CodeToSpecExtractor
+from agent.code_to_spec import CodeToSpecConverter, CodeToSpecExtractor, Language
 from agent.config import AgentConfig
 
 
@@ -176,9 +177,6 @@ def test_convert_source_layer_b_supported_succeeds() -> None:
 
 def test_extension_map_matches_language_type() -> None:
     """EXTENSION_MAP values are a subset of the Language literal."""
-    from agent.code_to_spec import Language
-    import typing
-
     allowed = set(typing.get_args(Language))
     ext_languages = set(CodeToSpecExtractor.EXTENSION_MAP.values())
     assert ext_languages <= allowed, f"EXTENSION_MAP has languages not in Language type: {ext_languages - allowed}"

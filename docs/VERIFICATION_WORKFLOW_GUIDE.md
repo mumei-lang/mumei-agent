@@ -315,9 +315,8 @@ mumei-agent extract-spec \
 `extract-spec --code-file` より詳細な検証を行う専用コマンド。コントラクト推論・Z3検証・Mumei検証を統合して実行する。`--input` には単一コードファイルを指定する。
 
 ```bash
-mumei-agent validate-code \
-  --input src/payment.py
-  # --language 省略時は拡張子から自動推定（python|rust|typescript|go）
+mumei-agent validate-code --input src/payment.py
+# --language 省略時は拡張子から自動推定（python|rust|typescript|go）
 ```
 
 `validate-code` の `--language` は省略可能。省略時は `--input` の拡張子から推定し、対応外拡張子の場合はエラーで終了する。
