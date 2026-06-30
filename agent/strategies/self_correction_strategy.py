@@ -12,8 +12,8 @@ from openai import OpenAI
 from agent.budget_policy import BudgetPolicy, classify_action_class, evaluate_budget
 from agent.config import AgentConfig
 from agent.metrics import Metrics
-from agent.proofcert import Z3CheckResult
 from agent.mumei_client import MumeiClient, create_mumei_client
+from agent.proofcert import Z3CheckResult
 from agent.strategies import fix_strategy
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory

@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Protocol
 
 from agent.config import AgentConfig
-from agent.proofcert import Z3CheckResult
 from agent.lean_bridge import run_lean_bridge as run_lean_bridge_impl
 from agent.mumei_client import create_mumei_client
+from agent.proofcert import Z3CheckResult
 from agent.strategies.fix_strategy import ConfiguredLossVectorFixClient, SelfCorrectionLoop
 from agent.strategies.generate_strategy import generate_code
 

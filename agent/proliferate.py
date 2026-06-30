@@ -37,8 +37,8 @@ from agent.gap_rules import (
 )
 from agent.harness_metrics import HarnessMetrics, harness_profile_names
 from agent.metrics import Metrics
-from agent.proofcert import Z3CheckResult
 from agent.mumei_client import MumeiClient, create_mumei_client
+from agent.proofcert import Z3CheckResult
 from agent.propose import build_spec_from_proposal
 from agent.publish import publish
 from agent.strategies.generate_strategy import generate_code
