@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent.proofcert import Z3CheckResult
+
 
 _OUTSIDE_DECIDABLE_FRAGMENT_RE = re.compile(
     r"outside_decidable_fragment:.*? uses (?P<tags>[^;\n]+)"
@@ -341,7 +343,7 @@ class Metrics:
             if isinstance(atoms, list):
                 z3_unknown = any(
                     isinstance(atom, Mapping)
-                    and atom.get("z3_check_result") == "unknown"
+                    and atom.get("z3_check_result") == Z3CheckResult.UNKNOWN.value
                     for atom in atoms
                 )
         stderr = verify_result.get("stderr")

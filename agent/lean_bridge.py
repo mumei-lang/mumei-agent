@@ -35,6 +35,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent.proofcert import (
+    VerificationStatus,
+    Z3CheckResult,
+    iter_atoms,
+)
+
 logger = logging.getLogger(__name__)
 
 _RETRYABLE_ERROR_CODES = {
@@ -280,34 +286,11 @@ def extract_unknown_atoms(verify_result: dict[str, Any]) -> list[dict[str, Any]]
     """
     if not isinstance(verify_result, dict):
         return []
-
-    atoms: list[dict[str, Any]] = []
-
-    def _consume_cert(cert: dict[str, Any]) -> None:
-        cert_atoms = cert.get("atoms")
-        if isinstance(cert_atoms, list):
-            for atom in cert_atoms:
-                if (
-                    isinstance(atom, dict)
-                    and atom.get("z3_check_result") == "unknown"
-                ):
-                    atoms.append(atom)
-        modules = cert.get("modules")
-        if isinstance(modules, dict):
-            for module_cert in modules.values():
-                if isinstance(module_cert, dict):
-                    _consume_cert(module_cert)
-
-    # Direct certificate.
-    _consume_cert(verify_result)
-    # Common wrappers used by ``MumeiClient.verify`` and the proliferate
-    # output JSON.
-    for key in ("certificate", "report", "proof_certificate"):
-        nested = verify_result.get(key)
-        if isinstance(nested, dict):
-            _consume_cert(nested)
-
-    return atoms
+    return [
+        atom.raw
+        for atom in iter_atoms(verify_result, include_candidates=False)
+        if atom.z3_check_result == Z3CheckResult.UNKNOWN
+    ]
 
 
 def _load_json_file(path: str | Path) -> dict[str, Any] | None:
@@ -343,28 +326,11 @@ def _module_source_path(repo_path: Path, module: str) -> Path:
 
 
 def _atom_names_with_result(cert: dict[str, Any], result: str) -> set[str]:
-    names: set[str] = set()
-
-    def _consume(payload: dict[str, Any]) -> None:
-        for key in ("atoms", "candidates"):
-            atoms = payload.get(key)
-            if not isinstance(atoms, list):
-                continue
-            for atom in atoms:
-                if (
-                    isinstance(atom, dict)
-                    and atom.get("z3_check_result") == result
-                    and isinstance(atom.get("name"), str)
-                ):
-                    names.add(atom["name"])
-        modules = payload.get("modules")
-        if isinstance(modules, dict):
-            for module_cert in modules.values():
-                if isinstance(module_cert, dict):
-                    _consume(module_cert)
-
-    _consume(cert)
-    return names
+    return {
+        atom.name
+        for atom in iter_atoms(cert)
+        if atom.z3_check_result == result and atom.name is not None
+    }
 
 
 def _lean_atom_records_with_result(
@@ -372,26 +338,9 @@ def _lean_atom_records_with_result(
     result: str,
 ) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
-
-    def _consume(payload: dict[str, Any]) -> None:
-        for key in ("atoms", "candidates"):
-            atoms = payload.get(key)
-            if not isinstance(atoms, list):
-                continue
-            for atom in atoms:
-                if (
-                    isinstance(atom, dict)
-                    and atom.get("z3_check_result") == result
-                    and isinstance(atom.get("name"), str)
-                ):
-                    records[atom["name"]] = atom
-        modules = payload.get("modules")
-        if isinstance(modules, dict):
-            for module_cert in modules.values():
-                if isinstance(module_cert, dict):
-                    _consume(module_cert)
-
-    _consume(cert)
+    for atom in iter_atoms(cert):
+        if atom.z3_check_result == result and atom.name is not None:
+            records[atom.name] = atom.raw
     return records
 
 
@@ -404,50 +353,47 @@ def _upgrade_atoms_by_name(
 ) -> dict[str, Any]:
     upgraded: dict[str, Any] = json.loads(json.dumps(cert))
 
-    def _consume(payload: dict[str, Any]) -> None:
-        for key in ("atoms", "candidates"):
-            atoms = payload.get(key)
-            if not isinstance(atoms, list):
-                continue
-            for atom in atoms:
-                if (
-                    isinstance(atom, dict)
-                    and atom.get("name") in proved_names
-                    and atom.get("z3_check_result") == "unknown"
+    for atom in iter_atoms(upgraded):
+        if (
+            atom.name in proved_names
+            and atom.z3_check_result == Z3CheckResult.UNKNOWN
+        ):
+            atom.raw["z3_check_result"] = Z3CheckResult.LEAN_VERIFIED.value
+            atom.raw["status"] = VerificationStatus.VERIFIED.value
+            lean_atom = (lean_atom_records or {}).get(str(atom.name))
+            if isinstance(lean_atom, dict):
+                for field in (
+                    "translator_version",
+                    "bridge_lemma_hash",
+                    "lean_metadata",
+                    "lean_result_metadata",
+                    "unknown_obligation_domain",
+                    "escalation_reason",
                 ):
-                    atom["z3_check_result"] = "lean_verified"
-                    atom["status"] = "verified"
-                    lean_atom = (
-                        (lean_atom_records or {}).get(str(atom.get("name")))
-                    )
-                    if isinstance(lean_atom, dict):
-                        for field in (
-                            "translator_version",
-                            "bridge_lemma_hash",
-                            "lean_metadata",
-                            "lean_result_metadata",
-                            "unknown_obligation_domain",
-                            "escalation_reason",
-                        ):
-                            if field in lean_atom:
-                                atom[field] = json.loads(
-                                    json.dumps(lean_atom[field])
-                                )
-                    if strategy is not None:
-                        atom["lean_fallback_strategy"] = strategy
-            if atoms:
-                payload["all_verified"] = all(
-                    isinstance(atom, dict)
-                    and atom.get("z3_check_result") in {"unsat", "lean_verified"}
-                    for atom in atoms
-                )
+                    if field in lean_atom:
+                        atom.raw[field] = json.loads(json.dumps(lean_atom[field]))
+            if strategy is not None:
+                atom.raw["lean_fallback_strategy"] = strategy
+
+    def _refresh_all_verified(payload: dict[str, Any]) -> None:
+        atoms = payload.get("atoms")
+        if isinstance(atoms, list):
+            payload["all_verified"] = all(
+                isinstance(atom, dict)
+                and atom.get("z3_check_result")
+                in {
+                    Z3CheckResult.UNSAT.value,
+                    Z3CheckResult.LEAN_VERIFIED.value,
+                }
+                for atom in atoms
+            )
         modules = payload.get("modules")
         if isinstance(modules, dict):
             for module_cert in modules.values():
                 if isinstance(module_cert, dict):
-                    _consume(module_cert)
+                    _refresh_all_verified(module_cert)
 
-    _consume(upgraded)
+    _refresh_all_verified(upgraded)
     return upgraded
 
 
@@ -457,10 +403,12 @@ def _unknowns_verified_in_cert(
 ) -> tuple[bool, bool]:
     if original_cert is None or upgraded_cert is None:
         return False, False
-    unknown_names = _atom_names_with_result(original_cert, "unknown")
+    unknown_names = _atom_names_with_result(original_cert, Z3CheckResult.UNKNOWN)
     if not unknown_names:
         return False, False
-    verified_names = _atom_names_with_result(upgraded_cert, "lean_verified")
+    verified_names = _atom_names_with_result(
+        upgraded_cert, Z3CheckResult.LEAN_VERIFIED
+    )
     proved_any = bool(unknown_names.intersection(verified_names))
     proved_all = unknown_names.issubset(verified_names)
     return proved_all, proved_any and not proved_all
@@ -471,8 +419,10 @@ def count_lean_verified_unknowns(
     upgraded_cert: dict[str, Any],
 ) -> int:
     """Count original Z3-unknown atoms promoted to ``lean_verified``."""
-    unknown_names = _atom_names_with_result(original_cert, "unknown")
-    verified_names = _atom_names_with_result(upgraded_cert, "lean_verified")
+    unknown_names = _atom_names_with_result(original_cert, Z3CheckResult.UNKNOWN)
+    verified_names = _atom_names_with_result(
+        upgraded_cert, Z3CheckResult.LEAN_VERIFIED
+    )
     return len(unknown_names.intersection(verified_names))
 
 
@@ -583,8 +533,8 @@ def _known_witness_atom_records(
                 metadata.setdefault(metadata_field, value)
 
         record = json.loads(json.dumps(atom))
-        record["z3_check_result"] = "lean_verified"
-        record["status"] = "verified"
+        record["z3_check_result"] = Z3CheckResult.LEAN_VERIFIED.value
+        record["status"] = VerificationStatus.VERIFIED.value
         for const_key, field in (
             ("TRANSLATOR_VERSION", "translator_version"),
             ("BRIDGE_LEMMA_HASH", "bridge_lemma_hash"),
@@ -603,24 +553,10 @@ def _known_witness_atom_records(
         }
         return record
 
-    def _consume(payload: dict[str, Any]) -> None:
-        for key in ("atoms", "candidates"):
-            atoms = payload.get(key)
-            if not isinstance(atoms, list):
-                continue
-            for atom in atoms:
-                if not isinstance(atom, dict):
-                    continue
-                record = _record_for_atom(atom)
-                if record is not None:
-                    records[record["name"]] = record
-        modules = payload.get("modules")
-        if isinstance(modules, dict):
-            for module_cert in modules.values():
-                if isinstance(module_cert, dict):
-                    _consume(module_cert)
-
-    _consume(cert)
+    for atom in iter_atoms(cert):
+        record = _record_for_atom(atom.raw)
+        if record is not None:
+            records[record["name"]] = record
     return records
 
 
@@ -1124,7 +1060,10 @@ def merge_lean_cert_into_proof_cert(
     ``lean_cert_schema_version`` fields (when present in *lean_cert*)
     and recomputes ``all_verified`` over the upgraded atom list.
     """
-    lean_atom_records = _lean_atom_records_with_result(lean_cert, "lean_verified")
+    lean_atom_records = _lean_atom_records_with_result(
+        lean_cert,
+        Z3CheckResult.LEAN_VERIFIED.value,
+    )
     proved_names = set(lean_atom_records)
     upgraded = _upgrade_atoms_by_name(
         original_cert,

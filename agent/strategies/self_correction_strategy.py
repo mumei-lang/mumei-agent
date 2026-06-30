@@ -12,6 +12,7 @@ from openai import OpenAI
 from agent.budget_policy import BudgetPolicy, classify_action_class, evaluate_budget
 from agent.config import AgentConfig
 from agent.metrics import Metrics
+from agent.proofcert import Z3CheckResult
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.strategies import fix_strategy
 from agent.strategies.generate_strategy import generate_code
@@ -117,7 +118,7 @@ class SelfCorrectionStrategy:
             report = dict(result.get("report") or {})
             verification_result = self._verification_result(result, report)
             loss_empty = self._reconstruction_loss_empty(report)
-            success = verification_result in {"unsat", "lean_verified"} and loss_empty
+            success = verification_result in {Z3CheckResult.UNSAT.value, Z3CheckResult.LEAN_VERIFIED.value} and loss_empty
             consecutive_successes = consecutive_successes + 1 if success else 0
 
             iterations.append(
@@ -241,7 +242,7 @@ class SelfCorrectionStrategy:
     def _verification_result(result: dict, report: dict) -> str:
         if result.get("success"):
             raw = report.get("z3_check_result") or report.get("z3_result_class")
-            if raw in {"lean_verified", "unsat"}:
+            if raw in {Z3CheckResult.LEAN_VERIFIED.value, Z3CheckResult.UNSAT.value}:
                 return str(raw)
             atoms = report.get("atoms")
             if isinstance(atoms, list) and atoms:
@@ -250,8 +251,16 @@ class SelfCorrectionStrategy:
                     for atom in atoms
                     if isinstance(atom, dict)
                 }
-                if atom_results and atom_results <= {"unsat", "lean_verified", "verified"}:
-                    return "lean_verified" if "lean_verified" in atom_results else "unsat"
+                if atom_results and atom_results <= {
+                    Z3CheckResult.UNSAT.value,
+                    Z3CheckResult.LEAN_VERIFIED.value,
+                    "verified",
+                }:
+                    return (
+                        Z3CheckResult.LEAN_VERIFIED.value
+                        if Z3CheckResult.LEAN_VERIFIED.value in atom_results
+                        else Z3CheckResult.UNSAT.value
+                    )
             return "unsat"
         return str(
             report.get("z3_check_result")

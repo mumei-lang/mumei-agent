@@ -37,6 +37,7 @@ from agent.gap_rules import (
 )
 from agent.harness_metrics import HarnessMetrics, harness_profile_names
 from agent.metrics import Metrics
+from agent.proofcert import Z3CheckResult
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.propose import build_spec_from_proposal
 from agent.publish import publish
@@ -1699,7 +1700,7 @@ def _jsonify_result(
                 1
                 for a in atom_list
                 if isinstance(a, dict)
-                and a.get("z3_check_result") == "lean_verified"
+                and a.get("z3_check_result") == Z3CheckResult.LEAN_VERIFIED.value
             )
             out["upgraded_cert_summary"] = {
                 "atom_count": len(atom_list),
@@ -1761,7 +1762,7 @@ def _jsonify_result(
                             for atom in cert_atom_list
                             if isinstance(atom, dict)
                             and atom.get("z3_check_result")
-                            == "lean_verified"
+                            == Z3CheckResult.LEAN_VERIFIED.value
                         ),
                         "all_verified": cert.get("all_verified"),
                     }
