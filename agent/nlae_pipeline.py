@@ -11,6 +11,7 @@ from typing import Protocol
 from agent.config import AgentConfig
 from agent.lean_bridge import run_lean_bridge as run_lean_bridge_impl
 from agent.mumei_client import create_mumei_client
+from agent.proofcert import Z3CheckResult
 from agent.strategies.fix_strategy import ConfiguredLossVectorFixClient, SelfCorrectionLoop
 from agent.strategies.generate_strategy import generate_code
 
@@ -295,7 +296,7 @@ def _certificate_from_verify_result(
             "name": atom_name,
             "module_key": "examples/nlae_integration_demo",
             "module": "examples/nlae_integration_demo.mm",
-            "z3_check_result": "unknown",
+            "z3_check_result": Z3CheckResult.UNKNOWN.value,
         }
         for atom_name in _atom_names(code)
     ]
