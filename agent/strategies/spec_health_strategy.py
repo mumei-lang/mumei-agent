@@ -25,6 +25,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from agent.strategies.spec_health_strategy_helpers import (
+    ContradictionInfo,
+    OverConstrainedInfo,
+    VacuousInfo,
     _as_dict,
     _collect_atoms,
     _collect_fix_suggestions,
@@ -39,35 +42,6 @@ from agent.strategies.spec_health_strategy_helpers import (
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
-
-@dataclass
-class ContradictionInfo:
-    """An atom whose ``spec_validation_result.is_satisfiable`` is false."""
-
-    atom: str
-    details: str = ""
-    fix_suggestion: str = ""
-
-
-@dataclass
-class OverConstrainedInfo:
-    """An atom with many unused hypotheses (requires, invariants, effects)."""
-
-    atom: str
-    unused_requires: list[str] = field(default_factory=list)
-    unused_invariants: list[str] = field(default_factory=list)
-    unused_effect_constraints: list[str] = field(default_factory=list)
-    fix_suggestion: str = ""
-
-
-@dataclass
-class VacuousInfo:
-    """An atom flagged as vacuous by ``--enable-vacuity-check``."""
-
-    atom: str
-    message: str = ""
-    fix_suggestion: str = ""
-
 
 @dataclass
 class SpecHealthReport:

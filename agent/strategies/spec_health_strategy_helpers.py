@@ -2,6 +2,38 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ContradictionInfo:
+    """An atom whose ``spec_validation_result.is_satisfiable`` is false."""
+
+    atom: str
+    details: str = ""
+    fix_suggestion: str = ""
+
+
+@dataclass
+class OverConstrainedInfo:
+    """An atom with many unused hypotheses (requires, invariants, effects)."""
+
+    atom: str
+    unused_requires: list[str] = field(default_factory=list)
+    unused_invariants: list[str] = field(default_factory=list)
+    unused_effect_constraints: list[str] = field(default_factory=list)
+    fix_suggestion: str = ""
+
+
+@dataclass
+class VacuousInfo:
+    """An atom flagged as vacuous by ``--enable-vacuity-check``."""
+
+    atom: str
+    message: str = ""
+    fix_suggestion: str = ""
+
+
 def _as_dict(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return {str(k): v for k, v in value.items()}
@@ -110,5 +142,3 @@ def _collect_fix_suggestions(
             seen.add(vacuity.fix_suggestion)
             suggestions.append(vacuity.fix_suggestion)
     return suggestions
-
-
