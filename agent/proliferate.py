@@ -62,6 +62,12 @@ from agent.proliferate_report import (
     _lean_fallback_not_attempted,
     _metrics_payload,
 )
+from agent.proliferate_cache import (
+    _detect_diffs,
+    _forge_cache_path,
+    _safe_relative_file,
+    _spec_cache_key,
+)
 
 logger = logging.getLogger(__name__)
 _FORGE_CACHE_LOCK = Lock()
@@ -236,51 +242,6 @@ def attempt_heal(
 # Main proliferate loop
 # ---------------------------------------------------------------------------
 
-def _safe_relative_file(repo_dir: Path, rel_path: str) -> Path | None:
-    candidate = (repo_dir / rel_path).resolve()
-    try:
-        candidate.relative_to(repo_dir.resolve())
-    except ValueError:
-        return None
-    return candidate
-
-
-def _spec_cache_key(
-    spec: dict[str, Any],
-    mumei_repo_dir: Path | None = None,
-) -> str:
-    payload_obj: dict[str, Any] = {"spec": spec}
-    if mumei_repo_dir is not None:
-        context_hashes: dict[str, str | None] = {}
-        rel_paths: set[str] = set()
-        for key in ("target_file",):
-            value = spec.get(key)
-            if isinstance(value, str):
-                rel_paths.add(value)
-        for key in ("context_files", "depends_on"):
-            value = spec.get(key)
-            if isinstance(value, list):
-                rel_paths.update(item for item in value if isinstance(item, str))
-        for rel_path in sorted(rel_paths):
-            candidate = _safe_relative_file(mumei_repo_dir, rel_path)
-            if candidate is not None and candidate.is_file():
-                try:
-                    context_hashes[rel_path] = hashlib.sha256(
-                        candidate.read_bytes()
-                    ).hexdigest()
-                except OSError:
-                    context_hashes[rel_path] = None
-            else:
-                context_hashes[rel_path] = None
-        payload_obj["context_hashes"] = context_hashes
-    payload = json.dumps(payload_obj, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _forge_cache_path(mumei_repo_dir: Path) -> Path:
-    return mumei_repo_dir / ".mumei" / "proliferate_forge_cache.json"
-
-
 def _cache_results(
     cache_path: str | Path,
     spec: dict[str, Any],
@@ -331,29 +292,6 @@ def _cache_results(
         except OSError:
             logger.debug("Could not write forge cache at %s", path, exc_info=True)
         return entry
-
-
-def _detect_diffs(
-    mumei_repo_dir: str | Path,
-    target_file: str | Path,
-    code: str,
-) -> dict[str, Any]:
-    """Return content-level diff metadata for a generated target file."""
-    path = Path(mumei_repo_dir) / target_file
-    existing = path.read_text(encoding="utf-8") if path.exists() else None
-    old_hash = (
-        hashlib.sha256(existing.encode("utf-8")).hexdigest()
-        if existing is not None
-        else None
-    )
-    new_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
-    return {
-        "target_file": str(target_file),
-        "exists": existing is not None,
-        "changed": existing != code,
-        "old_sha256": old_hash,
-        "new_sha256": new_hash,
-    }
 
 
 def _forge_worker_count(spec_count: int, override: int | None = None) -> int:
