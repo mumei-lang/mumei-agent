@@ -5,10 +5,8 @@ import argparse
 import ast
 from collections.abc import Iterable
 from dataclasses import asdict, replace
-import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
@@ -81,6 +79,21 @@ from agent.cross_validation_foreign import (
     _typescript_raw_return_expression,
     _typescript_return_type,
     _with_source_lines,
+)
+from agent.cross_validation_payload import (
+    _atom_from_mapping,
+    _atoms_from_payload,
+    _atoms_to_mumei_module,
+    _contract_clause,
+    _default_literal,
+    _extract_inline_contract_atoms,
+    _int_value,
+    _issues_from_payload,
+    _json_from_text,
+    _params_from_contract_text,
+    _params_from_value,
+    _string_list,
+    _string_value,
 )
 from agent.cross_validation_report import (
     _atoms_to_spec_payload,
@@ -1011,166 +1024,6 @@ def _infer_contracts_with_llm(
         return [], [], warnings
 
 
-def _json_from_text(text: str) -> dict[str, object]:
-    stripped = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
-    if fence_match:
-        stripped = fence_match.group(1)
-    elif not stripped.startswith("{"):
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start >= 0 and end > start:
-            stripped = stripped[start : end + 1]
-    payload = json.loads(stripped)
-    if not isinstance(payload, dict):
-        raise json.JSONDecodeError("expected JSON object", stripped, 0)
-    return payload
-
-
-def _atoms_from_payload(payload: dict[str, object]) -> list[MumeiContractAtom]:
-    atoms_value = payload.get("atoms")
-    if not isinstance(atoms_value, list):
-        return []
-    atoms: list[MumeiContractAtom] = []
-    for index, atom_value in enumerate(atoms_value):
-        if isinstance(atom_value, dict):
-            atoms.append(_atom_from_mapping(atom_value, index))
-    return atoms
-
-
-def _atom_from_mapping(value: dict[object, object], index: int) -> MumeiContractAtom:
-    name = _safe_identifier(_string_value(value, "name", f"cross_validation_{index}"))
-    params = _params_from_value(value.get("params") or value.get("inputs"))
-    return_type = _string_value(value, "return_type", "i64")
-    requires = _contract_clause(value.get("requires"))
-    ensures = _contract_clause(value.get("ensures"))
-    effects = _string_list(value.get("effects"))
-    return MumeiContractAtom(
-        name=name,
-        params=params,
-        return_type=return_type,
-        requires=requires,
-        ensures=ensures,
-        effects=effects,
-    )
-
-
-def _issues_from_payload(payload: dict[str, object]) -> list[CrossValidationIssue]:
-    issues_value = payload.get("issues")
-    if not isinstance(issues_value, list):
-        return []
-    issues: list[CrossValidationIssue] = []
-    valid_kinds = {
-        "contradiction",
-        "ambiguity",
-        "overconstraint",
-        "satisfiability",
-        "llm",
-        "verification",
-        "alignment",
-        "missing_implementation",
-        "postcondition_violated",
-        "drift",
-    }
-    for issue_value in issues_value:
-        if not isinstance(issue_value, dict):
-            continue
-        kind_text = str(issue_value.get("kind") or "llm")
-        kind: IssueKind = kind_text if kind_text in valid_kinds else "llm"
-        severity_text = str(issue_value.get("severity") or "error")
-        severity: Severity = "warning" if severity_text == "warning" else "error"
-        issues.append(
-            CrossValidationIssue(
-                kind=kind,
-                message=str(issue_value.get("message") or "LLM reported a cross-validation issue."),
-                evidence=str(issue_value.get("evidence") or ""),
-                fix_suggestion=str(issue_value.get("fix_suggestion") or ""),
-                location=str(issue_value.get("location") or ""),
-                severity=severity,
-                source_line=_int_value(issue_value.get("source_line")),
-            )
-        )
-    return issues
-
-
-def _string_value(value: dict[object, object], key: str, default: str) -> str:
-    raw = value.get(key)
-    if raw is None:
-        return default
-    text = str(raw).strip()
-    return text or default
-
-
-def _int_value(value: object) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _params_from_value(value: object) -> list[ContractParam]:
-    if not isinstance(value, list):
-        return []
-    params: list[ContractParam] = []
-    for index, raw_param in enumerate(value):
-        if isinstance(raw_param, dict):
-            name = _safe_identifier(str(raw_param.get("name") or f"arg{index}"))
-            type_name = str(raw_param.get("type") or "i64").strip() or "i64"
-            params.append(ContractParam(name=name, type=type_name))
-    return params
-
-
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def _contract_clause(value: object) -> str:
-    if isinstance(value, list):
-        parts = [str(item).strip().rstrip(";") for item in value if str(item).strip()]
-        return " && ".join(parts) if parts else "true"
-    text = str(value or "true").strip().rstrip(";")
-    return text or "true"
-
-
-def _extract_inline_contract_atoms(spec_text: str) -> list[MumeiContractAtom]:
-    requires_match = re.search(r"requires\s*:\s*([^;\n]+)", spec_text, flags=re.IGNORECASE)
-    ensures_match = re.search(r"ensures\s*:\s*([^;\n]+)", spec_text, flags=re.IGNORECASE)
-    if not requires_match and not ensures_match:
-        return []
-    return [
-        MumeiContractAtom(
-            name="nl_spec_contract",
-            params=_params_from_contract_text(spec_text),
-            return_type="i64",
-            requires=requires_match.group(1).strip() if requires_match else "true",
-            ensures=ensures_match.group(1).strip() if ensures_match else "true",
-        )
-    ]
-
-
-def _params_from_contract_text(text: str) -> list[ContractParam]:
-    names = sorted(
-        name
-        for name in set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", text))
-        if name
-        not in {
-            "and",
-            "or",
-            "true",
-            "false",
-            "requires",
-            "ensures",
-            "result",
-            "i64",
-            "MAX",
-            "MIN",
-        }
-    )
-    return [ContractParam(name=name, type="i64") for name in names[:8]]
-
-
 
 
 
@@ -1322,37 +1175,5 @@ def _verify_atoms_with_mumei(
             )
         )
     return result, issues, warnings
-
-
-def _atoms_to_mumei_module(atoms: list[MumeiContractAtom]) -> str:
-    blocks: list[str] = []
-    for atom in atoms:
-        params = ", ".join(f"{param.name}: {param.type}" for param in atom.params)
-        default_value = _default_literal(atom.return_type)
-        blocks.append(
-            "\n".join(
-                [
-                    f"trusted atom {atom.name}({params}) -> {atom.return_type} {{",
-                    f"    requires: {atom.requires};",
-                    f"    ensures: {atom.ensures};",
-                    "    body: {",
-                    f"        {default_value}",
-                    "    }",
-                    "}",
-                ]
-            )
-        )
-    return "\n\n".join(blocks) + ("\n" if blocks else "")
-
-
-def _default_literal(return_type: str) -> str:
-    normalized = return_type.strip().lower()
-    if normalized in {"bool", "boolean"}:
-        return "true"
-    if normalized in {"str", "string"}:
-        return '""'
-    return "0"
-
-
 
 
