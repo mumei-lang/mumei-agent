@@ -1,6 +1,12 @@
 """Common formatting helpers for report.json structured fields."""
 from __future__ import annotations
 
+from agent.prompts.report_formatter_core import (
+    _extract_constraint_set,
+    _safe_dict,
+    _safe_sf,
+)
+
 # Keywords that indicate a suggestion was dynamically generated from
 # counterexample data rather than being a generic template fallback.
 _CONTEXTUAL_MARKERS = (
@@ -205,22 +211,6 @@ def format_error_diff(prev_report: dict, curr_report: dict) -> str:
     return "\n".join(lines)
 
 
-def _extract_constraint_set(report: dict) -> set[str]:
-    """Extract a set of constraint description strings from a report."""
-    sf = report.get("semantic_feedback")
-    if not sf or not isinstance(sf, dict):
-        return set()
-    constraints = sf.get("violated_constraints")
-    if not constraints or not isinstance(constraints, list):
-        return set()
-    result: set[str] = set()
-    for vc in constraints:
-        param = vc.get("param", "?")
-        constraint = vc.get("constraint", "?")
-        result.add(f"param '{param}' constraint `{constraint}`")
-    return result
-
-
 def format_structured_unsat_core(report: dict) -> str:
     """Format semantic_feedback.structured_unsat_core into human-readable text.
 
@@ -257,22 +247,6 @@ def format_structured_unsat_core(report: dict) -> str:
         lines.append(f"- [{ctype}]{detail}{suffix}")
 
     return "\n".join(lines)
-
-
-def _safe_sf(report: dict) -> dict:
-    """Return ``semantic_feedback`` as a dict, defaulting to ``{}`` on null/missing."""
-    sf = report.get("semantic_feedback")
-    if not sf or not isinstance(sf, dict):
-        return {}
-    return sf
-
-
-def _safe_dict(report: dict, key: str) -> dict:
-    """Return *key* from *report* as a dict, defaulting to ``{}`` on null/missing."""
-    val = report.get(key)
-    if not val or not isinstance(val, dict):
-        return {}
-    return val
 
 
 def format_actionable_fix_hint(report: dict) -> str:
