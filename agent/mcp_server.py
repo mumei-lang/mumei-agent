@@ -876,6 +876,8 @@ def escalate_to_lean(atom_name: str) -> str:
         return _err(f"failed to escalate atom to Lean: {exc}", atom_name=atom_name)
     return _ok({"atom": entry, "path": str(tracker.queue_path)})
 
+# TODO: expose reject_review MCP tool (HumanReviewTracker.reject_review exists)
+
 def _human_review_tracker():
     global _active_human_review_tracker
     if _active_human_review_tracker is not None:
