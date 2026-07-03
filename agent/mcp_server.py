@@ -45,103 +45,20 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("Mumei-Agent")
 _active_human_review_tracker = None
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _err(message: str, **extra: Any) -> str:
-    """Return a JSON-encoded error payload."""
-    payload: dict[str, Any] = {"status": "error", "error": message}
-    payload.update(extra)
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _ok(payload: dict[str, Any]) -> str:
-    """Return a JSON-encoded ``status: ok`` payload."""
-    payload.setdefault("status", "ok")
-    return json.dumps(payload, ensure_ascii=False, default=str)
-
-
-def _ok_dataclass(result: Any) -> str:
-    """Return a dataclass result as a JSON-encoded ``status: ok`` payload."""
-    return _ok(asdict(result))
-
-
-def _resolve_repo(path: str) -> Path:
-    """Resolve *path* as an absolute Path."""
-    return Path(path).expanduser().resolve()
-
-
-def _parse_spec_files(spec_files: Any) -> list[str]:
-    if isinstance(spec_files, list):
-        return [str(item) for item in spec_files if str(item).strip()]
-    if not isinstance(spec_files, str):
-        return []
-    text = spec_files.strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, list):
-        return [str(item) for item in parsed if str(item).strip()]
-    return [part.strip() for part in text.split(",") if part.strip()]
-
-
-def _parse_error_report(error_report: str) -> tuple[dict[str, Any], str]:
-    if not error_report:
-        return {}, ""
-    try:
-        parsed = json.loads(error_report)
-    except json.JSONDecodeError:
-        return {"raw": error_report}, error_report
-    if isinstance(parsed, dict):
-        return parsed, error_report
-    return {"raw": parsed}, error_report
-
-
-def _existing_path_arg(value: str) -> Path | None:
-    if not value or "\n" in value or len(value) > 4096:
-        return None
-    try:
-        candidate = Path(value).expanduser()
-        if candidate.exists():
-            return candidate.resolve()
-    except OSError:
-        return None
-    return None
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"true", "1", "yes", "on"}
-
-
-def _sampling_enabled(config: Any) -> bool:
-    return bool(getattr(config, "use_mcp_sampling", False)) or _env_bool("USE_MCP_SAMPLING")
-
-
-def _llm_provider_for_context(config: Any, ctx: Context | None) -> Any | None:
-    if not _sampling_enabled(config) or ctx is None:
-        return None
-    from agent.llm_provider import McpSamplingLLMProvider, OpenAILLMProvider
-
-    return McpSamplingLLMProvider(ctx, fallback=OpenAILLMProvider(config))
-
-
-def _llm_client_for_context(config: Any, ctx: Context | None) -> Any:
-    provider = _llm_provider_for_context(config, ctx)
-    if provider is None:
-        return config.create_client()
-    from agent.llm_provider import openai_client_adapter
-
-    return openai_client_adapter(provider)
-
+from agent.mcp_server_helpers import (
+    _err,
+    _existing_path_arg,
+    _env_bool,
+    _json_object_arg,
+    _llm_client_for_context,
+    _llm_provider_for_context,
+    _ok,
+    _ok_dataclass,
+    _parse_error_report,
+    _parse_spec_files,
+    _resolve_repo,
+    _sampling_enabled,
+)
 
 def _heal_single_file(
     code_file: Path,
@@ -229,7 +146,6 @@ def _heal_single_file(
         "healed_code": healed,
     }
 
-
 def _heal_directory(
     code_dir: Path,
     error_report: str = "",
@@ -306,7 +222,6 @@ def _heal_directory(
     payload["ordered_files"] = [str(path) for path in ordered_files]
     return _ok(payload)
 
-
 _SPEC_GUIDELINES: dict[str, Any] = {
     "summary": "Prefer the Z3-stable decidable fragment before escalating to Lean.",
     "fragment_catalog": [
@@ -373,23 +288,15 @@ _SPEC_GUIDELINES: dict[str, Any] = {
     },
 }
 
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
-
 @mcp.tool()
 def get_spec_guide_summary() -> str:
     """Return the agent-facing decidable-fragment guideline summary."""
     return _ok({"summary": SPEC_GUIDE_DECIDABLE_FRAGMENT})
 
-
 @mcp.tool()
 def get_spec_guidelines() -> str:
     """Return agent-facing guidance for proof-friendly Mumei specifications."""
     return _ok({"guidelines": _SPEC_GUIDELINES})
-
 
 @mcp.tool()
 def forge_task(
@@ -516,7 +423,6 @@ def forge_task(
             "commit_sha": result.commit_sha,
         }
     )
-
 
 @mcp.tool()
 def heal_file(
@@ -654,7 +560,6 @@ def heal_file(
         }
     )
 
-
 @mcp.tool()
 def self_correct(
     code_file: str,
@@ -698,7 +603,6 @@ def self_correct(
     payload["file"] = str(path)
     return _ok(payload)
 
-
 @mcp.tool()
 def run_nlae_pipeline(
     spec: str,
@@ -729,7 +633,6 @@ def run_nlae_pipeline(
     except Exception as exc:
         return _err(f"run_nlae_pipeline failed: {exc}")
     return _ok(result.to_dict())
-
 
 @mcp.tool()
 def measure_std_health(mumei_repo: str) -> str:
@@ -769,7 +672,6 @@ def measure_std_health(mumei_repo: str) -> str:
 
     payload = dict(report)
     return _ok(payload)
-
 
 @mcp.tool()
 def cross_validate(spec_file: str, impl_file: str, language: str = "") -> str:
@@ -829,7 +731,6 @@ def cross_validate(spec_file: str, impl_file: str, language: str = "") -> str:
     )
     return _ok(report.to_dict())
 
-
 @mcp.tool()
 def propose_forge_tasks(mumei_repo: str, max_proposals: int = 3) -> str:
     """Propose new forge task specs from a gap analysis of *mumei_repo*.
@@ -880,7 +781,6 @@ def propose_forge_tasks(mumei_repo: str, max_proposals: int = 3) -> str:
         }
     )
 
-
 @mcp.tool()
 def list_forge_log(log_path: str = "forge_log.json") -> str:
     """Return the contents of a forge log JSON file.
@@ -929,7 +829,6 @@ def list_forge_log(log_path: str = "forge_log.json") -> str:
         )
     return _ok({"entries": entries, "count": len(entries), "path": str(path)})
 
-
 @mcp.tool()
 def get_review_queue(mumei_repo: str) -> str:
     """Return the human review queue emitted by ``mumei verify``.
@@ -957,7 +856,6 @@ def get_review_queue(mumei_repo: str) -> str:
         }
     )
 
-
 @mcp.tool()
 def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
     """Record human approval for one atom in the active review queue."""
@@ -967,7 +865,6 @@ def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
     except Exception as exc:
         return _err(f"failed to approve review: {exc}", atom_name=atom_name)
     return _ok({"atom": entry, "path": str(tracker.queue_path)})
-
 
 @mcp.tool()
 def escalate_to_lean(atom_name: str) -> str:
@@ -990,7 +887,6 @@ def _human_review_tracker():
     _active_human_review_tracker = HumanReviewTracker.default()
     _active_human_review_tracker.load()
     return _active_human_review_tracker
-
 
 @mcp.tool()
 def get_agent_status() -> str:
@@ -1067,7 +963,6 @@ def get_agent_status() -> str:
         }
     )
 
-
 @mcp.tool()
 def send_latent_message(
     message: str,
@@ -1105,7 +1000,6 @@ def send_latent_message(
     except Exception as exc:
         logger.exception("send_latent_message failed")
         return _err(f"latent send failed: {exc}", error_type=type(exc).__name__)
-
 
 @mcp.tool()
 def send_latent_message_batch(messages: str, verify: bool = False) -> str:
@@ -1197,7 +1091,6 @@ def send_latent_message_batch(messages: str, verify: bool = False) -> str:
         }
     )
 
-
 @mcp.tool()
 async def async_send_latent_message(
     message: str,
@@ -1206,20 +1099,6 @@ async def async_send_latent_message(
 ) -> str:
     """Asynchronously send a latent message without blocking MCP transport."""
     return await asyncio.to_thread(send_latent_message, message, context, verify)
-
-
-def _json_object_arg(value: Any, name: str) -> tuple[dict[str, Any], str | None]:
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError as exc:
-            return {}, f"{name} is not valid JSON: {exc}"
-    else:
-        decoded = value
-    if not isinstance(decoded, dict):
-        return {}, f"{name} must decode to a JSON object"
-    return decoded, None
-
 
 def _latent_runtime() -> tuple[dict[str, Any], str | None]:
     try:
@@ -1245,7 +1124,6 @@ def _latent_runtime() -> tuple[dict[str, Any], str | None]:
         "create_mumei_client": create_mumei_client,
         "protocol": protocol,
     }, None
-
 
 def _encode_latent_payload(
     runtime: dict[str, Any],
@@ -1282,7 +1160,6 @@ def _encode_latent_payload(
         "authentication_verified": protocol.verify_authentication_tag(latent_vector),
         "audit_events": len(protocol.audit_log),
     }
-
 
 @mcp.tool()
 def extract_spec(
@@ -1393,7 +1270,6 @@ def extract_spec(
     except Exception as exc:
         return _err(f"extract_spec failed: {exc}")
 
-
 @mcp.tool()
 def check_spec_contradiction(
     natural_language: str,
@@ -1411,7 +1287,6 @@ def check_spec_contradiction(
         natural_language,
         **kwargs,
     )
-
 
 @mcp.tool()
 def check_cross_spec_consistency(spec_files: str) -> str:
@@ -1467,7 +1342,6 @@ def check_cross_spec_consistency(spec_files: str) -> str:
             "cross_spec": cross_spec_report,
         }
     )
-
 
 @mcp.tool()
 def check_spec_health(source_code: str, mumei_repo: str = "") -> str:
@@ -1531,7 +1405,6 @@ def check_spec_health(source_code: str, mumei_repo: str = "") -> str:
     report = checker.check_all(verify_result, proof_cert)
     return _ok(report.to_dict())
 
-
 @mcp.tool()
 def validate_nl_spec(
     spec_text: str,
@@ -1575,7 +1448,6 @@ def validate_nl_spec(
     ]
     payload["fix_suggestions"] = cross_validation._fix_suggestions(issues)
     return _ok(payload)
-
 
 @mcp.tool()
 def validate_nl_spec_multi(
@@ -1625,7 +1497,6 @@ def validate_nl_spec_multi(
         return _err(f"validate_nl_spec_multi failed: {exc}")
     return _ok(result)
 
-
 def _validate_existing_code_payload(
     code: str,
     language: str,
@@ -1663,7 +1534,6 @@ def _validate_existing_code_payload(
         return _err(f"{tool_name} failed: {exc}")
     return _ok_dataclass(result)
 
-
 @mcp.tool()
 def validate_code(
     code: str,
@@ -1682,7 +1552,6 @@ def validate_code(
         ctx=ctx,
     )
 
-
 @mcp.tool()
 def validate_foreign_code(
     code: str,
@@ -1700,7 +1569,6 @@ def validate_foreign_code(
         tool_name="validate_foreign_code",
         ctx=ctx,
     )
-
 
 @mcp.tool()
 def validate_spec_to_code(
@@ -1741,7 +1609,6 @@ def validate_spec_to_code(
         return _err(f"validate_spec_to_code failed: {exc}")
     return _ok_dataclass(result)
 
-
 @mcp.tool()
 def validate_code_to_spec(
     code_path: str,
@@ -1780,7 +1647,6 @@ def validate_code_to_spec(
     except Exception as exc:
         return _err(f"validate_code_to_spec failed: {exc}")
     return _ok_dataclass(result)
-
 
 @mcp.tool()
 def verify_conformance(
@@ -1824,7 +1690,6 @@ def verify_conformance(
     payload["status"] = "ok" if result.success else "needs_review"
     return payload
 
-
 @mcp.tool()
 def verify_code_spec_traceability(
     code_file: str,
@@ -1867,7 +1732,6 @@ def verify_code_spec_traceability(
     payload["status"] = "ok" if result.success else "needs_review"
     return payload
 
-
 @mcp.tool()
 def verify_foreign_code(
     source_code: str,
@@ -1885,7 +1749,6 @@ def verify_foreign_code(
         tool_name="verify_foreign_code",
         ctx=ctx,
     )
-
 
 @mcp.tool()
 def audit_code(
@@ -1921,7 +1784,6 @@ def audit_code(
     except Exception as exc:
         return {"success": False, "errors": [f"audit_code failed: {exc}"]}
     return asdict(result)
-
 
 @mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
@@ -1963,7 +1825,6 @@ def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]")
     except OSError as exc:
         return _err(f"failed to read code_file: {exc}")
     return _ok({"migration_hints": [asdict(hint) for hint in hints]})
-
 
 @mcp.tool()
 def scan_and_fix(
@@ -2074,8 +1935,6 @@ def scan_and_fix(
 
         payload["formatted_report"] = format_scan_and_fix_report(payload)
     return payload
-
-
 
 @mcp.tool()
 def extract_spec_from_code(
@@ -2213,12 +2072,6 @@ def extract_spec_from_code(
 
     return _ok(payload)
 
-
-# ---------------------------------------------------------------------------
-# CLI entrypoint
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     """Run the FastMCP server over stdio.
 
@@ -2227,7 +2080,6 @@ def main() -> None:
     """
     logging.basicConfig(level=logging.INFO)
     mcp.run()
-
 
 if __name__ == "__main__":
     main()
