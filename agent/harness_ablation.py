@@ -50,28 +50,54 @@ def load_run_aggregate(path: str | Path) -> dict[str, Any]:
     return extract_harness_aggregate(data)
 
 
+def _record_outcome(record: Mapping[str, Any]) -> bool | None:
+    if record.get("artifact_contract_passed") is not None:
+        return bool(record["artifact_contract_passed"])
+    if record.get("verification_gate") is not None:
+        return bool(record["verification_gate"])
+    status = record.get("intent_fidelity_status")
+    if status == "passed":
+        return True
+    if status in ("failed", "drifted"):
+        return False
+    return None
+
+
 def _overall_metrics(aggregate: Mapping[str, Any]) -> dict[str, float]:
-    """Sum module_comparison buckets into run-level totals and rates."""
-    comparison = aggregate.get("module_comparison") or {}
+    """Reduce raw records into run-level totals and a stage success rate.
+
+    ``HarnessMetrics.record_result`` fans one observation out into several
+    module records that all carry the same cost values, so costs are
+    deduplicated per stage (max across the stage's records) rather than
+    summed across module buckets.
+    """
+    records = aggregate.get("records") or []
     totals = {metric: 0.0 for metric in _OVERALL_METRICS}
-    rate_sum = 0.0
-    rate_count = 0
-    for bucket in comparison.values():
-        if not isinstance(bucket, Mapping):
+    stage_costs: dict[str, dict[str, float]] = {}
+    stage_outcomes: dict[str, bool] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
             continue
-        records = float(bucket.get("records", 0) or 0)
-        if records > 0:
-            rate_sum += float(bucket.get("success_rate", 0.0) or 0.0) * records
-            rate_count += int(records)
-        for metric in _OVERALL_METRICS:
-            if metric in ("success_rate", "average_spec_drift_score"):
-                continue
-            totals[metric] += float(bucket.get(metric, 0) or 0)
-        totals["average_spec_drift_score"] = max(
-            totals["average_spec_drift_score"],
-            float(bucket.get("average_spec_drift_score", 0.0) or 0.0),
+        stage = str(record.get("stage", ""))
+        costs = stage_costs.setdefault(
+            stage,
+            {metric: 0.0 for metric in _OVERALL_METRICS if metric != "success_rate"},
         )
-    totals["success_rate"] = rate_sum / rate_count if rate_count else 0.0
+        for metric in costs:
+            record_key = "spec_drift_score" if metric == "average_spec_drift_score" else metric
+            costs[metric] = max(costs[metric], float(record.get(record_key, 0) or 0))
+        outcome = _record_outcome(record)
+        if outcome is not None:
+            stage_outcomes[stage] = stage_outcomes.get(stage, True) and outcome
+    for costs in stage_costs.values():
+        for metric, value in costs.items():
+            if metric == "average_spec_drift_score":
+                totals[metric] = max(totals[metric], value)
+            else:
+                totals[metric] += value
+    totals["success_rate"] = (
+        sum(stage_outcomes.values()) / len(stage_outcomes) if stage_outcomes else 0.0
+    )
     return totals
 
 

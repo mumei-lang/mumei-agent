@@ -77,6 +77,9 @@ class TestCompareAblationRuns:
         # basic has a lower success rate than full → negative delta.
         assert run["overall_delta"]["success_rate"] < 0
         assert run["overall"]["success_rate"] == pytest.approx(0.4)
+        # Costs are deduplicated per stage, not triple-counted across the
+        # module records that record_result fans out to.
+        assert run["overall"]["tokens_to_success"] == pytest.approx(4 * 50 + 6 * 100)
         # Per-module deltas mirror the drop for exercised modules.
         assert run["per_module"]["verification_gate"]["success_rate_delta"] < 0
         assert run["per_module"]["verification_gate"]["baseline_enabled"] is True
