@@ -9,6 +9,7 @@ _SUBCOMMANDS = {
     "propose",
     "analyze-std-gaps",
     "proliferate",
+    "harness-ablation",
     "health",
     "audit",
     "extract-spec",
@@ -118,6 +119,23 @@ def main() -> None:
         prolif_build_parser(parser)
         args = parser.parse_args(argv[1:])
         prolif_main(args)
+    elif command == "harness-ablation":
+        import argparse
+        from agent.harness_ablation import (
+            build_parser as ablation_build_parser,
+            main as ablation_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent harness-ablation",
+            description=(
+                "Compare harness_metrics aggregates across --harness-profile "
+                "runs against a baseline (module ablation report)."
+            ),
+        )
+        ablation_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        ablation_main(args)
     elif command == "health":
         import argparse
         from agent.std_health import build_parser as health_build_parser, main as health_main
