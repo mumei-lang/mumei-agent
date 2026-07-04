@@ -17,6 +17,10 @@ from agent.proofcert import Z3CheckResult
 from agent.strategies import fix_strategy
 from agent.strategies.generate_strategy import generate_code
 from agent.strategies.retry_history import RetryAttempt, RetryHistory
+from agent.strategies.self_correction_strategy_helpers import (
+    _dict_get,
+    _numeric_zero,
+)
 
 
 GenerateFn = Callable[[OpenAI, str, dict, int, MumeiClient | None], tuple[str, bool]]
@@ -332,19 +336,6 @@ class SelfCorrectionStrategy:
         if len(failures) < 2:
             return False
         return failures[-1].counterexample == failures[-2].counterexample
-
-
-def _dict_get(value: object, key: str) -> object | None:
-    if isinstance(value, dict):
-        return value.get(key)
-    return None
-
-
-def _numeric_zero(value: object) -> bool:
-    try:
-        return abs(float(value)) <= 1e-9
-    except (TypeError, ValueError):
-        return False
 
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
