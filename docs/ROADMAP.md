@@ -75,9 +75,14 @@ Future work:
    (b) private `_client_params` attribute,
    (c) unknown → assume capable (backward-compat).
    OpenAI-compatible fallback when sampling is absent is unchanged.
-2. Add optional tool-enabled sampling only after `sampling.tools` capability
-   detection is covered by tests, and keep tool definitions scoped to each
-   sampling request.
+2. ✅ **Complete** — optional tool-enabled sampling is available via
+   `McpSamplingLLMProvider.complete_with_tools()`.  It requires an explicit
+   `sampling.tools` client capability (detected via the same public
+   `client_params` + `check_client_capability()` path with `_client_params`
+   fallback; unknown capabilities resolve to *not supported*, never
+   optimistic), keeps tool definitions scoped to each sampling request, and
+   returns parsed text + `tool_use` blocks (`SamplingToolCompletion`).  The
+   default text-only `complete()` path is unchanged.
 3. Preserve the current text-only path as the default; add multimodal
    image/audio request support only if a concrete forge/heal use case appears.
 4. Monitor MCP spec releases for sampling changes, especially `includeContext`
