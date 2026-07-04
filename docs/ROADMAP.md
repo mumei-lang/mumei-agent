@@ -932,6 +932,252 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
+## P15: OpenTelemetry Observability 導入（調査・今後対応予定）
+
+**ステータス: 今後対応予定（未着手）**
+
+### 目的
+
+[OpenTelemetry ブログ「AI エージェント可観測性」](https://opentelemetry.io/ja/blog/2025/ai-agent-observability/) の観点に沿って、mumei-agent の LLM 呼び出し・ツール呼び出し・エージェントループを span/trace で串刺しにし、トークン・コスト・レイテンシを OTel Metrics として可視化可能にする。
+
+### 現状
+
+mumei-agent リポジトリ全体で OpenTelemetry はまだ導入されていない。各所が独自の JSON メトリクス（`agent/metrics.py` の `Metrics`、`agent/harness_metrics.py` の `HarnessMetrics`）、`print`/`logging` に留まっており、分散トレースやメトリクスバックエンドへのエクスポートは行っていない。`pyproject.toml` に `opentelemetry-*` パッケージは未登録。
+
+クロスプロジェクトロードマップ（[`mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md)）の P11-C「Harness telemetry & ablation metrics」は mumei-agent 側では P13-B として完了済みだが、これは JSON ベースのハーネス内テレメトリであり OTel バックエンドへの接続は含まれていない。OTel 導入は P13-B の成果を OTel Metrics/Traces に接続する後続ステップとなる。
+
+### 推奨導入順
+
+1. **Phase 1**: `llm_provider.py` の LLM span + トークン/コスト metrics
+2. **Phase 2**: `mumei_client.py` の verify span（Z3 サブプロセス計装）
+3. **Phase 3**: 各ループの root span 化 + `ThoughtProcess` の span イベント写像
+4. **Phase 4**: MCP サーバーのツール計装とコンテキスト伝播
+
+### 依存追加（予定）
+
+`pyproject.toml` の `[project.optional-dependencies]` に以下を追加する想定（opt-in）:
+
+```
+otel = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp>=1.20",
+    "opentelemetry-instrumentation-openai>=0.1",  # 利用可能な場合
+]
+```
+
+既存の `mcp` optional と同様にデフォルト無効で導入し、OTel バックエンドが設定されていない場合は `NoOp` tracer/meter にフォールバックして既存動作への影響をゼロにする。
+
+---
+
+### P15-1: LLM 呼び出しの計装（最優先・単一チョークポイント）
+
+LLM 呼び出しはエージェントのコスト・レイテンシの大部分を占める単一チョークポイントであり、最も費用対効果の高い計装対象。
+
+#### 計装対象（provider 経由の正規パス）
+
+| 対象ファイル | 関数/メソッド | 計装内容 |
+|---|---|---|
+| `agent/llm_provider.py` | `OpenAILLMProvider.complete` (L55-60) | `client.chat.completions.create` を span でラップ |
+| `agent/llm_provider.py` | `complete_text` (L242-244) / `complete_response` (L247-260) | ディスパッチ関数を計装し provider 種別を属性に記録 |
+| `agent/llm_provider.py` | `McpSamplingLLMProvider.complete` (L77-84) / `_complete_via_sampling` (L86-116) | MCP sampling 経路を span 化。既存 `metadata={"mumei_agent_llm_provider": "mcp_sampling"}` に trace/span ID を追加 |
+| `agent/llm_provider.py` | `McpSamplingLLMProvider.complete_with_tools` (L118-172) | ツール付き sampling を独立 span 化 |
+
+#### 計装対象（provider を経由しない直接 `client.chat.completions.create` 呼び出し）
+
+以下の箇所は `OpenAILLMProvider` を経由せず `client.chat.completions.create` を直接呼び出しているため、provider への寄せ直しまたは個別計装が必要:
+
+| 対象ファイル | 関数 | 行番号 |
+|---|---|---|
+| `agent/strategies/spec_refinement.py` | `run_refinement_loop` 内の LLM 呼び出し | L86 |
+| `agent/strategies/multi_stage_strategy.py` | `_multi_stage_fix` 内の fix LLM 呼び出し | L123 |
+| `agent/strategies/multi_stage_strategy_helpers.py` | `_diagnose` 内の診断 LLM 呼び出し | L112 |
+| `agent/strategies/cegis_loop.py` | `CEGISLoop._synthesize_invariant` | L195 |
+| `agent/spec_extractor.py` | `_call_llm` 内の仕様抽出 LLM 呼び出し | L107 |
+| `agent/code_to_spec.py` | `CodeToSpecConverter._call_llm` | L238 |
+| `agent/dense_property_generator.py` | `DensePropertyGenerator.generate` | L76 |
+| `agent/ambiguity_detector.py` | `AmbiguityDetector._detect_ambiguities` | L156 |
+
+#### span 属性候補
+
+- `gen_ai.request.model` — `agent/config.py` の `config.model`（例: `gpt-4o`、`qwen3.5:4b`）
+- `gen_ai.system` — `openai-compatible` / `mcp-sampling` / `mcp-sampling-tools`
+- `server.address` — `config.base_url`（例: `https://api.openai.com/v1`、`http://localhost:11434/v1`）
+- `gen_ai.prompt.type` — プロンプト種別（`generate`、`fix`、`diagnose`、`refine`、`extract_spec` 等）
+
+#### トークン metrics
+
+- `agent/strategies/fix_strategy_helpers.py` の `response_token_count()` (L309) が OpenAI response の `usage.total_tokens` を抽出済み — これを OTel の `gen_ai.usage.total_tokens` counter/histogram に流用
+- `agent/metrics.py` の `Metrics.record_tokens(count)` も同データを蓄積しており、OTel meter への二重報告を避ける設計が必要
+
+---
+
+### P15-2: Z3 検証のサブプロセス呼び出し（ツール span）
+
+#### 計装対象
+
+| 対象ファイル | 関数/メソッド | 計装内容 |
+|---|---|---|
+| `agent/mumei_client.py` | `MumeiClient.verify` (L86-168) | `mumei verify --json` の `subprocess.run` を span でラップ。exit code・stdout/stderr サイズ・`decidable_fragment` 有無を属性化 |
+| `agent/mumei_client.py` | `MumeiClient.verify_loss_vector` (L170-183) | `mumei verify --emit loss-vector` を独立 span。loss-vector 取得が re-run されるケースの可視化 |
+| `agent/mumei_client.py` | `MumeiClient.check` (L185-197) | `mumei check` パース検証 span |
+| `agent/mumei_client.py` | `MumeiClient.infer_effects` (L199-208) / `infer_contracts` (L210-219) | エフェクト/契約推論 span |
+| `agent/mumei_client.py` | `MumeiClient.build_with_emit` (L221-235) / `build` (L237-249) | ビルド/FFI emit span |
+
+#### span 属性候補
+
+- `mumei.command` — `verify` / `check` / `infer-effects` / `infer-contracts` / `build`
+- `mumei.source_path` — 検証対象ファイルパス
+- `mumei.exit_code` — subprocess exit code
+- `mumei.collect_decidable_metrics` — decidable-metrics 収集フラグ
+- `mumei.loss_vector.present` — loss-vector が返されたか
+- `mumei.verification.duration_ms` — サブプロセス実行時間
+
+#### 備考
+
+- `create_mumei_client` ファクトリ (L53-75) が `MumeiMCPClient` を返す場合（`USE_MCP_CLIENT=true`）、MCP 経由の検証パスも同じ span 体系でラップする必要がある
+
+---
+
+### P15-3: エージェントの反復ループ（親 trace / root span）
+
+#### 計装対象
+
+| 対象ファイル | 関数/クラス | 計装内容 |
+|---|---|---|
+| `agent/strategies/generate_strategy.py` | `generate_code` / `generate_multi_atom` (L263-606) | retry ループ全体を root span 化。各イテレーション（parse check → verify → fix）を子 span にする |
+| `agent/self_healing.py` | `main()` の heal ループ (L314-) | `for attempt in range(max_retries + 1)` を root span 化。CEGIS repair / Meta-Architect refactor / LLM fix の分岐を子 span にする |
+| `agent/self_correction.py` | `StructuredFeedbackSelfCorrectionLoop.run` (L81-211) | P9-F 収束ループを root span 化。`stop_reason`（`converged` / `max_retries_reached` / `token_cost_exceeded` / `no_fix_produced`）を span 属性化 |
+| `agent/strategies/self_correction_strategy.py` | `SelfCorrectionStrategy.run` (L94-227) | P9-F 予算付き自己修正ループを root span 化。`action_class` / `budget_policy` 判定を span イベント化 |
+
+#### `ThoughtProcess` → span イベント写像
+
+`agent/thought_log.py` の `ThoughtProcess.add_step()` が記録する `VerificationStep`（action = `initial_verify` / `re_verify` / `llm_fix`）を OTel span events に写像する統合方針:
+
+- `ThoughtProcess` のコンストラクタで現在の trace context を取得し、`started_at` と trace の開始時刻を一致させる
+- `add_step(action=...)` の呼び出しごとに `span.add_event(name=action, attributes={...})` を発行
+- `final_success` / `total_attempts` を root span の終了時属性として付与
+
+#### span 属性候補
+
+- `mumei.loop.type` — `generate` / `heal` / `self_correction` / `self_correction_strategy`
+- `mumei.loop.max_retries` — 最大リトライ回数
+- `mumei.loop.attempt` — 現在のイテレーション番号
+- `mumei.loop.stop_reason` — 停止理由
+- `mumei.loop.final_success` — 最終結果
+- `mumei.strategy` — `single` / `multi-stage` / `cegis_loop` / `meta_architect`
+- `mumei.budget_policy.fingerprint` — 予算ポリシーのフィンガープリント
+
+---
+
+### P15-4: MCP サーバー（外部エージェント連携の入口）
+
+#### 計装対象
+
+| 対象ファイル | ツール / 関数 | 計装内容 |
+|---|---|---|
+| `agent/mcp_server.py` | `@mcp.tool()` `forge_task` | forge 実行の入口 span。呼び出し元 agent の trace context を受信 |
+| `agent/mcp_server.py` | `@mcp.tool()` `heal_file` | heal 実行の入口 span。ディレクトリ対応時の子 span 生成 |
+| `agent/mcp_server.py` | `@mcp.tool()` `run_nlae_pipeline` | NLAE pipeline の入口 span |
+| `agent/mcp_server.py` | `@mcp.tool()` `self_correct` | 自己修正ループの入口 span |
+| `agent/mcp_server.py` | `@mcp.tool()` `audit_code` / `scan_and_fix` | 監査パイプラインの入口 span |
+| `agent/mcp_server.py` | `@mcp.tool()` `extract_spec_from_code` | 仕様抽出の入口 span |
+| `agent/mcp_server.py` | `@mcp.tool()` `measure_std_health` / `propose_forge_tasks` / `list_forge_log` / `get_agent_status` | 軽量ツールの span（レイテンシ計測目的） |
+
+#### トレースコンテキスト伝播
+
+- `agent/llm_provider.py` の `McpSamplingLLMProvider._complete_via_sampling` 内の `metadata={"mumei_agent_llm_provider": "mcp_sampling"}` (L103) に `traceparent` / `tracestate` を追加し、MCP client → sampling → LLM の trace を接続する
+- 外部 MCP client（Claude Code / Devin）が W3C Trace Context を MCP request に含める場合、`mcp_server.py` の各ツールハンドラでコンテキストを抽出して span の parent に設定する
+
+---
+
+### P15-5: 既存メトリクスの OTel Metrics 接続
+
+#### 計装対象
+
+| 対象ファイル | クラス / 関数 | OTel Metric 候補 |
+|---|---|---|
+| `agent/metrics.py` | `Metrics.llm_tokens_used` | `gen_ai.usage.total_tokens` (Counter) |
+| `agent/metrics.py` | `Metrics.verification_times_seconds` | `mumei.verify.duration` (Histogram, 単位: seconds) |
+| `agent/metrics.py` | `Metrics.first_pass_verification_success_rate` | `mumei.first_pass.success_rate` (Gauge) |
+| `agent/metrics.py` | `Metrics.z3_unknowns` | `mumei.z3.unknowns` (Counter) |
+| `agent/metrics.py` | `Metrics.outside_decidable_fragment_warnings` | `mumei.decidable_fragment.warnings` (Counter) |
+| `agent/metrics.py` | `Metrics.total_attempts` / `successes` | `mumei.fix.attempts` / `mumei.fix.successes` (Counter) |
+| `agent/metrics.py` | `Metrics.by_violation_type` | `mumei.fix.attempts` に `violation_type` attribute を付与 |
+| `agent/harness_metrics.py` | `HarnessMetrics.record_result` | `mumei.harness.tokens_to_success` (Histogram)、`mumei.harness.solver_seconds_to_success` (Histogram)、`mumei.harness.spec_drift_score` (Histogram) |
+| `agent/harness_metrics.py` | `HarnessMetrics.aggregate_metrics` | stage/module 別集計を OTel の dimension attributes で自然に再現 |
+| `agent/lean_bridge.py` | `count_lean_verified_unknowns` / `run_lean_bridge` 結果 | `mumei.lean.verified_count` (Counter)、`mumei.lean.bridge.duration` (Histogram)、`mumei.lean.bridge.error_code` (属性付き Counter) |
+
+#### 統合方針
+
+- `Metrics` / `HarnessMetrics` の既存 `record_*` メソッド内部で OTel meter が利用可能な場合のみ OTel instrument に値を送信し、既存の JSON 出力パスはそのまま維持する
+- `to_dict()` の出力形式には影響を与えない（OTel は並行チャネルとして追加）
+
+---
+
+### P15-6: 今後便利になる箇所（将来性）
+
+#### `agent/proliferate.py` — 週次自律ラン
+
+- `proliferate()` の `[PROLIFERATE] Step N/4` ログをルート span 化し、各提案の処理（generate → blast-radius → heal → publish）を子 span にする
+- 長時間バッチ（週次 cron で数十分〜数時間）のボトルネック特定に有用
+- `_run_lean_fallback()` (L404) も Lean bridge の subprocess 呼び出しを span でラップ
+
+#### `agent/nlae_pipeline.py` — `NLAEPipeline.run_full_pipeline`
+
+- 生成 → Z3 検証 → 自己修正 → Lean fallback の 4 段階を parent trace で接続
+- 4 リポジトリ横断（mumei-agent / mumei / mumei-lean / mumei-demo）の分散トレースの起点となる
+- `NLAEResult` に trace ID を含めることで、MCP tool `run_nlae_pipeline` の呼び出し元まで trace を遡及可能
+
+#### `agent/audit.py` — 監査パイプライン
+
+- `AuditPipeline.audit_file` / `audit_directory` / `audit_source` を span 化し、外部コード検査のレイテンシ分布を可視化
+- ディレクトリ監査時のファイル単位の並列/逐次処理パターンを trace で把握可能
+
+#### Rust コンパイラ側（`mumei-lang/mumei`）との接続構想
+
+- `mumei-core/src/verification/executor.rs`（Z3 solver 呼び出し）、`src/lsp.rs`（LSP サーバー）で将来 `tracing` crate + `tracing-opentelemetry` を導入し、Python 側 trace と接続する構想
+- Python agent → `subprocess.run("mumei verify ...")` → Rust binary 内の Z3 実行 span を trace propagation で串刺しにするには、環境変数 `TRACEPARENT` 経由でコンテキストを伝播するか、`--trace-id` CLI フラグを追加する設計が考えられる
+
+### 対象ファイル（全体）
+
+- `agent/llm_provider.py` — LLM provider の span 計装（Phase 1）
+- `agent/strategies/fix_strategy_helpers.py` — `response_token_count()` の OTel token counter 接続
+- `agent/strategies/spec_refinement.py` — 直接 LLM 呼び出しの provider 寄せまたは個別計装
+- `agent/strategies/multi_stage_strategy.py` — 同上
+- `agent/strategies/multi_stage_strategy_helpers.py` — 同上
+- `agent/strategies/cegis_loop.py` — 同上
+- `agent/spec_extractor.py` — 同上
+- `agent/code_to_spec.py` — 同上
+- `agent/dense_property_generator.py` — 同上
+- `agent/ambiguity_detector.py` — 同上
+- `agent/mumei_client.py` — Z3 verify subprocess の span 計装（Phase 2）
+- `agent/strategies/generate_strategy.py` — generate/retry ループの root span 化（Phase 3）
+- `agent/self_healing.py` — heal ループの root span 化（Phase 3）
+- `agent/self_correction.py` — P9-F self-correction ループの root span 化（Phase 3）
+- `agent/strategies/self_correction_strategy.py` — P9-F strategy ループの root span 化（Phase 3）
+- `agent/thought_log.py` — `ThoughtProcess` の OTel span event 写像（Phase 3）
+- `agent/mcp_server.py` — MCP ツールの入口 span 計装 + トレースコンテキスト伝播（Phase 4）
+- `agent/metrics.py` — `Metrics` の OTel Metrics 接続（Phase 1-3 並行）
+- `agent/harness_metrics.py` — `HarnessMetrics` の OTel Metrics 接続（Phase 1-3 並行）
+- `agent/lean_bridge.py` — Lean bridge の span + metrics 接続（Phase 2-3）
+- `agent/proliferate.py` — 週次自律ランの root span 化（将来）
+- `agent/nlae_pipeline.py` — NLAE pipeline の分散トレース（将来）
+- `agent/audit.py` — 監査パイプラインの span 計装（将来）
+- `pyproject.toml` — `opentelemetry-*` optional-dependencies 追加
+
+### 成功指標
+
+- OTel SDK 導入後、`OTEL_EXPORTER_OTLP_ENDPOINT` を設定するだけで Jaeger / Grafana Tempo 等のバックエンドに trace が送信される
+- 既存の JSON metrics 出力（`Metrics.to_dict()`、`HarnessMetrics.aggregate_metrics()`）との互換性を 100% 維持
+- `OTel_ENABLED=false`（デフォルト）の場合、パフォーマンスへの影響が計測不可能なレベルに収まる
+- LLM 呼び出し 1 件ごとに `gen_ai.request.model`、`gen_ai.usage.total_tokens`、レイテンシが trace に記録される
+- Z3 verify のサブプロセス実行時間が `mumei.verify.duration` histogram に記録される
+- エージェントの 1 回の heal/generate/self-correct サイクル全体が 1 つの trace として可視化される
+- MCP ツール経由の外部呼び出しが W3C Trace Context で親 trace に接続される
+
+---
+
 ## Related Documents
 
 - [mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) — Cross-project roadmap (incl. Strategic Initiatives)
