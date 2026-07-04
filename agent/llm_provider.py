@@ -115,6 +115,129 @@ class McpSamplingLLMProvider:
             return text
         raise RuntimeError("MCP sampling response did not contain text content")
 
+    def complete_with_tools(
+        self,
+        messages: Sequence[Message],
+        model: str,
+        tools: Sequence[Any],
+        *,
+        tool_choice: str | None = None,
+    ) -> "SamplingToolCompletion":
+        """Send a tool-enabled ``sampling/createMessage`` request.
+
+        Per the MCP 2025-11-25 specification, tool-enabled sampling requires
+        the client to declare the ``sampling.tools`` capability during
+        initialization; a :class:`RuntimeError` is raised otherwise (callers
+        can catch it and fall back to text-only sampling or the OpenAI path).
+
+        ``tools`` accepts ``mcp.types.Tool`` instances or plain mappings with
+        ``name`` / ``inputSchema`` (and optional ``description``) keys.  Tool
+        definitions are scoped to this single request — they are not
+        registered on the server or reused across calls.
+
+        ``tool_choice`` maps to ``ToolChoice.mode`` (``"auto"``, ``"required"``
+        or ``"none"``).
+        """
+        from mcp import types as mcp_types
+
+        if not _client_supports_basic_sampling(self.ctx):
+            raise RuntimeError("connected MCP client did not declare sampling capability")
+        if not _client_supports_sampling_tools(self.ctx):
+            raise RuntimeError(
+                "connected MCP client did not declare the sampling.tools capability"
+            )
+
+        request_tools = [_to_sampling_tool(tool) for tool in tools]
+        choice = mcp_types.ToolChoice(mode=tool_choice) if tool_choice else None
+        sampling_messages, system_prompt = _to_sampling_messages(messages)
+
+        async def call_sampling() -> Any:
+            result = self.ctx.session.create_message(
+                sampling_messages,
+                max_tokens=self.max_tokens,
+                system_prompt=system_prompt or None,
+                model_preferences=mcp_types.ModelPreferences(
+                    hints=[mcp_types.ModelHint(name=model)] if model else None,
+                    intelligencePriority=0.8,
+                ),
+                metadata={"mumei_agent_llm_provider": "mcp_sampling_tools"},
+                tools=request_tools,
+                tool_choice=choice,
+            )
+            if inspect.isawaitable(result):
+                return await result
+            return result
+
+        result = _run_async_from_sync(call_sampling)
+        return _parse_tool_sampling_result(result)
+
+
+@dataclass
+class SamplingToolCall:
+    """A single tool invocation requested by the sampling model."""
+
+    name: str
+    id: str
+    input: Mapping[str, Any]
+
+
+@dataclass
+class SamplingToolCompletion:
+    """Result of a tool-enabled sampling request."""
+
+    text: str
+    tool_calls: list[SamplingToolCall]
+    stop_reason: str | None = None
+
+
+def _to_sampling_tool(tool: Any) -> Any:
+    from mcp import types as mcp_types
+
+    if isinstance(tool, mcp_types.Tool):
+        return tool
+    if isinstance(tool, Mapping):
+        return mcp_types.Tool.model_validate(dict(tool))
+    raise TypeError(f"unsupported sampling tool definition: {type(tool)!r}")
+
+
+def _parse_tool_sampling_result(result: Any) -> SamplingToolCompletion:
+    """Extract text and tool-use blocks from a create_message result.
+
+    Handles both ``CreateMessageResult`` (single content block) and
+    ``CreateMessageResultWithTools`` (list of content blocks).
+    """
+    from mcp import types as mcp_types
+
+    content = getattr(result, "content", None)
+    blocks: Sequence[Any]
+    if isinstance(content, Sequence) and not isinstance(content, (str, bytes, bytearray)):
+        blocks = content
+    else:
+        blocks = [content]
+
+    text_parts: list[str] = []
+    tool_calls: list[SamplingToolCall] = []
+    for block in blocks:
+        if isinstance(block, mcp_types.ToolUseContent):
+            tool_calls.append(
+                SamplingToolCall(
+                    name=block.name,
+                    id=block.id,
+                    input=block.input or {},
+                )
+            )
+            continue
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            text_parts.append(text)
+    if not text_parts and not tool_calls:
+        raise RuntimeError("MCP sampling response did not contain text or tool-use content")
+    return SamplingToolCompletion(
+        text="\n".join(text_parts),
+        tool_calls=tool_calls,
+        stop_reason=getattr(result, "stopReason", None),
+    )
+
 
 def complete_text(llm_or_client: Any, messages: Sequence[Message], model: str) -> str:
     """Complete with either an LLMProvider or a legacy OpenAI-compatible client."""
@@ -267,6 +390,53 @@ def _client_supports_basic_sampling(ctx: Context) -> bool:
     if capabilities is None:
         return True
     return _field_value(capabilities, "sampling") is not None
+
+
+def _client_supports_sampling_tools(ctx: Context) -> bool:
+    """Check whether the connected MCP client declared ``sampling.tools``.
+
+    Unlike :func:`_client_supports_basic_sampling`, unknown or missing
+    capability information resolves to ``False``: the MCP 2025-11-25 spec
+    requires an explicit ``sampling.tools`` capability before a server may
+    send tool-enabled sampling requests, so there is no optimistic fallback.
+    """
+    session = getattr(ctx, "session", None)
+    if session is None:
+        return False
+
+    cp = getattr(session, "client_params", _SENTINEL)
+    if cp is not _SENTINEL:
+        if cp is None:
+            return False
+        check = getattr(session, "check_client_capability", None)
+        if callable(check):
+            try:
+                from mcp import types as mcp_types
+
+                return check(
+                    mcp_types.ClientCapabilities(
+                        sampling=mcp_types.SamplingCapability(
+                            tools=mcp_types.SamplingToolsCapability(),
+                        ),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "check_client_capability raised; "
+                    "falling back to direct client_params inspection"
+                )
+        capabilities = _field_value(cp, "capabilities")
+        sampling = _field_value(capabilities, "sampling") if capabilities is not None else None
+        return sampling is not None and _field_value(sampling, "tools") is not None
+
+    client_params = getattr(session, "_client_params", None)
+    if client_params is None:
+        return False
+    capabilities = _field_value(client_params, "capabilities")
+    if capabilities is None:
+        return False
+    sampling = _field_value(capabilities, "sampling")
+    return sampling is not None and _field_value(sampling, "tools") is not None
 
 
 def _field_value(value: Any, name: str) -> Any:
