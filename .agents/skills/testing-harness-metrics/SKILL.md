@@ -13,6 +13,7 @@ Live Forge/proliferate execution that calls an LLM requires `LLM_API_KEY` or `OP
 
 Use this skill for PRs touching:
 - `agent/harness_metrics.py`
+- `agent/harness_ablation.py` or the `harness-ablation` subcommand in `agent/__main__.py`
 - `agent/budget_metrics.py` harness summary integration
 - Forge/proliferate `--harness-profile` parser or runtime wiring
 - Tests around module ON/OFF, module comparison, cost, drift, or retry/intent status aggregation
@@ -59,6 +60,25 @@ Create a temporary/uncommitted probe or run an inline Python script that verifie
    - Call `agent.proliferate._metrics_payload(metrics)`.
    - Assert the payload key is `attempts`, not `attempts_to_success`, and that solver seconds are summed.
 
+# Harness Ablation CLI (`python -m agent harness-ablation`)
+
+For PRs touching `agent/harness_ablation.py` or the `harness-ablation` subcommand
+in `agent/__main__.py`, test the CLI end-to-end without any LLM:
+
+1. Build two run summaries with the real `HarnessMetrics` API and dump each as
+   `{"harness_metrics": metrics.aggregate_metrics()}` (the shape proliferate's
+   `_write_output_json` emits). Use different profiles (e.g. `full` vs `basic`)
+   and hand-computable stage counts/token values.
+2. Run `uv run python -m agent harness-ablation full=/tmp/full.json basic=/tmp/basic.json --baseline full --format json`
+   and assert exact values: `ablated_modules` must equal the profile flag diff,
+   stage-level `success_rate` (successes/stages), and `overall.tokens_to_success`
+   must equal the per-stage sum — NOT 3x it. `record_result` fans one observation
+   into 3 module records with duplicated costs; if totals look ~3x inflated, the
+   per-stage dedup in `_overall_metrics` may have regressed.
+3. Also check `--format markdown --output` renders the delta table, and that an
+   unknown `--baseline` exits non-zero mentioning `baseline run ... not found`
+   (currently surfaces as a raw ValueError traceback; that is expected).
+
 # Acceptance Commands
 
 Run the focused acceptance test:
@@ -72,6 +92,8 @@ Expected result:
 ```text
 6 passed
 ```
+
+For ablation CLI changes also run `python -m pytest -q tests/test_harness_ablation.py` (expect `10 passed`).
 
 If full CI failed on proliferate dry-run behavior, also run targeted proliferate tests around the failing call sites before pushing fixes.
 
