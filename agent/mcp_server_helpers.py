@@ -90,6 +90,36 @@ def _llm_client_for_context(config: Any, ctx: Context | None) -> Any:
 
     return openai_client_adapter(provider)
 
+def _carrier_from_ctx(ctx: Context | None) -> dict[str, Any] | None:
+    """Build a W3C trace-context carrier from an incoming MCP request's ``_meta``.
+
+    External MCP clients (Claude Code, Devin, ...) may attach a ``traceparent`` /
+    ``tracestate`` to the request ``_meta``; FastMCP surfaces that as
+    ``ctx.request_context.meta``.  We dump it to a plain ``{str: str}`` mapping so
+    :func:`agent.telemetry.extract_trace_context` can recover the parent trace.
+
+    Returns ``None`` when *ctx* carries no usable metadata.  Never raises — a
+    missing / malformed context simply yields ``None`` (new root span).
+    """
+    if ctx is None:
+        return None
+    try:
+        meta = ctx.request_context.meta
+    except Exception:
+        return None
+    if meta is None:
+        return None
+    try:
+        dumped = meta.model_dump(exclude_none=True)
+    except Exception:
+        return None
+    carrier = {
+        str(key): str(value)
+        for key, value in dumped.items()
+        if isinstance(value, (str, int, float))
+    }
+    return carrier or None
+
 def _json_object_arg(value: Any, name: str) -> tuple[dict[str, Any], str | None]:
     if isinstance(value, str):
         try:

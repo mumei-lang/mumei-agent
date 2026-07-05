@@ -373,3 +373,68 @@ def inject_trace_context(carrier: dict[str, Any]) -> dict[str, Any]:
     except Exception:  # pragma: no cover - defensive
         logger.debug("trace context injection failed", exc_info=True)
     return carrier
+
+
+def extract_trace_context(carrier: dict[str, Any] | None) -> Any:
+    """Extract a W3C trace context from *carrier* and return an OTel Context.
+
+    The inverse of :func:`inject_trace_context`: given a mapping that may hold a
+    W3C ``traceparent`` / ``tracestate`` (e.g. an incoming MCP request's
+    ``_meta``), return the OTel :class:`~opentelemetry.context.Context` extracted
+    from it so a span can be started as a child of the caller's trace.
+
+    Returns ``None`` (no parent context) when OTel is disabled/unavailable, when
+    *carrier* is empty, or when extraction fails.  Callers pass the result
+    straight through to ``start_as_current_span(context=...)`` — a ``None``
+    context makes the span behave as a fresh root, preserving backward
+    compatibility.
+    """
+    if not carrier or not is_enabled():
+        return None
+    try:
+        from opentelemetry.propagate import extract
+
+        return extract(carrier)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("trace context extraction failed", exc_info=True)
+        return None
+
+
+@contextmanager
+def start_tool_span(
+    tool_name: str,
+    *,
+    carrier: dict[str, Any] | None = None,
+    **attrs: Any,
+) -> Iterator[Any]:
+    """Open an ``mcp.tool.<tool_name>`` entry span for an MCP tool handler.
+
+    Extracts any W3C trace context from *carrier* (typically an incoming MCP
+    request's ``_meta``) and starts the span as a child of that context so an
+    external MCP client's trace connects through this tool into the inner
+    generate / heal / verify spans.  When no context can be extracted the span
+    behaves as a fresh root (backward compatible).
+
+    ``mcp.tool.name`` is always set; any keyword *attrs* whose value is not
+    ``None`` are attached as additional span attributes.  When OTel is disabled
+    the yielded object is a :class:`_NoOpSpan` and every call is swallowed.
+
+    Exceptions are recorded on the span but **not** suppressed.
+    """
+    tracer = get_tracer(__name__)
+    span_attrs: dict[str, Any] = {"mcp.tool.name": tool_name}
+    for key, value in attrs.items():
+        if value is not None:
+            span_attrs[key] = value
+    parent = extract_trace_context(carrier)
+    try:
+        with tracer.start_as_current_span(
+            f"mcp.tool.{tool_name}", context=parent, attributes=span_attrs,
+        ) as span:
+            yield span
+    except Exception as exc:
+        try:
+            span.record_exception(exc)  # type: ignore[possibly-undefined]
+        except Exception:
+            pass
+        raise

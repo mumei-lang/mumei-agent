@@ -394,3 +394,97 @@ def test_self_correction_strategy_noop_span(monkeypatch, tmp_path):
     assert d["converged"] is True
     assert d["stop_reason"] == "converged"
     assert "self_correction_metadata" in d
+
+
+# ---------------------------------------------------------------------------
+# P15-4: MCP server entry-span helpers (NoOp path)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_trace_context_none_when_disabled(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    carrier = {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
+    # Disabled -> no parent context, but must never raise.
+    assert telemetry.extract_trace_context(carrier) is None
+
+
+def test_extract_trace_context_none_for_empty_carrier(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    assert telemetry.extract_trace_context(None) is None
+    assert telemetry.extract_trace_context({}) is None
+
+
+def test_inject_then_extract_roundtrip_noop(monkeypatch):
+    """inject leaves no traceparent when disabled; extract still yields None."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    carrier: dict = {}
+    telemetry.inject_trace_context(carrier)
+    assert "traceparent" not in carrier
+    assert telemetry.extract_trace_context(carrier) is None
+
+
+def test_start_tool_span_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    with telemetry.start_tool_span(
+        "forge_task", carrier=None, dry_run=True, task_id="t1",
+    ) as span:
+        assert isinstance(span, telemetry._NoOpSpan)
+        span.set_attribute("mcp.tool.status", "success")
+        span.add_event("event", {"k": "v"})
+
+
+def test_start_tool_span_noop_with_carrier(monkeypatch):
+    """A caller-supplied trace carrier must not break the NoOp span."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    carrier = {"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
+    with telemetry.start_tool_span("heal_file", carrier=carrier) as span:
+        assert isinstance(span, telemetry._NoOpSpan)
+
+
+def test_start_tool_span_records_exception_and_reraises(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    import pytest
+
+    with pytest.raises(ValueError):
+        with telemetry.start_tool_span("self_correct"):
+            raise ValueError("boom")
+
+
+def test_carrier_from_ctx_none_without_meta():
+    from agent.mcp_server_helpers import _carrier_from_ctx
+
+    assert _carrier_from_ctx(None) is None
+
+    class _NoMeta:
+        @property
+        def request_context(self):  # pragma: no cover - trivial
+            raise RuntimeError("no request context outside a request")
+
+    assert _carrier_from_ctx(_NoMeta()) is None
+
+
+def test_carrier_from_ctx_extracts_meta_fields():
+    from agent.mcp_server_helpers import _carrier_from_ctx
+    from mcp.types import RequestParams
+
+    meta = RequestParams.Meta.model_validate(
+        {
+            "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            "tracestate": "vendor=1",
+        }
+    )
+    ctx = SimpleNamespace(request_context=SimpleNamespace(meta=meta))
+    carrier = _carrier_from_ctx(ctx)
+    assert carrier is not None
+    assert carrier["traceparent"].startswith("00-")
+    assert carrier["tracestate"] == "vendor=1"
+
+
+def test_carrier_from_ctx_none_for_empty_meta():
+    from agent.mcp_server_helpers import _carrier_from_ctx
+    from mcp.types import RequestParams
+
+    ctx = SimpleNamespace(
+        request_context=SimpleNamespace(meta=RequestParams.Meta())
+    )
+    assert _carrier_from_ctx(ctx) is None
