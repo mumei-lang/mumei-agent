@@ -113,3 +113,123 @@ def test_mcp_sampling_metadata_has_no_traceparent_when_disabled(monkeypatch):
     metadata = recorded["kwargs"]["metadata"]
     assert metadata == {"mumei_agent_llm_provider": "mcp_sampling"}
     assert "traceparent" not in metadata
+
+
+# ---------------------------------------------------------------------------
+# P15-2: MumeiClient subprocess span instrumentation (NoOp path)
+# ---------------------------------------------------------------------------
+
+
+def test_record_verify_duration_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.record_verify_duration(1.5)
+    telemetry.record_verify_duration(0)
+    telemetry.record_verify_duration(-1)
+
+
+def test_mumei_client_verify_returns_dict_under_noop_span(monkeypatch, tmp_path):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    mm_file = tmp_path / "test.mm"
+    mm_file.write_text("// dummy", encoding="utf-8")
+    from agent.mumei_client import MumeiClient
+
+    client = MumeiClient(mumei_bin="echo")
+    result = client.verify(str(mm_file))
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "report" in result
+    assert "stdout" in result
+    assert "stderr" in result
+    assert "spec_code_mapping" in result
+
+
+def test_mumei_client_check_returns_dict_under_noop_span(monkeypatch, tmp_path):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    mm_file = tmp_path / "test.mm"
+    mm_file.write_text("// dummy", encoding="utf-8")
+    from agent.mumei_client import MumeiClient
+
+    client = MumeiClient(mumei_bin="echo")
+    result = client.check(str(mm_file))
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "stdout" in result
+    assert "stderr" in result
+
+
+def test_mumei_client_infer_effects_returns_dict_under_noop_span(monkeypatch, tmp_path):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    mm_file = tmp_path / "test.mm"
+    mm_file.write_text("// dummy", encoding="utf-8")
+    from agent.mumei_client import MumeiClient
+
+    client = MumeiClient(mumei_bin="echo")
+    result = client.infer_effects(str(mm_file))
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "analysis" in result
+
+
+def test_mumei_client_infer_contracts_returns_dict_under_noop_span(monkeypatch, tmp_path):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    mm_file = tmp_path / "test.mm"
+    mm_file.write_text("// dummy", encoding="utf-8")
+    from agent.mumei_client import MumeiClient
+
+    client = MumeiClient(mumei_bin="echo")
+    result = client.infer_contracts(str(mm_file))
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "analysis" in result
+
+
+def test_mumei_client_build_returns_dict_under_noop_span(monkeypatch, tmp_path):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    mm_file = tmp_path / "test.mm"
+    mm_file.write_text("// dummy", encoding="utf-8")
+    from agent.mumei_client import MumeiClient
+
+    client = MumeiClient(mumei_bin="echo")
+    result = client.build(str(mm_file))
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "stdout" in result
+    assert "stderr" in result
+
+
+def test_mumei_client_build_with_emit_returns_dict_under_noop_span(monkeypatch, tmp_path):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    mm_file = tmp_path / "test.mm"
+    mm_file.write_text("// dummy", encoding="utf-8")
+    from agent.mumei_client import MumeiClient
+
+    client = MumeiClient(mumei_bin="echo")
+    result = client.build_with_emit(str(mm_file), "c-header")
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "stdout" in result
+    assert "stderr" in result
+
+
+def test_mumei_client_verify_loss_vector_returns_dict_under_noop_span(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    mm_file = tmp_path / "test.mm"
+    mm_file.write_text("// dummy", encoding="utf-8")
+    from agent.mumei_client import MumeiClient
+
+    client = MumeiClient(mumei_bin="echo")
+    result = client.verify_loss_vector(str(mm_file))
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "loss_vector" in result
+    assert "stdout" in result
+    assert "stderr" in result
+
+
+def test_verify_duration_histogram_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    hist = telemetry._verify_duration_histogram()
+    assert isinstance(hist, telemetry._NoOpInstrument)
+    hist.record(0.5)

@@ -34,10 +34,12 @@ import logging
 import os
 import shlex
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent import telemetry
 from agent.mumei_client import MumeiClient
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,7 @@ class MumeiMCPClient:
         self._inproc_module: Any | None = None
         self._mode = self._detect_mode()
         self._mcp_command = os.environ.get("MUMEI_MCP_COMMAND", "").strip()
+        self._tracer = telemetry.get_tracer(__name__)
 
     # ------------------------------------------------------------------
     # Mode detection
@@ -314,43 +317,81 @@ class MumeiMCPClient:
                 spec_code_mapping=spec_code_mapping,
                 collect_decidable_metrics=collect_decidable_metrics,
             )
-        result = self.validate_logic(source_code)
-        report = result.get("report") or {}
-        if isinstance(report, dict) and (report or spec_code_mapping):
-            report.setdefault("spec_code_mapping", spec_code_mapping or [])
-        loss_vector_result: dict[str, Any] = {}
-        if not result.get("success") and isinstance(report, dict):
-            structured_feedback = report.get("structured_feedback")
-            has_loss_vector = isinstance(report.get("loss_vector"), dict) or (
-                isinstance(structured_feedback, dict)
-                and structured_feedback.get("status") == "verification_failed"
-            )
-            if not has_loss_vector:
-                loss_vector_result = self._fallback.verify_loss_vector(source_path)
-                loss_vector = loss_vector_result.get("loss_vector")
-                if isinstance(loss_vector, dict) and loss_vector:
-                    report.setdefault("structured_feedback", loss_vector)
-        return {
-            "success": result.get("success", False),
-            "report": report,
-            "stdout": result.get("raw", ""),
-            "stderr": "" if result.get("success") else result.get("raw", ""),
-            "mcp": True,
-            "spec_code_mapping": spec_code_mapping or [],
-            "loss_vector": loss_vector_result.get("loss_vector", {}),
-        }
+        with self._tracer.start_as_current_span("mumei.mcp.verify") as span:
+            span.set_attribute("mumei.command", "verify")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.mcp", True)
+            t0 = time.monotonic()
+            result = self.validate_logic(source_code)
+            duration_s = time.monotonic() - t0
+            span.set_attribute("mumei.verification.duration_ms", duration_s * 1000)
+            if result.get("mode") != "fallback":
+                telemetry.record_verify_duration(duration_s)
+
+            report = result.get("report") or {}
+            if isinstance(report, dict) and (report or spec_code_mapping):
+                report.setdefault("spec_code_mapping", spec_code_mapping or [])
+            loss_vector_result: dict[str, Any] = {}
+            if not result.get("success") and isinstance(report, dict):
+                structured_feedback = report.get("structured_feedback")
+                has_loss_vector = isinstance(report.get("loss_vector"), dict) or (
+                    isinstance(structured_feedback, dict)
+                    and structured_feedback.get("status") == "verification_failed"
+                )
+                if not has_loss_vector:
+                    loss_vector_result = self._fallback.verify_loss_vector(source_path)
+                    loss_vector = loss_vector_result.get("loss_vector")
+                    if isinstance(loss_vector, dict) and loss_vector:
+                        report.setdefault("structured_feedback", loss_vector)
+
+            success = result.get("success", False)
+            span.set_attribute("mumei.exit_code", 0 if success else 1)
+            has_lv = isinstance(report, dict) and (
+                isinstance(report.get("loss_vector"), dict)
+                or (
+                    isinstance(report.get("structured_feedback"), dict)
+                    and report["structured_feedback"].get("status")
+                    == "verification_failed"
+                )
+            ) or bool(loss_vector_result.get("loss_vector"))
+            span.set_attribute("mumei.loss_vector.present", bool(has_lv))
+            return {
+                "success": success,
+                "report": report,
+                "stdout": result.get("raw", ""),
+                "stderr": "" if success else result.get("raw", ""),
+                "mcp": True,
+                "spec_code_mapping": spec_code_mapping or [],
+                "loss_vector": loss_vector_result.get("loss_vector", {}),
+            }
 
     def verify_loss_vector(self, source_path: str) -> dict[str, Any]:
         """Forward loss-vector verification to the CLI client."""
-        return self._fallback.verify_loss_vector(source_path)
+        with self._tracer.start_as_current_span("mumei.mcp.verify.loss_vector") as span:
+            span.set_attribute("mumei.command", "verify-loss-vector")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.mcp", True)
+            result = self._fallback.verify_loss_vector(source_path)
+            span.set_attribute("mumei.exit_code", 0 if result.get("success") else 1)
+            return result
 
     def check(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent)."""
-        return self._fallback.check(source_path)
+        with self._tracer.start_as_current_span("mumei.mcp.check") as span:
+            span.set_attribute("mumei.command", "check")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.mcp", True)
+            result = self._fallback.check(source_path)
+            span.set_attribute("mumei.exit_code", 0 if result.get("success") else 1)
+            return result
 
     def infer_effects(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
-        return self._fallback.infer_effects(source_path)
+        with self._tracer.start_as_current_span("mumei.mcp.infer_effects") as span:
+            span.set_attribute("mumei.command", "infer-effects")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.infer_effects(source_path)
 
     def infer_contracts(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input).
@@ -359,11 +400,19 @@ class MumeiMCPClient:
         when a spec sets ``context_file``; without this shim the
         ``USE_MCP_CLIENT=true`` path would raise ``AttributeError``.
         """
-        return self._fallback.infer_contracts(source_path)
+        with self._tracer.start_as_current_span("mumei.mcp.infer_contracts") as span:
+            span.set_attribute("mumei.command", "infer-contracts")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.infer_contracts(source_path)
 
     def build(self, source_path: str, output: str = "katana") -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent)."""
-        return self._fallback.build(source_path, output=output)
+        with self._tracer.start_as_current_span("mumei.mcp.build") as span:
+            span.set_attribute("mumei.command", "build")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.build(source_path, output=output)
 
     def build_with_emit(
         self, source_path: str, emit: str, output: str = "katana"
@@ -375,7 +424,12 @@ class MumeiMCPClient:
         which calls ``build_with_emit`` for c-header / rust-wrapper /
         python-wrapper generation.
         """
-        return self._fallback.build_with_emit(source_path, emit, output=output)
+        with self._tracer.start_as_current_span("mumei.mcp.build") as span:
+            span.set_attribute("mumei.command", "build")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.build.emit", emit)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.build_with_emit(source_path, emit, output=output)
 
     # ------------------------------------------------------------------
     # Internal fallback

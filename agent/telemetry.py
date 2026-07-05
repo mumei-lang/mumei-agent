@@ -264,6 +264,36 @@ def record_llm_tokens(count: int, *, model: str | None = None) -> None:
         logger.debug("record_llm_tokens failed", exc_info=True)
 
 
+_VERIFY_DURATION_HISTOGRAM: Any = None
+
+
+def _verify_duration_histogram() -> Any:
+    global _VERIFY_DURATION_HISTOGRAM
+    if _VERIFY_DURATION_HISTOGRAM is not None:
+        return _VERIFY_DURATION_HISTOGRAM
+    meter = get_meter(__name__)
+    _VERIFY_DURATION_HISTOGRAM = meter.create_histogram(
+        "mumei.verify.duration",
+        unit="s",
+        description="Wall-clock duration of mumei verify subprocess calls.",
+    )
+    return _VERIFY_DURATION_HISTOGRAM
+
+
+def record_verify_duration(seconds: float) -> None:
+    """Record verify subprocess duration on the ``mumei.verify.duration`` histogram.
+
+    Parallel channel to :attr:`agent.metrics.Metrics.verification_times_seconds`;
+    never affects the JSON metrics output.  No-op unless OTel is enabled.
+    """
+    if seconds <= 0 or not is_enabled():
+        return
+    try:
+        _verify_duration_histogram().record(seconds)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_verify_duration failed", exc_info=True)
+
+
 def inject_trace_context(carrier: dict[str, Any]) -> dict[str, Any]:
     """Inject W3C trace context (``traceparent``/``tracestate``) into *carrier*.
 
