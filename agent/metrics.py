@@ -122,7 +122,9 @@ class Metrics:
     def record_verification_time(self, seconds: float, dense_properties: bool = False) -> None:
         """Record time spent verifying generated contracts."""
         self.verification_times_seconds.append(seconds)
-        telemetry.record_verify_duration(seconds)
+        # NOTE: telemetry.record_verify_duration is already called at the
+        # substrate level (mumei_client.py / mcp_client.py) in P15-2, so we
+        # do NOT call it here to avoid double-reporting.
         if dense_properties:
             self.dense_verification_times_seconds.append(seconds)
 
