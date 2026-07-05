@@ -150,16 +150,21 @@ def _initialise() -> None:
                 logger.debug("OTLP span exporter unavailable; spans not exported")
             trace.set_tracer_provider(tracer_provider)
 
-        try:
-            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
-                OTLPMetricExporter,
-            )
+        # Mirror the tracer guard: only install our MeterProvider when the
+        # application has not already configured one.
+        if not isinstance(metrics.get_meter_provider(), MeterProvider):
+            try:
+                from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                    OTLPMetricExporter,
+                )
 
-            reader = PeriodicExportingMetricReader(OTLPMetricExporter())
-            meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
-            metrics.set_meter_provider(meter_provider)
-        except Exception:  # pragma: no cover - exporter optional / offline
-            logger.debug("OTLP metric exporter unavailable; metrics not exported")
+                reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+                meter_provider = MeterProvider(
+                    resource=resource, metric_readers=[reader]
+                )
+                metrics.set_meter_provider(meter_provider)
+            except Exception:  # pragma: no cover - exporter optional / offline
+                logger.debug("OTLP metric exporter unavailable; metrics not exported")
 
         _TRACER = trace.get_tracer(_SERVICE_NAME)
         _METER = metrics.get_meter(_SERVICE_NAME)
