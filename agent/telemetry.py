@@ -544,6 +544,123 @@ def record_lean_bridge_result(
 
 
 @contextmanager
+def start_span(
+    name: str,
+    *,
+    context: Any = None,
+    **attrs: Any,
+) -> Iterator[Any]:
+    """Open a generic OTel span named *name* as a child of the current context.
+
+    A thin, NoOp-safe wrapper over ``tracer.start_as_current_span`` used by the
+    P15-6 proliferate / NLAE / audit instrumentation.  Keyword *attrs* whose
+    value is not ``None`` are attached as span attributes.  When *context* is
+    supplied it is used as the parent context (e.g. a context captured with
+    :func:`capture_context` and re-attached in a worker thread); otherwise the
+    span parents on the current context.
+
+    When OTel is disabled the yielded object is a :class:`_NoOpSpan` and every
+    call is swallowed.  Exceptions are recorded on the span but not suppressed.
+    """
+    tracer = get_tracer(__name__)
+    span_attrs = {key: value for key, value in attrs.items() if value is not None}
+    try:
+        with tracer.start_as_current_span(
+            name, context=context, attributes=span_attrs,
+        ) as span:
+            yield span
+    except Exception as exc:
+        try:
+            span.record_exception(exc)  # type: ignore[possibly-undefined]
+        except Exception:
+            pass
+        raise
+
+
+def set_span_attributes(span: Any, attributes: dict[str, Any]) -> None:
+    """Set several attributes on *span*, dropping ``None`` values.
+
+    Safe to call unconditionally: works on the real OTel span and on
+    :class:`_NoOpSpan`, and never raises.
+    """
+    if span is None:
+        return
+    try:
+        clean = {key: value for key, value in attributes.items() if value is not None}
+        if clean:
+            span.set_attributes(clean)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("set_span_attributes failed", exc_info=True)
+
+
+def span_trace_id(span: Any) -> str | None:
+    """Return the 32-hex-char W3C trace ID of *span*, or ``None``.
+
+    Used by the NLAE pipeline to surface the distributed-trace root ID on
+    ``NLAEResult.trace_id`` so a caller can follow the trace back through the
+    ``mcp.tool.run_nlae_pipeline`` entry span.  Returns ``None`` when OTel is
+    disabled, when *span* is a NoOp, or when no valid context is available.
+    """
+    if span is None or not is_enabled():
+        return None
+    try:
+        ctx = span.get_span_context()
+        trace_id = getattr(ctx, "trace_id", 0) if ctx is not None else 0
+        if not trace_id:
+            return None
+        return format(trace_id, "032x")
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("span_trace_id failed", exc_info=True)
+        return None
+
+
+def capture_context() -> Any:
+    """Capture the current OTel context for hand-off to a worker thread.
+
+    Returns ``None`` when OTel is disabled/unavailable.  The result is meant to
+    be passed to :func:`use_context` inside a ``ThreadPoolExecutor`` worker so
+    spans opened there parent onto the submitting thread's span.
+    """
+    if not is_enabled():
+        return None
+    try:
+        from opentelemetry import context as _otel_context
+
+        return _otel_context.get_current()
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("capture_context failed", exc_info=True)
+        return None
+
+
+@contextmanager
+def use_context(context: Any) -> Iterator[None]:
+    """Attach a *context* captured by :func:`capture_context` for the block.
+
+    A NoOp when *context* is ``None`` or OTel is disabled.  Detaches the context
+    on exit.  Intended for worker threads so their spans connect to the parent
+    trace captured on the submitting thread.
+    """
+    if context is None or not is_enabled():
+        yield
+        return
+    try:
+        from opentelemetry import context as _otel_context
+
+        token = _otel_context.attach(context)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("use_context attach failed", exc_info=True)
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            _otel_context.detach(token)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("use_context detach failed", exc_info=True)
+
+
+@contextmanager
 def start_loop_span(
     loop_type: str,
     *,

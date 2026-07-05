@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from agent import telemetry
 from agent.config import AgentConfig
 from agent.lean_bridge import run_lean_bridge as run_lean_bridge_impl
 from agent.mumei_client import create_mumei_client
@@ -26,6 +27,7 @@ class NLAEResult:
     correction_result: dict[str, object] | None
     lean_result: dict[str, object] | None
     artifacts: dict[str, str]
+    trace_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -168,36 +170,61 @@ class NLAEPipeline:
         self.lean_bridge = lean_bridge or ConfiguredLeanBridgeRunner(no_build=lean_no_build)
 
     def run_full_pipeline(self, spec: str, mumei_lean_repo: Path) -> NLAEResult:
-        code = self.agent.generate_code(spec)
+        """Run generate -> verify -> self-correct -> Lean fidelity as one trace.
+
+        The whole run is wrapped in a ``mumei.nlae.pipeline`` root span.  When
+        invoked through the ``run_nlae_pipeline`` MCP tool the entry span is the
+        current span, so this root span nests underneath it automatically,
+        connecting the caller's trace to the inner verify / loop / Lean spans.
+        """
+        with telemetry.start_span("mumei.nlae.pipeline") as _root_span:
+            return self._run_full_pipeline_inner(_root_span, spec, mumei_lean_repo)
+
+    def _run_full_pipeline_inner(
+        self, _root_span: object, spec: str, mumei_lean_repo: Path,
+    ) -> NLAEResult:
+        with telemetry.start_span("mumei.nlae.generate"):
+            code = self.agent.generate_code(spec)
         code_path = self._write_code(code)
-        verify_result = self._verify_with_loss_vector(code_path)
+        with telemetry.start_span("mumei.nlae.verify"):
+            verify_result = self._verify_with_loss_vector(code_path)
         loss_vector = _extract_loss_vector(verify_result)
         pipeline_loss_vector = loss_vector
         correction_result: dict[str, object] | None = None
 
         if not _all_verified(verify_result) and loss_vector is not None:
-            correction = self.self_correction_loop.run(code, loss_vector)
-            correction_result = _normalise_correction(correction)
-            code = str(correction_result.get("code") or code)
-            code_path = self._write_code(code)
-            corrected_verify = correction_result.get("verify_result")
-            if isinstance(corrected_verify, dict):
-                verify_result = corrected_verify
-            else:
-                verify_result = self._verify_with_loss_vector(code_path)
+            with telemetry.start_span("mumei.nlae.self_correction"):
+                correction = self.self_correction_loop.run(code, loss_vector)
+                correction_result = _normalise_correction(correction)
+                code = str(correction_result.get("code") or code)
+                code_path = self._write_code(code)
+                corrected_verify = correction_result.get("verify_result")
+                if isinstance(corrected_verify, dict):
+                    verify_result = corrected_verify
+                else:
+                    verify_result = self._verify_with_loss_vector(code_path)
             loss_vector = _extract_loss_vector(verify_result)
             if loss_vector is not None:
                 pipeline_loss_vector = loss_vector
 
         cert_path = self._write_certificate(code, verify_result)
         lean_cert_out = self.work_dir / "nlae_pipeline.lean-cert.json"
-        lean_result = self.lean_bridge.run_lean_bridge(
-            cert_path,
-            lean_cert_out,
-            Path(mumei_lean_repo),
-        )
+        with telemetry.start_span("mumei.nlae.lean_bridge"):
+            lean_result = self.lean_bridge.run_lean_bridge(
+                cert_path,
+                lean_cert_out,
+                Path(mumei_lean_repo),
+            )
         lean_verified = bool(lean_result.get("success"))
         verified = _all_verified(verify_result) or lean_verified
+        telemetry.set_span_attributes(
+            _root_span,
+            {
+                "mumei.nlae.verified": verified,
+                "mumei.nlae.lean_verified": lean_verified,
+                "mumei.nlae.loss_vector.present": pipeline_loss_vector is not None,
+            },
+        )
         return NLAEResult(
             code=code,
             verified=verified,
@@ -211,6 +238,7 @@ class NLAEPipeline:
                 "proof_cert": str(cert_path),
                 "lean_cert": str(lean_cert_out),
             },
+            trace_id=telemetry.span_trace_id(_root_span),
         )
 
     def _write_code(self, code: str) -> Path:

@@ -932,11 +932,11 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
-## P15: OpenTelemetry Observability 導入（Phase 5 実装済み）
+## P15: OpenTelemetry Observability 導入（Phase 6 Python 側実装済み）
 
-**ステータス: Phase 5 実装済み / Phase 6 以降 今後対応予定**
+**ステータス: Phase 6 の Python 側 3 ファイル（`proliferate.py` / `nlae_pipeline.py` / `audit.py`）実装済み / Rust コンパイラ連携は将来構想（未着手）**
 
-Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）および Phase 5（既存 `Metrics` / `HarnessMetrics` / `run_lean_bridge` の OTel Metrics 並行チャネル接続）が実装済み。Phase 6 以降（`proliferate` / `nlae_pipeline` の分散トレース統合）は後続 PR で段階的に追加する。
+Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）および Phase 5（既存 `Metrics` / `HarnessMetrics` / `run_lean_bridge` の OTel Metrics 並行チャネル接続）および Phase 6 の Python 側 3 ファイル（`proliferate` の root/step/proposal/parallel-forge span、`nlae_pipeline` の分散トレース + `NLAEResult.trace_id`、`audit` の file/directory/source span）が実装済み。Phase 6 の Rust コンパイラ連携（`mumei-lang/mumei` への `tracing-opentelemetry` 導入）は将来構想（未着手）として別 PR に切り出す。
 
 ### 目的
 
@@ -1146,26 +1146,32 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 
 ---
 
-### P15-6: 今後便利になる箇所（将来性）
+### P15-6: 週次ラン / NLAE / 監査パイプラインの span 計装（Python 側実装済み）
 
-#### `agent/proliferate.py` — 週次自律ラン
+**ステータス: Python 側 3 ファイル実装済み**（全 span は `is_enabled()` ガード付き・OTel 未インストール時 NoOp・例外を握りつぶす設計。既存の `proliferate()` 戻り値・`summary.json` 出力、`NLAEResult.to_dict()`、`AuditResult` / `AuditDirectoryResult` の dataclass 形式は不変。`NLAEResult` には末尾 optional の `trace_id: str | None = None` のみ追加。）Rust コンパイラ連携は将来構想（未着手）。
 
-- `proliferate()` の `[PROLIFERATE] Step N/4` ログをルート span 化し、各提案の処理（generate → blast-radius → heal → publish）を子 span にする
-- 長時間バッチ（週次 cron で数十分〜数時間）のボトルネック特定に有用
-- `_run_lean_fallback()` (L404) も Lean bridge の subprocess 呼び出しを span でラップ
+#### `agent/proliferate.py` — 週次自律ラン（実装済み）
 
-#### `agent/nlae_pipeline.py` — `NLAEPipeline.run_full_pipeline`
+- `proliferate()` 全体を `mumei.proliferate` root span でラップ。属性 `mumei.proliferate.max_proposals` / `dry_run` / `harness_profile` / `proposals_found`
+- `[PROLIFERATE] Step N/4` を子 span 化：`mumei.proliferate.gap_analysis` / `spec_generation` / `forge`
+- 並列 forge（`_parallel_forge`, `ThreadPoolExecutor`）は `telemetry.capture_context()` / `use_context()` でワーカースレッドに span コンテキストを伝播し、各候補が `mumei.proliferate.forge.candidate` 子 span として `mumei.proliferate.forge` 配下に紐づく
+- 各提案の publish 処理は `mumei.proliferate.proposal` 子 span。属性 `target_file` / `verified` / `blast_radius_broken` / `healed`
+- `_run_lean_fallback()` を `mumei.proliferate.lean_fallback` span でラップ（metrics は P15-5 の `record_lean_bridge_result` に一本化、二重報告なし）
 
-- 生成 → Z3 検証 → 自己修正 → Lean fallback の 4 段階を parent trace で接続
-- 4 リポジトリ横断（mumei-agent / mumei / mumei-lean / mumei-demo）の分散トレースの起点となる
-- `NLAEResult` に trace ID を含めることで、MCP tool `run_nlae_pipeline` の呼び出し元まで trace を遡及可能
+#### `agent/nlae_pipeline.py` — `NLAEPipeline.run_full_pipeline`（実装済み）
 
-#### `agent/audit.py` — 監査パイプライン
+- 全体を `mumei.nlae.pipeline` root span でラップ。生成 → Z3 検証 → 自己修正 → Lean bridge の 4 段階を `mumei.nlae.generate` / `verify` / `self_correction` / `lean_bridge` 子 span に分割
+- 属性 `mumei.nlae.verified` / `lean_verified` / `loss_vector.present`
+- root span の trace ID を `NLAEResult.trace_id`（末尾 optional）に格納し、MCP tool `run_nlae_pipeline` の入口 span（P15-4）まで trace を遡及可能。MCP 経由呼び出し時は入口 span が current span となり、この root span が自動的にその子として接続される
+- 4 リポジトリ横断（mumei-agent / mumei / mumei-lean / mumei-demo）の分散トレースの起点
 
-- `AuditPipeline.audit_file` / `audit_directory` / `audit_source` を span 化し、外部コード検査のレイテンシ分布を可視化
-- ディレクトリ監査時のファイル単位の並列/逐次処理パターンを trace で把握可能
+#### `agent/audit.py` — 監査パイプライン（実装済み）
 
-#### Rust コンパイラ側（`mumei-lang/mumei`）との接続構想
+- `AuditPipeline.audit_file` / `audit_directory` / `audit_source` を `mumei.audit.file` / `mumei.audit.directory` / `mumei.audit.source` span でラップ
+- `audit_directory` 配下に各ファイルの `mumei.audit.file` 子 span が逐次ぶら下がる
+- 属性 `mumei.audit.language` / `success` / `violations`（file/source）/ `files_with_issues`（directory）
+
+#### Rust コンパイラ側（`mumei-lang/mumei`）との接続構想（未着手・別 PR）
 
 - `mumei-core/src/verification/executor.rs`（Z3 solver 呼び出し）、`src/lsp.rs`（LSP サーバー）で将来 `tracing` crate + `tracing-opentelemetry` を導入し、Python 側 trace と接続する構想
 - Python agent → `subprocess.run("mumei verify ...")` → Rust binary 内の Z3 実行 span を trace propagation で串刺しにするには、環境変数 `TRACEPARENT` 経由でコンテキストを伝播するか、`--trace-id` CLI フラグを追加する設計が考えられる
@@ -1192,9 +1198,9 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 - `agent/metrics.py` — `Metrics` の OTel Metrics 接続（Phase 1-3 並行）
 - `agent/harness_metrics.py` — `HarnessMetrics` の OTel Metrics 接続（Phase 1-3 並行）
 - `agent/lean_bridge.py` — Lean bridge の span + metrics 接続（Phase 2-3）
-- `agent/proliferate.py` — 週次自律ランの root span 化（将来）
-- `agent/nlae_pipeline.py` — NLAE pipeline の分散トレース（将来）
-- `agent/audit.py` — 監査パイプラインの span 計装（将来）
+- `agent/proliferate.py` — 週次自律ランの root span 化（Phase 6、実装済み）
+- `agent/nlae_pipeline.py` — NLAE pipeline の分散トレース（Phase 6、実装済み）
+- `agent/audit.py` — 監査パイプラインの span 計装（Phase 6、実装済み）
 - `pyproject.toml` — `opentelemetry-*` optional-dependencies 追加
 
 ### 成功指標

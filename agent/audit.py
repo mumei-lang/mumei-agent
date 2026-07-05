@@ -12,6 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import cast
 
+from agent import telemetry
 from agent.audit_models import (
     AuditDirectoryResult,
     AuditResult,
@@ -152,6 +153,36 @@ class AuditPipeline:
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
             )
+        with telemetry.start_span(
+            "mumei.audit.file",
+            **{"mumei.audit.language": _normalize_language(language) or None},
+        ) as _span:
+            result = self._audit_file_inner(
+                source_path,
+                language,
+                domain_hint=domain_hint,
+                auto_migrate=auto_migrate,
+                auto_heal=auto_heal,
+            )
+            telemetry.set_span_attributes(
+                _span,
+                {
+                    "mumei.audit.language": result.language or None,
+                    "mumei.audit.success": result.success,
+                    "mumei.audit.violations": len(result.verification_violations),
+                },
+            )
+            return result
+
+    def _audit_file_inner(
+        self,
+        source_path: Path,
+        language: str | None = None,
+        *,
+        domain_hint: str = "",
+        auto_migrate: bool = False,
+        auto_heal: bool = False,
+    ) -> AuditResult:
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
         errors: list[str] = []
@@ -299,7 +330,41 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
     ) -> AuditDirectoryResult:
-        """Audit all supported source files in a directory."""
+        """Audit all supported source files in a directory.
+
+        Wrapped in a ``mumei.audit.directory`` span; the per-file
+        :meth:`audit_file` calls nest as ``mumei.audit.file`` child spans.
+        """
+        with telemetry.start_span(
+            "mumei.audit.directory",
+            **{"mumei.audit.language": _normalize_language(language) or None},
+        ) as _span:
+            result = self._audit_directory_inner(
+                source_dir,
+                language,
+                domain_hint=domain_hint,
+                auto_migrate=auto_migrate,
+                auto_heal=auto_heal,
+            )
+            telemetry.set_span_attributes(
+                _span,
+                {
+                    "mumei.audit.language": result.language or None,
+                    "mumei.audit.success": result.success,
+                    "mumei.audit.files_with_issues": result.files_with_issues,
+                },
+            )
+            return result
+
+    def _audit_directory_inner(
+        self,
+        source_dir: str | Path,
+        language: str | None = None,
+        *,
+        domain_hint: str = "",
+        auto_migrate: bool = False,
+        auto_heal: bool = False,
+    ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
@@ -441,17 +506,30 @@ class AuditPipeline:
     ) -> AuditResult:
         normalized_language = _normalize_language(language)
         extension = _extension_for_language(normalized_language)
-        with tempfile.TemporaryDirectory(prefix="mumei-audit-source-") as tmp:
-            source_path = Path(tmp) / f"inline_source{extension}"
-            source_path.write_text(source_code, encoding="utf-8")
-            result = self.audit_file(
-                source_path,
-                normalized_language,
-                domain_hint=domain_hint,
+        with telemetry.start_span(
+            "mumei.audit.source",
+            **{"mumei.audit.language": normalized_language or None},
+        ) as _span:
+            with tempfile.TemporaryDirectory(prefix="mumei-audit-source-") as tmp:
+                source_path = Path(tmp) / f"inline_source{extension}"
+                source_path.write_text(source_code, encoding="utf-8")
+                result = self.audit_file(
+                    source_path,
+                    normalized_language,
+                    domain_hint=domain_hint,
+                )
+            result = cast(AuditResult, result)
+            result.source_file = f"<inline:{normalized_language}>"
+            result = _finalize_audit_result(result)
+            telemetry.set_span_attributes(
+                _span,
+                {
+                    "mumei.audit.language": result.language or None,
+                    "mumei.audit.success": result.success,
+                    "mumei.audit.violations": len(result.verification_violations),
+                },
             )
-        result.source_file = f"<inline:{normalized_language}>"
-        result = _finalize_audit_result(result)
-        return result
+            return result
 
     def _check_spec_health(self, spec_path: Path, report_dir: str) -> SpecHealthReport:
         cert_path = str(Path(report_dir) / "audit_spec.proof.json")
