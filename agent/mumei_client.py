@@ -111,7 +111,7 @@ class MumeiClient:
             span.set_attribute("mumei.exit_code", result.returncode)
             span.set_attribute("mumei.stdout.size", len(result.stdout))
             span.set_attribute("mumei.stderr.size", len(result.stderr))
-            span.set_attribute("mumei.verification.duration_ms", duration_s * 1000)
+            span.set_attribute("mumei.duration_ms", duration_s * 1000)
         return result
 
     def verify(

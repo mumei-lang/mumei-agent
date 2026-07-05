@@ -317,7 +317,7 @@ class MumeiMCPClient:
                 spec_code_mapping=spec_code_mapping,
                 collect_decidable_metrics=collect_decidable_metrics,
             )
-        with self._tracer.start_as_current_span("mumei.verify") as span:
+        with self._tracer.start_as_current_span("mumei.mcp.verify") as span:
             span.set_attribute("mumei.command", "verify")
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.mcp", True)
@@ -367,7 +367,7 @@ class MumeiMCPClient:
 
     def verify_loss_vector(self, source_path: str) -> dict[str, Any]:
         """Forward loss-vector verification to the CLI client."""
-        with self._tracer.start_as_current_span("mumei.verify.loss_vector") as span:
+        with self._tracer.start_as_current_span("mumei.mcp.verify.loss_vector") as span:
             span.set_attribute("mumei.command", "verify-loss-vector")
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.mcp", True)
@@ -377,7 +377,7 @@ class MumeiMCPClient:
 
     def check(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent)."""
-        with self._tracer.start_as_current_span("mumei.check") as span:
+        with self._tracer.start_as_current_span("mumei.mcp.check") as span:
             span.set_attribute("mumei.command", "check")
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.mcp", True)
@@ -387,7 +387,7 @@ class MumeiMCPClient:
 
     def infer_effects(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
-        with self._tracer.start_as_current_span("mumei.infer_effects") as span:
+        with self._tracer.start_as_current_span("mumei.mcp.infer_effects") as span:
             span.set_attribute("mumei.command", "infer-effects")
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.mcp", True)
@@ -400,7 +400,7 @@ class MumeiMCPClient:
         when a spec sets ``context_file``; without this shim the
         ``USE_MCP_CLIENT=true`` path would raise ``AttributeError``.
         """
-        with self._tracer.start_as_current_span("mumei.infer_contracts") as span:
+        with self._tracer.start_as_current_span("mumei.mcp.infer_contracts") as span:
             span.set_attribute("mumei.command", "infer-contracts")
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.mcp", True)
@@ -408,7 +408,7 @@ class MumeiMCPClient:
 
     def build(self, source_path: str, output: str = "katana") -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent)."""
-        with self._tracer.start_as_current_span("mumei.build") as span:
+        with self._tracer.start_as_current_span("mumei.mcp.build") as span:
             span.set_attribute("mumei.command", "build")
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.mcp", True)
@@ -424,7 +424,7 @@ class MumeiMCPClient:
         which calls ``build_with_emit`` for c-header / rust-wrapper /
         python-wrapper generation.
         """
-        with self._tracer.start_as_current_span("mumei.build") as span:
+        with self._tracer.start_as_current_span("mumei.mcp.build") as span:
             span.set_attribute("mumei.command", "build")
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.build.emit", emit)

@@ -340,17 +340,20 @@ requests carry a W3C `traceparent` in their metadata for cross-process trace
 propagation.
 
 Phase 2 instruments the Z3 verification subprocess calls in `MumeiClient` and
-`MumeiMCPClient`. Every `verify`, `check`, `infer-effects`, `infer-contracts`,
-and `build` call is wrapped in an OTel span (`mumei.verify`, `mumei.check`,
-`mumei.infer_effects`, `mumei.infer_contracts`, `mumei.build`) with attributes
-`mumei.command`, `mumei.source_path`, `mumei.exit_code`,
-`mumei.verification.duration_ms`, `mumei.stdout.size`, and `mumei.stderr.size`.
-The `mumei.verify` span additionally carries `mumei.collect_decidable_metrics`,
+`MumeiMCPClient`. Every CLI subprocess call is wrapped in an OTel span
+(`mumei.verify`, `mumei.check`, `mumei.infer_effects`, `mumei.infer_contracts`,
+`mumei.build`) with attributes `mumei.command`, `mumei.source_path`,
+`mumei.exit_code`, `mumei.duration_ms`, `mumei.stdout.size`, and
+`mumei.stderr.size`. The `mumei.verify` span additionally carries
+`mumei.verification.duration_ms`, `mumei.collect_decidable_metrics`,
 `mumei.decidable_fragment.present`, and `mumei.loss_vector.present`.  Failed
 verifications that trigger a loss-vector re-run produce a child span
-`mumei.verify.loss_vector`.  Verification wall-clock time is also reported to
-the `mumei.verify.duration` histogram (unit: seconds) as a parallel OTel
-metrics channel that never changes the `Metrics.to_dict()` JSON output.
+`mumei.verify.loss_vector`.  `MumeiMCPClient` wraps the same methods under
+`mumei.mcp.*` span names (`mumei.mcp.verify`, `mumei.mcp.check`, etc.) so MCP
+routing and CLI execution appear as distinct layers in the trace.  Verification
+wall-clock time is also reported to the `mumei.verify.duration` histogram
+(unit: seconds) as a parallel OTel metrics channel that never changes the
+`Metrics.to_dict()` JSON output.
 
 Per-loop root spans and MCP server tool instrumentation are planned for
 Phase 3+.
