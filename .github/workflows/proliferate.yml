@@ -546,12 +546,12 @@ print("")
 if not slo:
     print("_OTel disabled (`OTEL_ENABLED` unset); no SLO status recorded._")
 else:
-    rate = slo.get("first_pass_success_rate")
+    rate = slo.get("proposal_success_rate")
     rate_text = "n/a" if rate is None else f"{float(rate):.3f}"
     violations = slo.get("violations") or []
     print("| field | value |")
     print("| --- | ---: |")
-    print(f"| first_pass_success_rate | {rate_text} |")
+    print(f"| proposal_success_rate | {rate_text} |")
     print(f"| slo_met | {bool(slo.get('slo_met'))} |")
     print(f"| violations | {', '.join(violations) if violations else 'none'} |")
 PY

@@ -70,6 +70,11 @@ services:
       - ./deploy/otel/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/otel/dashboards:/var/lib/grafana/dashboards:ro
       - mumei_grafana_data:/var/lib/grafana
+    # Lets the provisioned SLO contact point reach a webhook sink running on the
+    # host via http://host.docker.internal:5001 on Linux (macOS/Windows Docker
+    # Desktop resolve this automatically). See docs/OBSERVABILITY.md § Alerts.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:

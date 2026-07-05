@@ -1045,11 +1045,11 @@ class TestOtelSloStatus:
         data = json.loads(out_path.read_text(encoding="utf-8"))
         assert data["otel_slo_status"] is None
 
-    def test_otel_slo_status_flags_low_first_pass(
+    def test_otel_slo_status_flags_low_proposal_rate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # When OTEL is enabled, the helper derives the first-pass rate and
-        # flags an SLO violation below the warning threshold.
+        # When OTEL is enabled, the helper derives the proposal success rate
+        # and flags an SLO violation below the critical threshold.
         monkeypatch.setattr(proliferate.telemetry, "is_enabled", lambda: True)
         status = proliferate._collect_otel_slo_status(
             succeeded=1,
@@ -1058,9 +1058,9 @@ class TestOtelSloStatus:
         )
         assert status is not None
         assert status["otel_enabled"] is True
-        assert status["first_pass_success_rate"] == 0.25
+        assert status["proposal_success_rate"] == 0.25
         assert status["slo_met"] is False
-        assert "first_pass_success_rate:critical" in status["violations"]
+        assert "proposal_success_rate:critical" in status["violations"]
 
     def test_otel_slo_status_met_when_healthy(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1072,7 +1072,7 @@ class TestOtelSloStatus:
             harness_metrics=None,
         )
         assert status is not None
-        assert status["first_pass_success_rate"] == 1.0
+        assert status["proposal_success_rate"] == 1.0
         assert status["violations"] == []
         assert status["slo_met"] is True
 

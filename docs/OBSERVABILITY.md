@@ -246,6 +246,16 @@ local webhook (`http://host.docker.internal:5001/mumei-slo`) so alerts can be
 observed end-to-end without a real pager. Point it at any local HTTP sink
 (e.g. `python -m http.server 5001` or a webhook tunnel) for verification.
 
+> **Notes for local verification**
+> - On **Linux**, `host.docker.internal` is not resolved by Docker by default.
+>   Add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `grafana`
+>   service in `docker-compose.otel.yml` (or point the contact point at your
+>   host's LAN/bridge IP) so notifications can reach a sink on the host.
+> - The alert rules run in **Prometheus**; the authoritative firing state is at
+>   Prometheus → *Alerts* (http://localhost:9090/alerts). The dashboard's
+>   `alertlist` panel lists **Grafana-managed** alerts (none are provisioned
+>   here), so the SLO row is primarily for the threshold-line visualisations.
+
 | Alert | Severity | Expression (summary) | Threshold |
 |---|---|---|---|
 | `MumeiFirstPassSuccessRateLow` / `Critical` | warning / critical | mean of `mumei_first_pass_success_rate_{sum,count}` | < 0.70 / < 0.40 |

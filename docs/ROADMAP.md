@@ -1185,7 +1185,7 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 
 - **Prometheus アラートルール** — [`deploy/otel/alert_rules.yml`](../deploy/otel/alert_rules.yml) に SLO アラートを定義し `prometheus.yml` の `rule_files` に登録。first-pass 成功率低下（`mumei_first_pass_success_rate_{sum,count}` の窓平均、warning <0.70 / critical <0.40）、verify p95 スパイク（`mumei_verify_duration_seconds_bucket`、>30s）、fix 成功率低下（`mumei_fix_successes_total` / `mumei_fix_attempts_total`、<0.50）、Lean fallback エラー率上昇（`mumei_lean_bridge_error_code_total` を `mumei_lean_error_code` 別、>0.05/s）、LLM トークンコスト急増（`gen_ai_usage_tokens_total`、>2000 tok/s）。各ルールに severity ラベルと `docs/OBSERVABILITY.md` 該当セクションへの runbook_url annotation を付与。`promtool check rules` で検証可能。
 - **Grafana アラート/しきい値可視化** — ダッシュボード JSON に SLO しきい値ライン付きパネルと alertlist（アラート状態）パネルの行を追加。`deploy/otel/grafana/provisioning/alerting/` に contact point（ローカル検証用 webhook）と notification policy を provisioning。
-- **proliferate 回帰ゲート接続** — `summary.json` に末尾 optional の `otel_slo_status` フィールドを追加（`OTEL_ENABLED=false` 時は `None` で後方互換を維持、既存フィールド・`_write_output_json` 契約は不変）。first-pass 成功率を run 結果から再導出し SLO 違反を集約。
+- **proliferate 回帰ゲート接続** — `summary.json` に末尾 optional の `otel_slo_status` フィールドを追加（`OTEL_ENABLED=false` 時は `None` で後方互換を維持、既存フィールド・`_write_output_json` 契約は不変）。run 結果から `proposal_success_rate`（self-heal / publish 後の proposal 単位成功率）を導出し SLO 違反を集約する。これは OTel の `mumei.first_pass.success_rate`（atom 単位の初回 verify 成功率、Prometheus 側 `MumeiFirstPassSuccessRateLow` が担当）とは別量である点に注意。
 - **CI 連携** — `.github/workflows/proliferate.yml` の post-run 集計に `otel_slo_status` を GitHub Step Summary へ出力するステップを追加（既存の health regression 失敗ゲートのロジックは不変・観測のみ）。
 
 ### 対象ファイル（全体）

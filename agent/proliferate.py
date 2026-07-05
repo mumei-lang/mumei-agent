@@ -1166,10 +1166,14 @@ def _proliferate_inner(
     return results
 
 
-# SLO thresholds mirrored from deploy/otel/alert_rules.yml so the summary
-# JSON's SLO evaluation stays in lock-step with the Prometheus alert rules.
-_SLO_FIRST_PASS_WARN = 0.70
-_SLO_FIRST_PASS_CRIT = 0.40
+# SLO thresholds for the run-level proposal success rate exposed in
+# summary.json. NOTE: this is a *proposal-level* success rate (post self-heal /
+# publish) derived from the run outcomes, which is intentionally distinct from
+# the OTel ``mumei.first_pass.success_rate`` instrument (an atom-level first
+# *attempt* rate recorded in agent/metrics.py). It is named accordingly to
+# avoid conflating the two.
+_SLO_PROPOSAL_SUCCESS_WARN = 0.70
+_SLO_PROPOSAL_SUCCESS_CRIT = 0.40
 
 
 def _collect_otel_slo_status(
@@ -1180,12 +1184,17 @@ def _collect_otel_slo_status(
 ) -> dict[str, Any] | None:
     """Summarise OTel-derived SLO status for the run, or ``None`` when disabled.
 
-    This is a *thin*, in-process summary that mirrors the SLO-based Prometheus
-    alerts in ``deploy/otel/alert_rules.yml`` (see the "Alerts / SLO" section of
-    ``docs/OBSERVABILITY.md``). It never reads from a metrics backend; it
-    re-derives the first-pass verification success rate from the same run
-    outcomes the OTel ``mumei.first_pass.success_rate`` instrument observed so
-    operators can spot an SLO breach directly in ``summary.json``.
+    This is a *thin*, in-process summary that complements the SLO-based
+    Prometheus alerts in ``deploy/otel/alert_rules.yml`` (see the "Alerts / SLO"
+    section of ``docs/OBSERVABILITY.md``). It never reads from a metrics
+    backend; it derives a run-level ``proposal_success_rate`` (proposals
+    succeeded / processed, i.e. post self-heal and publish) so operators can
+    spot a regression directly in ``summary.json``.
+
+    ``proposal_success_rate`` is deliberately NOT the same quantity as the OTel
+    ``mumei.first_pass.success_rate`` instrument (an atom-level first-*attempt*
+    rate); the Prometheus ``MumeiFirstPassSuccessRateLow`` alert covers the
+    latter.
 
     Returns ``None`` when OTel is disabled (the default, ``OTEL_ENABLED``
     unset/false or the ``opentelemetry`` packages unavailable) so the existing
@@ -1193,19 +1202,19 @@ def _collect_otel_slo_status(
     """
     if not telemetry.is_enabled():
         return None
-    first_pass_rate = (succeeded / processed) if processed > 0 else None
+    proposal_rate = (succeeded / processed) if processed > 0 else None
     violations: list[str] = []
-    if first_pass_rate is not None:
-        if first_pass_rate < _SLO_FIRST_PASS_CRIT:
-            violations.append("first_pass_success_rate:critical")
-        elif first_pass_rate < _SLO_FIRST_PASS_WARN:
-            violations.append("first_pass_success_rate:warning")
+    if proposal_rate is not None:
+        if proposal_rate < _SLO_PROPOSAL_SUCCESS_CRIT:
+            violations.append("proposal_success_rate:critical")
+        elif proposal_rate < _SLO_PROPOSAL_SUCCESS_WARN:
+            violations.append("proposal_success_rate:warning")
     status: dict[str, Any] = {
         "otel_enabled": True,
-        "first_pass_success_rate": first_pass_rate,
+        "proposal_success_rate": proposal_rate,
         "thresholds": {
-            "first_pass_success_rate_warning": _SLO_FIRST_PASS_WARN,
-            "first_pass_success_rate_critical": _SLO_FIRST_PASS_CRIT,
+            "proposal_success_rate_warning": _SLO_PROPOSAL_SUCCESS_WARN,
+            "proposal_success_rate_critical": _SLO_PROPOSAL_SUCCESS_CRIT,
         },
         "violations": violations,
         "slo_met": not violations,
