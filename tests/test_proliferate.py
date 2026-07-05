@@ -1005,6 +1005,89 @@ class TestOutputJson:
         assert results[0]["reason"] == "std_dir_not_found"
 
 
+class TestOtelSloStatus:
+    """P15 operational alerts / SLO layer — otel_slo_status in summary.json."""
+
+    def test_otel_slo_status_none_when_disabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Default path: OTEL disabled -> otel_slo_status is present but None,
+        # and every pre-existing summary.json field is unchanged.
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        out_path = tmp_path / "summary.json"
+        proliferate._write_output_json(
+            out_path,
+            started_at="2026-07-05T10:00:00+00:00",
+            pre_health=None,
+            post_health=None,
+            results=[{"success": True, "reason": "published"}],
+            dry_run=False,
+        )
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert "otel_slo_status" in data
+        assert data["otel_slo_status"] is None
+        # Backward-compat: existing fields still present.
+        assert data["proposals_processed"] == 1
+        assert data["proposals_succeeded"] == 1
+        assert data["health_delta"] is None
+
+    def test_default_proliferate_summary_has_null_slo(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # End-to-end default run (OTEL unset) writes otel_slo_status=None.
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        out_path = tmp_path / "summary.json"
+        proliferate.proliferate(
+            tmp_path / "does-not-exist",
+            dry_run=True,
+            output_json=out_path,
+        )
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["otel_slo_status"] is None
+
+    def test_otel_slo_status_flags_low_first_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # When OTEL is enabled, the helper derives the first-pass rate and
+        # flags an SLO violation below the warning threshold.
+        monkeypatch.setattr(proliferate.telemetry, "is_enabled", lambda: True)
+        status = proliferate._collect_otel_slo_status(
+            succeeded=1,
+            processed=4,
+            harness_metrics=None,
+        )
+        assert status is not None
+        assert status["otel_enabled"] is True
+        assert status["first_pass_success_rate"] == 0.25
+        assert status["slo_met"] is False
+        assert "first_pass_success_rate:critical" in status["violations"]
+
+    def test_otel_slo_status_met_when_healthy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(proliferate.telemetry, "is_enabled", lambda: True)
+        status = proliferate._collect_otel_slo_status(
+            succeeded=4,
+            processed=4,
+            harness_metrics=None,
+        )
+        assert status is not None
+        assert status["first_pass_success_rate"] == 1.0
+        assert status["violations"] == []
+        assert status["slo_met"] is True
+
+    def test_otel_slo_status_none_when_disabled_helper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(proliferate.telemetry, "is_enabled", lambda: False)
+        assert (
+            proliferate._collect_otel_slo_status(
+                succeeded=0, processed=0, harness_metrics=None
+            )
+            is None
+        )
+
+
 # ---------------------------------------------------------------------------
 # Task 2-A — auto-close on health regression + model field in summary JSON
 # ---------------------------------------------------------------------------

@@ -1,0 +1,21 @@
+# Auto-provisioned Grafana contact point for the mumei-agent reference stack.
+# Local-verification use only — see the "Alerts / SLO" section of
+# docs/OBSERVABILITY.md.
+#
+# The webhook target is a placeholder local receiver so SLO alert
+# notifications can be observed end-to-end without wiring up a real paging
+# provider. Point it at any local HTTP sink (e.g. `python -m http.server` or a
+# webhook.site tunnel); from inside the Grafana container the host is reachable
+# via `host.docker.internal`.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: mumei-slo-webhook
+    receivers:
+      - uid: mumei_slo_webhook
+        type: webhook
+        settings:
+          url: http://host.docker.internal:5001/mumei-slo
+          httpMethod: POST
+        disableResolveMessage: false

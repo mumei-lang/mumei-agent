@@ -1,0 +1,25 @@
+# Auto-provisioned Grafana notification policy for the mumei-agent reference
+# stack. Local-verification use only — see the "Alerts / SLO" section of
+# docs/OBSERVABILITY.md.
+#
+# Routes every mumei-agent SLO alert (warning + critical) to the
+# `mumei-slo-webhook` contact point, with critical alerts grouped/notified
+# faster than warnings.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: mumei-slo-webhook
+    group_by: ["alertname", "slo"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+    routes:
+      - receiver: mumei-slo-webhook
+        matchers:
+          - severity = critical
+        group_wait: 10s
+        repeat_interval: 1h
+      - receiver: mumei-slo-webhook
+        matchers:
+          - severity = warning

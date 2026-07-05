@@ -4,6 +4,12 @@ global:
   scrape_interval: 10s
   evaluation_interval: 10s
 
+# SLO alert rules (P15 operational alerts / SLO layer). See
+# deploy/otel/alert_rules.yml and the "Alerts / SLO" section of
+# docs/OBSERVABILITY.md.
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
 scrape_configs:
   # Metrics exported by the OTel Collector's prometheus exporter (:8889).
   - job_name: otel-collector

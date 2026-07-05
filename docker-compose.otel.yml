@@ -51,6 +51,7 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
     volumes:
       - ./deploy/otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/otel/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
     ports:
       - "127.0.0.1:9090:9090"
     depends_on:

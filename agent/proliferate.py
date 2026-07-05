@@ -1166,6 +1166,61 @@ def _proliferate_inner(
     return results
 
 
+# SLO thresholds mirrored from deploy/otel/alert_rules.yml so the summary
+# JSON's SLO evaluation stays in lock-step with the Prometheus alert rules.
+_SLO_FIRST_PASS_WARN = 0.70
+_SLO_FIRST_PASS_CRIT = 0.40
+
+
+def _collect_otel_slo_status(
+    *,
+    succeeded: int,
+    processed: int,
+    harness_metrics: HarnessMetrics | None,
+) -> dict[str, Any] | None:
+    """Summarise OTel-derived SLO status for the run, or ``None`` when disabled.
+
+    This is a *thin*, in-process summary that mirrors the SLO-based Prometheus
+    alerts in ``deploy/otel/alert_rules.yml`` (see the "Alerts / SLO" section of
+    ``docs/OBSERVABILITY.md``). It never reads from a metrics backend; it
+    re-derives the first-pass verification success rate from the same run
+    outcomes the OTel ``mumei.first_pass.success_rate`` instrument observed so
+    operators can spot an SLO breach directly in ``summary.json``.
+
+    Returns ``None`` when OTel is disabled (the default, ``OTEL_ENABLED``
+    unset/false or the ``opentelemetry`` packages unavailable) so the existing
+    ``summary.json`` shape is preserved byte-for-byte for the common path.
+    """
+    if not telemetry.is_enabled():
+        return None
+    first_pass_rate = (succeeded / processed) if processed > 0 else None
+    violations: list[str] = []
+    if first_pass_rate is not None:
+        if first_pass_rate < _SLO_FIRST_PASS_CRIT:
+            violations.append("first_pass_success_rate:critical")
+        elif first_pass_rate < _SLO_FIRST_PASS_WARN:
+            violations.append("first_pass_success_rate:warning")
+    status: dict[str, Any] = {
+        "otel_enabled": True,
+        "first_pass_success_rate": first_pass_rate,
+        "thresholds": {
+            "first_pass_success_rate_warning": _SLO_FIRST_PASS_WARN,
+            "first_pass_success_rate_critical": _SLO_FIRST_PASS_CRIT,
+        },
+        "violations": violations,
+        "slo_met": not violations,
+    }
+    if harness_metrics is not None:
+        try:
+            aggregate = harness_metrics.aggregate_metrics()
+            status["intent_fidelity_status"] = aggregate.get(
+                "intent_fidelity_status"
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("otel_slo_status: harness aggregate failed", exc_info=True)
+    return status
+
+
 def _write_output_json(
     output_json: str | Path | None,
     *,
@@ -1224,6 +1279,14 @@ def _write_output_json(
     payload["lean_fallback_metrics"] = lean_metrics
     if harness_metrics is not None:
         payload["harness_metrics"] = harness_metrics.aggregate_metrics()
+    # P15 operational alerts / SLO layer: append a thin OTel-derived SLO status
+    # as a new optional trailing field. It is ``None`` when OTel is disabled
+    # (the default), preserving the existing summary.json contract.
+    payload["otel_slo_status"] = _collect_otel_slo_status(
+        succeeded=succeeded,
+        processed=processed,
+        harness_metrics=harness_metrics,
+    )
     path = Path(output_json)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
