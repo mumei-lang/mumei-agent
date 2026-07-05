@@ -26,6 +26,18 @@ dependencies = [
 mcp = [
     "mcp[cli]>=1.0",
 ]
+# P15 — OpenTelemetry observability is opt-in.  Install with
+# ``pip install mumei-agent[otel]`` (or ``uv sync --extra otel``) and set
+# ``OTEL_ENABLED=true`` plus ``OTEL_EXPORTER_OTLP_ENDPOINT`` to export
+# LLM/tool spans and token metrics to an OTLP backend.  The agent's
+# heal / generate / forge / proliferate flows fall back to NoOp
+# tracers/meters and run unchanged when this extra is not installed.
+otel = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp>=1.20",
+    "opentelemetry-instrumentation-openai>=0.1",  # if available
+]
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

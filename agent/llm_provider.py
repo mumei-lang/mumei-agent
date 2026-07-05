@@ -12,6 +12,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Protocol
 
 from agent.config import AgentConfig
+from agent import telemetry
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -19,6 +20,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 Message = Mapping[str, Any]
+
+
+def _span_total_tokens(response: Any) -> int:
+    """Best-effort ``usage.total_tokens`` extraction for span annotation."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0
+    total = usage.get("total_tokens") if isinstance(usage, Mapping) else getattr(usage, "total_tokens", None)
+    try:
+        return int(total or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _annotate_response(span: Any, response: Any) -> None:
+    total = _span_total_tokens(response)
+    if total:
+        span.set_attribute("gen_ai.usage.total_tokens", total)
 
 
 class LLMProvider(Protocol):
@@ -53,11 +72,20 @@ class OpenAILLMProvider:
         return self._client
 
     def complete(self, messages: Sequence[Message], model: str) -> str:
-        response = self._ensure_client().chat.completions.create(
-            model=model,
-            messages=list(messages),
-        )
-        return _extract_openai_text(response)
+        tracer = telemetry.get_tracer(__name__)
+        with tracer.start_as_current_span("llm.complete") as span:
+            span.set_attribute("gen_ai.system", "openai-compatible")
+            if model:
+                span.set_attribute("gen_ai.request.model", model)
+            base_url = getattr(self.config, "base_url", None) if self.config else None
+            if base_url:
+                span.set_attribute("server.address", base_url)
+            response = self._ensure_client().chat.completions.create(
+                model=model,
+                messages=list(messages),
+            )
+            _annotate_response(span, response)
+            return _extract_openai_text(response)
 
 
 class McpSamplingLLMProvider:
@@ -75,13 +103,20 @@ class McpSamplingLLMProvider:
         self.max_tokens = max_tokens or int(os.getenv("MCP_SAMPLING_MAX_TOKENS", "4096"))
 
     def complete(self, messages: Sequence[Message], model: str) -> str:
-        try:
-            return self._complete_via_sampling(messages, model)
-        except Exception as exc:
-            if self.fallback is None:
-                raise
-            logger.warning("MCP sampling failed; falling back to OpenAI-compatible LLM: %s", exc)
-            return self.fallback.complete(messages, model)
+        tracer = telemetry.get_tracer(__name__)
+        with tracer.start_as_current_span("mcp_sampling.complete") as span:
+            span.set_attribute("gen_ai.system", "mcp-sampling")
+            if model:
+                span.set_attribute("gen_ai.request.model", model)
+            try:
+                return self._complete_via_sampling(messages, model)
+            except Exception as exc:
+                if self.fallback is None:
+                    raise
+                logger.warning(
+                    "MCP sampling failed; falling back to OpenAI-compatible LLM: %s", exc
+                )
+                return self.fallback.complete(messages, model)
 
     def _complete_via_sampling(self, messages: Sequence[Message], model: str) -> str:
         from mcp import types as mcp_types
@@ -100,7 +135,9 @@ class McpSamplingLLMProvider:
                     hints=[mcp_types.ModelHint(name=model)] if model else None,
                     intelligencePriority=0.8,
                 ),
-                metadata={"mumei_agent_llm_provider": "mcp_sampling"},
+                metadata=telemetry.inject_trace_context(
+                    {"mumei_agent_llm_provider": "mcp_sampling"}
+                ),
             )
             if inspect.isawaitable(result):
                 return await result

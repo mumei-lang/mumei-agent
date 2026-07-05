@@ -1,0 +1,241 @@
+"""OpenTelemetry helpers with a zero-dependency NoOp fallback (P15 Phase 1).
+
+Observability is opt-in.  Unless ``OTEL_ENABLED`` is truthy *and* the
+``opentelemetry`` packages are importable, every helper here returns a NoOp
+tracer/meter whose spans and instruments do nothing.  This guarantees that the
+agent's existing heal / generate / forge / proliferate flows behave identically
+whether or not the ``otel`` extra is installed.
+
+Install the optional dependencies with ``pip install mumei-agent[otel]`` (or
+``uv sync --extra otel``) and set ``OTEL_ENABLED=true`` plus
+``OTEL_EXPORTER_OTLP_ENDPOINT`` to export traces/metrics to an OTLP backend
+(Jaeger, Grafana Tempo, etc.).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import contextmanager
+from typing import Any, Iterator
+
+logger = logging.getLogger(__name__)
+
+_SERVICE_NAME = "mumei-agent"
+
+# Resolved lazily on first use so that importing this module never touches the
+# opentelemetry packages or configures any global provider.
+_INITIALISED = False
+_TRACER: Any = None
+_METER: Any = None
+_TOKEN_COUNTER: Any = None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def is_enabled() -> bool:
+    """Return whether OTel instrumentation is active.
+
+    Requires both ``OTEL_ENABLED`` to be truthy (default ``false``) and the
+    ``opentelemetry`` packages to be importable.
+    """
+    if not _env_bool("OTEL_ENABLED", False):
+        return False
+    try:
+        import opentelemetry.trace  # noqa: F401
+    except Exception:  # pragma: no cover - exercised only without the extra
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# NoOp fallbacks
+# --------------------------------------------------------------------------- #
+class _NoOpSpan:
+    """Span stand-in that swallows every OTel span operation."""
+
+    def set_attribute(self, key: str, value: Any) -> None:  # noqa: D401
+        return None
+
+    def set_attributes(self, attributes: Any) -> None:
+        return None
+
+    def add_event(self, name: str, attributes: Any = None) -> None:
+        return None
+
+    def record_exception(self, exception: BaseException, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def set_status(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def get_span_context(self) -> None:
+        return None
+
+    def end(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class _NoOpTracer:
+    @contextmanager
+    def start_as_current_span(self, name: str, **kwargs: Any) -> Iterator[_NoOpSpan]:
+        yield _NoOpSpan()
+
+
+class _NoOpInstrument:
+    def add(self, amount: Any, attributes: Any = None) -> None:
+        return None
+
+    def record(self, amount: Any, attributes: Any = None) -> None:
+        return None
+
+
+class _NoOpMeter:
+    def create_counter(self, *args: Any, **kwargs: Any) -> _NoOpInstrument:
+        return _NoOpInstrument()
+
+    def create_histogram(self, *args: Any, **kwargs: Any) -> _NoOpInstrument:
+        return _NoOpInstrument()
+
+    def create_up_down_counter(self, *args: Any, **kwargs: Any) -> _NoOpInstrument:
+        return _NoOpInstrument()
+
+
+_NOOP_TRACER = _NoOpTracer()
+_NOOP_METER = _NoOpMeter()
+_NOOP_INSTRUMENT = _NoOpInstrument()
+
+
+# --------------------------------------------------------------------------- #
+# Lazy provider setup
+# --------------------------------------------------------------------------- #
+def _initialise() -> None:
+    """Configure the global tracer/meter providers once (best effort)."""
+    global _INITIALISED, _TRACER, _METER
+    if _INITIALISED:
+        return
+    _INITIALISED = True
+
+    if not is_enabled():
+        return
+
+    try:
+        from opentelemetry import metrics, trace
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+
+        resource = Resource.create({"service.name": _SERVICE_NAME})
+
+        # Only install our own providers if the application has not already
+        # configured one (respects an externally-supplied SDK setup).
+        if not isinstance(trace.get_tracer_provider(), TracerProvider):
+            tracer_provider = TracerProvider(resource=resource)
+            try:
+                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                    OTLPSpanExporter,
+                )
+
+                tracer_provider.add_span_processor(
+                    BatchSpanProcessor(OTLPSpanExporter())
+                )
+            except Exception:  # pragma: no cover - exporter optional / offline
+                logger.debug("OTLP span exporter unavailable; spans not exported")
+            trace.set_tracer_provider(tracer_provider)
+
+        try:
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                OTLPMetricExporter,
+            )
+
+            reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+            meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
+            metrics.set_meter_provider(meter_provider)
+        except Exception:  # pragma: no cover - exporter optional / offline
+            logger.debug("OTLP metric exporter unavailable; metrics not exported")
+
+        _TRACER = trace.get_tracer(_SERVICE_NAME)
+        _METER = metrics.get_meter(_SERVICE_NAME)
+    except Exception:  # pragma: no cover - defensive; never break the agent
+        logger.warning("OpenTelemetry setup failed; falling back to NoOp", exc_info=True)
+        _TRACER = None
+        _METER = None
+
+
+def get_tracer(name: str | None = None) -> Any:
+    """Return an OTel tracer, or a NoOp tracer when disabled/unavailable."""
+    _initialise()
+    if _TRACER is None:
+        return _NOOP_TRACER
+    try:
+        from opentelemetry import trace
+
+        return trace.get_tracer(name or _SERVICE_NAME)
+    except Exception:  # pragma: no cover - defensive
+        return _NOOP_TRACER
+
+
+def get_meter(name: str | None = None) -> Any:
+    """Return an OTel meter, or a NoOp meter when disabled/unavailable."""
+    _initialise()
+    if _METER is None:
+        return _NOOP_METER
+    try:
+        from opentelemetry import metrics
+
+        return metrics.get_meter(name or _SERVICE_NAME)
+    except Exception:  # pragma: no cover - defensive
+        return _NOOP_METER
+
+
+def _token_counter() -> Any:
+    global _TOKEN_COUNTER
+    if _TOKEN_COUNTER is not None:
+        return _TOKEN_COUNTER
+    meter = get_meter(__name__)
+    _TOKEN_COUNTER = meter.create_counter(
+        "gen_ai.usage.total_tokens",
+        unit="{token}",
+        description="Total LLM tokens consumed (prompt + completion).",
+    )
+    return _TOKEN_COUNTER
+
+
+def record_llm_tokens(count: int, *, model: str | None = None) -> None:
+    """Record LLM token usage on the ``gen_ai.usage.total_tokens`` counter.
+
+    This is a parallel channel to :meth:`agent.metrics.Metrics.record_tokens`
+    and never affects the JSON metrics output.  It is a no-op unless OTel is
+    enabled and available.
+    """
+    if count <= 0 or not is_enabled():
+        return
+    attributes = {"gen_ai.request.model": model} if model else None
+    try:
+        _token_counter().add(count, attributes)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_llm_tokens failed", exc_info=True)
+
+
+def inject_trace_context(carrier: dict[str, Any]) -> dict[str, Any]:
+    """Inject W3C trace context (``traceparent``/``tracestate``) into *carrier*.
+
+    Returns *carrier* unchanged when OTel is disabled/unavailable so callers can
+    always use the result directly.
+    """
+    if not is_enabled():
+        return carrier
+    try:
+        from opentelemetry.propagate import inject
+
+        inject(carrier)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("trace context injection failed", exc_info=True)
+    return carrier

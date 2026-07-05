@@ -303,6 +303,39 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
+### OpenTelemetry Observability (opt-in, P15 Phase 1)
+
+Distributed tracing and token/latency metrics are **opt-in** and default to off.
+Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
+and metric instrument falls back to a NoOp implementation, so the heal /
+generate / forge / proliferate flows run byte-for-byte identically.
+
+```bash
+# Install the optional OTel dependencies
+uv sync --extra otel        # or: pip install mumei-agent[otel]
+
+# Enable and point at an OTLP backend (Jaeger, Grafana Tempo, etc.)
+export OTEL_ENABLED=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+uv run mumei-agent heal examples/effect_test.mm
+```
+
+- `OTEL_ENABLED` (default: `false`): master switch. Instrumentation is active
+  only when this is truthy **and** the `opentelemetry` packages are importable;
+  otherwise NoOp tracers/meters are used.
+- `OTEL_EXPORTER_OTLP_ENDPOINT`: standard OTLP endpoint the SDK exports
+  traces/metrics to (honored by the `opentelemetry` SDK).
+
+Phase 1 instruments the LLM call chokepoint: `OpenAILLMProvider.complete` and
+`McpSamplingLLMProvider.complete` emit spans with `gen_ai.request.model`,
+`gen_ai.system`, `server.address`, and `gen_ai.usage.total_tokens`; token usage
+is also reported to the `gen_ai.usage.total_tokens` counter as a parallel
+channel that never changes the JSON metrics output
+(`Metrics.to_dict()` / `HarnessMetrics.aggregate_metrics()`). MCP sampling
+requests carry a W3C `traceparent` in their metadata for cross-process trace
+propagation. Z3 `verify` spans, per-loop root spans, and MCP server tool
+instrumentation are planned for Phase 2+.
+
 ### Ollama KV cache and long-context tuning
 
 `docker-compose.yml` configures the Ollama service with:

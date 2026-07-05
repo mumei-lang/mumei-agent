@@ -932,9 +932,11 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
-## P15: OpenTelemetry Observability 導入（調査・今後対応予定）
+## P15: OpenTelemetry Observability 導入（Phase 1 実装済み）
 
-**ステータス: 今後対応予定（未着手）**
+**ステータス: Phase 1 実装済み / Phase 2 以降 今後対応予定**
+
+Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）が実装済み。Phase 2 以降（Z3 verify span、各ループの root span 化、MCP サーバー計装）は後続 PR で段階的に追加する。
 
 ### 目的
 
@@ -972,7 +974,19 @@ otel = [
 
 ### P15-1: LLM 呼び出しの計装（最優先・単一チョークポイント）
 
+**ステータス: 実装済み（Phase 1）**
+
 LLM 呼び出しはエージェントのコスト・レイテンシの大部分を占める単一チョークポイントであり、最も費用対効果の高い計装対象。
+
+実装内容:
+
+- `agent/telemetry.py` — `OTEL_ENABLED`（デフォルト `false`）と `OTEL_EXPORTER_OTLP_ENDPOINT` を読み、OTel SDK 未インストール/無効時は NoOp tracer/meter を返す `get_tracer()` / `get_meter()`。`opentelemetry` が import できない環境でも ImportError を握りつぶして NoOp にフォールバックする。
+- `OpenAILLMProvider.complete` を `llm.complete` span でラップし、`gen_ai.system=openai-compatible` / `gen_ai.request.model` / `server.address`（`config.base_url`）/ `gen_ai.usage.total_tokens` を属性化。
+- `McpSamplingLLMProvider.complete` を `mcp_sampling.complete` span 化し、`_complete_via_sampling` の `metadata` に `traceparent`（W3C Trace Context）を注入。
+- `fix_strategy_helpers.response_token_count()` が抽出する `usage.total_tokens` を OTel の `gen_ai.usage.total_tokens` counter へ並行報告（`Metrics.record_tokens` / `Metrics.to_dict()` の出力形式には一切影響しない）。
+- `pyproject.toml` に opt-in の `otel` extra を追加。
+
+Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出しの個別計装、`complete_with_tools` の独立 span 化、ディスパッチ関数計装）は後続で対応する。
 
 #### 計装対象（provider 経由の正規パス）
 
