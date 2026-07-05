@@ -127,11 +127,13 @@ layer above `mumei.verify` when calls go through `MumeiMCPClient`.
 All instruments are a parallel OTel channel — the JSON metrics
 (`Metrics.to_dict()`, `HarnessMetrics.aggregate_metrics()`) are unchanged. The
 Prometheus names below reflect the collector's prometheus exporter naming
-(dots → underscores, unit suffixes, `_total` for counters).
+(dots → underscores, unit suffixes, `_total` for counters). Note the collector
+collapses the redundant `total` in `gen_ai.usage.total_tokens`, exporting it as
+`gen_ai_usage_tokens_total` (not `..._total_tokens_total`).
 
 | OTel instrument | Type | Prometheus name | Key attributes/labels |
 |---|---|---|---|
-| `gen_ai.usage.total_tokens` | Counter | `gen_ai_usage_total_tokens_total` | `gen_ai.request.model` |
+| `gen_ai.usage.total_tokens` | Counter | `gen_ai_usage_tokens_total` | `gen_ai.request.model` |
 | `mumei.verify.duration` | Histogram (s) | `mumei_verify_duration_seconds_*` | — |
 | `mumei.first_pass.success_rate` | Histogram (1) | `mumei_first_pass_success_rate_*` | — |
 | `mumei.z3.unknowns` | Counter | `mumei_z3_unknowns_total` | — |
@@ -139,7 +141,7 @@ Prometheus names below reflect the collector's prometheus exporter naming
 | `mumei.fix.attempts` | Counter | `mumei_fix_attempts_total` | `mumei.violation_type` |
 | `mumei.fix.successes` | Counter | `mumei_fix_successes_total` | `mumei.violation_type` |
 | `mumei.harness.tokens_to_success` | Histogram | `mumei_harness_tokens_to_success_*` | `stage`, `module`, `profile` |
-| `mumei.harness.solver_seconds_to_success` | Histogram (s) | `mumei_harness_solver_seconds_to_success_seconds_*` | `stage`, `module`, `profile` |
+| `mumei.harness.solver_seconds_to_success` | Histogram (s) | `mumei_harness_solver_seconds_to_success_*` | `stage`, `module`, `profile` |
 | `mumei.harness.spec_drift_score` | Histogram (1) | `mumei_harness_spec_drift_score_*` | `stage`, `module`, `profile` |
 | `mumei.lean.bridge.duration` | Histogram (s) | `mumei_lean_bridge_duration_seconds_*` | — |
 | `mumei.lean.verified_count` | Counter | `mumei_lean_verified_count_total` | — |

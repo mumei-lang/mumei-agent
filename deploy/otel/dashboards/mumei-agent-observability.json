@@ -34,7 +34,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (gen_ai_request_model) (increase(gen_ai_usage_total_tokens_total[$__rate_interval]))",
+          "expr": "sum by (gen_ai_request_model) (increase(gen_ai_usage_tokens_total[$__rate_interval]))",
           "legendFormat": "{{gen_ai_request_model}}",
           "refId": "A"
         }
@@ -51,7 +51,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(gen_ai_usage_total_tokens_total)",
+          "expr": "sum(gen_ai_usage_tokens_total)",
           "legendFormat": "total tokens",
           "refId": "A"
         }
@@ -169,7 +169,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum(rate(mumei_harness_solver_seconds_to_success_seconds_bucket[$__rate_interval])) by (le, stage, module))",
+          "expr": "histogram_quantile(0.95, sum(rate(mumei_harness_solver_seconds_to_success_bucket[$__rate_interval])) by (le, stage, module))",
           "legendFormat": "{{stage}}/{{module}}",
           "refId": "A"
         }
