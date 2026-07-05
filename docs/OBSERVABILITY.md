@@ -177,14 +177,24 @@ export MUMEI_BIN="$PWD/target/debug/mumei"
 ```
 
 **2. Start the reference stack and run the agent** against it (see section b),
-pointing `MUMEI_BIN` at the `otel` build so the subprocess is trace-aware:
+pointing `MUMEI_BIN` at the `otel` build so the subprocess is trace-aware.
+Use the **OTLP/HTTP** endpoint (`:4318`) for this flow: the `mumei` binary's
+exporter is HTTP-only, and the agent passes its own `OTEL_EXPORTER_OTLP_*`
+environment through to the `mumei` subprocess, so both sides must agree on a
+protocol the Rust side supports.
 
 ```bash
 docker compose -f docker-compose.otel.yml up -d
 export OTEL_ENABLED=true
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 uv run mumei-agent heal examples/effect_test.mm
 ```
+
+> The Python agent alone also works over gRPC (the default,
+> `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`); HTTP/`:4318` is required
+> only when you want the spawned `mumei` subprocess to export into the same
+> collector.
 
 **3. Confirm in Jaeger** (http://localhost:16686): select service
 `mumei-agent`, open a recent trace, and confirm the span chain
@@ -200,8 +210,9 @@ Observability (P15)* dashboard should plot `mumei.verify.duration` and the
 
 ```bash
 # Emulate a caller-provided trace context and run verify directly.
+# The mumei binary exports over OTLP/HTTP, so target :4318.
 OTEL_ENABLED=true \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 TRACEPARENT="00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" \
   "$MUMEI_BIN" verify examples/effect_test.mm
 ```
