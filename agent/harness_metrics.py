@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from agent import telemetry
+
 HarnessProfileName = Literal[
     "basic",
     "stateful",
@@ -237,6 +239,16 @@ class HarnessMetrics:
             spec_drift_score=max(0.0, float(spec_drift_score)),
         )
         self.records.append(record)
+        telemetry.record_harness_result(
+            tokens_to_success=record.tokens_to_success,
+            solver_seconds_to_success=record.solver_seconds_to_success,
+            spec_drift_score=record.spec_drift_score,
+            attributes={
+                "stage": stage,
+                "module": module_name,
+                "profile": self.profile,
+            },
+        )
         return record
 
     def record_result(

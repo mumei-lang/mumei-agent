@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent import telemetry
 from agent.lean_bridge_helpers import (
     _KNOWN_LEAN_WITNESSES,
     _NON_RETRYABLE_ERROR_CODES,
@@ -58,6 +59,26 @@ from agent.lean_bridge_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_lean_bridge_telemetry(result: dict[str, Any]) -> None:
+    """Emit OTel metrics for a lean bridge result dict (best-effort)."""
+    duration = result.get("duration_seconds")
+    error_code = result.get("error_code")
+    lean_cert = result.get("lean_cert")
+    verified_count = 0
+    if isinstance(lean_cert, dict):
+        from agent.proofcert import Z3CheckResult, iter_atoms
+
+        for atom in iter_atoms(lean_cert):
+            if atom.z3_check_result == Z3CheckResult.LEAN_VERIFIED:
+                verified_count += 1
+    telemetry.record_lean_bridge_result(
+        duration_seconds=float(duration) if duration else 0.0,
+        verified_count=verified_count,
+        error_code=error_code,
+    )
+
 
 def _verify_known_witnesses(
     *,
@@ -472,16 +493,19 @@ def run_lean_bridge(
             duration_seconds=elapsed,
         )
         if enable_known_witness_fallback and not no_build:
-            return _combine_with_witness_fallback(
+            combined = _combine_with_witness_fallback(
                 primary=timeout_result,
                 cert_path=input_path,
                 mumei_lean_repo=mumei_lean_repo,
                 timeout=timeout,
             )
+            _emit_lean_bridge_telemetry(combined)
+            return combined
+        _emit_lean_bridge_telemetry(timeout_result)
         return timeout_result
     except OSError as exc:
         elapsed = time.monotonic() - started
-        return _result(
+        os_result = _result(
             success=False,
             returncode=-1,
             stderr=f"lean_bridge subprocess failed: {exc}",
@@ -491,6 +515,8 @@ def run_lean_bridge(
             ],
             duration_seconds=elapsed,
         )
+        _emit_lean_bridge_telemetry(os_result)
+        return os_result
     elapsed = time.monotonic() - started
 
     lean_cert: dict[str, Any] | None = None
@@ -525,12 +551,15 @@ def run_lean_bridge(
         and not no_build
         and not primary_result["success"]
     ):
-        return _combine_with_witness_fallback(
+        combined = _combine_with_witness_fallback(
             primary=primary_result,
             cert_path=input_path,
             mumei_lean_repo=mumei_lean_repo,
             timeout=timeout,
         )
+        _emit_lean_bridge_telemetry(combined)
+        return combined
+    _emit_lean_bridge_telemetry(primary_result)
     return primary_result
 
 def lean_fallback_available(mumei_lean_repo: str | Path | None) -> bool:
