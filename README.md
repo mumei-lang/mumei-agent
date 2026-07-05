@@ -386,9 +386,10 @@ instrumented tool opens an `mcp.tool.<name>` span (e.g. `mcp.tool.forge_task`,
 `mcp.tool.extract_spec_from_code`, plus the lightweight
 `mcp.tool.measure_std_health` / `mcp.tool.propose_forge_tasks` /
 `mcp.tool.list_forge_log` / `mcp.tool.get_agent_status`) carrying
-`mcp.tool.name` and tool-specific attributes (`dry_run` / `mcp.tool.task_id` /
-`mcp.tool.status` for `forge_task`, `mumei.heal.kind` for `heal_file`,
-`max_iterations` for `self_correct`, `no_build` for `run_nlae_pipeline`,
+`mcp.tool.name` and tool-specific attributes (`mcp.tool.dry_run` /
+`mcp.tool.task_id` / `mcp.tool.status` for `forge_task`, `mumei.heal.kind` for
+`heal_file`, `mcp.tool.max_iterations` for `self_correct`, `mcp.tool.no_build`
+for `run_nlae_pipeline`, `mcp.tool.generate` for `extract_spec_from_code`,
 `mumei.language` for `audit_code` / `scan_and_fix`). Directory heals additionally
 emit a per-file `mcp.tool.heal_file.file` child span. Because the entry span is
 the current span, the P15-3 loop root spans (`mumei.loop.*`) and P15-2 verify

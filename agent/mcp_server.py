@@ -327,7 +327,8 @@ def forge_task(
         ``error`` and ``code_length`` fields.
     """
     with telemetry.start_tool_span(
-        "forge_task", carrier=_carrier_from_ctx(ctx), dry_run=dry_run,
+        "forge_task", carrier=_carrier_from_ctx(ctx),
+        **{"mcp.tool.dry_run": dry_run},
     ) as span:
         try:
             task = json.loads(task_json)
@@ -592,7 +593,7 @@ def self_correct(
     with telemetry.start_tool_span(
         "self_correct",
         carrier=_carrier_from_ctx(ctx),
-        max_iterations=max_iterations,
+        **{"mcp.tool.max_iterations": max_iterations},
     ):
         path = _existing_path_arg(code_file)
         if path is None or not path.is_file():
@@ -638,7 +639,9 @@ def run_nlae_pipeline(
     no_build: bool = False,
 ) -> str:
     """P9-G: run the four-repository NLAE integration pipeline."""
-    with telemetry.start_tool_span("run_nlae_pipeline", no_build=no_build):
+    with telemetry.start_tool_span(
+        "run_nlae_pipeline", **{"mcp.tool.no_build": no_build}
+    ):
         lean_repo = Path(
             mumei_lean_repo
             or os.environ.get("MUMEI_LEAN_REPO", "../mumei-lean")
@@ -2001,7 +2004,8 @@ def extract_spec_from_code(
         language, forge task spec, warnings, and optional generation result.
     """
     with telemetry.start_tool_span(
-        "extract_spec_from_code", carrier=_carrier_from_ctx(ctx), generate=generate,
+        "extract_spec_from_code", carrier=_carrier_from_ctx(ctx),
+        **{"mcp.tool.generate": generate},
     ):
         source_path = Path(code_file).expanduser().resolve()
         if not source_path.exists():
