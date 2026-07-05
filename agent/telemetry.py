@@ -112,6 +112,53 @@ _NOOP_INSTRUMENT = _NoOpInstrument()
 
 
 # --------------------------------------------------------------------------- #
+# Exporter selection (gRPC vs HTTP)
+# --------------------------------------------------------------------------- #
+def _otlp_protocol() -> str:
+    """Resolve the OTLP wire protocol from the standard OTel env var.
+
+    Honors ``OTEL_EXPORTER_OTLP_PROTOCOL`` (values ``grpc``, ``http/protobuf``,
+    ``http/json``), defaulting to ``grpc``.  Any ``http*`` value selects the
+    HTTP/protobuf exporter.
+    """
+    return (os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc") or "grpc").strip().lower()
+
+
+def _build_span_exporter() -> Any:
+    """Construct an OTLP span exporter, or ``None`` if unavailable."""
+    try:
+        if _otlp_protocol().startswith("http"):
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter,
+            )
+        else:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter,
+            )
+        return OTLPSpanExporter()
+    except Exception:  # pragma: no cover - exporter optional / offline
+        logger.debug("OTLP span exporter unavailable; spans not exported")
+        return None
+
+
+def _build_metric_exporter() -> Any:
+    """Construct an OTLP metric exporter, or ``None`` if unavailable."""
+    try:
+        if _otlp_protocol().startswith("http"):
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                OTLPMetricExporter,
+            )
+        else:
+            from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                OTLPMetricExporter,
+            )
+        return OTLPMetricExporter()
+    except Exception:  # pragma: no cover - exporter optional / offline
+        logger.debug("OTLP metric exporter unavailable; metrics not exported")
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Lazy provider setup
 # --------------------------------------------------------------------------- #
 def _initialise() -> None:
@@ -138,33 +185,21 @@ def _initialise() -> None:
         # configured one (respects an externally-supplied SDK setup).
         if not isinstance(trace.get_tracer_provider(), TracerProvider):
             tracer_provider = TracerProvider(resource=resource)
-            try:
-                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                    OTLPSpanExporter,
-                )
-
-                tracer_provider.add_span_processor(
-                    BatchSpanProcessor(OTLPSpanExporter())
-                )
-            except Exception:  # pragma: no cover - exporter optional / offline
-                logger.debug("OTLP span exporter unavailable; spans not exported")
+            span_exporter = _build_span_exporter()
+            if span_exporter is not None:
+                tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
             trace.set_tracer_provider(tracer_provider)
 
         # Mirror the tracer guard: only install our MeterProvider when the
         # application has not already configured one.
         if not isinstance(metrics.get_meter_provider(), MeterProvider):
-            try:
-                from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
-                    OTLPMetricExporter,
-                )
-
-                reader = PeriodicExportingMetricReader(OTLPMetricExporter())
+            metric_exporter = _build_metric_exporter()
+            if metric_exporter is not None:
+                reader = PeriodicExportingMetricReader(metric_exporter)
                 meter_provider = MeterProvider(
                     resource=resource, metric_readers=[reader]
                 )
                 metrics.set_meter_provider(meter_provider)
-            except Exception:  # pragma: no cover - exporter optional / offline
-                logger.debug("OTLP metric exporter unavailable; metrics not exported")
 
         _TRACER = trace.get_tracer(_SERVICE_NAME)
         _METER = metrics.get_meter(_SERVICE_NAME)

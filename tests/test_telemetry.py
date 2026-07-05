@@ -39,6 +39,30 @@ def test_record_llm_tokens_noop(monkeypatch):
     telemetry.record_llm_tokens(-5)
 
 
+def test_otlp_protocol_env(monkeypatch):
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_PROTOCOL", raising=False)
+    assert telemetry._otlp_protocol() == "grpc"
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+    assert telemetry._otlp_protocol() == "http/protobuf"
+
+
+def test_exporter_builders_return_none_without_extra():
+    # In the default env the otel exporter packages are not installed, so the
+    # builders must swallow the ImportError and return None (never raise).
+    assert telemetry._build_span_exporter() is None
+    assert telemetry._build_metric_exporter() is None
+
+
+def test_response_token_count_accepts_model():
+    from types import SimpleNamespace
+
+    from agent.strategies.fix_strategy_helpers import response_token_count
+
+    response = SimpleNamespace(usage=SimpleNamespace(total_tokens=21))
+    assert response_token_count(response, "gpt-4o") == 21
+    assert response_token_count(response) == 21
+
+
 def test_inject_trace_context_passthrough_when_disabled(monkeypatch):
     monkeypatch.delenv("OTEL_ENABLED", raising=False)
     carrier = {"mumei_agent_llm_provider": "mcp_sampling"}

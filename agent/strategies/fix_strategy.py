@@ -567,7 +567,7 @@ def get_fix(
         ],
         model,
     )
-    llm_tokens_used = response_token_count(response)
+    llm_tokens_used = response_token_count(response, model)
     if metrics is not None:
         metrics.record_tokens(llm_tokens_used)
     report_data["llm_tokens_used"] = llm_tokens_used

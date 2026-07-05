@@ -307,7 +307,7 @@ def _format_loss_vector_guidance(report_data: dict) -> str:
     return "\n".join(lines)
 
 
-def response_token_count(response: object) -> int:
+def response_token_count(response: object, model: str | None = None) -> int:
     try:
         usage = response.usage
     except AttributeError:
@@ -327,7 +327,7 @@ def response_token_count(response: object) -> int:
         return 0
     # Parallel OTel channel; independent of Metrics.record_tokens and never
     # affects the JSON metrics output.  No-op unless OTel is enabled.
-    telemetry.record_llm_tokens(count)
+    telemetry.record_llm_tokens(count, model=model)
     return count
 
 def _update_spec_code_mapping(

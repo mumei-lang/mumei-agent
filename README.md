@@ -325,12 +325,16 @@ uv run mumei-agent heal examples/effect_test.mm
   otherwise NoOp tracers/meters are used.
 - `OTEL_EXPORTER_OTLP_ENDPOINT`: standard OTLP endpoint the SDK exports
   traces/metrics to (honored by the `opentelemetry` SDK).
+- `OTEL_EXPORTER_OTLP_PROTOCOL` (default: `grpc`): OTLP wire protocol. Set to
+  `http/protobuf` (or any `http*` value) to use the HTTP exporters instead of
+  gRPC.
 
 Phase 1 instruments the LLM call chokepoint: `OpenAILLMProvider.complete` and
 `McpSamplingLLMProvider.complete` emit spans with `gen_ai.request.model`,
 `gen_ai.system`, `server.address`, and `gen_ai.usage.total_tokens`; token usage
-is also reported to the `gen_ai.usage.total_tokens` counter as a parallel
-channel that never changes the JSON metrics output
+is also reported to the `gen_ai.usage.total_tokens` counter (tagged with the
+`gen_ai.request.model` attribute) as a parallel channel that never changes the
+JSON metrics output
 (`Metrics.to_dict()` / `HarnessMetrics.aggregate_metrics()`). MCP sampling
 requests carry a W3C `traceparent` in their metadata for cross-process trace
 propagation. Z3 `verify` spans, per-loop root spans, and MCP server tool
