@@ -222,6 +222,105 @@ trace ID `0af7651916cd43dd8448eb211c80319c`.
 
 ---
 
+## (e) Alerts / SLO
+
+The reference stack ships an SLO-based alerting layer on top of the metrics
+above. Prometheus alert rules live in
+[`deploy/otel/alert_rules.yml`](../deploy/otel/alert_rules.yml) (registered via
+`rule_files` in [`deploy/otel/prometheus.yml`](../deploy/otel/prometheus.yml)),
+and Grafana provisions a webhook contact point plus notification policy under
+[`deploy/otel/grafana/provisioning/alerting/`](../deploy/otel/grafana/provisioning/alerting/).
+The Grafana dashboard's *SLO thresholds & alerts (P15 …)* row renders the
+threshold lines and an alert-state panel.
+
+The alert expressions query the Prometheus names in the metrics catalogue
+above, which are kept in strict correspondence with the OTel instrument names
+in `agent/telemetry.py`. Validate the rules with:
+
+```bash
+promtool check rules deploy/otel/alert_rules.yml
+```
+
+Notifications route to the `mumei-slo-webhook` contact point, a placeholder
+local webhook (`http://host.docker.internal:5001/mumei-slo`) so alerts can be
+observed end-to-end without a real pager. Point it at any local HTTP sink
+(e.g. `python -m http.server 5001` or a webhook tunnel) for verification.
+
+> **Notes for local verification**
+> - On **Linux**, `host.docker.internal` is not resolved by Docker by default.
+>   Add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `grafana`
+>   service in `docker-compose.otel.yml` (or point the contact point at your
+>   host's LAN/bridge IP) so notifications can reach a sink on the host.
+> - The alert rules run in **Prometheus**; the authoritative firing state is at
+>   Prometheus → *Alerts* (http://localhost:9090/alerts). The dashboard's
+>   `alertlist` panel lists **Grafana-managed** alerts (none are provisioned
+>   here), so the SLO row is primarily for the threshold-line visualisations.
+
+| Alert | Severity | Expression (summary) | Threshold |
+|---|---|---|---|
+| `MumeiFirstPassSuccessRateLow` / `Critical` | warning / critical | mean of `mumei_first_pass_success_rate_{sum,count}` | < 0.70 / < 0.40 |
+| `MumeiVerifyLatencyP95High` | warning | p95 of `mumei_verify_duration_seconds_bucket` | > 30s |
+| `MumeiFixSuccessRateLow` | warning | `rate(mumei_fix_successes_total)` / `rate(mumei_fix_attempts_total)` | < 0.50 |
+| `MumeiLeanFallbackErrorRateHigh` | warning | `rate(mumei_lean_bridge_error_code_total)` by `mumei_lean_error_code` | > 0.05/s |
+| `MumeiLLMTokenRateSurge` | warning | `rate(gen_ai_usage_tokens_total)` | > 2000 tok/s |
+
+To exercise the alerts locally, bring the stack up
+(`docker compose -f docker-compose.otel.yml up -d`), run agent flows with
+`OTEL_ENABLED=true`, and watch Prometheus → *Alerts* (http://localhost:9090/alerts)
+or the Grafana SLO row transition to firing when an SLO is violated.
+
+### First-pass verification success rate
+
+**What it means.** The share of atoms that pass verification on the first
+attempt (`mumei.first_pass.success_rate`). A sustained drop means generated
+specs/code are increasingly failing before any self-healing.
+
+**Runbook.** Inspect recent `mumei.z3.unknowns` and decidable-fragment
+warnings; review spec-extraction / generation prompt quality and the LLM model
+in use. A critical breach (< 40%) usually indicates a model or prompt
+regression rather than task difficulty.
+
+### Verify latency p95
+
+**What it means.** The p95 wall-clock time of `mumei verify` subprocess calls
+(`mumei.verify.duration`). Spikes point at slow Z3 solves or subprocess/IO
+overhead.
+
+**Runbook.** Correlate with the Jaeger `mumei.verify.cli` → `mumei.z3.solve`
+spans for the slow traces; check for pathological atoms (non-linear arithmetic,
+large quantifier alternation) and consider Lean escalation.
+
+### Fix success rate
+
+**What it means.** `rate(mumei.fix.successes) / rate(mumei.fix.attempts)` — how
+often the self-healing loop repairs a violation. A drop means the loop is
+burning attempts without converging.
+
+**Runbook.** Break down by `mumei_violation_type` on the *Fix success rate*
+panel to find the failing class; inspect loss vectors / counterexamples for
+that violation type.
+
+### Lean fallback error rate
+
+**What it means.** The rate of `mumei.lean.bridge.error_code` increments,
+labelled by `mumei_lean_error_code`. A rising rate means Z3 `unknown` atoms are
+failing Lean escalation.
+
+**Runbook.** Check the `error_code` label (`lake_missing`, `stale_translator`,
+…). `lake_missing` indicates a toolchain/availability issue rather than a proof
+failure; `stale_translator` means the certificate/bridge versions diverged.
+
+### LLM token cost
+
+**What it means.** `rate(gen_ai.usage.total_tokens)` — token consumption per
+second. A surge signals runaway retries or an unexpectedly expensive model.
+
+**Runbook.** Break down by `gen_ai_request_model`; check for retry storms in
+the self-healing loop and confirm the configured `LLM_MODEL` matches
+expectations.
+
+---
+
 ## Related
 
 - README → *OpenTelemetry Observability (opt-in, P15 Phase 1-6)* — per-phase span/attribute catalogue.

@@ -1166,6 +1166,70 @@ def _proliferate_inner(
     return results
 
 
+# SLO thresholds for the run-level proposal success rate exposed in
+# summary.json. NOTE: this is a *proposal-level* success rate (post self-heal /
+# publish) derived from the run outcomes, which is intentionally distinct from
+# the OTel ``mumei.first_pass.success_rate`` instrument (an atom-level first
+# *attempt* rate recorded in agent/metrics.py). It is named accordingly to
+# avoid conflating the two.
+_SLO_PROPOSAL_SUCCESS_WARN = 0.70
+_SLO_PROPOSAL_SUCCESS_CRIT = 0.40
+
+
+def _collect_otel_slo_status(
+    *,
+    succeeded: int,
+    processed: int,
+    harness_metrics: HarnessMetrics | None,
+) -> dict[str, Any] | None:
+    """Summarise OTel-derived SLO status for the run, or ``None`` when disabled.
+
+    This is a *thin*, in-process summary that complements the SLO-based
+    Prometheus alerts in ``deploy/otel/alert_rules.yml`` (see the "Alerts / SLO"
+    section of ``docs/OBSERVABILITY.md``). It never reads from a metrics
+    backend; it derives a run-level ``proposal_success_rate`` (proposals
+    succeeded / processed, i.e. post self-heal and publish) so operators can
+    spot a regression directly in ``summary.json``.
+
+    ``proposal_success_rate`` is deliberately NOT the same quantity as the OTel
+    ``mumei.first_pass.success_rate`` instrument (an atom-level first-*attempt*
+    rate); the Prometheus ``MumeiFirstPassSuccessRateLow`` alert covers the
+    latter.
+
+    Returns ``None`` when OTel is disabled (the default, ``OTEL_ENABLED``
+    unset/false or the ``opentelemetry`` packages unavailable) so the existing
+    ``summary.json`` shape is preserved byte-for-byte for the common path.
+    """
+    if not telemetry.is_enabled():
+        return None
+    proposal_rate = (succeeded / processed) if processed > 0 else None
+    violations: list[str] = []
+    if proposal_rate is not None:
+        if proposal_rate < _SLO_PROPOSAL_SUCCESS_CRIT:
+            violations.append("proposal_success_rate:critical")
+        elif proposal_rate < _SLO_PROPOSAL_SUCCESS_WARN:
+            violations.append("proposal_success_rate:warning")
+    status: dict[str, Any] = {
+        "otel_enabled": True,
+        "proposal_success_rate": proposal_rate,
+        "thresholds": {
+            "proposal_success_rate_warning": _SLO_PROPOSAL_SUCCESS_WARN,
+            "proposal_success_rate_critical": _SLO_PROPOSAL_SUCCESS_CRIT,
+        },
+        "violations": violations,
+        "slo_met": not violations,
+    }
+    if harness_metrics is not None:
+        try:
+            aggregate = harness_metrics.aggregate_metrics()
+            status["intent_fidelity_status"] = aggregate.get(
+                "intent_fidelity_status"
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("otel_slo_status: harness aggregate failed", exc_info=True)
+    return status
+
+
 def _write_output_json(
     output_json: str | Path | None,
     *,
@@ -1224,6 +1288,14 @@ def _write_output_json(
     payload["lean_fallback_metrics"] = lean_metrics
     if harness_metrics is not None:
         payload["harness_metrics"] = harness_metrics.aggregate_metrics()
+    # P15 operational alerts / SLO layer: append a thin OTel-derived SLO status
+    # as a new optional trailing field. It is ``None`` when OTel is disabled
+    # (the default), preserving the existing summary.json contract.
+    payload["otel_slo_status"] = _collect_otel_slo_status(
+        succeeded=succeeded,
+        processed=processed,
+        harness_metrics=harness_metrics,
+    )
     path = Path(output_json)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

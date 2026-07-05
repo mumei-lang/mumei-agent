@@ -1179,6 +1179,15 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 - Python 側: `agent/telemetry.py` に `current_traceparent() -> str | None` を追加。`agent/mumei_client.py` の `MumeiClient._run_command` / `verify` の `subprocess.run` に `env={**os.environ, "TRACEPARENT": tp}` を注入（OTel 無効時は既存挙動のまま）
 - 結果: `mumei-agent` → `subprocess.run("mumei verify ...")` → Z3 実行まで、W3C Trace Context で 1 本の分散トレースに串刺し
 
+### P15-7: 運用アラート/SLO 層（完了）
+
+**ステータス: 完了** — P15-1〜P15-6 で整備した OTel メトリクス/ダッシュボードの上に、SLO ベースで回帰を自動検知するアラート層を追加。アラート式のメトリクス名は `agent/telemetry.py` の instrument 名（`deploy/otel/prometheus.yml` の collector 正規化を経た Prometheus 名）に厳密一致させ、`docs/OBSERVABILITY.md` の「(e) Alerts / SLO」に各アラートの意味・閾値・runbook を記載。
+
+- **Prometheus アラートルール** — [`deploy/otel/alert_rules.yml`](../deploy/otel/alert_rules.yml) に SLO アラートを定義し `prometheus.yml` の `rule_files` に登録。first-pass 成功率低下（`mumei_first_pass_success_rate_{sum,count}` の窓平均、warning <0.70 / critical <0.40）、verify p95 スパイク（`mumei_verify_duration_seconds_bucket`、>30s）、fix 成功率低下（`mumei_fix_successes_total` / `mumei_fix_attempts_total`、<0.50）、Lean fallback エラー率上昇（`mumei_lean_bridge_error_code_total` を `mumei_lean_error_code` 別、>0.05/s）、LLM トークンコスト急増（`gen_ai_usage_tokens_total`、>2000 tok/s）。各ルールに severity ラベルと `docs/OBSERVABILITY.md` 該当セクションへの runbook_url annotation を付与。`promtool check rules` で検証可能。
+- **Grafana アラート/しきい値可視化** — ダッシュボード JSON に SLO しきい値ライン付きパネルと alertlist（アラート状態）パネルの行を追加。`deploy/otel/grafana/provisioning/alerting/` に contact point（ローカル検証用 webhook）と notification policy を provisioning。
+- **proliferate 回帰ゲート接続** — `summary.json` に末尾 optional の `otel_slo_status` フィールドを追加（`OTEL_ENABLED=false` 時は `None` で後方互換を維持、既存フィールド・`_write_output_json` 契約は不変）。run 結果から `proposal_success_rate`（self-heal / publish 後の proposal 単位成功率）を導出し SLO 違反を集約する。これは OTel の `mumei.first_pass.success_rate`（atom 単位の初回 verify 成功率、Prometheus 側 `MumeiFirstPassSuccessRateLow` が担当）とは別量である点に注意。
+- **CI 連携** — `.github/workflows/proliferate.yml` の post-run 集計に `otel_slo_status` を GitHub Step Summary へ出力するステップを追加（既存の health regression 失敗ゲートのロジックは不変・観測のみ）。
+
 ### 対象ファイル（全体）
 
 - `agent/llm_provider.py` — LLM provider の span 計装（Phase 1）
@@ -1217,6 +1226,7 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 - MCP ツール経由の外部呼び出しが W3C Trace Context で親 trace に接続される
 - `mumei verify` を `--features otel` ビルド + `TRACEPARENT` 付きで呼んだとき、Rust 側 `mumei.verify.cli` → `mumei.z3.solve` span が Python 側 trace と同一 trace ID で貫通する（Rust 連携: mumei PR #398、達成済み）
 - リファレンス OTLP スタック（`docker-compose.otel.yml`: OTel Collector / Jaeger / Prometheus / Grafana）で trace と metrics を可視化できる（[`docs/OBSERVABILITY.md`](OBSERVABILITY.md)、達成済み）
+- SLO ベースのアラート（`deploy/otel/alert_rules.yml`）で first-pass 成功率・verify p95・fix 成功率・Lean fallback エラー率・LLM トークンコストの回帰を自動検知でき、`promtool check rules` が通る（P15-7、達成済み）
 
 ---
 

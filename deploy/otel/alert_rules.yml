@@ -1,0 +1,141 @@
+# Prometheus SLO alert rules for the mumei-agent reference observability stack
+# (P15 operational alerts / SLO layer). Local-verification use only — see the
+# "Alerts / SLO" section of docs/OBSERVABILITY.md.
+#
+# Every expression below queries the Prometheus names exported by the OTel
+# Collector's prometheus exporter (dots -> underscores, `_total` for counters,
+# `_bucket`/`_sum`/`_count` for histograms). These names are kept in strict
+# correspondence with the OTel instrument names declared in agent/telemetry.py;
+# see the metrics catalogue table in docs/OBSERVABILITY.md.
+#
+# Validate with:  promtool check rules deploy/otel/alert_rules.yml
+
+groups:
+  - name: mumei-agent-slo
+    rules:
+      # --- first-pass verification success rate (SLO: >= 70%) --------------
+      # OTel instrument: mumei.first_pass.success_rate (Histogram, unit 1)
+      # -> mumei_first_pass_success_rate_{sum,count,bucket}
+      # Windowed mean of the recorded snapshots; alert when it drops below the
+      # SLO target.
+      - alert: MumeiFirstPassSuccessRateLow
+        expr: |
+          (
+            sum(rate(mumei_first_pass_success_rate_sum[15m]))
+            /
+            clamp_min(sum(rate(mumei_first_pass_success_rate_count[15m])), 1e-9)
+          ) < 0.70
+        for: 15m
+        labels:
+          severity: warning
+          slo: first_pass_success_rate
+        annotations:
+          summary: "First-pass verification success rate below SLO (< 70%)"
+          description: >
+            The 15m mean of mumei.first_pass.success_rate is
+            {{ $value | humanizePercentage }}, below the 70% SLO target. First
+            attempts are increasingly failing verification — inspect recent
+            spec/generation quality and z3 unknowns.
+          runbook_url: "https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md#first-pass-verification-success-rate"
+
+      - alert: MumeiFirstPassSuccessRateCritical
+        expr: |
+          (
+            sum(rate(mumei_first_pass_success_rate_sum[15m]))
+            /
+            clamp_min(sum(rate(mumei_first_pass_success_rate_count[15m])), 1e-9)
+          ) < 0.40
+        for: 15m
+        labels:
+          severity: critical
+          slo: first_pass_success_rate
+        annotations:
+          summary: "First-pass verification success rate critically low (< 40%)"
+          description: >
+            The 15m mean of mumei.first_pass.success_rate is
+            {{ $value | humanizePercentage }}, below the 40% critical floor.
+          runbook_url: "https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md#first-pass-verification-success-rate"
+
+      # --- verify latency p95 spike ---------------------------------------
+      # OTel instrument: mumei.verify.duration (Histogram, unit s)
+      # -> mumei_verify_duration_seconds_bucket
+      - alert: MumeiVerifyLatencyP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(mumei_verify_duration_seconds_bucket[10m])) by (le)
+          ) > 30
+        for: 10m
+        labels:
+          severity: warning
+          slo: verify_latency_p95
+        annotations:
+          summary: "mumei verify p95 latency above 30s"
+          description: >
+            The p95 of mumei.verify.duration over the last 10m is {{ $value |
+            humanizeDuration }}, above the 30s budget. Z3 solve times or
+            subprocess overhead may be regressing.
+          runbook_url: "https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md#verify-latency-p95"
+
+      # --- fix success rate drop ------------------------------------------
+      # OTel instruments: mumei.fix.successes / mumei.fix.attempts (Counters)
+      # -> mumei_fix_successes_total / mumei_fix_attempts_total
+      - alert: MumeiFixSuccessRateLow
+        expr: |
+          (
+            sum(rate(mumei_fix_successes_total[30m]))
+            /
+            clamp_min(sum(rate(mumei_fix_attempts_total[30m])), 1e-9)
+          ) < 0.50
+          and
+          sum(rate(mumei_fix_attempts_total[30m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+          slo: fix_success_rate
+        annotations:
+          summary: "Self-healing fix success rate below SLO (< 50%)"
+          description: >
+            The 30m ratio rate(mumei.fix.successes) / rate(mumei.fix.attempts)
+            is {{ $value | humanizePercentage }}, below the 50% SLO target. The
+            self-healing loop is failing to repair most violations.
+          runbook_url: "https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md#fix-success-rate"
+
+      # --- Lean fallback error rate rising --------------------------------
+      # OTel instrument: mumei.lean.bridge.error_code (Counter, attr
+      # mumei.lean.error_code) -> mumei_lean_bridge_error_code_total
+      # {mumei_lean_error_code=...}
+      - alert: MumeiLeanFallbackErrorRateHigh
+        expr: |
+          sum by (mumei_lean_error_code) (
+            rate(mumei_lean_bridge_error_code_total[30m])
+          ) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          slo: lean_fallback_error_rate
+        annotations:
+          summary: "Lean fallback error rate rising ({{ $labels.mumei_lean_error_code }})"
+          description: >
+            mumei.lean.bridge.error_code is incrementing at {{ $value }}/s for
+            error_code={{ $labels.mumei_lean_error_code }} over the last 30m.
+            Z3 unknown atoms are failing Lean escalation.
+          runbook_url: "https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md#lean-fallback-error-rate"
+
+      # --- LLM token cost surge -------------------------------------------
+      # OTel instrument: gen_ai.usage.total_tokens (Counter)
+      # -> gen_ai_usage_tokens_total (collector collapses redundant `total`)
+      - alert: MumeiLLMTokenRateSurge
+        expr: |
+          sum(rate(gen_ai_usage_tokens_total[15m])) > 2000
+        for: 15m
+        labels:
+          severity: warning
+          slo: llm_token_cost
+        annotations:
+          summary: "LLM token consumption rate surging (> 2000 tok/s)"
+          description: >
+            rate(gen_ai.usage.total_tokens) is {{ $value | humanize }} tokens/s
+            over the last 15m, above the 2000 tok/s budget. Investigate runaway
+            retries or an unexpectedly expensive model.
+          runbook_url: "https://github.com/mumei-lang/mumei-agent/blob/develop/docs/OBSERVABILITY.md#llm-token-cost"
