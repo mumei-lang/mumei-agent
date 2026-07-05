@@ -9,6 +9,7 @@ from typing import Callable
 
 from openai import OpenAI
 
+from agent import telemetry
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.strategies import fix_strategy
@@ -83,6 +84,18 @@ class StructuredFeedbackSelfCorrectionLoop:
         source_path: str | Path,
         structured_feedback: dict[str, object] | str | Path,
     ) -> SelfCorrectionLoopResult:
+        with telemetry.start_loop_span(
+            "self_correction",
+            max_retries=self.max_retries,
+        ) as _loop_span:
+            return self._run_inner(_loop_span, source_path, structured_feedback)
+
+    def _run_inner(
+        self,
+        _loop_span: object,
+        source_path: str | Path,
+        structured_feedback: dict[str, object] | str | Path,
+    ) -> SelfCorrectionLoopResult:
         path = Path(source_path)
         current_feedback = load_structured_feedback(structured_feedback)
         iterations: list[SelfCorrectionLoopIteration] = []
@@ -90,10 +103,11 @@ class StructuredFeedbackSelfCorrectionLoop:
         repair_attempts = 0
         token_cost = 0
         final_error: str | None = None
+        loop_result: SelfCorrectionLoopResult | None = None
 
         for iteration in range(1, self.max_retries + self.convergence_threshold + 1):
             if token_cost >= self.max_tokens:
-                return _finish(
+                loop_result = _finish(
                     False,
                     repair_attempts,
                     consecutive_successes,
@@ -102,8 +116,9 @@ class StructuredFeedbackSelfCorrectionLoop:
                     "token_cost_exceeded",
                     final_error,
                 )
+                break
             if repair_attempts >= MAX_REPAIR_ATTEMPTS:
-                return _finish(
+                loop_result = _finish(
                     False,
                     repair_attempts,
                     consecutive_successes,
@@ -112,6 +127,7 @@ class StructuredFeedbackSelfCorrectionLoop:
                     "hard_repair_limit_reached",
                     final_error,
                 )
+                break
 
             result = self.mumei_client.verify(str(path))
             report = _report_dict(result.get("report"))
@@ -134,7 +150,7 @@ class StructuredFeedbackSelfCorrectionLoop:
 
             if consecutive_successes >= self.convergence_threshold:
                 iterations[-1].stop_reason = "converged"
-                return _finish(
+                loop_result = _finish(
                     True,
                     repair_attempts,
                     consecutive_successes,
@@ -143,6 +159,7 @@ class StructuredFeedbackSelfCorrectionLoop:
                     "converged",
                     None,
                 )
+                break
 
             if success:
                 continue
@@ -150,7 +167,7 @@ class StructuredFeedbackSelfCorrectionLoop:
             final_error = _final_error(report, result)
             if repair_attempts >= self.max_retries:
                 iterations[-1].stop_reason = "max_retries_reached"
-                return _finish(
+                loop_result = _finish(
                     False,
                     repair_attempts,
                     consecutive_successes,
@@ -159,6 +176,7 @@ class StructuredFeedbackSelfCorrectionLoop:
                     "max_retries_reached",
                     final_error,
                 )
+                break
 
             repair_report = dict(report)
             repair_report["structured_feedback"] = current_feedback
@@ -175,7 +193,7 @@ class StructuredFeedbackSelfCorrectionLoop:
             token_cost += _token_cost(repair_report, current_feedback)
             if token_cost >= self.max_tokens:
                 iterations[-1].stop_reason = "token_cost_exceeded"
-                return _finish(
+                loop_result = _finish(
                     False,
                     repair_attempts,
                     consecutive_successes,
@@ -184,9 +202,10 @@ class StructuredFeedbackSelfCorrectionLoop:
                     "token_cost_exceeded",
                     final_error,
                 )
+                break
             if not fixed:
                 iterations[-1].stop_reason = "no_fix_produced"
-                return _finish(
+                loop_result = _finish(
                     False,
                     repair_attempts,
                     consecutive_successes,
@@ -195,20 +214,29 @@ class StructuredFeedbackSelfCorrectionLoop:
                     "no_fix_produced",
                     final_error,
                 )
+                break
             path.write_text(fixed, encoding="utf-8")
             repair_attempts += 1
             iterations[-1].repair_attempts = repair_attempts
             iterations[-1].token_cost = token_cost
 
-        return _finish(
-            False,
-            repair_attempts,
-            consecutive_successes,
-            token_cost,
-            iterations,
-            "max_retries_reached",
-            final_error,
-        )
+        if loop_result is None:
+            loop_result = _finish(
+                False,
+                repair_attempts,
+                consecutive_successes,
+                token_cost,
+                iterations,
+                "max_retries_reached",
+                final_error,
+            )
+        try:
+            _loop_span.set_attribute("mumei.loop.final_success", loop_result.converged)  # type: ignore[union-attr]
+            _loop_span.set_attribute("mumei.loop.stop_reason", loop_result.stop_reason or "unknown")  # type: ignore[union-attr]
+            _loop_span.set_attribute("mumei.loop.attempt", loop_result.repair_attempts)  # type: ignore[union-attr]
+        except Exception:
+            pass
+        return loop_result
 
 
 def default_repair(

@@ -9,7 +9,8 @@ from typing import Callable
 
 from openai import OpenAI
 
-from agent.budget_policy import BudgetPolicy, classify_action_class, evaluate_budget
+from agent import telemetry
+from agent.budget_policy import BudgetPolicy, classify_action_class, compute_policy_fingerprint, evaluate_budget
 from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient, create_mumei_client
@@ -98,6 +99,27 @@ class SelfCorrectionStrategy:
         spec: dict | None = None,
         generate_fn: GenerateFn | None = None,
     ) -> SelfCorrectionResult:
+        with telemetry.start_loop_span(
+            "self_correction_strategy",
+            max_retries=self.max_repairs,
+        ) as _loop_span:
+            try:
+                _loop_span.set_attribute(  # type: ignore[union-attr]
+                    "mumei.budget_policy.fingerprint",
+                    compute_policy_fingerprint(self.budget_policy),
+                )
+            except Exception:
+                pass
+            return self._run_inner(_loop_span, source_path, spec=spec, generate_fn=generate_fn)
+
+    def _run_inner(
+        self,
+        _loop_span: object,
+        source_path: str | Path,
+        *,
+        spec: dict | None = None,
+        generate_fn: GenerateFn | None = None,
+    ) -> SelfCorrectionResult:
         path = Path(source_path)
         if spec is not None and not path.exists():
             generator = generate_fn or self._default_generate
@@ -116,6 +138,7 @@ class SelfCorrectionStrategy:
         consecutive_successes = 0
         total_tokens = 0
         final_error: str | None = None
+        loop_result: SelfCorrectionResult | None = None
 
         for iteration in range(1, self.max_repairs + self.required_successes + 1):
             result = self.mumei_client.verify(str(path))
@@ -138,7 +161,7 @@ class SelfCorrectionStrategy:
             )
             if consecutive_successes >= self.required_successes:
                 iterations[-1].stop_reason = "converged"
-                return SelfCorrectionResult(
+                loop_result = SelfCorrectionResult(
                     converged=True,
                     repair_attempts=len(history.attempts),
                     consecutive_successes=consecutive_successes,
@@ -146,6 +169,7 @@ class SelfCorrectionStrategy:
                     iterations=iterations,
                     stop_reason="converged",
                 )
+                break
             if success:
                 continue
 
@@ -172,6 +196,17 @@ class SelfCorrectionStrategy:
                 report,
                 proposed_action_class=action_class,
             )
+            try:
+                _loop_span.add_event(  # type: ignore[union-attr]
+                    "budget_decision",
+                    {
+                        "mumei.loop.attempt": iteration,
+                        "action_class": decision.action_class,
+                        "budget_policy.allowed": decision.allowed,
+                    },
+                )
+            except Exception:
+                pass
             if not decision.allowed:
                 final_error = decision.reason or self._final_error(report, result)
                 iterations[-1].stop_reason = final_error
@@ -216,15 +251,23 @@ class SelfCorrectionStrategy:
             iterations[-1].tokens_used = tokens
             iterations[-1].action_class = decision.action_class
 
-        return SelfCorrectionResult(
-            converged=False,
-            repair_attempts=len(history.attempts),
-            consecutive_successes=consecutive_successes,
-            total_tokens=total_tokens,
-            iterations=iterations,
-            final_error=final_error,
-            stop_reason=iterations[-1].stop_reason if iterations else "not_started",
-        )
+        if loop_result is None:
+            loop_result = SelfCorrectionResult(
+                converged=False,
+                repair_attempts=len(history.attempts),
+                consecutive_successes=consecutive_successes,
+                total_tokens=total_tokens,
+                iterations=iterations,
+                final_error=final_error,
+                stop_reason=iterations[-1].stop_reason if iterations else "not_started",
+            )
+        try:
+            _loop_span.set_attribute("mumei.loop.final_success", loop_result.converged)  # type: ignore[union-attr]
+            _loop_span.set_attribute("mumei.loop.stop_reason", loop_result.stop_reason or "unknown")  # type: ignore[union-attr]
+            _loop_span.set_attribute("mumei.loop.attempt", loop_result.repair_attempts)  # type: ignore[union-attr]
+        except Exception:
+            pass
+        return loop_result
 
     @staticmethod
     def _default_generate(

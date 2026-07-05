@@ -13,6 +13,7 @@ import fcntl
 import warnings
 from pathlib import Path
 
+from agent import telemetry
 from agent.budget_policy import (
     BudgetPolicy,
     classify_action_class,
@@ -310,6 +311,12 @@ def main() -> None:
     outer_history = RetryHistory()
     pattern_lib = PatternLibrary()
     thought = ThoughtProcess(target_file=source_file)
+    _loop_span_ctx = telemetry.start_loop_span(
+        "heal",
+        max_retries=max_retries,
+        strategy=config.strategy,
+    )
+    _loop_span = _loop_span_ctx.__enter__()
     try:
         for attempt in range(max_retries + 1):
             result = mumei.verify(source_file)
@@ -367,6 +374,12 @@ def main() -> None:
                     thought.total_attempts = attempt + 1
                 except Exception:
                     pass
+                try:
+                    _loop_span.set_attribute("mumei.loop.final_success", True)
+                    _loop_span.set_attribute("mumei.loop.attempt", attempt + 1)
+                    _loop_span.set_attribute("mumei.loop.stop_reason", "success")
+                except Exception:
+                    pass
                 return
 
             print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
@@ -392,6 +405,10 @@ def main() -> None:
                 ).summary
                 summary["reason"] = "max_retries_exhausted"
                 print(json.dumps(summary, indent=2, ensure_ascii=False))
+                try:
+                    _loop_span.set_attribute("mumei.loop.stop_reason", "max_retries_exhausted")
+                except Exception:
+                    pass
                 break
 
             with open(source_file, "r", encoding="utf-8") as f:
@@ -420,6 +437,10 @@ def main() -> None:
                         thought=thought,
                     )
                 if meta_fixed_code:
+                    try:
+                        _loop_span.add_event("meta_architect", {"mumei.strategy": "meta_architect", "mumei.loop.attempt": attempt + 1})
+                    except Exception:
+                        pass
                     outer_history.add(
                         RetryAttempt(
                             attempt_number=len(outer_history.attempts) + 1,
@@ -438,6 +459,10 @@ def main() -> None:
                     print("Meta-Architect applied interface refactoring. Retrying...")
                     time.sleep(2)
                     continue
+                try:
+                    _loop_span.set_attribute("mumei.loop.stop_reason", "budget_denied")
+                except Exception:
+                    pass
                 print(json.dumps(decision.summary, indent=2, ensure_ascii=False))
                 return
 
@@ -453,6 +478,10 @@ def main() -> None:
                     thought=thought,
                 )
                 if meta_fixed_code:
+                    try:
+                        _loop_span.add_event("meta_architect", {"mumei.strategy": "meta_architect", "mumei.loop.attempt": attempt + 1})
+                    except Exception:
+                        pass
                     outer_history.add(
                         RetryAttempt(
                             attempt_number=len(outer_history.attempts) + 1,
@@ -496,6 +525,10 @@ def main() -> None:
                     )
                 )
                 if fixed_code:
+                    try:
+                        _loop_span.add_event("cegis_loop", {"mumei.strategy": "cegis_loop", "mumei.loop.attempt": attempt + 1})
+                    except Exception:
+                        pass
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(fixed_code)
                     print(
@@ -506,6 +539,10 @@ def main() -> None:
                     continue
 
             # Get fix from AI
+            try:
+                _loop_span.add_event("llm_fix", {"mumei.strategy": "llm", "mumei.loop.attempt": attempt + 1})
+            except Exception:
+                pass
             fixed_code = get_fix(
                 client, config.model, source, logs, report,
                 strategy=config.strategy,
@@ -564,6 +601,17 @@ def main() -> None:
     except Exception as exc:
         print(f"Error during healing: {exc}")
     finally:
+        try:
+            _loop_span.set_attribute("mumei.loop.final_success", success)
+            _loop_span.set_attribute("mumei.loop.attempt", len(
+                [s for s in thought.steps if s.action in ("initial_verify", "re_verify")]
+            ))
+        except Exception:
+            pass
+        try:
+            _loop_span_ctx.__exit__(None, None, None)
+        except Exception:
+            pass
         try:
             thought.final_success = success
             thought.total_attempts = len(

@@ -233,3 +233,164 @@ def test_verify_duration_histogram_noop(monkeypatch):
     hist = telemetry._verify_duration_histogram()
     assert isinstance(hist, telemetry._NoOpInstrument)
     hist.record(0.5)
+
+
+# ---------------------------------------------------------------------------
+# P15-3: Loop root span instrumentation (NoOp path)
+# ---------------------------------------------------------------------------
+
+
+def test_start_loop_span_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    with telemetry.start_loop_span(
+        "generate", max_retries=3, strategy="single",
+    ) as span:
+        assert isinstance(span, telemetry._NoOpSpan)
+        span.set_attribute("mumei.loop.final_success", True)
+        span.set_attribute("mumei.loop.attempt", 1)
+        span.set_attribute("mumei.loop.stop_reason", "success")
+        span.add_event("budget_decision", {"action_class": "verify"})
+
+
+def test_add_thought_event_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.add_thought_event("initial_verify", {"thought.step_number": 1})
+    telemetry.add_thought_event("llm_fix", None)
+
+
+def test_thought_process_add_step_emits_event_noop(monkeypatch):
+    """ThoughtProcess.add_step emits a span event under NoOp without error."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.thought_log import ThoughtProcess
+
+    tp = ThoughtProcess(target_file="test.mm")
+    step = tp.add_step(action="initial_verify", verification_success=True)
+    assert step.action == "initial_verify"
+    assert step.step_number == 1
+    step2 = tp.add_step(action="llm_fix", verification_success=False, fix_strategy="llm")
+    assert step2.step_number == 2
+    # to_dict output must be unchanged
+    d = tp.to_dict()
+    assert d["target_file"] == "test.mm"
+    assert len(d["steps"]) == 2
+    assert d["steps"][0]["action"] == "initial_verify"
+
+
+def test_generate_code_noop_span(monkeypatch):
+    """generate_code with NoOp span returns the same result and to_dict."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.strategies.generate_strategy import generate_code
+    from agent.thought_log import ThoughtProcess
+
+    # Build a fake client and mumei_client that simulate immediate success
+    fake_response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(
+            content="```mumei\natom add(a: i64, b: i64) -> i64\n  requires: true;\n  ensures: result == a + b;\n  body: { a + b };\n```"
+        ))],
+        usage=SimpleNamespace(total_tokens=10),
+    )
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_: fake_response)
+        )
+    )
+
+    class ImmediateSuccessClient:
+        def check(self, _path):
+            return {"success": True, "stdout": "", "stderr": ""}
+
+        def verify(self, _path):
+            return {
+                "success": True,
+                "stdout": "",
+                "stderr": "",
+                "report": {"z3_check_result": "unsat"},
+                "spec_code_mapping": None,
+            }
+
+        def infer_effects(self, _path):
+            return {"success": True, "analysis": {}}
+
+        def infer_contracts(self, _path):
+            return {"success": True, "analysis": {}}
+
+    tp = ThoughtProcess(target_file="test.mm")
+    spec = {"name": "add", "params": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}]}
+    code, verified = generate_code(
+        fake_client, "test-model", spec,
+        config_max_retries=1,
+        mumei_client=ImmediateSuccessClient(),
+        thought_process=tp,
+    )
+    assert isinstance(code, str)
+    assert len(code) > 0
+    d = tp.to_dict()
+    assert "target_file" in d
+    assert isinstance(d["steps"], list)
+
+
+def test_self_correction_loop_noop_span(monkeypatch, tmp_path):
+    """StructuredFeedbackSelfCorrectionLoop runs under NoOp span."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.self_correction import StructuredFeedbackSelfCorrectionLoop
+
+    source = tmp_path / "test.mm"
+    source.write_text("// dummy", encoding="utf-8")
+
+    class AlwaysPass:
+        def verify(self, _path):
+            return {
+                "success": True,
+                "report": {"z3_check_result": "unsat"},
+                "stdout": "",
+                "stderr": "",
+            }
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_: None)
+        )
+    )
+    loop = StructuredFeedbackSelfCorrectionLoop(
+        fake_client, "test", AlwaysPass(),
+        max_retries=2, convergence_threshold=2,
+    )
+    feedback = {"status": "verification_failed", "error_type": "test"}
+    result = loop.run(str(source), feedback)
+    d = result.to_dict()
+    assert d["converged"] is True
+    assert d["stop_reason"] == "converged"
+    assert "self_correction_metadata" in d
+
+
+def test_self_correction_strategy_noop_span(monkeypatch, tmp_path):
+    """SelfCorrectionStrategy.run under NoOp span returns correct to_dict."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.strategies.self_correction_strategy import SelfCorrectionStrategy
+
+    source = tmp_path / "test.mm"
+    source.write_text("// dummy", encoding="utf-8")
+
+    class AlwaysPass:
+        def verify(self, _path):
+            return {
+                "success": True,
+                "report": {"z3_check_result": "unsat"},
+                "stdout": "",
+                "stderr": "",
+            }
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_: None)
+        )
+    )
+    strategy = SelfCorrectionStrategy(
+        fake_client, "test", AlwaysPass(),
+        max_repairs=2, required_successes=2,
+    )
+    result = strategy.run(str(source))
+    d = result.to_dict()
+    assert d["converged"] is True
+    assert d["stop_reason"] == "converged"
+    assert "self_correction_metadata" in d
