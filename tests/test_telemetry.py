@@ -488,3 +488,189 @@ def test_carrier_from_ctx_none_for_empty_meta():
         request_context=SimpleNamespace(meta=RequestParams.Meta())
     )
     assert _carrier_from_ctx(ctx) is None
+
+
+# ---------------------------------------------------------------------------
+# P15-5: OTel Metrics instrument helpers (NoOp path)
+# ---------------------------------------------------------------------------
+
+
+def test_record_first_pass_success_rate_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.record_first_pass_success_rate(0.75)
+    telemetry.record_first_pass_success_rate(0.0)
+
+
+def test_record_z3_unknown_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.record_z3_unknown()
+    telemetry.record_z3_unknown(3)
+    telemetry.record_z3_unknown(0)
+    telemetry.record_z3_unknown(-1)
+
+
+def test_record_decidable_fragment_warning_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.record_decidable_fragment_warning()
+    telemetry.record_decidable_fragment_warning(tags=["nonlinear", "quantifier"])
+    telemetry.record_decidable_fragment_warning(0)
+
+
+def test_record_fix_attempt_and_success_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.record_fix_attempt("postcondition_violation")
+    telemetry.record_fix_success("postcondition_violation")
+    telemetry.record_fix_attempt()
+    telemetry.record_fix_success()
+
+
+def test_record_harness_result_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.record_harness_result(
+        tokens_to_success=500,
+        solver_seconds_to_success=2.5,
+        spec_drift_score=0.1,
+        attributes={"stage": "forge", "module": "verification_gate", "profile": "full"},
+    )
+    telemetry.record_harness_result(0, 0.0, 0.0)
+
+
+def test_record_lean_bridge_result_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.record_lean_bridge_result(duration_seconds=5.0, verified_count=3)
+    telemetry.record_lean_bridge_result(duration_seconds=0.0, error_code="timeout")
+    telemetry.record_lean_bridge_result(duration_seconds=1.0, verified_count=0, error_code=None)
+
+
+def test_metrics_record_attempt_emits_otel_noop(monkeypatch):
+    """Metrics.record_attempt/record_success work unchanged under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.metrics import Metrics
+
+    m = Metrics()
+    m.record_attempt("postcondition_violation")
+    m.record_success("postcondition_violation")
+    d = m.to_dict()
+    assert d["total_attempts"] == 1
+    assert d["successes"] == 1
+    assert d["by_violation_type"]["postcondition_violation"]["attempts"] == 1
+    assert d["by_violation_type"]["postcondition_violation"]["successes"] == 1
+
+
+def test_metrics_record_verification_time_emits_otel_noop(monkeypatch):
+    """Metrics.record_verification_time preserves to_dict under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.metrics import Metrics
+
+    m = Metrics()
+    m.record_verification_time(1.5)
+    m.record_verification_time(2.0, dense_properties=True)
+    d = m.to_dict()
+    assert d["verification_times_seconds"] == [1.5, 2.0]
+    assert d["dense_verification_times_seconds"] == [2.0]
+
+
+def test_metrics_record_new_spec_emits_otel_noop(monkeypatch):
+    """Metrics.record_new_spec preserves to_dict under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.metrics import Metrics
+
+    m = Metrics()
+    m.record_new_spec(
+        ["nonlinear"],
+        outside_decidable_fragment=True,
+        z3_unknown=True,
+        first_pass_verified=False,
+    )
+    m.record_new_spec(first_pass_verified=True)
+    d = m.to_dict()
+    assert d["outside_decidable_fragment_warnings"] == 1
+    assert d["z3_unknowns"] == 1
+    assert d["first_pass_verification_attempts"] == 2
+    assert d["first_pass_verification_successes"] == 1
+    assert d["new_spec_attempts"] == 2
+
+
+def test_harness_metrics_record_stage_emits_otel_noop(monkeypatch):
+    """HarnessMetrics.record_stage preserves aggregate_metrics under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.harness_metrics import HarnessMetrics
+
+    hm = HarnessMetrics.from_profile("verifier")
+    hm.record_stage(
+        "forge",
+        module="verification_gate",
+        verification_gate=True,
+        tokens_to_success=300,
+        solver_seconds_to_success=1.25,
+        spec_drift_score=0.2,
+    )
+    agg = hm.aggregate_metrics()
+    assert agg["profile"] == "verifier"
+    assert len(agg["records"]) == 1
+    assert agg["records"][0]["tokens_to_success"] == 300
+    assert agg["records"][0]["solver_seconds_to_success"] == 1.25
+    assert agg["records"][0]["spec_drift_score"] == 0.2
+    assert agg["by_stage"]["forge"]["tokens_to_success"] == 300
+
+
+def test_harness_metrics_record_result_emits_otel_noop(monkeypatch):
+    """HarnessMetrics.record_result preserves aggregate_metrics under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.harness_metrics import HarnessMetrics
+
+    hm = HarnessMetrics.from_profile("basic")
+    hm.record_result(
+        "generate",
+        success=True,
+        tokens_to_success=100,
+        solver_seconds_to_success=0.5,
+        spec_drift_score=0.05,
+    )
+    agg = hm.aggregate_metrics()
+    assert agg["profile"] == "basic"
+    assert len(agg["records"]) == 3  # record_result creates 3 records
+
+
+def test_lean_bridge_repo_missing_emits_telemetry_noop(monkeypatch, tmp_path):
+    """run_lean_bridge with missing repo returns correct dict under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    result = telemetry  # just ensure import works
+    from agent.lean_bridge import run_lean_bridge
+
+    result = run_lean_bridge(
+        cert_path=str(tmp_path / "dummy.proof-cert.json"),
+        lean_cert_out=None,
+        mumei_lean_repo=str(tmp_path / "nonexistent"),
+    )
+    assert result["success"] is False
+    assert result["error_code"] == "repo_missing"
+    assert result["returncode"] == -1
+
+
+def test_lean_bridge_no_build_success_emits_telemetry_noop(monkeypatch, tmp_path):
+    """run_lean_bridge no_build=True preserves result dict under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.lean_bridge import run_lean_bridge
+
+    repo = tmp_path / "lean_repo"
+    repo.mkdir()
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "bridge.py").write_text(
+        "import sys; sys.exit(0)", encoding="utf-8"
+    )
+    cert = tmp_path / "test.proof-cert.json"
+    cert.write_text('{"atoms": []}', encoding="utf-8")
+    result = run_lean_bridge(
+        cert_path=str(cert),
+        lean_cert_out=str(tmp_path / "out.lean-cert.json"),
+        mumei_lean_repo=str(repo),
+        no_build=True,
+        enable_known_witness_fallback=False,
+    )
+    assert isinstance(result, dict)
+    assert "success" in result
+    assert "returncode" in result
+    assert "lean_cert_path" in result
+    assert "stdout" in result
+    assert "stderr" in result

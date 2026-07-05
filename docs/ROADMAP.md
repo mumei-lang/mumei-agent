@@ -932,11 +932,11 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
-## P15: OpenTelemetry Observability 導入（Phase 4 実装済み）
+## P15: OpenTelemetry Observability 導入（Phase 5 実装済み）
 
-**ステータス: Phase 4 実装済み / Phase 5 以降 今後対応予定**
+**ステータス: Phase 5 実装済み / Phase 6 以降 今後対応予定**
 
-Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）が実装済み。Phase 5 以降（既存 JSON メトリクスの OTel Metrics 接続）は後続 PR で段階的に追加する。
+Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）および Phase 5（既存 `Metrics` / `HarnessMetrics` / `run_lean_bridge` の OTel Metrics 並行チャネル接続）が実装済み。Phase 6 以降（`proliferate` / `nlae_pipeline` の分散トレース統合）は後続 PR で段階的に追加する。
 
 ### 目的
 
@@ -1120,7 +1120,9 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 
 ---
 
-### P15-5: 既存メトリクスの OTel Metrics 接続
+### P15-5: 既存メトリクスの OTel Metrics 接続（実装済み）
+
+**ステータス: 実装済み**（`agent/telemetry.py` に P15-5 instrument ヘルパ群を追加し、`agent/metrics.py` の `record_verification_time` / `record_new_spec` / `record_attempt` / `record_success`、`agent/harness_metrics.py` の `record_stage`、`agent/lean_bridge.py` の `run_lean_bridge` 全 return 経路から OTel Metrics を並行送信。既存の `to_dict()` / `aggregate_metrics()` / 戻り値 dict の JSON 形式は一切変更なし。）
 
 #### 計装対象
 

@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from agent import telemetry
 from agent.proofcert import Z3CheckResult
 
 
@@ -121,6 +122,7 @@ class Metrics:
     def record_verification_time(self, seconds: float, dense_properties: bool = False) -> None:
         """Record time spent verifying generated contracts."""
         self.verification_times_seconds.append(seconds)
+        telemetry.record_verify_duration(seconds)
         if dense_properties:
             self.dense_verification_times_seconds.append(seconds)
 
@@ -161,12 +163,19 @@ class Metrics:
             self.quarterly_outside_decidable_fragment_warnings[quarter] = (
                 self.quarterly_outside_decidable_fragment_warnings.get(quarter, 0) + 1
             )
+            telemetry.record_decidable_fragment_warning(
+                tags=list(logic_fragment_tags) if logic_fragment_tags else None,
+            )
         if z3_unknown:
             self.z3_unknowns += 1
+            telemetry.record_z3_unknown()
         if first_pass_verified is not None:
             self.first_pass_verification_attempts += 1
             if first_pass_verified:
                 self.first_pass_verification_successes += 1
+            telemetry.record_first_pass_success_rate(
+                self.first_pass_verification_success_rate,
+            )
         for tag in logic_fragment_tags:
             if tag not in self.by_logic_fragment:
                 self.by_logic_fragment[tag] = ViolationMetrics()
@@ -364,6 +373,7 @@ class Metrics:
         if violation_type not in self.by_violation_type:
             self.by_violation_type[violation_type] = ViolationMetrics()
         self.by_violation_type[violation_type].attempts += 1
+        telemetry.record_fix_attempt(violation_type)
 
     def record_success(self, violation_type: str = "unknown") -> None:
         """Record a successful fix or generation."""
@@ -371,6 +381,7 @@ class Metrics:
         if violation_type not in self.by_violation_type:
             self.by_violation_type[violation_type] = ViolationMetrics()
         self.by_violation_type[violation_type].successes += 1
+        telemetry.record_fix_success(violation_type)
 
     def success_rate(self, violation_type: str) -> float:
         """Return the success rate for *violation_type* (0.0 if no attempts)."""

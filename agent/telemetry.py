@@ -294,6 +294,255 @@ def record_verify_duration(seconds: float) -> None:
         logger.debug("record_verify_duration failed", exc_info=True)
 
 
+# --------------------------------------------------------------------------- #
+# P15-5: OTel Metrics instrument helpers (lazy-initialized, NoOp-safe)
+# --------------------------------------------------------------------------- #
+
+_FIRST_PASS_GAUGE: Any = None
+_Z3_UNKNOWN_COUNTER: Any = None
+_DECIDABLE_FRAGMENT_COUNTER: Any = None
+_FIX_ATTEMPTS_COUNTER: Any = None
+_FIX_SUCCESSES_COUNTER: Any = None
+_HARNESS_TOKENS_HIST: Any = None
+_HARNESS_SOLVER_HIST: Any = None
+_HARNESS_DRIFT_HIST: Any = None
+_LEAN_BRIDGE_DURATION_HIST: Any = None
+_LEAN_VERIFIED_COUNTER: Any = None
+_LEAN_BRIDGE_ERROR_COUNTER: Any = None
+
+
+def _first_pass_gauge() -> Any:
+    global _FIRST_PASS_GAUGE
+    if _FIRST_PASS_GAUGE is not None:
+        return _FIRST_PASS_GAUGE
+    meter = get_meter(__name__)
+    _FIRST_PASS_GAUGE = meter.create_histogram(
+        "mumei.first_pass.success_rate",
+        unit="1",
+        description="First-pass verification success rate snapshot.",
+    )
+    return _FIRST_PASS_GAUGE
+
+
+def _z3_unknown_counter() -> Any:
+    global _Z3_UNKNOWN_COUNTER
+    if _Z3_UNKNOWN_COUNTER is not None:
+        return _Z3_UNKNOWN_COUNTER
+    meter = get_meter(__name__)
+    _Z3_UNKNOWN_COUNTER = meter.create_counter(
+        "mumei.z3.unknowns",
+        unit="{occurrence}",
+        description="Count of Z3 unknown outcomes.",
+    )
+    return _Z3_UNKNOWN_COUNTER
+
+
+def _decidable_fragment_counter() -> Any:
+    global _DECIDABLE_FRAGMENT_COUNTER
+    if _DECIDABLE_FRAGMENT_COUNTER is not None:
+        return _DECIDABLE_FRAGMENT_COUNTER
+    meter = get_meter(__name__)
+    _DECIDABLE_FRAGMENT_COUNTER = meter.create_counter(
+        "mumei.decidable_fragment.warnings",
+        unit="{warning}",
+        description="Count of outside-decidable-fragment warnings.",
+    )
+    return _DECIDABLE_FRAGMENT_COUNTER
+
+
+def _fix_attempts_counter() -> Any:
+    global _FIX_ATTEMPTS_COUNTER
+    if _FIX_ATTEMPTS_COUNTER is not None:
+        return _FIX_ATTEMPTS_COUNTER
+    meter = get_meter(__name__)
+    _FIX_ATTEMPTS_COUNTER = meter.create_counter(
+        "mumei.fix.attempts",
+        unit="{attempt}",
+        description="Count of fix/generation attempts.",
+    )
+    return _FIX_ATTEMPTS_COUNTER
+
+
+def _fix_successes_counter() -> Any:
+    global _FIX_SUCCESSES_COUNTER
+    if _FIX_SUCCESSES_COUNTER is not None:
+        return _FIX_SUCCESSES_COUNTER
+    meter = get_meter(__name__)
+    _FIX_SUCCESSES_COUNTER = meter.create_counter(
+        "mumei.fix.successes",
+        unit="{success}",
+        description="Count of successful fixes/generations.",
+    )
+    return _FIX_SUCCESSES_COUNTER
+
+
+def _harness_tokens_histogram() -> Any:
+    global _HARNESS_TOKENS_HIST
+    if _HARNESS_TOKENS_HIST is not None:
+        return _HARNESS_TOKENS_HIST
+    meter = get_meter(__name__)
+    _HARNESS_TOKENS_HIST = meter.create_histogram(
+        "mumei.harness.tokens_to_success",
+        unit="{token}",
+        description="Tokens consumed to reach success in a harness stage.",
+    )
+    return _HARNESS_TOKENS_HIST
+
+
+def _harness_solver_histogram() -> Any:
+    global _HARNESS_SOLVER_HIST
+    if _HARNESS_SOLVER_HIST is not None:
+        return _HARNESS_SOLVER_HIST
+    meter = get_meter(__name__)
+    _HARNESS_SOLVER_HIST = meter.create_histogram(
+        "mumei.harness.solver_seconds_to_success",
+        unit="s",
+        description="Solver wall-clock seconds to success in a harness stage.",
+    )
+    return _HARNESS_SOLVER_HIST
+
+
+def _harness_drift_histogram() -> Any:
+    global _HARNESS_DRIFT_HIST
+    if _HARNESS_DRIFT_HIST is not None:
+        return _HARNESS_DRIFT_HIST
+    meter = get_meter(__name__)
+    _HARNESS_DRIFT_HIST = meter.create_histogram(
+        "mumei.harness.spec_drift_score",
+        unit="1",
+        description="Spec drift score observed in a harness stage.",
+    )
+    return _HARNESS_DRIFT_HIST
+
+
+def _lean_bridge_duration_histogram() -> Any:
+    global _LEAN_BRIDGE_DURATION_HIST
+    if _LEAN_BRIDGE_DURATION_HIST is not None:
+        return _LEAN_BRIDGE_DURATION_HIST
+    meter = get_meter(__name__)
+    _LEAN_BRIDGE_DURATION_HIST = meter.create_histogram(
+        "mumei.lean.bridge.duration",
+        unit="s",
+        description="Wall-clock duration of Lean bridge subprocess calls.",
+    )
+    return _LEAN_BRIDGE_DURATION_HIST
+
+
+def _lean_verified_counter() -> Any:
+    global _LEAN_VERIFIED_COUNTER
+    if _LEAN_VERIFIED_COUNTER is not None:
+        return _LEAN_VERIFIED_COUNTER
+    meter = get_meter(__name__)
+    _LEAN_VERIFIED_COUNTER = meter.create_counter(
+        "mumei.lean.verified_count",
+        unit="{atom}",
+        description="Count of atoms verified by Lean bridge.",
+    )
+    return _LEAN_VERIFIED_COUNTER
+
+
+def _lean_bridge_error_counter() -> Any:
+    global _LEAN_BRIDGE_ERROR_COUNTER
+    if _LEAN_BRIDGE_ERROR_COUNTER is not None:
+        return _LEAN_BRIDGE_ERROR_COUNTER
+    meter = get_meter(__name__)
+    _LEAN_BRIDGE_ERROR_COUNTER = meter.create_counter(
+        "mumei.lean.bridge.error_code",
+        unit="{error}",
+        description="Count of Lean bridge errors by error_code.",
+    )
+    return _LEAN_BRIDGE_ERROR_COUNTER
+
+
+def record_first_pass_success_rate(rate: float) -> None:
+    """Record a first-pass verification success rate snapshot."""
+    if not is_enabled():
+        return
+    try:
+        _first_pass_gauge().record(rate)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_first_pass_success_rate failed", exc_info=True)
+
+
+def record_z3_unknown(count: int = 1) -> None:
+    """Record Z3 unknown outcome(s) on the ``mumei.z3.unknowns`` counter."""
+    if count <= 0 or not is_enabled():
+        return
+    try:
+        _z3_unknown_counter().add(count)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_z3_unknown failed", exc_info=True)
+
+
+def record_decidable_fragment_warning(count: int = 1, tags: list[str] | None = None) -> None:
+    """Record outside-decidable-fragment warning(s)."""
+    if count <= 0 or not is_enabled():
+        return
+    try:
+        attributes = {"mumei.logic_fragment.tags": ",".join(tags)} if tags else None
+        _decidable_fragment_counter().add(count, attributes)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_decidable_fragment_warning failed", exc_info=True)
+
+
+def record_fix_attempt(violation_type: str | None = None) -> None:
+    """Record a fix attempt on the ``mumei.fix.attempts`` counter."""
+    if not is_enabled():
+        return
+    try:
+        attributes = {"mumei.violation_type": violation_type} if violation_type else None
+        _fix_attempts_counter().add(1, attributes)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_fix_attempt failed", exc_info=True)
+
+
+def record_fix_success(violation_type: str | None = None) -> None:
+    """Record a fix success on the ``mumei.fix.successes`` counter."""
+    if not is_enabled():
+        return
+    try:
+        attributes = {"mumei.violation_type": violation_type} if violation_type else None
+        _fix_successes_counter().add(1, attributes)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_fix_success failed", exc_info=True)
+
+
+def record_harness_result(
+    tokens_to_success: int,
+    solver_seconds_to_success: float,
+    spec_drift_score: float,
+    attributes: dict[str, str] | None = None,
+) -> None:
+    """Record harness stage results on the ``mumei.harness.*`` histograms."""
+    if not is_enabled():
+        return
+    try:
+        _harness_tokens_histogram().record(tokens_to_success, attributes)
+        _harness_solver_histogram().record(solver_seconds_to_success, attributes)
+        _harness_drift_histogram().record(spec_drift_score, attributes)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_harness_result failed", exc_info=True)
+
+
+def record_lean_bridge_result(
+    duration_seconds: float,
+    verified_count: int = 0,
+    error_code: str | None = None,
+) -> None:
+    """Record Lean bridge results on ``mumei.lean.*`` instruments."""
+    if not is_enabled():
+        return
+    try:
+        if duration_seconds > 0:
+            _lean_bridge_duration_histogram().record(duration_seconds)
+        if verified_count > 0:
+            _lean_verified_counter().add(verified_count)
+        if error_code:
+            _lean_bridge_error_counter().add(1, {"mumei.lean.error_code": error_code})
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("record_lean_bridge_result failed", exc_info=True)
+
+
 @contextmanager
 def start_loop_span(
     loop_type: str,

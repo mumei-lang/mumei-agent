@@ -303,7 +303,7 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
-### OpenTelemetry Observability (opt-in, P15 Phase 1-4)
+### OpenTelemetry Observability (opt-in, P15 Phase 1-5)
 
 Distributed tracing and token/latency metrics are **opt-in** and default to off.
 Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
@@ -406,6 +406,44 @@ trace. When no context is present the entry span behaves as a fresh root
 (backward compatible). With `OTEL_ENABLED` unset, `extract_trace_context`
 returns `None` and every entry span is a NoOp, so tool JSON payloads are
 unchanged.
+
+Phase 5 connects existing JSON metrics to OTel Metrics as a parallel channel.
+The `Metrics`, `HarnessMetrics`, and `run_lean_bridge` code paths now emit the
+following instruments (all no-op when disabled):
+
+| Instrument | Type | Source |
+|---|---|---|
+| `mumei.verify.duration` | Histogram (s) | `Metrics.record_verification_time` |
+| `mumei.first_pass.success_rate` | Histogram (1) | `Metrics.record_new_spec` |
+| `mumei.z3.unknowns` | Counter | `Metrics.record_new_spec` |
+| `mumei.decidable_fragment.warnings` | Counter | `Metrics.record_new_spec` |
+| `mumei.fix.attempts` | Counter | `Metrics.record_attempt` |
+| `mumei.fix.successes` | Counter | `Metrics.record_success` |
+| `mumei.harness.tokens_to_success` | Histogram | `HarnessMetrics.record_stage` |
+| `mumei.harness.solver_seconds_to_success` | Histogram (s) | `HarnessMetrics.record_stage` |
+| `mumei.harness.spec_drift_score` | Histogram (1) | `HarnessMetrics.record_stage` |
+| `mumei.lean.bridge.duration` | Histogram (s) | `run_lean_bridge` |
+| `mumei.lean.verified_count` | Counter | `run_lean_bridge` |
+| `mumei.lean.bridge.error_code` | Counter | `run_lean_bridge` |
+
+Dimension attributes: `mumei.violation_type` on fix counters,
+`stage`/`module`/`profile` on harness histograms, `mumei.lean.error_code` on
+bridge error counter.  `to_dict()` / `aggregate_metrics()` / return-value dicts
+remain byte-for-byte identical; OTel is purely additive.
+
+**Dashboard example** (Grafana / Prometheus OTLP receiver):
+
+```promql
+# Fix success rate by violation type
+sum(rate(mumei_fix_successes_total[5m])) by (mumei_violation_type)
+/ sum(rate(mumei_fix_attempts_total[5m])) by (mumei_violation_type)
+
+# P95 verify duration
+histogram_quantile(0.95, rate(mumei_verify_duration_seconds_bucket[5m]))
+
+# Lean bridge error rate
+sum(rate(mumei_lean_bridge_error_code_total[5m])) by (mumei_lean_error_code)
+```
 
 ### Ollama KV cache and long-context tuning
 
