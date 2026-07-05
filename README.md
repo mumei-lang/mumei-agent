@@ -487,9 +487,12 @@ or the extra is not installed, and swallow exceptions; `proliferate()`'s
   `mumei.audit.language`, `mumei.audit.success`, `mumei.audit.violations`
   (file / source) and `mumei.audit.files_with_issues` (directory).
 
-The Rust compiler-side integration (`tracing-opentelemetry` in
-`mumei-lang/mumei`) that would connect the `mumei verify` subprocess into these
-Python traces is future work, tracked separately.
+The Rust compiler-side integration is now implemented: when the `mumei` binary
+is built with `--features otel` and `OTEL_ENABLED=true`, `MumeiClient` methods
+automatically inject `TRACEPARENT` into the subprocess environment. The Rust
+side extracts this context and parents its `mumei.verify.cli` / `mumei.z3.solve`
+spans under the Python caller's span, creating a single end-to-end distributed
+trace from **MCP client → mumei-agent → mumei verify → Z3**.
 
 ### Ollama KV cache and long-context tuning
 

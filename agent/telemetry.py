@@ -741,6 +741,27 @@ def inject_trace_context(carrier: dict[str, Any]) -> dict[str, Any]:
     return carrier
 
 
+def current_traceparent() -> str | None:
+    """Return the current W3C ``traceparent`` header value, or ``None``.
+
+    Intended for subprocess env-var injection: the caller passes the result as
+    ``TRACEPARENT`` in the child process's environment so the Rust ``mumei``
+    binary can continue the same distributed trace.
+
+    Returns ``None`` when OTel is disabled, unavailable, or when no active span
+    context exists.
+    """
+    if not is_enabled():
+        return None
+    try:
+        carrier: dict[str, Any] = {}
+        inject_trace_context(carrier)
+        return carrier.get("traceparent")  # type: ignore[return-value]
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("current_traceparent failed", exc_info=True)
+        return None
+
+
 def extract_trace_context(carrier: dict[str, Any] | None) -> Any:
     """Extract a W3C trace context from *carrier* and return an OTel Context.
 

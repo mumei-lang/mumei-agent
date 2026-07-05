@@ -88,6 +88,21 @@ class MumeiClient:
         self._cmd_prefix = mumei_bin.split()
         self._tracer = telemetry.get_tracer(__name__)
 
+    @staticmethod
+    def _env_with_traceparent(
+        base_env: dict[str, str] | None = None,
+    ) -> dict[str, str] | None:
+        """Return *base_env* (or ``os.environ``) extended with ``TRACEPARENT``.
+
+        When OTel is disabled or no active span exists, *base_env* is returned
+        unchanged (or ``None`` when *base_env* was ``None``).
+        """
+        tp = telemetry.current_traceparent()
+        if tp is None:
+            return base_env
+        env = {**os.environ, **(base_env or {}), "TRACEPARENT": tp}
+        return env
+
     def _run_command(
         self,
         cmd: list[str],
@@ -106,7 +121,11 @@ class MumeiClient:
                 for k, v in extra_attributes.items():
                     span.set_attribute(k, v)
             t0 = time.monotonic()
-            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            run_env = self._env_with_traceparent(env)
+            run_kwargs: dict[str, Any] = {"capture_output": True, "text": True}
+            if run_env is not None:
+                run_kwargs["env"] = run_env
+            result = subprocess.run(cmd, **run_kwargs)
             duration_s = time.monotonic() - t0
             span.set_attribute("mumei.exit_code", result.returncode)
             span.set_attribute("mumei.stdout.size", len(result.stdout))
@@ -147,7 +166,11 @@ class MumeiClient:
             span.set_attribute("mumei.source_path", source_path)
             span.set_attribute("mumei.collect_decidable_metrics", collect_decidable_metrics)
             t0 = time.monotonic()
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            verify_env = self._env_with_traceparent()
+            run_kwargs: dict[str, Any] = {"capture_output": True, "text": True}
+            if verify_env is not None:
+                run_kwargs["env"] = verify_env
+            result = subprocess.run(cmd, **run_kwargs)
             duration_s = time.monotonic() - t0
             span.set_attribute("mumei.exit_code", result.returncode)
             span.set_attribute("mumei.stdout.size", len(result.stdout))
