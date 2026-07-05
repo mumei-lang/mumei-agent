@@ -932,11 +932,11 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
-## P15: OpenTelemetry Observability 導入（Phase 2 実装済み）
+## P15: OpenTelemetry Observability 導入（Phase 3 実装済み）
 
-**ステータス: Phase 2 実装済み / Phase 3 以降 今後対応予定**
+**ステータス: Phase 3 実装済み / Phase 4 以降 今後対応予定**
 
-Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）が実装済み。Phase 3 以降（各ループの root span 化、MCP サーバー計装）は後続 PR で段階的に追加する。
+Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）が実装済み。Phase 4 以降（MCP サーバー計装）は後続 PR で段階的に追加する。
 
 ### 目的
 
@@ -1056,6 +1056,17 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 ---
 
 ### P15-3: エージェントの反復ループ（親 trace / root span）
+
+**ステータス: 実装済み（Phase 3）**
+
+実装内容:
+
+- `agent/telemetry.py` に `start_loop_span(loop_type, *, max_retries, strategy, **attrs)` コンテキストマネージャと `add_thought_event(action, attributes)` ヘルパを追加。`is_enabled()` ガード付き・OTel 未インストール時 NoOp・例外握りつぶし。
+- `agent/thought_log.py` の `ThoughtProcess.add_step()` 内部で `add_thought_event()` を呼び出し、現在の trace context 上の span に `action` イベントを発行。`to_dict()` 出力形式は一切変更なし。
+- `agent/strategies/generate_strategy.py` の `generate_code` / `generate_multi_atom` を `mumei.loop.generate` root span でラップ。`mumei.strategy`（`single` / `multi-stage`）、`mumei.loop.final_success`、`mumei.loop.attempt` を属性化。
+- `agent/self_healing.py` の `main()` heal ループを `mumei.loop.heal` root span でラップ。CEGIS / Meta-Architect / LLM fix 分岐を span イベント化、`mumei.loop.stop_reason` を属性化。
+- `agent/self_correction.py` の `StructuredFeedbackSelfCorrectionLoop.run` を `mumei.loop.self_correction` root span でラップ。`stop_reason` を span 属性に写像。
+- `agent/strategies/self_correction_strategy.py` の `SelfCorrectionStrategy.run` を `mumei.loop.self_correction_strategy` root span でラップ。`budget_policy.fingerprint` を属性化、`budget_decision` を span イベント化。
 
 #### 計装対象
 

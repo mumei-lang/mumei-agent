@@ -5,6 +5,8 @@ import datetime
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from agent import telemetry
+
 
 @dataclass
 class VerificationStep:
@@ -47,6 +49,19 @@ class ThoughtProcess:
             **kwargs,
         )
         self.steps.append(step)
+        try:
+            event_attrs: dict[str, Any] = {
+                "thought.step_number": step.step_number,
+            }
+            if step.verification_success:
+                event_attrs["thought.verification_success"] = True
+            if step.fix_strategy is not None:
+                event_attrs["thought.fix_strategy"] = step.fix_strategy
+            if step.re_verify_success is not None:
+                event_attrs["thought.re_verify_success"] = step.re_verify_success
+            telemetry.add_thought_event(step.action, event_attrs)
+        except Exception:
+            pass
         return step
 
     def to_dict(self) -> dict[str, Any]:

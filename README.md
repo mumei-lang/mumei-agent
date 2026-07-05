@@ -303,7 +303,7 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
-### OpenTelemetry Observability (opt-in, P15 Phase 1-2)
+### OpenTelemetry Observability (opt-in, P15 Phase 1-3)
 
 Distributed tracing and token/latency metrics are **opt-in** and default to off.
 Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
@@ -355,8 +355,30 @@ wall-clock time is also reported to the `mumei.verify.duration` histogram
 (unit: seconds) as a parallel OTel metrics channel that never changes the
 `Metrics.to_dict()` JSON output.
 
-Per-loop root spans and MCP server tool instrumentation are planned for
-Phase 3+.
+Phase 3 adds per-loop root spans and `ThoughtProcess` span event mapping:
+
+- **`mumei.loop.generate`** — wraps the `generate_code` / `generate_multi_atom`
+  retry loop in `generate_strategy.py`. Attributes: `mumei.loop.type=generate`,
+  `mumei.strategy` (`single` / `multi-stage`), `mumei.loop.max_retries`,
+  `mumei.loop.final_success`, `mumei.loop.attempt`.
+- **`mumei.loop.heal`** — wraps the `main()` heal loop in `self_healing.py`.
+  CEGIS repair, Meta-Architect refactor, and LLM fix branches emit span events.
+  Attributes: `mumei.loop.stop_reason` (`success` / `max_retries_exhausted` /
+  `budget_denied`), `mumei.loop.final_success`, `mumei.loop.attempt`.
+- **`mumei.loop.self_correction`** — wraps
+  `StructuredFeedbackSelfCorrectionLoop.run` in `self_correction.py`.
+  `stop_reason` (`converged` / `max_retries_reached` / `token_cost_exceeded` /
+  `no_fix_produced` / `hard_repair_limit_reached`) is mapped to
+  `mumei.loop.stop_reason`.
+- **`mumei.loop.self_correction_strategy`** — wraps
+  `SelfCorrectionStrategy.run` in `self_correction_strategy.py`.
+  `action_class` / `budget_policy` decisions are emitted as span events;
+  `mumei.budget_policy.fingerprint` is set as a span attribute.
+- **`ThoughtProcess.add_step()`** emits an OTel span event on the current span
+  for each verification step (`initial_verify`, `re_verify`, `llm_fix`).
+  `to_dict()` output is unchanged.
+
+MCP server tool instrumentation is planned for Phase 4.
 
 ### Ollama KV cache and long-context tuning
 

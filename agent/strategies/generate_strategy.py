@@ -15,6 +15,7 @@ from openai import OpenAI
 from agent.llm_provider import complete_text
 from agent.mumei_client import MumeiClient
 from agent.metrics import Metrics
+from agent import telemetry
 from agent.prompts.report_formatter import (
     format_error_diff,
     format_retry_report_context,
@@ -294,6 +295,37 @@ def generate_multi_atom(
     Returns:
         A tuple of (code, verified).
     """
+    with telemetry.start_loop_span(
+        "generate",
+        max_retries=config_max_retries,
+        strategy="multi-stage",
+    ) as _loop_span:
+        return _generate_multi_atom_inner(
+            _loop_span,
+            client, model, spec,
+            config_max_retries=config_max_retries,
+            mumei_client=mumei_client,
+            metrics=metrics,
+            thought_process=thought_process,
+            enable_dense_properties=enable_dense_properties,
+            enable_spec_code_mapping=enable_spec_code_mapping,
+            prompt_report_truncate_chars=prompt_report_truncate_chars,
+        )
+
+
+def _generate_multi_atom_inner(
+    _loop_span: object,
+    client: OpenAI,
+    model: str,
+    spec: dict,
+    config_max_retries: int = 5,
+    mumei_client: MumeiClient | None = None,
+    metrics: Metrics | None = None,
+    thought_process: ThoughtProcess | None = None,
+    enable_dense_properties: bool | None = None,
+    enable_spec_code_mapping: bool | None = None,
+    prompt_report_truncate_chars: int | None = None,
+) -> tuple[str, bool]:
     if metrics is None:
         metrics = Metrics()
     generation_config = _load_generation_config(spec)
@@ -416,6 +448,11 @@ def generate_multi_atom(
                 thought_process.total_attempts = 0
             except Exception:
                 pass
+        try:
+            _loop_span.set_attribute("mumei.loop.final_success", True)  # type: ignore[union-attr]
+            _loop_span.set_attribute("mumei.loop.attempt", 0)  # type: ignore[union-attr]
+        except Exception:
+            pass
         return generated_code, True
 
     # Stage 2+3: Check, verify, and targeted fix loop
@@ -509,6 +546,11 @@ def generate_multi_atom(
                         )
                     except Exception:
                         pass
+                try:
+                    _loop_span.set_attribute("mumei.loop.final_success", True)  # type: ignore[union-attr]
+                    _loop_span.set_attribute("mumei.loop.attempt", attempt + 1)  # type: ignore[union-attr]
+                except Exception:
+                    pass
                 return current_code, True
 
             _logger.info(
@@ -602,6 +644,11 @@ def generate_multi_atom(
             )
         except Exception:
             pass
+    try:
+        _loop_span.set_attribute("mumei.loop.final_success", verified)  # type: ignore[union-attr]
+        _loop_span.set_attribute("mumei.loop.attempt", config_max_retries)  # type: ignore[union-attr]
+    except Exception:
+        pass
 
     return current_code, verified
 
@@ -719,6 +766,37 @@ def generate_code(
             prompt_report_truncate_chars=prompt_report_truncate_chars,
         )
 
+    with telemetry.start_loop_span(
+        "generate",
+        max_retries=config_max_retries,
+        strategy="single",
+    ) as _loop_span:
+        return _generate_code_inner(
+            _loop_span,
+            client, model, spec,
+            config_max_retries=config_max_retries,
+            mumei_client=mumei_client,
+            metrics=metrics,
+            thought_process=thought_process,
+            enable_dense_properties=enable_dense_properties,
+            enable_spec_code_mapping=enable_spec_code_mapping,
+            prompt_report_truncate_chars=prompt_report_truncate_chars,
+        )
+
+
+def _generate_code_inner(
+    _loop_span: object,
+    client: OpenAI,
+    model: str,
+    spec: dict,
+    config_max_retries: int = 5,
+    mumei_client: MumeiClient | None = None,
+    metrics: Metrics | None = None,
+    thought_process: ThoughtProcess | None = None,
+    enable_dense_properties: bool | None = None,
+    enable_spec_code_mapping: bool | None = None,
+    prompt_report_truncate_chars: int | None = None,
+) -> tuple[str, bool]:
     if metrics is None:
         metrics = Metrics()
     generation_config = _load_generation_config(spec)
@@ -837,6 +915,11 @@ def generate_code(
                 thought_process.total_attempts = 0
             except Exception:
                 pass
+        try:
+            _loop_span.set_attribute("mumei.loop.final_success", True)  # type: ignore[union-attr]
+            _loop_span.set_attribute("mumei.loop.attempt", 0)  # type: ignore[union-attr]
+        except Exception:
+            pass
         return generated_code, True
 
     # Stage 2+3: Check, verify, and fix loop
@@ -932,6 +1015,11 @@ def generate_code(
                         )
                     except Exception:
                         pass
+                try:
+                    _loop_span.set_attribute("mumei.loop.final_success", True)  # type: ignore[union-attr]
+                    _loop_span.set_attribute("mumei.loop.attempt", attempt + 1)  # type: ignore[union-attr]
+                except Exception:
+                    pass
                 return current_code, True
 
             _logger.info(
@@ -1023,6 +1111,11 @@ def generate_code(
             )
         except Exception:
             pass
+    try:
+        _loop_span.set_attribute("mumei.loop.final_success", verified)  # type: ignore[union-attr]
+        _loop_span.set_attribute("mumei.loop.attempt", config_max_retries)  # type: ignore[union-attr]
+    except Exception:
+        pass
 
     return current_code, verified
 

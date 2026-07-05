@@ -294,6 +294,70 @@ def record_verify_duration(seconds: float) -> None:
         logger.debug("record_verify_duration failed", exc_info=True)
 
 
+@contextmanager
+def start_loop_span(
+    loop_type: str,
+    *,
+    max_retries: int | None = None,
+    strategy: str | None = None,
+    **extra_attrs: Any,
+) -> Iterator[Any]:
+    """Context manager that opens a ``mumei.loop.<loop_type>`` root span.
+
+    Yields the span so callers can set finalisation attributes
+    (``mumei.loop.final_success``, ``mumei.loop.stop_reason``, etc.)
+    at loop exit.  When OTel is disabled the yielded object is a
+    :class:`_NoOpSpan` — all attribute / event calls are silently
+    swallowed.
+
+    Exceptions are recorded on the span but **not** suppressed.
+    """
+    tracer = get_tracer(__name__)
+    attrs: dict[str, Any] = {"mumei.loop.type": loop_type}
+    if max_retries is not None:
+        attrs["mumei.loop.max_retries"] = max_retries
+    if strategy is not None:
+        attrs["mumei.strategy"] = strategy
+    attrs.update(extra_attrs)
+    try:
+        with tracer.start_as_current_span(
+            f"mumei.loop.{loop_type}", attributes=attrs,
+        ) as span:
+            yield span
+    except Exception as exc:
+        # The real OTel SDK records the exception automatically when
+        # ``record_exception=True`` (the default), but we want to be
+        # safe in NoOp mode too.
+        try:
+            span.record_exception(exc)  # type: ignore[possibly-undefined]
+        except Exception:
+            pass
+        raise
+
+
+def add_thought_event(action: str, attributes: dict[str, Any] | None = None) -> None:
+    """Emit an OTel span event on the current span for a ThoughtProcess step.
+
+    Safe to call unconditionally — returns immediately when OTel is disabled
+    or unavailable and never raises.
+    """
+    if not is_enabled():
+        return
+    try:
+        from opentelemetry import trace as _trace
+
+        span = _trace.get_current_span()
+        if span is not None and span.is_recording():
+            safe_attrs: dict[str, Any] | None = None
+            if attributes:
+                safe_attrs = {
+                    k: v for k, v in attributes.items() if v is not None
+                }
+            span.add_event(action, attributes=safe_attrs)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("add_thought_event failed", exc_info=True)
+
+
 def inject_trace_context(carrier: dict[str, Any]) -> dict[str, Any]:
     """Inject W3C trace context (``traceparent``/``tracestate``) into *carrier*.
 
