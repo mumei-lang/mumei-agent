@@ -17,7 +17,3 @@ datasources:
     access: proxy
     uid: jaeger
     url: http://jaeger:16686
-    jsonData:
-      # Correlate Prometheus metrics <-> Jaeger traces via exemplars.
-      tracesToLogsV2:
-        datasourceUid: prometheus
