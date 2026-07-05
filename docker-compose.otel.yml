@@ -16,7 +16,9 @@
 #   Prometheus:     http://localhost:9090
 #
 # See docs/OBSERVABILITY.md for the full walkthrough. Ports are chosen to not
-# collide with the Ollama service in docker-compose.yml (11434).
+# collide with the Ollama service in docker-compose.yml (11434) and are bound to
+# 127.0.0.1 only (loopback) so the stack — including Grafana's anonymous-admin
+# UI — is never exposed on other network interfaces.
 
 services:
   otel-collector:
@@ -26,9 +28,9 @@ services:
     volumes:
       - ./deploy/otel/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
-      - "8889:8889"   # Prometheus exporter (scrape target)
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8889:8889"   # Prometheus exporter (scrape target)
     depends_on:
       - jaeger
     restart: unless-stopped
@@ -39,7 +41,7 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16686:16686"  # Jaeger UI
+      - "127.0.0.1:16686:16686"  # Jaeger UI
     restart: unless-stopped
 
   prometheus:
@@ -50,7 +52,7 @@ services:
     volumes:
       - ./deploy/otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - otel-collector
     restart: unless-stopped
@@ -68,7 +70,7 @@ services:
       - ./deploy/otel/dashboards:/var/lib/grafana/dashboards:ro
       - mumei_grafana_data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
       - jaeger

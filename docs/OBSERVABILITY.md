@@ -77,6 +77,10 @@ uv run mumei-agent heal examples/effect_test.mm
 
 Ports are chosen to avoid colliding with the Ollama service in the primary
 `docker-compose.yml` (`:11434`); the two compose files can run simultaneously.
+All published ports bind to `127.0.0.1` (loopback) only, so the stack — including
+Grafana's anonymous-admin UI — is never exposed on other network interfaces. To
+reach it from another host, use SSH port-forwarding rather than changing the
+bind address.
 
 Tear down with `docker compose -f docker-compose.otel.yml down` (add `-v` to
 also drop the Grafana volume).
