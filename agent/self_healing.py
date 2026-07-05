@@ -374,12 +374,6 @@ def main() -> None:
                     thought.total_attempts = attempt + 1
                 except Exception:
                     pass
-                try:
-                    _loop_span.set_attribute("mumei.loop.final_success", True)
-                    _loop_span.set_attribute("mumei.loop.attempt", attempt + 1)
-                    _loop_span.set_attribute("mumei.loop.stop_reason", "success")
-                except Exception:
-                    pass
                 return
 
             print(f"Attempt {attempt + 1}: Flaw detected. Consulting AI...")
@@ -609,7 +603,7 @@ def main() -> None:
         except Exception:
             pass
         try:
-            _loop_span_ctx.__exit__(None, None, None)
+            _loop_span_ctx.__exit__(*sys.exc_info())
         except Exception:
             pass
         try:
