@@ -932,9 +932,9 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
-## P15: OpenTelemetry Observability 導入（Phase 6 Python 側実装済み）
+## P15: OpenTelemetry Observability 導入（完了）
 
-**ステータス: Phase 6 の Python 側 3 ファイル（`proliferate.py` / `nlae_pipeline.py` / `audit.py`）実装済み / Rust コンパイラ連携は将来構想（未着手）**
+**ステータス: 完了** — Phase 1〜6 の Python 側全実装 + Rust コンパイラ側 `mumei verify` / Z3 span 連携の分散トレース接続が実装済み。`TRACEPARENT` 環境変数による W3C Trace Context 伝播により、外部 MCP client → mumei-agent → mumei verify subprocess 内の Z3 実行まで 1 本の分散トレースで貫通する。
 
 Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）および Phase 5（既存 `Metrics` / `HarnessMetrics` / `run_lean_bridge` の OTel Metrics 並行チャネル接続）および Phase 6 の Python 側 3 ファイル（`proliferate` の root/step/proposal/parallel-forge span、`nlae_pipeline` の分散トレース + `NLAEResult.trace_id`、`audit` の file/directory/source span）が実装済み。Phase 6 の Rust コンパイラ連携（`mumei-lang/mumei` への `tracing-opentelemetry` 導入）は将来構想（未着手）として別 PR に切り出す。
 
@@ -1146,9 +1146,9 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 
 ---
 
-### P15-6: 週次ラン / NLAE / 監査パイプラインの span 計装（Python 側実装済み）
+### P15-6: 週次ラン / NLAE / 監査パイプラインの span 計装 + Rust コンパイラ連携（実装済み）
 
-**ステータス: Python 側 3 ファイル実装済み**（全 span は `is_enabled()` ガード付き・OTel 未インストール時 NoOp・例外を握りつぶす設計。既存の `proliferate()` 戻り値・`summary.json` 出力、`NLAEResult.to_dict()`、`AuditResult` / `AuditDirectoryResult` の dataclass 形式は不変。`NLAEResult` には末尾 optional の `trace_id: str | None = None` のみ追加。）Rust コンパイラ連携は将来構想（未着手）。
+**ステータス: 実装済み**（全 span は `is_enabled()` ガード付き・OTel 未インストール時 NoOp・例外を握りつぶす設計。既存の `proliferate()` 戻り値・`summary.json` 出力、`NLAEResult.to_dict()`、`AuditResult` / `AuditDirectoryResult` の dataclass 形式は不変。`NLAEResult` には末尾 optional の `trace_id: str | None = None` のみ追加。）Rust コンパイラ連携が実装済み — 下記参照。
 
 #### `agent/proliferate.py` — 週次自律ラン（実装済み）
 
@@ -1171,10 +1171,13 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 - `audit_directory` 配下に各ファイルの `mumei.audit.file` 子 span が逐次ぶら下がる
 - 属性 `mumei.audit.language` / `success` / `violations`（file/source）/ `files_with_issues`（directory）
 
-#### Rust コンパイラ側（`mumei-lang/mumei`）との接続構想（未着手・別 PR）
+#### Rust コンパイラ側（`mumei-lang/mumei`）との分散トレース接続（実装済み）
 
-- `mumei-core/src/verification/executor.rs`（Z3 solver 呼び出し）、`src/lsp.rs`（LSP サーバー）で将来 `tracing` crate + `tracing-opentelemetry` を導入し、Python 側 trace と接続する構想
-- Python agent → `subprocess.run("mumei verify ...")` → Rust binary 内の Z3 実行 span を trace propagation で串刺しにするには、環境変数 `TRACEPARENT` 経由でコンテキストを伝播するか、`--trace-id` CLI フラグを追加する設計が考えられる
+- Rust 側: `Cargo.toml` に `otel` feature（デフォルト無効）を新設。`tracing` / `tracing-opentelemetry` / `opentelemetry` / `opentelemetry-otlp` を opt-in で追加。`src/telemetry.rs` が `OTEL_ENABLED` + `OTEL_EXPORTER_OTLP_ENDPOINT` で OTLP tracer を初期化し、`TRACEPARENT` 環境変数から親コンテキストを抽出する
+- `src/commands/verify.rs`: `mumei.verify.cli` root span（属性 `source_path` / `timeout_ms`）を `TRACEPARENT` から抽出した親コンテキストにぶら下げる
+- `mumei-core/src/verification/executor.rs`: `verify_inner` を `mumei.z3.solve` 子 span（属性 `atom_name` / `timeout_ms`）でラップ
+- Python 側: `agent/telemetry.py` に `current_traceparent() -> str | None` を追加。`agent/mumei_client.py` の `MumeiClient._run_command` / `verify` の `subprocess.run` に `env={**os.environ, "TRACEPARENT": tp}` を注入（OTel 無効時は既存挙動のまま）
+- 結果: `mumei-agent` → `subprocess.run("mumei verify ...")` → Z3 実行まで、W3C Trace Context で 1 本の分散トレースに串刺し
 
 ### 対象ファイル（全体）
 
