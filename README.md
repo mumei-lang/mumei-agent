@@ -303,7 +303,7 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
-### OpenTelemetry Observability (opt-in, P15 Phase 1-3)
+### OpenTelemetry Observability (opt-in, P15 Phase 1-4)
 
 Distributed tracing and token/latency metrics are **opt-in** and default to off.
 Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
@@ -378,7 +378,34 @@ Phase 3 adds per-loop root spans and `ThoughtProcess` span event mapping:
   for each verification step (`initial_verify`, `re_verify`, `llm_fix`).
   `to_dict()` output is unchanged.
 
-MCP server tool instrumentation is planned for Phase 4.
+Phase 4 instruments the MCP server tool entry points so external MCP clients
+(Claude Code, Devin, ...) become the top of a single distributed trace. Each
+instrumented tool opens an `mcp.tool.<name>` span (e.g. `mcp.tool.forge_task`,
+`mcp.tool.heal_file`, `mcp.tool.self_correct`, `mcp.tool.run_nlae_pipeline`,
+`mcp.tool.audit_code`, `mcp.tool.scan_and_fix`,
+`mcp.tool.extract_spec_from_code`, plus the lightweight
+`mcp.tool.measure_std_health` / `mcp.tool.propose_forge_tasks` /
+`mcp.tool.list_forge_log` / `mcp.tool.get_agent_status`) carrying
+`mcp.tool.name` and tool-specific attributes (`mcp.tool.dry_run` /
+`mcp.tool.task_id` / `mcp.tool.status` for `forge_task`, `mumei.heal.kind` for
+`heal_file`, `mcp.tool.max_iterations` for `self_correct`, `mcp.tool.no_build`
+for `run_nlae_pipeline`, `mcp.tool.generate` for `extract_spec_from_code`,
+`mumei.language` for `audit_code` / `scan_and_fix`). Directory heals additionally
+emit a per-file `mcp.tool.heal_file.file` child span. Because the entry span is
+the current span, the P15-3 loop root spans (`mumei.loop.*`) and P15-2 verify
+spans (`mumei.verify`) nest underneath it automatically.
+
+`telemetry.extract_trace_context(carrier)` is the inverse of
+`inject_trace_context`: given a W3C `traceparent` / `tracestate` carrier it
+returns the OTel `Context` to start the entry span as a child of. An external
+MCP client connects its trace by attaching `traceparent` / `tracestate` to the
+request `_meta`; the server reads it via `ctx.request_context.meta`
+(`_carrier_from_ctx`) and parents the `mcp.tool.<name>` span on it, so
+**MCP client → tool → inner loop → verify subprocess → LLM** appear as one
+trace. When no context is present the entry span behaves as a fresh root
+(backward compatible). With `OTEL_ENABLED` unset, `extract_trace_context`
+returns `None` and every entry span is a NoOp, so tool JSON payloads are
+unchanged.
 
 ### Ollama KV cache and long-context tuning
 

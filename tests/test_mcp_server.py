@@ -2295,3 +2295,101 @@ class TestMcpSamplingScanAndFix:
 
         assert result["audit"]["success"] is True
         ctx.session.create_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# P15-4: MCP entry-span wrapping must not change tool payloads / registration
+# ---------------------------------------------------------------------------
+
+
+class TestP15EntrySpans:
+    """With OTel disabled (default) the ``mcp.tool.*`` spans are NoOp, so every
+    wrapped tool must still return its usual ``_ok`` / ``_err`` JSON payload and
+    the registered-tool set must be unchanged."""
+
+    def test_otel_disabled_by_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        from agent import telemetry
+
+        assert telemetry.is_enabled() is False
+        assert isinstance(
+            telemetry.get_tracer("agent.mcp_server"), telemetry._NoOpTracer
+        )
+
+    def test_registration_unchanged_by_span_wrapping(self) -> None:
+        registered = set(mcp_server.mcp._tool_manager._tools)
+        # Span wrapping is inside the tool bodies; it must not register / drop
+        # any tools.  These are the 10 tools instrumented in P15-4.
+        for name in (
+            "forge_task",
+            "heal_file",
+            "self_correct",
+            "run_nlae_pipeline",
+            "audit_code",
+            "scan_and_fix",
+            "extract_spec_from_code",
+            "measure_std_health",
+            "propose_forge_tasks",
+            "list_forge_log",
+            "get_agent_status",
+        ):
+            assert name in registered
+
+    def test_forge_task_dry_run_ok_under_noop_span(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(
+            mcp_server.forge_task(
+                json.dumps({"task_id": "p15-4", "target_file": "std/x.mm"}),
+                mumei_repo=str(tmp_path),
+                dry_run=True,
+            )
+        )
+        assert result["status"] == "skipped"
+        assert result["task_id"] == "p15-4"
+        assert result["dry_run"] is True
+
+    def test_forge_task_bad_json_err_under_noop_span(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(
+            mcp_server.forge_task("not json", mumei_repo=str(tmp_path), dry_run=True)
+        )
+        assert result["status"] == "error"
+
+    def test_heal_file_err_under_noop_span(self, monkeypatch) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(mcp_server.heal_file(source_code=""))
+        assert result["status"] == "error"
+
+    def test_measure_std_health_err_under_noop_span(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(mcp_server.measure_std_health(str(tmp_path)))
+        assert result["status"] == "error"
+
+    def test_propose_forge_tasks_err_under_noop_span(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(mcp_server.propose_forge_tasks(str(tmp_path), max_proposals=0))
+        assert result["status"] == "error"
+
+    def test_list_forge_log_missing_ok_under_noop_span(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(mcp_server.list_forge_log(str(tmp_path / "missing.json")))
+        assert result["status"] == "ok"
+        assert result["count"] == 0
+
+    def test_get_agent_status_ok_under_noop_span(self, monkeypatch) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(mcp_server.get_agent_status())
+        assert result["status"] == "ok"
+        assert set(result["mcp_tools"]) == set(mcp_server.mcp._tool_manager._tools)
+
+    def test_run_nlae_pipeline_err_under_noop_span(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(
+            mcp_server.run_nlae_pipeline("spec", mumei_lean_repo=str(tmp_path / "nope"))
+        )
+        assert result["status"] == "error"
+
+    def test_extract_spec_from_code_err_under_noop_span(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        result = _payload(mcp_server.extract_spec_from_code(str(tmp_path / "nope.py")))
+        assert result["status"] == "error"

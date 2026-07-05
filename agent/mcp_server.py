@@ -37,6 +37,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from agent import telemetry
 from agent.nlae_pipeline import NLAEPipeline
 from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
 
@@ -46,6 +47,7 @@ mcp = FastMCP("Mumei-Agent")
 _active_human_review_tracker = None
 
 from agent.mcp_server_helpers import (
+    _carrier_from_ctx,
     _err,
     _existing_path_arg,
     _env_bool,
@@ -207,17 +209,23 @@ def _heal_directory(
             hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
         )
 
-    results = [
-        _heal_single_file(
-            path,
-            error_report=error_report,
-            config=config,
-            client=client,
-            mumei=mumei,
-            ctx=ctx,
-        )
-        for path in ordered_files
-    ]
+    tracer = telemetry.get_tracer(__name__)
+    results = []
+    for path in ordered_files:
+        with tracer.start_as_current_span(
+            "mcp.tool.heal_file.file",
+            attributes={"mcp.tool.name": "heal_file", "mumei.heal.file": str(path)},
+        ):
+            results.append(
+                _heal_single_file(
+                    path,
+                    error_report=error_report,
+                    config=config,
+                    client=client,
+                    mumei=mumei,
+                    ctx=ctx,
+                )
+            )
     payload = _aggregate_heal_results(results)
     payload["ordered_files"] = [str(path) for path in ordered_files]
     return _ok(payload)
@@ -318,111 +326,119 @@ def forge_task(
         JSON string with ``task_id``, ``status``, ``target_file``,
         ``error`` and ``code_length`` fields.
     """
-    try:
-        task = json.loads(task_json)
-    except json.JSONDecodeError as exc:
-        return _err(f"task_json is not valid JSON: {exc}")
-    if not isinstance(task, dict):
-        return _err("task_json must decode to a JSON object")
-
-    repo = _resolve_repo(mumei_repo)
-    if not repo.exists():
-        return _err(f"mumei_repo does not exist: {repo}")
-
-    # Lazy imports keep the module importable in environments without the
-    # OpenAI client (e.g. the tools-only CI used by the unit tests).
-    try:
-        from agent.config import AgentConfig
-        from agent.forge import MumeiForge
-        from agent.mumei_client import create_mumei_client
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import agent modules: {exc}")
-
-    config: AgentConfig | None = None
-    llm_provider = None
-    if not dry_run:
+    with telemetry.start_tool_span(
+        "forge_task", carrier=_carrier_from_ctx(ctx),
+        **{"mcp.tool.dry_run": dry_run},
+    ) as span:
         try:
-            config = AgentConfig()
-            llm_provider = _llm_provider_for_context(config, ctx)
-            if llm_provider is None:
-                config.create_client()
-        except Exception as exc:
-            return _err(
-                f"AgentConfig is unavailable: {exc}",
-                hint="set LLM_API_KEY, enable USE_MCP_SAMPLING from an MCP client, or run with dry_run=true",
+            task = json.loads(task_json)
+        except json.JSONDecodeError as exc:
+            return _err(f"task_json is not valid JSON: {exc}")
+        if not isinstance(task, dict):
+            return _err("task_json must decode to a JSON object")
+
+        span.set_attribute("mcp.tool.task_id", task.get("task_id", "unknown"))
+
+        repo = _resolve_repo(mumei_repo)
+        if not repo.exists():
+            return _err(f"mumei_repo does not exist: {repo}")
+
+        # Lazy imports keep the module importable in environments without the
+        # OpenAI client (e.g. the tools-only CI used by the unit tests).
+        try:
+            from agent.config import AgentConfig
+            from agent.forge import MumeiForge
+            from agent.mumei_client import create_mumei_client
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"failed to import agent modules: {exc}")
+
+        config: AgentConfig | None = None
+        llm_provider = None
+        if not dry_run:
+            try:
+                config = AgentConfig()
+                llm_provider = _llm_provider_for_context(config, ctx)
+                if llm_provider is None:
+                    config.create_client()
+            except Exception as exc:
+                return _err(
+                    f"AgentConfig is unavailable: {exc}",
+                    hint="set LLM_API_KEY, enable USE_MCP_SAMPLING from an MCP client, or run with dry_run=true",
+                )
+
+        mumei_bin = (config.mumei_bin if config else None) or os.environ.get(
+            "MUMEI_BIN", "mumei"
+        )
+        # Honor ``USE_MCP_CLIENT`` for forge_task so MCP-backed verification
+        # is available from both the CLI and the MCP entrypoint.
+        mumei_client = create_mumei_client(mumei_bin)
+        forge_tasks_dir = repo.parent / "mumei-agent" / "forge_tasks"
+        if not forge_tasks_dir.exists():
+            forge_tasks_dir = repo / "forge_tasks"
+
+        forge = MumeiForge(
+            config=config,
+            mumei_client=mumei_client,
+            mumei_repo_dir=repo,
+            forge_tasks_dir=forge_tasks_dir,
+            llm_provider=llm_provider,
+        )
+
+        if dry_run:
+            return _ok(
+                {
+                    "task_id": task.get("task_id", "unknown"),
+                    "status": "skipped",
+                    "target_file": task.get("target_file"),
+                    "error": "dry-run",
+                    "code_length": 0,
+                    "dry_run": True,
+                }
             )
 
-    mumei_bin = (config.mumei_bin if config else None) or os.environ.get(
-        "MUMEI_BIN", "mumei"
-    )
-    # Honor ``USE_MCP_CLIENT`` for forge_task so MCP-backed verification
-    # is available from both the CLI and the MCP entrypoint.
-    mumei_client = create_mumei_client(mumei_bin)
-    forge_tasks_dir = repo.parent / "mumei-agent" / "forge_tasks"
-    if not forge_tasks_dir.exists():
-        forge_tasks_dir = repo / "forge_tasks"
+        try:
+            result = forge.forge_one(task)
+        except Exception as exc:
+            return _err(
+                f"forge_one raised: {exc}",
+                task_id=task.get("task_id", "unknown"),
+                target_file=task.get("target_file"),
+            )
 
-    forge = MumeiForge(
-        config=config,
-        mumei_client=mumei_client,
-        mumei_repo_dir=repo,
-        forge_tasks_dir=forge_tasks_dir,
-        llm_provider=llm_provider,
-    )
+        span.set_attribute("mcp.tool.status", result.status)
 
-    if dry_run:
+        # Mirror ``MumeiForge.run()`` (agent/forge.py:151-152) so MCP-driven
+        # tasks land in ``forge_log.json`` and ``filter_completed_tasks``
+        # deduplicates them on subsequent CLI / MCP runs.  Logging failures
+        # must not fail the tool call — the task itself already succeeded.
+        try:
+            forge.log_result(task, result)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("forge_task: log_result failed: %s", exc)
+
+        code_length = 0
+        target = result.target_file
+        if target:
+            target_path = (repo / target).resolve()
+            try:
+                target_path.relative_to(repo)
+                if target_path.exists():
+                    code_length = len(target_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                code_length = 0
+
         return _ok(
             {
-                "task_id": task.get("task_id", "unknown"),
-                "status": "skipped",
-                "target_file": task.get("target_file"),
-                "error": "dry-run",
-                "code_length": 0,
-                "dry_run": True,
+                "task_id": result.task_id,
+                "status": result.status,
+                "target_file": result.target_file,
+                "error": result.error,
+                "code_length": code_length,
+                "attempts": result.attempts,
+                "atoms_added": result.atoms_added,
+                "commit_sha": result.commit_sha,
             }
         )
-
-    try:
-        result = forge.forge_one(task)
-    except Exception as exc:
-        return _err(
-            f"forge_one raised: {exc}",
-            task_id=task.get("task_id", "unknown"),
-            target_file=task.get("target_file"),
-        )
-
-    # Mirror ``MumeiForge.run()`` (agent/forge.py:151-152) so MCP-driven
-    # tasks land in ``forge_log.json`` and ``filter_completed_tasks``
-    # deduplicates them on subsequent CLI / MCP runs.  Logging failures
-    # must not fail the tool call — the task itself already succeeded.
-    try:
-        forge.log_result(task, result)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("forge_task: log_result failed: %s", exc)
-
-    code_length = 0
-    target = result.target_file
-    if target:
-        target_path = (repo / target).resolve()
-        try:
-            target_path.relative_to(repo)
-            if target_path.exists():
-                code_length = len(target_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            code_length = 0
-
-    return _ok(
-        {
-            "task_id": result.task_id,
-            "status": result.status,
-            "target_file": result.target_file,
-            "error": result.error,
-            "code_length": code_length,
-            "attempts": result.attempts,
-            "atoms_added": result.atoms_added,
-            "commit_sha": result.commit_sha,
-        }
-    )
 
 @mcp.tool()
 def heal_file(
@@ -448,117 +464,124 @@ def heal_file(
         to be configured (LLM_API_KEY etc.); errors out cleanly with a
         descriptive ``hint`` field otherwise.
     """
-    target_arg = (code_file or "").strip()
-    if target_arg:
-        target_path = _existing_path_arg(target_arg)
-        if target_path is None:
-            return _err(f"code_file not found: {target_arg}")
-    else:
-        target_path = _existing_path_arg((source_code or "").strip())
+    with telemetry.start_tool_span(
+        "heal_file", carrier=_carrier_from_ctx(ctx),
+    ) as span:
+        target_arg = (code_file or "").strip()
+        if target_arg:
+            target_path = _existing_path_arg(target_arg)
+            if target_path is None:
+                return _err(f"code_file not found: {target_arg}")
+        else:
+            target_path = _existing_path_arg((source_code or "").strip())
 
-    if target_path is not None:
-        if target_path.is_dir():
-            return _heal_directory(target_path, error_report=error_report, ctx=ctx)
-        if target_path.is_file():
-            result = _heal_single_file(target_path, error_report=error_report, ctx=ctx)
-            from agent.strategies.fix_strategy import _aggregate_heal_results
+        if target_path is not None:
+            if target_path.is_dir():
+                span.set_attribute("mumei.heal.kind", "directory")
+                return _heal_directory(target_path, error_report=error_report, ctx=ctx)
+            if target_path.is_file():
+                span.set_attribute("mumei.heal.kind", "file")
+                result = _heal_single_file(target_path, error_report=error_report, ctx=ctx)
+                from agent.strategies.fix_strategy import _aggregate_heal_results
 
-            payload = _aggregate_heal_results([result])
-            payload["file"] = str(target_path)
-            if result.get("healed_code"):
-                payload["healed_code"] = result["healed_code"]
-            return _ok(payload)
-        return _err(f"code_file must be a file or directory: {target_path}")
+                payload = _aggregate_heal_results([result])
+                payload["file"] = str(target_path)
+                if result.get("healed_code"):
+                    payload["healed_code"] = result["healed_code"]
+                return _ok(payload)
+            return _err(f"code_file must be a file or directory: {target_path}")
 
-    if not source_code or not source_code.strip():
-        return _err("source_code must be non-empty")
+        span.set_attribute("mumei.heal.kind", "inline")
 
-    try:
-        from agent.config import AgentConfig
-        from agent.mumei_client import create_mumei_client
-        from agent.strategies.fix_strategy import get_fix
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import agent modules: {exc}")
+        if not source_code or not source_code.strip():
+            return _err("source_code must be non-empty")
 
-    try:
-        config = AgentConfig()
-        client = _llm_client_for_context(config, ctx)
-    except Exception as exc:
-        return _err(
-            f"AgentConfig is unavailable: {exc}",
-            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
-        )
-
-    report_data: dict[str, Any] = {}
-    error_log = error_report
-    if error_report:
         try:
-            report_data = json.loads(error_report)
-            if not isinstance(report_data, dict):
-                report_data = {"raw": report_data}
-        except json.JSONDecodeError:
-            report_data = {"raw": error_report}
-    else:
-        # Best-effort initial verification so the prompt has something
-        # concrete to fix.  Failures are non-fatal — the LLM will simply
-        # see an empty report.
-        import tempfile
+            from agent.config import AgentConfig
+            from agent.mumei_client import create_mumei_client
+            from agent.strategies.fix_strategy import get_fix
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"failed to import agent modules: {exc}")
 
-        # Honor ``USE_MCP_CLIENT`` for heal_file's initial verification so
-        # the prompt seed benefits from the same richer semantic feedback
-        # the CLI ``heal`` subcommand sees.
-        mumei = create_mumei_client(config.mumei_bin)
-        # Initialize to None before the try block so the ``finally``
-        # clause never hits ``UnboundLocalError`` when NamedTemporaryFile
-        # or tmp.write raises — matching the pattern in
-        # ``agent/strategies/fix_strategy.py``.
-        tmp_path: str | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                "w", suffix=".mm", delete=False, encoding="utf-8"
-            ) as tmp:
-                tmp_path = tmp.name
-                tmp.write(source_code)
-            verify = mumei.verify(tmp_path)
-            report_data = verify.get("report") or {}
-            error_log = verify.get("stderr") or verify.get("stdout") or ""
-            if verify.get("success"):
-                return _ok(
-                    {
-                        "healed_code": source_code,
-                        "attempts": 0,
-                        "success": True,
-                        "note": "source already verifies; no heal needed",
-                    }
-                )
-        finally:
-            if tmp_path is not None:
-                try:
-                    Path(tmp_path).unlink()
-                except Exception:
-                    pass
+            config = AgentConfig()
+            client = _llm_client_for_context(config, ctx)
+        except Exception as exc:
+            return _err(
+                f"AgentConfig is unavailable: {exc}",
+                hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+            )
 
-    try:
-        mumei = create_mumei_client(config.mumei_bin)
-        healed = get_fix(
-            client=client,
-            model=config.model,
-            source_code=source_code,
-            error_log=error_log or "",
-            report_data=report_data,
-            strategy=getattr(config, "strategy", "single"),
-            mumei_client=mumei,
+        report_data: dict[str, Any] = {}
+        error_log = error_report
+        if error_report:
+            try:
+                report_data = json.loads(error_report)
+                if not isinstance(report_data, dict):
+                    report_data = {"raw": report_data}
+            except json.JSONDecodeError:
+                report_data = {"raw": error_report}
+        else:
+            # Best-effort initial verification so the prompt has something
+            # concrete to fix.  Failures are non-fatal — the LLM will simply
+            # see an empty report.
+            import tempfile
+
+            # Honor ``USE_MCP_CLIENT`` for heal_file's initial verification so
+            # the prompt seed benefits from the same richer semantic feedback
+            # the CLI ``heal`` subcommand sees.
+            mumei = create_mumei_client(config.mumei_bin)
+            # Initialize to None before the try block so the ``finally``
+            # clause never hits ``UnboundLocalError`` when NamedTemporaryFile
+            # or tmp.write raises — matching the pattern in
+            # ``agent/strategies/fix_strategy.py``.
+            tmp_path: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w", suffix=".mm", delete=False, encoding="utf-8"
+                ) as tmp:
+                    tmp_path = tmp.name
+                    tmp.write(source_code)
+                verify = mumei.verify(tmp_path)
+                report_data = verify.get("report") or {}
+                error_log = verify.get("stderr") or verify.get("stdout") or ""
+                if verify.get("success"):
+                    return _ok(
+                        {
+                            "healed_code": source_code,
+                            "attempts": 0,
+                            "success": True,
+                            "note": "source already verifies; no heal needed",
+                        }
+                    )
+            finally:
+                if tmp_path is not None:
+                    try:
+                        Path(tmp_path).unlink()
+                    except Exception:
+                        pass
+
+        try:
+            mumei = create_mumei_client(config.mumei_bin)
+            healed = get_fix(
+                client=client,
+                model=config.model,
+                source_code=source_code,
+                error_log=error_log or "",
+                report_data=report_data,
+                strategy=getattr(config, "strategy", "single"),
+                mumei_client=mumei,
+            )
+        except Exception as exc:
+            return _err(f"fix_strategy.get_fix raised: {exc}")
+
+        return _ok(
+            {
+                "healed_code": healed or source_code,
+                "attempts": 1,
+                "success": bool(healed),
+            }
         )
-    except Exception as exc:
-        return _err(f"fix_strategy.get_fix raised: {exc}")
-
-    return _ok(
-        {
-            "healed_code": healed or source_code,
-            "attempts": 1,
-            "success": bool(healed),
-        }
-    )
 
 @mcp.tool()
 def self_correct(
@@ -567,41 +590,46 @@ def self_correct(
     ctx: Context | None = None,
 ) -> str:
     """P9-F: Self-Correction Protocol - 自己修復ループを実行する."""
-    path = _existing_path_arg(code_file)
-    if path is None or not path.is_file():
-        return _err(f"code_file not found: {code_file}")
+    with telemetry.start_tool_span(
+        "self_correct",
+        carrier=_carrier_from_ctx(ctx),
+        **{"mcp.tool.max_iterations": max_iterations},
+    ):
+        path = _existing_path_arg(code_file)
+        if path is None or not path.is_file():
+            return _err(f"code_file not found: {code_file}")
 
-    try:
-        from agent.config import AgentConfig
-        from agent.mumei_client import create_mumei_client
-        from agent.strategies.fix_strategy import (
-            ConfiguredLossVectorFixClient,
-            SelfCorrectionLoop,
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import self-correction modules: {exc}")
+        try:
+            from agent.config import AgentConfig
+            from agent.mumei_client import create_mumei_client
+            from agent.strategies.fix_strategy import (
+                ConfiguredLossVectorFixClient,
+                SelfCorrectionLoop,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"failed to import self-correction modules: {exc}")
 
-    try:
-        config = AgentConfig()
-        mumei = create_mumei_client(config.mumei_bin)
-        llm_provider = _llm_provider_for_context(config, ctx)
-        if llm_provider is None:
-            config.create_client()
-    except Exception as exc:
-        return _err(
-            f"AgentConfig is unavailable: {exc}",
-            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
-        )
+        try:
+            config = AgentConfig()
+            mumei = create_mumei_client(config.mumei_bin)
+            llm_provider = _llm_provider_for_context(config, ctx)
+            if llm_provider is None:
+                config.create_client()
+        except Exception as exc:
+            return _err(
+                f"AgentConfig is unavailable: {exc}",
+                hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
+            )
 
-    loop = SelfCorrectionLoop(max_iterations=max_iterations)
-    llm = ConfiguredLossVectorFixClient(config, mumei, llm_provider=llm_provider)
-    try:
-        result = loop.run(path, mumei, llm)
-    except Exception as exc:
-        return _err(f"self-correction failed: {exc}")
-    payload = result.to_dict()
-    payload["file"] = str(path)
-    return _ok(payload)
+        loop = SelfCorrectionLoop(max_iterations=max_iterations)
+        llm = ConfiguredLossVectorFixClient(config, mumei, llm_provider=llm_provider)
+        try:
+            result = loop.run(path, mumei, llm)
+        except Exception as exc:
+            return _err(f"self-correction failed: {exc}")
+        payload = result.to_dict()
+        payload["file"] = str(path)
+        return _ok(payload)
 
 @mcp.tool()
 def run_nlae_pipeline(
@@ -611,28 +639,31 @@ def run_nlae_pipeline(
     no_build: bool = False,
 ) -> str:
     """P9-G: run the four-repository NLAE integration pipeline."""
-    lean_repo = Path(
-        mumei_lean_repo
-        or os.environ.get("MUMEI_LEAN_REPO", "../mumei-lean")
-    ).expanduser().resolve()
-    if not lean_repo.exists():
-        return _err(
-            f"mumei_lean_repo not found: {lean_repo}",
-            hint="pass a mumei-lang/mumei-lean checkout or set MUMEI_LEAN_REPO",
+    with telemetry.start_tool_span(
+        "run_nlae_pipeline", **{"mcp.tool.no_build": no_build}
+    ):
+        lean_repo = Path(
+            mumei_lean_repo
+            or os.environ.get("MUMEI_LEAN_REPO", "../mumei-lean")
+        ).expanduser().resolve()
+        if not lean_repo.exists():
+            return _err(
+                f"mumei_lean_repo not found: {lean_repo}",
+                hint="pass a mumei-lang/mumei-lean checkout or set MUMEI_LEAN_REPO",
+            )
+        pipeline_work_dir = (
+            Path(work_dir).expanduser().resolve()
+            if work_dir
+            else Path(tempfile.mkdtemp(prefix="mumei-nlae-mcp-"))
         )
-    pipeline_work_dir = (
-        Path(work_dir).expanduser().resolve()
-        if work_dir
-        else Path(tempfile.mkdtemp(prefix="mumei-nlae-mcp-"))
-    )
-    try:
-        result = NLAEPipeline(
-            work_dir=pipeline_work_dir,
-            lean_no_build=no_build,
-        ).run_full_pipeline(spec, lean_repo)
-    except Exception as exc:
-        return _err(f"run_nlae_pipeline failed: {exc}")
-    return _ok(result.to_dict())
+        try:
+            result = NLAEPipeline(
+                work_dir=pipeline_work_dir,
+                lean_no_build=no_build,
+            ).run_full_pipeline(spec, lean_repo)
+        except Exception as exc:
+            return _err(f"run_nlae_pipeline failed: {exc}")
+        return _ok(result.to_dict())
 
 @mcp.tool()
 def measure_std_health(mumei_repo: str) -> str:
@@ -646,32 +677,33 @@ def measure_std_health(mumei_repo: str) -> str:
         ``trusted_atoms``, ``health_score``, ``todo_count``, and
         ``details``.
     """
-    repo = _resolve_repo(mumei_repo)
-    std_dir = repo / "std"
-    if not std_dir.exists():
-        return _err(f"std directory not found under {repo}")
+    with telemetry.start_tool_span("measure_std_health"):
+        repo = _resolve_repo(mumei_repo)
+        std_dir = repo / "std"
+        if not std_dir.exists():
+            return _err(f"std directory not found under {repo}")
 
-    try:
-        from agent.config import AgentConfig
-        from agent.mumei_client import create_mumei_client
-        from agent.std_health import measure_health
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import agent modules: {exc}")
+        try:
+            from agent.config import AgentConfig
+            from agent.mumei_client import create_mumei_client
+            from agent.std_health import measure_health
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"failed to import agent modules: {exc}")
 
-    try:
-        config = AgentConfig()
-        mumei_bin = config.mumei_bin
-    except Exception:
-        mumei_bin = os.environ.get("MUMEI_BIN", "mumei")
+        try:
+            config = AgentConfig()
+            mumei_bin = config.mumei_bin
+        except Exception:
+            mumei_bin = os.environ.get("MUMEI_BIN", "mumei")
 
-    mumei_client = create_mumei_client(mumei_bin)
-    try:
-        report = measure_health(mumei_client, std_dir)
-    except Exception as exc:
-        return _err(f"measure_health raised: {exc}")
+        mumei_client = create_mumei_client(mumei_bin)
+        try:
+            report = measure_health(mumei_client, std_dir)
+        except Exception as exc:
+            return _err(f"measure_health raised: {exc}")
 
-    payload = dict(report)
-    return _ok(payload)
+        payload = dict(report)
+        return _ok(payload)
 
 @mcp.tool()
 def cross_validate(spec_file: str, impl_file: str, language: str = "") -> str:
@@ -749,37 +781,38 @@ def propose_forge_tasks(mumei_repo: str, max_proposals: int = 3) -> str:
     Returns:
         JSON string with ``proposals`` and ``specs`` lists.
     """
-    if max_proposals <= 0:
-        return _err("max_proposals must be positive")
+    with telemetry.start_tool_span("propose_forge_tasks"):
+        if max_proposals <= 0:
+            return _err("max_proposals must be positive")
 
-    repo = _resolve_repo(mumei_repo)
-    std_dir = repo / "std"
-    if not std_dir.exists():
-        return _err(f"std directory not found under {repo}")
+        repo = _resolve_repo(mumei_repo)
+        std_dir = repo / "std"
+        if not std_dir.exists():
+            return _err(f"std directory not found under {repo}")
 
-    try:
-        from agent.proliferate import analyze_gaps, generate_specs_from_gaps
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import agent.proliferate: {exc}")
+        try:
+            from agent.proliferate import analyze_gaps, generate_specs_from_gaps
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"failed to import agent.proliferate: {exc}")
 
-    try:
-        gaps = analyze_gaps(std_dir)
-    except Exception as exc:
-        return _err(f"analyze_gaps raised: {exc}")
+        try:
+            gaps = analyze_gaps(std_dir)
+        except Exception as exc:
+            return _err(f"analyze_gaps raised: {exc}")
 
-    try:
-        specs = generate_specs_from_gaps(gaps, max_count=max_proposals)
-    except Exception as exc:
-        return _err(f"generate_specs_from_gaps raised: {exc}")
+        try:
+            specs = generate_specs_from_gaps(gaps, max_count=max_proposals)
+        except Exception as exc:
+            return _err(f"generate_specs_from_gaps raised: {exc}")
 
-    return _ok(
-        {
-            "proposals": gaps.get("proposals") or [],
-            "specs": specs,
-            "trusted_atoms": gaps.get("trusted_atoms") or [],
-            "todo_comments": gaps.get("todo_comments") or [],
-        }
-    )
+        return _ok(
+            {
+                "proposals": gaps.get("proposals") or [],
+                "specs": specs,
+                "trusted_atoms": gaps.get("trusted_atoms") or [],
+                "todo_comments": gaps.get("todo_comments") or [],
+            }
+        )
 
 @mcp.tool()
 def list_forge_log(log_path: str = "forge_log.json") -> str:
@@ -796,38 +829,39 @@ def list_forge_log(log_path: str = "forge_log.json") -> str:
     Returns:
         JSON string with ``entries`` (the parsed log) and ``count``.
     """
-    path = Path(log_path).expanduser()
-    if not path.is_absolute():
-        path = path.resolve()
-    if not path.exists():
-        return _ok(
-            {
-                "entries": [],
-                "count": 0,
-                "path": str(path),
-                "note": "forge log does not exist yet",
-            }
-        )
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return _err(f"failed to read {path}: {exc}")
-    if not text.strip():
-        return _ok({"entries": [], "count": 0, "path": str(path)})
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return _err(f"forge log is not valid JSON: {exc}", path=str(path))
-    if isinstance(data, list):
-        entries = data
-    elif isinstance(data, dict) and isinstance(data.get("entries"), list):
-        entries = data["entries"]
-    else:
-        return _err(
-            "unexpected forge log structure (expected list or {entries: [...]})",
-            path=str(path),
-        )
-    return _ok({"entries": entries, "count": len(entries), "path": str(path)})
+    with telemetry.start_tool_span("list_forge_log"):
+        path = Path(log_path).expanduser()
+        if not path.is_absolute():
+            path = path.resolve()
+        if not path.exists():
+            return _ok(
+                {
+                    "entries": [],
+                    "count": 0,
+                    "path": str(path),
+                    "note": "forge log does not exist yet",
+                }
+            )
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return _err(f"failed to read {path}: {exc}")
+        if not text.strip():
+            return _ok({"entries": [], "count": 0, "path": str(path)})
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return _err(f"forge log is not valid JSON: {exc}", path=str(path))
+        if isinstance(data, list):
+            entries = data
+        elif isinstance(data, dict) and isinstance(data.get("entries"), list):
+            entries = data["entries"]
+        else:
+            return _err(
+                "unexpected forge log structure (expected list or {entries: [...]})",
+                path=str(path),
+            )
+        return _ok({"entries": entries, "count": len(entries), "path": str(path)})
 
 @mcp.tool()
 def get_review_queue(mumei_repo: str) -> str:
@@ -900,68 +934,69 @@ def get_agent_status() -> str:
         available CLI subcommands, registered MCP tools, and the
         relevant feature-flag environment variables.
     """
-    try:
-        from agent.config import AgentConfig
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import agent.config: {exc}")
+    with telemetry.start_tool_span("get_agent_status"):
+        try:
+            from agent.config import AgentConfig
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"failed to import agent.config: {exc}")
 
-    try:
-        config = AgentConfig()
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"AgentConfig() failed: {exc}")
+        try:
+            config = AgentConfig()
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"AgentConfig() failed: {exc}")
 
-    try:
-        from agent.__main__ import _SUBCOMMANDS
+        try:
+            from agent.__main__ import _SUBCOMMANDS
 
-        subcommands = sorted(_SUBCOMMANDS)
-    except Exception:  # pragma: no cover - defensive
-        subcommands = [
-            "heal",
-            "generate",
-            "publish",
-            "forge",
-            "propose",
-            "analyze-std-gaps",
-            "proliferate",
-            "health",
-            "extract-spec",
-            "validate-spec",
-            "validate-code",
-            "validate-spec-to-code",
-            "validate-code-to-spec",
-            "verify-conformance",
-            "verify-traceability",
-            "self-correct",
-            "mcp-server",
-            "check-spec-health",
-            "migrate-suggest",
-            "cross-validate",
-        ]
+            subcommands = sorted(_SUBCOMMANDS)
+        except Exception:  # pragma: no cover - defensive
+            subcommands = [
+                "heal",
+                "generate",
+                "publish",
+                "forge",
+                "propose",
+                "analyze-std-gaps",
+                "proliferate",
+                "health",
+                "extract-spec",
+                "validate-spec",
+                "validate-code",
+                "validate-spec-to-code",
+                "validate-code-to-spec",
+                "verify-conformance",
+                "verify-traceability",
+                "self-correct",
+                "mcp-server",
+                "check-spec-health",
+                "migrate-suggest",
+                "cross-validate",
+            ]
 
-    return _ok(
-        {
-            "llm_provider": "mcp-sampling" if _sampling_enabled(config) else "openai-compatible",
-            "model": config.model,
-            "base_url": config.base_url,
-            "mumei_bin": config.mumei_bin,
-            "strategy": config.strategy,
-            "subcommands": subcommands,
-            "mcp_tools": sorted(mcp._tool_manager._tools),
-            "feature_flags": {
-                "PREFER_MCP_GAPS": os.environ.get("PREFER_MCP_GAPS", ""),
-                "USE_MCP_CLIENT": os.environ.get("USE_MCP_CLIENT", ""),
-                "USE_MCP_SAMPLING": os.environ.get("USE_MCP_SAMPLING", ""),
-                "INJECT_CORE_AXIOMS": os.environ.get("INJECT_CORE_AXIOMS", ""),
-                "ENABLE_LATENT_DEBUG": os.environ.get("ENABLE_LATENT_DEBUG", ""),
-                "ENABLE_DENSE_PROPERTIES": os.environ.get(
-                    "ENABLE_DENSE_PROPERTIES", ""
-                ),
-                "ENABLE_LATENT_PROTOCOL": os.environ.get("ENABLE_LATENT_PROTOCOL", ""),
-                "ENABLE_CODE_TO_SPEC": os.environ.get("ENABLE_CODE_TO_SPEC", ""),
-            },
-            "python": sys.version,
-        }
-    )
+        return _ok(
+            {
+                "llm_provider": "mcp-sampling" if _sampling_enabled(config) else "openai-compatible",
+                "model": config.model,
+                "base_url": config.base_url,
+                "mumei_bin": config.mumei_bin,
+                "strategy": config.strategy,
+                "subcommands": subcommands,
+                "mcp_tools": sorted(mcp._tool_manager._tools),
+                "feature_flags": {
+                    "PREFER_MCP_GAPS": os.environ.get("PREFER_MCP_GAPS", ""),
+                    "USE_MCP_CLIENT": os.environ.get("USE_MCP_CLIENT", ""),
+                    "USE_MCP_SAMPLING": os.environ.get("USE_MCP_SAMPLING", ""),
+                    "INJECT_CORE_AXIOMS": os.environ.get("INJECT_CORE_AXIOMS", ""),
+                    "ENABLE_LATENT_DEBUG": os.environ.get("ENABLE_LATENT_DEBUG", ""),
+                    "ENABLE_DENSE_PROPERTIES": os.environ.get(
+                        "ENABLE_DENSE_PROPERTIES", ""
+                    ),
+                    "ENABLE_LATENT_PROTOCOL": os.environ.get("ENABLE_LATENT_PROTOCOL", ""),
+                    "ENABLE_CODE_TO_SPEC": os.environ.get("ENABLE_CODE_TO_SPEC", ""),
+                },
+                "python": sys.version,
+            }
+        )
 
 @mcp.tool()
 def send_latent_message(
@@ -1758,32 +1793,35 @@ def audit_code(
     ctx: Context | None = None,
 ) -> dict:
     """Audit existing code for bugs by extracting specs and verifying them."""
-    try:
-        from agent.audit import AuditPipeline
-        from agent.config import AgentConfig
-    except Exception as exc:  # pragma: no cover - defensive
-        return {"success": False, "errors": [f"failed to import audit pipeline: {exc}"]}
+    with telemetry.start_tool_span(
+        "audit_code", carrier=_carrier_from_ctx(ctx), **{"mumei.language": language},
+    ):
+        try:
+            from agent.audit import AuditPipeline
+            from agent.config import AgentConfig
+        except Exception as exc:  # pragma: no cover - defensive
+            return {"success": False, "errors": [f"failed to import audit pipeline: {exc}"]}
 
-    try:
-        config = AgentConfig()
-        llm_provider = _llm_provider_for_context(config, ctx)
-        client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
-    except Exception:
-        config = None
-        llm_provider = None
-        client = None
+        try:
+            config = AgentConfig()
+            llm_provider = _llm_provider_for_context(config, ctx)
+            client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
+        except Exception:
+            config = None
+            llm_provider = None
+            client = None
 
-    try:
-        result = AuditPipeline(
-            config=config, client=client, llm_provider=llm_provider,
-        ).audit_source(
-            source_code,
-            language,
-            domain_hint=domain_hint,
-        )
-    except Exception as exc:
-        return {"success": False, "errors": [f"audit_code failed: {exc}"]}
-    return asdict(result)
+        try:
+            result = AuditPipeline(
+                config=config, client=client, llm_provider=llm_provider,
+            ).audit_source(
+                source_code,
+                language,
+                domain_hint=domain_hint,
+            )
+        except Exception as exc:
+            return {"success": False, "errors": [f"audit_code failed: {exc}"]}
+        return asdict(result)
 
 @mcp.tool()
 def suggest_mm_migration(code_file: str, language: str, issues_json: str = "[]") -> str:
@@ -1856,85 +1894,90 @@ def scan_and_fix(
         domain_hint: Optional domain hint for spec extraction.
         output_format: json, human, or markdown formatted_report sidecar.
     """
-    from agent.audit import (
-        AUDIT_CONTRACT_TERMS,
-        AUDIT_SCHEMA_KEYS,
-        AuditPipeline,
-    )
-    from agent.config import AgentConfig
-
-    try:
-        config = AgentConfig()
-        llm_provider = _llm_provider_for_context(config, ctx)
-        client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
-    except Exception:
-        config = None
-        llm_provider = None
-        client = None
-
-    pipeline = AuditPipeline(
-        config=config, heal_output_dir=heal_output_dir or None, client=client,
-        llm_provider=llm_provider,
-    )
-    code_path = Path(code_file).expanduser().resolve()
-    if code_path.is_dir():
-        result = pipeline.audit_directory(
-            code_file,
-            language,
-            domain_hint=domain_hint,
-            auto_migrate=True,
-            auto_heal=auto_heal,
+    with telemetry.start_tool_span(
+        "scan_and_fix",
+        carrier=_carrier_from_ctx(ctx),
+        **{"mumei.language": language, "mumei.auto_heal": auto_heal},
+    ):
+        from agent.audit import (
+            AUDIT_CONTRACT_TERMS,
+            AUDIT_SCHEMA_KEYS,
+            AuditPipeline,
         )
-    else:
-        result = pipeline.audit_file(
-            code_file,
-            language,
-            domain_hint=domain_hint,
-            auto_migrate=True,
-            auto_heal=auto_heal,
-        )
+        from agent.config import AgentConfig
 
-    spec_alignment = None
-    conformance_verification = None
-    if spec and not code_path.is_dir():
-        from agent.cross_validation import validate_spec_to_code as cv_validate_spec_to_code
-        from agent.conformance_verifier import verify_conformance as cv_verify_conformance
+        try:
+            config = AgentConfig()
+            llm_provider = _llm_provider_for_context(config, ctx)
+            client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
+        except Exception:
+            config = None
+            llm_provider = None
+            client = None
 
-        spec_text = Path(spec).read_text(encoding="utf-8")
-        alignment = cv_validate_spec_to_code(
-            spec_text, code_file, language=language,
-            config=config, llm_provider=llm_provider,
-        )
-        spec_alignment = asdict(alignment)
-        conformance = cv_verify_conformance(
-            spec_text,
-            code_file,
-            language=language,
-            alignment=alignment,
-            config=config,
+        pipeline = AuditPipeline(
+            config=config, heal_output_dir=heal_output_dir or None, client=client,
             llm_provider=llm_provider,
         )
-        conformance_verification = asdict(conformance)
-        if not conformance_verification.get("report"):
-            from agent.report_formatter import format_result_report
+        code_path = Path(code_file).expanduser().resolve()
+        if code_path.is_dir():
+            result = pipeline.audit_directory(
+                code_file,
+                language,
+                domain_hint=domain_hint,
+                auto_migrate=True,
+                auto_heal=auto_heal,
+            )
+        else:
+            result = pipeline.audit_file(
+                code_file,
+                language,
+                domain_hint=domain_hint,
+                auto_migrate=True,
+                auto_heal=auto_heal,
+            )
 
-            conformance_verification["report"] = format_result_report(conformance, "human")
+        spec_alignment = None
+        conformance_verification = None
+        if spec and not code_path.is_dir():
+            from agent.cross_validation import validate_spec_to_code as cv_validate_spec_to_code
+            from agent.conformance_verifier import verify_conformance as cv_verify_conformance
 
-    payload = {
-        "audit": asdict(result),
-        "next_steps": result.next_steps,
-        "spec_alignment": spec_alignment,
-        "conformance_verification": conformance_verification,
-        "audit_schema": AUDIT_SCHEMA_KEYS,
-        "contract_terms": AUDIT_CONTRACT_TERMS,
-    }
-    for key in AUDIT_SCHEMA_KEYS:
-        payload[key] = getattr(result, key, [])
-    if output_format in {"human", "markdown"}:
-        from agent.report_formatter import format_scan_and_fix_report
+            spec_text = Path(spec).read_text(encoding="utf-8")
+            alignment = cv_validate_spec_to_code(
+                spec_text, code_file, language=language,
+                config=config, llm_provider=llm_provider,
+            )
+            spec_alignment = asdict(alignment)
+            conformance = cv_verify_conformance(
+                spec_text,
+                code_file,
+                language=language,
+                alignment=alignment,
+                config=config,
+                llm_provider=llm_provider,
+            )
+            conformance_verification = asdict(conformance)
+            if not conformance_verification.get("report"):
+                from agent.report_formatter import format_result_report
 
-        payload["formatted_report"] = format_scan_and_fix_report(payload)
-    return payload
+                conformance_verification["report"] = format_result_report(conformance, "human")
+
+        payload = {
+            "audit": asdict(result),
+            "next_steps": result.next_steps,
+            "spec_alignment": spec_alignment,
+            "conformance_verification": conformance_verification,
+            "audit_schema": AUDIT_SCHEMA_KEYS,
+            "contract_terms": AUDIT_CONTRACT_TERMS,
+        }
+        for key in AUDIT_SCHEMA_KEYS:
+            payload[key] = getattr(result, key, [])
+        if output_format in {"human", "markdown"}:
+            from agent.report_formatter import format_scan_and_fix_report
+
+            payload["formatted_report"] = format_scan_and_fix_report(payload)
+        return payload
 
 @mcp.tool()
 def extract_spec_from_code(
@@ -1960,117 +2003,121 @@ def extract_spec_from_code(
         JSON string with the extracted natural-language spec, detected
         language, forge task spec, warnings, and optional generation result.
     """
-    source_path = Path(code_file).expanduser().resolve()
-    if not source_path.exists():
-        return _err(f"code_file does not exist: {source_path}")
+    with telemetry.start_tool_span(
+        "extract_spec_from_code", carrier=_carrier_from_ctx(ctx),
+        **{"mcp.tool.generate": generate},
+    ):
+        source_path = Path(code_file).expanduser().resolve()
+        if not source_path.exists():
+            return _err(f"code_file does not exist: {source_path}")
 
-    try:
-        from agent.code_to_spec import CodeToSpecExtractor, Language
-        from agent.config import AgentConfig
-        from agent.extract_spec import extract_spec_from_code_directory
-        from agent.mumei_client import create_mumei_client
-    except Exception as exc:  # pragma: no cover - defensive
-        return _err(f"failed to import agent modules: {exc}")
-
-    if not source_path.is_file() and not source_path.is_dir():
-        return _err(f"code_file is not a file or directory: {source_path}")
-
-    selected_language: Language | None
-    if language:
-        allowed = set(CodeToSpecExtractor.EXTENSION_MAP.values()) | {"unknown"}
-        if language not in allowed:
-            return _err(
-                f"unsupported language: {language}",
-                supported_languages=sorted(allowed),
-            )
-        selected_language = language  # type: ignore[assignment]
-    else:
-        selected_language = None
-
-    try:
-        config = AgentConfig()
-        llm_provider = _llm_provider_for_context(config, ctx)
-        llm_client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
-        mumei_bin = config.mumei_bin
-        if generate and mumei_repo:
-            repo = _resolve_repo(mumei_repo)
-            if not repo.exists():
-                return _err(f"mumei_repo does not exist: {repo}")
-            release_bin = repo / "target" / "release" / "mumei"
-            debug_bin = repo / "target" / "debug" / "mumei"
-            if release_bin.exists():
-                mumei_bin = str(release_bin)
-            elif debug_bin.exists():
-                mumei_bin = str(debug_bin)
-        mumei = create_mumei_client(mumei_bin)
-        if source_path.is_dir():
-            payload = extract_spec_from_code_directory(
-                config,
-                source_path,
-                language=selected_language,
-                domain_hint=domain_hint,
-                mumei_client=mumei,
-                max_retries=config.max_retries,
-                client=llm_client, llm_provider=llm_provider,
-            )
-            forge_task_spec = payload["merged_spec"]
-            result = None
-        else:
-            result = CodeToSpecExtractor(
-                config, client=llm_client, llm_provider=llm_provider,
-            ).extract_from_file(
-                source_path,
-                language=selected_language,
-                domain_hint=domain_hint,
-                mumei_client=mumei,
-            )
-            payload = {
-                "natural_language_spec": result.natural_language_spec,
-                "detected_language": result.detected_language,
-                "spec": result.forge_task_spec,
-                "warnings": result.warnings,
-            }
-            forge_task_spec = result.forge_task_spec
-    except Exception as exc:
-        return _err(
-            f"extract_spec_from_code failed: {exc}",
-            hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
-        )
-
-    if result is not None and (not result.success or result.forge_task_spec is None):
-        return _err(
-            "code-to-spec extraction failed",
-            natural_language_spec=result.natural_language_spec,
-            detected_language=result.detected_language,
-            warnings=result.warnings,
-            errors=result.errors,
-        )
-
-    if generate:
         try:
-            from agent.generate import _normalize_forge_task_spec
-            from agent.strategies.generate_strategy import generate_code
-            from agent.strategies.spec_refinement import run_refinement_loop
+            from agent.code_to_spec import CodeToSpecExtractor, Language
+            from agent.config import AgentConfig
+            from agent.extract_spec import extract_spec_from_code_directory
+            from agent.mumei_client import create_mumei_client
+        except Exception as exc:  # pragma: no cover - defensive
+            return _err(f"failed to import agent modules: {exc}")
 
-            code, verified, final_spec = run_refinement_loop(
-                llm_client,
-                config.model,
-                _normalize_forge_task_spec(forge_task_spec),
-                generate_code,
-                max_refinements=3,
-                config_max_retries=config.max_retries,
-                mumei_client=mumei,
-            )
-            payload.update(
-                {"code": code, "verified": verified, "final_spec": final_spec}
-            )
+        if not source_path.is_file() and not source_path.is_dir():
+            return _err(f"code_file is not a file or directory: {source_path}")
+
+        selected_language: Language | None
+        if language:
+            allowed = set(CodeToSpecExtractor.EXTENSION_MAP.values()) | {"unknown"}
+            if language not in allowed:
+                return _err(
+                    f"unsupported language: {language}",
+                    supported_languages=sorted(allowed),
+                )
+            selected_language = language  # type: ignore[assignment]
+        else:
+            selected_language = None
+
+        try:
+            config = AgentConfig()
+            llm_provider = _llm_provider_for_context(config, ctx)
+            llm_client = None if llm_provider is not None else _llm_client_for_context(config, ctx)
+            mumei_bin = config.mumei_bin
+            if generate and mumei_repo:
+                repo = _resolve_repo(mumei_repo)
+                if not repo.exists():
+                    return _err(f"mumei_repo does not exist: {repo}")
+                release_bin = repo / "target" / "release" / "mumei"
+                debug_bin = repo / "target" / "debug" / "mumei"
+                if release_bin.exists():
+                    mumei_bin = str(release_bin)
+                elif debug_bin.exists():
+                    mumei_bin = str(debug_bin)
+            mumei = create_mumei_client(mumei_bin)
+            if source_path.is_dir():
+                payload = extract_spec_from_code_directory(
+                    config,
+                    source_path,
+                    language=selected_language,
+                    domain_hint=domain_hint,
+                    mumei_client=mumei,
+                    max_retries=config.max_retries,
+                    client=llm_client, llm_provider=llm_provider,
+                )
+                forge_task_spec = payload["merged_spec"]
+                result = None
+            else:
+                result = CodeToSpecExtractor(
+                    config, client=llm_client, llm_provider=llm_provider,
+                ).extract_from_file(
+                    source_path,
+                    language=selected_language,
+                    domain_hint=domain_hint,
+                    mumei_client=mumei,
+                )
+                payload = {
+                    "natural_language_spec": result.natural_language_spec,
+                    "detected_language": result.detected_language,
+                    "spec": result.forge_task_spec,
+                    "warnings": result.warnings,
+                }
+                forge_task_spec = result.forge_task_spec
         except Exception as exc:
             return _err(
-                f"generation failed after code-to-spec extraction: {exc}",
-                **payload,
+                f"extract_spec_from_code failed: {exc}",
+                hint="set LLM_API_KEY / OPENAI_API_KEY or enable USE_MCP_SAMPLING from an MCP client",
             )
 
-    return _ok(payload)
+        if result is not None and (not result.success or result.forge_task_spec is None):
+            return _err(
+                "code-to-spec extraction failed",
+                natural_language_spec=result.natural_language_spec,
+                detected_language=result.detected_language,
+                warnings=result.warnings,
+                errors=result.errors,
+            )
+
+        if generate:
+            try:
+                from agent.generate import _normalize_forge_task_spec
+                from agent.strategies.generate_strategy import generate_code
+                from agent.strategies.spec_refinement import run_refinement_loop
+
+                code, verified, final_spec = run_refinement_loop(
+                    llm_client,
+                    config.model,
+                    _normalize_forge_task_spec(forge_task_spec),
+                    generate_code,
+                    max_refinements=3,
+                    config_max_retries=config.max_retries,
+                    mumei_client=mumei,
+                )
+                payload.update(
+                    {"code": code, "verified": verified, "final_spec": final_spec}
+                )
+            except Exception as exc:
+                return _err(
+                    f"generation failed after code-to-spec extraction: {exc}",
+                    **payload,
+                )
+
+        return _ok(payload)
 
 def main() -> None:
     """Run the FastMCP server over stdio.

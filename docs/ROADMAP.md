@@ -932,11 +932,11 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
-## P15: OpenTelemetry Observability 導入（Phase 3 実装済み）
+## P15: OpenTelemetry Observability 導入（Phase 4 実装済み）
 
-**ステータス: Phase 3 実装済み / Phase 4 以降 今後対応予定**
+**ステータス: Phase 4 実装済み / Phase 5 以降 今後対応予定**
 
-Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）が実装済み。Phase 4 以降（MCP サーバー計装）は後続 PR で段階的に追加する。
+Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）が実装済み。Phase 5 以降（既存 JSON メトリクスの OTel Metrics 接続）は後続 PR で段階的に追加する。
 
 ### 目的
 
@@ -1097,7 +1097,9 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 
 ---
 
-### P15-4: MCP サーバー（外部エージェント連携の入口）
+### P15-4: MCP サーバー（外部エージェント連携の入口）（実装済み）
+
+**ステータス: 実装済み**（`agent/telemetry.py` に `extract_trace_context` / `start_tool_span` を追加し、`agent/mcp_server.py` の主要 10 ツールを `mcp.tool.<name>` span でラップ。`agent/mcp_server_helpers.py` の `_carrier_from_ctx` が incoming MCP request の `_meta` から W3C Trace Context を取り出し、入口 span の parent に設定する。）
 
 #### 計装対象
 
@@ -1113,8 +1115,8 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 
 #### トレースコンテキスト伝播
 
-- `agent/llm_provider.py` の `McpSamplingLLMProvider._complete_via_sampling` 内の `metadata={"mumei_agent_llm_provider": "mcp_sampling"}` (L103) に `traceparent` / `tracestate` を追加し、MCP client → sampling → LLM の trace を接続する
-- 外部 MCP client（Claude Code / Devin）が W3C Trace Context を MCP request に含める場合、`mcp_server.py` の各ツールハンドラでコンテキストを抽出して span の parent に設定する
+- `agent/llm_provider.py` の `McpSamplingLLMProvider._complete_via_sampling` は `telemetry.inject_trace_context({"mumei_agent_llm_provider": "mcp_sampling"})` により送信側 `traceparent` / `tracestate` を注入済み（P15-1）。
+- 外部 MCP client（Claude Code / Devin）が W3C Trace Context を MCP request の `_meta` に含める場合、`mcp_server.py` の各ツールハンドラが `_carrier_from_ctx(ctx)` → `telemetry.extract_trace_context(carrier)` でコンテキストを抽出し、入口 span（`mcp.tool.<name>`）の parent に設定する。抽出できない場合は新規 root span として振る舞う（後方互換）。これにより MCP client → tool → 内部ループ（`mumei.loop.*`）→ verify subprocess（`mumei.verify`）→ LLM が 1 本の trace で接続される。
 
 ---
 
