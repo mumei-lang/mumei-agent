@@ -23,6 +23,7 @@ from threading import Lock
 from pathlib import Path
 from typing import Any
 
+from agent import telemetry
 from agent.config import AgentConfig
 from agent.gap_rules import (
     _IMPORT_RE,
@@ -312,26 +313,40 @@ def _parallel_forge(
         return []
     workers = _forge_worker_count(len(specs), max_workers)
     path = Path(cache_path)
+    # Capture the current (forge) span context so worker-thread spans parent
+    # onto the ``mumei.proliferate.forge`` span rather than appearing as roots.
+    forge_context = telemetry.capture_context()
 
     def run(index: int, spec: dict[str, Any]) -> dict[str, Any]:
-        _, result, metrics = _run_forge_generation(
-            index=index,
-            spec=spec,
-            config=config,
-            mumei_client=mumei_client,
-            cache_path=path,
-            mumei_repo_dir=mumei_repo_dir,
-        )
-        success = bool(result.get("verified"))
-        harness_metrics.record_result(
-            "proliferate_generation",
-            success,
-            retry_class=("cache_hit" if result.get("cache_hit") else "none")
-            if success
-            else str(result.get("reason", "generation_error")).split(":", 1)[0],
-            **_metrics_payload(metrics),
-        )
-        return result
+        with telemetry.use_context(forge_context), telemetry.start_span(
+            "mumei.proliferate.forge.candidate",
+            **{"mumei.proliferate.target_file": spec.get("target_file")},
+        ) as _span:
+            _, result, metrics = _run_forge_generation(
+                index=index,
+                spec=spec,
+                config=config,
+                mumei_client=mumei_client,
+                cache_path=path,
+                mumei_repo_dir=mumei_repo_dir,
+            )
+            success = bool(result.get("verified"))
+            telemetry.set_span_attributes(
+                _span,
+                {
+                    "mumei.proliferate.verified": success,
+                    "mumei.proliferate.cache_hit": bool(result.get("cache_hit")),
+                },
+            )
+            harness_metrics.record_result(
+                "proliferate_generation",
+                success,
+                retry_class=("cache_hit" if result.get("cache_hit") else "none")
+                if success
+                else str(result.get("reason", "generation_error")).split(":", 1)[0],
+                **_metrics_payload(metrics),
+            )
+            return result
 
     if workers == 1:
         return [run(idx, spec) for idx, spec in enumerate(specs, start=1)]
@@ -416,6 +431,18 @@ def _run_lean_fallback(
     The Lean fallback is best-effort: any failure short-circuits the
     enrichment for that spec and leaves the rest of the run untouched.
     """
+    with telemetry.start_span(
+        "mumei.proliferate.lean_fallback",
+        **{"mumei.proliferate.results": len(results)},
+    ):
+        _run_lean_fallback_inner(results, mumei_lean_repo=mumei_lean_repo)
+
+
+def _run_lean_fallback_inner(
+    results: list[dict[str, Any]],
+    *,
+    mumei_lean_repo: str | None,
+) -> None:
     from agent import lean_bridge
 
     import tempfile
@@ -517,6 +544,30 @@ def _run_lean_fallback(
                 publish_result["certificate"] = upgraded
 
 
+def _proposal_spans(
+    forged_results: list[dict[str, Any]],
+) -> Any:
+    """Yield ``(idx, spec_result, span)`` under a per-proposal child span.
+
+    Each proposal's publish/blast-radius/heal processing runs inside a
+    ``mumei.proliferate.proposal`` span carrying the target file and the forge
+    verification outcome.  The span is closed when the consumer advances the
+    loop (including via ``continue``) or the loop ends, so callers need no
+    explicit teardown.  Under NoOp the yielded span swallows every call.
+    """
+    for idx, spec_result in enumerate(forged_results, start=1):
+        spec = spec_result.get("spec") or {}
+        target_file = spec.get("target_file", "unknown.mm")
+        with telemetry.start_span(
+            "mumei.proliferate.proposal",
+            **{
+                "mumei.proliferate.target_file": str(target_file),
+                "mumei.proliferate.verified": bool(spec_result.get("verified")),
+            },
+        ) as span:
+            yield idx, spec_result, span
+
+
 def proliferate(
     mumei_repo_dir: str | Path,
     *,
@@ -555,6 +606,41 @@ def proliferate(
     -------
     List of result dicts, one per proposal.
     """
+    with telemetry.start_span(
+        "mumei.proliferate",
+        **{
+            "mumei.proliferate.max_proposals": max_proposals,
+            "mumei.proliferate.dry_run": dry_run,
+            "mumei.proliferate.harness_profile": harness_profile,
+        },
+    ) as _root_span:
+        return _proliferate_inner(
+            _root_span,
+            mumei_repo_dir,
+            max_proposals=max_proposals,
+            dry_run=dry_run,
+            mumei_bin=mumei_bin,
+            output_json=output_json,
+            enable_lean_fallback=enable_lean_fallback,
+            enable_self_correction=enable_self_correction,
+            harness_profile=harness_profile,
+            parallel_forge_workers=parallel_forge_workers,
+        )
+
+
+def _proliferate_inner(
+    _root_span: object,
+    mumei_repo_dir: str | Path,
+    *,
+    max_proposals: int = 3,
+    dry_run: bool = False,
+    mumei_bin: str | None = None,
+    output_json: str | Path | None = None,
+    enable_lean_fallback: bool = True,
+    enable_self_correction: bool | None = None,
+    harness_profile: str = "basic",
+    parallel_forge_workers: int | None = None,
+) -> list[dict[str, Any]]:
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="seconds"
     )
@@ -600,8 +686,13 @@ def proliferate(
         logger.debug("Could not measure initial health", exc_info=True)
 
     # Step 1: Gap analysis
-    _log_step(1, 4, f"Analyzing gaps in {std_dir}")
-    gaps = analyze_gaps(std_dir)
+    with telemetry.start_span("mumei.proliferate.gap_analysis"):
+        _log_step(1, 4, f"Analyzing gaps in {std_dir}")
+        gaps = analyze_gaps(std_dir)
+    telemetry.set_span_attributes(
+        _root_span,
+        {"mumei.proliferate.proposals_found": len(gaps["proposals"])},
+    )
     if not gaps["proposals"]:
         _log_info("No proposals found — std/ is complete or no gaps detected")
         results = [{"success": True, "reason": "no_proposals"}]
@@ -630,8 +721,9 @@ def proliferate(
     )
 
     # Step 2: Generate specs
-    _log_step(2, 4, "Generating forge task specs")
-    specs = generate_specs_from_gaps(gaps, max_count=max_proposals)
+    with telemetry.start_span("mumei.proliferate.spec_generation"):
+        _log_step(2, 4, "Generating forge task specs")
+        specs = generate_specs_from_gaps(gaps, max_count=max_proposals)
     if not specs:
         results = [{"success": True, "reason": "no_specs_generated"}]
         # PR 4: same rationale as the ``no_proposals`` branch above —
@@ -665,18 +757,19 @@ def proliferate(
     openai_client: Any | None = None
 
     specs = [harness_metrics.apply_to_spec(spec) for spec in specs]
-    forged_results = _parallel_forge(
-        specs,
-        config=config,
-        mumei_client=mumei_client,
-        harness_metrics=harness_metrics,
-        cache_path=_forge_cache_path(mumei_repo),
-        mumei_repo_dir=mumei_repo,
-        max_workers=parallel_forge_workers,
-    )
+    with telemetry.start_span("mumei.proliferate.forge"):
+        forged_results = _parallel_forge(
+            specs,
+            config=config,
+            mumei_client=mumei_client,
+            harness_metrics=harness_metrics,
+            cache_path=_forge_cache_path(mumei_repo),
+            mumei_repo_dir=mumei_repo,
+            max_workers=parallel_forge_workers,
+        )
 
     results: list[dict[str, Any]] = []
-    for idx, spec_result in enumerate(forged_results, start=1):
+    for idx, spec_result, _p_span in _proposal_spans(forged_results):
         spec = spec_result["spec"]
         target_file = spec.get("target_file", "unknown.mm")
         thought = spec_result["thought_process"]
@@ -709,6 +802,10 @@ def proliferate(
             f"Blast-radius result for {target_file}: "
             f"all_passed={blast['all_passed']}, "
             f"broken={len(blast['broken_files'])}"
+        )
+        telemetry.set_span_attributes(
+            _p_span,
+            {"mumei.proliferate.blast_radius_broken": len(blast["broken_files"])},
         )
 
         # Track files that were healed so they can be committed alongside
@@ -822,6 +919,11 @@ def proliferate(
             # Remove the new file — publish block below handles placement
             if new_file_path.exists():
                 new_file_path.unlink()
+
+        telemetry.set_span_attributes(
+            _p_span,
+            {"mumei.proliferate.healed": bool(healed_files)},
+        )
 
         # 3d. Publish (or dry-run)
         if dry_run:

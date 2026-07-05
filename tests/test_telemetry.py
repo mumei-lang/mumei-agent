@@ -674,3 +674,241 @@ def test_lean_bridge_no_build_success_emits_telemetry_noop(monkeypatch, tmp_path
     assert "lean_cert_path" in result
     assert "stdout" in result
     assert "stderr" in result
+
+
+# ---------------------------------------------------------------------------
+# P15-6: proliferate / NLAE / audit span helpers (NoOp path)
+# ---------------------------------------------------------------------------
+
+
+def test_start_span_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    with telemetry.start_span(
+        "mumei.proliferate", **{"mumei.proliferate.dry_run": True, "x": None},
+    ) as span:
+        assert isinstance(span, telemetry._NoOpSpan)
+        span.set_attribute("mumei.proliferate.proposals_found", 3)
+
+
+def test_set_span_attributes_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    telemetry.set_span_attributes(None, {"a": 1})
+    with telemetry.start_span("probe") as span:
+        telemetry.set_span_attributes(span, {"a": 1, "b": None, "c": "x"})
+
+
+def test_span_trace_id_none_when_disabled(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    with telemetry.start_span("probe") as span:
+        assert telemetry.span_trace_id(span) is None
+    assert telemetry.span_trace_id(None) is None
+
+
+def test_capture_and_use_context_noop(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    ctx = telemetry.capture_context()
+    assert ctx is None
+    with telemetry.use_context(ctx):
+        with telemetry.start_span("child") as span:
+            assert isinstance(span, telemetry._NoOpSpan)
+    with telemetry.use_context(None):
+        pass
+
+
+def test_start_span_records_exception_and_reraises(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    import pytest
+
+    with pytest.raises(ValueError):
+        with telemetry.start_span("boom"):
+            raise ValueError("kaboom")
+
+
+def test_proliferate_dry_run_returns_results_under_noop_span(monkeypatch, tmp_path):
+    """proliferate() dry-run keeps its return shape under NoOp spans."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from unittest.mock import MagicMock, patch
+
+    from agent import proliferate
+
+    std = tmp_path / "std"
+    std.mkdir()
+    fake_code = "// auto-generated\natom core_ok(x: i64) ensures: true; body: x;\n"
+
+    with patch("agent.proliferate.generate_code") as gen_mock, patch(
+        "agent.proliferate.AgentConfig"
+    ) as cfg_mock, patch(
+        "agent.proliferate.create_mumei_client"
+    ) as client_mock:
+        gen_mock.return_value = (fake_code, True)
+        cfg_instance = MagicMock()
+        cfg_instance.mumei_bin = "mumei"
+        cfg_instance.model = "gpt-test"
+        cfg_instance.max_retries = 2
+        cfg_instance.enable_self_correction = False
+        cfg_instance.create_client.return_value = MagicMock()
+        cfg_mock.return_value = cfg_instance
+
+        verify_client = MagicMock()
+        verify_client.verify.return_value = {
+            "success": True,
+            "report": {"status": "ok"},
+            "stdout": "",
+            "stderr": "",
+        }
+        client_mock.return_value = verify_client
+
+        results = proliferate.proliferate(tmp_path, dry_run=True, max_proposals=1)
+
+    assert len(results) >= 1
+    assert results[0]["success"] is True
+    assert results[0].get("dry_run") is True
+    assert results[0]["code"] == fake_code
+
+
+def test_proliferate_no_std_returns_error_under_noop_span(monkeypatch, tmp_path):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent import proliferate
+
+    results = proliferate.proliferate(tmp_path, dry_run=True)
+    assert results == [{"success": False, "reason": "std_dir_not_found"}]
+
+
+def test_nlae_run_full_pipeline_returns_result_under_noop_span(monkeypatch, tmp_path):
+    """NLAEPipeline.run_full_pipeline keeps its result/to_dict under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from agent.nlae_pipeline import NLAEPipeline
+
+    class FakeAgent:
+        def generate_code(self, spec: str) -> str:
+            return (
+                "atom nlae_ok(balance: i64, amount: i64)\n"
+                "    requires: balance >= 0;\n"
+                "    ensures: result >= 0;\n"
+                "    body: balance - amount;\n"
+            )
+
+    class FakeMumeiClient:
+        def verify(self, source_path: str) -> dict:
+            return {"success": True, "report": {"status": "ok"}}
+
+        def verify_loss_vector(self, source_path: str) -> dict:
+            return {"success": True}
+
+    class FakeLeanBridge:
+        def run_lean_bridge(self, cert_path, lean_cert_out, mumei_lean_repo) -> dict:
+            return {"success": True}
+
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=object(),
+        lean_bridge=FakeLeanBridge(),
+        work_dir=tmp_path,
+    )
+    result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+    assert result.verified is True
+    assert result.lean_verified is True
+    # trace_id is an optional field defaulting to None under NoOp.
+    assert result.trace_id is None
+    d = result.to_dict()
+    assert d["verified"] is True
+    assert d["trace_id"] is None
+
+
+def test_audit_file_and_directory_return_results_under_noop_span(monkeypatch, tmp_path):
+    """AuditPipeline.audit_file / audit_directory keep dataclass shape under NoOp."""
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from unittest.mock import MagicMock
+
+    from agent.audit import AuditDirectoryResult, AuditPipeline, AuditResult
+    from agent.code_to_spec import CodeToSpecResult
+    from agent.config import AgentConfig
+    from agent.strategies.cross_validation_strategy import CrossValidationReport
+
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+
+    def _make_pipeline() -> AuditPipeline:
+        extractor = MagicMock()
+        extractor.extract_from_file.return_value = CodeToSpecResult(
+            success=True,
+            natural_language_spec="withdraw preserves non-negative balance",
+            forge_task_spec={
+                "task_id": "audit-payment",
+                "target_file": "audit/payment.mm",
+                "mode": "create",
+                "atoms": [
+                    {
+                        "name": "withdraw",
+                        "inputs": [
+                            {"name": "balance", "type": "i64"},
+                            {"name": "amount", "type": "i64"},
+                        ],
+                        "return_type": "i64",
+                        "requires": "balance >= amount && amount >= 0",
+                        "ensures": "result == balance - amount && result >= 0",
+                    }
+                ],
+            },
+            detected_language="python",
+        )
+        foreign_verifier = MagicMock()
+        foreign_verifier.verify.return_value = {"success": True, "errors": []}
+        cross_validator = MagicMock()
+        cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+            spec_stronger_than_impl=[],
+            details=[],
+            coverage_ratio=1.0,
+        )
+        mumei = MagicMock()
+        mumei.verify.return_value = {"success": True, "report": {}, "stdout": "", "stderr": ""}
+        return AuditPipeline(
+            AgentConfig(api_key="test"),
+            code_to_spec_extractor=extractor,
+            foreign_code_verifier=foreign_verifier,
+            cross_validator=cross_validator,
+            mumei_client=mumei,
+        )
+
+    file_result = _make_pipeline().audit_file(source, "python")
+    assert isinstance(file_result, AuditResult)
+    assert file_result.spec_extracted is True
+
+    dir_result = _make_pipeline().audit_directory(tmp_path, "python")
+    assert isinstance(dir_result, AuditDirectoryResult)
+    assert dir_result.total_files >= 1
+    assert all(isinstance(fr, AuditResult) for fr in dir_result.file_results)
+
+
+def test_audit_source_returns_result_under_noop_span(monkeypatch):
+    monkeypatch.delenv("OTEL_ENABLED", raising=False)
+    from unittest.mock import MagicMock
+
+    from agent.audit import AuditPipeline, AuditResult
+    from agent.code_to_spec import CodeToSpecResult
+    from agent.config import AgentConfig
+    from agent.strategies.cross_validation_strategy import CrossValidationReport
+
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=False,
+        natural_language_spec="",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=["no spec"],
+    )
+    pipeline = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    )
+    result = pipeline.audit_source("def f():\n    return 1\n", "python")
+    assert isinstance(result, AuditResult)
+    assert result.source_file == "<inline:python>"

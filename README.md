@@ -303,7 +303,7 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
-### OpenTelemetry Observability (opt-in, P15 Phase 1-5)
+### OpenTelemetry Observability (opt-in, P15 Phase 1-6)
 
 Distributed tracing and token/latency metrics are **opt-in** and default to off.
 Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
@@ -444,6 +444,52 @@ histogram_quantile(0.95, rate(mumei_verify_duration_seconds_bucket[5m]))
 # Lean bridge error rate
 sum(rate(mumei_lean_bridge_error_code_total[5m])) by (mumei_lean_error_code)
 ```
+
+Phase 6 wraps the three long-running Python pipelines in root/child spans so a
+single proliferate / NLAE / audit run appears as one hierarchical trace, with
+the P15-2 `mumei.verify` and P15-3 `mumei.loop.*` spans nesting underneath
+automatically. All spans are `is_enabled()`-guarded, NoOp when OTel is disabled
+or the extra is not installed, and swallow exceptions; `proliferate()`'s
+`summary.json`, `NLAEResult.to_dict()`, and the `AuditResult` /
+`AuditDirectoryResult` dataclasses are unchanged.
+
+- **`mumei.proliferate`** — wraps the whole `proliferate()` weekly run.
+  Attributes: `mumei.proliferate.max_proposals`, `mumei.proliferate.dry_run`,
+  `mumei.proliferate.harness_profile`, `mumei.proliferate.proposals_found`.
+  Child spans: `mumei.proliferate.gap_analysis`,
+  `mumei.proliferate.spec_generation`, `mumei.proliferate.forge`, and
+  `mumei.proliferate.lean_fallback`. Because `_parallel_forge` runs on a
+  `ThreadPoolExecutor`, the submitting thread's context is captured with
+  `telemetry.capture_context()` and re-attached in each worker via
+  `telemetry.use_context()`, so every `mumei.proliferate.forge.candidate`
+  worker span (attributes `mumei.proliferate.target_file`,
+  `mumei.proliferate.verified`, `mumei.proliferate.cache_hit`) parents onto the
+  `mumei.proliferate.forge` span rather than becoming an orphan root. Each
+  publish iteration opens a `mumei.proliferate.proposal` span
+  (`mumei.proliferate.target_file`, `mumei.proliferate.verified`,
+  `mumei.proliferate.blast_radius_broken`, `mumei.proliferate.healed`).
+- **`mumei.nlae.pipeline`** — wraps `NLAEPipeline.run_full_pipeline`. The four
+  stages are child spans `mumei.nlae.generate`, `mumei.nlae.verify`,
+  `mumei.nlae.self_correction`, and `mumei.nlae.lean_bridge`. Attributes:
+  `mumei.nlae.verified`, `mumei.nlae.lean_verified`,
+  `mumei.nlae.loss_vector.present`. The root span's 32-hex trace ID is surfaced
+  on the new optional `NLAEResult.trace_id` field (default `None`, present only
+  as the last dataclass field so `to_dict()` stays backward compatible). When
+  the pipeline is invoked through the `run_nlae_pipeline` MCP tool, that
+  `mcp.tool.run_nlae_pipeline` entry span is the current span, so
+  `mumei.nlae.pipeline` nests underneath it and `trace_id` lets a caller follow
+  the distributed trace back to the originating MCP request across the
+  mumei-agent / mumei / mumei-lean / mumei-demo repositories.
+- **`mumei.audit.file` / `mumei.audit.directory` / `mumei.audit.source`** — wrap
+  `AuditPipeline.audit_file` / `audit_directory` / `audit_source`. A directory
+  audit's per-file `audit_file` calls appear as sequential `mumei.audit.file`
+  child spans under the `mumei.audit.directory` span. Attributes:
+  `mumei.audit.language`, `mumei.audit.success`, `mumei.audit.violations`
+  (file / source) and `mumei.audit.files_with_issues` (directory).
+
+The Rust compiler-side integration (`tracing-opentelemetry` in
+`mumei-lang/mumei`) that would connect the `mumei verify` subprocess into these
+Python traces is future work, tracked separately.
 
 ### Ollama KV cache and long-context tuning
 
