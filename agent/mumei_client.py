@@ -153,7 +153,6 @@ class MumeiClient:
             span.set_attribute("mumei.stdout.size", len(result.stdout))
             span.set_attribute("mumei.stderr.size", len(result.stderr))
             span.set_attribute("mumei.verification.duration_ms", duration_s * 1000)
-            telemetry.record_verify_duration(duration_s)
 
             if (
                 collect_decidable_metrics
@@ -171,6 +170,8 @@ class MumeiClient:
                     extra_args=extra_args,
                     spec_code_mapping=spec_code_mapping,
                 )
+
+            telemetry.record_verify_duration(duration_s)
 
             report = {}
             if result.stdout.strip():

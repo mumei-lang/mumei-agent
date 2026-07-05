@@ -325,7 +325,8 @@ class MumeiMCPClient:
             result = self.validate_logic(source_code)
             duration_s = time.monotonic() - t0
             span.set_attribute("mumei.verification.duration_ms", duration_s * 1000)
-            telemetry.record_verify_duration(duration_s)
+            if result.get("mode") != "fallback":
+                telemetry.record_verify_duration(duration_s)
 
             report = result.get("report") or {}
             if isinstance(report, dict) and (report or spec_code_mapping):
