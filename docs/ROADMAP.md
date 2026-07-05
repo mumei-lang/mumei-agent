@@ -936,7 +936,7 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 **ステータス: 完了** — Phase 1〜6 の Python 側全実装 + Rust コンパイラ側 `mumei verify` / Z3 span 連携の分散トレース接続が実装済み。`TRACEPARENT` 環境変数による W3C Trace Context 伝播により、外部 MCP client → mumei-agent → mumei verify subprocess 内の Z3 実行まで 1 本の分散トレースで貫通する。
 
-Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）および Phase 5（既存 `Metrics` / `HarnessMetrics` / `run_lean_bridge` の OTel Metrics 並行チャネル接続）および Phase 6 の Python 側 3 ファイル（`proliferate` の root/step/proposal/parallel-forge span、`nlae_pipeline` の分散トレース + `NLAEResult.trace_id`、`audit` の file/directory/source span）が実装済み。Phase 6 の Rust コンパイラ連携（`mumei-lang/mumei` への `tracing-opentelemetry` 導入）は将来構想（未着手）として別 PR に切り出す。
+Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）および Phase 3（各ループの root span 化 + `ThoughtProcess` の span イベント写像）および Phase 4（MCP サーバーのツール入口 span 化 + `extract_trace_context` による W3C Trace Context 受信）および Phase 5（既存 `Metrics` / `HarnessMetrics` / `run_lean_bridge` の OTel Metrics 並行チャネル接続）および Phase 6 の Python 側 3 ファイル（`proliferate` の root/step/proposal/parallel-forge span、`nlae_pipeline` の分散トレース + `NLAEResult.trace_id`、`audit` の file/directory/source span）が実装済み。Phase 6 の Rust コンパイラ連携（`mumei-lang/mumei` への `tracing-opentelemetry` 導入、`otel` feature / `OTEL_ENABLED` / `TRACEPARENT` 受信）は **実装済み（mumei PR #398）**。`mumei verify` を `--features otel` ビルド + `TRACEPARENT` 付きで呼ぶと Rust 側 `mumei.verify.cli` → `mumei.z3.solve` span が Python 側 trace と同一 trace ID で貫通する。運用層（リファレンス OTLP スタック・Grafana ダッシュボード・運用ドキュメント）は [`docs/OBSERVABILITY.md`](OBSERVABILITY.md) を参照。
 
 ### 目的
 
@@ -1215,6 +1215,8 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 - Z3 verify のサブプロセス実行時間が `mumei.verify.duration` histogram に記録される
 - エージェントの 1 回の heal/generate/self-correct サイクル全体が 1 つの trace として可視化される
 - MCP ツール経由の外部呼び出しが W3C Trace Context で親 trace に接続される
+- `mumei verify` を `--features otel` ビルド + `TRACEPARENT` 付きで呼んだとき、Rust 側 `mumei.verify.cli` → `mumei.z3.solve` span が Python 側 trace と同一 trace ID で貫通する（Rust 連携: mumei PR #398、達成済み）
+- リファレンス OTLP スタック（`docker-compose.otel.yml`: OTel Collector / Jaeger / Prometheus / Grafana）で trace と metrics を可視化できる（[`docs/OBSERVABILITY.md`](OBSERVABILITY.md)、達成済み）
 
 ---
 
