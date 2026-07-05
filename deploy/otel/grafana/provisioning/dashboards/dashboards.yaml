@@ -1,0 +1,16 @@
+# Auto-provisioned Grafana dashboard provider for the mumei-agent reference
+# stack. Loads every dashboard JSON mounted at /var/lib/grafana/dashboards.
+# Local-verification use only — see docs/OBSERVABILITY.md.
+apiVersion: 1
+
+providers:
+  - name: mumei-agent
+    orgId: 1
+    folder: Mumei
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

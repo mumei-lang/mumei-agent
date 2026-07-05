@@ -310,6 +310,12 @@ Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
 and metric instrument falls back to a NoOp implementation, so the heal /
 generate / forge / proliferate flows run byte-for-byte identically.
 
+> **Operations guide:** see [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for
+> the reference OTLP backend stack (`docker compose -f docker-compose.otel.yml up`
+> → Collector / Jaeger / Prometheus / Grafana), the Grafana dashboard, the span
+> hierarchy + metrics catalogue, and the end-to-end distributed-trace
+> verification procedure (mumei-agent → `mumei verify` → Rust Z3).
+
 ```bash
 # Install the optional OTel dependencies
 uv sync --extra otel        # or: pip install mumei-agent[otel]
