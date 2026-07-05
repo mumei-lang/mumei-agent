@@ -127,7 +127,7 @@ def get_fix_multi_stage(
                 {"role": "user", "content": fix_prompt},
             ],
         )
-        fix_tokens = response_token_count(fix_response)
+        fix_tokens = response_token_count(fix_response, model)
         total_tokens = diagnose_tokens + fix_tokens
         report_data["llm_tokens_used"] = total_tokens
         if metrics is not None:

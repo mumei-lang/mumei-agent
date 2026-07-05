@@ -118,7 +118,7 @@ def _diagnose(
     )
     return (
         _parse_diagnosis(diag_response.choices[0].message.content or ""),
-        response_token_count(diag_response),
+        response_token_count(diag_response, model),
     )
 
 
