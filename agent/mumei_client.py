@@ -5,7 +5,11 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
+from typing import Any
+
+from agent import telemetry
 
 
 def _decidable_metrics_emit_unsupported(stderr: str) -> bool:
@@ -82,6 +86,33 @@ class MumeiClient:
         self.mumei_bin = mumei_bin
         # Support "cargo run --" style invocation
         self._cmd_prefix = mumei_bin.split()
+        self._tracer = telemetry.get_tracer(__name__)
+
+    def _run_command(
+        self,
+        cmd: list[str],
+        *,
+        span_name: str,
+        source_path: str,
+        command_label: str,
+        env: dict[str, str] | None = None,
+        extra_attributes: dict[str, Any] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute *cmd* inside an OTel span and return the subprocess result."""
+        with self._tracer.start_as_current_span(span_name) as span:
+            span.set_attribute("mumei.command", command_label)
+            span.set_attribute("mumei.source_path", source_path)
+            if extra_attributes:
+                for k, v in extra_attributes.items():
+                    span.set_attribute(k, v)
+            t0 = time.monotonic()
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+            duration_s = time.monotonic() - t0
+            span.set_attribute("mumei.exit_code", result.returncode)
+            span.set_attribute("mumei.stdout.size", len(result.stdout))
+            span.set_attribute("mumei.stderr.size", len(result.stderr))
+            span.set_attribute("mumei.verification.duration_ms", duration_s * 1000)
+        return result
 
     def verify(
         self,
@@ -111,68 +142,96 @@ class MumeiClient:
             cmd.extend(extra_args)
         cmd.append(source_path)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if (
-            collect_decidable_metrics
-            and metrics_path is not None
-            and not metrics_path.read_text(encoding="utf-8", errors="ignore").strip()
-            and _decidable_metrics_emit_unsupported(result.stderr)
-        ):
-            try:
-                metrics_path.unlink()
-            except OSError:
-                pass
-            return self.verify(
-                source_path,
-                report_dir=report_dir,
-                extra_args=extra_args,
-                spec_code_mapping=spec_code_mapping,
-            )
+        with self._tracer.start_as_current_span("mumei.verify") as span:
+            span.set_attribute("mumei.command", "verify")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.collect_decidable_metrics", collect_decidable_metrics)
+            t0 = time.monotonic()
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            duration_s = time.monotonic() - t0
+            span.set_attribute("mumei.exit_code", result.returncode)
+            span.set_attribute("mumei.stdout.size", len(result.stdout))
+            span.set_attribute("mumei.stderr.size", len(result.stderr))
+            span.set_attribute("mumei.verification.duration_ms", duration_s * 1000)
+            telemetry.record_verify_duration(duration_s)
 
-        report = {}
-        if result.stdout.strip():
-            try:
-                report = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                pass
-        if collect_decidable_metrics and metrics_path is not None:
-            try:
-                metrics_text = metrics_path.read_text(encoding="utf-8")
-                if metrics_text.strip():
-                    decidable_metrics = json.loads(metrics_text)
-                    if isinstance(decidable_metrics, dict):
-                        report.setdefault("decidable_fragment", decidable_metrics)
-            except (OSError, json.JSONDecodeError):
-                pass
-            finally:
+            if (
+                collect_decidable_metrics
+                and metrics_path is not None
+                and not metrics_path.read_text(encoding="utf-8", errors="ignore").strip()
+                and _decidable_metrics_emit_unsupported(result.stderr)
+            ):
                 try:
                     metrics_path.unlink()
                 except OSError:
                     pass
-        result_report = {
-            "success": result.returncode == 0,
-            "report": report,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
-        if result.returncode != 0 and not _report_has_loss_vector(report):
-            loss_result = self.verify_loss_vector(source_path)
-            loss_vector = loss_result.get("loss_vector")
-            if isinstance(loss_vector, dict) and loss_vector:
-                result_report["loss_vector"] = loss_vector
-                if isinstance(report, dict):
-                    report.setdefault("structured_feedback", loss_vector)
-        result_report["spec_code_mapping"] = spec_code_mapping or []
-        if isinstance(report, dict) and (report or spec_code_mapping):
-            report.setdefault("spec_code_mapping", spec_code_mapping or [])
-        return result_report
+                return self.verify(
+                    source_path,
+                    report_dir=report_dir,
+                    extra_args=extra_args,
+                    spec_code_mapping=spec_code_mapping,
+                )
+
+            report = {}
+            if result.stdout.strip():
+                try:
+                    report = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    pass
+            if collect_decidable_metrics and metrics_path is not None:
+                try:
+                    metrics_text = metrics_path.read_text(encoding="utf-8")
+                    if metrics_text.strip():
+                        decidable_metrics = json.loads(metrics_text)
+                        if isinstance(decidable_metrics, dict):
+                            report.setdefault("decidable_fragment", decidable_metrics)
+                except (OSError, json.JSONDecodeError):
+                    pass
+                finally:
+                    try:
+                        metrics_path.unlink()
+                    except OSError:
+                        pass
+
+            has_decidable = isinstance(report, dict) and "decidable_fragment" in report
+            span.set_attribute("mumei.decidable_fragment.present", has_decidable)
+
+            result_report: dict[str, Any] = {
+                "success": result.returncode == 0,
+                "report": report,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+            if result.returncode != 0 and not _report_has_loss_vector(report):
+                loss_result = self.verify_loss_vector(source_path)
+                loss_vector = loss_result.get("loss_vector")
+                if isinstance(loss_vector, dict) and loss_vector:
+                    result_report["loss_vector"] = loss_vector
+                    if isinstance(report, dict):
+                        report.setdefault("structured_feedback", loss_vector)
+
+            has_lv = _report_has_loss_vector(report) or bool(
+                result_report.get("loss_vector")
+            )
+            span.set_attribute("mumei.loss_vector.present", has_lv)
+
+            result_report["spec_code_mapping"] = spec_code_mapping or []
+            if isinstance(report, dict) and (report or spec_code_mapping):
+                report.setdefault("spec_code_mapping", spec_code_mapping or [])
+            return result_report
 
     def verify_loss_vector(self, source_path: str) -> dict:
         """Run mumei verify --emit loss-vector and return parsed structured feedback."""
         cmd = [*self._cmd_prefix, "verify", "--emit", "loss-vector", source_path]
         env = dict(os.environ)
         env.setdefault("ENABLE_SELF_CORRECTION", "1")
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        result = self._run_command(
+            cmd,
+            span_name="mumei.verify.loss_vector",
+            source_path=source_path,
+            command_label="verify-loss-vector",
+            env=env,
+        )
         loss_vector = _parse_json_object_from_output(result.stdout)
         return {
             "success": result.returncode == 0,
@@ -189,7 +248,12 @@ class MumeiClient:
             Dict with keys: success (bool), stdout (str), stderr (str).
         """
         cmd = [*self._cmd_prefix, "check", source_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(
+            cmd,
+            span_name="mumei.check",
+            source_path=source_path,
+            command_label="check",
+        )
         return {
             "success": result.returncode == 0,
             "stdout": result.stdout,
@@ -199,7 +263,12 @@ class MumeiClient:
     def infer_effects(self, source_path: str) -> dict:
         """Run mumei infer-effects and return parsed JSON result."""
         cmd = [*self._cmd_prefix, "infer-effects", source_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(
+            cmd,
+            span_name="mumei.infer_effects",
+            source_path=source_path,
+            command_label="infer-effects",
+        )
         if result.returncode == 0 and result.stdout.strip():
             try:
                 return {"success": True, "analysis": json.loads(result.stdout)}
@@ -210,7 +279,12 @@ class MumeiClient:
     def infer_contracts(self, source_path: str) -> dict:
         """Run mumei infer-contracts and return parsed JSON result."""
         cmd = [*self._cmd_prefix, "infer-contracts", source_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(
+            cmd,
+            span_name="mumei.infer_contracts",
+            source_path=source_path,
+            command_label="infer-contracts",
+        )
         if result.returncode == 0 and result.stdout.strip():
             try:
                 return {"success": True, "analysis": json.loads(result.stdout)}
@@ -227,7 +301,13 @@ class MumeiClient:
         - python-wrapper: generates ctypes-based Python wrappers
         """
         cmd = [*self._cmd_prefix, "build", source_path, "-o", output, "--emit", emit]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(
+            cmd,
+            span_name="mumei.build",
+            source_path=source_path,
+            command_label="build",
+            extra_attributes={"mumei.build.emit": emit},
+        )
         return {
             "success": result.returncode == 0,
             "stdout": result.stdout,
@@ -241,7 +321,12 @@ class MumeiClient:
         is retained for standalone build use-cases.
         """
         cmd = [*self._cmd_prefix, "build", source_path, "-o", output]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run_command(
+            cmd,
+            span_name="mumei.build",
+            source_path=source_path,
+            command_label="build",
+        )
         return {
             "success": result.returncode == 0,
             "stdout": result.stdout,

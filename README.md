@@ -303,7 +303,7 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
-### OpenTelemetry Observability (opt-in, P15 Phase 1)
+### OpenTelemetry Observability (opt-in, P15 Phase 1-2)
 
 Distributed tracing and token/latency metrics are **opt-in** and default to off.
 Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
@@ -337,8 +337,23 @@ is also reported to the `gen_ai.usage.total_tokens` counter (tagged with the
 JSON metrics output
 (`Metrics.to_dict()` / `HarnessMetrics.aggregate_metrics()`). MCP sampling
 requests carry a W3C `traceparent` in their metadata for cross-process trace
-propagation. Z3 `verify` spans, per-loop root spans, and MCP server tool
-instrumentation are planned for Phase 2+.
+propagation.
+
+Phase 2 instruments the Z3 verification subprocess calls in `MumeiClient` and
+`MumeiMCPClient`. Every `verify`, `check`, `infer-effects`, `infer-contracts`,
+and `build` call is wrapped in an OTel span (`mumei.verify`, `mumei.check`,
+`mumei.infer_effects`, `mumei.infer_contracts`, `mumei.build`) with attributes
+`mumei.command`, `mumei.source_path`, `mumei.exit_code`,
+`mumei.verification.duration_ms`, `mumei.stdout.size`, and `mumei.stderr.size`.
+The `mumei.verify` span additionally carries `mumei.collect_decidable_metrics`,
+`mumei.decidable_fragment.present`, and `mumei.loss_vector.present`.  Failed
+verifications that trigger a loss-vector re-run produce a child span
+`mumei.verify.loss_vector`.  Verification wall-clock time is also reported to
+the `mumei.verify.duration` histogram (unit: seconds) as a parallel OTel
+metrics channel that never changes the `Metrics.to_dict()` JSON output.
+
+Per-loop root spans and MCP server tool instrumentation are planned for
+Phase 3+.
 
 ### Ollama KV cache and long-context tuning
 

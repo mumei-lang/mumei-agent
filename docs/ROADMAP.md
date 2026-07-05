@@ -932,11 +932,11 @@ mumei-demo リポジトリとの連携。詳細は [mumei-lang/mumei の docs/CR
 
 ---
 
-## P15: OpenTelemetry Observability 導入（Phase 1 実装済み）
+## P15: OpenTelemetry Observability 導入（Phase 2 実装済み）
 
-**ステータス: Phase 1 実装済み / Phase 2 以降 今後対応予定**
+**ステータス: Phase 2 実装済み / Phase 3 以降 今後対応予定**
 
-Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）が実装済み。Phase 2 以降（Z3 verify span、各ループの root span 化、MCP サーバー計装）は後続 PR で段階的に追加する。
+Phase 1（`agent/telemetry.py` の NoOp フォールバック基盤 + LLM 呼び出しの span 計装 + `gen_ai.usage.total_tokens` counter 接続 + `otel` optional-dependency）および Phase 2（`MumeiClient` / `MumeiMCPClient` の Z3 verify span 計装 + `mumei.verify.duration` histogram）が実装済み。Phase 3 以降（各ループの root span 化、MCP サーバー計装）は後続 PR で段階的に追加する。
 
 ### 目的
 
@@ -1027,6 +1027,8 @@ Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出�
 ---
 
 ### P15-2: Z3 検証のサブプロセス呼び出し（ツール span）
+
+**ステータス: 実装済み（Phase 2）**
 
 #### 計装対象
 
