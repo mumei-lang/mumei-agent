@@ -7,6 +7,8 @@ from typing import Mapping
 
 from openai import OpenAI
 
+from agent import telemetry
+
 
 @dataclass(frozen=True)
 class DenseCompressionStats:
@@ -73,22 +75,26 @@ class DensePropertyGenerator:
     ) -> str:
         """Ask an LLM for compact mathematically precise properties."""
         prompt = self._optimize_prompt(spec, current_properties)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You synthesize proof-friendly Mumei contracts for Z3. "
-                        "Minimize estimated solver cost by deduplicating "
-                        "predicates, preferring linear arithmetic comparisons, "
-                        "and avoiding quantifiers unless semantically required. "
-                        "Return only requires/ensures clauses."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
+        tracer = telemetry.get_tracer(__name__)
+        with tracer.start_as_current_span("llm.dense_property_generation") as span:
+            span.set_attribute("gen_ai.system", "openai-compatible")
+            span.set_attribute("gen_ai.request.model", model)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You synthesize proof-friendly Mumei contracts for Z3. "
+                            "Minimize estimated solver cost by deduplicating "
+                            "predicates, preferring linear arithmetic comparisons, "
+                            "and avoiding quantifiers unless semantically required. "
+                            "Return only requires/ensures clauses."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+            )
         return response.choices[0].message.content or ""
 
     def _optimize_prompt(

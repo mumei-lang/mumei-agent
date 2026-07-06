@@ -335,7 +335,7 @@ uv run mumei-agent heal examples/effect_test.mm
   `http/protobuf` (or any `http*` value) to use the HTTP exporters instead of
   gRPC.
 
-Phase 1 instruments the LLM call chokepoint: `OpenAILLMProvider.complete` and
+Phase 1 instruments all LLM call sites: `OpenAILLMProvider.complete` and
 `McpSamplingLLMProvider.complete` emit spans with `gen_ai.request.model`,
 `gen_ai.system`, `server.address`, and `gen_ai.usage.total_tokens`; token usage
 is also reported to the `gen_ai.usage.total_tokens` counter (tagged with the
@@ -343,7 +343,14 @@ is also reported to the `gen_ai.usage.total_tokens` counter (tagged with the
 JSON metrics output
 (`Metrics.to_dict()` / `HarnessMetrics.aggregate_metrics()`). MCP sampling
 requests carry a W3C `traceparent` in their metadata for cross-process trace
-propagation.
+propagation. `McpSamplingLLMProvider.complete_with_tools` has its own
+`mcp_sampling.complete_with_tools` span with `tool_count` and `tool_choice`
+attributes. The dispatch functions `complete_text` / `complete_response` emit
+`llm.complete_text` / `llm.complete_response` spans with `gen_ai.dispatch_path`
+identifying the routing decision. All 8 direct `client.chat.completions.create`
+call sites (spec refinement, multi-stage fix, diagnose, CEGIS invariant
+synthesis, spec extraction, code-to-spec, dense property generation, ambiguity
+detection) are individually instrumented with `llm.*` spans.
 
 Phase 2 instruments the Z3 verification subprocess calls in `MumeiClient` and
 `MumeiMCPClient`. Every CLI subprocess call is wrapped in an OTel span

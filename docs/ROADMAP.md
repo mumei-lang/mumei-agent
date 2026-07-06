@@ -83,11 +83,8 @@ Future work:
    optimistic), keeps tool definitions scoped to each sampling request, and
    returns parsed text + `tool_use` blocks (`SamplingToolCompletion`).  The
    default text-only `complete()` path is unchanged.
-3. Preserve the current text-only path as the default; add multimodal
-   image/audio request support only if a concrete forge/heal use case appears.
-4. Monitor MCP spec releases for sampling changes, especially `includeContext`
-   soft-deprecation and client capability shape changes, while keeping the
-   direct `LLMProvider` abstraction and OpenAI-compatible fallback stable.
+3. 🔍 **監視項目** — multimodal image/audio sampling は具体的な forge/heal ユースケースが発生するまで追加しない。現行の text-only path をデフォルトとして維持する。
+4. 🔍 **監視項目** — MCP spec release 追随。特に `includeContext` soft-deprecation と client capability shape の変更を監視し、`LLMProvider` 抽象と OpenAI-compatible fallback の安定性を維持する。
 
 ## 現状
 
@@ -986,7 +983,7 @@ LLM 呼び出しはエージェントのコスト・レイテンシの大部分�
 - `fix_strategy_helpers.response_token_count()` が抽出する `usage.total_tokens` を OTel の `gen_ai.usage.total_tokens` counter へ並行報告（`Metrics.record_tokens` / `Metrics.to_dict()` の出力形式には一切影響しない）。
 - `pyproject.toml` に opt-in の `otel` extra を追加。
 
-Phase 1 の残り（表内の直接 `client.chat.completions.create` 呼び出しの個別計装、`complete_with_tools` の独立 span 化、ディスパッチ関数計装）は後続で対応する。
+Phase 1 の残り — ✅ **完了**: 直接 `client.chat.completions.create` 呼び出し 8 箇所の個別計装（`spec_refinement`, `multi_stage_strategy`, `multi_stage_strategy_helpers`, `cegis_loop`, `spec_extractor`, `code_to_spec`, `dense_property_generator`, `ambiguity_detector`）、`complete_with_tools` の独立 `mcp_sampling.complete_with_tools` span 化（tool_count / tool_choice 属性付き）、ディスパッチ関数 `complete_text` / `complete_response` の `llm.complete_text` / `llm.complete_response` span 化（dispatch_path 属性 + response token annotation）。
 
 #### 計装対象（provider 経由の正規パス）
 

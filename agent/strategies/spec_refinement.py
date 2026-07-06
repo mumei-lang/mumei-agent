@@ -24,6 +24,7 @@ from openai import OpenAI
 
 from agent.config import AgentConfig
 from agent.intent_tracker import IntentDriftResult, IntentTracker
+from agent import telemetry
 from agent.metrics import Metrics
 
 _logger = logging.getLogger(__name__)
@@ -83,20 +84,24 @@ def refine_spec(
         "Return ONLY the refined JSON spec (no explanation).\n"
     )
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a specification engineer for the Mumei "
-                    "proof-driven language. Refine specifications to make "
-                    "them satisfiable while preserving intent."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-    )
+    tracer = telemetry.get_tracer(__name__)
+    with tracer.start_as_current_span("llm.spec_refinement") as span:
+        span.set_attribute("gen_ai.system", "openai-compatible")
+        span.set_attribute("gen_ai.request.model", model)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a specification engineer for the Mumei "
+                        "proof-driven language. Refine specifications to make "
+                        "them satisfiable while preserving intent."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
 
     raw = response.choices[0].message.content or ""
 

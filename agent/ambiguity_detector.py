@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from agent import telemetry
 from agent.config import AgentConfig
 from agent.prompts.ambiguity_detection import (
     AMBIGUITY_DETECTION_SYSTEM_PROMPT,
@@ -153,17 +154,21 @@ class AmbiguityDetector:
     ) -> tuple[list[AmbiguityFinding], list[str]]:
         try:
             client = self.config.create_client()
-            response = client.chat.completions.create(
-                model=self.config.model,
-                messages=[
-                    {"role": "system", "content": AMBIGUITY_DETECTION_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": build_disambiguation_prompt(natural_language),
-                    },
-                ],
-                response_format={"type": "json_object"},
-            )
+            tracer = telemetry.get_tracer(__name__)
+            with tracer.start_as_current_span("llm.ambiguity_detection") as span:
+                span.set_attribute("gen_ai.system", "openai-compatible")
+                span.set_attribute("gen_ai.request.model", self.config.model)
+                response = client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        {"role": "system", "content": AMBIGUITY_DETECTION_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": build_disambiguation_prompt(natural_language),
+                        },
+                    ],
+                    response_format={"type": "json_object"},
+                )
             raw = response.choices[0].message.content or ""
             payload = json.loads(raw)
         except (ValueError, json.JSONDecodeError, AttributeError, TypeError) as exc:

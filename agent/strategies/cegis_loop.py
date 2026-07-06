@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from agent import telemetry
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient
 
@@ -192,19 +193,23 @@ Return ONLY the refined invariant expression."""
         try:
             if self._client is None:
                 self._client = self.config.create_client()
-            response = self._client.chat.completions.create(
-                model=self.config.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You synthesize concise Mumei loop invariants. "
-                            "Return only a boolean expression."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-            )
+            tracer = telemetry.get_tracer(__name__)
+            with tracer.start_as_current_span("llm.cegis_synthesize_invariant") as span:
+                span.set_attribute("gen_ai.system", "openai-compatible")
+                span.set_attribute("gen_ai.request.model", self.config.model)
+                response = self._client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You synthesize concise Mumei loop invariants. "
+                                "Return only a boolean expression."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                )
             content = response.choices[0].message.content or ""
             invariant = _clean_invariant(content)
             return invariant or fallback
