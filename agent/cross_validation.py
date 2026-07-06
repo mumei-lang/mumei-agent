@@ -18,8 +18,7 @@ import z3
 from agent.ambiguity_detector import AmbiguityDetector
 from agent.config import AgentConfig
 from agent.code_to_spec import CodeToSpecConverter
-from agent.lean_bridge import run_lean_bridge
-from agent.lean_bridge_helpers import merge_lean_cert_into_proof_cert
+from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.llm_provider import LLMProvider, OpenAILLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.cross_validation_code import (
@@ -703,7 +702,7 @@ def validate_foreign_code(
             config,
         )
         if lean_bridge_result is not None:
-            warnings.extend(lean_bridge_result.get("warnings", []))
+            warnings.extend(lean_bridge_result.get("diagnostics", []))
             if not lean_bridge_result.get("success", False):
                 warnings.append(
                     str(lean_bridge_result.get("stderr") or lean_bridge_result.get("error_code") or "lean bridge failed")
@@ -751,20 +750,10 @@ def _run_solidity_guard_trace_lean_bridge(
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     if not config.mumei_lean_repo:
         return proof_certificate, None
-    with tempfile.TemporaryDirectory(prefix="mumei-solidity-lean-") as tmp:
-        tmp_dir = Path(tmp)
-        cert_path = tmp_dir / "solidity_guard_trace.proof-cert.json"
-        lean_cert_out = tmp_dir / "solidity_guard_trace.lean-cert.json"
-        cert_path.write_text(json.dumps(proof_certificate, indent=2), encoding="utf-8")
-        bridge_result = run_lean_bridge(
-            cert_path=cert_path,
-            lean_cert_out=lean_cert_out,
-            mumei_lean_repo=config.mumei_lean_repo,
-        )
-        lean_cert = bridge_result.get("lean_cert")
-        if isinstance(lean_cert, dict):
-            proof_certificate = merge_lean_cert_into_proof_cert(proof_certificate, lean_cert)
-        return proof_certificate, bridge_result
+    return run_lean_bridge_and_merge_proof_cert(
+        proof_certificate,
+        config.mumei_lean_repo,
+    )
 
 
 def _solidity_advisory_issues(code: str) -> list[CrossValidationIssue]:

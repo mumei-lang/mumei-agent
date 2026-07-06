@@ -228,13 +228,41 @@ def test_audit_pipeline_emits_guard_trace_certificate_and_upgrades_via_lean_brid
         ]
     }
 
-    with patch("agent.audit.run_lean_bridge") as bridge_mock:
-        bridge_mock.return_value = {
-            "success": True,
-            "lean_cert": lean_cert,
-            "stdout": "",
-            "stderr": "",
-        }
+    with patch("agent.audit.run_lean_bridge_and_merge_proof_cert") as bridge_mock:
+        bridge_mock.return_value = (
+            {
+                "atoms": [
+                    {
+                        "name": "withdraw_guard_trace",
+                        "z3_check_result": "lean_verified",
+                        "status": "verified",
+                        "translator_ir": {
+                            "guard_trace": {
+                                "ops": ["lock", "externalCall", "unlock"],
+                                "expected_outcome": "safe",
+                            }
+                        },
+                    },
+                    {
+                        "name": "manualWithdraw_guard_trace",
+                        "z3_check_result": "lean_verified",
+                        "status": "verified",
+                        "translator_ir": {
+                            "guard_trace": {
+                                "ops": ["lock", "externalCall", "unlock"],
+                                "expected_outcome": "safe",
+                            }
+                        },
+                    },
+                ]
+            },
+            {
+                "success": True,
+                "lean_cert": lean_cert,
+                "stdout": "",
+                "stderr": "",
+            },
+        )
         result = AuditPipeline(
             AgentConfig(api_key="test", mumei_lean_repo="/tmp/mumei-lean"),
             code_to_spec_extractor=extractor,

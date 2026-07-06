@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -555,3 +556,28 @@ def merge_lean_cert_into_proof_cert(
             ]
 
     return upgraded
+
+
+def run_lean_bridge_and_merge_proof_cert(
+    proof_certificate: dict[str, Any],
+    mumei_lean_repo: str | Path,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    from agent.lean_bridge import run_lean_bridge
+
+    with tempfile.TemporaryDirectory(prefix="mumei-lean-bridge-") as tmp:
+        tmp_dir = Path(tmp)
+        cert_path = tmp_dir / "bridge_input.proof-cert.json"
+        lean_cert_out = tmp_dir / "bridge_output.lean-cert.json"
+        cert_path.write_text(json.dumps(proof_certificate, indent=2), encoding="utf-8")
+        bridge_result = run_lean_bridge(
+            cert_path=cert_path,
+            lean_cert_out=lean_cert_out,
+            mumei_lean_repo=mumei_lean_repo,
+        )
+        lean_cert = bridge_result.get("lean_cert")
+        if isinstance(lean_cert, dict):
+            proof_certificate = merge_lean_cert_into_proof_cert(
+                proof_certificate,
+                lean_cert,
+            )
+        return proof_certificate, bridge_result

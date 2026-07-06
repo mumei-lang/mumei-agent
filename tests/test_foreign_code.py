@@ -249,13 +249,30 @@ def test_validate_foreign_code_can_upgrade_guard_trace_certificate_via_lean_brid
         ]
     }
 
-    with patch("agent.cross_validation.run_lean_bridge") as bridge_mock:
-        bridge_mock.return_value = {
-            "success": True,
-            "lean_cert": lean_cert,
-            "stdout": "",
-            "stderr": "",
-        }
+    with patch("agent.cross_validation.run_lean_bridge_and_merge_proof_cert") as bridge_mock:
+        bridge_mock.return_value = (
+            {
+                "atoms": [
+                    {
+                        "name": "withdraw_guard_trace",
+                        "z3_check_result": "lean_verified",
+                        "status": "verified",
+                    },
+                    {
+                        "name": "manualWithdraw_guard_trace",
+                        "z3_check_result": "lean_verified",
+                        "status": "verified",
+                    },
+                ]
+            },
+            {
+                "success": True,
+                "lean_cert": lean_cert,
+                "diagnostics": ["bridge diag"],
+                "stdout": "",
+                "stderr": "",
+            },
+        )
         result = validate_foreign_code(
             source,
             "solidity",
@@ -273,6 +290,7 @@ def test_validate_foreign_code_can_upgrade_guard_trace_certificate_via_lean_brid
     assert atoms["manualWithdraw_guard_trace"]["z3_check_result"] == "lean_verified"
     assert result.lean_bridge is not None
     assert result.lean_bridge["success"] is True
+    assert "bridge diag" in result.warnings
 
 
 def test_to_mumei_atom_emits_trusted_contract() -> None:

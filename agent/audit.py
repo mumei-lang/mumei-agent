@@ -69,8 +69,7 @@ from agent.audit_reporting import (
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
 from agent.extract_spec import _collect_code_files
-from agent.lean_bridge import run_lean_bridge
-from agent.lean_bridge_helpers import merge_lean_cert_into_proof_cert
+from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.llm_provider import LLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
@@ -277,25 +276,12 @@ class AuditPipeline:
             )
             lean_bridge_result: dict[str, object] | None = None
             if enable_lean_bridge and proof_certificate is not None and self.config.mumei_lean_repo:
-                with tempfile.TemporaryDirectory(prefix="mumei-audit-lean-") as lean_tmp:
-                    lean_tmp_path = Path(lean_tmp)
-                    cert_path = lean_tmp_path / "audit_guard_trace.proof-cert.json"
-                    lean_cert_out = lean_tmp_path / "audit_guard_trace.lean-cert.json"
-                    cert_path.write_text(
-                        json.dumps(proof_certificate, indent=2),
-                        encoding="utf-8",
+                proof_certificate, lean_bridge_result = (
+                    run_lean_bridge_and_merge_proof_cert(
+                        proof_certificate,
+                        self.config.mumei_lean_repo,
                     )
-                    lean_bridge_result = run_lean_bridge(
-                        cert_path=cert_path,
-                        lean_cert_out=lean_cert_out,
-                        mumei_lean_repo=self.config.mumei_lean_repo,
-                    )
-                    lean_cert = lean_bridge_result.get("lean_cert")
-                    if isinstance(lean_cert, dict):
-                        proof_certificate = merge_lean_cert_into_proof_cert(
-                            proof_certificate,
-                            lean_cert,
-                        )
+                )
 
             try:
                 foreign_result = self.foreign_code_verifier.verify(source_code, audit_language)
