@@ -1,6 +1,7 @@
 """Extract natural language specifications from existing source code."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
@@ -218,7 +219,7 @@ class CodeToSpecExtractor:
             return self.EXTENSION_MAP[suffix]
 
         code_lower = code.lower()
-        if "pragma solidity" in code_lower or "contract " in code:
+        if "pragma solidity" in code_lower or re.search(r"\bcontract\s+[A-Z]", code):
             return "solidity"
         if "fn main()" in code or "fn " in code or "impl " in code:
             return "rust"

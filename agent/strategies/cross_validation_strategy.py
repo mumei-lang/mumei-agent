@@ -108,7 +108,7 @@ class CrossValidator:
         Args:
             spec_path: Path to .mm specification file.
             impl_path: Path to implementation source file.
-            language: Language of the implementation (python/rust/typescript/go).
+            language: Language of the implementation (python/rust/typescript/go/solidity).
 
         Returns:
             CrossValidationReport with semantic gap analysis.

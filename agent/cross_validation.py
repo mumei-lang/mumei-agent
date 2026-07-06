@@ -783,7 +783,7 @@ def build_validate_code_to_spec_parser(
 def build_validate_code_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     """Add validate-code arguments to an argparse parser."""
     parser = parser or argparse.ArgumentParser(
-        description="Infer and verify contracts from existing code (Python, Rust, TypeScript, Go)."
+        description="Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity)."
     )
     source_arg = parser.add_mutually_exclusive_group(required=True)
     source_arg.add_argument("--input", dest="input", help="Path to source code.")
