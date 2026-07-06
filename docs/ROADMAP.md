@@ -309,9 +309,10 @@ Solidity（`.sol`）は関数レベルの契約（pre/postcondition）と `uint2
 #### 次タスク候補: スマートコントラクト固有パターン検証
 
 Solidity の Layer B は stage 1 として、CEI/reentrancy と access control 欠落の
-**決定論的ヒューリスティック警告**を実装済み（Z3 証明ではない）。残タスクは次の段階に分ける:
+**決定論的ヒューリスティック警告**を実装済み（Z3 証明ではない）。stage 2 では
+reentrancy について guard-state-machine の Z3 検証を実装済み（`solc` 依存なし）。残タスクは
+次の段階に分ける:
 
-- **stage 2**: `solc --ast-compact-json` の Solidity AST を使った Z3 ベースの状態機械検証
 - **stage 3**: mumei-lean の `SmartContract.lean` / `GuardState` / `runGuard` モデルと
   `no_external_call_without_lock` 系 theorem による Lean 証明証跡化
 

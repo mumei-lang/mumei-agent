@@ -135,6 +135,30 @@ def test_verifier_reports_solidity_reentrancy_and_access_control_heuristics() ->
     assert any("setOwner" in error and "access-control guard" in error for error in result["errors"])
     assert all("withdrawAll" not in error for error in result["errors"])
     assert all("getBalance" not in error for error in result["errors"])
+    assert result["counterexample"]["guard"] == "absent"
+    assert result["counterexample"]["reentrancy_trace"] == [
+        "externalCall: msg.sender.call{value: amount}(\"\");",
+        "stateWrite: balances[msg.sender]",
+    ]
+    mumei.verify.assert_called_once()
+
+
+def test_verifier_suppresses_solidity_reentrancy_when_guarded() -> None:
+    source = (FIXTURES / "sample_solidity_guarded.sol").read_text(encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "solidity")
+
+    assert result["success"] is False
+    assert any("no access-control guard" in error for error in result["errors"])
+    assert all("may be vulnerable to reentrancy" not in error for error in result["errors"])
+    assert "counterexample" not in result
     mumei.verify.assert_called_once()
 
 
