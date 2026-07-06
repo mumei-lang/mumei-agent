@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 from collections.abc import Iterable
 from dataclasses import asdict, replace
 import os
@@ -17,6 +18,8 @@ import z3
 from agent.ambiguity_detector import AmbiguityDetector
 from agent.config import AgentConfig
 from agent.code_to_spec import CodeToSpecConverter
+from agent.lean_bridge import run_lean_bridge
+from agent.lean_bridge_helpers import merge_lean_cert_into_proof_cert
 from agent.llm_provider import LLMProvider, OpenAILLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.cross_validation_code import (
@@ -79,6 +82,9 @@ from agent.cross_validation_foreign import (
     _typescript_raw_return_expression,
     _typescript_return_type,
     _with_source_lines,
+)
+from agent.strategies.foreign_code_strategy_helpers import (
+    build_solidity_guard_trace_proof_certificate,
 )
 from agent.cross_validation_payload import (
     _atom_from_mapping,
@@ -632,6 +638,7 @@ def validate_foreign_code(
     config: AgentConfig | None = None,
     use_llm: bool = True,
     run_mumei: bool = True,
+    enable_lean_bridge: bool = False,
     llm_provider: LLMProvider | None = None,
 ) -> ForeignCodeValidationResult:
     """Validate Python, Rust, TypeScript, or Go code by inferring contracts."""
@@ -685,6 +692,23 @@ def validate_foreign_code(
         if verification is not None and verification.get("success") is False:
             satisfiable = False
 
+    proof_certificate = _build_solidity_guard_trace_proof_certificate(
+        code,
+        language=normalized_language,
+    )
+    lean_bridge_result: dict[str, object] | None = None
+    if proof_certificate is not None and enable_lean_bridge:
+        proof_certificate, lean_bridge_result = _run_solidity_guard_trace_lean_bridge(
+            proof_certificate,
+            config,
+        )
+        if lean_bridge_result is not None:
+            warnings.extend(lean_bridge_result.get("warnings", []))
+            if not lean_bridge_result.get("success", False):
+                warnings.append(
+                    str(lean_bridge_result.get("stderr") or lean_bridge_result.get("error_code") or "lean bridge failed")
+                )
+
     success = not errors and not issues and atoms and satisfiable is not False
     return ForeignCodeValidationResult(
         success=bool(success),
@@ -693,11 +717,54 @@ def validate_foreign_code(
         mumei_source=mumei_source,
         satisfiable=satisfiable,
         verification=verification,
+        proof_certificate=proof_certificate,
+        lean_bridge=lean_bridge_result,
         issues=issues,
         source_line_map=source_line_map,
         warnings=warnings,
         errors=errors,
     )
+
+
+def _build_solidity_guard_trace_proof_certificate(
+    code: str,
+    *,
+    language: str,
+) -> dict[str, object] | None:
+    if language != "solidity":
+        return None
+    cert = build_solidity_guard_trace_proof_certificate(
+        code,
+        source_file="<inline:solidity>",
+        package_name="solidity",
+        package_version="0",
+        mumei_version="agent",
+    )
+    if not cert.get("atoms"):
+        return None
+    return cert
+
+
+def _run_solidity_guard_trace_lean_bridge(
+    proof_certificate: dict[str, object],
+    config: AgentConfig,
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    if not config.mumei_lean_repo:
+        return proof_certificate, None
+    with tempfile.TemporaryDirectory(prefix="mumei-solidity-lean-") as tmp:
+        tmp_dir = Path(tmp)
+        cert_path = tmp_dir / "solidity_guard_trace.proof-cert.json"
+        lean_cert_out = tmp_dir / "solidity_guard_trace.lean-cert.json"
+        cert_path.write_text(json.dumps(proof_certificate, indent=2), encoding="utf-8")
+        bridge_result = run_lean_bridge(
+            cert_path=cert_path,
+            lean_cert_out=lean_cert_out,
+            mumei_lean_repo=config.mumei_lean_repo,
+        )
+        lean_cert = bridge_result.get("lean_cert")
+        if isinstance(lean_cert, dict):
+            proof_certificate = merge_lean_cert_into_proof_cert(proof_certificate, lean_cert)
+        return proof_certificate, bridge_result
 
 
 def _solidity_advisory_issues(code: str) -> list[CrossValidationIssue]:
@@ -812,6 +879,16 @@ def build_validate_code_parser(parser: argparse.ArgumentParser | None = None) ->
     parser.add_argument("--output", help="Optional JSON report path.")
     parser.add_argument("--no-llm", action="store_true", help="Skip LLM contract inference.")
     parser.add_argument("--no-mumei", action="store_true", help="Skip mumei verify.")
+    parser.add_argument(
+        "--enable-lean-bridge",
+        action="store_true",
+        help="Run the optional mumei-lean bridge for Solidity guard-trace certificates.",
+    )
+    parser.add_argument(
+        "--mumei-lean-repo",
+        default=None,
+        help="Path to the mumei-lean checkout used by --enable-lean-bridge.",
+    )
     return parser
 
 
@@ -971,11 +1048,14 @@ def main_validate_code(args: argparse.Namespace | None = None) -> ForeignCodeVal
         args = build_validate_code_parser().parse_args()
     language = _infer_validate_code_language(args.input, args.language)
     code = _read_input_file(args.input)
+    config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
     result = validate_foreign_code(
         code,
         language,
+        config=config,
         use_llm=not args.no_llm,
         run_mumei=not args.no_mumei,
+        enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
     )
     _emit_result(result, args.output)
     if not result.success:

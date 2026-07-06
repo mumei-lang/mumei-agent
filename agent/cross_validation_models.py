@@ -91,6 +91,8 @@ class ForeignCodeValidationResult:
     mumei_source: str
     satisfiable: bool | None
     verification: dict[str, object] | None = None
+    proof_certificate: dict[str, object] | None = None
+    lean_bridge: dict[str, object] | None = None
     issues: list[CrossValidationIssue] = field(default_factory=list)
     source_line_map: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)

@@ -14,6 +14,11 @@ from agent.strategies.foreign_code_strategy import (
     build_parser,
     to_mumei_atom,
 )
+from agent.strategies.foreign_code_strategy_helpers import (
+    build_solidity_guard_trace_proof_certificate,
+)
+from agent.cross_validation import validate_foreign_code
+from agent.config import AgentConfig
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -160,6 +165,114 @@ def test_verifier_suppresses_solidity_reentrancy_when_guarded() -> None:
     assert all("may be vulnerable to reentrancy" not in error for error in result["errors"])
     assert "counterexample" not in result
     mumei.verify.assert_called_once()
+
+
+def test_build_solidity_guard_trace_proof_certificate_from_vulnerable_fixture() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+
+    cert = build_solidity_guard_trace_proof_certificate(
+        source,
+        source_file=FIXTURES / "sample_solidity_vulnerable.sol",
+        package_name="sample_solidity_vulnerable",
+        package_version="0",
+        mumei_version="agent",
+        timestamp="2026-07-06T00:00:00Z",
+    )
+
+    atoms = {atom["name"]: atom for atom in cert["atoms"]}
+    assert set(atoms) == {"withdraw_guard_trace", "withdrawAll_guard_trace"}
+    assert atoms["withdraw_guard_trace"]["translator_ir"]["guard_trace"]["ops"] == [
+        "externalCall"
+    ]
+    assert atoms["withdraw_guard_trace"]["translator_ir"]["guard_trace_expected_outcome"] == "none"
+    assert atoms["withdraw_guard_trace"]["translator_ir"]["theorem_goal"] == (
+        "runGuard GuardState.Unlocked [GuardOp.externalCall] = none"
+    )
+    assert atoms["withdraw_guard_trace"]["logic_fragment_tag"] == "smart_contract_guard_trace"
+    assert atoms["withdraw_guard_trace"]["unknown_obligation_domain"] == "smart_contract"
+    assert atoms["withdraw_guard_trace"]["translator_ir"]["obligation_class"] == (
+        "smart_contract_guard_trace_obligation"
+    )
+    assert atoms["withdrawAll_guard_trace"]["translator_ir"]["guard_trace"]["ops"] == [
+        "externalCall"
+    ]
+    assert atoms["withdrawAll_guard_trace"]["translator_ir"]["guard_trace_expected_outcome"] == "none"
+    assert cert["file"] == str(FIXTURES / "sample_solidity_vulnerable.sol")
+    assert cert["package_name"] == "sample_solidity_vulnerable"
+    assert cert["all_verified"] is False
+
+
+def test_build_solidity_guard_trace_proof_certificate_from_guarded_fixture() -> None:
+    source = (FIXTURES / "sample_solidity_guarded.sol").read_text(encoding="utf-8")
+
+    cert = build_solidity_guard_trace_proof_certificate(
+        source,
+        source_file=FIXTURES / "sample_solidity_guarded.sol",
+        package_name="sample_solidity_guarded",
+        package_version="0",
+        mumei_version="agent",
+        timestamp="2026-07-06T00:00:00Z",
+    )
+
+    atoms = {atom["name"]: atom for atom in cert["atoms"]}
+    assert set(atoms) == {"withdraw_guard_trace", "manualWithdraw_guard_trace"}
+    for atom in atoms.values():
+        guard_trace = atom["translator_ir"]["guard_trace"]
+        assert guard_trace["ops"][0] == "lock"
+        assert guard_trace["ops"][-1] == "unlock"
+        assert guard_trace["expected_outcome"] == "safe"
+        assert atom["translator_ir"]["guard_trace_expected_outcome"] == "safe"
+        assert atom["translator_ir"]["theorem_goal"].endswith(
+            "= some GuardState.Unlocked"
+        )
+        assert atom["translator_ir"]["requires_bridge_lemmas"] == [
+            "MumeiLean.SmartContract.no_external_call_without_lock"
+        ]
+
+
+def test_validate_foreign_code_can_upgrade_guard_trace_certificate_via_lean_bridge() -> None:
+    source = (FIXTURES / "sample_solidity_guarded.sol").read_text(encoding="utf-8")
+    config = AgentConfig(api_key="test", mumei_lean_repo="/tmp/mumei-lean")
+
+    lean_cert = {
+        "atoms": [
+            {
+                "name": "withdraw_guard_trace",
+                "z3_check_result": "lean_verified",
+                "status": "verified",
+            },
+            {
+                "name": "manualWithdraw_guard_trace",
+                "z3_check_result": "lean_verified",
+                "status": "verified",
+            },
+        ]
+    }
+
+    with patch("agent.cross_validation.run_lean_bridge") as bridge_mock:
+        bridge_mock.return_value = {
+            "success": True,
+            "lean_cert": lean_cert,
+            "stdout": "",
+            "stderr": "",
+        }
+        result = validate_foreign_code(
+            source,
+            "solidity",
+            config=config,
+            use_llm=False,
+            run_mumei=False,
+            enable_lean_bridge=True,
+        )
+
+    bridge_mock.assert_called_once()
+    assert result.proof_certificate is not None
+    atoms = {atom["name"]: atom for atom in result.proof_certificate["atoms"]}
+    assert atoms["withdraw_guard_trace"]["z3_check_result"] == "lean_verified"
+    assert atoms["withdraw_guard_trace"]["status"] == "verified"
+    assert atoms["manualWithdraw_guard_trace"]["z3_check_result"] == "lean_verified"
+    assert result.lean_bridge is not None
+    assert result.lean_bridge["success"] is True
 
 
 def test_to_mumei_atom_emits_trusted_contract() -> None:

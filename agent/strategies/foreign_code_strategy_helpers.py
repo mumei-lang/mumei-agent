@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
+import hashlib
+import json
 import re
+from pathlib import Path
 from typing import Iterable
 
 import z3
@@ -916,6 +920,156 @@ def _solidity_reentrancy_trace(name: str, attrs: str, body: str) -> tuple[str, l
 
 def _solidity_format_trace_item(item: _SolidityOpTraceItem) -> str:
     return f"{item.kind}: {item.snippet}"
+
+
+_SOLIDITY_GUARD_TRACE_TRANSLATOR_VERSION = "mumei-lean-translator-ir-v2"
+_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH = "a3e9c1f4b7d2806e5f19347cab82d0963ef1a5bc70d4e8290f136d5ab7c84e11"
+
+
+def extract_solidity_guard_trace_atoms(
+    source: str,
+    *,
+    source_file: str | Path | None = None,
+) -> list[dict[str, object]]:
+    file_name = str(source_file or "<solidity-source>")
+    atoms: list[dict[str, object]] = []
+    for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source):
+        function_name = _safe_identifier(match.group("name"))
+        attrs = match.group("attrs") or ""
+        body = _balanced_brace_body(source, match.end() - 1)
+        ordered_ops = [
+            op.kind
+            for op in _solidity_ordered_op_trace(body)
+            if op.kind == "externalCall"
+        ]
+        if not ordered_ops:
+            continue
+        guarded = _solidity_reentrancy_guard_present(attrs, body)
+        guard_ops = (
+            ["lock", *ordered_ops, "unlock"]
+            if guarded
+            else [*ordered_ops]
+        )
+        expected_outcome = "safe" if guarded else "none"
+        line = _line_for_offset(source, match.start())
+        atoms.append(
+            _build_solidity_guard_trace_atom(
+                function_name=function_name,
+                source_file=file_name,
+                line=line,
+                guard_ops=guard_ops,
+                expected_outcome=expected_outcome,
+                guarded=guarded,
+                body=body,
+            )
+        )
+    return atoms
+
+
+def build_solidity_guard_trace_proof_certificate(
+    source: str,
+    *,
+    source_file: str | Path | None = None,
+    package_name: str | None = None,
+    package_version: str = "0",
+    mumei_version: str = "test-fixture",
+    z3_version: str | None = None,
+    timestamp: str | None = None,
+) -> dict[str, object]:
+    file_name = str(source_file or "<solidity-source>")
+    atoms = extract_solidity_guard_trace_atoms(source, source_file=file_name)
+    return {
+        "version": "1.0",
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "mumei_version": mumei_version,
+        "z3_version": z3_version or f"Z3 version {z3.get_version_string()}",
+        "file": file_name,
+        "atoms": atoms,
+        "package_name": package_name or Path(file_name).stem or "solidity",
+        "package_version": package_version,
+        "certificate_hash": _hash_guard_trace_payload(file_name, atoms),
+        "all_verified": False,
+    }
+
+
+def _build_solidity_guard_trace_atom(
+    *,
+    function_name: str,
+    source_file: str,
+    line: int,
+    guard_ops: list[str],
+    expected_outcome: str,
+    guarded: bool,
+    body: str,
+) -> dict[str, object]:
+    safe_name = _safe_identifier(f"{function_name}_guard_trace")
+    theorem_goal = _solidity_guard_trace_theorem_goal(guard_ops, expected_outcome)
+    content_hash = _hash_guard_trace_payload(
+        function_name,
+        guard_ops,
+        expected_outcome,
+        source_file,
+        body,
+    )
+    body_summary = (
+        "guard trace proof for "
+        f"{'a guarded external call' if guarded else 'an unguarded external call'}"
+    )
+    return {
+        "name": safe_name,
+        "z3_check_result": "unknown",
+        "content_hash": content_hash,
+        "status": "unknown",
+        "proof_hash": _hash_guard_trace_payload("proof", content_hash, theorem_goal),
+        "requires": "true",
+        "ensures": "true",
+        "body_expr": "",
+        "body_summary": body_summary,
+        "z3_result_class": "unknown",
+        "escalation_reason": "sc",
+        "logic_fragment_tag": "smart_contract_guard_trace",
+        "logic_fragment_tags": ["smart_contract", "guard_trace"],
+        "translator_version": _SOLIDITY_GUARD_TRACE_TRANSLATOR_VERSION,
+        "binder_mapping": {},
+        "bridge_lemma_hash": _SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH,
+        "translator_ir": {
+            "sort": "contract_obligation",
+            "binders": [],
+            "theorem_goal": theorem_goal,
+            "provenance_span": {
+                "file": source_file,
+                "line": line,
+                "col": 1,
+                "len": 0,
+            },
+            "lowering_rules": ["smart_contract_guard_trace_lowering"],
+            "proof_trace_hints": [
+                "use the concrete guard trace with SmartContract.runGuard",
+            ],
+            "requires_bridge_lemmas": [
+                "MumeiLean.SmartContract.no_external_call_without_lock",
+            ],
+            "obligation_class": "smart_contract_guard_trace_obligation",
+            "guard_trace": {
+                "ops": guard_ops,
+                "expected_outcome": expected_outcome,
+            },
+            "guard_trace_ops": guard_ops,
+            "guard_trace_expected_outcome": expected_outcome,
+        },
+        "unknown_obligation_domain": "smart_contract",
+    }
+
+
+def _solidity_guard_trace_theorem_goal(guard_ops: list[str], expected_outcome: str) -> str:
+    op_terms = ", ".join(f"GuardOp.{op}" for op in guard_ops)
+    expected = "some GuardState.Unlocked" if expected_outcome == "safe" else "none"
+    return f"runGuard GuardState.Unlocked [{op_terms}] = {expected}"
+
+
+def _hash_guard_trace_payload(*parts: object) -> str:
+    payload = json.dumps(parts, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def _solidity_first_storage_write(
     body: str,
