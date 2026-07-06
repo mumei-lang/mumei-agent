@@ -56,6 +56,8 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _rust_params,
     _rust_type,
     _safe_identifier,
+    _solidity_params,
+    _solidity_type,
     _split_params,
     _strip_contract_marker,
     _typescript_function_blocks,
@@ -70,7 +72,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
 class ForeignCodeExtractor:
     """Extract function signatures and comment contracts from foreign code."""
 
-    SUPPORTED_LANGUAGES = {"python", "typescript", "rust", "go"}
+    SUPPORTED_LANGUAGES = {"python", "typescript", "rust", "go", "solidity"}
 
     def extract(self, source: str, language: str) -> list[ForeignCodeSpec]:
         normalized = language.strip().lower()
@@ -82,6 +84,8 @@ class ForeignCodeExtractor:
             return self.extract_rust(source)
         if normalized == "go":
             return self.extract_go(source)
+        if normalized == "solidity":
+            return self.extract_solidity(source)
         raise ValueError(
             "language must be one of: "
             + ", ".join(sorted(self.SUPPORTED_LANGUAGES))
@@ -226,6 +230,39 @@ class ForeignCodeExtractor:
             )
         return specs
 
+    def extract_solidity(self, source: str) -> list[ForeignCodeSpec]:
+        """Extract Solidity ``function`` declarations and preceding ``///`` NatSpec."""
+        pattern = re.compile(
+            r"(?P<comment>(?:\s*///[^\n]*\n)*)\s*"
+            r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
+            r"\((?P<params>[^)]*)\)"
+            r"(?P<attrs>[^{;]*?)\{",
+            re.DOTALL,
+        )
+        specs: list[ForeignCodeSpec] = []
+        for match in pattern.finditer(source):
+            comment = _clean_rust_doc(match.group("comment") or "")
+            preconditions, postconditions = _contract_lines(comment)
+            attrs = match.group("attrs") or ""
+            returns_match = re.search(r"returns\s*\((?P<ret>[^)]*)\)", attrs)
+            return_type = (
+                _solidity_type(returns_match.group("ret"))
+                if returns_match
+                else "void"
+            )
+            source_line = _line_for_offset(source, match.start("name"))
+            specs.append(
+                ForeignCodeSpec(
+                    function_name=_safe_identifier(match.group("name")),
+                    params=_solidity_params(match.group("params")),
+                    return_type=return_type,
+                    preconditions=preconditions,
+                    postconditions=postconditions,
+                    source_line=source_line,
+                )
+            )
+        return specs
+
 class ForeignCodeVerifier:
     """Verify extracted foreign-code atoms with ``mumei verify --json``."""
 
@@ -301,7 +338,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "--language",
         required=True,
         choices=sorted(ForeignCodeExtractor.SUPPORTED_LANGUAGES),
-        help="Source language.",
+        help="Source language (python/typescript/rust/go/solidity).",
     )
     parser.add_argument("--mumei-bin", default="mumei", help="mumei CLI executable.")
     parser.add_argument("--output", help="Optional JSON report path.")

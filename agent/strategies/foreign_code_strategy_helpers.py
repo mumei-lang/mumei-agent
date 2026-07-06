@@ -9,6 +9,7 @@ from typing import Iterable
 import z3
 
 from agent.cross_validation_foreign import (
+    SOLIDITY_UINT256_MAX,
     _dedupe_strings,
     _go_function_declarations,
     _infer_go_contracts,
@@ -213,6 +214,40 @@ def _rust_type(type_name: str) -> str:
 def _go_type(type_name: str) -> str:
     return _mumei_type(type_name.strip().lstrip("*"))
 
+def _solidity_type(type_name: str) -> str:
+    normalized = type_name.strip().removesuffix("[]")
+    for modifier in ("memory", "calldata", "storage", "payable"):
+        normalized = normalized.replace(modifier, "").strip()
+    lowered = normalized.lower()
+    if lowered.startswith("uint"):
+        return "u64"
+    if lowered.startswith("int"):
+        return "i64"
+    if lowered == "bool":
+        return "bool"
+    if lowered in {"string", "bytes"}:
+        return "string"
+    if lowered == "address":
+        return "i64"
+    return _mumei_type(normalized)
+
+def _solidity_params(params_text: str) -> dict[str, str]:
+    params: dict[str, str] = {}
+    modifiers = {"memory", "calldata", "storage", "payable", "indexed"}
+    for index, raw in enumerate(_split_params(params_text)):
+        raw = raw.strip()
+        if not raw:
+            continue
+        tokens = [token for token in raw.split() if token.lower() not in modifiers]
+        if len(tokens) >= 2:
+            type_text, name_text = tokens[0], tokens[-1]
+        elif tokens:
+            type_text, name_text = tokens[0], f"arg{index}"
+        else:
+            continue
+        params[_safe_identifier(name_text)] = _solidity_type(type_text)
+    return params
+
 def _mumei_type(type_name: str) -> str:
     normalized = _python_type_name(type_name).strip()
     normalized = normalized.removeprefix("Promise<").removesuffix(">")
@@ -261,6 +296,7 @@ def _normalize_language(language: str) -> str:
         "js": "typescript",
         "jsx": "typescript",
         "golang": "go",
+        "sol": "solidity",
     }
     return aliases.get(language.strip().lower(), language.strip().lower())
 
@@ -278,6 +314,12 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
         return _detect_go_safety_issues(source)
     if normalized == "python":
         return _detect_python_safety_issues(source)
+    if normalized == "solidity":
+        return _detect_block_safety_issues(
+            source,
+            _solidity_function_blocks(source),
+            "Solidity",
+        )
     return []
 
 def _first_counterexample_payload(
@@ -447,6 +489,31 @@ def _issues_for_expression(
                     counterexample=counterexample,
                 )
             )
+    if label == "Solidity":
+        for match in re.finditer(
+            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+            expression,
+        ):
+            left = match.group("left")
+            right = match.group("right")
+            counterexample = _z3_solidity_overflow_counterexample(left, right)
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` can overflow `{left} + {right}` "
+                        "without a uint256 bounds contract "
+                        "(Z3 counterexample: "
+                        + ", ".join(f"{key}={value}" for key, value in counterexample.items())
+                        + ")"
+                    ),
+                    required_contracts=(
+                        f"{left} + {right} <= {SOLIDITY_UINT256_MAX}",
+                        f"{left} + {right} >= 0",
+                    ),
+                    counterexample=counterexample,
+                )
+            )
     return issues
 
 def _filter_covered_safety_issues(
@@ -539,6 +606,38 @@ def _z3_i64_overflow_counterexample(left_name: str, right_name: str) -> dict[str
             right_name: model.eval(right, model_completion=True).as_long(),
         }
     return {left_name: max_i64, right_name: 1}
+
+def _z3_solidity_overflow_counterexample(left_name: str, right_name: str) -> dict[str, int]:
+    left = z3.Int(left_name)
+    right = z3.Int(right_name)
+    solver = z3.Solver()
+    solver.add(
+        left >= 0,
+        left <= SOLIDITY_UINT256_MAX,
+        right >= 0,
+        right <= SOLIDITY_UINT256_MAX,
+    )
+    solver.add(left + right > SOLIDITY_UINT256_MAX)
+    if solver.check() == z3.sat:
+        model = solver.model()
+        return {
+            left_name: model.eval(left, model_completion=True).as_long(),
+            right_name: model.eval(right, model_completion=True).as_long(),
+        }
+    return {left_name: SOLIDITY_UINT256_MAX, right_name: 1}
+
+def _solidity_function_blocks(source: str) -> list[tuple[str, str]]:
+    pattern = re.compile(
+        r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
+        r"\((?P<params>[^)]*)\)"
+        r"(?P<attrs>[^{;]*?)\{",
+        re.DOTALL,
+    )
+    blocks: list[tuple[str, str]] = []
+    for match in pattern.finditer(source):
+        body = _balanced_brace_body(source, match.end() - 1)
+        blocks.append((_safe_identifier(match.group("name")), body))
+    return blocks
 
 def _rust_function_blocks(source: str) -> list[tuple[str, str]]:
     pattern = re.compile(

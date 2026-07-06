@@ -26,6 +26,7 @@ Language = Literal[
     "typescript",
     "java",
     "cpp",
+    "solidity",
     "unknown",
 ]
 
@@ -73,7 +74,7 @@ class CodeToSpecConverter:
         detected_language: Language = (
             normalized if normalized in supported_languages else "unknown"
         )
-        layer_b_languages = {"python", "rust", "typescript", "go"}
+        layer_b_languages = {"python", "rust", "typescript", "go", "solidity"}
         if normalized not in layer_b_languages:
             is_layer_a = normalized in set(CodeToSpecExtractor.EXTENSION_MAP.values())
             if is_layer_a:
@@ -144,6 +145,7 @@ def _normalize_language_name(language: str) -> str:
         "js": "typescript",
         "jsx": "typescript",
         "golang": "go",
+        "sol": "solidity",
     }
     return aliases.get(language.strip().lower(), language.strip().lower())
 
@@ -192,6 +194,7 @@ class CodeToSpecExtractor:
         ".cc": "cpp",
         ".cxx": "cpp",
         ".hpp": "cpp",
+        ".sol": "solidity",
     }
 
     def __init__(
@@ -215,6 +218,8 @@ class CodeToSpecExtractor:
             return self.EXTENSION_MAP[suffix]
 
         code_lower = code.lower()
+        if "pragma solidity" in code_lower or "contract " in code:
+            return "solidity"
         if "fn main()" in code or "fn " in code or "impl " in code:
             return "rust"
         if "#include" in code and ("int main" in code or "void " in code):

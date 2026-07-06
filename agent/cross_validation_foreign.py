@@ -25,8 +25,14 @@ def _normalize_foreign_language(language: str) -> str:
         "js": "typescript",
         "jsx": "typescript",
         "golang": "go",
+        "sol": "solidity",
     }
     return aliases.get(language.strip().lower(), language.strip().lower())
+
+# 256-bit integer bounds for Solidity uint256/int256 overflow reasoning.
+SOLIDITY_UINT256_MAX = 2**256 - 1
+SOLIDITY_INT256_MAX = 2**255 - 1
+SOLIDITY_INT256_MIN = -(2**255)
 
 def _dedupe_strings(values: list[str]) -> list[str]:
     deduped: list[str] = []
@@ -46,6 +52,8 @@ def _infer_foreign_contracts_with_patterns(code: str, language: str) -> list[Mum
         return _infer_typescript_contracts(code)
     if language == "go":
         return _infer_go_contracts(code)
+    if language == "solidity":
+        return _infer_solidity_contracts(code)
     return []
 
 
@@ -95,6 +103,15 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
             )
         )
         return line_map
+    if language == "solidity":
+        return _infer_regex_source_line_map(
+            code,
+            re.compile(
+                r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
+                r"\((?P<params>[^)]*)\)",
+                flags=re.DOTALL,
+            ),
+        )
     return {}
 
 
@@ -314,6 +331,113 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
             )
         )
     return atoms
+
+
+def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
+    atoms: list[MumeiContractAtom] = []
+    header = re.compile(
+        r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
+        r"\((?P<params>[^)]*)\)"
+        r"(?P<attrs>[^{;]*?)\{",
+        flags=re.DOTALL,
+    )
+    for match in header.finditer(code):
+        params, param_types = _solidity_params_from_signature(match.group("params"))
+        attrs = match.group("attrs") or ""
+        returns_match = re.search(r"returns\s*\((?P<ret>[^)]*)\)", attrs)
+        body = _balanced_brace_body(code, match.end() - 1)
+        raw_return_expr = _raw_return_statement_expression(body)
+        return_expr = _normalize_foreign_expression(raw_return_expr)
+        atoms.append(
+            MumeiContractAtom(
+                name=_safe_identifier(match.group("name")),
+                params=params,
+                return_type="i64" if returns_match else "bool",
+                requires=_solidity_safety_requires_for_expression(
+                    raw_return_expr,
+                    param_types,
+                ),
+                ensures=f"result == {return_expr}" if return_expr else "true",
+            )
+        )
+    return atoms
+
+
+def _solidity_params_from_signature(
+    params_text: str,
+) -> tuple[list[ContractParam], dict[str, str]]:
+    params: list[ContractParam] = []
+    param_types: dict[str, str] = {}
+    modifiers = {"memory", "calldata", "storage", "payable", "indexed"}
+    for index, raw in enumerate(part.strip() for part in params_text.split(",") if part.strip()):
+        tokens = [token for token in raw.split() if token.lower() not in modifiers]
+        if len(tokens) >= 2:
+            type_text, name_text = tokens[0], tokens[-1]
+        elif tokens:
+            type_text, name_text = tokens[0], f"arg{index}"
+        else:
+            type_text, name_text = "uint256", f"arg{index}"
+        name = _safe_identifier(name_text)
+        params.append(
+            ContractParam(name=name, type=_solidity_signature_type(type_text))
+        )
+        param_types[name] = type_text.strip().lower()
+    return params, param_types
+
+
+def _solidity_signature_type(type_text: str) -> str:
+    normalized = type_text.strip().removesuffix("[]").lower()
+    if normalized in {"bool"}:
+        return "bool"
+    if normalized in {"string", "bytes"}:
+        return "string"
+    if normalized.startswith("uint"):
+        return "u64"
+    return "i64"
+
+
+def _solidity_type_is_unsigned(type_text: str) -> bool:
+    return type_text.strip().lower().startswith("uint")
+
+
+def _solidity_safety_requires_for_expression(
+    expression: str,
+    param_types: dict[str, str] | None = None,
+) -> str:
+    requirements: list[str] = []
+    base = _safety_requires_for_expression(expression)
+    if base != "true":
+        requirements.extend(part.strip() for part in base.split("&&") if part.strip())
+    requirements.extend(
+        _solidity_overflow_requires_for_expression(expression, param_types)
+    )
+    return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+
+
+def _solidity_overflow_requires_for_expression(
+    expression: str,
+    param_types: dict[str, str] | None = None,
+) -> list[str]:
+    param_types = param_types or {}
+    requirements: list[str] = []
+    for match in re.finditer(
+        r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+        expression,
+    ):
+        left = match.group("left")
+        right = match.group("right")
+        unsigned = _solidity_type_is_unsigned(
+            param_types.get(left, "")
+        ) or _solidity_type_is_unsigned(param_types.get(right, ""))
+        # Default to uint256 semantics when the operand types are unknown, as
+        # Solidity's most common integer type is unsigned.
+        if not param_types or unsigned:
+            requirements.append(f"{left} + {right} <= {SOLIDITY_UINT256_MAX}")
+            requirements.append(f"{left} + {right} >= 0")
+        else:
+            requirements.append(f"{left} + {right} <= {SOLIDITY_INT256_MAX}")
+            requirements.append(f"{left} + {right} >= {SOLIDITY_INT256_MIN}")
+    return requirements
 
 
 def _rust_safety_requires_for_expression(expression: str) -> str:

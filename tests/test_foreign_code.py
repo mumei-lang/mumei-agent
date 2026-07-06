@@ -74,6 +74,47 @@ pub fn widen(x: i64) -> i64 {
     ]
 
 
+def test_extract_solidity_function_contracts_from_natspec() -> None:
+    source = (FIXTURES / "sample_solidity.sol").read_text(encoding="utf-8")
+
+    specs = ForeignCodeExtractor().extract_solidity(source)
+
+    assert [spec.function_name for spec in specs] == ["safeDivide", "add"]
+    assert specs[0].params == {"a": "u64", "b": "u64"}
+    assert specs[0].preconditions == ["b != 0"]
+    assert specs[0].postconditions == ["result * b == a"]
+    assert specs[1].function_name == "add"
+    assert specs[1].postconditions == ["result == a + b"]
+
+
+def test_verifier_reports_solidity_uint256_overflow_counterexample() -> None:
+    from agent.audit_reporting import _verification_issue_strings
+
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(
+        "function add(uint256 a, uint256 b) public pure returns (uint256) {\n"
+        "    return a + b;\n"
+        "}\n",
+        "solidity",
+    )
+
+    assert result["success"] is False
+    assert result["counterexample"] == {
+        "a": 2**256 - 1,
+        "b": 1,
+    }
+    violations = _verification_issue_strings(result)
+    assert any("can overflow `a + b`" in violation for violation in violations)
+    assert any("uint256 bounds contract" in violation for violation in violations)
+
+
 def test_to_mumei_atom_emits_trusted_contract() -> None:
     atom = to_mumei_atom(
         ForeignCodeSpec(

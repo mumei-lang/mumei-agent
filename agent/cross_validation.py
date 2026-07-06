@@ -639,7 +639,7 @@ def validate_foreign_code(
     warnings: list[str] = []
     errors: list[str] = []
     if normalized_language not in SUPPORTED_FOREIGN_CODE_LANGUAGES:
-        errors.append("language must be one of: python, rust, typescript, go")
+        errors.append("language must be one of: python, rust, typescript, go, solidity")
     if not code.strip():
         errors.append("code must be non-empty")
     if errors:
@@ -727,7 +727,7 @@ def build_validate_spec_to_code_parser(
     parser.add_argument("--code", required=True, help="Path to source code.")
     parser.add_argument(
         "--language",
-        choices=["python", "rust", "typescript", "go"],
+        choices=["python", "rust", "typescript", "go", "solidity"],
         help="Source language.",
     )
     parser.add_argument(
@@ -758,7 +758,7 @@ def build_validate_code_to_spec_parser(
     parser.add_argument("--spec", required=True, help="Path to spec file.")
     parser.add_argument(
         "--language",
-        choices=["python", "rust", "typescript", "go"],
+        choices=["python", "rust", "typescript", "go", "solidity"],
         help="Source language.",
     )
     parser.add_argument(
@@ -790,7 +790,7 @@ def build_validate_code_parser(parser: argparse.ArgumentParser | None = None) ->
     source_arg.add_argument("--file", dest="input", help=argparse.SUPPRESS)
     parser.add_argument(
         "--language",
-        choices=["python", "rust", "typescript", "go"],
+        choices=["python", "rust", "typescript", "go", "solidity"],
         default=None,
         help="Target language. 省略時は --input の拡張子から推定する。",
     )
@@ -935,6 +935,7 @@ def _infer_validate_code_language(input_path: str, language: str | None) -> str:
         ".js": "typescript",
         ".jsx": "typescript",
         ".go": "go",
+        ".sol": "solidity",
     }
     detected = ext_map.get(suffix)
     if detected is None:

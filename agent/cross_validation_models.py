@@ -7,7 +7,7 @@ from typing import Literal
 from agent.intent_tracker import IntentDriftResult
 from agent.spec_code_mapper import MappingResult
 
-SUPPORTED_FOREIGN_CODE_LANGUAGES = {"python", "rust", "typescript", "go"}
+SUPPORTED_FOREIGN_CODE_LANGUAGES = {"python", "rust", "typescript", "go", "solidity"}
 
 ContradictionType = Literal[
     "",
