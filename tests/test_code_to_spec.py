@@ -39,6 +39,34 @@ def test_detect_language_from_content() -> None:
     assert extractor._detect_language(Path("unknown"), "function simpleAdd(a, b) { return a + b; }") == "javascript"
 
 
+def test_detect_language_solidity_from_extension_and_content() -> None:
+    extractor = CodeToSpecExtractor(AgentConfig(api_key="test"))
+
+    assert extractor._detect_language(Path("Ledger.sol"), "") == "solidity"
+    assert extractor._detect_language(
+        Path("unknown"),
+        "pragma solidity ^0.8.0;\nfunction add(uint256 a) {}",
+    ) == "solidity"
+    assert extractor._detect_language(
+        Path("unknown"),
+        "contract Ledger {\n    function add() public {}\n}",
+    ) == "solidity"
+
+
+def test_convert_source_layer_b_solidity_succeeds() -> None:
+    converter = CodeToSpecConverter(AgentConfig())
+    result = converter.convert_source(
+        "function add(uint256 a, uint256 b) public pure returns (uint256) {\n"
+        "    return a + b;\n"
+        "}\n",
+        "solidity",
+    )
+
+    assert result.success is True
+    assert result.detected_language == "solidity"
+    assert result.atoms[0].name == "add"
+
+
 def test_extract_from_file_with_mock_llm(tmp_path: Path) -> None:
     source = tmp_path / "simple_add.rs"
     source.write_text("pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")

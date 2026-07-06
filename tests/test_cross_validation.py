@@ -128,6 +128,12 @@ def test_validate_foreign_code_infers_multilanguage_safety_contracts() -> None:
             "package users\nfunc age(user *User) int { return user.Age }\n",
             "user != nil",
         ),
+        (
+            "solidity",
+            "function add(uint256 a, uint256 b) public pure returns (uint256) "
+            "{ return a + b; }\n",
+            "a + b <= 115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        ),
     ]
 
     for language, code, expected_requires in fixtures:
@@ -198,6 +204,11 @@ def test_validate_foreign_code_go_extracts_method_receiver() -> None:
             "export function identity(x: number): number { return x; }\n",
         ),
         ("go", "impl.go", "package demo\nfunc identity(x int) int { return x }\n"),
+        (
+            "solidity",
+            "impl.sol",
+            "function identity(int256 x) public pure returns (int256) { return x; }\n",
+        ),
     ],
 )
 def test_validate_spec_to_code_detects_multilanguage_missing_requires(

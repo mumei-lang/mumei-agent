@@ -201,6 +201,7 @@ def build_parser(parser=None):
             "typescript",
             "java",
             "cpp",
+            "solidity",
             "unknown",
         ],
         default=None,

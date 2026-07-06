@@ -76,7 +76,7 @@ from agent.strategies.cross_validation_strategy import CrossValidationReport, Cr
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
 
-SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript", "go")
+SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript", "go", "solidity")
 
 AUDIT_EXTENSION_MAP: dict[str, Language] = {
     ".py": "python",
@@ -84,6 +84,7 @@ AUDIT_EXTENSION_MAP: dict[str, Language] = {
     ".ts": "typescript",
     ".tsx": "typescript",
     ".go": "go",
+    ".sol": "solidity",
 }
 
 AUDIT_SCHEMA_KEYS = [
@@ -629,6 +630,7 @@ def _normalize_language(language: str | None) -> str:
         "js": "typescript",
         "jsx": "typescript",
         "golang": "go",
+        "sol": "solidity",
     }
     return aliases.get(normalized, normalized)
 
@@ -637,4 +639,8 @@ def _extension_for_language(language: str) -> str:
         return ".rs"
     if language == "typescript":
         return ".ts"
+    if language == "go":
+        return ".go"
+    if language == "solidity":
+        return ".sol"
     return ".py"

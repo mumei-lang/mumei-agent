@@ -69,6 +69,71 @@ def _healthy_verify(source_path, report_dir=None, extra_args=None, **kwargs):
     return {"success": True, "report": {}, "stdout": "", "stderr": ""}
 
 
+def _solidity_forge_spec() -> dict[str, object]:
+    return {
+        "task_id": "audit-add",
+        "target_file": "audit/add.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "add",
+                "inputs": [
+                    {"name": "a", "type": "u64"},
+                    {"name": "b", "type": "u64"},
+                ],
+                "return_type": "u64",
+                "requires": "true",
+                "ensures": "result == a + b",
+            }
+        ],
+    }
+
+
+def test_audit_pipeline_reports_solidity_uint256_overflow(tmp_path: Path) -> None:
+    source = tmp_path / "Ledger.sol"
+    source.write_text(
+        "function add(uint256 a, uint256 b) public pure returns (uint256) {\n"
+        "    return a + b;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="add returns the sum of two uint256 values",
+        forge_task_spec=_solidity_forge_spec(),
+        detected_language="solidity",
+    )
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=ForeignCodeVerifier(mumei_client=mumei),
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "solidity")
+
+    assert result.language == "solidity"
+    assert result.success is False
+    assert any(
+        "can overflow `a + b`" in violation for violation in result.verification_violations
+    )
+    assert any(
+        "uint256 bounds contract" in violation
+        for violation in result.verification_violations
+    )
+    assert {
+        "function_name": "add",
+        "counterexample": {"a": 2**256 - 1, "b": 1},
+    } in result.counterexample_values
+
+
 def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text(

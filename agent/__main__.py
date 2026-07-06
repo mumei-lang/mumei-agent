@@ -201,7 +201,7 @@ def main() -> None:
 
         parser = argparse.ArgumentParser(
             prog="python -m agent validate-code",
-            description="Infer and verify contracts from existing code (Python, Rust, TypeScript, Go).",
+            description="Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity).",
         )
         build_validate_code_parser(parser)
         args = parser.parse_args(argv[1:])
@@ -367,7 +367,7 @@ def main() -> None:
         parser.add_argument("impl", help="Path to the implementation source file")
         parser.add_argument(
             "--language", "-l", default="",
-            help="Implementation language (python/rust/typescript/go). Inferred from extension if omitted.",
+            help="Implementation language (python/rust/typescript/go/solidity). Inferred from extension if omitted.",
         )
         parser.add_argument(
             "--old-cert", default=None,
@@ -394,6 +394,7 @@ def main() -> None:
                 ".ts": "typescript",
                 ".tsx": "typescript",
                 ".go": "go",
+                ".sol": "solidity",
             }
             lang = ext_map.get(_Path(args.impl).suffix.lower(), "")
             if not lang:
