@@ -308,11 +308,12 @@ Solidity（`.sol`）は関数レベルの契約（pre/postcondition）と `uint2
 
 #### 次タスク候補: スマートコントラクト固有パターン検証
 
-Solidity の関数レベル契約対応の次段として、以下のスマートコントラクト固有の状態機械検証を別タスクで扱う:
+Solidity の Layer B は stage 1 として、CEI/reentrancy と access control 欠落の
+**決定論的ヒューリスティック警告**を実装済み（Z3 証明ではない）。残タスクは次の段階に分ける:
 
-- **Reentrancy**: 外部呼び出し後の状態変更（Checks-Effects-Interactions 違反）の検出。
-- **Access control**: `onlyOwner` / `require(msg.sender == ...)` などの権限ガード欠落の検出。
-- **状態機械不変条件**: `balance` 総量保存や `mapping` 更新の一貫性など、複数関数にまたがる不変条件の Z3/Lean 検証。
+- **stage 2**: `solc --ast-compact-json` の Solidity AST を使った Z3 ベースの状態機械検証
+- **stage 3**: mumei-lean の `SmartContract.lean` / `GuardState` / `runGuard` モデルと
+  `no_external_call_without_lock` 系 theorem による Lean 証明証跡化
 
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 
