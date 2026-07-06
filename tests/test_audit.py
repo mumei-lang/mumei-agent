@@ -180,6 +180,16 @@ def test_audit_pipeline_reports_solidity_reentrancy(tmp_path: Path) -> None:
     )
     assert all("withdrawAll" not in violation for violation in result.verification_violations)
     assert all("getBalance" not in violation for violation in result.verification_violations)
+    assert {
+        "function_name": "withdraw",
+        "counterexample": {
+            "reentrancy_trace": [
+                "externalCall: msg.sender.call{value: amount}(\"\");",
+                "stateWrite: balances[msg.sender]",
+            ],
+            "guard": "absent",
+        },
+    } in result.counterexample_values
 
 
 def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:

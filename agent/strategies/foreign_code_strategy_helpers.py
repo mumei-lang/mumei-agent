@@ -12,7 +12,6 @@ from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _dedupe_strings,
     _go_function_declarations,
-    _infer_go_contracts,
 )
 
 _SOLIDITY_FUNCTION_PATTERN = re.compile(
@@ -63,6 +62,22 @@ _SOLIDITY_ACCESS_GUARD_PATTERNS = (
         re.DOTALL,
     ),
 )
+_SOLIDITY_REENTRANCY_GUARD_MODIFIER_PATTERN = re.compile(
+    r"\b(?:nonReentrant|noReentrancy|nonreentrant)\b",
+    re.IGNORECASE,
+)
+_SOLIDITY_MANUAL_LOCK_REQUIRE_PATTERNS = (
+    re.compile(r"require\s*\(\s*!\s*(?P<var>[A-Za-z_$][\w$]*)\b"),
+    re.compile(r"require\s*\(\s*(?P<var>[A-Za-z_$][\w$]*)\s*==\s*false\b", re.IGNORECASE),
+)
+_SOLIDITY_OP_TRACE_PATTERN = re.compile(
+    r"(?P<externalCall>\.call\s*\{[^}]*value\s*:\s*[^}]*\}|\.[cC]all\s*\(|\.transfer\s*\(|\.send\s*\()"
+    r"|(?P<stateWrite>(?:^|;|\{)\s*(?P<lhs>[A-Za-z_][\w$]*(?:\[[^\]]+\]|\.[A-Za-z_][\w$]*)*)\s*"
+    r"(?P<op>(?<![=!<>])=(?![=])|\+=|-=|\*=))",
+    re.DOTALL | re.MULTILINE,
+)
+_SOLIDITY_GUARD_UNLOCKED = z3.IntVal(0)
+_SOLIDITY_GUARD_LOCKED = z3.IntVal(1)
 
 @dataclass(frozen=True)
 class ForeignCodeSpec:
@@ -81,6 +96,13 @@ class ForeignSafetyIssue:
     message: str
     required_contracts: tuple[str, ...] = ()
     counterexample: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _SolidityOpTraceItem:
+    kind: str
+    offset: int
+    snippet: str
 
 def to_mumei_atom(spec: ForeignCodeSpec) -> str:
     """Convert a foreign-code contract into Mumei atom syntax."""
@@ -701,7 +723,7 @@ def _detect_solidity_contract_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, attrs, body in _solidity_function_blocks_with_attrs(source):
         if _solidity_function_is_mutating_external(attrs, body):
-            maybe_cei_issue = _solidity_cei_issue(name, body)
+            maybe_cei_issue = _solidity_cei_issue(name, attrs, body)
             if maybe_cei_issue is not None:
                 issues.append(maybe_cei_issue)
             if _solidity_function_is_externally_callable(attrs) and not _solidity_function_has_access_guard(
@@ -738,23 +760,21 @@ def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
         return True
     return any(pattern.search(body) for pattern in _SOLIDITY_ACCESS_GUARD_PATTERNS)
 
-def _solidity_cei_issue(name: str, body: str) -> ForeignSafetyIssue | None:
-    call_match = _solidity_first_external_call(body)
-    if call_match is None:
+def _solidity_cei_issue(name: str, attrs: str, body: str) -> ForeignSafetyIssue | None:
+    trace_result = _solidity_reentrancy_trace(name, attrs, body)
+    if trace_result is None:
         return None
-    call_offset, call_snippet = call_match
-    storage_write = _solidity_first_storage_write(body, minimum_offset=call_offset)
-    if storage_write is None:
-        return None
-    lhs, _ = storage_write
+    guard_state, trace = trace_result
     return ForeignSafetyIssue(
         function_name=name,
         message=(
-            f"Solidity function `{name}` may be vulnerable to reentrancy: state write "
-            f"`{lhs}` occurs after external call `{call_snippet}` "
+            f"Solidity function `{name}` may be vulnerable to reentrancy: "
+            "verified guard-state-machine trace shows an external call reachable in "
+            "the Unlocked state before a later state write "
             "(Checks-Effects-Interactions violation; move state updates before external "
             "calls or add a reentrancy guard)"
         ),
+        counterexample={"reentrancy_trace": trace, "guard": guard_state},
     )
 
 def _solidity_first_external_call(body: str) -> tuple[int, str] | None:
@@ -786,6 +806,116 @@ def _solidity_call_snippet(body: str, offset: int, fallback: str) -> str:
     if len(tail) < len(fallback):
         return fallback
     return tail[:120]
+
+def _solidity_ordered_op_trace(body: str) -> list[_SolidityOpTraceItem]:
+    ops: list[_SolidityOpTraceItem] = []
+    for match in _SOLIDITY_OP_TRACE_PATTERN.finditer(body):
+        if match.group("externalCall") is not None:
+            offset = match.start("externalCall")
+            snippet = _solidity_call_snippet(
+                body,
+                offset,
+                match.group("externalCall").strip(),
+            )
+            ops.append(_SolidityOpTraceItem("externalCall", offset, snippet))
+            continue
+        if match.group("stateWrite") is not None:
+            lhs = match.group("lhs") or ""
+            statement_start = max(
+                body.rfind(";", 0, match.start("stateWrite")),
+                body.rfind("{", 0, match.start("stateWrite")),
+            )
+            statement_start = max(statement_start, body.rfind("\n", 0, match.start("stateWrite")))
+            statement_prefix = body[statement_start + 1 : match.start("stateWrite")].strip()
+            if _solidity_statement_is_local_declaration(statement_prefix) or statement_prefix.startswith("emit"):
+                continue
+            ops.append(_SolidityOpTraceItem("stateWrite", match.start("stateWrite"), lhs))
+    return sorted(ops, key=lambda item: (item.offset, item.kind))
+
+def _solidity_reentrancy_guard_present(attrs: str, body: str) -> bool:
+    if _SOLIDITY_REENTRANCY_GUARD_MODIFIER_PATTERN.search(attrs):
+        return True
+    return _solidity_manual_lock_guard_present(body)
+
+def _solidity_manual_lock_guard_present(body: str) -> bool:
+    for pattern in _SOLIDITY_MANUAL_LOCK_REQUIRE_PATTERNS:
+        for match in pattern.finditer(body):
+            lock_var = match.group("var")
+            if not lock_var:
+                continue
+            true_match = re.search(
+                rf"\b{re.escape(lock_var)}\s*=\s*true\b",
+                body,
+                re.IGNORECASE,
+            )
+            false_match = re.search(
+                rf"\b{re.escape(lock_var)}\s*=\s*false\b",
+                body,
+                re.IGNORECASE,
+            )
+            if true_match is None or false_match is None:
+                continue
+            if match.start() < true_match.start() < false_match.start():
+                return True
+    return False
+
+def _solidity_reentrancy_trace(name: str, attrs: str, body: str) -> tuple[str, list[str]] | None:
+    ops = _solidity_ordered_op_trace(body)
+    if not any(op.kind == "externalCall" for op in ops):
+        return None
+    if not any(op.kind == "stateWrite" for op in ops):
+        return None
+
+    guarded = _solidity_reentrancy_guard_present(attrs, body)
+    abstract_ops = [
+        _SolidityOpTraceItem("lock", -1, "lock"),
+        *ops,
+        _SolidityOpTraceItem("unlock", len(body) + 1, "unlock"),
+    ] if guarded else ops
+
+    solver = z3.Solver()
+    states = [z3.Int(f"{name}_guard_state_{index}") for index in range(len(abstract_ops) + 1)]
+    solver.add(states[0] == _SOLIDITY_GUARD_UNLOCKED)
+    for index, op in enumerate(abstract_ops):
+        if op.kind == "lock":
+            solver.add(states[index + 1] == _SOLIDITY_GUARD_LOCKED)
+        elif op.kind == "unlock":
+            solver.add(states[index + 1] == _SOLIDITY_GUARD_UNLOCKED)
+        else:
+            solver.add(states[index + 1] == states[index])
+
+    ext_idx = z3.Int(f"{name}_external_call_index")
+    write_idx = z3.Int(f"{name}_state_write_index")
+    ext_positions = [index for index, op in enumerate(abstract_ops) if op.kind == "externalCall"]
+    write_positions = [index for index, op in enumerate(abstract_ops) if op.kind == "stateWrite"]
+    if not ext_positions or not write_positions:
+        return None
+    solver.add(z3.Or([ext_idx == index for index in ext_positions]))
+    solver.add(z3.Or([write_idx == index for index in write_positions]))
+    solver.add(ext_idx < write_idx)
+    solver.add(
+        z3.Or(
+            [
+                z3.And(ext_idx == index, states[index] == _SOLIDITY_GUARD_UNLOCKED)
+                for index in ext_positions
+            ]
+        )
+    )
+
+    if solver.check() != z3.sat:
+        return None
+
+    model = solver.model()
+    ext_value = model[ext_idx].as_long()
+    write_value = model[write_idx].as_long()
+    trace = [
+        _solidity_format_trace_item(abstract_ops[ext_value]),
+        _solidity_format_trace_item(abstract_ops[write_value]),
+    ]
+    return "absent", trace
+
+def _solidity_format_trace_item(item: _SolidityOpTraceItem) -> str:
+    return f"{item.kind}: {item.snippet}"
 
 def _solidity_first_storage_write(
     body: str,
