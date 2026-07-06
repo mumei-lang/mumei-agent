@@ -15,6 +15,55 @@ from agent.cross_validation_foreign import (
     _infer_go_contracts,
 )
 
+_SOLIDITY_FUNCTION_PATTERN = re.compile(
+    r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
+    r"\((?P<params>[^)]*)\)"
+    r"(?P<attrs>[^{;]*?)\{",
+    re.DOTALL,
+)
+_SOLIDITY_EXTERNAL_CALL_PATTERNS = (
+    re.compile(r"\.call\s*\{[^}]*value\s*:", re.DOTALL),
+    re.compile(r"\.call\s*\(", re.DOTALL),
+    re.compile(r"\.transfer\s*\(", re.DOTALL),
+    re.compile(r"\.send\s*\(", re.DOTALL),
+)
+_SOLIDITY_STORAGE_WRITE_PATTERN = re.compile(
+    r"(?:^|;|\{)\s*(?P<lhs>[A-Za-z_][\w$]*(?:\[[^\]]+\]|\.[A-Za-z_][\w$]*)*)\s*"
+    r"(?P<op>(?<![=!<>])=(?![=])|\+=|-=|\*=)",
+    re.DOTALL | re.MULTILINE,
+)
+_SOLIDITY_LOCAL_DECLARATION_PATTERN = re.compile(
+    r"^(?:"
+    r"uint(?:8|16|32|64|128|256)?|"
+    r"int(?:8|16|32|64|128|256)?|"
+    r"bool|"
+    r"address(?:\s+payable)?|"
+    r"bytes(?:\d+)?|"
+    r"string|"
+    r"mapping\b|"
+    r"[A-Z][\w$]*\s+(?:memory|storage|calldata)\b"
+    r")",
+    re.DOTALL,
+)
+_SOLIDITY_ACCESS_MODIFIER_PATTERN = re.compile(r"\bonly[A-Z]\w*|\bauth\b")
+_SOLIDITY_ACCESS_GUARD_PATTERNS = (
+    re.compile(r"require\s*\(\s*msg\.sender\s*=="),
+    re.compile(r"require\s*\(\s*(?:_?owner|owner\(\))"),
+    re.compile(r"hasRole\s*\("),
+    re.compile(r"_checkOwner\s*\("),
+    re.compile(r"_checkRole\s*\("),
+    re.compile(
+        r"if\s*\(\s*(?:msg\.sender\s*[!=]=\s*(?:_?owner|owner\(\))|"
+        r"(?:_?owner|owner\(\))\s*[!=]=\s*msg\.sender)[^)]*\)\s*revert\b",
+        re.DOTALL,
+    ),
+    re.compile(
+        r"if\s*\(\s*(?:msg\.sender\s*[!=]=\s*(?:_?owner|owner\(\))|"
+        r"(?:_?owner|owner\(\))\s*[!=]=\s*msg\.sender)[^)]*\)\s*\{[^}]*\brevert\b",
+        re.DOTALL,
+    ),
+)
+
 @dataclass(frozen=True)
 class ForeignCodeSpec:
     """Function-level contract inferred from foreign source code."""
@@ -315,11 +364,13 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
     if normalized == "python":
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
-        return _detect_block_safety_issues(
+        issues = _detect_block_safety_issues(
             source,
             _solidity_function_blocks(source),
             "Solidity",
         )
+        issues.extend(_detect_solidity_contract_issues(source))
+        return issues
     return []
 
 def _first_counterexample_payload(
@@ -627,17 +678,135 @@ def _z3_solidity_overflow_counterexample(left_name: str, right_name: str) -> dic
     return {left_name: SOLIDITY_UINT256_MAX, right_name: 1}
 
 def _solidity_function_blocks(source: str) -> list[tuple[str, str]]:
-    pattern = re.compile(
-        r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
-        r"\((?P<params>[^)]*)\)"
-        r"(?P<attrs>[^{;]*?)\{",
-        re.DOTALL,
-    )
     blocks: list[tuple[str, str]] = []
-    for match in pattern.finditer(source):
+    for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source):
         body = _balanced_brace_body(source, match.end() - 1)
         blocks.append((_safe_identifier(match.group("name")), body))
     return blocks
+
+def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, str]]:
+    blocks: list[tuple[str, str, str]] = []
+    for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source):
+        body = _balanced_brace_body(source, match.end() - 1)
+        blocks.append(
+            (
+                _safe_identifier(match.group("name")),
+                match.group("attrs") or "",
+                body,
+            )
+        )
+    return blocks
+
+def _detect_solidity_contract_issues(source: str) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for name, attrs, body in _solidity_function_blocks_with_attrs(source):
+        if _solidity_function_is_mutating_external(attrs, body):
+            maybe_cei_issue = _solidity_cei_issue(name, body)
+            if maybe_cei_issue is not None:
+                issues.append(maybe_cei_issue)
+            if _solidity_function_is_externally_callable(attrs) and not _solidity_function_has_access_guard(
+                attrs,
+                body,
+            ):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Solidity function `{name}` is an externally callable "
+                            "state-mutating function with no access-control guard "
+                            "(no `onlyOwner`-style modifier or `require(msg.sender == ...)`); "
+                            "confirm this is intentionally permissionless"
+                        ),
+                    )
+                )
+    return issues
+
+def _solidity_function_is_externally_callable(attrs: str) -> bool:
+    return bool(re.search(r"\b(?:public|external)\b", attrs))
+
+def _solidity_function_is_mutating_external(attrs: str, body: str) -> bool:
+    return _solidity_function_has_storage_write(body) or _solidity_function_has_external_call(body)
+
+def _solidity_function_has_external_call(body: str) -> bool:
+    return any(pattern.search(body) for pattern in _SOLIDITY_EXTERNAL_CALL_PATTERNS)
+
+def _solidity_function_has_storage_write(body: str) -> bool:
+    return _solidity_first_storage_write(body) is not None
+
+def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
+    if _SOLIDITY_ACCESS_MODIFIER_PATTERN.search(attrs):
+        return True
+    return any(pattern.search(body) for pattern in _SOLIDITY_ACCESS_GUARD_PATTERNS)
+
+def _solidity_cei_issue(name: str, body: str) -> ForeignSafetyIssue | None:
+    call_match = _solidity_first_external_call(body)
+    if call_match is None:
+        return None
+    call_offset, call_snippet = call_match
+    storage_write = _solidity_first_storage_write(body, minimum_offset=call_offset)
+    if storage_write is None:
+        return None
+    lhs, _ = storage_write
+    return ForeignSafetyIssue(
+        function_name=name,
+        message=(
+            f"Solidity function `{name}` may be vulnerable to reentrancy: state write "
+            f"`{lhs}` occurs after external call `{call_snippet}` "
+            "(Checks-Effects-Interactions violation; move state updates before external "
+            "calls or add a reentrancy guard)"
+        ),
+    )
+
+def _solidity_first_external_call(body: str) -> tuple[int, str] | None:
+    matches: list[tuple[int, str]] = []
+    for pattern in _SOLIDITY_EXTERNAL_CALL_PATTERNS:
+        match = pattern.search(body)
+        if match is not None:
+            matches.append((match.start(), match.group(0)))
+    if not matches:
+        return None
+    offset, snippet = min(matches, key=lambda item: item[0])
+    return offset, _solidity_call_snippet(body, offset, snippet)
+
+def _solidity_call_snippet(body: str, offset: int, fallback: str) -> str:
+    statement_start = max(body.rfind(";", 0, offset), body.rfind("{", 0, offset))
+    statement_start = max(statement_start, body.rfind("\n", 0, offset))
+    tail = body[statement_start + 1 :] if statement_start != -1 else body[offset:]
+    end_candidates = [
+        candidate
+        for candidate in (
+            tail.find(";"),
+            tail.find("\n"),
+        )
+        if candidate != -1
+    ]
+    if end_candidates:
+        tail = tail[: min(end_candidates) + 1]
+    tail = tail.strip()
+    if len(tail) < len(fallback):
+        return fallback
+    return tail[:120]
+
+def _solidity_first_storage_write(
+    body: str,
+    minimum_offset: int = 0,
+) -> tuple[str, int] | None:
+    for match in _SOLIDITY_STORAGE_WRITE_PATTERN.finditer(body, minimum_offset):
+        lhs = match.group("lhs")
+        statement_start = max(body.rfind(";", 0, match.start()), body.rfind("{", 0, match.start()))
+        statement_start = max(statement_start, body.rfind("\n", 0, match.start()))
+        statement_prefix = body[statement_start + 1 : match.start()].strip()
+        if _solidity_statement_is_local_declaration(statement_prefix):
+            continue
+        if statement_prefix.startswith("emit"):
+            continue
+        return lhs, match.start()
+    return None
+
+def _solidity_statement_is_local_declaration(statement_prefix: str) -> bool:
+    if not statement_prefix:
+        return False
+    return bool(_SOLIDITY_LOCAL_DECLARATION_PATTERN.match(statement_prefix))
 
 def _rust_function_blocks(source: str) -> list[tuple[str, str]]:
     pattern = re.compile(

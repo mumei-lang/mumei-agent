@@ -115,6 +115,29 @@ def test_verifier_reports_solidity_uint256_overflow_counterexample() -> None:
     assert any("uint256 bounds contract" in violation for violation in violations)
 
 
+def test_verifier_reports_solidity_reentrancy_and_access_control_heuristics() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "solidity")
+
+    assert result["success"] is False
+    assert any("may be vulnerable to reentrancy" in error for error in result["errors"])
+    assert any("Checks-Effects-Interactions" in error for error in result["errors"])
+    assert any("no access-control guard" in error for error in result["errors"])
+    assert any("withdraw" in error and "reentrancy" in error for error in result["errors"])
+    assert any("setOwner" in error and "access-control guard" in error for error in result["errors"])
+    assert all("withdrawAll" not in error for error in result["errors"])
+    assert all("getBalance" not in error for error in result["errors"])
+    mumei.verify.assert_called_once()
+
+
 def test_to_mumei_atom_emits_trusted_contract() -> None:
     atom = to_mumei_atom(
         ForeignCodeSpec(

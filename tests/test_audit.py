@@ -23,6 +23,8 @@ from agent.mm_migration_advisor import MigrationHint
 from agent.strategies.cross_validation_strategy import CrossValidationReport
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 
 def _forge_spec() -> dict[str, object]:
     return {
@@ -132,6 +134,52 @@ def test_audit_pipeline_reports_solidity_uint256_overflow(tmp_path: Path) -> Non
         "function_name": "add",
         "counterexample": {"a": 2**256 - 1, "b": 1},
     } in result.counterexample_values
+
+
+def test_audit_pipeline_reports_solidity_reentrancy(tmp_path: Path) -> None:
+    source = tmp_path / "Vulnerable.sol"
+    source.write_text(
+        (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw and owner management for a vulnerable bank",
+        forge_task_spec=_solidity_forge_spec(),
+        detected_language="solidity",
+    )
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=ForeignCodeVerifier(mumei_client=mumei),
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "solidity")
+
+    assert result.language == "solidity"
+    assert result.success is False
+    assert any(
+        "may be vulnerable to reentrancy" in violation
+        for violation in result.verification_violations
+    )
+    assert any(
+        "Checks-Effects-Interactions" in violation
+        for violation in result.verification_violations
+    )
+    assert any(
+        "no access-control guard" in violation
+        for violation in result.verification_violations
+    )
+    assert all("withdrawAll" not in violation for violation in result.verification_violations)
+    assert all("getBalance" not in violation for violation in result.verification_violations)
 
 
 def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:

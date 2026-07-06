@@ -34,6 +34,9 @@ from agent.prompts.cross_validation_code import build_code_cross_validation_prom
 from agent.prompts.cross_validation_nl import build_nl_cross_validation_prompt
 
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
 def test_validate_nl_spec_detects_contradiction_ambiguity_and_unsat_contract() -> None:
     spec = (
         "常に残高を更新する、かつ決して残高を更新する。"
@@ -149,6 +152,29 @@ def test_validate_foreign_code_infers_multilanguage_safety_contracts() -> None:
         assert result.language == language
         assert result.inferred_atoms
         assert expected_requires in result.inferred_atoms[0].requires
+
+
+def test_validate_foreign_code_reports_solidity_reentrancy_and_access_control() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+
+    result = validate_foreign_code(
+        source,
+        "solidity",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    messages = [issue.message for issue in result.issues]
+
+    assert result.success is False
+    assert any("may be vulnerable to reentrancy" in message for message in messages)
+    assert any("Checks-Effects-Interactions" in message for message in messages)
+    assert any("no access-control guard" in message for message in messages)
+    assert any("withdraw" in message and "reentrancy" in message for message in messages)
+    assert any("setOwner" in message and "access-control guard" in message for message in messages)
+    assert all("withdrawAll" not in message for message in messages)
+    assert all("getBalance" not in message for message in messages)
 
 
 def test_validate_foreign_code_preserves_typescript_signature_types() -> None:

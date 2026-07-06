@@ -148,6 +148,7 @@ from agent.cross_validation_z3 import (
     _split_requirement_fragments,
     _spec_has_matching_atom,
 )
+from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
 
 
 
@@ -673,6 +674,8 @@ def validate_foreign_code(
     satisfiable, z3_issues, z3_warnings = _check_atoms_with_z3(atoms)
     warnings.extend(z3_warnings)
     issues = _with_source_lines(_dedupe_issues([*llm_issues, *z3_issues]), source_line_map)
+    if normalized_language == "solidity":
+        issues.extend(_solidity_advisory_issues(code))
     mumei_source = _atoms_to_mumei_module(atoms) if atoms else ""
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
@@ -695,6 +698,18 @@ def validate_foreign_code(
         warnings=warnings,
         errors=errors,
     )
+
+
+def _solidity_advisory_issues(code: str) -> list[CrossValidationIssue]:
+    return [
+        CrossValidationIssue(
+            kind="verification",
+            message=issue.message,
+            location=issue.function_name,
+            severity="warning",
+        )
+        for issue in _detect_solidity_contract_issues(code)
+    ]
 
 
 def build_validate_spec_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
@@ -1176,5 +1191,3 @@ def _verify_atoms_with_mumei(
             )
         )
     return result, issues, warnings
-
-
