@@ -1,6 +1,6 @@
 ---
 name: testing-solidity-foreign-code
-description: Test mumei-agent Solidity (.sol) support across Layer A (spec extraction) and Layer B (Z3 strict verification). Use when verifying changes to agent/code_to_spec.py solidity detection, agent/cross_validation_foreign.py solidity inference/256-bit overflow, agent/strategies/foreign_code_strategy*.py extract_solidity, or agent/audit.py solidity wiring.
+description: Test mumei-agent Solidity (.sol) support across Layer A (spec extraction) and Layer B (Z3 strict verification + smart-contract heuristics). Use when verifying changes to agent/code_to_spec.py solidity detection, agent/cross_validation_foreign.py solidity inference/256-bit overflow, agent/strategies/foreign_code_strategy*.py extract_solidity / _detect_solidity_contract_issues (reentrancy/CEI + access control), or agent/audit.py solidity wiring.
 ---
 
 # Testing Solidity foreign-code support (Layer A / Layer B)
@@ -58,6 +58,30 @@ from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 # AuditPipeline(..., foreign_code_verifier=ForeignCodeVerifier(mumei_client=mumei), ...).audit_file(sol, "solidity")
 # assert "can overflow `a + b`" and "uint256 bounds contract" in a verification_violations entry.
 ```
+
+## Smart-contract heuristics (Layer B stage 1): reentrancy/CEI + access control
+`_detect_solidity_contract_issues` in `agent/strategies/foreign_code_strategy_helpers.py` emits
+**advisory heuristic warnings** (NOT Z3 proofs — no counterexample, `required_contracts=()`):
+- **Reentrancy/CEI**: external value-transfer call (`.call{value:}`/`.call(`/`.transfer(`/`.send(`)
+  followed *in source order* by a storage write → message contains `may be vulnerable to reentrancy`
+  and `Checks-Effects-Interactions`.
+- **Missing access control**: externally callable (`public`/`external`, non-`view`/`pure`)
+  state-mutating function with no `only*`/`auth` modifier and no body guard
+  (`require(msg.sender == ...)`, `hasRole(`, `_checkOwner()`, owner-revert `if`) → message contains
+  `no access-control guard`.
+These surface in `verification_violations` (audit/validate-code) and as `warning`-severity
+`verification` issues from `validate_foreign_code(..., "solidity")`.
+
+**Test adversarially on BOTH axes** — a fixture must contain vulnerable AND safe functions:
+- vulnerable `withdraw` (call then state write, unguarded) → both warnings;
+- `setOwner(...) public { owner = ...; }` → access-control only;
+- `withdrawAll() public onlyOwner { state write; then transfer }` → NEITHER (guarded + correct order);
+- `getBalance() public view` → NEITHER.
+The most discriminating check: a function that writes state **before** the external call and is
+guarded (`onlyOwner`) must produce **0** CEI and **0** access-control warnings. A naive detector that
+flags "external call + any state write" (ignoring order) or "state write + public" (ignoring guards)
+would wrongly flag it. Always assert absence for safe functions, not just presence for vulnerable ones.
+Fixture: `tests/fixtures/sample_solidity_vulnerable.sol`.
 
 ## Detection heuristic (Layer A) is easy to over-broaden
 `_detect_language` content fallback (only used for files with NO recognized extension) must use
