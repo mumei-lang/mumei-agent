@@ -83,6 +83,27 @@ flags "external call + any state write" (ignoring order) or "state write + publi
 would wrongly flag it. Always assert absence for safe functions, not just presence for vulnerable ones.
 Fixture: `tests/fixtures/sample_solidity_vulnerable.sol`.
 
+## Stage 2: Z3 reentrancy guard-state-machine (suppression + trace)
+Stage 2 upgraded the CEI/reentrancy detector (`_solidity_reentrancy_trace` +
+`_solidity_cei_issue` in `foreign_code_strategy_helpers.py`) from a pure ordering heuristic to a
+Z3-backed guard-state-machine check (GuardState Unlocked/Locked, modeled on mumei-lean
+`SmartContract.lean`). Two testable behaviors:
+- **Trace**: an unguarded call-then-write finding now carries `counterexample =
+  {"reentrancy_trace": ["externalCall: ...", "stateWrite: ..."], "guard": "absent"}`. This surfaces on
+  `ForeignCodeVerifier.verify(...)["counterexample"]` and on `AuditPipeline` `counterexample_values`
+  (list of `{"function_name", "counterexample"}`), but is NOT inline in the `validate-code` JSON
+  `issues[]` entries — assert it at the verifier/audit layer, not the CLI JSON.
+- **Suppression**: a reentrancy guard makes the finding disappear. Guard = a `nonReentrant`/
+  `noReentrancy` modifier, OR a manual lock (`require(!locked); locked=true; ...; locked=false;`).
+  Fixture `tests/fixtures/sample_solidity_guarded.sol` has both a `nonReentrant withdraw` and a
+  manual-lock `manualWithdraw`; both do call-then-write yet must produce NO
+  `may be vulnerable to reentrancy` warning — while their access-control warnings STILL appear
+  (only the reentrancy branch is suppressed, the function isn't skipped). This is the key adversarial
+  check: a broken guard detector would still flag them.
+Note `ForeignCodeVerifier(mumei_client=...)` must be passed by keyword — the first positional arg is
+not `mumei_client`, so a positional mock falls through to the real `mumei` subprocess and errors with
+`FileNotFoundError: 'verify'`.
+
 ## Detection heuristic (Layer A) is easy to over-broaden
 `_detect_language` content fallback (only used for files with NO recognized extension) must use
 `re.search(r"\bcontract\s+[A-Z]", code)`, NOT `"contract " in code`. Regression test: a Python
