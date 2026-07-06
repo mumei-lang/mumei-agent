@@ -175,6 +175,24 @@ class McpSamplingLLMProvider:
         ``tool_choice`` maps to ``ToolChoice.mode`` (``"auto"``, ``"required"``
         or ``"none"``).
         """
+        tracer = telemetry.get_tracer(__name__)
+        with tracer.start_as_current_span("mcp_sampling.complete_with_tools") as span:
+            span.set_attribute("gen_ai.system", "mcp-sampling-tools")
+            if model:
+                span.set_attribute("gen_ai.request.model", model)
+            span.set_attribute("gen_ai.request.tool_count", len(tools))
+            if tool_choice:
+                span.set_attribute("gen_ai.request.tool_choice", tool_choice)
+            return self._complete_with_tools_impl(messages, model, tools, tool_choice=tool_choice)
+
+    def _complete_with_tools_impl(
+        self,
+        messages: Sequence[Message],
+        model: str,
+        tools: Sequence[Any],
+        *,
+        tool_choice: str | None = None,
+    ) -> "SamplingToolCompletion":
         from mcp import types as mcp_types
 
         if not _client_supports_basic_sampling(self.ctx):
@@ -197,7 +215,9 @@ class McpSamplingLLMProvider:
                     hints=[mcp_types.ModelHint(name=model)] if model else None,
                     intelligencePriority=0.8,
                 ),
-                metadata={"mumei_agent_llm_provider": "mcp_sampling_tools"},
+                metadata=telemetry.inject_trace_context(
+                    {"mumei_agent_llm_provider": "mcp_sampling_tools"}
+                ),
                 tools=request_tools,
                 tool_choice=choice,
             )
@@ -278,7 +298,11 @@ def _parse_tool_sampling_result(result: Any) -> SamplingToolCompletion:
 
 def complete_text(llm_or_client: Any, messages: Sequence[Message], model: str) -> str:
     """Complete with either an LLMProvider or a legacy OpenAI-compatible client."""
-    return _extract_openai_text(complete_response(llm_or_client, messages, model))
+    tracer = telemetry.get_tracer(__name__)
+    with tracer.start_as_current_span("llm.complete_text") as span:
+        if model:
+            span.set_attribute("gen_ai.request.model", model)
+        return _extract_openai_text(complete_response(llm_or_client, messages, model))
 
 
 def complete_response(
@@ -287,14 +311,25 @@ def complete_response(
     model: str,
 ) -> Any:
     """Return an OpenAI-like response from either provider style."""
-    chat = getattr(llm_or_client, "chat", None)
-    completions = getattr(chat, "completions", None)
-    if callable(getattr(completions, "create", None)):
-        return completions.create(model=model, messages=list(messages))
-    complete = getattr(llm_or_client, "complete", None)
-    if callable(complete):
-        return _CompletionResponse([_Choice(_Message(str(complete(messages, model))))])
-    return completions.create(model=model, messages=list(messages))
+    tracer = telemetry.get_tracer(__name__)
+    with tracer.start_as_current_span("llm.complete_response") as span:
+        if model:
+            span.set_attribute("gen_ai.request.model", model)
+        chat = getattr(llm_or_client, "chat", None)
+        completions = getattr(chat, "completions", None)
+        if callable(getattr(completions, "create", None)):
+            span.set_attribute("gen_ai.dispatch_path", "openai_client")
+            response = completions.create(model=model, messages=list(messages))
+            _annotate_response(span, response)
+            return response
+        complete = getattr(llm_or_client, "complete", None)
+        if callable(complete):
+            span.set_attribute("gen_ai.dispatch_path", "llm_provider")
+            return _CompletionResponse([_Choice(_Message(str(complete(messages, model))))])
+        span.set_attribute("gen_ai.dispatch_path", "openai_client_fallback")
+        response = completions.create(model=model, messages=list(messages))
+        _annotate_response(span, response)
+        return response
 
 
 @dataclass

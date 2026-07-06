@@ -6,6 +6,7 @@ import logging
 
 from openai import OpenAI
 
+from agent import telemetry
 from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
@@ -104,14 +105,18 @@ def extract_spec(
                 "Return a corrected forge task spec JSON object."
             )
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SPEC_EXTRACTION_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-        )
+        tracer = telemetry.get_tracer(__name__)
+        with tracer.start_as_current_span("llm.spec_extraction") as span:
+            span.set_attribute("gen_ai.system", "openai-compatible")
+            span.set_attribute("gen_ai.request.model", model)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SPEC_EXTRACTION_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+            )
         raw = response.choices[0].message.content or ""
         try:
             spec = _extract_json(raw)

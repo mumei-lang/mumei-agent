@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 import chardet
 from openai import OpenAI
 
+from agent import telemetry
 from agent.config import AgentConfig
 from agent.llm_provider import LLMProvider
 from agent.mumei_client import MumeiClient
@@ -235,13 +236,17 @@ class CodeToSpecExtractor:
     def _extract_spec_with_llm(self, client: OpenAI, code: str, language: str) -> str:
         """Use an LLM to extract a natural language specification."""
         prompt = build_code_to_spec_prompt(code, language)
-        response = client.chat.completions.create(
-            model=self.config.model,
-            messages=[
-                {"role": "system", "content": CODE_TO_SPEC_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        )
+        tracer = telemetry.get_tracer(__name__)
+        with tracer.start_as_current_span("llm.code_to_spec") as span:
+            span.set_attribute("gen_ai.system", "openai-compatible")
+            span.set_attribute("gen_ai.request.model", self.config.model)
+            response = client.chat.completions.create(
+                model=self.config.model,
+                messages=[
+                    {"role": "system", "content": CODE_TO_SPEC_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+            )
         return response.choices[0].message.content or ""
 
     def _infer_domain(self, code: str, language: str) -> str:

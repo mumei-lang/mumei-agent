@@ -6,6 +6,7 @@ import re
 
 from openai import OpenAI
 
+from agent import telemetry
 from agent.strategies.fix_strategy import response_token_count
 from agent.strategies.retry_history import RetryHistory
 
@@ -109,13 +110,17 @@ def _diagnose(
         approach_switch_instruction=switch_text,
     )
 
-    diag_response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": _DIAGNOSE_SYSTEM},
-            {"role": "user", "content": diagnose_prompt},
-        ],
-    )
+    tracer = telemetry.get_tracer(__name__)
+    with tracer.start_as_current_span("llm.diagnose") as span:
+        span.set_attribute("gen_ai.system", "openai-compatible")
+        span.set_attribute("gen_ai.request.model", model)
+        diag_response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _DIAGNOSE_SYSTEM},
+                {"role": "user", "content": diagnose_prompt},
+            ],
+        )
     return (
         _parse_diagnosis(diag_response.choices[0].message.content or ""),
         response_token_count(diag_response, model),

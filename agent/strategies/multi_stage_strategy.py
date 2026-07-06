@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from openai import OpenAI
 
+from agent import telemetry
 from agent.mumei_client import MumeiClient
 from agent.pattern_library import PatternLibrary
 from agent.prompts.report_formatter import truncate_prompt_section
@@ -120,13 +121,17 @@ def get_fix_multi_stage(
             retry_context=retry_context,
         )
 
-        fix_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _FIX_SYSTEM},
-                {"role": "user", "content": fix_prompt},
-            ],
-        )
+        tracer = telemetry.get_tracer(__name__)
+        with tracer.start_as_current_span("llm.multi_stage_fix") as span:
+            span.set_attribute("gen_ai.system", "openai-compatible")
+            span.set_attribute("gen_ai.request.model", model)
+            fix_response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _FIX_SYSTEM},
+                    {"role": "user", "content": fix_prompt},
+                ],
+            )
         fix_tokens = response_token_count(fix_response, model)
         total_tokens = diagnose_tokens + fix_tokens
         report_data["llm_tokens_used"] = total_tokens
