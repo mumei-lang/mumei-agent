@@ -69,11 +69,15 @@ from agent.audit_reporting import (
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
 from agent.extract_spec import _collect_code_files
+from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.llm_provider import LLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
+from agent.strategies.foreign_code_strategy_helpers import (
+    build_solidity_guard_trace_proof_certificate,
+)
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
 
 SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript", "go", "solidity")
@@ -144,6 +148,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        enable_lean_bridge: bool = False,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
         if source_path.is_dir():
@@ -153,6 +158,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                enable_lean_bridge=enable_lean_bridge,
             )
         with telemetry.start_span(
             "mumei.audit.file",
@@ -164,6 +170,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                enable_lean_bridge=enable_lean_bridge,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -183,6 +190,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        enable_lean_bridge: bool = False,
     ) -> AuditResult:
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
@@ -255,6 +263,26 @@ class AuditPipeline:
                 health_report = self._check_spec_health(spec_path, tmp)
                 spec_health_issues = _spec_health_issue_strings(health_report)
 
+            proof_certificate = (
+                build_solidity_guard_trace_proof_certificate(
+                    source_code,
+                    source_file=source_label,
+                    package_name=source_path.stem,
+                    package_version="0",
+                    mumei_version="agent",
+                )
+                if audit_language == "solidity"
+                else None
+            )
+            lean_bridge_result: dict[str, object] | None = None
+            if enable_lean_bridge and proof_certificate is not None and self.config.mumei_lean_repo:
+                proof_certificate, lean_bridge_result = (
+                    run_lean_bridge_and_merge_proof_cert(
+                        proof_certificate,
+                        self.config.mumei_lean_repo,
+                    )
+                )
+
             try:
                 foreign_result = self.foreign_code_verifier.verify(source_code, audit_language)
                 verification_violations = _verification_issue_strings(foreign_result)
@@ -288,6 +316,8 @@ class AuditPipeline:
             counterexample_values=counterexample_values,
             cross_validation_gaps=cross_validation_gaps,
             errors=errors,
+            proof_certificate=proof_certificate,
+            lean_bridge=lean_bridge_result,
         )
         if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
@@ -330,6 +360,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        enable_lean_bridge: bool = False,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
 
@@ -346,6 +377,7 @@ class AuditPipeline:
                 domain_hint=domain_hint,
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
+                enable_lean_bridge=enable_lean_bridge,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -365,6 +397,7 @@ class AuditPipeline:
         domain_hint: str = "",
         auto_migrate: bool = False,
         auto_heal: bool = False,
+        enable_lean_bridge: bool = False,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
@@ -413,6 +446,7 @@ class AuditPipeline:
                     domain_hint=domain_hint,
                     auto_migrate=auto_migrate,
                     auto_heal=auto_heal,
+                    enable_lean_bridge=enable_lean_bridge,
                 )
             except Exception as exc:
                 file_result = AuditResult(
@@ -598,16 +632,28 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         default=None,
         help="Directory to write healed .mm files (default: same directory as --code-file).",
     )
+    parser.add_argument(
+        "--enable-lean-bridge",
+        action="store_true",
+        help="Run the optional mumei-lean bridge for Solidity guard-trace certificates.",
+    )
+    parser.add_argument(
+        "--mumei-lean-repo",
+        default=None,
+        help="Path to the mumei-lean checkout used by --enable-lean-bridge.",
+    )
     return parser
 
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
     args = args or build_parser().parse_args()
-    result = AuditPipeline(heal_output_dir=args.heal_output_dir).audit_file(
+    config = AgentConfig(mumei_lean_repo=getattr(args, "mumei_lean_repo", None))
+    result = AuditPipeline(config=config, heal_output_dir=args.heal_output_dir).audit_file(
         args.code_file,
         args.language,
         domain_hint=args.domain_hint,
         auto_migrate=args.auto_migrate,
         auto_heal=args.auto_heal,
+        enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)

@@ -192,6 +192,99 @@ def test_audit_pipeline_reports_solidity_reentrancy(tmp_path: Path) -> None:
     } in result.counterexample_values
 
 
+def test_audit_pipeline_emits_guard_trace_certificate_and_upgrades_via_lean_bridge(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "Guarded.sol"
+    source.write_text(
+        (FIXTURES / "sample_solidity_guarded.sol").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="guarded bank with nonReentrant and manual lock",
+        forge_task_spec=_solidity_forge_spec(),
+        detected_language="solidity",
+    )
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    lean_cert = {
+        "atoms": [
+            {
+                "name": "withdraw_guard_trace",
+                "z3_check_result": "lean_verified",
+                "status": "verified",
+            },
+            {
+                "name": "manualWithdraw_guard_trace",
+                "z3_check_result": "lean_verified",
+                "status": "verified",
+            },
+        ]
+    }
+
+    with patch("agent.audit.run_lean_bridge_and_merge_proof_cert") as bridge_mock:
+        bridge_mock.return_value = (
+            {
+                "atoms": [
+                    {
+                        "name": "withdraw_guard_trace",
+                        "z3_check_result": "lean_verified",
+                        "status": "verified",
+                        "translator_ir": {
+                            "guard_trace": {
+                                "ops": ["lock", "externalCall", "unlock"],
+                                "expected_outcome": "safe",
+                            }
+                        },
+                    },
+                    {
+                        "name": "manualWithdraw_guard_trace",
+                        "z3_check_result": "lean_verified",
+                        "status": "verified",
+                        "translator_ir": {
+                            "guard_trace": {
+                                "ops": ["lock", "externalCall", "unlock"],
+                                "expected_outcome": "safe",
+                            }
+                        },
+                    },
+                ]
+            },
+            {
+                "success": True,
+                "lean_cert": lean_cert,
+                "stdout": "",
+                "stderr": "",
+            },
+        )
+        result = AuditPipeline(
+            AgentConfig(api_key="test", mumei_lean_repo="/tmp/mumei-lean"),
+            code_to_spec_extractor=extractor,
+            foreign_code_verifier=ForeignCodeVerifier(mumei_client=mumei),
+            cross_validator=cross_validator,
+            mumei_client=mumei,
+        ).audit_file(source, "solidity", enable_lean_bridge=True)
+
+    bridge_mock.assert_called_once()
+    assert result.proof_certificate is not None
+    atoms = {atom["name"]: atom for atom in result.proof_certificate["atoms"]}
+    assert atoms["withdraw_guard_trace"]["z3_check_result"] == "lean_verified"
+    assert atoms["withdraw_guard_trace"]["translator_ir"]["guard_trace"]["ops"] == [
+        "lock",
+        "externalCall",
+        "unlock",
+    ]
+    assert atoms["manualWithdraw_guard_trace"]["translator_ir"]["guard_trace"]["expected_outcome"] == "safe"
+    assert result.lean_bridge is not None
+    assert result.lean_bridge["success"] is True
+
+
 def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text(
@@ -784,6 +877,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         domain_hint="",
         auto_migrate=False,
         auto_heal=False,
+        enable_lean_bridge=False,
     )
 
 

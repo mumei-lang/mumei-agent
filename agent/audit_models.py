@@ -25,6 +25,8 @@ class AuditResult:
     healed_files: list[str] = field(default_factory=list)
     heal_errors: list[str] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
+    proof_certificate: dict[str, object] | None = None
+    lean_bridge: dict[str, object] | None = None
     report: str = ""
     errors: list[str] = field(default_factory=list)
 
