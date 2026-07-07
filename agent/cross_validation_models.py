@@ -87,11 +87,11 @@ class ForeignCodeValidationResult:
     """Result of existing-code validation."""
 
     success: bool
-    verdict: ForeignCodeVerdict
     language: str
     inferred_atoms: list[MumeiContractAtom]
     mumei_source: str
     satisfiable: bool | None
+    verdict: ForeignCodeVerdict = "unverifiable"
     verification: dict[str, object] | None = None
     proof_certificate: dict[str, object] | None = None
     lean_bridge: dict[str, object] | None = None

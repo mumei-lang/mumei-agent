@@ -687,10 +687,15 @@ def validate_foreign_code(
     mumei_source = _atoms_to_mumei_module(atoms) if atoms else ""
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
+        skipped_clause_warnings = [
+            warning
+            for warning in z3_warnings
+            if warning.startswith("Skipped unsupported Z3 clause:")
+        ]
         verification, mumei_issues, mumei_warnings = _verify_atoms_with_mumei(
             atoms,
             config,
-            skipped_clause_warnings=z3_warnings,
+            skipped_clause_warnings=skipped_clause_warnings,
         )
         warnings.extend(mumei_warnings)
         issues = _with_source_lines(_dedupe_issues([*issues, *mumei_issues]), source_line_map)

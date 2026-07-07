@@ -296,6 +296,46 @@ def test_validate_foreign_code_without_mumei_stays_verified(tmp_path: Path) -> N
     assert cli_result.verdict == "verified"
 
 
+def test_validate_foreign_code_non_skip_z3_warning_keeps_plain_verification_message(tmp_path: Path) -> None:
+    source = tmp_path / "unknown.go"
+    source.write_text(
+        "package demo\nfunc size(input []byte) int { return len(input) + 1 }\n",
+        encoding="utf-8",
+    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {"status": "failed"},
+        "stdout": "",
+        "stderr": "verification failed",
+    }
+
+    with patch("agent.cross_validation._check_atoms_with_z3") as z3_mock, patch(
+        "agent.cross_validation.create_mumei_client",
+        return_value=mumei,
+    ):
+        z3_mock.return_value = (
+            True,
+            [],
+            ["Z3 returned unknown for expression: len(input) > 1"],
+        )
+        result = validate_foreign_code(
+            source.read_text(encoding="utf-8"),
+            "go",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+
+    assert result.success is False
+    assert result.verdict == "refuted"
+    assert any(
+        "mumei verify reported an unsatisfied or inconsistent inferred contract." in issue.message
+        for issue in result.issues
+    )
+    assert all("unsupported Z3 clauses were skipped" not in issue.message for issue in result.issues)
+
+
 def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: Path) -> None:
     source = tmp_path / "inconclusive.go"
     source.write_text(
