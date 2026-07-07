@@ -1,7 +1,7 @@
 """Regression tests for cross-repo harness contract vocabulary.
 
 Covers docs, CLI help text, and MCP docstrings to ensure the
-``audit -> migrate-suggest -> heal`` contract and seven fixed keys
+``audit -> migrate-suggest -> heal`` contract and eight fixed keys
 are described without aliases across all surfaces.
 
 The doc-only test runs in the lightweight ``contract-vocabulary`` CI job
@@ -24,6 +24,7 @@ DOCS_UNDER_CONTRACT = [
 NO_MM_KEYS = [
     "spec_health_issues",
     "verification_violations",
+    "verification_status",
     "cross_validation_gaps",
     "next_steps",
     "migration_hints",
@@ -113,7 +114,7 @@ def _get_audit_cli_help() -> str:
 
 @_needs_agent
 def test_cli_help_uses_fixed_audit_keys_without_alias_keys() -> None:
-    """CLI help for audit must mention all 7 fixed keys and no aliases."""
+    """CLI help for audit must mention all 8 fixed keys and no aliases."""
     help_text = _get_audit_cli_help()
     failures: list[str] = []
     for key in NO_MM_KEYS:
@@ -132,7 +133,7 @@ def test_cli_help_uses_fixed_audit_keys_without_alias_keys() -> None:
 
 @_needs_agent
 def test_scan_and_fix_docstring_uses_fixed_audit_keys_without_alias_keys() -> None:
-    """MCP scan_and_fix docstring must mention all 7 fixed keys and no aliases."""
+    """MCP scan_and_fix docstring must mention all 8 fixed keys and no aliases."""
     from agent.mcp_server import scan_and_fix
 
     docstring = scan_and_fix.__doc__ or ""

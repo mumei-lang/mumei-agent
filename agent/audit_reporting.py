@@ -8,6 +8,7 @@ import re
 from typing import Literal
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
+from agent.cross_validation_models import ForeignCodeVerdict
 from agent.prompts.report_formatter import format_counterexample
 from agent.report_formatter import format_result_report
 from agent.strategies.cross_validation_strategy import CrossValidationReport
@@ -101,6 +102,47 @@ def _verification_issue_strings(result: dict[str, object]) -> list[str]:
         if stderr:
             issues.append(_shorten(stderr))
     return _dedupe_strings(issues)
+
+
+def _verification_status_from_foreign_result(
+    result: dict[str, object] | None,
+    *,
+    counterexample_values: list[dict[str, object]] | None = None,
+    verification_violations: list[str] | None = None,
+) -> ForeignCodeVerdict | None:
+    """Mirror the validate-code verdict split for audit output.
+
+    A skipped or missing Z3 encoding is unverifiable rather than refuted.
+    """
+    if result is None:
+        return "unverifiable"
+    verification = _dict_value(result.get("verification"))
+    if not verification:
+        return "unverifiable"
+    report = _dict_value(verification.get("report"))
+    status = _string_value(report.get("status"), "")
+    diagnostics = _string_list(report.get("diagnostics"))
+    has_counterexample = bool(
+        result.get("counterexample")
+        or report.get("counterexample")
+        or counterexample_values
+        or any("counterexample" in violation.lower() for violation in (verification_violations or []))
+    )
+    skipped_clause_warnings = any(
+        warning.startswith("Skipped unsupported Z3 clause:") for warning in diagnostics
+    ) or any(
+        warning.startswith("Skipped unsupported Z3 clause:")
+        for warning in _string_list(result.get("warnings"))
+    )
+    if status == "satisfiable_with_skips" and not has_counterexample:
+        return "unverifiable"
+    if skipped_clause_warnings and not has_counterexample:
+        return "unverifiable"
+    if has_counterexample:
+        return "refuted"
+    if verification.get("success") is False:
+        return "refuted"
+    return "verified"
 
 def _counterexample_value_dicts(result: dict[str, object]) -> list[dict]:
     values: list[dict] = []
@@ -396,6 +438,7 @@ def _build_report(result: AuditResult) -> str:
         f"Audit {'passed' if result.success else 'found issues'}: {result.source_file}",
         f"language: {result.language or 'unknown'}",
         f"spec_extracted: {result.spec_extracted}",
+        f"verification_status: {result.verification_status or 'unverifiable'}",
         f"spec_health_issues: {result.spec_health_issues}",
         f"verification_violations: {result.verification_violations}",
         f"counterexample_values: {result.counterexample_values}",
