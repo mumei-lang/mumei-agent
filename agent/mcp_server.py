@@ -1972,7 +1972,8 @@ def scan_and_fix(
             "contract_terms": AUDIT_CONTRACT_TERMS,
         }
         for key in AUDIT_SCHEMA_KEYS:
-            payload[key] = getattr(result, key, [])
+            default: object = None if key == "verification_status" else []
+            payload[key] = getattr(result, key, default)
         if output_format in {"human", "markdown"}:
             from agent.report_formatter import format_scan_and_fix_report
 

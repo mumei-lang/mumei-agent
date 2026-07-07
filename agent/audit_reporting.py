@@ -438,7 +438,7 @@ def _build_report(result: AuditResult) -> str:
         f"Audit {'passed' if result.success else 'found issues'}: {result.source_file}",
         f"language: {result.language or 'unknown'}",
         f"spec_extracted: {result.spec_extracted}",
-        f"Verification status: {result.verification_status or 'unverifiable'}",
+        f"verification_status: {result.verification_status or 'unverifiable'}",
         f"spec_health_issues: {result.spec_health_issues}",
         f"verification_violations: {result.verification_violations}",
         f"counterexample_values: {result.counterexample_values}",

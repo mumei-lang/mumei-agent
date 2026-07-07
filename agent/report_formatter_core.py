@@ -195,7 +195,7 @@ def _status_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list
         verification_status = payload.get("verification_status")
         if verification_status is None:
             verification_status = source_payload.get("verification_status")
-        lines.append(f"- Verification status: `{verification_status or 'unverifiable'}`")
+        lines.append(f"- verification_status: `{verification_status or 'unverifiable'}`")
     summary = payload.get("summary")
     if summary:
         lines.append(f"- Summary: {_inline_value(summary)}")
