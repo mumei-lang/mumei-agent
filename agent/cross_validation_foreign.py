@@ -312,7 +312,6 @@ def _single_return_expr(function_node: ast.FunctionDef) -> str:
 def _safety_requires_for_expression(expression: str) -> str:
     if not expression:
         return "true"
-    expression = _strip_go_rust_literals_and_comments(expression)
     requirements: list[str] = []
     try:
         tree = ast.parse(expression, mode="eval")
@@ -328,7 +327,6 @@ def _safety_requires_for_expression(expression: str) -> str:
 
 
 def _generic_safety_requires_for_expression(expression: str) -> list[str]:
-    expression = _strip_go_rust_literals_and_comments(expression)
     requirements: list[str] = []
     for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:/|%)\s*([A-Za-z_][A-Za-z0-9_]*)", expression):
         requirements.append(f"{match.group(2)} != 0")

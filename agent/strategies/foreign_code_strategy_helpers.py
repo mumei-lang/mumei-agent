@@ -441,7 +441,8 @@ def _detect_block_safety_issues(
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, body in blocks:
-        body = _strip_go_rust_literals_and_comments(body)
+        if label in {"Go", "Rust"}:
+            body = _strip_go_rust_literals_and_comments(body)
         expressions = _return_expressions(body)
         if not expressions and label == "Rust":
             expressions = [_last_rust_expression(body)]
@@ -472,7 +473,8 @@ def _issues_for_expression(
     *,
     dereference_values: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
-    expression = _strip_go_rust_literals_and_comments(expression)
+    if label in {"Go", "Rust"}:
+        expression = _strip_go_rust_literals_and_comments(expression)
     issues: list[ForeignSafetyIssue] = []
     for match in re.finditer(
         r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
