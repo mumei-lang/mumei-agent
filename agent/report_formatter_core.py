@@ -191,6 +191,11 @@ def _status_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list
         lines.append(f"- Source: `{source_dir}`")
     if "contradiction_type" in payload and payload.get("contradiction_type"):
         lines.append(f"- contradiction_type: `{payload['contradiction_type']}`")
+    if "verification_status" in payload or "verification_status" in source_payload:
+        verification_status = payload.get("verification_status")
+        if verification_status is None:
+            verification_status = source_payload.get("verification_status")
+        lines.append(f"- Verification status: `{verification_status or 'unverifiable'}`")
     summary = payload.get("summary")
     if summary:
         lines.append(f"- Summary: {_inline_value(summary)}")

@@ -65,6 +65,7 @@ from agent.audit_reporting import (
     _string_list,
     _string_value,
     _verification_issue_strings,
+    _verification_status_from_foreign_result,
 )
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
@@ -94,6 +95,7 @@ AUDIT_EXTENSION_MAP: dict[str, Language] = {
 AUDIT_SCHEMA_KEYS = [
     "spec_health_issues",
     "verification_violations",
+    "verification_status",
     "cross_validation_gaps",
     "next_steps",
     "migration_hints",
@@ -104,6 +106,7 @@ AUDIT_SCHEMA_KEYS = [
 AUDIT_CONTRACT_TERMS = {
     "spec_health_issues": "spec-only contradictions, overconstraints, vacuity, or ambiguity",
     "verification_violations": "existing-code bugs or unsafe paths found before .mm migration",
+    "verification_status": "machine-readable code-safety verdict for the audited source: verified, refuted, or unverifiable",
     "cross_validation_gaps": "spec/code mismatches or cross-spec drift discovered during audit",
     "next_steps": "human-review entrypoint for audit -> migrate-suggest -> heal",
     "migration_hints": "generated .mm skeleton advice from migrate-suggest or audit --auto-migrate",
@@ -210,6 +213,7 @@ class AuditPipeline:
                 source_file=source_label,
                 language=normalized_language,
                 spec_extracted=False,
+                verification_status="unverifiable",
                 errors=[f"Failed to read source file: {exc}"],
             )
             return _finalize_audit_result(result)
@@ -220,6 +224,7 @@ class AuditPipeline:
                 source_file=source_label,
                 language=normalized_language,
                 spec_extracted=False,
+                verification_status="unverifiable",
                 errors=[
                     "language must be one of: "
                     + ", ".join(SUPPORTED_AUDIT_LANGUAGES)
@@ -243,6 +248,7 @@ class AuditPipeline:
                 source_file=source_label,
                 language=audit_language,
                 spec_extracted=False,
+                verification_status="unverifiable",
                 errors=errors,
             )
             return _finalize_audit_result(result)
@@ -255,6 +261,7 @@ class AuditPipeline:
         verification_violations: list[str] = []
         counterexample_values: list[dict] = []
         cross_validation_gaps: list[str] = []
+        verification_status: str | None = None
 
         with tempfile.TemporaryDirectory(prefix="mumei-audit-") as tmp:
             spec_path = Path(tmp) / "audit_spec.mm"
@@ -287,10 +294,17 @@ class AuditPipeline:
                 foreign_result = self.foreign_code_verifier.verify(source_code, audit_language)
                 verification_violations = _verification_issue_strings(foreign_result)
                 counterexample_values = _counterexample_value_dicts(foreign_result)
+                verification_status = _verification_status_from_foreign_result(
+                    foreign_result,
+                    counterexample_values=counterexample_values,
+                    verification_violations=verification_violations,
+                )
             except ValueError as exc:
                 verification_violations.append(str(exc))
+                verification_status = "unverifiable"
             except FileNotFoundError as exc:
                 verification_violations.append(f"mumei verify failed to start: {exc}")
+                verification_status = "unverifiable"
 
             if spec_source:
                 cross_report = self.cross_validator.validate_spec_vs_impl(
@@ -311,6 +325,8 @@ class AuditPipeline:
             source_file=source_label,
             language=audit_language,
             spec_extracted=True,
+            verification_status=verification_status
+            or _verification_status_from_foreign_result(None),
             spec_health_issues=spec_health_issues,
             verification_violations=verification_violations,
             counterexample_values=counterexample_values,
@@ -586,7 +602,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "One-command migration/heal contract: "
         "mumei-agent audit --code-file <file-or-dir> --auto-migrate --auto-heal. "
         "The MCP scan_and_fix tool uses the same audit -> migrate-suggest -> heal flow. "
-        "Fixed output keys: spec_health_issues, verification_violations, "
+        "Fixed output keys: spec_health_issues, verification_violations, verification_status, "
         "cross_validation_gaps, next_steps, migration_hints, healed_files, heal_errors."
     )
     parser = parser or argparse.ArgumentParser(

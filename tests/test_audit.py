@@ -345,6 +345,142 @@ def test_audit_pipeline_reports_python_bug(tmp_path: Path) -> None:
     )
 
 
+def test_audit_pipeline_marks_verification_status_refuted(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw requires balance >= amount",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": False,
+        "errors": [],
+        "verification": {
+            "success": False,
+            "report": {
+                "status": "failed",
+                "failed": 1,
+                "counterexample": {"balance": 100, "amount": 150},
+            },
+        },
+    }
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "python")
+
+    assert result.verification_status == "refuted"
+
+
+def test_audit_pipeline_marks_verification_status_unverifiable_for_skipped_clause(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw requires balance >= amount",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": False,
+        "errors": ["mumei verify reported a skipped clause"],
+        "verification": {
+            "success": False,
+            "report": {
+                "status": "satisfiable_with_skips",
+                "diagnostics": [
+                    "Skipped unsupported Z3 clause: requires clause 'balance >= amount': Unknown function: is_hex_digit"
+                ],
+            },
+        },
+    }
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "python")
+
+    assert result.verification_status == "unverifiable"
+
+
+def test_audit_pipeline_marks_verification_status_verified_for_clean_run(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n"
+        "    return balance - amount\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw requires balance >= amount",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": True,
+        "errors": [],
+        "verification": {
+            "success": True,
+            "report": {"status": "satisfiable"},
+        },
+    }
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "python")
+
+    assert result.verification_status == "verified"
+
+
 def test_audit_report_includes_counterexample_values(tmp_path: Path) -> None:
     source = tmp_path / "payment.py"
     source.write_text(

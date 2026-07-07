@@ -25,7 +25,10 @@ def test_audit_text_report_keeps_fixed_no_mm_keys_when_empty() -> None:
     report = _build_report(result)
 
     for key in AUDIT_SCHEMA_KEYS:
-        assert f"{key}:" in report
+        if key == "verification_status":
+            assert "Verification status:" in report
+        else:
+            assert f"{key}:" in report
     assert "recommendations:" not in report
     assert "repair_hints:" not in report
 

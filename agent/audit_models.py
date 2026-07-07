@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from agent.code_to_spec import CodeToSpecResult, Language
+from agent.cross_validation_models import ForeignCodeVerdict
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 from agent.strategies.spec_health_strategy import SpecHealthChecker
@@ -17,6 +18,7 @@ class AuditResult:
     source_file: str
     language: str
     spec_extracted: bool
+    verification_status: ForeignCodeVerdict | None = field(default=None, kw_only=True)
     spec_health_issues: list[str] = field(default_factory=list)
     verification_violations: list[str] = field(default_factory=list)
     counterexample_values: list[dict] = field(default_factory=list)
