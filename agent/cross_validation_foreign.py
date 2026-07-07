@@ -42,6 +42,130 @@ def _dedupe_strings(values: list[str]) -> list[str]:
             deduped.append(stripped)
     return deduped
 
+
+def _strip_go_rust_literals_and_comments(text: str) -> str:
+    def mask(span: str) -> str:
+        return "".join("\n" if char == "\n" else " " for char in span)
+
+    def consume_string(index: int, quote: str) -> int:
+        i = index + 1
+        while i < len(text):
+            char = text[i]
+            if char == "\\" and i + 1 < len(text):
+                i += 2
+                continue
+            if char == quote:
+                return i + 1
+            i += 1
+        return len(text)
+
+    def consume_char_literal(index: int) -> int:
+        i = index + 1
+        if i >= len(text) or text[i] == "\n":
+            return 0
+        if text[i] == "\\":
+            i += 1
+            if i >= len(text) or text[i] == "\n":
+                return 0
+            if text[i] in {"x", "u", "U", "n", "r", "t", "0", "\\", "'", '"'}:
+                if text[i] in {"u", "U"}:
+                    i += 1
+                    if i >= len(text) or text[i] != "{":
+                        return 0
+                    i += 1
+                    digits = 0
+                    while i < len(text) and text[i] != "}":
+                        if text[i] == "\n" or digits > 6 or text[i] not in "0123456789abcdefABCDEF":
+                            return 0
+                        digits += 1
+                        i += 1
+                    if digits == 0 or i >= len(text) or text[i] != "}":
+                        return 0
+                    i += 1
+                elif text[i] == "x":
+                    i += 1
+                    digits = 0
+                    while i < len(text) and digits < 2 and text[i] in "0123456789abcdefABCDEF":
+                        digits += 1
+                        i += 1
+                    if digits == 0:
+                        return 0
+                else:
+                    i += 1
+            else:
+                return 0
+        else:
+            if text[i] == "'" or text[i] == "\\":
+                return 0
+            i += 1
+        if i < len(text) and text[i] == "'":
+            return i + 1
+        return 0
+
+    def consume_rust_raw_string(index: int) -> int:
+        if text[index] == "b" and index + 1 < len(text) and text[index + 1] == "r":
+            prefix = 2
+        elif text[index] == "r":
+            prefix = 1
+        else:
+            return 0
+        hashes = 0
+        cursor = index + prefix
+        while cursor < len(text) and text[cursor] == "#":
+            hashes += 1
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != '"':
+            return 0
+        closing = '"' + ("#" * hashes)
+        end = text.find(closing, cursor + 1)
+        if end == -1:
+            return len(text)
+        return end + len(closing)
+
+    stripped: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith("//", i):
+            j = text.find("\n", i)
+            if j == -1:
+                stripped.append(mask(text[i:]))
+                break
+            stripped.append(mask(text[i:j]))
+            stripped.append("\n")
+            i = j + 1
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            end = len(text) if j == -1 else j + 2
+            stripped.append(mask(text[i:end]))
+            i = end
+            continue
+        raw_end = consume_rust_raw_string(i)
+        if raw_end:
+            stripped.append(mask(text[i:raw_end]))
+            i = raw_end
+            continue
+        char = text[i]
+        if char == '"':
+            end = consume_string(i, char)
+            stripped.append(mask(text[i:end]))
+            i = end
+            continue
+        if char == "'":
+            end = consume_char_literal(i)
+            if end:
+                stripped.append(mask(text[i:end]))
+                i = end
+                continue
+        if char == "`":
+            end = consume_string(i, char)
+            stripped.append(mask(text[i:end]))
+            i = end
+            continue
+        stripped.append(char)
+        i += 1
+    return "".join(stripped)
+
 def _infer_foreign_contracts_with_patterns(code: str, language: str) -> list[MumeiContractAtom]:
     language = _normalize_foreign_language(language)
     if language == "python":
@@ -295,6 +419,7 @@ def _go_nil_dereference_values(
     expression: str,
     eligible_values: set[str] | None = None,
 ) -> list[str]:
+    expression = _strip_go_rust_literals_and_comments(expression)
     values: list[str] = []
     for match in re.finditer(r"\*\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)", expression):
         value = match.group("value")
@@ -315,18 +440,21 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     pattern = re.compile(
         r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[A-Za-z0-9_:<>]+))?\s*\{(?P<body>.*?)\}",
+        r"(?:<[^>]+>)?\s*"
+        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?\s*\{(?P<body>.*?)\}",
         flags=re.DOTALL,
     )
     for match in pattern.finditer(code):
         params = _params_from_signature(match.group("params"))
-        return_expr = _last_expression(match.group("body"))
+        body = match.group("body")
+        return_expr = _last_expression(body)
+        safety_expr = _last_expression(_strip_go_rust_literals_and_comments(body))
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
                 params=params,
                 return_type="i64" if match.group("ret") else "bool",
-                requires=_rust_safety_requires_for_expression(return_expr),
+                requires=_rust_safety_requires_for_expression(safety_expr),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
         )
@@ -508,6 +636,9 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
     for name, params_text, return_type, body in _go_function_declarations(code):
         params = _params_from_signature(params_text)
         raw_return_expr = _raw_return_statement_expression(body)
+        safety_expr = _raw_return_statement_expression(
+            _strip_go_rust_literals_and_comments(body)
+        )
         return_expr = _normalize_foreign_expression(raw_return_expr)
         atoms.append(
             MumeiContractAtom(
@@ -515,7 +646,7 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
                 params=params,
                 return_type="i64" if return_type else "bool",
                 requires=_go_safety_requires_for_expression(
-                    raw_return_expr,
+                    safety_expr,
                     [param.name for param in params],
                 ),
                 ensures=f"result == {return_expr}" if return_expr else "true",

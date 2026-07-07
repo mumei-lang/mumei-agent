@@ -16,6 +16,7 @@ from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _dedupe_strings,
     _go_function_declarations,
+    _strip_go_rust_literals_and_comments,
 )
 
 _SOLIDITY_FUNCTION_PATTERN = re.compile(
@@ -378,7 +379,12 @@ def _normalize_language(language: str) -> str:
 def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
     normalized = _normalize_language(language)
     if normalized == "rust":
-        return _detect_block_safety_issues(source, _rust_function_blocks(source), "Rust")
+        stripped_source = _strip_go_rust_literals_and_comments(source)
+        return _detect_block_safety_issues(
+            stripped_source,
+            _rust_function_blocks(stripped_source),
+            "Rust",
+        )
     if normalized == "typescript":
         return _detect_block_safety_issues(
             source,
@@ -386,7 +392,8 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             "TypeScript",
         )
     if normalized == "go":
-        return _detect_go_safety_issues(source)
+        stripped_source = _strip_go_rust_literals_and_comments(source)
+        return _detect_go_safety_issues(stripped_source)
     if normalized == "python":
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
@@ -434,6 +441,8 @@ def _detect_block_safety_issues(
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, body in blocks:
+        if label in {"Go", "Rust"}:
+            body = _strip_go_rust_literals_and_comments(body)
         expressions = _return_expressions(body)
         if not expressions and label == "Rust":
             expressions = [_last_rust_expression(body)]
@@ -444,6 +453,7 @@ def _detect_block_safety_issues(
 def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, params_text, _return_type, body in _go_function_declarations(source):
+        body = _strip_go_rust_literals_and_comments(body)
         param_names = set(_go_params(params_text))
         for expression in _return_expressions(body):
             issues.extend(
@@ -463,6 +473,8 @@ def _issues_for_expression(
     *,
     dereference_values: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
+    if label in {"Go", "Rust"}:
+        expression = _strip_go_rust_literals_and_comments(expression)
     issues: list[ForeignSafetyIssue] = []
     for match in re.finditer(
         r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",

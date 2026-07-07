@@ -148,6 +148,90 @@ def test_verifier_reports_solidity_reentrancy_and_access_control_heuristics() ->
     mumei.verify.assert_called_once()
 
 
+def test_verifier_ignores_go_literals_and_comments_in_safety_heuristics() -> None:
+    source = (
+        "package demo\n"
+        "// http://example.com and/or other notes should not matter\n"
+        "func unmarshalText(input []byte) error {\n"
+        '    return fmt.Errorf("invalid hex or decimal integer %q", input)\n'
+        "}\n"
+    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "go")
+
+    assert result["success"] is True
+    assert all("divide by" not in error for error in result["errors"])
+    assert all("overflow" not in error for error in result["errors"])
+
+
+def test_validate_foreign_code_ignores_go_literals_and_comments_in_safety_requires() -> None:
+    result = validate_foreign_code(
+        (
+            "package demo\n"
+            "// http://example.com and/or other notes should not matter\n"
+            "func unmarshalText(input []byte) error {\n"
+            '    return fmt.Errorf("invalid hex or decimal integer %q", input)\n'
+            "}\n"
+        ),
+        "go",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].requires == "true"
+
+
+def test_validate_foreign_code_keeps_real_go_division_requirement() -> None:
+    result = validate_foreign_code(
+        "package demo\nfunc divide(a int, b int) int { return a / b }\n",
+        "go",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].requires == "b != 0"
+
+
+def test_validate_foreign_code_keeps_rust_lifetimes_and_division_requirement() -> None:
+    result = validate_foreign_code(
+        "pub fn divide<'a>(a: i64, b: i64, x: &'a str) -> i64 { a / b }\n",
+        "rust",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].requires == "b != 0"
+
+
+def test_validate_foreign_code_ignores_rust_literals_and_comments_in_safety_requires() -> None:
+    result = validate_foreign_code(
+        "pub fn render<'a>(x: &'a str) -> &'a str {\n"
+        "    // / still should not count\n"
+        '    "http://example.com/and/or".into()\n'
+        "}\n",
+        "rust",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].requires == "true"
+
+
 def test_verifier_suppresses_solidity_reentrancy_when_guarded() -> None:
     source = (FIXTURES / "sample_solidity_guarded.sol").read_text(encoding="utf-8")
     mumei = MagicMock()
