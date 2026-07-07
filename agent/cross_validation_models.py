@@ -31,6 +31,7 @@ IssueKind = Literal[
 ]
 
 Severity = Literal["warning", "error"]
+ForeignCodeVerdict = Literal["verified", "refuted", "unverifiable"]
 
 @dataclass(frozen=True)
 class CrossValidationIssue:
@@ -86,6 +87,7 @@ class ForeignCodeValidationResult:
     """Result of existing-code validation."""
 
     success: bool
+    verdict: ForeignCodeVerdict
     language: str
     inferred_atoms: list[MumeiContractAtom]
     mumei_source: str
