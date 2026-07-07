@@ -104,6 +104,36 @@ Note `ForeignCodeVerifier(mumei_client=...)` must be passed by keyword — the f
 not `mumei_client`, so a positional mock falls through to the real `mumei` subprocess and errors with
 `FileNotFoundError: 'verify'`.
 
+## Stage 3: guard-trace → Lean certificate (cross-repo with mumei-lean)
+Stage 3 turns the stage-2 guard trace into a machine-checked Lean cert via the mumei-lean bridge.
+Producer side: `build_solidity_guard_trace_proof_certificate` in `foreign_code_strategy_helpers.py`
+emits a proof-cert whose atoms carry `translator_ir.guard_trace = {ops, expected_outcome}`. Opt-in
+flags `--enable-lean-bridge --mumei-lean-repo <path>` on both `validate-code` and `audit` run the
+bridge (`agent/lean_bridge_helpers.run_lean_bridge_and_merge_proof_cert` → mumei-lean
+`scripts/bridge.py` → `lake build`) and merge the returned statuses.
+
+**Use `validate-code`, not `audit`, for the E2E** — `audit` still crashes at spec-health without the
+`mumei` binary, but `validate-code --no-llm --no-mumei --enable-lean-bridge` reaches the bridge fully.
+Requires a mumei-lean checkout with the guard-trace lowering branch. `lake build` is fast (~3-4s) when
+the mathlib cache/`.lake` is already built; expect minutes on a cold build.
+
+Assert on the emitted JSON (`--output`, it's `asdict(result)` incl. `proof_certificate`):
+- unguarded external call → `guard_trace.ops == ["externalCall"]`, `expected_outcome == "none"`,
+  goal `runGuard GuardState.Unlocked [GuardOp.externalCall] = none`, and after bridge
+  `z3_check_result == "lean_verified"` / `status == "verified"`, `lean_bridge.returncode == 0`.
+- guarded function → ops `["lock","externalCall","unlock"]`, `expected_outcome == "safe"`,
+  goal ends `= some GuardState.Unlocked`, atoms `lean_verified`.
+
+**Two adversarial checks that a broken bridge can't fake:**
+- Baseline: WITHOUT `--enable-lean-bridge`, atoms stay `z3_check_result == "unknown"` and
+  `lean_bridge` is null (proves the upgrade comes from lake, not cert construction).
+- Integrity: craft a cert with `ops=["externalCall"]` but `expected_outcome="safe"` (false prop
+  `runGuard ... = some Unlocked`), reset atoms to `z3_check_result="unknown"`, run mumei-lean
+  `scripts/bridge.py` directly → `lake build` exits 1 with `tactic 'decide' proved that the
+  proposition ...` and atoms are NOT upgraded. This proves `by decide` genuinely checks the goal.
+Generated theorem lands in mumei-lean `generated/Generated/_<module>_.lean` (gitignored) with the
+provenance block (`-- mumei_z3_result_class:`, `/-- Auto-generated from mumei atom ... -/`).
+
 ## Detection heuristic (Layer A) is easy to over-broaden
 `_detect_language` content fallback (only used for files with NO recognized extension) must use
 `re.search(r"\bcontract\s+[A-Z]", code)`, NOT `"contract " in code`. Regression test: a Python
