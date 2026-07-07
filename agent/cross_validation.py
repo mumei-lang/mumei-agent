@@ -38,6 +38,7 @@ from agent.cross_validation_models import (
     CrossValidationReport,
     CrossValidationResult,
     ForeignCodeValidationResult,
+    ForeignCodeVerdict,
     IssueKind,
     MumeiContractAtom,
     NLSpecValidationResult,
@@ -652,6 +653,7 @@ def validate_foreign_code(
     if errors:
         return ForeignCodeValidationResult(
             success=False,
+            verdict="unverifiable",
             language=normalized_language,
             inferred_atoms=[],
             mumei_source="",
@@ -685,7 +687,16 @@ def validate_foreign_code(
     mumei_source = _atoms_to_mumei_module(atoms) if atoms else ""
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
-        verification, mumei_issues, mumei_warnings = _verify_atoms_with_mumei(atoms, config)
+        skipped_clause_warnings = [
+            warning
+            for warning in z3_warnings
+            if warning.startswith("Skipped unsupported Z3 clause:")
+        ]
+        verification, mumei_issues, mumei_warnings = _verify_atoms_with_mumei(
+            atoms,
+            config,
+            skipped_clause_warnings=skipped_clause_warnings,
+        )
         warnings.extend(mumei_warnings)
         issues = _with_source_lines(_dedupe_issues([*issues, *mumei_issues]), source_line_map)
         if verification is not None and verification.get("success") is False:
@@ -708,9 +719,18 @@ def validate_foreign_code(
                     str(lean_bridge_result.get("stderr") or lean_bridge_result.get("error_code") or "lean bridge failed")
                 )
 
-    success = not errors and not issues and atoms and satisfiable is not False
+    verdict = _validate_foreign_code_verdict(
+        atoms=atoms,
+        errors=errors,
+        issues=issues,
+        satisfiable=satisfiable,
+        verification=verification,
+        warnings=warnings,
+    )
+    success = verdict == "verified"
     return ForeignCodeValidationResult(
-        success=bool(success),
+        success=success,
+        verdict=verdict,
         language=normalized_language,
         inferred_atoms=atoms,
         mumei_source=mumei_source,
@@ -1047,8 +1067,10 @@ def main_validate_code(args: argparse.Namespace | None = None) -> ForeignCodeVal
         enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
     )
     _emit_result(result, args.output)
-    if not result.success:
+    if result.verdict == "refuted":
         sys.exit(1)
+    if result.verdict == "unverifiable":
+        sys.exit(2)
     return result
 
 
@@ -1235,6 +1257,8 @@ def _with_fix_suggestions(issues: list[CrossValidationIssue]) -> list[CrossValid
 def _verify_atoms_with_mumei(
     atoms: list[MumeiContractAtom],
     config: AgentConfig,
+    *,
+    skipped_clause_warnings: list[str] | None = None,
 ) -> tuple[dict[str, object] | None, list[CrossValidationIssue], list[str]]:
     source = _atoms_to_mumei_module(atoms)
     warnings: list[str] = []
@@ -1252,11 +1276,43 @@ def _verify_atoms_with_mumei(
             warnings.append(f"mumei verify skipped because `{config.mumei_bin}` was not found.")
             return None, issues, warnings
     if result.get("success") is False:
+        inconclusive_due_to_skipped_clauses = bool(skipped_clause_warnings)
+        message = (
+            "mumei verify returned an inconclusive result because unsupported Z3 clauses were skipped."
+            if inconclusive_due_to_skipped_clauses
+            else "mumei verify reported an unsatisfied or inconsistent inferred contract."
+        )
         issues.append(
             CrossValidationIssue(
                 kind="verification",
-                message="mumei verify reported an unsatisfied or inconsistent inferred contract.",
+                message=message,
                 evidence=str(result.get("stderr") or result.get("stdout") or result.get("report") or ""),
             )
         )
     return result, issues, warnings
+
+
+def _has_skipped_z3_clause_warnings(warnings: list[str]) -> bool:
+    return any(warning.startswith("Skipped unsupported Z3 clause:") for warning in warnings)
+
+
+def _validate_foreign_code_verdict(
+    *,
+    atoms: list[MumeiContractAtom],
+    errors: list[str],
+    issues: list[CrossValidationIssue],
+    satisfiable: bool | None,
+    verification: dict[str, object] | None,
+    warnings: list[str],
+) -> ForeignCodeVerdict:
+    if errors or not atoms:
+        return "unverifiable"
+    skipped_clause_warnings = _has_skipped_z3_clause_warnings(warnings)
+    verification_failed = verification is not None and verification.get("success") is False
+    if verification is not None and verification_failed and skipped_clause_warnings and not any(
+        issue.kind != "verification" for issue in issues
+    ):
+        return "unverifiable"
+    if issues or satisfiable is False or verification_failed:
+        return "refuted"
+    return "verified"

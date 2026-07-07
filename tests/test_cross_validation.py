@@ -82,6 +82,7 @@ def test_validate_foreign_code_infers_python_contract_and_runs_mumei() -> None:
         )
 
     assert result.success is True
+    assert result.verdict == "verified"
     assert result.language == "python"
     assert result.inferred_atoms[0].name == "add"
     assert result.inferred_atoms[0].ensures == "result == a + b"
@@ -91,16 +92,25 @@ def test_validate_foreign_code_infers_python_contract_and_runs_mumei() -> None:
 
 def test_validate_foreign_code_adds_division_safety_precondition() -> None:
     code = "def divide(a: int, b: int) -> int:\n    return a // b\n"
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
 
-    result = validate_foreign_code(
-        code,
-        "python",
-        config=AgentConfig(api_key=""),
-        use_llm=False,
-        run_mumei=False,
-    )
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            code,
+            "python",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
 
     assert result.success is True
+    assert result.verdict == "verified"
     assert result.inferred_atoms[0].requires == "b != 0"
 
 
@@ -138,17 +148,26 @@ def test_validate_foreign_code_infers_multilanguage_safety_contracts() -> None:
             "a + b <= 115792089237316195423570985008687907853269984665640564039457584007913129639935",
         ),
     ]
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
 
     for language, code, expected_requires in fixtures:
-        result = validate_foreign_code(
-            code,
-            language,
-            config=AgentConfig(api_key=""),
-            use_llm=False,
-            run_mumei=False,
-        )
+        with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+            result = validate_foreign_code(
+                code,
+                language,
+                config=AgentConfig(api_key=""),
+                use_llm=False,
+                run_mumei=True,
+            )
 
         assert result.success is True
+        assert result.verdict == "verified"
         assert result.language == language
         assert result.inferred_atoms
         assert expected_requires in result.inferred_atoms[0].requires
@@ -156,18 +175,27 @@ def test_validate_foreign_code_infers_multilanguage_safety_contracts() -> None:
 
 def test_validate_foreign_code_reports_solidity_reentrancy_and_access_control() -> None:
     source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
 
-    result = validate_foreign_code(
-        source,
-        "solidity",
-        config=AgentConfig(api_key=""),
-        use_llm=False,
-        run_mumei=False,
-    )
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            source,
+            "solidity",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
 
     messages = [issue.message for issue in result.issues]
 
     assert result.success is False
+    assert result.verdict == "refuted"
     assert any("may be vulnerable to reentrancy" in message for message in messages)
     assert any("Checks-Effects-Interactions" in message for message in messages)
     assert any("no access-control guard" in message for message in messages)
@@ -178,13 +206,21 @@ def test_validate_foreign_code_reports_solidity_reentrancy_and_access_control() 
 
 
 def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
-    result = validate_foreign_code(
-        "export function isEmpty(name?: string): boolean { return name!.length == 0; }\n",
-        "typescript",
-        config=AgentConfig(api_key=""),
-        use_llm=False,
-        run_mumei=False,
-    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            "export function isEmpty(name?: string): boolean { return name!.length == 0; }\n",
+            "typescript",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
 
     assert result.success is True
     assert result.inferred_atoms[0].params[0].type == "string"
@@ -192,13 +228,21 @@ def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
 
 
 def test_validate_foreign_code_go_ignores_package_selector_for_nil_contract() -> None:
-    result = validate_foreign_code(
-        'package demo\nimport "math"\nfunc abs(x int) int { return math.Abs(x) }\n',
-        "go",
-        config=AgentConfig(api_key=""),
-        use_llm=False,
-        run_mumei=False,
-    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            'package demo\nimport "math"\nfunc abs(x int) int { return math.Abs(x) }\n',
+            "go",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
 
     assert result.success is True
     assert result.inferred_atoms[0].requires == "true"
@@ -206,18 +250,135 @@ def test_validate_foreign_code_go_ignores_package_selector_for_nil_contract() ->
 
 
 def test_validate_foreign_code_go_extracts_method_receiver() -> None:
-    result = validate_foreign_code(
-        "package users\nfunc (u *User) Age() int { return u.Age }\n",
-        "go",
-        config=AgentConfig(api_key=""),
-        use_llm=False,
-        run_mumei=False,
-    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            "package users\nfunc (u *User) Age() int { return u.Age }\n",
+            "go",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
 
     assert result.success is True
     assert result.inferred_atoms[0].name == "Age"
     assert result.inferred_atoms[0].params[0].name == "u"
     assert result.inferred_atoms[0].requires == "u != nil"
+
+
+def test_validate_foreign_code_without_mumei_stays_verified(tmp_path: Path) -> None:
+    source = tmp_path / "add.py"
+    source.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+
+    result = validate_foreign_code(
+        source.read_text(encoding="utf-8"),
+        "python",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+
+    args = build_validate_code_parser().parse_args(
+        ["--input", str(source), "--no-llm", "--no-mumei"]
+    )
+
+    cli_result = main_validate_code(args)
+
+    assert result.success is True
+    assert result.verdict == "verified"
+    assert cli_result.success is True
+    assert cli_result.verdict == "verified"
+
+
+def test_validate_foreign_code_non_skip_z3_warning_keeps_plain_verification_message(tmp_path: Path) -> None:
+    source = tmp_path / "unknown.go"
+    source.write_text(
+        "package demo\nfunc size(input []byte) int { return len(input) + 1 }\n",
+        encoding="utf-8",
+    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {"status": "failed"},
+        "stdout": "",
+        "stderr": "verification failed",
+    }
+
+    with patch("agent.cross_validation._check_atoms_with_z3") as z3_mock, patch(
+        "agent.cross_validation.create_mumei_client",
+        return_value=mumei,
+    ):
+        z3_mock.return_value = (
+            True,
+            [],
+            ["Z3 returned unknown for expression: len(input) > 1"],
+        )
+        result = validate_foreign_code(
+            source.read_text(encoding="utf-8"),
+            "go",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+
+    assert result.success is False
+    assert result.verdict == "refuted"
+    assert any(
+        "mumei verify reported an unsatisfied or inconsistent inferred contract." in issue.message
+        for issue in result.issues
+    )
+    assert all("unsupported Z3 clauses were skipped" not in issue.message for issue in result.issues)
+
+
+def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: Path) -> None:
+    source = tmp_path / "inconclusive.go"
+    source.write_text(
+        "package demo\nfunc size(input []byte) int { return len(input) + 1 }\n",
+        encoding="utf-8",
+    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {"status": "failed"},
+        "stdout": "",
+        "stderr": "verification failed",
+    }
+
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            source.read_text(encoding="utf-8"),
+            "go",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+
+    assert result.success is False
+    assert result.verdict == "unverifiable"
+    assert any("Skipped unsupported Z3 clause" in warning for warning in result.warnings)
+    assert any("inconclusive" in issue.message for issue in result.issues)
+
+    args = build_validate_code_parser().parse_args(
+        [
+            "--input",
+            str(source),
+            "--language",
+            "go",
+            "--no-llm",
+        ]
+    )
+
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        with pytest.raises(SystemExit) as exc:
+            main_validate_code(args)
+
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize(
@@ -307,6 +468,13 @@ def test_validate_code_cli_writes_json_report(tmp_path: Path) -> None:
     source = tmp_path / "code.py"
     output = tmp_path / "report.json"
     source.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
     args = build_validate_code_parser().parse_args(
         [
             "--input",
@@ -316,15 +484,17 @@ def test_validate_code_cli_writes_json_report(tmp_path: Path) -> None:
             "--output",
             str(output),
             "--no-llm",
-            "--no-mumei",
         ]
     )
 
-    result = main_validate_code(args)
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = main_validate_code(args)
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert result.success is True
+    assert result.verdict == "verified"
     assert payload["success"] is True
+    assert payload["verdict"] == "verified"
     assert payload["inferred_atoms"][0]["name"] == "add"
 
 
@@ -350,11 +520,19 @@ def test_validate_code_cli_infers_language_from_extension(
     source = tmp_path / filename
     output = tmp_path / "report.json"
     source.write_text(code, encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
     args = build_validate_code_parser().parse_args(
-        ["--input", str(source), "--output", str(output), "--no-llm", "--no-mumei"]
+        ["--input", str(source), "--output", str(output), "--no-llm"]
     )
 
-    result = main_validate_code(args)
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = main_validate_code(args)
 
     assert result.language == expected_language
     payload = json.loads(output.read_text(encoding="utf-8"))
@@ -380,11 +558,19 @@ def test_validate_code_cli_explicit_language_overrides_extension(tmp_path: Path)
     source = tmp_path / "code.py"
     output = tmp_path / "report.json"
     source.write_text("pub fn add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
     args = build_validate_code_parser().parse_args(
-        ["--input", str(source), "--language", "rust", "--output", str(output), "--no-llm", "--no-mumei"]
+        ["--input", str(source), "--language", "rust", "--output", str(output), "--no-llm"]
     )
 
-    result = main_validate_code(args)
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = main_validate_code(args)
 
     assert result.language == "rust"
 
