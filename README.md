@@ -698,7 +698,13 @@ See `.env.example` for configuration details.
 | `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
 | `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` (python\|rust\|typescript\|go) |
 | `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` (python\|rust\|typescript\|go) |
+| `extract-spec` | Extract forge spec from existing code or natural-language input | `mumei-agent extract-spec --code-file src/foo.py` |
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `mumei-agent check-spec-health spec.mm` |
+| `cross-validate` | Cross-validate spec↔code consistency across multiple files | `mumei-agent cross-validate --spec spec.txt --code src/foo.py` |
+| `proliferate` | Autonomous weekly loop: analyze gaps → spec → generate → blast-radius check → heal → PR | `mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
+| `propose` | Generate forge task specs from `analyze-std-gaps` output | `mumei-agent propose --auto --mumei-repo ../mumei` |
+| `analyze-std-gaps` | Identify gaps in std/ coverage | `mumei-agent analyze-std-gaps --mumei-repo ../mumei` |
+| `health` | Show agent health status (LLM provider, mumei binary, etc.) | `mumei-agent health` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `mumei-agent mcp-server` |
 
 ## Verification Workflow Guide
@@ -731,6 +737,19 @@ Exported tools:
 | `verify_code_spec_traceability(code_file, spec_text, language, use_llm=true, run_mumei=true)` | Return the V1-C/V1-D bidirectional traceability summary with `cross_validation_gaps`, `drift_score`, and `next_steps` |
 | `self_correct(code_file, max_iterations=10)` | Run the P9-F Loss Vector self-correction loop for a `.mm` file |
 | `run_nlae_pipeline(spec, mumei_lean_repo="", work_dir="", no_build=false)` | Run the P9-G NLAE pipeline: generate `.mm`, verify with `--emit loss-vector`, self-correct, then call the Lean Fidelity Checker |
+| `audit_code(code_file, language, auto_migrate=false, auto_heal=false, ...)` | Audit existing code: extract spec, verify contracts, detect cross-validation gaps |
+| `validate_nl_spec(natural_language, domain_hint="")` | Validate a natural-language spec for contradictions, ambiguity, and over-constraint |
+| `validate_spec_to_code(spec, code_path, language, ...)` | Detect missing implementation constraints by comparing spec to code |
+| `validate_code_to_spec(code_path, spec, language, ...)` | Detect spec drift by comparing changed code to spec |
+| `validate_foreign_code(code, language, ...)` | Infer and verify contracts from foreign code (alias for `validate_code`) |
+| `verify_foreign_code(code, language, ...)` | Z3 strict verification of foreign code contracts |
+| `check_spec_health(source_code)` | Check a Mumei spec for contradictions, over-constraints, and vacuity |
+| `suggest_mm_migration(code_file, language, ...)` | Generate `.mm` migration skeleton for functions with verification issues |
+| `extract_spec_from_code(code_file, language, ...)` | Extract natural-language specification from existing code (Layer A) |
+| `escalate_to_lean(cert_path, mumei_lean_repo, ...)` | Escalate Z3 unknown obligations to Lean 4 via mumei-lean bridge |
+| `cross_validate(spec_files, code_files, ...)` | Cross-validate spec↔code consistency across multiple files |
+| `get_review_queue()` | List pending review items for human review |
+| `approve_review(review_id)` | Approve a pending review item |
 
 `check_cross_spec_consistency` delegates to `mumei verify --cross-spec-files` and returns the parsed `cross_spec.json`, including contract consistency, global invariant conflicts, source file names, and dependency cycles.
 
