@@ -47,17 +47,60 @@ def _strip_go_rust_literals_and_comments(text: str) -> str:
     def mask(span: str) -> str:
         return "".join("\n" if char == "\n" else " " for char in span)
 
-    def consume_quoted(index: int, quote: str) -> int:
+    def consume_string(index: int, quote: str) -> int:
         i = index + 1
         while i < len(text):
             char = text[i]
-            if char == "\\" and quote in {'"', "'"} and i + 1 < len(text):
+            if char == "\\" and i + 1 < len(text):
                 i += 2
                 continue
             if char == quote:
                 return i + 1
             i += 1
         return len(text)
+
+    def consume_char_literal(index: int) -> int:
+        i = index + 1
+        if i >= len(text) or text[i] == "\n":
+            return 0
+        if text[i] == "\\":
+            i += 1
+            if i >= len(text) or text[i] == "\n":
+                return 0
+            if text[i] in {"x", "u", "U", "n", "r", "t", "0", "\\", "'", '"'}:
+                if text[i] in {"u", "U"}:
+                    i += 1
+                    if i >= len(text) or text[i] != "{":
+                        return 0
+                    i += 1
+                    digits = 0
+                    while i < len(text) and text[i] != "}":
+                        if text[i] == "\n" or digits > 6 or text[i] not in "0123456789abcdefABCDEF":
+                            return 0
+                        digits += 1
+                        i += 1
+                    if digits == 0 or i >= len(text) or text[i] != "}":
+                        return 0
+                    i += 1
+                elif text[i] == "x":
+                    i += 1
+                    digits = 0
+                    while i < len(text) and digits < 2 and text[i] in "0123456789abcdefABCDEF":
+                        digits += 1
+                        i += 1
+                    if digits == 0:
+                        return 0
+                else:
+                    i += 1
+            else:
+                return 0
+        else:
+            if text[i] == "'" or text[i] == "\\":
+                return 0
+            i += 1
+        if i < len(text) and text[i] == "'":
+            return i + 1
+        return 0
 
     def consume_rust_raw_string(index: int) -> int:
         if text[index] == "b" and index + 1 < len(text) and text[index + 1] == "r":
@@ -103,8 +146,19 @@ def _strip_go_rust_literals_and_comments(text: str) -> str:
             i = raw_end
             continue
         char = text[i]
-        if char in {'"', "'", "`"}:
-            end = consume_quoted(i, char)
+        if char == '"':
+            end = consume_string(i, char)
+            stripped.append(mask(text[i:end]))
+            i = end
+            continue
+        if char == "'":
+            end = consume_char_literal(i)
+            if end:
+                stripped.append(mask(text[i:end]))
+                i = end
+                continue
+        if char == "`":
+            end = consume_string(i, char)
             stripped.append(mask(text[i:end]))
             i = end
             continue
@@ -386,7 +440,8 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     pattern = re.compile(
         r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[A-Za-z0-9_:<>]+))?\s*\{(?P<body>.*?)\}",
+        r"(?:<[^>]+>)?\s*"
+        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?\s*\{(?P<body>.*?)\}",
         flags=re.DOTALL,
     )
     for match in pattern.finditer(code):
