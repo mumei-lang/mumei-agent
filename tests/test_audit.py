@@ -17,6 +17,7 @@ from agent.audit import (
     build_parser,
     main,
 )
+from agent.audit_reporting import _verification_status_from_foreign_result
 from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
 from agent.mm_migration_advisor import MigrationHint
@@ -388,6 +389,80 @@ def test_audit_pipeline_marks_verification_status_refuted(tmp_path: Path) -> Non
     ).audit_file(source, "python")
 
     assert result.verification_status == "refuted"
+
+
+def test_audit_verification_status_unverifiable_for_lowering_failure_without_counterexample() -> None:
+    result = {
+        "success": False,
+        "verification": {
+            "success": False,
+            "report": {
+                "status": "trusted",
+                "failed": None,
+            },
+        },
+    }
+
+    status = _verification_status_from_foreign_result(
+        result,
+        counterexample_values=[],
+        verification_violations=[
+            "mumei verify failed",
+            "mumei verify failed: status=trusted, failed=None",
+        ],
+        spec_health_issues=[
+            "contradiction: calc_mem_size_64: spec_lowering_failed: failed to lower ensures clause"
+        ],
+    )
+
+    assert status == "unverifiable"
+
+
+def test_audit_verification_status_refuted_for_counterexample() -> None:
+    result = {
+        "success": False,
+        "verification": {
+            "success": False,
+            "report": {
+                "status": "trusted",
+                "failed": None,
+            },
+        },
+    }
+
+    status = _verification_status_from_foreign_result(
+        result,
+        counterexample_values=[
+            {"function_name": "calc_mem_size_64", "counterexample": {"offset": 1}}
+        ],
+        verification_violations=["mumei verify failed"],
+        spec_health_issues=["spec_lowering_failed: failed to lower ensures clause"],
+    )
+
+    assert status == "refuted"
+
+
+def test_audit_verification_status_preserves_skips_without_verification_failure() -> None:
+    result = {
+        "success": True,
+        "verification": {
+            "success": True,
+            "report": {
+                "status": "satisfiable_with_skips",
+                "diagnostics": [
+                    "Skipped unsupported Z3 clause: ensures clause 'opaque()'"
+                ],
+            },
+        },
+    }
+
+    status = _verification_status_from_foreign_result(
+        result,
+        counterexample_values=[],
+        verification_violations=[],
+    )
+
+    assert status == "unverifiable"
 
 
 def test_audit_pipeline_marks_verification_status_unverifiable_for_skipped_clause(

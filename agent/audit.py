@@ -298,6 +298,7 @@ class AuditPipeline:
                     foreign_result,
                     counterexample_values=counterexample_values,
                     verification_violations=verification_violations,
+                    spec_health_issues=spec_health_issues,
                 )
             except ValueError as exc:
                 verification_violations.append(str(exc))
