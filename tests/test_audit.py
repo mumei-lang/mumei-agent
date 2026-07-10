@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 from agent import mcp_server
@@ -17,7 +18,10 @@ from agent.audit import (
     build_parser,
     main,
 )
-from agent.audit_reporting import _spec_health_issue_strings
+from agent.audit_reporting import (
+    _malformed_extraction_issue_strings,
+    _spec_health_issue_strings,
+)
 from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
 from agent.mm_migration_advisor import MigrationHint
@@ -154,6 +158,96 @@ def test_spec_health_genuine_contradiction_remains_a_contradiction() -> None:
     assert _spec_health_issue_strings(report) == [
         "contradiction: impossible_positive: requires_unsat: x > 0 && x < 0"
     ]
+
+
+def test_malformed_extraction_detector_flags_dogfood_clause_corruption() -> None:
+    spec: dict[str, object] = {
+        "atoms": [
+            {
+                "name": "calc_mem_size_64",
+                "requires": "true",
+                "ensures": (
+                    "overflow == true <= >((offset + length) > "
+                    "int(0 xFFFFFFFFFFFFFFFF))"
+                ),
+            }
+        ]
+    }
+
+    issues = _malformed_extraction_issue_strings(spec)
+
+    assert len(issues) == 2
+    assert all(issue.startswith("malformed-extraction:") for issue in issues)
+    assert any("split hexadecimal literal" in issue for issue in issues)
+    assert any("garbled comparison operators" in issue for issue in issues)
+    assert not any(issue.startswith("contradiction:") for issue in issues)
+
+
+def test_malformed_extraction_detector_ignores_valid_clauses() -> None:
+    spec: dict[str, object] = {
+        "atoms": [
+            {
+                "name": "valid",
+                "requires": "a <= b && p => q",
+                "ensures": (
+                    "x + y <= 2**64 - 1 && "
+                    "result == int(0xFFFFFFFFFFFFFFFF)"
+                ),
+            }
+        ]
+    }
+
+    assert _malformed_extraction_issue_strings(spec) == []
+
+
+def test_audit_malformed_extraction_is_unverifiable(tmp_path: Path) -> None:
+    source = tmp_path / "common.py"
+    source.write_text("def calc(offset, length):\n    return 0\n", encoding="utf-8")
+    malformed_spec = _forge_spec()
+    malformed_atoms = cast(list[dict[str, object]], malformed_spec["atoms"])
+    malformed_atoms[0]["ensures"] = (
+        "overflow == true <= >((offset + length) > int(0 xFFFFFFFFFFFFFFFF))"
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="overflow-safe calculation",
+        forge_task_spec=malformed_spec,
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": True,
+        "verification": {
+            "success": True,
+            "report": {"status": "satisfiable"},
+        },
+    }
+    cross_validator = MagicMock()
+    mumei = MagicMock()
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    ).audit_file(source, "python")
+
+    assert result.success is False
+    assert result.verification_status == "unverifiable"
+    assert len(result.spec_health_issues) == 2
+    assert all(
+        issue.startswith("malformed-extraction:")
+        for issue in result.spec_health_issues
+    )
+    assert "malformed-extraction:" in result.report
+    assert not any(
+        issue.startswith("contradiction:")
+        for issue in result.spec_health_issues
+    )
+    mumei.verify.assert_not_called()
+    cross_validator.validate_spec_vs_impl.assert_not_called()
 
 
 def test_audit_pipeline_reports_solidity_uint256_overflow(tmp_path: Path) -> None:

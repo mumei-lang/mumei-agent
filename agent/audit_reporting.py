@@ -62,6 +62,39 @@ def _contract_text(value: object, default: str) -> str:
         return " && ".join(parts) if parts else default
     return default
 
+
+_MALFORMED_HEX_LITERAL_RE = re.compile(r"\b\d+\s+x[0-9a-fA-F]+")
+_MALFORMED_OPERATOR_RE = re.compile(
+    r"(?:<=|>=|==|!=)\s*[<>]=?|[<>]\s*(?:<=|>=|==|!=|[<>])"
+)
+
+
+def _malformed_extraction_issue_strings(spec: dict[str, object]) -> list[str]:
+    """Return diagnostics for high-confidence malformed extracted clauses."""
+    atoms = _dict_list(spec.get("atoms"))
+    if not atoms and "name" in spec:
+        atoms = [spec]
+
+    issues: list[str] = []
+    for atom in atoms:
+        atom_name = _safe_identifier(_string_value(atom.get("name"), "audited_atom"))
+        for clause_name in ("requires", "ensures"):
+            clause = _contract_text(atom.get(clause_name), "true")
+            for match in _MALFORMED_HEX_LITERAL_RE.finditer(clause):
+                issues.append(
+                    "malformed-extraction: "
+                    f"{atom_name} {clause_name}: split hexadecimal literal "
+                    f"'{match.group(0)}'"
+                )
+            for match in _MALFORMED_OPERATOR_RE.finditer(clause):
+                issues.append(
+                    "malformed-extraction: "
+                    f"{atom_name} {clause_name}: garbled comparison operators "
+                    f"'{match.group(0)}'"
+                )
+    return issues
+
+
 def _spec_health_issue_strings(report: SpecHealthReport) -> list[str]:
     issues: list[str] = []
     for item in report.contradictions:
