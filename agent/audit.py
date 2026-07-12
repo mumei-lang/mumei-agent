@@ -54,6 +54,7 @@ from agent.audit_reporting import (
     _markdown_items_text,
     _markdown_issue_lines,
     _markdown_next_step_lines,
+    _malformed_extraction_issue_strings,
     _migration_issue_dicts,
     _pluralize,
     _read_json_dict,
@@ -253,11 +254,14 @@ class AuditPipeline:
             )
             return _finalize_audit_result(result)
 
+        malformed_extraction_issues = _malformed_extraction_issue_strings(
+            extraction.forge_task_spec
+        )
         spec_source = _forge_task_to_mumei_source(extraction.forge_task_spec)
         if not spec_source:
             errors.append("No Mumei atoms were generated from the extracted forge task spec.")
 
-        spec_health_issues: list[str] = []
+        spec_health_issues: list[str] = malformed_extraction_issues
         verification_violations: list[str] = []
         counterexample_values: list[dict] = []
         cross_validation_gaps: list[str] = []
@@ -265,7 +269,7 @@ class AuditPipeline:
 
         with tempfile.TemporaryDirectory(prefix="mumei-audit-") as tmp:
             spec_path = Path(tmp) / "audit_spec.mm"
-            if spec_source:
+            if spec_source and not malformed_extraction_issues:
                 spec_path.write_text(spec_source, encoding="utf-8")
                 health_report = self._check_spec_health(spec_path, tmp)
                 spec_health_issues = _spec_health_issue_strings(health_report)
@@ -307,7 +311,10 @@ class AuditPipeline:
                 verification_violations.append(f"mumei verify failed to start: {exc}")
                 verification_status = "unverifiable"
 
-            if spec_source:
+            if malformed_extraction_issues and not counterexample_values:
+                verification_status = "unverifiable"
+
+            if spec_source and not malformed_extraction_issues:
                 cross_report = self.cross_validator.validate_spec_vs_impl(
                     str(spec_path),
                     str(source_path),
