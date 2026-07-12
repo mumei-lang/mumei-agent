@@ -630,6 +630,25 @@ def test_verification_issue_strings_keeps_real_failure() -> None:
     assert any("status=refuted" in issue for issue in issues)
 
 
+def test_verification_issue_strings_keeps_top_level_counterexample() -> None:
+    """A top-level (safety-check) counterexample is a genuine failure even
+    when the verify report status is `trusted`, so it must not be suppressed
+    as inconclusive."""
+    result = {
+        "success": False,
+        "errors": ["mumei verify failed"],
+        "counterexample": {"a": "9223372036854775807", "b": "1"},
+        "verification": {
+            "success": False,
+            "report": {"status": "trusted", "failed": None, "diagnostics": []},
+        },
+    }
+
+    issues = _verification_issue_strings(result)
+    assert issues, "top-level counterexample must not be dropped as inconclusive"
+    assert any("mumei verify failed" in issue for issue in issues)
+
+
 def test_audit_verification_status_refuted_for_counterexample() -> None:
     result = {
         "success": False,

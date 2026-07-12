@@ -166,7 +166,15 @@ def _verification_issue_strings(result: dict[str, object]) -> list[str]:
     verification = _dict_value(result.get("verification"))
     report = _dict_value(verification.get("report"))
     report_counterexample = format_counterexample(report)
-    counterexample_present = bool(report.get("counterexample")) or bool(report_counterexample)
+    # A counterexample can live either on the nested verify report or at the
+    # top level of the result (foreign-code safety checks put it there via
+    # `_first_counterexample_payload`). Both must count so a genuine failure
+    # with only a top-level counterexample isn't misjudged inconclusive.
+    counterexample_present = (
+        bool(result.get("counterexample"))
+        or bool(report.get("counterexample"))
+        or bool(report_counterexample)
+    )
     inconclusive = _is_inconclusive_non_failure(
         report, counterexample_present=counterexample_present
     )
