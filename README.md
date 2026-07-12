@@ -4,6 +4,8 @@ AI-driven autonomous fix loop for the [Mumei](https://github.com/mumei-lang/mume
 proof-driven programming language. Combines LLM (Qwen/Ollama/OpenAI) with Z3 formal
 verification to automatically detect and fix code issues.
 
+> **Note:** 本ドキュメントのコマンドは uv 管理のプロジェクト環境で実行することを前提とし、`uv run` を付けて表記している。仮想環境をアクティベート済み（`source .venv/bin/activate`）の場合は `uv run` を省略できる。
+
 ## Background
 
 This repository was extracted from the [mumei](https://github.com/mumei-lang/mumei)
@@ -15,7 +17,7 @@ developed in-tree and moved here as a standalone project
 
 `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap. Agent docs and MCP contracts use the same canonical field names: `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Audit/spec tooling additionally uses the stable audit keys `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`, plus `contradiction_type` values `spec_internal`, `spec_overconstraint`, `spec_vacuity`, and `spec_vs_code`; do not introduce aliases in README, CLI help, or MCP tool descriptions.
 
-`mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` are the same no-`.mm` contract: `audit` emits `spec_health_issues` / `verification_violations` / `verification_status` / `cross_validation_gaps` / `next_steps`, `migrate-suggest` emits `migration_hints`, and `heal` records `healed_files` / `heal_errors`.
+`uv run mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` are the same no-`.mm` contract: `audit` emits `spec_health_issues` / `verification_violations` / `verification_status` / `cross_validation_gaps` / `next_steps`, `migrate-suggest` emits `migration_hints`, and `heal` records `healed_files` / `heal_errors`.
 
 ## Architecture
 
@@ -167,7 +169,7 @@ You can also run commands as `mumei-agent ...` after activating the uv-managed v
 
 ## No-.mm entry: one audit contract
 
-`mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` are the same contract. They both run the same three-stage path:
+`uv run mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` are the same contract. They both run the same three-stage path:
 
 1. `audit`: accept existing code only, extract candidate specs, and classify findings.
 2. `migrate-suggest` / `--auto-migrate`: emit `.mm` skeleton guidance only for findings that need migration.
@@ -217,7 +219,7 @@ flowchart TD
 Use the one-command CLI form when you want audit, skeleton generation, and healing evidence together:
 
 ```bash
-mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
+uv run mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
 
 MCP clients call the same contract with `scan_and_fix`:
@@ -236,9 +238,9 @@ MCP clients call the same contract with `scan_and_fix`:
 For manual review, run the same stages separately:
 
 ```bash
-mumei-agent audit --code-file src/foo.py --language python
-mumei-agent migrate-suggest --code-file src/foo.py --language python --output generated/mm
-mumei-agent heal generated/mm/foo.mm
+uv run mumei-agent audit --code-file src/foo.py --language python
+uv run mumei-agent migrate-suggest --code-file src/foo.py --language python --output generated/mm
+uv run mumei-agent heal generated/mm/foo.mm
 ```
 
 Demo wording for no-`.mm` user-facing material is fixed to these three phrases:
@@ -258,7 +260,7 @@ mumei-agent NLAEPipeline (Module A / AV)
   ↓ generated .mm
 mumei verify --emit loss-vector (Module B / AR)
   ↓ Loss Vector JSON
-mumei-agent self-correct
+uv run mumei-agent self-correct
   ↓ proof certificate
 mumei-lean Fidelity Checker
   ↓
@@ -686,27 +688,27 @@ See `.env.example` for configuration details.
 
 | Command | Description | Example |
 |---|---|---|
-| `heal` (default) | Self-healing loop for existing .mm files | `mumei-agent heal examples/sword_test.mm` |
-| `self-correct` | P9-F Loss Vector driven self-correction loop | `mumei-agent self-correct examples/effect_test.mm --max-iterations 3` |
-| `generate` | Generate new .mm code from spec JSON | `mumei-agent generate --spec-file spec.json --output out.mm` |
-| `audit` | Audit existing code or directories: extract spec, check health, verify contracts, detect cross-validation gaps | `mumei-agent audit --code-file src/ --auto-migrate --auto-heal` |
-| `migrate-suggest` | Generate .mm migration skeletons for functions with verification issues | `mumei-agent migrate-suggest --code-file src/foo.ts --language typescript` |
-| `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `mumei-agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
-| `forge` | Autonomously extend the mumei std library with verified atoms | `mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
-| `validate-spec` | Cross-validate natural-language specs for contradiction, ambiguity, over-constraint, and Z3 satisfiability | `mumei-agent validate-spec --input spec.txt --format nl` |
-| `validate-code` | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go). `--language` is optional; inferred from extension when omitted | `mumei-agent validate-code --input code.ts` |
-| `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
-| `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
-| `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` (python\|rust\|typescript\|go) |
-| `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` (python\|rust\|typescript\|go) |
-| `extract-spec` | Extract forge spec from existing code or natural-language input | `mumei-agent extract-spec --code-file src/foo.py` |
-| `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `mumei-agent check-spec-health spec.mm` |
-| `cross-validate` | Cross-validate spec↔code consistency across multiple files | `mumei-agent cross-validate --spec spec.txt --code src/foo.py` |
-| `proliferate` | Autonomous weekly loop: analyze gaps → spec → generate → blast-radius check → heal → PR | `mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
-| `propose` | Generate forge task specs from `analyze-std-gaps` output | `mumei-agent propose --auto --mumei-repo ../mumei` |
-| `analyze-std-gaps` | Identify gaps in std/ coverage | `mumei-agent analyze-std-gaps --mumei-repo ../mumei` |
-| `health` | Show agent health status (LLM provider, mumei binary, etc.) | `mumei-agent health` |
-| `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `mumei-agent mcp-server` |
+| `heal` (default) | Self-healing loop for existing .mm files | `uv run mumei-agent heal examples/sword_test.mm` |
+| `self-correct` | P9-F Loss Vector driven self-correction loop | `uv run mumei-agent self-correct examples/effect_test.mm --max-iterations 3` |
+| `generate` | Generate new .mm code from spec JSON | `uv run mumei-agent generate --spec-file spec.json --output out.mm` |
+| `audit` | Audit existing code or directories: extract spec, check health, verify contracts, detect cross-validation gaps | `uv run mumei-agent audit --code-file src/ --auto-migrate --auto-heal` |
+| `migrate-suggest` | Generate .mm migration skeletons for functions with verification issues | `uv run mumei-agent migrate-suggest --code-file src/foo.ts --language typescript` |
+| `publish` | Autonomous delivery: generate → verify → emit wrappers → PR | `uv run mumei-agent publish --spec examples/publish_demo/payment_spec.json --dry-run` |
+| `forge` | Autonomously extend the mumei std library with verified atoms | `uv run mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 1` |
+| `validate-spec` | Cross-validate natural-language specs for contradiction, ambiguity, over-constraint, and Z3 satisfiability | `uv run mumei-agent validate-spec --input spec.txt --format nl` |
+| `validate-code` | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go). `--language` is optional; inferred from extension when omitted | `uv run mumei-agent validate-code --input code.ts` |
+| `validate-spec-to-code` | Detect missing implementation constraints by comparing specs to code | `uv run mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
+| `validate-code-to-spec` | Detect spec drift by comparing changed code to specs | `uv run mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
+| `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `uv run mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` (python\|rust\|typescript\|go) |
+| `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `uv run mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` (python\|rust\|typescript\|go) |
+| `extract-spec` | Extract forge spec from existing code or natural-language input | `uv run mumei-agent extract-spec --code-file src/foo.py` |
+| `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `uv run mumei-agent check-spec-health spec.mm` |
+| `cross-validate` | Cross-validate spec↔code consistency across multiple files | `uv run mumei-agent cross-validate --spec spec.txt --code src/foo.py` |
+| `proliferate` | Autonomous weekly loop: analyze gaps → spec → generate → blast-radius check → heal → PR | `uv run mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
+| `propose` | Generate forge task specs from `analyze-std-gaps` output | `uv run mumei-agent propose --auto --mumei-repo ../mumei` |
+| `analyze-std-gaps` | Identify gaps in std/ coverage | `uv run mumei-agent analyze-std-gaps --mumei-repo ../mumei` |
+| `health` | Show agent health status (LLM provider, mumei binary, etc.) | `uv run mumei-agent health` |
+| `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `uv run mumei-agent mcp-server` |
 
 ## Verification Workflow Guide
 

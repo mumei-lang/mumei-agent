@@ -5,7 +5,7 @@
 
 ## 0. No-.mm entry: one audit contract
 
-`mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` are the same contract. They both run the same three-stage path:
+`uv run mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix` are the same contract. They both run the same three-stage path:
 
 1. `audit`: accept existing code only, extract candidate specs, and classify findings.
 2. `migrate-suggest` / `--auto-migrate`: emit `.mm` skeleton guidance only for findings that need migration.
@@ -48,7 +48,7 @@ flowchart TD
 Use the one-command CLI form when you want audit, skeleton generation, and healing evidence together:
 
 ```bash
-mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
+uv run mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
 
 MCP clients call the same contract with `scan_and_fix`:
@@ -75,9 +75,9 @@ Phase 7 in `mumei-demo/scenarios/spec_code_verification_suite` is the reference 
 For manual review, run the same stages separately:
 
 ```bash
-mumei-agent audit --code-file src/foo.py --language python
-mumei-agent migrate-suggest --code-file src/foo.py --language python --output generated/mm
-mumei-agent heal generated/mm/foo.mm
+uv run mumei-agent audit --code-file src/foo.py --language python
+uv run mumei-agent migrate-suggest --code-file src/foo.py --language python --output generated/mm
+uv run mumei-agent heal generated/mm/foo.mm
 ```
 
 Demo wording for no-`.mm` user-facing material is fixed to these three phrases:
@@ -112,22 +112,22 @@ docker exec mumei-ollama ollama pull qwen3.5
 
 | やりたいこと | コマンド |
 |---|---|
-| 自然言語仕様の矛盾チェック | `mumei-agent extract-spec --text "..." --check-contradiction-only --output report.json` |
-| 仕様ファイルの矛盾チェック | `mumei-agent extract-spec --text-file spec.txt --check-contradiction-only --output report.json` |
-| 既存コードの統合監査 | `mumei-agent audit --code-file src/foo.py` |
-| 既存コードの統合監査レポート（Markdown） | `mumei-agent audit --code-file src/foo.py --format markdown --output reports/foo-audit.md` |
-| ディレクトリの統合監査 | `mumei-agent audit --code-file src/` |
-| 監査→移行→自己修復の1コマンド実行 | `mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/` |
-| 単一コードファイルの検証 | `mumei-agent extract-spec --code-file src/foo.rs --output spec.json` |
-| ディレクトリ単位のコード検証 | `mumei-agent extract-spec --code-file src/ --output spec.json` |
-| 仕様→コード整合性検証 | `mumei-agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
-| コード→仕様の逆検証 | `mumei-agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
-| 自然言語仕様の詳細検証（矛盾・曖昧さ・過制約） | `mumei-agent validate-spec --input spec.txt --format nl` |
-| 既存コードの詳細検証 | `mumei-agent validate-code --input code.py` （`--language` 省略時は拡張子から自動推定） |
-| 仕様→コードの整合性検証 | `mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
-| コード→仕様のドリフト検出 | `mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
+| 自然言語仕様の矛盾チェック | `uv run mumei-agent extract-spec --text "..." --check-contradiction-only --output report.json` |
+| 仕様ファイルの矛盾チェック | `uv run mumei-agent extract-spec --text-file spec.txt --check-contradiction-only --output report.json` |
+| 既存コードの統合監査 | `uv run mumei-agent audit --code-file src/foo.py` |
+| 既存コードの統合監査レポート（Markdown） | `uv run mumei-agent audit --code-file src/foo.py --format markdown --output reports/foo-audit.md` |
+| ディレクトリの統合監査 | `uv run mumei-agent audit --code-file src/` |
+| 監査→移行→自己修復の1コマンド実行 | `uv run mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/` |
+| 単一コードファイルの検証 | `uv run mumei-agent extract-spec --code-file src/foo.rs --output spec.json` |
+| ディレクトリ単位のコード検証 | `uv run mumei-agent extract-spec --code-file src/ --output spec.json` |
+| 仕様→コード整合性検証 | `uv run mumei-agent extract-spec --text-file spec.txt --generate --generate-output out.mm --output spec.json` |
+| コード→仕様の逆検証 | `uv run mumei-agent extract-spec --code-file src/ --check-contradiction-only --output report.json` |
+| 自然言語仕様の詳細検証（矛盾・曖昧さ・過制約） | `uv run mumei-agent validate-spec --input spec.txt --format nl` |
+| 既存コードの詳細検証 | `uv run mumei-agent validate-code --input code.py` （`--language` 省略時は拡張子から自動推定） |
+| 仕様→コードの整合性検証 | `uv run mumei-agent validate-spec-to-code --spec spec.txt --code src/foo.py --language python` |
+| コード→仕様のドリフト検出 | `uv run mumei-agent validate-code-to-spec --code src/foo.py --spec spec.txt --language python` |
 | 4モード no-.mm 参照デモ | `cd ../mumei-demo && CI_FIXTURE_MODE=1 make demo-spec-code` |
-| 仕様の健全性チェック（vacuity含む） | `mumei-agent check-spec-health spec.mm` |
+| 仕様の健全性チェック（vacuity含む） | `uv run mumei-agent check-spec-health spec.mm` |
 | MCP 経由の監査・移行・修復 | `scan_and_fix(code_file="src/", language="python", auto_heal=true)` |
 | エディタ統合（LSP） | `mumei lsp` |
 | MCP 経由（Claude Code 等） | `.mcp.json` 設定後、AI エージェントから利用 |
@@ -139,7 +139,7 @@ docker exec mumei-ollama ollama pull qwen3.5
 ### 1-1. インラインテキスト（単一仕様）
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --text "送金額は正の整数のみ。送金後の残高は非負。残高不足はエラー。" \
   --check-contradiction-only \
   --output /tmp/spec_report.json \
@@ -164,7 +164,7 @@ SpecValidation failed for the synthesized specification: ...
 
 ```bash
 # spec.txt に仕様を記述
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --text-file docs/requirements/payment_spec.txt \
   --check-contradiction-only \
   --output reports/payment_contradiction.json \
@@ -193,7 +193,7 @@ mumei-agent extract-spec \
 #### 単一テキストファイル
 
 ```bash
-mumei-agent validate-spec \
+uv run mumei-agent validate-spec \
   --input docs/requirements/payment_spec.txt \
   --format nl \
   --domain financial  # 任意
@@ -218,9 +218,9 @@ mumei-agent validate-spec \
 `files_with_issues` に集約される。
 
 ```bash
-mumei-agent audit --code-file src/foo.py
-mumei-agent audit --code-file src/
-mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
+uv run mumei-agent audit --code-file src/foo.py
+uv run mumei-agent audit --code-file src/
+uv run mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir out/
 ```
 
 この 1 コマンド flow は `audit -> migrate-suggest -> heal` の順に従います。`audit` は `spec_health_issues` / `verification_violations` / `verification_status` / `cross_validation_gaps` / `next_steps` を返し、`migrate-suggest` / `--auto-migrate` は `migration_hints`、`heal` / `--auto-heal` は `healed_files` / `heal_errors` だけを返します。MCP `scan_and_fix` は同じ契約を使います。
@@ -239,8 +239,8 @@ mumei-agent audit --code-file src/ --auto-migrate --auto-heal --heal-output-dir 
 出力される。
 
 ```bash
-mumei-agent audit --code-file src/foo.py --format markdown --output reports/foo-audit.md
-mumei-agent audit --code-file src/ --format markdown --output reports/src-audit.md
+uv run mumei-agent audit --code-file src/foo.py --format markdown --output reports/foo-audit.md
+uv run mumei-agent audit --code-file src/ --format markdown --output reports/src-audit.md
 ```
 
 `extract-spec --code-file` は単一ファイルとディレクトリの両方を受け付ける。ディレクトリを渡すと対応拡張子のファイルをまとめて処理する。
@@ -261,7 +261,7 @@ mumei-agent audit --code-file src/ --format markdown --output reports/src-audit.
 ### 2-1. 単一ファイル
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/payment.rs \
   --output reports/payment_spec.json \
   --domain financial  # 任意
@@ -270,7 +270,7 @@ mumei-agent extract-spec \
 言語を明示する場合:
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/payment.rs \
   --code-language rust \
   --output reports/payment_spec.json
@@ -279,7 +279,7 @@ mumei-agent extract-spec \
 ### 2-2. ディレクトリ単位（複数ファイル）
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/ \
   --output reports/src_spec.json \
   --domain financial  # 任意
@@ -291,7 +291,7 @@ mumei-agent extract-spec \
 ### 2-3. 矛盾チェックまで一括実行
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/ \
   --check-contradiction-only \
   --output reports/src_contradiction.json
@@ -316,7 +316,7 @@ mumei-agent extract-spec \
 `extract-spec --code-file` より詳細な検証を行う専用コマンド。コントラクト推論・Z3検証・Mumei検証を統合して実行する。`--input` には単一コードファイルを指定する。
 
 ```bash
-mumei-agent validate-code --input src/payment.py
+uv run mumei-agent validate-code --input src/payment.py
 # --language 省略時は拡張子から自動推定（python|rust|typescript|go）
 ```
 
@@ -337,7 +337,7 @@ mumei-agent validate-code --input src/payment.py
 ### 3-1. 仕様からコードを生成して検証（仕様が正しいかの確認）
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --text-file docs/requirements/payment_spec.txt \
   --generate \
   --generate-output /tmp/payment_verified.mm \
@@ -354,13 +354,13 @@ mumei-agent extract-spec \
 
 ```bash
 # 仕様抽出 → .mm 生成
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/account.rs \
   --generate \
   --generate-output /tmp/account.mm \
   --output /tmp/account_spec.json
 
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/transfer.rs \
   --generate \
   --generate-output /tmp/transfer.mm \
@@ -395,7 +395,7 @@ mumei verify \
 仕様書に記述された制約がコードに実装されているかを直接検証する。`extract-spec` + cross-spec の2ステップを1コマンドで実行できる。
 
 ```bash
-mumei-agent validate-spec-to-code \
+uv run mumei-agent validate-spec-to-code \
   --spec docs/requirements/payment_spec.txt \
   --code src/payment.py \
   --language python  # 任意: python|rust|typescript|go
@@ -423,7 +423,7 @@ mumei-agent validate-spec-to-code \
 ### 4-1. コードから仕様を抽出する
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/payment.rs \
   --output reports/extracted_spec.json
 ```
@@ -433,7 +433,7 @@ mumei-agent extract-spec \
 ### 4-2. 抽出仕様の矛盾チェック
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/payment.rs \
   --check-contradiction-only \
   --output reports/code_contradiction.json
@@ -442,7 +442,7 @@ mumei-agent extract-spec \
 ### 4-3. ディレクトリ全体から仕様を逆抽出
 
 ```bash
-mumei-agent extract-spec \
+uv run mumei-agent extract-spec \
   --code-file src/ \
   --check-contradiction-only \
   --output reports/src_contradiction.json
@@ -474,7 +474,7 @@ mumei verify --report-dir reports/ --cross-spec-files src/account.mm src/transfe
 コードが変更された際に、仕様書が追従できているかを検証する（仕様ドリフト検出）。
 
 ```bash
-mumei-agent validate-code-to-spec \
+uv run mumei-agent validate-code-to-spec \
   --code src/payment.py \
   --spec docs/requirements/payment_spec.txt \
   --language python  # 任意: python|rust|typescript|go

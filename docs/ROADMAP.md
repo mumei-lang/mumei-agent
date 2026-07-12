@@ -287,7 +287,7 @@ feedback として返す。
 
 **成功指標**:
 
-- `mumei-agent audit --code-file src/` が複数ファイルを処理し、成功/失敗件数を集約する。
+- `uv run mumei-agent audit --code-file src/` が複数ファイルを処理し、成功/失敗件数を集約する。
 - 問題ありの関数だけ `.mm` skeleton と self-heal 対象になる。
 - `verification_violations`, `counterexample_values`, `cross_validation_gaps`,
   `migration_hints`, `healed_files` が機械可読に返る。
@@ -378,7 +378,7 @@ reentrancy について guard-state-machine の Z3 検証を実装済み（`solc
 
 **成功指標**:
 
-- 既存コードから `mumei-agent audit --code-file src/ --auto-migrate --auto-heal`
+- 既存コードから `uv run mumei-agent audit --code-file src/ --auto-migrate --auto-heal`
   だけで監査・移行・修復まで試せる。
 - MCP client は `scan_and_fix` だけで同じ workflow を実行できる。
 - 問題なし / 自動修復可能 / human review の分岐が README と guide で一致する。
