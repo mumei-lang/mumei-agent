@@ -605,6 +605,13 @@ def _integer_overflow_requires_for_expression(expression: str) -> list[str]:
         r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
         expression,
     ):
+        # Skip operands that are call receivers / member accesses (e.g. the
+        # `SomeStruct` in `a + SomeStruct.method()`), which are not integer
+        # variables and must not be bounded as free integers (#281).
+        if _operand_is_member_or_call(
+            expression, match.span("left")
+        ) or _operand_is_member_or_call(expression, match.span("right")):
+            continue
         left = match.group("left")
         right = match.group("right")
         requirements.append(f"{left} + {right} <= 9223372036854775807")

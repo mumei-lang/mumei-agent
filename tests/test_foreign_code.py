@@ -134,6 +134,20 @@ def test_solidity_overflow_ignores_method_call_receiver() -> None:
     assert any("can overflow `a + b`" in issue.message for issue in real)
 
 
+def test_rust_go_overflow_requires_ignore_method_call_receiver() -> None:
+    """`a + SomeStruct.method()` must not bound `SomeStruct` as a free integer (#281)."""
+    from agent.cross_validation_foreign import (
+        _integer_overflow_requires_for_expression,
+    )
+
+    reqs = _integer_overflow_requires_for_expression("a + SomeStruct.method()")
+    assert reqs == []
+
+    # A genuine two-variable addition still emits overflow bounds.
+    real = _integer_overflow_requires_for_expression("a + b")
+    assert any("a + b <=" in req for req in real)
+
+
 def test_verifier_reports_solidity_reentrancy_and_access_control_heuristics() -> None:
     source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
     mumei = MagicMock()
