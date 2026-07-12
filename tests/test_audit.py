@@ -159,6 +159,29 @@ def test_spec_health_genuine_contradiction_remains_a_contradiction() -> None:
     ]
 
 
+def test_spec_health_non_boolean_lowering_failure_is_an_encoding_gap() -> None:
+    report = SpecHealthReport(
+        contradictions=[
+            ContradictionInfo(
+                atom="get_data",
+                details=(
+                    "spec_not_boolean: ensures clause must lower to boolean "
+                    "(unsupported let..in expression)"
+                ),
+            )
+        ]
+    )
+
+    issues = _spec_health_issue_strings(report)
+
+    assert issues == [
+        "encoding-gap: get_data: "
+        "spec_not_boolean: ensures clause must lower to boolean "
+        "(unsupported let..in expression)"
+    ]
+    assert not any(issue.startswith("contradiction:") for issue in issues)
+
+
 def test_audit_pipeline_reports_solidity_uint256_overflow(tmp_path: Path) -> None:
     source = tmp_path / "Ledger.sol"
     source.write_text(
