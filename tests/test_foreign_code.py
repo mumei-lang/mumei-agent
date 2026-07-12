@@ -120,6 +120,34 @@ def test_verifier_reports_solidity_uint256_overflow_counterexample() -> None:
     assert any("uint256 bounds contract" in violation for violation in violations)
 
 
+def test_solidity_overflow_ignores_method_call_receiver() -> None:
+    """`result + SafeCast.toUint(...)` must not model `SafeCast` as uint256 (#281)."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    expr = "result + SafeCast.toUint(unsignedRoundsUp(rounding) && result * result < a)"
+    issues = _issues_for_expression("sqrt", expr, "Solidity")
+    assert not any("can overflow" in issue.message for issue in issues)
+    assert all("SafeCast" not in issue.message for issue in issues)
+
+    # A genuine two-variable addition is still flagged.
+    real = _issues_for_expression("add", "a + b", "Solidity")
+    assert any("can overflow `a + b`" in issue.message for issue in real)
+
+
+def test_rust_go_overflow_requires_ignore_method_call_receiver() -> None:
+    """`a + SomeStruct.method()` must not bound `SomeStruct` as a free integer (#281)."""
+    from agent.cross_validation_foreign import (
+        _integer_overflow_requires_for_expression,
+    )
+
+    reqs = _integer_overflow_requires_for_expression("a + SomeStruct.method()")
+    assert reqs == []
+
+    # A genuine two-variable addition still emits overflow bounds.
+    real = _integer_overflow_requires_for_expression("a + b")
+    assert any("a + b <=" in req for req in real)
+
+
 def test_verifier_reports_solidity_reentrancy_and_access_control_heuristics() -> None:
     source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
     mumei = MagicMock()
