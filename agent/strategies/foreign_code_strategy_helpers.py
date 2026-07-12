@@ -109,6 +109,40 @@ class _SolidityOpTraceItem:
     offset: int
     snippet: str
 
+_MUMEI_CONTRACT_BUILTINS = frozenset(
+    {
+        "len",
+        "forall",
+        "exists",
+        "old",
+        "abs",
+        "min",
+        "max",
+        "sum",
+        "implies",
+        "result",
+        "int",
+        "bool",
+    }
+)
+_CALL_CALLEE_RE = re.compile(r"\b(?P<callee>[A-Za-z_]\w*)\s*\(")
+
+
+def _clause_references_undeclared_helper(clause: str, declared: set[str]) -> bool:
+    """True when ``clause`` calls a helper atom that the skeleton doesn't declare.
+
+    A generated ``ensures`` such as ``result == Hex2Bytes(s)`` can never verify
+    in a single-atom skeleton because ``Hex2Bytes`` is undefined there. Such
+    clauses are dropped rather than emitted (#283).
+    """
+    for match in _CALL_CALLEE_RE.finditer(clause):
+        callee = match.group("callee")
+        if callee in _MUMEI_CONTRACT_BUILTINS or callee in declared:
+            continue
+        return True
+    return False
+
+
 def to_mumei_atom(spec: ForeignCodeSpec) -> str:
     """Convert a foreign-code contract into Mumei atom syntax."""
     params = ", ".join(
@@ -117,7 +151,16 @@ def to_mumei_atom(spec: ForeignCodeSpec) -> str:
     )
     return_type = _mumei_type(spec.return_type)
     requires = _join_contracts(spec.preconditions)
-    ensures = _join_contracts(spec.postconditions)
+    declared = {
+        _safe_identifier(spec.function_name),
+        *(_safe_identifier(name) for name in spec.params),
+    }
+    safe_postconditions = [
+        clause
+        for clause in spec.postconditions
+        if not _clause_references_undeclared_helper(clause, declared)
+    ]
+    ensures = _join_contracts(safe_postconditions)
     default_value = _default_literal(return_type)
     return "\n".join(
         [
@@ -324,9 +367,29 @@ def _solidity_params(params_text: str) -> dict[str, str]:
         params[_safe_identifier(name_text)] = _solidity_type(type_text)
     return params
 
+_BYTE_LIKE_TYPE_RE = re.compile(
+    r"^(?:"
+    r"\[\](?:byte|uint8)"  # Go []byte / []uint8
+    r"|vec<\s*u8\s*>"  # Rust Vec<u8>
+    r"|\[\s*u8\s*(?:;[^\]]*)?\]"  # Rust [u8] / [u8; N]
+    r"|uint8array|arraybuffer|buffer"  # TS Uint8Array / ArrayBuffer / Buffer
+    r"|bytes\d*"  # Solidity/general bytes, bytes32
+    r")$"
+)
+
+
 def _mumei_type(type_name: str) -> str:
     normalized = _python_type_name(type_name).strip()
     normalized = normalized.removeprefix("Promise<").removesuffix(">")
+    normalized = normalized.strip()
+    byte_probe = _python_type_name(type_name).replace(" ", "").lstrip("&").lower()
+    if byte_probe.startswith("promise<") and byte_probe.endswith(">"):
+        byte_probe = byte_probe[len("promise<") : -1]
+    if _BYTE_LIKE_TYPE_RE.match(byte_probe):
+        # Byte slices / arrays / buffers are modeled as opaque strings rather
+        # than defaulting to i64, mirroring the Solidity bytes->string
+        # convention, so migration skeletons keep type fidelity (#283).
+        return "string"
     normalized = normalized.removesuffix("[]").strip()
     normalized_lower = normalized.lower()
     if normalized_lower in {"int", "integer", "number", "i8", "i16", "i32", "i64", "isize"}:
