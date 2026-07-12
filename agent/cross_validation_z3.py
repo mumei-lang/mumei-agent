@@ -381,6 +381,45 @@ def _alignment_contradiction_type(
         return "spec_vs_code"
     return ""
 
+def _split_top_level_conjuncts(expr: str) -> list[str]:
+    """Split ``expr`` on top-level ``&&`` / ``and`` conjunctions only.
+
+    Paren/bracket/brace-aware, so a compound clause such as
+    ``(a && b) || (c && d)`` (whose top-level operator is ``||``) is returned
+    whole instead of being shredded into unbalanced fragments like ``(a`` and
+    ``b) || (c``. Mirrors mumei's ``split_top_level_conjunctions``.
+    """
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    i = 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch == "&" and i + 1 < n and expr[i + 1] == "&":
+            parts.append(expr[start:i])
+            i += 2
+            start = i
+            continue
+        elif (
+            depth == 0
+            and expr[i : i + 3] == "and"
+            and (i == 0 or not (expr[i - 1].isalnum() or expr[i - 1] == "_"))
+            and (i + 3 >= n or not (expr[i + 3].isalnum() or expr[i + 3] == "_"))
+        ):
+            parts.append(expr[start:i])
+            i += 3
+            start = i
+            continue
+        i += 1
+    parts.append(expr[start:])
+    return parts
+
+
 def _clause_to_z3(
     clause: str,
     symbols: dict[str, z3.IntNumRef | z3.ArithRef],
@@ -392,7 +431,7 @@ def _clause_to_z3(
         return [z3.BoolVal(False)], []
     warnings: list[str] = []
     expressions: list[z3.BoolRef] = []
-    for part in re.split(r"\s*&&\s*|\s+\band\b\s+", normalized):
+    for part in _split_top_level_conjuncts(normalized):
         part = part.strip()
         if not part or part.lower() == "true":
             continue

@@ -381,6 +381,30 @@ def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: P
     assert exc.value.code == 2
 
 
+def test_clause_split_is_paren_aware_and_balanced() -> None:
+    """Top-level && split must not shred parenthesized/|| clauses (#420)."""
+    from agent.cross_validation_z3 import _clause_to_z3, _split_top_level_conjuncts
+
+    compound = (
+        "(b == nil && result == nil) || "
+        "(b != nil && len(result) == len(b) && forall(i, 0, len(b), result[i] == b[i]))"
+    )
+    # A top-level || clause has no top-level &&: it stays whole.
+    assert _split_top_level_conjuncts(compound) == [compound]
+
+    conjunction = "len(result) == l && forall(i, 0, len(slice), result[i] == slice[i])"
+    assert _split_top_level_conjuncts(conjunction) == [
+        "len(result) == l ",
+        " forall(i, 0, len(slice), result[i] == slice[i])",
+    ]
+
+    # Any residual skip warnings must reference balanced fragments.
+    _, warnings = _clause_to_z3(compound, {})
+    for warning in warnings:
+        fragment = warning.removeprefix("Skipped unsupported Z3 clause: ")
+        assert fragment.count("(") == fragment.count(")"), warning
+
+
 @pytest.mark.parametrize(
     ("language", "filename", "source"),
     [
