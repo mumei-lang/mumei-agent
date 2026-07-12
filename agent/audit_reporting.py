@@ -468,6 +468,54 @@ def _generate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
 def _aggregate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
     return _generate_directory_next_steps(result)
 
+# Worst-of ordering for aggregating per-file verdicts: a single refuted file
+# makes the directory refuted; unverifiable dominates verified.
+_VERDICT_SEVERITY = {"verified": 0, "unverifiable": 1, "refuted": 2}
+
+def _aggregate_directory_verification_status(
+    result: AuditDirectoryResult,
+) -> str | None:
+    worst: str | None = None
+    worst_rank = -1
+    for file_result in result.file_results:
+        status = file_result.verification_status
+        if not status:
+            continue
+        rank = _VERDICT_SEVERITY.get(status, 1)
+        if rank > worst_rank:
+            worst_rank = rank
+            worst = status
+    return worst
+
+def _aggregate_directory_fixed_keys(result: AuditDirectoryResult) -> None:
+    """Populate the fixed audit-contract keys on a directory result.
+
+    Mirrors the single-file schema by flattening each per-file list with a
+    file-label prefix (so attribution is preserved) and taking the worst-of
+    verification verdict. ``file_results`` still carries the per-file detail.
+    """
+    spec_health: list[str] = []
+    violations: list[str] = []
+    gaps: list[str] = []
+    hints: list[dict] = []
+    healed: list[str] = []
+    heal_errors: list[str] = []
+    for file_result in result.file_results:
+        label = _directory_file_label(result.source_dir, file_result.source_file)
+        spec_health.extend(f"{label}: {item}" for item in file_result.spec_health_issues)
+        violations.extend(f"{label}: {item}" for item in file_result.verification_violations)
+        gaps.extend(f"{label}: {item}" for item in file_result.cross_validation_gaps)
+        healed.extend(file_result.healed_files)
+        heal_errors.extend(f"{label}: {item}" for item in file_result.heal_errors)
+        hints.extend(file_result.migration_hints)
+    result.verification_status = _aggregate_directory_verification_status(result)
+    result.spec_health_issues = spec_health
+    result.verification_violations = violations
+    result.cross_validation_gaps = gaps
+    result.migration_hints = hints
+    result.healed_files = healed
+    result.heal_errors = heal_errors
+
 def _build_directory_report(result: AuditDirectoryResult) -> str:
     lines = [f"Audit directory: {result.source_dir}"]
     for file_result in result.file_results:
