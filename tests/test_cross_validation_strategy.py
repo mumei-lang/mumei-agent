@@ -93,6 +93,15 @@ class TestExtractFunctions:
         assert "safe_add" in names
         assert "validate_balance" in names
 
+    def test_typescript_arrow_with_type_annotation(self):
+        # `const name: Type = async (...)` must still be extracted (#280).
+        src = (
+            "export const timingSafeEqual: TimingSafeEqual = async (\n"
+            "  a,\n  b,\n) => {\n  return a === b;\n}\n"
+        )
+        names = _extract_functions(src, "typescript")
+        assert "timingSafeEqual" in names
+
 
 # ---------------------------------------------------------------------------
 # Tests: _extract_spec_atoms
@@ -166,6 +175,39 @@ class TestValidateSpecVsImpl:
             language="python",
         )
         assert report.coverage_ratio == 1.0
+
+    def test_matching_is_normalization_tolerant(self):
+        # Spec atoms use snake_case; Go impl uses CamelCase. These must match
+        # instead of being reported as uncovered (#280).
+        spec = (
+            "atom bytes2hex(d: Bytes) -> String\n"
+            "  requires: true\n  ensures: true\n{\n  d\n}\n\n"
+            "atom check_arg_length(n: i64) -> bool\n"
+            "  requires: true\n  ensures: true\n{\n  n > 0\n}\n"
+        )
+        spec_path = Path(self.tmpdir) / "norm.mm"
+        spec_path.write_text(spec)
+        impl_path = Path(self.tmpdir) / "impl.go"
+        impl_path.write_text(
+            "package demo\n"
+            "func Bytes2Hex(d []byte) string { return \"\" }\n"
+            "func _checkArgLength(n int) bool { return n > 0 }\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path),
+            impl_path=str(impl_path),
+            language="go",
+        )
+        assert report.uncovered_atoms == []
+        assert report.coverage_ratio == 1.0
+
+    def test_check_impl_coverage_normalization_tolerant(self):
+        result = self.validator.check_impl_coverage(
+            ["bytes2hex", "check_arg_length"],
+            ["Bytes2Hex", "_checkArgLength"],
+        )
+        assert result["uncovered"] == []
+        assert result["ratio"] == 1.0
 
 
 # ---------------------------------------------------------------------------
