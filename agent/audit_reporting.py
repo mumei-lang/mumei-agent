@@ -66,7 +66,12 @@ def _spec_health_issue_strings(report: SpecHealthReport) -> list[str]:
     issues: list[str] = []
     for item in report.contradictions:
         detail = f": {item.details}" if item.details else ""
-        issues.append(f"contradiction: {item.atom}{detail}")
+        prefix = (
+            "encoding-gap"
+            if _is_spec_lowering_or_unsupported_error(item.details)
+            else "contradiction"
+        )
+        issues.append(f"{prefix}: {item.atom}{detail}")
     for item in report.over_constrained:
         unused = [
             *item.unused_requires,
@@ -79,6 +84,24 @@ def _spec_health_issue_strings(report: SpecHealthReport) -> list[str]:
         detail = f": {item.message}" if item.message else ""
         issues.append(f"vacuous: {item.atom}{detail}")
     return issues
+
+
+def _is_spec_lowering_or_unsupported_error(details: str) -> bool:
+    """Identify verifier failures caused by unsupported spec encodings."""
+    lowered = details.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "spec_lowering_failed",
+            "skipped unsupported z3 clause",
+            "unsupported clause",
+            "unsupported expression",
+            "forall() requires exactly",
+            "unknown function:",
+            "expected bool for",
+        )
+    )
+
 
 def _verification_issue_strings(result: dict[str, object]) -> list[str]:
     issues: list[str] = []

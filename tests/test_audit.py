@@ -17,12 +17,17 @@ from agent.audit import (
     build_parser,
     main,
 )
-from agent.audit_reporting import _verification_status_from_foreign_result
+from agent.audit_reporting import (
+    _spec_health_issue_strings,
+    _verification_status_from_foreign_result,
+)
 from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
 from agent.mm_migration_advisor import MigrationHint
 from agent.strategies.cross_validation_strategy import CrossValidationReport
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
+from agent.strategies.spec_health_strategy import SpecHealthReport
+from agent.strategies.spec_health_strategy_helpers import ContradictionInfo
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -90,6 +95,68 @@ def _solidity_forge_spec() -> dict[str, object]:
             }
         ],
     }
+
+
+def test_spec_health_lowering_failure_is_an_encoding_gap() -> None:
+    report = SpecHealthReport(
+        contradictions=[
+            ContradictionInfo(
+                atom="get_data_and_adjusted_bounds",
+                details=(
+                    "spec_lowering_failed: failed to lower ensures clause: "
+                    "Verification Error: Unknown function: min"
+                ),
+            )
+        ]
+    )
+
+    issues = _spec_health_issue_strings(report)
+
+    assert issues == [
+        "encoding-gap: get_data_and_adjusted_bounds: "
+        "spec_lowering_failed: failed to lower ensures clause: "
+        "Verification Error: Unknown function: min"
+    ]
+    assert not any(issue.startswith("contradiction:") for issue in issues)
+
+
+def test_spec_health_unsupported_clause_errors_are_encoding_gaps() -> None:
+    report = SpecHealthReport(
+        contradictions=[
+            ContradictionInfo(
+                atom="get_data",
+                details="spec_lowering_failed: forall() requires exactly 4 arguments",
+            ),
+            ContradictionInfo(
+                atom="check_max_code_size",
+                details="spec_lowering_failed: Expected bool for &&",
+            ),
+            ContradictionInfo(
+                atom="opaque",
+                details="Skipped unsupported Z3 clause: ensures clause 'opaque()'",
+            ),
+        ]
+    )
+
+    issues = _spec_health_issue_strings(report)
+
+    assert len(issues) == 3
+    assert all(issue.startswith("encoding-gap:") for issue in issues)
+
+
+def test_spec_health_genuine_contradiction_remains_a_contradiction() -> None:
+    report = SpecHealthReport(
+        contradictions=[
+            ContradictionInfo(
+                atom="impossible_positive",
+                details="requires_unsat: x > 0 && x < 0",
+            )
+        ]
+    )
+
+    assert _spec_health_issue_strings(report) == [
+        "contradiction: impossible_positive: requires_unsat: x > 0 && x < 0"
+    ]
 
 
 def test_audit_pipeline_reports_solidity_uint256_overflow(tmp_path: Path) -> None:
