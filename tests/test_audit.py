@@ -9,11 +9,13 @@ from unittest.mock import MagicMock, patch
 
 from agent import mcp_server
 from agent.audit import (
+    AUDIT_EXTENSION_MAP,
     AUDIT_SCHEMA_KEYS,
     AuditDirectoryResult,
     AuditPipeline,
     AuditResult,
     _build_report,
+    _collect_code_files,
     _format_result,
     build_parser,
     main,
@@ -1102,6 +1104,69 @@ def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
     )
 
 
+def _make_test_and_prod_dir(tmp_path: Path) -> Path:
+    src = tmp_path / "src"
+    (src / "tests").mkdir(parents=True)
+    (src / "common.go").write_text("package common\n", encoding="utf-8")
+    (src / "common_test.go").write_text("package common\n", encoding="utf-8")
+    (src / "buffer.ts").write_text("export const x = 1\n", encoding="utf-8")
+    (src / "buffer.test.ts").write_text("test('x', () => {})\n", encoding="utf-8")
+    (src / "validators.py").write_text("x = 1\n", encoding="utf-8")
+    (src / "test_validators.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    (src / "tests" / "helper.py").write_text("y = 2\n", encoding="utf-8")
+    return src
+
+
+def test_collect_code_files_filters_tests(tmp_path: Path) -> None:
+    """_collect_code_files drops test files when include_tests=False (#286)."""
+    src = _make_test_and_prod_dir(tmp_path)
+
+    excluded = {
+        path.name
+        for path in _collect_code_files(
+            src, AUDIT_EXTENSION_MAP, None, include_tests=False
+        )
+    }
+    assert excluded == {"common.go", "buffer.ts", "validators.py"}
+
+    included = {
+        path.name
+        for path in _collect_code_files(
+            src, AUDIT_EXTENSION_MAP, None, include_tests=True
+        )
+    }
+    assert {"common_test.go", "buffer.test.ts", "test_validators.py", "helper.py"} <= included
+
+
+def test_audit_directory_excludes_tests_by_default(tmp_path: Path) -> None:
+    """Directory audit skips test files unless include_tests=True (#286)."""
+    src = _make_test_and_prod_dir(tmp_path)
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=False,
+        natural_language_spec="",
+        forge_task_spec=None,
+        detected_language="go",
+        errors=["stub"],
+    )
+    pipeline = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    )
+
+    default_result = pipeline.audit_directory(src)
+    default_names = {Path(fr.source_file).name for fr in default_result.file_results}
+    assert default_names == {"common.go", "buffer.ts", "validators.py"}
+
+    with_tests = pipeline.audit_directory(src, include_tests=True)
+    with_tests_names = {Path(fr.source_file).name for fr in with_tests.file_results}
+    assert "common_test.go" in with_tests_names
+    assert "buffer.test.ts" in with_tests_names
+
+
 def test_audit_directory_summary_table(tmp_path: Path) -> None:
     source_dir = tmp_path / "src"
     source_dir.mkdir()
@@ -1271,6 +1336,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         auto_migrate=False,
         auto_heal=False,
         enable_lean_bridge=False,
+        include_tests=False,
     )
 
 
