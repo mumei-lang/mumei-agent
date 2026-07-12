@@ -33,6 +33,7 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _RUST_FUNC_RE,
     _TS_ARROW_RE,
     _TS_FUNC_RE,
+    _canonical_symbol,
     _extract_function_body,
     _extract_functions,
     _extract_spec_atoms,
@@ -136,30 +137,43 @@ class CrossValidator:
             report.details.append("No spec atoms found in spec file.")
             return report
 
-        # Coverage analysis
-        spec_names = {a["name"] for a in spec_atoms}
-        impl_names = set(impl_functions)
-        report.uncovered_atoms = sorted(spec_names - impl_names)
+        # Coverage analysis (normalization-tolerant: snake_case / camelCase /
+        # leading-underscore differences between the two extractors must not
+        # register as false "no matching implementation" gaps).
+        spec_by_canon: dict[str, str] = {}
+        for atom in spec_atoms:
+            spec_by_canon.setdefault(_canonical_symbol(atom["name"]), atom["name"])
+        impl_by_canon = {_canonical_symbol(func): func for func in impl_functions}
 
-        covered = spec_names & impl_names
-        report.coverage_ratio = len(covered) / len(spec_names) if spec_names else 0.0
+        report.uncovered_atoms = sorted(
+            original
+            for canon, original in spec_by_canon.items()
+            if canon not in impl_by_canon
+        )
+
+        covered = set(spec_by_canon) & set(impl_by_canon)
+        report.coverage_ratio = len(covered) / len(spec_by_canon) if spec_by_canon else 0.0
 
         # Semantic gap detection: spec stronger than impl
         # If the spec has complex requires/ensures but the implementation
         # function is trivial (heuristic: short or no validation code)
         for atom in spec_atoms:
-            if atom["name"] not in impl_names:
+            impl_name = impl_by_canon.get(_canonical_symbol(atom["name"]))
+            if impl_name is None:
                 continue
             has_complex_contract = bool(atom["requires"]) and len(atom["requires"]) > 20
             if has_complex_contract:
-                body = _extract_function_body(impl_source, language, atom["name"])
+                body = _extract_function_body(impl_source, language, impl_name)
                 if body and len(body.strip()) < len(atom["requires"]):
                     report.spec_stronger_than_impl.append(atom["name"])
 
         # Semantic gap detection: impl stronger than spec
         # Functions with complex validation that have no spec or trivial spec
         for func_name in impl_functions:
-            matching_atom = next((a for a in spec_atoms if a["name"] == func_name), None)
+            matching_atom = next(
+                (a for a in spec_atoms if _canonical_symbol(a["name"]) == _canonical_symbol(func_name)),
+                None,
+            )
             if matching_atom is None:
                 continue
             if not matching_atom["requires"] and not matching_atom["ensures"]:
@@ -227,13 +241,22 @@ class CrossValidator:
         Returns:
             Dict with ``covered``, ``uncovered``, ``extra``, and ``ratio``.
         """
-        spec_set = set(spec_atoms)
-        impl_set = set(impl_functions)
+        spec_by_canon: dict[str, str] = {}
+        for name in spec_atoms:
+            spec_by_canon.setdefault(_canonical_symbol(name), name)
+        impl_by_canon: dict[str, str] = {}
+        for name in impl_functions:
+            impl_by_canon.setdefault(_canonical_symbol(name), name)
 
-        covered = sorted(spec_set & impl_set)
-        uncovered = sorted(spec_set - impl_set)
-        extra = sorted(impl_set - spec_set)
-        ratio = len(covered) / len(spec_set) if spec_set else 0.0
+        covered_canon = set(spec_by_canon) & set(impl_by_canon)
+        covered = sorted(spec_by_canon[c] for c in covered_canon)
+        uncovered = sorted(
+            original for canon, original in spec_by_canon.items() if canon not in impl_by_canon
+        )
+        extra = sorted(
+            original for canon, original in impl_by_canon.items() if canon not in spec_by_canon
+        )
+        ratio = len(covered_canon) / len(spec_by_canon) if spec_by_canon else 0.0
 
         return {
             "covered": covered,

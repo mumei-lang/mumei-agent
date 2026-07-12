@@ -4,6 +4,20 @@ from __future__ import annotations
 import re
 from typing import Any
 
+
+def _canonical_symbol(name: str) -> str:
+    """Canonicalize a symbol name for normalization-tolerant matching.
+
+    Spec-atom names and source symbols come from different extractors that
+    normalize casing/underscores differently (snake_case vs camelCase vs a
+    leading ``_``). Comparing raw names yields false "no matching
+    implementation" gaps, so both sides are reduced to a case- and
+    underscore-insensitive key: ``_check_arg_length``, ``check_arg_length``
+    and ``CheckArgLength`` all collapse to ``checkarglength``.
+    """
+    return name.strip().replace("_", "").lower()
+
+
 # ---------------------------------------------------------------------------
 # Implementation function extraction
 # ---------------------------------------------------------------------------
@@ -21,7 +35,9 @@ _TS_FUNC_RE = re.compile(
     re.MULTILINE,
 )
 _TS_ARROW_RE = re.compile(
-    r"(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s+)?\(",
+    # Allow an optional type annotation between the name and `=`, e.g.
+    # `export const timingSafeEqual: TimingSafeEqual = async (...) => ...`.
+    r"(?:export\s+)?(?:const|let)\s+(\w+)\s*(?::\s*[^=;]+?)?\s*=\s*(?:async\s+)?\(",
     re.MULTILINE,
 )
 _GO_FUNC_RE = re.compile(
@@ -107,7 +123,11 @@ def _extract_function_body(source: str, language: str, function_name: str) -> st
                     re.MULTILINE,
                 ),
                 re.compile(
-                    rf"(?:export\s+)?(?:const|let)\s+{escaped}\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>\s*(?P<body>\{{[\s\S]*?\}}|[^;\n]+)",
+                    # Allow an optional type annotation between the name and
+                    # `=` (mirrors _TS_ARROW_RE) so bodies of declarations like
+                    # `export const timingSafeEqual: TimingSafeEqual = async (...) => ...`
+                    # are still analyzed for semantic gaps.
+                    rf"(?:export\s+)?(?:const|let)\s+{escaped}\s*(?::\s*[^=;]+?)?\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>\s*(?P<body>\{{[\s\S]*?\}}|[^;\n]+)",
                     re.MULTILINE,
                 ),
             ]
