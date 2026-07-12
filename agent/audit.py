@@ -22,6 +22,7 @@ from agent.audit_models import (
     MumeiVerifyClientLike,
 )
 from agent.audit_reporting import (
+    _aggregate_directory_fixed_keys,
     _append_text_next_step,
     _aggregate_directory_next_steps,
     _build_directory_report,
@@ -496,6 +497,7 @@ class AuditPipeline:
             files_with_issues=files_with_issues,
             errors=errors,
         )
+        _aggregate_directory_fixed_keys(result)
         result.next_steps = _generate_directory_next_steps(result)
         result.summary = _build_directory_report(result)
         return result

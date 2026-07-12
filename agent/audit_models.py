@@ -43,6 +43,16 @@ class AuditDirectoryResult:
     summary: str = ""
     total_files: int = 0
     files_with_issues: int = 0
+    # Fixed audit-contract keys aggregated across ``file_results`` so directory
+    # audits expose the same top-level schema as single-file audits and the
+    # MCP ``scan_and_fix`` tool.
+    verification_status: ForeignCodeVerdict | None = field(default=None, kw_only=True)
+    spec_health_issues: list[str] = field(default_factory=list)
+    verification_violations: list[str] = field(default_factory=list)
+    cross_validation_gaps: list[str] = field(default_factory=list)
+    migration_hints: list[dict] = field(default_factory=list)
+    healed_files: list[str] = field(default_factory=list)
+    heal_errors: list[str] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 

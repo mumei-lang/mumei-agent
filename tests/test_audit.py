@@ -1101,6 +1101,21 @@ def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
         == "mumei-agent validate-spec-to-code --spec <spec> --code <file> --format human"
     )
 
+    # Directory audits must expose the same fixed keys at the top level as a
+    # single-file audit (#284).
+    from dataclasses import asdict
+
+    payload = asdict(result)
+    for key in AUDIT_SCHEMA_KEYS:
+        assert key in payload, key
+    # Aggregated lists flatten per-file findings and carry file attribution.
+    aggregated_violations = result.verification_violations
+    per_file_violations = sum(
+        len(file_result.verification_violations) for file_result in result.file_results
+    )
+    assert len(aggregated_violations) == per_file_violations
+    assert all(": " in violation for violation in aggregated_violations)
+
 
 def test_audit_directory_summary_table(tmp_path: Path) -> None:
     source_dir = tmp_path / "src"
