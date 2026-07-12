@@ -393,6 +393,61 @@ def test_to_mumei_atom_emits_trusted_contract() -> None:
     assert "ensures: result * b == a;" in atom
 
 
+def test_to_mumei_atom_maps_byte_slice_types_to_string() -> None:
+    """Byte-slice/string params keep type fidelity instead of defaulting to i64 (#283)."""
+    atom = to_mumei_atom(
+        ForeignCodeSpec(
+            function_name="FromHex",
+            params={"s": "string", "b": "[]byte"},
+            return_type="[]byte",
+        )
+    )
+
+    assert "trusted atom FromHex(s: string, b: string) -> string {" in atom
+    assert "i64" not in atom
+
+
+def test_mumei_type_maps_byte_and_buffer_types() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _mumei_type
+
+    assert _mumei_type("[]byte") == "string"
+    assert _mumei_type("Vec<u8>") == "string"
+    assert _mumei_type("&[u8]") == "string"
+    assert _mumei_type("Uint8Array") == "string"
+    assert _mumei_type("bytes32") == "string"
+    # Non-byte integers are unaffected.
+    assert _mumei_type("i64") == "i64"
+    assert _mumei_type("u32") == "u64"
+
+
+def test_to_mumei_atom_drops_ensures_referencing_undeclared_helper() -> None:
+    """`ensures: result == Hex2Bytes(s)` can't verify in a single-atom skeleton (#283)."""
+    atom = to_mumei_atom(
+        ForeignCodeSpec(
+            function_name="FromHex",
+            params={"s": "string"},
+            return_type="string",
+            postconditions=["result == Hex2Bytes(s)"],
+        )
+    )
+
+    assert "Hex2Bytes" not in atom
+    assert "ensures: true;" in atom
+
+
+def test_to_mumei_atom_keeps_ensures_using_declared_names_and_builtins() -> None:
+    atom = to_mumei_atom(
+        ForeignCodeSpec(
+            function_name="pad",
+            params={"b": "string", "n": "i64"},
+            return_type="string",
+            postconditions=["len(result) >= n"],
+        )
+    )
+
+    assert "ensures: len(result) >= n;" in atom
+
+
 def test_verifier_runs_mumei_client_on_extracted_atom() -> None:
     mumei = MagicMock()
     mumei.verify.return_value = {
