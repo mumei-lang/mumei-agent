@@ -138,19 +138,50 @@ def _is_spec_lowering_or_unsupported_error(details: str) -> bool:
     )
 
 
+# mumei verify statuses that mean "not proven" without being an actual
+# code-safety failure: a `trusted` atom is an accepted proof hole, and
+# `satisfiable_with_skips` means clauses were skipped rather than refuted.
+# Neither should be surfaced as a verification_violation on its own.
+_INCONCLUSIVE_VERIFY_STATUSES = frozenset({"trusted", "satisfiable_with_skips"})
+
+
+def _is_inconclusive_non_failure(report: dict[str, object], *, counterexample_present: bool) -> bool:
+    """A verify result that is unproven but not an actual code-safety failure.
+
+    ``trusted`` / ``satisfiable_with_skips`` with no failed atoms and no
+    counterexample is inconclusive (mapped to ``unverifiable``), not a
+    ``verification_violation``.
+    """
+    status = _string_value(report.get("status"), "")
+    failed = report.get("failed")
+    return (
+        status in _INCONCLUSIVE_VERIFY_STATUSES
+        and not failed
+        and not counterexample_present
+    )
+
+
 def _verification_issue_strings(result: dict[str, object]) -> list[str]:
     issues: list[str] = []
+    verification = _dict_value(result.get("verification"))
+    report = _dict_value(verification.get("report"))
+    report_counterexample = format_counterexample(report)
+    counterexample_present = bool(report.get("counterexample")) or bool(report_counterexample)
+    inconclusive = _is_inconclusive_non_failure(
+        report, counterexample_present=counterexample_present
+    )
     for item in _string_list(result.get("errors")):
+        # A bare "mumei verify failed" for a trusted/inconclusive result is a
+        # false positive; drop it (real failures carry status/failed detail).
+        if inconclusive and item.strip() == "mumei verify failed":
+            continue
         issues.append(item)
     top_level_counterexample = format_counterexample(result)
     if top_level_counterexample:
         issues.append(top_level_counterexample)
-    verification = _dict_value(result.get("verification"))
-    report = _dict_value(verification.get("report"))
-    report_counterexample = format_counterexample(report)
     if report_counterexample:
         issues.append(report_counterexample)
-    if verification and verification.get("success") is False:
+    if verification and verification.get("success") is False and not inconclusive:
         status = _string_value(report.get("status"), "")
         failed = report.get("failed")
         if status or failed is not None:
