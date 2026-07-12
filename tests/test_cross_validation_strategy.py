@@ -11,6 +11,7 @@ from agent.strategies.cross_validation_strategy import (
     CrossValidationReport,
     CrossValidator,
     DriftReport,
+    _extract_function_body,
     _extract_functions,
     _extract_spec_atoms,
 )
@@ -101,6 +102,16 @@ class TestExtractFunctions:
         )
         names = _extract_functions(src, "typescript")
         assert "timingSafeEqual" in names
+
+    def test_typescript_arrow_body_with_type_annotation(self):
+        # The body of a typed arrow must also be extractable so the
+        # semantic-gap check isn't silently skipped (#280).
+        src = (
+            "export const timingSafeEqual: TimingSafeEqual = async (\n"
+            "  a,\n  b,\n) => {\n  return a === b;\n}\n"
+        )
+        body = _extract_function_body(src, "typescript", "timingSafeEqual")
+        assert "return a === b" in body
 
 
 # ---------------------------------------------------------------------------

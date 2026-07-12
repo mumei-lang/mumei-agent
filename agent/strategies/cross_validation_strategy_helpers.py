@@ -123,7 +123,11 @@ def _extract_function_body(source: str, language: str, function_name: str) -> st
                     re.MULTILINE,
                 ),
                 re.compile(
-                    rf"(?:export\s+)?(?:const|let)\s+{escaped}\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>\s*(?P<body>\{{[\s\S]*?\}}|[^;\n]+)",
+                    # Allow an optional type annotation between the name and
+                    # `=` (mirrors _TS_ARROW_RE) so bodies of declarations like
+                    # `export const timingSafeEqual: TimingSafeEqual = async (...) => ...`
+                    # are still analyzed for semantic gaps.
+                    rf"(?:export\s+)?(?:const|let)\s+{escaped}\s*(?::\s*[^=;]+?)?\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::[^=]+)?=>\s*(?P<body>\{{[\s\S]*?\}}|[^;\n]+)",
                     re.MULTILINE,
                 ),
             ]
