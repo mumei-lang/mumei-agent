@@ -154,6 +154,7 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
+        include_tests: bool = False,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
         if source_path.is_dir():
@@ -164,6 +165,7 @@ class AuditPipeline:
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
+                include_tests=include_tests,
             )
         with telemetry.start_span(
             "mumei.audit.file",
@@ -387,11 +389,15 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
+        include_tests: bool = False,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
 
         Wrapped in a ``mumei.audit.directory`` span; the per-file
         :meth:`audit_file` calls nest as ``mumei.audit.file`` child spans.
+
+        Test files (``*_test.go``, ``*.test.ts``, ``test_*.py``, ``tests/``,
+        ...) are skipped by default; pass ``include_tests=True`` to audit them.
         """
         with telemetry.start_span(
             "mumei.audit.directory",
@@ -404,6 +410,7 @@ class AuditPipeline:
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
+                include_tests=include_tests,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -424,6 +431,7 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
+        include_tests: bool = False,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
         source_label = str(source_path)
@@ -455,6 +463,7 @@ class AuditPipeline:
             source_path,
             AUDIT_EXTENSION_MAP,
             normalized_language or None,
+            include_tests=include_tests,
         )
         if not code_files:
             errors.append(f"no supported source-code files found in directory: {source_label}")
@@ -674,6 +683,14 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         default=None,
         help="Path to the mumei-lean checkout used by --enable-lean-bridge.",
     )
+    parser.add_argument(
+        "--include-tests",
+        action="store_true",
+        help=(
+            "Also audit test files (e.g. *_test.go, *.test.ts, test_*.py, "
+            "tests/ dirs), which are skipped by default for directory audits."
+        ),
+    )
     return parser
 
 def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectoryResult:
@@ -686,6 +703,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         auto_migrate=args.auto_migrate,
         auto_heal=args.auto_heal,
         enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
+        include_tests=bool(getattr(args, "include_tests", False)),
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)

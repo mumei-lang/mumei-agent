@@ -104,10 +104,48 @@ def _code_extensions_for_language(
         if mapped_language == language
     )
 
+_TEST_FILENAME_SUFFIXES = (
+    "_test.go",
+    ".test.ts",
+    ".test.tsx",
+    ".test.js",
+    ".test.jsx",
+    ".spec.ts",
+    ".spec.tsx",
+    ".spec.js",
+    ".spec.jsx",
+    "_test.py",
+    ".t.sol",
+)
+_TEST_DIR_NAMES = frozenset({"tests", "__tests__", "testdata"})
+
+
+def _is_test_file(path: Path, source_dir: Path) -> bool:
+    """True when ``path`` is a language-idiomatic test file or lives in a test dir.
+
+    Covers ``*_test.go``, ``*.test.ts`` / ``*.spec.ts`` (and js/tsx variants),
+    ``test_*.py`` / ``*_test.py``, ``*.t.sol``, and any file under a ``tests`` /
+    ``__tests__`` / ``testdata`` directory. Used to skip tests during directory
+    audits by default (#286).
+    """
+    name = path.name.lower()
+    if name.startswith("test_") and name.endswith(".py"):
+        return True
+    if any(name.endswith(suffix) for suffix in _TEST_FILENAME_SUFFIXES):
+        return True
+    try:
+        relative_parts = path.relative_to(source_dir).parts[:-1]
+    except ValueError:
+        relative_parts = path.parts[:-1]
+    return any(part.lower() in _TEST_DIR_NAMES for part in relative_parts)
+
+
 def _collect_code_files(
     source_dir: Path,
     extension_map: Mapping[str, str],
     language: str | None,
+    *,
+    include_tests: bool = True,
 ) -> list[Path]:
     extensions = set(_code_extensions_for_language(extension_map, language))
     if not extensions:
@@ -116,7 +154,9 @@ def _collect_code_files(
         (
             path
             for path in source_dir.rglob("*")
-            if path.is_file() and path.suffix.lower() in extensions
+            if path.is_file()
+            and path.suffix.lower() in extensions
+            and (include_tests or not _is_test_file(path, source_dir))
         ),
         key=lambda path: path.relative_to(source_dir).as_posix(),
     )
