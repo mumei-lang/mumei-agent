@@ -252,6 +252,7 @@ class AuditPipeline:
                 spec_extracted=False,
                 verification_status="unverifiable",
                 errors=errors,
+                skipped_rate_limited=_errors_indicate_rate_limit(extraction.errors),
             )
             return _finalize_audit_result(result)
 
@@ -496,6 +497,11 @@ class AuditPipeline:
             total_files=len(file_results),
             files_with_issues=files_with_issues,
             errors=errors,
+            skipped_rate_limited_files=[
+                file_result.source_file
+                for file_result in file_results
+                if file_result.skipped_rate_limited
+            ],
         )
         _aggregate_directory_fixed_keys(result)
         result.next_steps = _generate_directory_next_steps(result)
@@ -688,6 +694,31 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
     else:
         print(payload)
     return result
+
+_RATE_LIMIT_MARKERS = (
+    "error code: 429",
+    "rate limit",
+    "rate_limit",
+    "tokens per min",
+    "too many requests",
+    "retry-after",
+)
+
+
+def _errors_indicate_rate_limit(errors: list[str]) -> bool:
+    """True when an extraction error looks like an exhausted LLM rate limit.
+
+    When the SDK's retries (which honor ``Retry-After``) are exhausted on a
+    429, the failure surfaces as an opaque error string. Recognizing it lets a
+    file be marked ``skipped_rate_limited`` instead of silently degrading into
+    a generic unverifiable result (#285).
+    """
+    for error in errors:
+        lowered = error.lower()
+        if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+            return True
+    return False
+
 
 def _normalize_language(language: str | None) -> str:
     if language is None:

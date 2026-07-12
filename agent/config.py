@@ -48,7 +48,7 @@ class AgentConfig:
     base_url: str | None = field(default_factory=lambda: os.getenv("LLM_BASE_URL", None))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o"))
     mumei_bin: str = field(default_factory=lambda: os.getenv("MUMEI_BIN", "mumei"))
-    max_retries: int = 5
+    max_retries: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_RETRIES", "5")))
     max_context_tokens: int = field(
         default_factory=lambda: int(os.getenv("MAX_CONTEXT_TOKENS", "16000"))
     )
@@ -136,7 +136,12 @@ class AgentConfig:
                 "LLM_API_KEY (or OPENAI_API_KEY) is not set. "
                 "Please check your .env file or environment variables."
             )
-        kwargs: dict = {"api_key": self.api_key}
+        # Wire the configured retry cap into the SDK so 429 (rate limit) and
+        # transient 5xx responses are retried with the SDK's native
+        # exponential backoff that honors the ``Retry-After`` header, instead
+        # of the SDK default (2) and instead of a single 429 silently dropping
+        # a file's verification.
+        kwargs: dict = {"api_key": self.api_key, "max_retries": self.max_retries}
         if self.base_url:
             kwargs["base_url"] = self.base_url
         return OpenAI(**kwargs)
