@@ -69,6 +69,22 @@ from agent.strategies.foreign_code_strategy_helpers import (
 )
 
 
+# mumei verify statuses that are "not proven" yet not a code-safety failure.
+_INCONCLUSIVE_VERIFY_STATUSES = frozenset({"trusted", "satisfiable_with_skips"})
+
+
+def _is_inconclusive_verify(verification: dict[str, object] | None) -> bool:
+    """True when a failed verify is inconclusive (trusted / skipped) rather than refuted."""
+    if not isinstance(verification, dict):
+        return False
+    report = verification.get("report")
+    report = report if isinstance(report, dict) else {}
+    status = report.get("status") or ""
+    failed = report.get("failed")
+    counterexample = report.get("counterexample") or verification.get("counterexample")
+    return status in _INCONCLUSIVE_VERIFY_STATUSES and not failed and not counterexample
+
+
 class ForeignCodeExtractor:
     """Extract function signatures and comment contracts from foreign code."""
 
@@ -311,6 +327,12 @@ class ForeignCodeVerifier:
                 report_dir=str(report_dir),
             )
 
+        errors = [issue.message for issue in safety_issues]
+        # A `trusted` / `satisfiable_with_skips` verify with no failed atoms and
+        # no counterexample is inconclusive (an accepted proof hole), not an
+        # actual code-safety failure, so it must not add "mumei verify failed".
+        if not verification.get("success") and not _is_inconclusive_verify(verification):
+            errors.append("mumei verify failed")
         return {
             "success": bool(verification.get("success")) and not safety_issues,
             "language": normalized_language,
@@ -319,10 +341,7 @@ class ForeignCodeVerifier:
             "source_line_map": {spec.function_name: spec.source_line for spec in specs},
             "mumei_source": mumei_source,
             "verification": verification,
-            "errors": [
-                *[issue.message for issue in safety_issues],
-                *([] if verification.get("success") else ["mumei verify failed"]),
-            ],
+            "errors": errors,
             "warnings": [],
             **_first_counterexample_payload(safety_issues),
         }

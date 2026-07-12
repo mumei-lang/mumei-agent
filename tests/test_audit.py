@@ -23,6 +23,7 @@ from agent.audit import (
 from agent.audit_reporting import (
     _malformed_extraction_issue_strings,
     _spec_health_issue_strings,
+    _verification_issue_strings,
 )
 from agent.audit_reporting import _verification_status_from_foreign_result
 from agent.code_to_spec import CodeToSpecResult
@@ -600,6 +601,54 @@ def test_audit_verification_status_unverifiable_for_lowering_failure_without_cou
     )
 
     assert status == "unverifiable"
+
+
+def test_verification_issue_strings_omits_trusted_without_failure() -> None:
+    """A trusted verify with failed=None is inconclusive, not a violation."""
+    result = {
+        "success": False,
+        "errors": ["mumei verify failed"],
+        "verification": {
+            "success": False,
+            "report": {"status": "trusted", "failed": None, "diagnostics": []},
+        },
+    }
+
+    assert _verification_issue_strings(result) == []
+
+
+def test_verification_issue_strings_keeps_real_failure() -> None:
+    """A failed atom is a genuine violation and must be reported."""
+    result = {
+        "success": False,
+        "errors": ["mumei verify failed"],
+        "verification": {
+            "success": False,
+            "report": {"status": "refuted", "failed": ["calc_mem_size_64"]},
+        },
+    }
+
+    issues = _verification_issue_strings(result)
+    assert any("status=refuted" in issue for issue in issues)
+
+
+def test_verification_issue_strings_keeps_top_level_counterexample() -> None:
+    """A top-level (safety-check) counterexample is a genuine failure even
+    when the verify report status is `trusted`, so it must not be suppressed
+    as inconclusive."""
+    result = {
+        "success": False,
+        "errors": ["mumei verify failed"],
+        "counterexample": {"a": "9223372036854775807", "b": "1"},
+        "verification": {
+            "success": False,
+            "report": {"status": "trusted", "failed": None, "diagnostics": []},
+        },
+    }
+
+    issues = _verification_issue_strings(result)
+    assert issues, "top-level counterexample must not be dropped as inconclusive"
+    assert any("mumei verify failed" in issue for issue in issues)
 
 
 def test_audit_verification_status_refuted_for_counterexample() -> None:
