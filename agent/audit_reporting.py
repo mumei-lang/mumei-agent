@@ -132,6 +132,8 @@ def _is_spec_lowering_or_unsupported_error(details: str) -> bool:
             "forall() requires exactly",
             "unknown function:",
             "expected bool for",
+            "spec_not_boolean",
+            "must lower to boolean",
         )
     )
 
@@ -165,6 +167,7 @@ def _verification_status_from_foreign_result(
     *,
     counterexample_values: list[dict[str, object]] | None = None,
     verification_violations: list[str] | None = None,
+    spec_health_issues: list[str] | None = None,
 ) -> ForeignCodeVerdict | None:
     """Mirror the validate-code verdict split for audit output.
 
@@ -178,6 +181,7 @@ def _verification_status_from_foreign_result(
     report = _dict_value(verification.get("report"))
     status = _string_value(report.get("status"), "")
     diagnostics = _string_list(report.get("diagnostics"))
+    verification_failed = verification.get("success") is False
     has_counterexample = bool(
         result.get("counterexample")
         or report.get("counterexample")
@@ -190,9 +194,20 @@ def _verification_status_from_foreign_result(
         warning.startswith("Skipped unsupported Z3 clause:")
         for warning in _string_list(result.get("warnings"))
     )
-    if status == "satisfiable_with_skips" and not has_counterexample:
-        return "unverifiable"
-    if skipped_clause_warnings and not has_counterexample:
+    has_spec_lowering_failures = any(
+        "spec_lowering_failed" in issue for issue in (spec_health_issues or [])
+    )
+    inconclusive_without_counterexample = (
+        status == "satisfiable_with_skips"
+        or skipped_clause_warnings
+        or has_spec_lowering_failures
+        or (
+            verification_failed
+            and status in {"trusted", "satisfiable_with_skips"}
+            and report.get("failed") is None
+        )
+    )
+    if inconclusive_without_counterexample and not has_counterexample:
         return "unverifiable"
     if has_counterexample:
         return "refuted"
