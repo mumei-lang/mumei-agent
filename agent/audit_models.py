@@ -31,6 +31,7 @@ class AuditResult:
     lean_bridge: dict[str, object] | None = None
     report: str = ""
     errors: list[str] = field(default_factory=list)
+    skipped_rate_limited: bool = False
 
 @dataclass
 class AuditDirectoryResult:
@@ -45,6 +46,7 @@ class AuditDirectoryResult:
     files_with_issues: int = 0
     next_steps: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    skipped_rate_limited_files: list[str] = field(default_factory=list)
 
 class CodeToSpecExtractorLike(Protocol):
     def extract_from_file(

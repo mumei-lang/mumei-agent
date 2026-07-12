@@ -91,3 +91,28 @@ def test_nla_options_false_values(monkeypatch) -> None:
         config = AgentConfig()
         assert config.enable_latent_debug is False
         assert config.enable_dense_properties is False
+
+
+def test_max_retries_default_and_env(monkeypatch) -> None:
+    """max_retries defaults to 5 and is overridable via LLM_MAX_RETRIES (#285)."""
+    monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
+    assert AgentConfig().max_retries == 5
+
+    monkeypatch.setenv("LLM_MAX_RETRIES", "9")
+    assert AgentConfig().max_retries == 9
+
+
+def test_create_client_wires_max_retries(monkeypatch) -> None:
+    """The configured retry cap is passed to the OpenAI SDK (#285)."""
+    import agent.config as config_module
+
+    captured: dict[str, object] = {}
+
+    def fake_openai(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(config_module, "OpenAI", fake_openai)
+    config = AgentConfig(api_key="test", max_retries=7)
+    config.create_client()
+    assert captured["max_retries"] == 7

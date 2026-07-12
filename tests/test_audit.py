@@ -1031,8 +1031,36 @@ def test_audit_pipeline_handles_spec_extraction_failure(tmp_path: Path) -> None:
     assert result.success is False
     assert result.spec_extracted is False
     assert result.errors == ["LLM returned an empty natural language specification"]
+    assert result.skipped_rate_limited is False
     foreign_verifier.verify.assert_not_called()
     cross_validator.validate_spec_vs_impl.assert_not_called()
+
+
+def test_audit_pipeline_marks_rate_limited_extraction_failure(tmp_path: Path) -> None:
+    source = tmp_path / "payment.py"
+    source.write_text("def withdraw(x: int) -> int:\n    return x\n", encoding="utf-8")
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=False,
+        natural_language_spec="",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[
+            "Error code: 429 - {'error': {'message': 'Rate limit reached for gpt-4o "
+            "on tokens per min (TPM): Limit 30000. Please try again in 884ms.'}}"
+        ],
+    )
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_file(source, "python")
+
+    assert result.success is False
+    assert result.skipped_rate_limited is True
 
 
 def test_audit_pipeline_handles_directory(tmp_path: Path) -> None:
