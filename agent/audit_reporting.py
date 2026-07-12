@@ -99,6 +99,8 @@ def _is_spec_lowering_or_unsupported_error(details: str) -> bool:
             "forall() requires exactly",
             "unknown function:",
             "expected bool for",
+            "spec_not_boolean",
+            "must lower to boolean",
         )
     )
 
