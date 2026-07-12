@@ -542,6 +542,21 @@ def _solidity_safety_requires_for_expression(
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
 
 
+def _operand_is_member_or_call(expression: str, span: tuple[int, int]) -> bool:
+    """True when the identifier at ``span`` is a member access or call.
+
+    ``result + SafeCast.toUint(...)`` must not treat ``SafeCast`` as an integer
+    addend: it is the receiver of a method call, not a variable. Modeling it as
+    a free ``uint256`` produces bogus overflow counterexamples (#281).
+    """
+    start, end = span
+    after = expression[end:].lstrip()
+    if after[:1] in {".", "("}:
+        return True
+    before = expression[:start].rstrip()
+    return before[-1:] == "."
+
+
 def _solidity_overflow_requires_for_expression(
     expression: str,
     param_types: dict[str, str] | None = None,
@@ -552,6 +567,13 @@ def _solidity_overflow_requires_for_expression(
         r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
         expression,
     ):
+        # Skip operands that are actually call receivers / member accesses
+        # (e.g. the `SafeCast` in `result + SafeCast.toUint(...)`), which are
+        # not integer variables and must not be bounded as free uint256.
+        if _operand_is_member_or_call(
+            expression, match.span("left")
+        ) or _operand_is_member_or_call(expression, match.span("right")):
+            continue
         left = match.group("left")
         right = match.group("right")
         unsigned = _solidity_type_is_unsigned(
