@@ -134,6 +134,57 @@ def test_solidity_overflow_ignores_method_call_receiver() -> None:
     assert any("can overflow `a + b`" in issue.message for issue in real)
 
 
+def test_solidity_nonzero_constant_divisor_not_flagged() -> None:
+    """A non-zero `constant` divisor (e.g. curve order N) can't be zero (#296)."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    issues = _issues_for_expression(
+        "verifySolidity",
+        "(x % N) == r",
+        "Solidity",
+        known_constants={"N": 0xFFFFFFFF00000000},
+    )
+    assert not any("divide by" in issue.message for issue in issues)
+
+    # Unknown divisor is still flagged.
+    unknown = _issues_for_expression("f", "a % b", "Solidity")
+    assert any("divide by `b`" in issue.message for issue in unknown)
+
+
+def test_solidity_nonnegative_constant_index_not_flagged() -> None:
+    """A non-negative `constant` index (EVM_TREE_RADIX=16) can't be -1 (#296)."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    issues = _issues_for_expression(
+        "tryTraverse",
+        "decoded[EVM_TREE_RADIX]",
+        "Solidity",
+        known_constants={"EVM_TREE_RADIX": 16},
+    )
+    assert not any("can index" in issue.message for issue in issues)
+
+    # Unknown index is still flagged.
+    unknown = _issues_for_expression("f", "decoded[i]", "Solidity")
+    assert any("can index `decoded[i]`" in issue.message for issue in unknown)
+
+
+def test_solidity_declared_constants_parses_hex_and_decimal() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    source = (
+        "uint256 internal constant N =\n"
+        "    0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551;\n"
+        "uint256 internal constant EVM_TREE_RADIX = 16;\n"
+        "uint256 private constant DERIVED = EVM_TREE_RADIX + 1;\n"
+    )
+    constants = _solidity_declared_constants(source)
+    assert constants["N"] != 0
+    assert constants["EVM_TREE_RADIX"] == 16
+    assert "DERIVED" not in constants  # non-literal initializer skipped
+
+
 def test_rust_go_overflow_requires_ignore_method_call_receiver() -> None:
     """`a + SomeStruct.method()` must not bound `SomeStruct` as a free integer (#281)."""
     from agent.cross_validation_foreign import (

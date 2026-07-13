@@ -464,10 +464,43 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             source,
             _solidity_function_blocks(source),
             "Solidity",
+            known_constants=_solidity_declared_constants(source),
         )
         issues.extend(_detect_solidity_contract_issues(source))
         return issues
     return []
+
+
+_SOLIDITY_CONST_RE = re.compile(
+    r"\b(?:u?int\d*|address|bytes\d*|bool)\s+"
+    r"(?:(?:public|private|internal|external)\s+)*"
+    r"(?:constant|immutable)\s+"
+    r"(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>[^;]+);"
+)
+
+
+def _parse_int_literal(text: str) -> int | None:
+    text = text.strip().replace("_", "")
+    try:
+        return int(text, 16) if text.lower().startswith("0x") else int(text, 10)
+    except ValueError:
+        return None
+
+
+def _solidity_declared_constants(source: str) -> dict[str, int]:
+    """Map Solidity ``constant``/``immutable`` names to their integer literal.
+
+    Used so the divide-by-zero and out-of-bounds heuristics don't model a named
+    constant (e.g. curve order ``N``, radix ``EVM_TREE_RADIX``) as a free Z3
+    integer that can be picked as ``0`` / ``-1`` (#296). Non-literal initializers
+    (expressions referencing other constants) are skipped.
+    """
+    constants: dict[str, int] = {}
+    for match in _SOLIDITY_CONST_RE.finditer(source):
+        value = _parse_int_literal(match.group("value"))
+        if value is not None:
+            constants[match.group("name")] = value
+    return constants
 
 def _first_counterexample_payload(
     issues: list[ForeignSafetyIssue],
@@ -501,6 +534,7 @@ def _detect_block_safety_issues(
     source: str,
     blocks: list[tuple[str, str]],
     label: str,
+    known_constants: dict[str, int] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, body in blocks:
@@ -510,7 +544,11 @@ def _detect_block_safety_issues(
         if not expressions and label == "Rust":
             expressions = [_last_rust_expression(body)]
         for expression in expressions:
-            issues.extend(_issues_for_expression(name, expression, label))
+            issues.extend(
+                _issues_for_expression(
+                    name, expression, label, known_constants=known_constants
+                )
+            )
     return issues
 
 def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
@@ -550,9 +588,11 @@ def _issues_for_expression(
     label: str,
     *,
     dereference_values: set[str] | None = None,
+    known_constants: dict[str, int] | None = None,
 ) -> list[ForeignSafetyIssue]:
     if label in {"Go", "Rust"}:
         expression = _strip_go_rust_literals_and_comments(expression)
+    known_constants = known_constants or {}
     issues: list[ForeignSafetyIssue] = []
     for match in re.finditer(
         r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
@@ -560,6 +600,11 @@ def _issues_for_expression(
     ):
         container = match.group("container")
         index = match.group("index")
+        # A non-negative `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
+        # EVM_TREE_RADIX=16) can never be out of the low bound, so don't model it
+        # as a free integer that Z3 is free to pick as -1 (#296).
+        if known_constants.get(index, -1) >= 0:
+            continue
         counterexample = _z3_index_counterexample(index, f"len_{container}")
         issues.append(
             ForeignSafetyIssue(
@@ -619,6 +664,11 @@ def _issues_for_expression(
         expression,
     ):
         divisor = match.group("right")
+        # A non-zero `constant`/`immutable` divisor (e.g. `x % N` where N is the
+        # secp256r1 curve order) can never be zero, so don't emit a bogus
+        # divide-by-zero from modeling it as a free integer (#296).
+        if known_constants.get(divisor, 0) != 0:
+            continue
         counterexample = {divisor: 0}
         issues.append(
             ForeignSafetyIssue(
