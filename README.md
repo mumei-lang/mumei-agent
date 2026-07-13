@@ -115,7 +115,7 @@ Both approaches are **complementary** — choose based on your use case, or comb
 ```bash
 # 1. Start Ollama container
 docker compose up -d
-docker exec mumei-ollama ollama pull qwen3.5
+docker exec mumei-ollama ollama pull qwen2.5-coder:7b
 
 # 2. Configure environment
 cp .env.example .env

@@ -92,9 +92,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Scheduled runs have no workflow_dispatch inputs, so default to the
-      # fully self-contained ollama-local profile with a small qwen model.
+      # fully self-contained ollama-local profile with the CPU-friendly
+      # qwen3.5:4b model (stable on the CPU-only ubuntu-latest runner).
       LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
-      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:0.8b' }}
+      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:4b' }}
     steps:
       - name: Checkout mumei-agent
         uses: actions/checkout@v4
