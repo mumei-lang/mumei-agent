@@ -405,6 +405,30 @@ def test_clause_split_is_paren_aware_and_balanced() -> None:
         assert fragment.count("(") == fragment.count(")"), warning
 
 
+def test_clause_disjunction_is_lowered_not_skipped() -> None:
+    """`||` clauses must lower to z3.Or instead of being silently skipped (#303)."""
+    import z3
+
+    from agent.cross_validation_z3 import _clause_to_z3
+
+    syms: dict[str, object] = {
+        "result": z3.Int("result"),
+        "v": z3.Int("v"),
+        "s": z3.Int("s"),
+    }
+    exprs, warnings = _clause_to_z3("result == v || s == 0", syms)
+    assert warnings == []
+    assert len(exprs) == 1
+    # `&&` remains supported (regression guard on the symmetric path).
+    exprs2, warnings2 = _clause_to_z3("result >= 0 && result <= v", syms)
+    assert warnings2 == []
+    assert len(exprs2) == 2
+    # Strict-equality spellings normalize too.
+    exprs3, warnings3 = _clause_to_z3("result !== s", syms)
+    assert warnings3 == []
+    assert len(exprs3) == 1
+
+
 @pytest.mark.parametrize(
     ("language", "filename", "source"),
     [

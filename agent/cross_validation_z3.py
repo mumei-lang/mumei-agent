@@ -420,11 +420,25 @@ def _split_top_level_conjuncts(expr: str) -> list[str]:
     return parts
 
 
+def _normalize_boolean_operators(clause: str) -> str:
+    """Rewrite foreign boolean syntax to the Python operators ``ast.parse`` accepts.
+
+    ``&&`` was already split out by ``_split_top_level_conjuncts``, but ``||`` was
+    left untouched and reached ``ast.parse`` as invalid Python, so any disjunctive
+    clause (used by Go/TS/Solidity/Rust) was silently dropped even though
+    ``_ast_bool_to_z3`` already lowers ``ast.Or``. Normalize both, plus the
+    strict-equality spellings, so disjunctions are checked instead of skipped.
+    """
+    normalized = clause.replace("===", "==").replace("!==", "!=")
+    normalized = normalized.replace("&&", " and ").replace("||", " or ")
+    return normalized
+
+
 def _clause_to_z3(
     clause: str,
     symbols: dict[str, z3.IntNumRef | z3.ArithRef],
 ) -> tuple[list[z3.BoolRef], list[str]]:
-    normalized = clause.strip().rstrip(";")
+    normalized = _normalize_boolean_operators(clause).strip().rstrip(";")
     if not normalized or normalized.lower() == "true":
         return [], []
     if normalized.lower() == "false":
