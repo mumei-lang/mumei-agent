@@ -133,6 +133,7 @@ def get_fix_multi_stage(
                 ],
             )
         fix_tokens = response_token_count(fix_response, model)
+        telemetry.record_llm_tokens(fix_tokens, model=model)
         total_tokens = diagnose_tokens + fix_tokens
         report_data["llm_tokens_used"] = total_tokens
         if metrics is not None:
