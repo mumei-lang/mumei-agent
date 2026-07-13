@@ -336,7 +336,10 @@ def test_validate_foreign_code_non_skip_z3_warning_keeps_plain_verification_mess
     assert all("unsupported Z3 clauses were skipped" not in issue.message for issue in result.issues)
 
 
-def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: Path) -> None:
+def test_validate_foreign_code_genuine_go_failure_is_refuted_despite_skips(tmp_path: Path) -> None:
+    """A genuine mumei refutation (status "failed") stays a real failure even when
+    the agent skipped some clauses: skipped clauses are removed from the module, so
+    any mumei failure refutes the clauses that *were* checked (#304)."""
     source = tmp_path / "inconclusive.go"
     source.write_text(
         "package demo\nfunc size(input []byte) int { return len(input) + 1 }\n",
@@ -360,9 +363,12 @@ def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: P
         )
 
     assert result.success is False
-    assert result.verdict == "unverifiable"
+    assert result.verdict == "refuted"
     assert any("Skipped unsupported Z3 clause" in warning for warning in result.warnings)
-    assert any("inconclusive" in issue.message for issue in result.issues)
+    assert any(
+        "unsatisfied or inconsistent" in issue.message for issue in result.issues
+    )
+    assert all("inconclusive" not in issue.message for issue in result.issues)
 
     args = build_validate_code_parser().parse_args(
         [
@@ -378,7 +384,7 @@ def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: P
         with pytest.raises(SystemExit) as exc:
             main_validate_code(args)
 
-    assert exc.value.code == 2
+    assert exc.value.code == 1
 
 
 def test_clause_split_is_paren_aware_and_balanced() -> None:
@@ -403,6 +409,54 @@ def test_clause_split_is_paren_aware_and_balanced() -> None:
     for warning in warnings:
         fragment = warning.removeprefix("Skipped unsupported Z3 clause: ")
         assert fragment.count("(") == fragment.count(")"), warning
+
+
+def test_genuine_mumei_failure_not_mislabeled_inconclusive() -> None:
+    """A real mumei refutation stays a failure even with agent-side skips (#304)."""
+    from agent.cross_validation import _verify_atoms_with_mumei
+    from agent.cross_validation_models import ContractParam, MumeiContractAtom
+
+    atoms = [
+        MumeiContractAtom(
+            name="f",
+            params=[ContractParam(name="x", type="i64")],
+            return_type="i64",
+            requires="true",
+            ensures="result == x",
+        )
+    ]
+    skips = ["Skipped unsupported Z3 clause: result == x > y || result == false"]
+
+    # mumei genuinely failed (failed=4, skipped=0): must NOT be called inconclusive.
+    failing = MagicMock()
+    failing.verify.return_value = {
+        "success": False,
+        "report": {"status": "failed", "failed": 4, "skipped": 0},
+        "stdout": "",
+        "stderr": "",
+    }
+    with patch("agent.cross_validation.create_mumei_client", return_value=failing):
+        _, issues, _ = _verify_atoms_with_mumei(
+            atoms, AgentConfig(api_key=""), skipped_clause_warnings=skips
+        )
+    assert len(issues) == 1
+    assert "inconclusive" not in issues[0].message
+    assert "unsatisfied or inconsistent" in issues[0].message
+
+    # No genuine failure recorded: skips make the result truly inconclusive.
+    skipped_only = MagicMock()
+    skipped_only.verify.return_value = {
+        "success": False,
+        "report": {"status": "verified", "failed": 0, "skipped": 0},
+        "stdout": "",
+        "stderr": "",
+    }
+    with patch("agent.cross_validation.create_mumei_client", return_value=skipped_only):
+        _, issues2, _ = _verify_atoms_with_mumei(
+            atoms, AgentConfig(api_key=""), skipped_clause_warnings=skips
+        )
+    assert len(issues2) == 1
+    assert "inconclusive" in issues2[0].message
 
 
 @pytest.mark.parametrize(
