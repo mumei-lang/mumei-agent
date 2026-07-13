@@ -264,6 +264,36 @@ def record_llm_tokens(count: int, *, model: str | None = None) -> None:
         logger.debug("record_llm_tokens failed", exc_info=True)
 
 
+def _response_total_tokens(response: Any) -> int:
+    """Best-effort ``usage.total_tokens`` extraction from an LLM response."""
+    from collections.abc import Mapping
+
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0
+    total = (
+        usage.get("total_tokens")
+        if isinstance(usage, Mapping)
+        else getattr(usage, "total_tokens", None)
+    )
+    try:
+        return int(total or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_response_tokens(response: Any, *, model: str | None = None) -> int:
+    """Record ``gen_ai.usage.total_tokens`` for any LLM response.
+
+    Shared by every LLM call site (spec extraction, cross-validation, fix/heal,
+    diagnostics) so token/cost/TPM usage is observable across all pipeline
+    phases, not just the fix path. Returns the extracted token count.
+    """
+    total = _response_total_tokens(response)
+    record_llm_tokens(total, model=model)
+    return total
+
+
 _VERIFY_DURATION_HISTOGRAM: Any = None
 
 

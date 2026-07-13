@@ -210,6 +210,7 @@ Return ONLY the refined invariant expression."""
                         {"role": "user", "content": prompt},
                     ],
                 )
+                telemetry.record_response_tokens(response, model=self.config.model)
             content = response.choices[0].message.content or ""
             invariant = _clean_invariant(content)
             return invariant or fallback

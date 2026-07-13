@@ -102,6 +102,7 @@ def refine_spec(
                 {"role": "user", "content": prompt},
             ],
         )
+        telemetry.record_response_tokens(response, model=model)
 
     raw = response.choices[0].message.content or ""
 
