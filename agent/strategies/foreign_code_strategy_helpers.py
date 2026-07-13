@@ -517,7 +517,10 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, params_text, _return_type, body in _go_function_declarations(source):
         body = _strip_go_rust_literals_and_comments(body)
-        param_names = set(_go_params(params_text))
+        # Only nillable Go types (pointer/slice/map/chan/func/interface) may be
+        # nil-dereferenced. Value types (e.g. a `reflect.Value` struct) can never
+        # be nil, so flagging them produces false `refuted` verdicts (#295).
+        param_names = _go_nillable_param_names(params_text)
         for expression in _return_expressions(body):
             issues.extend(
                 _issues_for_expression(
@@ -528,6 +531,50 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 )
             )
     return issues
+
+
+# Go types that can hold a nil value and therefore be nil-dereferenced. A bare
+# named/qualified type (e.g. `reflect.Value`, `time.Time`) is a value type here
+# and is intentionally treated as non-nillable.
+_GO_NILLABLE_TYPE_RE = re.compile(
+    r"^(?:"
+    r"\*"  # pointer *T
+    r"|\[\]"  # slice []T
+    r"|map\["  # map[K]V
+    r"|chan\b"  # chan T
+    r"|<-"  # <-chan T
+    r"|func\b"  # func(...) ...
+    r"|interface\s*\{"  # interface{ ... }
+    r"|any\b"
+    r"|error\b"
+    r")"
+)
+
+
+def _go_type_is_nillable(raw_type: str) -> bool:
+    return bool(_GO_NILLABLE_TYPE_RE.match(raw_type.strip()))
+
+
+def _go_nillable_param_names(params_text: str) -> set[str]:
+    """Names of Go params/receiver whose declared type can actually be nil.
+
+    Go params are ``name type``; the type (everything after the name) decides
+    nillability. Grouped names sharing a trailing type (``a, b *T``) only bind
+    the type to the last name, so the untyped leaders are conservatively
+    omitted rather than assumed nillable.
+    """
+    names: set[str] = set()
+    for raw in _split_params(params_text):
+        raw = raw.strip()
+        if not raw:
+            continue
+        pieces = raw.split()
+        if len(pieces) < 2:
+            continue
+        name_text, raw_type = pieces[0], " ".join(pieces[1:])
+        if _go_type_is_nillable(raw_type):
+            names.add(_safe_identifier(name_text))
+    return names
 
 def _operand_is_member_or_call(expression: str, span: tuple[int, int]) -> bool:
     """True when the identifier at ``span`` is a member access or call receiver.
@@ -592,7 +639,10 @@ def _issues_for_expression(
                     counterexample=counterexample,
                 )
             )
-    else:
+    elif label == "TypeScript":
+        # null/undefined dereference is a JS/TS concept. Solidity value types
+        # (`bytes`/`string`/structs) and Rust references are never null, so
+        # emitting a "non-null contract" for them is a false positive (#295).
         for match in re.finditer(
             r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
             expression,
