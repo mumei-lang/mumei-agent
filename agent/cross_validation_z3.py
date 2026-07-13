@@ -420,18 +420,71 @@ def _split_top_level_conjuncts(expr: str) -> list[str]:
     return parts
 
 
+def _normalize_boolean_operators(clause: str) -> str:
+    """Rewrite foreign boolean syntax to the Python operators ``ast.parse`` accepts.
+
+    ``||`` used to reach ``ast.parse`` as invalid Python, so any disjunctive clause
+    (used by Go/TS/Solidity/Rust) was silently dropped even though
+    ``_ast_bool_to_z3`` already lowers ``ast.Or``. Normalize both boolean operators,
+    plus the strict-equality spellings, so disjunctions are checked instead of
+    skipped. ``&&``/``and`` and ``||``/``or`` share the same relative precedence in
+    both C-family languages and Python, so the parsed tree keeps its meaning.
+    """
+    normalized = clause.replace("===", "==").replace("!==", "!=")
+    normalized = normalized.replace("&&", " and ").replace("||", " or ")
+    return normalized
+
+
+def _has_top_level_disjunction(expr: str) -> bool:
+    """True when ``expr`` has a depth-0 ``||``/``or`` disjunction.
+
+    Such a clause must be lowered whole because its lowest-precedence operator is
+    the disjunction; splitting on top-level ``&&`` would mis-bind precedence, e.g.
+    ``a && b || c`` means ``(a && b) || c`` (not ``a && (b || c)``).
+    """
+    depth = 0
+    i = 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and ch == "|" and i + 1 < n and expr[i + 1] == "|":
+            return True
+        elif (
+            depth == 0
+            and expr[i : i + 2] == "or"
+            and (i == 0 or not (expr[i - 1].isalnum() or expr[i - 1] == "_"))
+            and (i + 2 >= n or not (expr[i + 2].isalnum() or expr[i + 2] == "_"))
+        ):
+            return True
+        i += 1
+    return False
+
+
 def _clause_to_z3(
     clause: str,
     symbols: dict[str, z3.IntNumRef | z3.ArithRef],
 ) -> tuple[list[z3.BoolRef], list[str]]:
-    normalized = clause.strip().rstrip(";")
+    normalized = _normalize_boolean_operators(clause).strip().rstrip(";")
     if not normalized or normalized.lower() == "true":
         return [], []
     if normalized.lower() == "false":
         return [z3.BoolVal(False)], []
     warnings: list[str] = []
     expressions: list[z3.BoolRef] = []
-    for part in _split_top_level_conjuncts(normalized):
+    # A clause whose lowest-precedence operator is ``||`` must be lowered whole so
+    # ``ast`` builds the correct And/Or tree; only pure conjunctions are split into
+    # independent constraints (which lets a single unsupported conjunct be skipped
+    # while the rest survive).
+    parts = (
+        [normalized]
+        if _has_top_level_disjunction(normalized)
+        else _split_top_level_conjuncts(normalized)
+    )
+    for part in parts:
         part = part.strip()
         if not part or part.lower() == "true":
             continue

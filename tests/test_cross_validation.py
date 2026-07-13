@@ -411,6 +411,53 @@ def test_clause_split_is_paren_aware_and_balanced() -> None:
         assert fragment.count("(") == fragment.count(")"), warning
 
 
+def test_clause_disjunction_is_lowered_not_skipped() -> None:
+    """`||` clauses must lower to z3.Or instead of being silently skipped (#303)."""
+    import z3
+
+    from agent.cross_validation_z3 import _clause_to_z3
+
+    syms: dict[str, object] = {
+        "result": z3.Int("result"),
+        "v": z3.Int("v"),
+        "s": z3.Int("s"),
+    }
+    exprs, warnings = _clause_to_z3("result == v || s == 0", syms)
+    assert warnings == []
+    assert len(exprs) == 1
+    # `&&` remains supported (regression guard on the symmetric path).
+    exprs2, warnings2 = _clause_to_z3("result >= 0 && result <= v", syms)
+    assert warnings2 == []
+    assert len(exprs2) == 2
+    # Strict-equality spellings normalize too.
+    exprs3, warnings3 = _clause_to_z3("result !== s", syms)
+    assert warnings3 == []
+    assert len(exprs3) == 1
+
+
+def test_clause_mixed_and_or_preserves_precedence() -> None:
+    """`a && b || c` must lower as `(a && b) || c`, not `a && (b || c)` (#303)."""
+    import z3
+
+    from agent.cross_validation_z3 import _clause_to_z3
+
+    syms: dict[str, object] = {
+        "x": z3.Int("x"),
+        "y": z3.Int("y"),
+        "z": z3.Int("z"),
+    }
+    exprs, warnings = _clause_to_z3("x > 0 && y > 0 || z > 0", syms)
+    assert warnings == []
+    # A top-level disjunction is lowered whole, not split into conjuncts.
+    assert len(exprs) == 1
+
+    # (x=-1, y=-1, z=1) satisfies `(x>0 && y>0) || z>0` but not `x>0 && (y>0 || z>0)`.
+    solver = z3.Solver()
+    solver.add(exprs[0])
+    solver.add(syms["x"] == -1, syms["y"] == -1, syms["z"] == 1)
+    assert solver.check() == z3.sat
+
+
 def test_genuine_mumei_failure_not_mislabeled_inconclusive() -> None:
     """A real mumei refutation stays a failure even with agent-side skips (#304)."""
     from agent.cross_validation import _verify_atoms_with_mumei
