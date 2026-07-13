@@ -121,9 +121,11 @@ def _diagnose(
                 {"role": "user", "content": diagnose_prompt},
             ],
         )
+    diag_tokens = response_token_count(diag_response, model)
+    telemetry.record_llm_tokens(diag_tokens, model=model)
     return (
         _parse_diagnosis(diag_response.choices[0].message.content or ""),
-        response_token_count(diag_response, model),
+        diag_tokens,
     )
 
 

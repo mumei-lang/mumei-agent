@@ -8,7 +8,6 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from agent import telemetry
 from agent.pattern_library import PatternLibrary
 from agent.spec_code_mapper import SpecCodeMapper
 
@@ -322,13 +321,9 @@ def response_token_count(response: object, model: str | None = None) -> int:
         except AttributeError:
             return 0
     try:
-        count = int(total_tokens or 0)
+        return int(total_tokens or 0)
     except (TypeError, ValueError):
         return 0
-    # Parallel OTel channel; independent of Metrics.record_tokens and never
-    # affects the JSON metrics output.  No-op unless OTel is enabled.
-    telemetry.record_llm_tokens(count, model=model)
-    return count
 
 def _update_spec_code_mapping(
     report_data: dict,
