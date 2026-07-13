@@ -105,7 +105,7 @@ uv sync
 
 # LLM バックエンド起動（Ollama を使う場合）
 docker compose up -d
-docker exec mumei-ollama ollama pull qwen2.5-coder:7b
+docker exec mumei-ollama ollama pull qwen2.5-coder:3b
 ```
 
 ## ユースケース一覧（早見表）
