@@ -84,37 +84,17 @@ graph TD
 ```
 
 By default, `agent/mcp_server.py` uses the same OpenAI-compatible LLM endpoint
-as the CLI.  Set `USE_MCP_SAMPLING=true` to make all LLM-backed MCP tools
-request completion through standard MCP sampling
-(`Context.session.create_message`) from the connected client instead.  This
-lets Devin or another MCP client provide the LLM role without configuring
-`LLM_API_KEY` in mumei-agent.  If the connected client does not support
-sampling, or sampling fails, the agent falls back to the existing
-OpenAI-compatible path.  Tools that support this path include `heal_file`,
-`forge_task`, `extract_spec`, `self_correct`, `validate_nl_spec`,
-`validate_nl_spec_multi`, `validate_code`, `validate_foreign_code`,
-`verify_foreign_code`, `validate_spec_to_code`, `validate_code_to_spec`,
-`verify_conformance`, `verify_code_spec_traceability`, `audit_code`,
-`scan_and_fix`, and `extract_spec_from_code`.
+as the CLI. Set `USE_MCP_SAMPLING=true` to make all LLM-backed MCP tools request
+completion through standard MCP sampling from the connected client instead, so
+Devin or another MCP client supplies the LLM role without `LLM_API_KEY` being
+configured in mumei-agent. If the client does not support sampling, or sampling
+fails, the agent falls back to the OpenAI-compatible path.
 
-The implementation follows the MCP 2025-11-25 sampling specification for basic
-text generations: user/assistant chat messages are converted to
-`SamplingMessage` text content, system messages become `systemPrompt`, model
-names are passed as `modelPreferences.hints`, and `maxTokens` is bounded by
-`MCP_SAMPLING_MAX_TOKENS`.  The server checks the client's initialization
-`capabilities.sampling` before sending sampling requests — preferring the public
-`session.client_params` / `session.check_client_capability()` API and falling
-back to the private `session._client_params` attribute for older SDK versions.  It intentionally omits
-`includeContext`, sampling tools, images, and audio until the corresponding
-client capabilities (`sampling.context` or `sampling.tools`) and concrete
-forge/heal use cases are covered by tests.  The `includeContext` values
-`"thisServer"` and `"allServers"` are soft-deprecated in the 2025-11-25 spec,
-so this path leaves context inclusion at its default (`"none"`).
-
-The `mumei/mcp_server.py` **Mumei-Forge** server remains verification-only and
-does not need an LLM provider; sampling is implemented only in
-`mumei-agent` so the forge/heal autonomous loop is not duplicated in the compiler
-repository.
+See [`docs/AGENT_HARNESS_SPEC.md`](docs/AGENT_HARNESS_SPEC.md) § *MCP sampling
+provider* for the sampling-capable tool list, the MCP 2025-11-25 spec mapping,
+and capability-detection details. The `mumei/mcp_server.py` **Mumei-Forge**
+server remains verification-only; sampling is implemented only in `mumei-agent`
+so the forge/heal loop is not duplicated in the compiler repository.
 
 ### When to Use Which
 
@@ -306,18 +286,18 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
-### OpenTelemetry Observability (opt-in, P15 Phase 1-6)
+### OpenTelemetry Observability
 
 Distributed tracing and token/latency metrics are **opt-in** and default to off.
-Without the extra installed or with `OTEL_ENABLED` unset, every LLM/tool span
-and metric instrument falls back to a NoOp implementation, so the heal /
+Without the `otel` extra installed or with `OTEL_ENABLED` unset, every LLM/tool
+span and metric instrument falls back to a NoOp implementation, so the heal /
 generate / forge / proliferate flows run byte-for-byte identically.
 
-> **Operations guide:** see [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for
-> the reference OTLP backend stack (`docker compose -f docker-compose.otel.yml up`
-> → Collector / Jaeger / Prometheus / Grafana), the Grafana dashboard, the span
-> hierarchy + metrics catalogue, and the end-to-end distributed-trace
-> verification procedure (mumei-agent → `mumei verify` → Rust Z3).
+When enabled, the whole pipeline — **MCP client → mumei-agent → `mumei verify`
+→ Z3 → LLM** — can be visualized as a single distributed trace. This makes it
+straightforward to identify bottlenecks in the heal / generate / forge /
+proliferate loops, to monitor token consumption, solver time, and spec-drift
+scores, and to track Lean bridge error rates across a run.
 
 ```bash
 # Install the optional OTel dependencies
@@ -329,6 +309,8 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 uv run mumei-agent heal examples/effect_test.mm
 ```
 
+Three main environment variables control it:
+
 - `OTEL_ENABLED` (default: `false`): master switch. Instrumentation is active
   only when this is truthy **and** the `opentelemetry` packages are importable;
   otherwise NoOp tracers/meters are used.
@@ -338,177 +320,12 @@ uv run mumei-agent heal examples/effect_test.mm
   `http/protobuf` (or any `http*` value) to use the HTTP exporters instead of
   gRPC.
 
-Phase 1 instruments all LLM call sites: `OpenAILLMProvider.complete` and
-`McpSamplingLLMProvider.complete` emit spans with `gen_ai.request.model`,
-`gen_ai.system`, `server.address`, and `gen_ai.usage.total_tokens`; token usage
-is also reported to the `gen_ai.usage.total_tokens` counter (tagged with the
-`gen_ai.request.model` attribute) as a parallel channel that never changes the
-JSON metrics output
-(`Metrics.to_dict()` / `HarnessMetrics.aggregate_metrics()`). MCP sampling
-requests carry a W3C `traceparent` in their metadata for cross-process trace
-propagation. `McpSamplingLLMProvider.complete_with_tools` has its own
-`mcp_sampling.complete_with_tools` span with `tool_count` and `tool_choice`
-attributes. The dispatch functions `complete_text` / `complete_response` emit
-`llm.complete_text` / `llm.complete_response` spans with `gen_ai.dispatch_path`
-identifying the routing decision. All 8 direct `client.chat.completions.create`
-call sites (spec refinement, multi-stage fix, diagnose, CEGIS invariant
-synthesis, spec extraction, code-to-spec, dense property generation, ambiguity
-detection) are individually instrumented with `llm.*` spans.
-
-Phase 2 instruments the Z3 verification subprocess calls in `MumeiClient` and
-`MumeiMCPClient`. Every CLI subprocess call is wrapped in an OTel span
-(`mumei.verify`, `mumei.check`, `mumei.infer_effects`, `mumei.infer_contracts`,
-`mumei.build`) with attributes `mumei.command`, `mumei.source_path`,
-`mumei.exit_code`, `mumei.duration_ms`, `mumei.stdout.size`, and
-`mumei.stderr.size`. The `mumei.verify` span additionally carries
-`mumei.verification.duration_ms`, `mumei.collect_decidable_metrics`,
-`mumei.decidable_fragment.present`, and `mumei.loss_vector.present`.  Failed
-verifications that trigger a loss-vector re-run produce a child span
-`mumei.verify.loss_vector`.  `MumeiMCPClient` wraps the same methods under
-`mumei.mcp.*` span names (`mumei.mcp.verify`, `mumei.mcp.check`, etc.) so MCP
-routing and CLI execution appear as distinct layers in the trace.  Verification
-wall-clock time is also reported to the `mumei.verify.duration` histogram
-(unit: seconds) as a parallel OTel metrics channel that never changes the
-`Metrics.to_dict()` JSON output.
-
-Phase 3 adds per-loop root spans and `ThoughtProcess` span event mapping:
-
-- **`mumei.loop.generate`** — wraps the `generate_code` / `generate_multi_atom`
-  retry loop in `generate_strategy.py`. Attributes: `mumei.loop.type=generate`,
-  `mumei.strategy` (`single` / `multi-stage`), `mumei.loop.max_retries`,
-  `mumei.loop.final_success`, `mumei.loop.attempt`.
-- **`mumei.loop.heal`** — wraps the `main()` heal loop in `self_healing.py`.
-  CEGIS repair, Meta-Architect refactor, and LLM fix branches emit span events.
-  Attributes: `mumei.loop.stop_reason` (`success` / `max_retries_exhausted` /
-  `budget_denied`), `mumei.loop.final_success`, `mumei.loop.attempt`.
-- **`mumei.loop.self_correction`** — wraps
-  `StructuredFeedbackSelfCorrectionLoop.run` in `self_correction.py`.
-  `stop_reason` (`converged` / `max_retries_reached` / `token_cost_exceeded` /
-  `no_fix_produced` / `hard_repair_limit_reached`) is mapped to
-  `mumei.loop.stop_reason`.
-- **`mumei.loop.self_correction_strategy`** — wraps
-  `SelfCorrectionStrategy.run` in `self_correction_strategy.py`.
-  `action_class` / `budget_policy` decisions are emitted as span events;
-  `mumei.budget_policy.fingerprint` is set as a span attribute.
-- **`ThoughtProcess.add_step()`** emits an OTel span event on the current span
-  for each verification step (`initial_verify`, `re_verify`, `llm_fix`).
-  `to_dict()` output is unchanged.
-
-Phase 4 instruments the MCP server tool entry points so external MCP clients
-(Claude Code, Devin, ...) become the top of a single distributed trace. Each
-instrumented tool opens an `mcp.tool.<name>` span (e.g. `mcp.tool.forge_task`,
-`mcp.tool.heal_file`, `mcp.tool.self_correct`, `mcp.tool.run_nlae_pipeline`,
-`mcp.tool.audit_code`, `mcp.tool.scan_and_fix`,
-`mcp.tool.extract_spec_from_code`, plus the lightweight
-`mcp.tool.measure_std_health` / `mcp.tool.propose_forge_tasks` /
-`mcp.tool.list_forge_log` / `mcp.tool.get_agent_status`) carrying
-`mcp.tool.name` and tool-specific attributes (`mcp.tool.dry_run` /
-`mcp.tool.task_id` / `mcp.tool.status` for `forge_task`, `mumei.heal.kind` for
-`heal_file`, `mcp.tool.max_iterations` for `self_correct`, `mcp.tool.no_build`
-for `run_nlae_pipeline`, `mcp.tool.generate` for `extract_spec_from_code`,
-`mumei.language` for `audit_code` / `scan_and_fix`). Directory heals additionally
-emit a per-file `mcp.tool.heal_file.file` child span. Because the entry span is
-the current span, the P15-3 loop root spans (`mumei.loop.*`) and P15-2 verify
-spans (`mumei.verify`) nest underneath it automatically.
-
-`telemetry.extract_trace_context(carrier)` is the inverse of
-`inject_trace_context`: given a W3C `traceparent` / `tracestate` carrier it
-returns the OTel `Context` to start the entry span as a child of. An external
-MCP client connects its trace by attaching `traceparent` / `tracestate` to the
-request `_meta`; the server reads it via `ctx.request_context.meta`
-(`_carrier_from_ctx`) and parents the `mcp.tool.<name>` span on it, so
-**MCP client → tool → inner loop → verify subprocess → LLM** appear as one
-trace. When no context is present the entry span behaves as a fresh root
-(backward compatible). With `OTEL_ENABLED` unset, `extract_trace_context`
-returns `None` and every entry span is a NoOp, so tool JSON payloads are
-unchanged.
-
-Phase 5 connects existing JSON metrics to OTel Metrics as a parallel channel.
-The `Metrics`, `HarnessMetrics`, and `run_lean_bridge` code paths now emit the
-following instruments (all no-op when disabled):
-
-| Instrument | Type | Source |
-|---|---|---|
-| `mumei.verify.duration` | Histogram (s) | `Metrics.record_verification_time` |
-| `mumei.first_pass.success_rate` | Histogram (1) | `Metrics.record_new_spec` |
-| `mumei.z3.unknowns` | Counter | `Metrics.record_new_spec` |
-| `mumei.decidable_fragment.warnings` | Counter | `Metrics.record_new_spec` |
-| `mumei.fix.attempts` | Counter | `Metrics.record_attempt` |
-| `mumei.fix.successes` | Counter | `Metrics.record_success` |
-| `mumei.harness.tokens_to_success` | Histogram | `HarnessMetrics.record_stage` |
-| `mumei.harness.solver_seconds_to_success` | Histogram (s) | `HarnessMetrics.record_stage` |
-| `mumei.harness.spec_drift_score` | Histogram (1) | `HarnessMetrics.record_stage` |
-| `mumei.lean.bridge.duration` | Histogram (s) | `run_lean_bridge` |
-| `mumei.lean.verified_count` | Counter | `run_lean_bridge` |
-| `mumei.lean.bridge.error_code` | Counter | `run_lean_bridge` |
-
-Dimension attributes: `mumei.violation_type` on fix counters,
-`stage`/`module`/`profile` on harness histograms, `mumei.lean.error_code` on
-bridge error counter.  `to_dict()` / `aggregate_metrics()` / return-value dicts
-remain byte-for-byte identical; OTel is purely additive.
-
-**Dashboard example** (Grafana / Prometheus OTLP receiver):
-
-```promql
-# Fix success rate by violation type
-sum(rate(mumei_fix_successes_total[5m])) by (mumei_violation_type)
-/ sum(rate(mumei_fix_attempts_total[5m])) by (mumei_violation_type)
-
-# P95 verify duration
-histogram_quantile(0.95, rate(mumei_verify_duration_seconds_bucket[5m]))
-
-# Lean bridge error rate
-sum(rate(mumei_lean_bridge_error_code_total[5m])) by (mumei_lean_error_code)
-```
-
-Phase 6 wraps the three long-running Python pipelines in root/child spans so a
-single proliferate / NLAE / audit run appears as one hierarchical trace, with
-the P15-2 `mumei.verify` and P15-3 `mumei.loop.*` spans nesting underneath
-automatically. All spans are `is_enabled()`-guarded, NoOp when OTel is disabled
-or the extra is not installed, and swallow exceptions; `proliferate()`'s
-`summary.json`, `NLAEResult.to_dict()`, and the `AuditResult` /
-`AuditDirectoryResult` dataclasses are unchanged.
-
-- **`mumei.proliferate`** — wraps the whole `proliferate()` weekly run.
-  Attributes: `mumei.proliferate.max_proposals`, `mumei.proliferate.dry_run`,
-  `mumei.proliferate.harness_profile`, `mumei.proliferate.proposals_found`.
-  Child spans: `mumei.proliferate.gap_analysis`,
-  `mumei.proliferate.spec_generation`, `mumei.proliferate.forge`, and
-  `mumei.proliferate.lean_fallback`. Because `_parallel_forge` runs on a
-  `ThreadPoolExecutor`, the submitting thread's context is captured with
-  `telemetry.capture_context()` and re-attached in each worker via
-  `telemetry.use_context()`, so every `mumei.proliferate.forge.candidate`
-  worker span (attributes `mumei.proliferate.target_file`,
-  `mumei.proliferate.verified`, `mumei.proliferate.cache_hit`) parents onto the
-  `mumei.proliferate.forge` span rather than becoming an orphan root. Each
-  publish iteration opens a `mumei.proliferate.proposal` span
-  (`mumei.proliferate.target_file`, `mumei.proliferate.verified`,
-  `mumei.proliferate.blast_radius_broken`, `mumei.proliferate.healed`).
-- **`mumei.nlae.pipeline`** — wraps `NLAEPipeline.run_full_pipeline`. The four
-  stages are child spans `mumei.nlae.generate`, `mumei.nlae.verify`,
-  `mumei.nlae.self_correction`, and `mumei.nlae.lean_bridge`. Attributes:
-  `mumei.nlae.verified`, `mumei.nlae.lean_verified`,
-  `mumei.nlae.loss_vector.present`. The root span's 32-hex trace ID is surfaced
-  on the new optional `NLAEResult.trace_id` field (default `None`, present only
-  as the last dataclass field so `to_dict()` stays backward compatible). When
-  the pipeline is invoked through the `run_nlae_pipeline` MCP tool, that
-  `mcp.tool.run_nlae_pipeline` entry span is the current span, so
-  `mumei.nlae.pipeline` nests underneath it and `trace_id` lets a caller follow
-  the distributed trace back to the originating MCP request across the
-  mumei-agent / mumei / mumei-lean / mumei-demo repositories.
-- **`mumei.audit.file` / `mumei.audit.directory` / `mumei.audit.source`** — wrap
-  `AuditPipeline.audit_file` / `audit_directory` / `audit_source`. A directory
-  audit's per-file `audit_file` calls appear as sequential `mumei.audit.file`
-  child spans under the `mumei.audit.directory` span. Attributes:
-  `mumei.audit.language`, `mumei.audit.success`, `mumei.audit.violations`
-  (file / source) and `mumei.audit.files_with_issues` (directory).
-
-The Rust compiler-side integration is now implemented: when the `mumei` binary
-is built with `--features otel` and `OTEL_ENABLED=true`, `MumeiClient` methods
-automatically inject `TRACEPARENT` into the subprocess environment. The Rust
-side extracts this context and parents its `mumei.verify.cli` / `mumei.z3.solve`
-spans under the Python caller's span, creating a single end-to-end distributed
-trace from **MCP client → mumei-agent → mumei verify → Z3**.
+See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the per-phase span
+hierarchy and attribute catalogue, the metrics catalogue and PromQL examples,
+the reference Grafana / Jaeger / Prometheus / Collector stack
+(`docker compose -f docker-compose.otel.yml up`), and the end-to-end
+distributed-trace verification procedure (mumei-agent → `mumei verify` →
+Rust Z3).
 
 ### Ollama KV cache and long-context tuning
 
@@ -519,20 +336,9 @@ OLLAMA_KV_CACHE_TYPE: q8_0
 OLLAMA_NUM_CTX: "32768"
 ```
 
-`OLLAMA_KV_CACHE_TYPE=q8_0` uses the KV-cache quantization currently available
-through llama.cpp/Ollama-compatible backends, roughly halving KV-cache memory
-versus FP16 and allowing longer context before memory exhaustion. `OLLAMA_NUM_CTX`
-raises the context target from the common 2048 default to 32768; lower it on
-memory-constrained machines or raise it only after confirming enough GPU/CPU RAM.
-
-TurboQuant and PolarQuant show that stronger KV-cache compression is plausible:
-TurboQuant uses randomized rotation plus scalar quantization and reports neutral
-quality at about 3.5 bits/channel for KV cache, while PolarQuant uses random
-preconditioning plus polar-coordinate angle quantization and reports over 4.2x
-KV-cache compression on long-context evaluations. Once those methods are exposed
-by llama.cpp/Ollama as stable cache types, replace `q8_0` with the backend's
-published type name (for example a future `turbo*_0`/`polar*_0` cache type) and
-re-benchmark quality, latency, and maximum context before making it the default.
+See [`docs/OLLAMA_TUNING.md`](docs/OLLAMA_TUNING.md) for what these do, how to
+tune them for memory-constrained machines, and future KV-cache compression
+directions (TurboQuant / PolarQuant).
 
 ## Retry Budget Policy (P8-G)
 
@@ -884,6 +690,18 @@ python scripts/ci_verify.py src/*.mm --proof-cert
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the agent-specific roadmap, and
 [mumei-lang/mumei `docs/CROSS_PROJECT_ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md)
 for the cross-project roadmap covering both the compiler and agent.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | OpenTelemetry: per-phase span hierarchy & attribute catalogue, metrics catalogue + PromQL, reference Grafana/Jaeger/Prometheus stack, E2E distributed-trace verification, SLO alerts |
+| [`docs/OLLAMA_TUNING.md`](docs/OLLAMA_TUNING.md) | Ollama KV-cache / long-context tuning (`OLLAMA_KV_CACHE_TYPE`, `OLLAMA_NUM_CTX`) and future compression (TurboQuant / PolarQuant) |
+| [`docs/AGENT_HARNESS_SPEC.md`](docs/AGENT_HARNESS_SPEC.md) | Agent control-loop harness spec, stage/artifact contracts, and the MCP sampling provider (`USE_MCP_SAMPLING`) |
+| [`docs/VERIFICATION_WORKFLOW_GUIDE.md`](docs/VERIFICATION_WORKFLOW_GUIDE.md) | Use-case verification workflows (NL-spec contradiction, code verification, spec↔code consistency) |
+| [`docs/LEAN_FALLBACK.md`](docs/LEAN_FALLBACK.md) | Lean bridge fallback error codes and troubleshooting |
+| [`docs/NL_SPEC_DEMO.md`](docs/NL_SPEC_DEMO.md) | P11 natural-language specification extraction field demo |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Agent-specific roadmap |
 
 ## License
 
