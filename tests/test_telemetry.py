@@ -53,6 +53,41 @@ def test_exporter_builders_return_none_without_extra():
     assert telemetry._build_metric_exporter() is None
 
 
+def test_record_response_tokens_extracts_and_forwards(monkeypatch):
+    calls: list[tuple[int, str | None]] = []
+    monkeypatch.setattr(
+        telemetry, "record_llm_tokens", lambda c, *, model=None: calls.append((c, model))
+    )
+    response = SimpleNamespace(usage=SimpleNamespace(total_tokens=42))
+    assert telemetry.record_response_tokens(response, model="gpt-4o") == 42
+    assert calls == [(42, "gpt-4o")]
+
+    # Missing usage -> 0, still forwarded (record_llm_tokens ignores <= 0).
+    calls.clear()
+    assert telemetry.record_response_tokens(SimpleNamespace(usage=None)) == 0
+    assert calls == [(0, None)]
+
+
+def test_openai_provider_complete_records_tokens(monkeypatch):
+    """The shared audit/cross-validation LLM path feeds the OTel counter (#297)."""
+    calls: list[tuple[int, str | None]] = []
+    monkeypatch.setattr(
+        telemetry, "record_llm_tokens", lambda c, *, model=None: calls.append((c, model))
+    )
+
+    class _FakeCompletions:
+        def create(self, model, messages):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+                usage=SimpleNamespace(total_tokens=17),
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions()))
+    provider = OpenAILLMProvider(client=fake_client)
+    assert provider.complete([{"role": "user", "content": "hi"}], "gpt-4o") == "ok"
+    assert (17, "gpt-4o") in calls
+
+
 def test_response_token_count_accepts_model():
     from types import SimpleNamespace
 

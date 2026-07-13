@@ -117,6 +117,7 @@ def extract_spec(
                 ],
                 response_format={"type": "json_object"},
             )
+            telemetry.record_response_tokens(response, model=model)
         raw = response.choices[0].message.content or ""
         try:
             spec = _extract_json(raw)

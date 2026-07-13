@@ -24,20 +24,16 @@ Message = Mapping[str, Any]
 
 def _span_total_tokens(response: Any) -> int:
     """Best-effort ``usage.total_tokens`` extraction for span annotation."""
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return 0
-    total = usage.get("total_tokens") if isinstance(usage, Mapping) else getattr(usage, "total_tokens", None)
-    try:
-        return int(total or 0)
-    except (TypeError, ValueError):
-        return 0
+    return telemetry._response_total_tokens(response)
 
 
-def _annotate_response(span: Any, response: Any) -> None:
+def _annotate_response(span: Any, response: Any, model: str | None = None) -> None:
     total = _span_total_tokens(response)
     if total:
         span.set_attribute("gen_ai.usage.total_tokens", total)
+    # Also feed the OTel counter so token/cost/TPM is observable on every LLM
+    # call path, not just fix/heal (#297).
+    telemetry.record_llm_tokens(total, model=model)
 
 
 class LLMProvider(Protocol):
@@ -84,7 +80,7 @@ class OpenAILLMProvider:
                 model=model,
                 messages=list(messages),
             )
-            _annotate_response(span, response)
+            _annotate_response(span, response, model)
             return _extract_openai_text(response)
 
 
@@ -320,7 +316,7 @@ def complete_response(
         if callable(getattr(completions, "create", None)):
             span.set_attribute("gen_ai.dispatch_path", "openai_client")
             response = completions.create(model=model, messages=list(messages))
-            _annotate_response(span, response)
+            _annotate_response(span, response, model)
             return response
         complete = getattr(llm_or_client, "complete", None)
         if callable(complete):
@@ -328,7 +324,7 @@ def complete_response(
             return _CompletionResponse([_Choice(_Message(str(complete(messages, model))))])
         span.set_attribute("gen_ai.dispatch_path", "openai_client_fallback")
         response = completions.create(model=model, messages=list(messages))
-        _annotate_response(span, response)
+        _annotate_response(span, response, model)
         return response
 
 
