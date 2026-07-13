@@ -458,6 +458,73 @@ def test_clause_mixed_and_or_preserves_precedence() -> None:
     assert solver.check() == z3.sat
 
 
+def test_benign_llm_advisory_does_not_flip_verdict_to_refuted() -> None:
+    """A generic ``llm`` advisory must not refute code that Z3 finds satisfiable and
+    mumei verifies (#309)."""
+    from agent.cross_validation import _validate_foreign_code_verdict
+    from agent.cross_validation_models import (
+        ContractParam,
+        CrossValidationIssue,
+        MumeiContractAtom,
+    )
+
+    atoms = [
+        MumeiContractAtom(
+            name="f",
+            params=[ContractParam(name="x", type="i64")],
+            return_type="i64",
+            requires="true",
+            ensures="result == x",
+        )
+    ]
+    verification = {"success": True, "report": {"status": "trusted", "failed": 0}}
+    advisory = CrossValidationIssue(
+        kind="llm",
+        message="No externally visible functions with safety preconditions found.",
+        severity="error",
+    )
+
+    # A lone benign llm advisory must not drive `refuted` when sat + verified.
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[advisory],
+            satisfiable=True,
+            verification=verification,
+            warnings=[],
+        )
+        == "verified"
+    )
+
+    # A substantive issue still refutes.
+    substantive = CrossValidationIssue(kind="overconstraint", message="unsat")
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[substantive],
+            satisfiable=True,
+            verification=verification,
+            warnings=[],
+        )
+        == "refuted"
+    )
+
+    # An unsatisfiable contract still refutes even if the only issue is an advisory.
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[advisory],
+            satisfiable=False,
+            verification=verification,
+            warnings=[],
+        )
+        == "refuted"
+    )
+
+
 def test_genuine_mumei_failure_not_mislabeled_inconclusive() -> None:
     """A real mumei refutation stays a failure even with agent-side skips (#304)."""
     from agent.cross_validation import _verify_atoms_with_mumei
