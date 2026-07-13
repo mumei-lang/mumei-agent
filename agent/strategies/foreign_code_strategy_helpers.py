@@ -16,6 +16,9 @@ from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _dedupe_strings,
     _go_function_declarations,
+    _go_nillable_param_names,
+    _go_type_is_nillable,
+    _split_params,
     _strip_go_rust_literals_and_comments,
 )
 
@@ -225,24 +228,6 @@ def _go_params(params_text: str) -> dict[str, str]:
         else:
             name_text, type_text = raw, "int"
         params[_safe_identifier(name_text or f"arg{index}")] = _go_type(type_text)
-    return params
-
-def _split_params(params_text: str) -> list[str]:
-    params: list[str] = []
-    current: list[str] = []
-    depth = 0
-    for char in params_text:
-        if char in "([{<":
-            depth += 1
-        elif char in ")]}>":
-            depth = max(0, depth - 1)
-        if char == "," and depth == 0:
-            params.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-    if current:
-        params.append("".join(current))
     return params
 
 def _clean_jsdoc(comment: str) -> str:
@@ -517,7 +502,10 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, params_text, _return_type, body in _go_function_declarations(source):
         body = _strip_go_rust_literals_and_comments(body)
-        param_names = set(_go_params(params_text))
+        # Only nillable Go types (pointer/slice/map/chan/func/interface) may be
+        # nil-dereferenced. Value types (e.g. a `reflect.Value` struct) can never
+        # be nil, so flagging them produces false `refuted` verdicts (#295).
+        param_names = _go_nillable_param_names(params_text)
         for expression in _return_expressions(body):
             issues.extend(
                 _issues_for_expression(
@@ -592,7 +580,10 @@ def _issues_for_expression(
                     counterexample=counterexample,
                 )
             )
-    else:
+    elif label == "TypeScript":
+        # null/undefined dereference is a JS/TS concept. Solidity value types
+        # (`bytes`/`string`/structs) and Rust references are never null, so
+        # emitting a "non-null contract" for them is a false positive (#295).
         for match in re.finditer(
             r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
             expression,
