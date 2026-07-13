@@ -1343,9 +1343,15 @@ def _validate_foreign_code_verdict(
         and verification_failed
         and skipped_clause_warnings
         and not mumei_genuinely_failed
-        and not any(issue.kind != "verification" for issue in issues)
+        and not any(issue.kind not in ("verification", "llm") for issue in issues)
     ):
         return "unverifiable"
-    if issues or satisfiable is False or verification_failed:
+    # A generic ``llm``-kind entry is the fallback bucket for advisories the model
+    # places in its ``issues`` array (including benign "nothing found" notes); it
+    # must not by itself refute code that Z3 finds satisfiable and mumei verifies.
+    # Only substantive issues (contradiction/overconstraint/verification/etc.), an
+    # unsatisfiable contract, or a failed verification are refutations (#309).
+    substantive_issues = [issue for issue in issues if issue.kind != "llm"]
+    if substantive_issues or satisfiable is False or verification_failed:
         return "refuted"
     return "verified"
