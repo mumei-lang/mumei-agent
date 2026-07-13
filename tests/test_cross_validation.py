@@ -1168,3 +1168,21 @@ def test_verify_conformance_typescript_next_steps_before_findings(tmp_path: Path
     assert result.report.index("### next_steps (V1-E-1)") < result.report.index(
         "### Human review entrypoints"
     )
+
+
+def test_json_from_text_tolerates_trailing_prose() -> None:
+    from agent.cross_validation_payload import _json_from_text
+
+    # JSON, then a trailing sentence (the common local/OSS-model shape).
+    assert _json_from_text('{"atoms": []}\n\nThis contract has no preconditions.') == {
+        "atoms": []
+    }
+    # Leading prose, then JSON (previously the only tolerated shape).
+    assert _json_from_text("Here is the JSON:\n{\"atoms\": []}") == {"atoms": []}
+    # A fenced object with nested braces must survive intact.
+    assert _json_from_text(
+        '```json\n{"atoms": [{"name": "f", "params": []}]}\n```'
+    ) == {"atoms": [{"name": "f", "params": []}]}
+    # A non-object first value is still rejected.
+    with pytest.raises(json.JSONDecodeError):
+        _json_from_text("[1, 2, 3]")
