@@ -132,12 +132,27 @@ def _string_list(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _normalize_mumei_boolean_literals(clause: str) -> str:
+    """Map Python/JSON-style boolean literals to Mumei lowercase keywords.
+
+    LLMs and JSON decoders may produce ``True``/``False`` (Python bools) or
+    the capitalized strings ``"True"``/``"False"``.  Mumei source expects
+    lowercase ``true``/``false`` in contract clauses, so normalize them before
+    writing ``.mm`` files or passing clauses to Z3/mumei.
+    """
+    return re.sub(r"\bTrue\b", "true", re.sub(r"\bFalse\b", "false", clause))
+
+
 def _contract_clause(value: object) -> str:
-    if isinstance(value, list):
+    if isinstance(value, bool):
+        clause = "true" if value else "false"
+    elif isinstance(value, list):
         parts = [str(item).strip().rstrip(";") for item in value if str(item).strip()]
-        return " && ".join(parts) if parts else "true"
-    text = str(value or "true").strip().rstrip(";")
-    return text or "true"
+        clause = " && ".join(parts) if parts else "true"
+    else:
+        clause = str(value).strip().rstrip(";") if value is not None else "true"
+        clause = clause or "true"
+    return _normalize_mumei_boolean_literals(clause)
 
 
 def _extract_inline_contract_atoms(spec_text: str) -> list[MumeiContractAtom]:
@@ -182,12 +197,14 @@ def _atoms_to_mumei_module(atoms: list[MumeiContractAtom]) -> str:
     for atom in atoms:
         params = ", ".join(f"{param.name}: {param.type}" for param in atom.params)
         default_value = _default_literal(atom.return_type)
+        requires = _normalize_mumei_boolean_literals(atom.requires)
+        ensures = _normalize_mumei_boolean_literals(atom.ensures)
         blocks.append(
             "\n".join(
                 [
                     f"trusted atom {atom.name}({params}) -> {atom.return_type} {{",
-                    f"    requires: {atom.requires};",
-                    f"    ensures: {atom.ensures};",
+                    f"    requires: {requires};",
+                    f"    ensures: {ensures};",
                     "    body: {",
                     f"        {default_value}",
                     "    }",
