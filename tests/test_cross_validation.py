@@ -498,7 +498,7 @@ def test_benign_llm_advisory_does_not_flip_verdict_to_refuted() -> None:
     )
 
     # A substantive issue still refutes.
-    substantive = CrossValidationIssue(kind="overconstraint", message="unsat")
+    substantive = CrossValidationIssue(kind="verification", message="verification failed")
     assert (
         _validate_foreign_code_verdict(
             atoms=atoms,
@@ -537,6 +537,125 @@ def test_benign_llm_advisory_does_not_flip_verdict_to_refuted() -> None:
             warnings=["Skipped unsupported Z3 clause: result == foo(x)"],
         )
         == "unverifiable"
+    )
+
+
+def test_unsubstantiated_unsat_claim_does_not_refute_verified_code() -> None:
+    """LLM unsat claims need formal corroboration before refuting (#312)."""
+    from agent.cross_validation import _validate_foreign_code_verdict
+    from agent.cross_validation_models import ContractParam, MumeiContractAtom
+
+    atoms = [
+        MumeiContractAtom(
+            name="panic",
+            params=[ContractParam(name="code", type="i64")],
+            return_type="str",
+            requires="true",
+            ensures="result == 'x'",
+        )
+    ]
+    issue = CrossValidationIssue(
+        kind="overconstraint",
+        message="The inferred contract is unsatisfiable.",
+    )
+    verification = {"success": True, "report": {"status": "trusted", "failed": 0}}
+    warnings = ["Skipped unsupported Z3 clause: result == ..."]
+
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[issue],
+            satisfiable=None,
+            verification=verification,
+            warnings=warnings,
+        )
+        == "verified"
+    )
+
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[issue],
+            satisfiable=False,
+            verification=verification,
+            warnings=warnings,
+        )
+        == "refuted"
+    )
+
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[issue],
+            satisfiable=None,
+            verification={"success": False, "report": {"status": "failed", "failed": 3}},
+            warnings=warnings,
+        )
+        == "refuted"
+    )
+
+    satisfiability_issue = CrossValidationIssue(
+        kind="satisfiability",
+        message="The inferred contract is unsatisfiable.",
+    )
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[satisfiability_issue],
+            satisfiable=None,
+            verification=verification,
+            warnings=warnings,
+        )
+        == "verified"
+    )
+
+
+def test_unsubstantiated_unsat_claim_does_not_block_inconclusive_guard() -> None:
+    """Skipped Z3 clauses keep unsupported LLM unsat claims inconclusive (#312)."""
+    from agent.cross_validation import _validate_foreign_code_verdict
+    from agent.cross_validation_models import ContractParam, MumeiContractAtom
+
+    atoms = [
+        MumeiContractAtom(
+            name="panic",
+            params=[ContractParam(name="code", type="i64")],
+            return_type="str",
+            requires="true",
+            ensures="result == 'x'",
+        )
+    ]
+    issue = CrossValidationIssue(
+        kind="overconstraint",
+        message="The inferred contract is unsatisfiable.",
+    )
+    warnings = ["Skipped unsupported Z3 clause: result == ..."]
+
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[issue],
+            satisfiable=None,
+            verification={"success": False, "report": {"status": "trusted", "failed": 0}},
+            warnings=warnings,
+        )
+        == "unverifiable"
+    )
+
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[issue],
+            satisfiable=None,
+            verification={"success": False, "report": {"status": "failed", "failed": 3}},
+            warnings=warnings,
+        )
+        == "refuted"
     )
 
 

@@ -1343,7 +1343,15 @@ def _validate_foreign_code_verdict(
         and verification_failed
         and skipped_clause_warnings
         and not mumei_genuinely_failed
-        and not any(issue.kind not in ("verification", "llm") for issue in issues)
+        and not any(
+            issue.kind not in ("verification", "llm")
+            and not _is_unsubstantiated_unsat_claim(
+                issue,
+                satisfiable=satisfiable,
+                mumei_genuinely_failed=mumei_genuinely_failed,
+            )
+            for issue in issues
+        )
     ):
         return "unverifiable"
     # A generic ``llm``-kind entry is the fallback bucket for advisories the model
@@ -1351,7 +1359,46 @@ def _validate_foreign_code_verdict(
     # must not by itself refute code that Z3 finds satisfiable and mumei verifies.
     # Only substantive issues (contradiction/overconstraint/verification/etc.), an
     # unsatisfiable contract, or a failed verification are refutations (#309).
-    substantive_issues = [issue for issue in issues if issue.kind != "llm"]
+    substantive_issues = [
+        issue
+        for issue in issues
+        if not _is_unsubstantiated_unsat_claim(
+            issue,
+            satisfiable=satisfiable,
+            mumei_genuinely_failed=mumei_genuinely_failed,
+        )
+    ]
     if substantive_issues or satisfiable is False or verification_failed:
         return "refuted"
     return "verified"
+
+
+# Unsatisfiability-family issue kinds can be raised by either Z3 (which also sets
+# ``satisfiable=False``) or the LLM (which does not touch ``satisfiable``).
+_UNSAT_CLAIM_KINDS = ("overconstraint", "satisfiability", "contradiction")
+
+
+def _is_unsubstantiated_unsat_claim(
+    issue: CrossValidationIssue,
+    *,
+    satisfiable: bool | None,
+    mumei_genuinely_failed: bool,
+) -> bool:
+    """True for issues that must not, on their own, drive a ``refuted`` verdict.
+
+    Covers the generic ``llm`` advisory bucket (#309) and, additionally, an
+    unsatisfiability-family claim (``overconstraint``/``satisfiability``/
+    ``contradiction``) that no formal tool corroborates: Z3 did not find the
+    contract unsatisfiable (``satisfiable is not False`` — e.g. the clause was
+    skipped and Z3 returned ``None``) and mumei did not genuinely fail. Such a
+    claim is an unformalized LLM assertion and should not hard-refute (#312).
+    Z3-found overconstraints (``satisfiable is False``) and genuine mumei
+    failures still refute.
+    """
+    if issue.kind == "llm":
+        return True
+    return (
+        issue.kind in _UNSAT_CLAIM_KINDS
+        and satisfiable is not False
+        and not mumei_genuinely_failed
+    )
