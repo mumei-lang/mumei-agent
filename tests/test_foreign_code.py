@@ -151,21 +151,32 @@ def test_solidity_nonzero_constant_divisor_not_flagged() -> None:
     assert any("divide by `b`" in issue.message for issue in unknown)
 
 
-def test_solidity_nonnegative_constant_index_not_flagged() -> None:
-    """A non-negative `constant` index (EVM_TREE_RADIX=16) can't be -1 (#296)."""
+def test_solidity_constant_index_pins_value_keeps_upper_bound() -> None:
+    """A `constant` index (EVM_TREE_RADIX=16) is pinned to 16, not modeled as -1,
+    but the upper-bound check is preserved (#296, PR #299)."""
     from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
 
-    issues = _issues_for_expression(
-        "tryTraverse",
-        "decoded[EVM_TREE_RADIX]",
-        "Solidity",
-        known_constants={"EVM_TREE_RADIX": 16},
-    )
-    assert not any("can index" in issue.message for issue in issues)
+    issues = [
+        issue
+        for issue in _issues_for_expression(
+            "tryTraverse",
+            "decoded[EVM_TREE_RADIX]",
+            "Solidity",
+            known_constants={"EVM_TREE_RADIX": 16},
+        )
+        if "can index" in issue.message
+    ]
+    assert len(issues) == 1
+    issue = issues[0]
+    # No impossible negative index; the constant value is used instead.
+    assert issue.counterexample["EVM_TREE_RADIX"] == 16
+    # The redundant `>= 0` contract is dropped; the real upper bound stays.
+    assert issue.required_contracts == ("EVM_TREE_RADIX < len_decoded",)
 
-    # Unknown index is still flagged.
+    # Unknown index is still flagged with both bounds.
     unknown = _issues_for_expression("f", "decoded[i]", "Solidity")
-    assert any("can index `decoded[i]`" in issue.message for issue in unknown)
+    idx = [issue for issue in unknown if "can index `decoded[i]`" in issue.message]
+    assert idx and idx[0].required_contracts == ("i >= 0", "i < len_decoded")
 
 
 def test_solidity_declared_constants_parses_hex_and_decimal() -> None:

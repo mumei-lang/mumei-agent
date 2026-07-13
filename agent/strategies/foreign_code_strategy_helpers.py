@@ -600,12 +600,23 @@ def _issues_for_expression(
     ):
         container = match.group("container")
         index = match.group("index")
-        # A non-negative `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
-        # EVM_TREE_RADIX=16) can never be out of the low bound, so don't model it
-        # as a free integer that Z3 is free to pick as -1 (#296).
-        if known_constants.get(index, -1) >= 0:
+        # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
+        # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
+        # impossible negative index (#296). The upper bound is still a real
+        # concern, so we keep checking `index < len` rather than skipping it.
+        known_index = known_constants.get(index)
+        if known_index is not None and known_index < 0:
+            known_index = None
+        counterexample = _z3_index_counterexample(
+            index, f"len_{container}", known_index=known_index
+        )
+        if counterexample is None:
             continue
-        counterexample = _z3_index_counterexample(index, f"len_{container}")
+        required_contracts = (
+            (f"{index} < len_{container}",)
+            if known_index is not None
+            else (f"{index} >= 0", f"{index} < len_{container}")
+        )
         issues.append(
             ForeignSafetyIssue(
                 function_name=function_name,
@@ -615,10 +626,7 @@ def _issues_for_expression(
                     + ", ".join(f"{key}={value}" for key, value in counterexample.items())
                     + ")"
                 ),
-                required_contracts=(
-                    f"{index} >= 0",
-                    f"{index} < len_{container}",
-                ),
+                required_contracts=required_contracts,
                 counterexample=counterexample,
             )
         )
@@ -803,18 +811,31 @@ def _go_nil_dereference_values(
             values.append(value)
     return _dedupe_strings(values)
 
-def _z3_index_counterexample(index_name: str, length_name: str) -> dict[str, int]:
+def _z3_index_counterexample(
+    index_name: str,
+    length_name: str,
+    known_index: int | None = None,
+) -> dict[str, int] | None:
+    """Counterexample for an unbounded index access, or ``None`` if provably safe.
+
+    When ``known_index`` is given (a declared ``constant``/``immutable`` value),
+    the index is pinned to that value so Z3 can't invent an impossible negative
+    index (#296); the remaining, still-real concern is the upper bound
+    (``index >= length``), so a shorter container is a genuine counterexample.
+    """
     index = z3.Int(index_name)
     length = z3.Int(length_name)
     solver = z3.Solver()
     solver.add(length >= 0, z3.Or(index < 0, index >= length))
+    if known_index is not None:
+        solver.add(index == known_index)
     if solver.check() == z3.sat:
         model = solver.model()
         return {
             index_name: model.eval(index, model_completion=True).as_long(),
             length_name: model.eval(length, model_completion=True).as_long(),
         }
-    return {index_name: 0, length_name: 0}
+    return None
 
 def _z3_i64_overflow_counterexample(left_name: str, right_name: str) -> dict[str, int]:
     left = z3.Int(left_name)
