@@ -10,7 +10,7 @@ name: Forge
 #      has a real binary to invoke for verification.
 #   3. Provision the LLM backend according to the selected `llm_profile`:
 #        - ollama-local : spin up an Ollama server on the runner and pull
-#                         a small qwen model (default qwen3.5:0.8b).
+#                         a CPU-friendly qwen model (default qwen3.5:4b).
 #                         Requires zero additional secrets.
 #        - remote       : use any OpenAI-compatible endpoint configured via
 #                         repository secrets (DashScope / vLLM / self-hosted
@@ -75,7 +75,7 @@ on:
           bonsai-1bit-qwen if pullable).
           For remote, the model name your endpoint exposes (qwen-plus,
           Qwen/Qwen3.5-7B, gpt-4o-mini, ...).
-        default: "qwen3.5:0.8b"
+        default: "qwen3.5:4b"
         type: string
   schedule:
     # Every day at 03:00 UTC.  Schedule events always run with
@@ -92,9 +92,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Scheduled runs have no workflow_dispatch inputs, so default to the
-      # fully self-contained ollama-local profile with a small qwen model.
+      # fully self-contained ollama-local profile with the CPU-friendly
+      # qwen3.5:4b model (stable on the CPU-only ubuntu-latest runner).
       LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
-      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:0.8b' }}
+      LLM_MODEL_INPUT: ${{ github.event.inputs.llm_model || 'qwen3.5:4b' }}
     steps:
       - name: Checkout mumei-agent
         uses: actions/checkout@v4

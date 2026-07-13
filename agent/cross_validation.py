@@ -1276,12 +1276,27 @@ def _verify_atoms_with_mumei(
             warnings.append(f"mumei verify skipped because `{config.mumei_bin}` was not found.")
             return None, issues, warnings
     if result.get("success") is False:
-        inconclusive_due_to_skipped_clauses = bool(skipped_clause_warnings)
-        message = (
-            "mumei verify returned an inconclusive result because unsupported Z3 clauses were skipped."
-            if inconclusive_due_to_skipped_clauses
-            else "mumei verify reported an unsatisfied or inconsistent inferred contract."
+        # A genuine mumei refutation (status "failed" / failed > 0) must be
+        # reported as a real failure even when the agent skipped some clauses:
+        # skipped clauses are removed from the module, so any mumei failure is a
+        # genuine refutation of the clauses that *were* included (#304). Only when
+        # mumei did not actually fail is the result truly inconclusive.
+        mumei_failed = _mumei_report_has_failures(result.get("report"))
+        inconclusive_due_to_skipped_clauses = (
+            bool(skipped_clause_warnings) and not mumei_failed
         )
+        if inconclusive_due_to_skipped_clauses:
+            message = (
+                "mumei verify returned an inconclusive result because unsupported "
+                "Z3 clauses were skipped."
+            )
+        else:
+            message = "mumei verify reported an unsatisfied or inconsistent inferred contract."
+            if skipped_clause_warnings:
+                message += (
+                    f" ({len(skipped_clause_warnings)} additional clause(s) could "
+                    "not be lowered and were not checked.)"
+                )
         issues.append(
             CrossValidationIssue(
                 kind="verification",
@@ -1290,6 +1305,17 @@ def _verify_atoms_with_mumei(
             )
         )
     return result, issues, warnings
+
+
+def _mumei_report_has_failures(report: object) -> bool:
+    """True when a mumei verify report is a genuine refutation, not just skips."""
+    if not isinstance(report, dict):
+        return False
+    try:
+        failed = int(report.get("failed") or 0)
+    except (TypeError, ValueError):
+        failed = 0
+    return failed > 0 or report.get("status") == "failed"
 
 
 def _has_skipped_z3_clause_warnings(warnings: list[str]) -> bool:
@@ -1309,8 +1335,15 @@ def _validate_foreign_code_verdict(
         return "unverifiable"
     skipped_clause_warnings = _has_skipped_z3_clause_warnings(warnings)
     verification_failed = verification is not None and verification.get("success") is False
-    if verification is not None and verification_failed and skipped_clause_warnings and not any(
-        issue.kind != "verification" for issue in issues
+    mumei_genuinely_failed = verification is not None and _mumei_report_has_failures(
+        verification.get("report")
+    )
+    if (
+        verification is not None
+        and verification_failed
+        and skipped_clause_warnings
+        and not mumei_genuinely_failed
+        and not any(issue.kind != "verification" for issue in issues)
     ):
         return "unverifiable"
     if issues or satisfiable is False or verification_failed:

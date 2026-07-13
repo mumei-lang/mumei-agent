@@ -336,7 +336,10 @@ def test_validate_foreign_code_non_skip_z3_warning_keeps_plain_verification_mess
     assert all("unsupported Z3 clauses were skipped" not in issue.message for issue in result.issues)
 
 
-def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: Path) -> None:
+def test_validate_foreign_code_genuine_go_failure_is_refuted_despite_skips(tmp_path: Path) -> None:
+    """A genuine mumei refutation (status "failed") stays a real failure even when
+    the agent skipped some clauses: skipped clauses are removed from the module, so
+    any mumei failure refutes the clauses that *were* checked (#304)."""
     source = tmp_path / "inconclusive.go"
     source.write_text(
         "package demo\nfunc size(input []byte) int { return len(input) + 1 }\n",
@@ -360,9 +363,12 @@ def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: P
         )
 
     assert result.success is False
-    assert result.verdict == "unverifiable"
+    assert result.verdict == "refuted"
     assert any("Skipped unsupported Z3 clause" in warning for warning in result.warnings)
-    assert any("inconclusive" in issue.message for issue in result.issues)
+    assert any(
+        "unsatisfied or inconsistent" in issue.message for issue in result.issues
+    )
+    assert all("inconclusive" not in issue.message for issue in result.issues)
 
     args = build_validate_code_parser().parse_args(
         [
@@ -378,7 +384,7 @@ def test_validate_foreign_code_marks_skipped_go_clauses_unverifiable(tmp_path: P
         with pytest.raises(SystemExit) as exc:
             main_validate_code(args)
 
-    assert exc.value.code == 2
+    assert exc.value.code == 1
 
 
 def test_clause_split_is_paren_aware_and_balanced() -> None:
@@ -427,6 +433,77 @@ def test_clause_disjunction_is_lowered_not_skipped() -> None:
     exprs3, warnings3 = _clause_to_z3("result !== s", syms)
     assert warnings3 == []
     assert len(exprs3) == 1
+
+
+def test_clause_mixed_and_or_preserves_precedence() -> None:
+    """`a && b || c` must lower as `(a && b) || c`, not `a && (b || c)` (#303)."""
+    import z3
+
+    from agent.cross_validation_z3 import _clause_to_z3
+
+    syms: dict[str, object] = {
+        "x": z3.Int("x"),
+        "y": z3.Int("y"),
+        "z": z3.Int("z"),
+    }
+    exprs, warnings = _clause_to_z3("x > 0 && y > 0 || z > 0", syms)
+    assert warnings == []
+    # A top-level disjunction is lowered whole, not split into conjuncts.
+    assert len(exprs) == 1
+
+    # (x=-1, y=-1, z=1) satisfies `(x>0 && y>0) || z>0` but not `x>0 && (y>0 || z>0)`.
+    solver = z3.Solver()
+    solver.add(exprs[0])
+    solver.add(syms["x"] == -1, syms["y"] == -1, syms["z"] == 1)
+    assert solver.check() == z3.sat
+
+
+def test_genuine_mumei_failure_not_mislabeled_inconclusive() -> None:
+    """A real mumei refutation stays a failure even with agent-side skips (#304)."""
+    from agent.cross_validation import _verify_atoms_with_mumei
+    from agent.cross_validation_models import ContractParam, MumeiContractAtom
+
+    atoms = [
+        MumeiContractAtom(
+            name="f",
+            params=[ContractParam(name="x", type="i64")],
+            return_type="i64",
+            requires="true",
+            ensures="result == x",
+        )
+    ]
+    skips = ["Skipped unsupported Z3 clause: result == x > y || result == false"]
+
+    # mumei genuinely failed (failed=4, skipped=0): must NOT be called inconclusive.
+    failing = MagicMock()
+    failing.verify.return_value = {
+        "success": False,
+        "report": {"status": "failed", "failed": 4, "skipped": 0},
+        "stdout": "",
+        "stderr": "",
+    }
+    with patch("agent.cross_validation.create_mumei_client", return_value=failing):
+        _, issues, _ = _verify_atoms_with_mumei(
+            atoms, AgentConfig(api_key=""), skipped_clause_warnings=skips
+        )
+    assert len(issues) == 1
+    assert "inconclusive" not in issues[0].message
+    assert "unsatisfied or inconsistent" in issues[0].message
+
+    # No genuine failure recorded: skips make the result truly inconclusive.
+    skipped_only = MagicMock()
+    skipped_only.verify.return_value = {
+        "success": False,
+        "report": {"status": "verified", "failed": 0, "skipped": 0},
+        "stdout": "",
+        "stderr": "",
+    }
+    with patch("agent.cross_validation.create_mumei_client", return_value=skipped_only):
+        _, issues2, _ = _verify_atoms_with_mumei(
+            atoms, AgentConfig(api_key=""), skipped_clause_warnings=skips
+        )
+    assert len(issues2) == 1
+    assert "inconclusive" in issues2[0].message
 
 
 @pytest.mark.parametrize(
@@ -1192,3 +1269,21 @@ def test_verify_conformance_typescript_next_steps_before_findings(tmp_path: Path
     assert result.report.index("### next_steps (V1-E-1)") < result.report.index(
         "### Human review entrypoints"
     )
+
+
+def test_json_from_text_tolerates_trailing_prose() -> None:
+    from agent.cross_validation_payload import _json_from_text
+
+    # JSON, then a trailing sentence (the common local/OSS-model shape).
+    assert _json_from_text('{"atoms": []}\n\nThis contract has no preconditions.') == {
+        "atoms": []
+    }
+    # Leading prose, then JSON (previously the only tolerated shape).
+    assert _json_from_text("Here is the JSON:\n{\"atoms\": []}") == {"atoms": []}
+    # A fenced object with nested braces must survive intact.
+    assert _json_from_text(
+        '```json\n{"atoms": [{"name": "f", "params": []}]}\n```'
+    ) == {"atoms": [{"name": "f", "params": []}]}
+    # A non-object first value is still rejected.
+    with pytest.raises(json.JSONDecodeError):
+        _json_from_text("[1, 2, 3]")
