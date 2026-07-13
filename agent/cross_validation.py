@@ -1343,7 +1343,7 @@ def _validate_foreign_code_verdict(
         and verification_failed
         and skipped_clause_warnings
         and not mumei_genuinely_failed
-        and not any(issue.kind != "verification" for issue in issues)
+        and not any(issue.kind not in ("verification", "llm") for issue in issues)
     ):
         return "unverifiable"
     # A generic ``llm``-kind entry is the fallback bucket for advisories the model

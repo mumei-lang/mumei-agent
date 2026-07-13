@@ -524,6 +524,21 @@ def test_benign_llm_advisory_does_not_flip_verdict_to_refuted() -> None:
         == "refuted"
     )
 
+    # Non-genuine verify failure + skipped clauses + only a benign llm advisory must
+    # stay `unverifiable`, not fall through to `refuted` (the advisory must not block
+    # the inconclusive guard, mirroring the refutation-check exclusion above) (#309).
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[advisory],
+            satisfiable=True,
+            verification={"success": False, "report": {"status": "trusted", "failed": 0}},
+            warnings=["Skipped unsupported Z3 clause: result == foo(x)"],
+        )
+        == "unverifiable"
+    )
+
 
 def test_genuine_mumei_failure_not_mislabeled_inconclusive() -> None:
     """A real mumei refutation stays a failure even with agent-side skips (#304)."""
