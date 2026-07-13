@@ -664,6 +664,10 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     for name, params_text, return_type, body in _go_function_declarations(code):
         params = _params_from_signature(params_text)
+        # Only params whose declared Go type is nillable may carry a `!= nil`
+        # precondition; value types (e.g. `reflect.Value`) can never be nil, so
+        # inferring one produces a false `refuted` verdict (#295).
+        nillable_names = _go_nillable_param_names(params_text)
         raw_return_expr = _raw_return_statement_expression(body)
         safety_expr = _raw_return_statement_expression(
             _strip_go_rust_literals_and_comments(body)
@@ -676,7 +680,7 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
                 return_type="i64" if return_type else "bool",
                 requires=_go_safety_requires_for_expression(
                     safety_expr,
-                    [param.name for param in params],
+                    [param.name for param in params if param.name in nillable_names],
                 ),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
@@ -755,6 +759,69 @@ def _foreign_signature_type(type_text: str) -> str:
     if lowered in {"uint", "usize", "u8", "u16", "u32", "u64"}:
         return "u64"
     return "i64"
+
+
+def _split_params(params_text: str) -> list[str]:
+    params: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in params_text:
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>":
+            depth = max(0, depth - 1)
+        if char == "," and depth == 0:
+            params.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if current:
+        params.append("".join(current))
+    return params
+
+
+# Go types that can hold a nil value and therefore be nil-dereferenced. A bare
+# named/qualified type (e.g. `reflect.Value`, `time.Time`) is a value type here
+# and is intentionally treated as non-nillable.
+_GO_NILLABLE_TYPE_RE = re.compile(
+    r"^(?:"
+    r"\*"  # pointer *T
+    r"|\[\]"  # slice []T
+    r"|map\["  # map[K]V
+    r"|chan\b"  # chan T
+    r"|<-"  # <-chan T
+    r"|func\b"  # func(...) ...
+    r"|interface\s*\{"  # interface{ ... }
+    r"|any\b"
+    r"|error\b"
+    r")"
+)
+
+
+def _go_type_is_nillable(raw_type: str) -> bool:
+    return bool(_GO_NILLABLE_TYPE_RE.match(raw_type.strip()))
+
+
+def _go_nillable_param_names(params_text: str) -> set[str]:
+    """Names of Go params/receiver whose declared type can actually be nil.
+
+    Go params are ``name type``; the type (everything after the name) decides
+    nillability. Grouped names sharing a trailing type (``a, b *T``) only bind
+    the type to the last name, so the untyped leaders are conservatively
+    omitted rather than assumed nillable.
+    """
+    names: set[str] = set()
+    for raw in _split_params(params_text):
+        raw = raw.strip()
+        if not raw:
+            continue
+        pieces = raw.split()
+        if len(pieces) < 2:
+            continue
+        name_text, raw_type = pieces[0], " ".join(pieces[1:])
+        if _go_type_is_nillable(raw_type):
+            names.add(_safe_identifier(name_text))
+    return names
 
 
 def _last_expression(body: str) -> str:

@@ -161,6 +161,26 @@ def test_go_pointer_param_still_flagged_nil() -> None:
     assert any("user" in issue.message and "non-nil" in issue.message for issue in issues)
 
 
+def test_go_cross_validation_value_param_not_flagged_nil() -> None:
+    """The contract-inference path must also skip value types (#295, PR #298)."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = (
+        "package rlp\n"
+        "func decodeUint(s *Stream, val reflect.Value) bool {\n"
+        "    return val.Kind()\n"
+        "}\n"
+    )
+    atoms = _infer_go_contracts(source)
+    assert atoms
+    assert "val != nil" not in atoms[0].requires
+    # A genuine pointer receiver/param is still required to be non-nil.
+    ptr = _infer_go_contracts(
+        "package users\nfunc age(user *User) bool { return user.Age }\n"
+    )
+    assert ptr and "user != nil" in ptr[0].requires
+
+
 def test_go_type_is_nillable_matrix() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _go_type_is_nillable
 

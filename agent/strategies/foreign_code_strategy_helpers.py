@@ -16,6 +16,9 @@ from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _dedupe_strings,
     _go_function_declarations,
+    _go_nillable_param_names,
+    _go_type_is_nillable,
+    _split_params,
     _strip_go_rust_literals_and_comments,
 )
 
@@ -225,24 +228,6 @@ def _go_params(params_text: str) -> dict[str, str]:
         else:
             name_text, type_text = raw, "int"
         params[_safe_identifier(name_text or f"arg{index}")] = _go_type(type_text)
-    return params
-
-def _split_params(params_text: str) -> list[str]:
-    params: list[str] = []
-    current: list[str] = []
-    depth = 0
-    for char in params_text:
-        if char in "([{<":
-            depth += 1
-        elif char in ")]}>":
-            depth = max(0, depth - 1)
-        if char == "," and depth == 0:
-            params.append("".join(current))
-            current = []
-        else:
-            current.append(char)
-    if current:
-        params.append("".join(current))
     return params
 
 def _clean_jsdoc(comment: str) -> str:
@@ -531,50 +516,6 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 )
             )
     return issues
-
-
-# Go types that can hold a nil value and therefore be nil-dereferenced. A bare
-# named/qualified type (e.g. `reflect.Value`, `time.Time`) is a value type here
-# and is intentionally treated as non-nillable.
-_GO_NILLABLE_TYPE_RE = re.compile(
-    r"^(?:"
-    r"\*"  # pointer *T
-    r"|\[\]"  # slice []T
-    r"|map\["  # map[K]V
-    r"|chan\b"  # chan T
-    r"|<-"  # <-chan T
-    r"|func\b"  # func(...) ...
-    r"|interface\s*\{"  # interface{ ... }
-    r"|any\b"
-    r"|error\b"
-    r")"
-)
-
-
-def _go_type_is_nillable(raw_type: str) -> bool:
-    return bool(_GO_NILLABLE_TYPE_RE.match(raw_type.strip()))
-
-
-def _go_nillable_param_names(params_text: str) -> set[str]:
-    """Names of Go params/receiver whose declared type can actually be nil.
-
-    Go params are ``name type``; the type (everything after the name) decides
-    nillability. Grouped names sharing a trailing type (``a, b *T``) only bind
-    the type to the last name, so the untyped leaders are conservatively
-    omitted rather than assumed nillable.
-    """
-    names: set[str] = set()
-    for raw in _split_params(params_text):
-        raw = raw.strip()
-        if not raw:
-            continue
-        pieces = raw.split()
-        if len(pieces) < 2:
-            continue
-        name_text, raw_type = pieces[0], " ".join(pieces[1:])
-        if _go_type_is_nillable(raw_type):
-            names.add(_safe_identifier(name_text))
-    return names
 
 def _operand_is_member_or_call(expression: str, span: tuple[int, int]) -> bool:
     """True when the identifier at ``span`` is a member access or call receiver.
