@@ -614,6 +614,51 @@ def test_unsubstantiated_unsat_claim_does_not_refute_verified_code() -> None:
     )
 
 
+def test_unsubstantiated_unsat_claim_does_not_block_inconclusive_guard() -> None:
+    """Skipped Z3 clauses keep unsupported LLM unsat claims inconclusive (#312)."""
+    from agent.cross_validation import _validate_foreign_code_verdict
+    from agent.cross_validation_models import ContractParam, MumeiContractAtom
+
+    atoms = [
+        MumeiContractAtom(
+            name="panic",
+            params=[ContractParam(name="code", type="i64")],
+            return_type="str",
+            requires="true",
+            ensures="result == 'x'",
+        )
+    ]
+    issue = CrossValidationIssue(
+        kind="overconstraint",
+        message="The inferred contract is unsatisfiable.",
+    )
+    warnings = ["Skipped unsupported Z3 clause: result == ..."]
+
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[issue],
+            satisfiable=None,
+            verification={"success": False, "report": {"status": "trusted", "failed": 0}},
+            warnings=warnings,
+        )
+        == "unverifiable"
+    )
+
+    assert (
+        _validate_foreign_code_verdict(
+            atoms=atoms,
+            errors=[],
+            issues=[issue],
+            satisfiable=None,
+            verification={"success": False, "report": {"status": "failed", "failed": 3}},
+            warnings=warnings,
+        )
+        == "refuted"
+    )
+
+
 def test_genuine_mumei_failure_not_mislabeled_inconclusive() -> None:
     """A real mumei refutation stays a failure even with agent-side skips (#304)."""
     from agent.cross_validation import _verify_atoms_with_mumei
