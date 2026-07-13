@@ -782,7 +782,7 @@ def _solidity_advisory_issues(code: str) -> list[CrossValidationIssue]:
             kind="verification",
             message=issue.message,
             location=issue.function_name,
-            severity="warning",
+            severity="error" if issue.counterexample else "warning",
         )
         for issue in _detect_solidity_contract_issues(code)
     ]
@@ -1386,16 +1386,16 @@ def _is_unsubstantiated_unsat_claim(
 ) -> bool:
     """True for issues that must not, on their own, drive a ``refuted`` verdict.
 
-    Covers the generic ``llm`` advisory bucket (#309) and, additionally, an
-    unsatisfiability-family claim (``overconstraint``/``satisfiability``/
-    ``contradiction``) that no formal tool corroborates: Z3 did not find the
-    contract unsatisfiable (``satisfiable is not False`` — e.g. the clause was
-    skipped and Z3 returned ``None``) and mumei did not genuinely fail. Such a
-    claim is an unformalized LLM assertion and should not hard-refute (#312).
-    Z3-found overconstraints (``satisfiable is False``) and genuine mumei
+    Covers severity-``warning`` advisories, the generic ``llm`` advisory bucket
+    (#309), and unsatisfiability-family claims (``overconstraint``/
+    ``satisfiability``/``contradiction``) that no formal tool corroborates: Z3
+    did not find the contract unsatisfiable (``satisfiable is not False`` — e.g.
+    the clause was skipped and Z3 returned ``None``) and mumei did not genuinely
+    fail. Such claims are unformalized assertions and should not hard-refute
+    (#312). Z3-found overconstraints (``satisfiable is False``) and genuine mumei
     failures still refute.
     """
-    if issue.kind == "llm":
+    if issue.severity == "warning" or issue.kind == "llm":
         return True
     return (
         issue.kind in _UNSAT_CLAIM_KINDS
