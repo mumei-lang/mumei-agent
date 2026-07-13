@@ -35,6 +35,56 @@ The lower-level Python modules remain the deterministic runtime:
 | Deep-Proof Adapter | `lean_bridge`, `proliferate._run_lean_fallback` | Hand Z3 `unknown` atoms to `mumei-lean` and merge `lean_verified` certificates. | Make Lean mandatory for flows where Z3 already proves all atoms. |
 | Publisher | `publish`, `proliferate` | Persist verified artifacts, summaries, and PR metadata. | Publish code that has not passed the configured verifier gates. |
 
+## MCP sampling provider
+
+`agent/mcp_server.py` (the `FastMCP("Mumei-Agent")` server) can obtain LLM
+completions either from the OpenAI-compatible endpoint (the CLI default) or,
+when `USE_MCP_SAMPLING=true`, through standard MCP sampling from the connected
+client. This lets Devin or another MCP client supply the LLM role without
+`LLM_API_KEY` being configured in mumei-agent. If the client does not support
+sampling, or a sampling request fails, the agent falls back to the
+OpenAI-compatible path, so every tool keeps working.
+
+### Sampling-capable tools
+
+All LLM-backed MCP tools support the sampling path:
+
+`heal_file`, `forge_task`, `extract_spec`, `self_correct`, `validate_nl_spec`,
+`validate_nl_spec_multi`, `validate_code`, `validate_foreign_code`,
+`verify_foreign_code`, `validate_spec_to_code`, `validate_code_to_spec`,
+`verify_conformance`, `verify_code_spec_traceability`, `audit_code`,
+`scan_and_fix`, and `extract_spec_from_code`.
+
+### MCP 2025-11-25 spec mapping
+
+The implementation follows the MCP 2025-11-25 sampling specification for basic
+text generations:
+
+- User/assistant chat messages are converted to `SamplingMessage` text content.
+- System messages become `systemPrompt`.
+- Model names are passed as `modelPreferences.hints`.
+- `maxTokens` is bounded by `MCP_SAMPLING_MAX_TOKENS`.
+
+Sampling requests are issued via `Context.session.create_message`.
+
+### Capability detection & omitted features
+
+The server checks the client's initialization `capabilities.sampling` before
+sending sampling requests — preferring the public `session.client_params` /
+`session.check_client_capability()` API and falling back to the private
+`session._client_params` attribute for older SDK versions.
+
+It intentionally omits `includeContext`, sampling tools, images, and audio
+until the corresponding client capabilities (`sampling.context` or
+`sampling.tools`) and concrete forge/heal use cases are covered by tests. The
+`includeContext` values `"thisServer"` and `"allServers"` are soft-deprecated in
+the 2025-11-25 spec, so this path leaves context inclusion at its default
+(`"none"`).
+
+The `mumei/mcp_server.py` **Mumei-Forge** server remains verification-only and
+does not need an LLM provider; sampling is implemented only in `mumei-agent` so
+the forge/heal autonomous loop is not duplicated in the compiler repository.
+
 ## Stage Policy
 
 | Stage | Entrypoints | Input artifacts | Output artifacts | Verifier gate | Stop condition |
