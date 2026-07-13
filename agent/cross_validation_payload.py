@@ -19,12 +19,15 @@ def _json_from_text(text: str) -> dict[str, object]:
     fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
     if fence_match:
         stripped = fence_match.group(1)
-    elif not stripped.startswith("{"):
+    else:
+        # Tolerate a leading prose preamble by seeking the first object, and a
+        # trailing prose/second-object suffix by decoding only the first JSON
+        # value (small/OSS models routinely append an explanation after the
+        # JSON, which plain ``json.loads`` rejects with "Extra data").
         start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start >= 0 and end > start:
-            stripped = stripped[start : end + 1]
-    payload = json.loads(stripped)
+        if start > 0:
+            stripped = stripped[start:]
+    payload, _end = json.JSONDecoder().raw_decode(stripped)
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("expected JSON object", stripped, 0)
     return payload
