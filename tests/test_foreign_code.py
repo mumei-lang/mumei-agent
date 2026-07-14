@@ -762,3 +762,121 @@ def test_validate_foreign_code_void_functions_use_unit_body() -> None:
     assert result.success is True
     assert "-> ()" in result.mumei_source
     assert "body: {\n        ()" in result.mumei_source
+
+
+def test_python_unannotated_bool_return_type() -> None:
+    """Unannotated Python functions returning ``True``/``False`` must map to ``bool``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def is_true():\n    return True\n")
+    assert atoms[0].return_type == "bool"
+    assert "result == True" in atoms[0].ensures
+
+
+def test_python_unannotated_comparison_return_type() -> None:
+    """Unannotated Python comparison returns must map to ``bool``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def is_positive(x):\n    return x > 0\n")
+    assert atoms[0].return_type == "bool"
+
+
+def test_python_unannotated_isinstance_return_type() -> None:
+    """Unannotated Python ``isinstance`` calls return ``bool``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def is_int(x):\n    return isinstance(x, int)\n")
+    assert atoms[0].return_type == "bool"
+
+
+def test_python_unannotated_string_return_type() -> None:
+    """Unannotated Python string constants return ``string``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def greeting():\n    return 'hi'\n")
+    assert atoms[0].return_type == "string"
+
+
+def test_python_unannotated_float_return_uses_float_body() -> None:
+    """Unannotated Python float returns must map to ``f64`` and a ``0.0`` body."""
+    from agent.cross_validation import validate_foreign_code
+    from agent.config import AgentConfig
+
+    result = validate_foreign_code(
+        "def pi():\n    return 3.14\n",
+        "python",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+    assert result.success is True
+    assert "-> f64" in result.mumei_source
+    assert "body: {\n        0.0" in result.mumei_source
+
+
+def test_python_return_type_inference_ignores_nested_function_returns() -> None:
+    """Return statements from nested functions must not influence the outer function."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    source = (
+        "def setup():\n"
+        "    def callback():\n"
+        "        return True\n"
+    )
+    atoms = _infer_python_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "setup"
+    assert atoms[0].return_type == "()"
+    assert "result == True" not in atoms[0].ensures
+
+
+def test_python_return_type_inference_with_nested_and_outer_returns() -> None:
+    """Outer returns take precedence when a nested function has a different type."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    source = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        return 42\n"
+        "    return True\n"
+    )
+    atoms = _infer_python_contracts(source)
+    outer = [atom for atom in atoms if atom.name == "outer"][0]
+    assert outer.return_type == "bool"
+
+
+def test_rust_contract_inference_handles_nested_generics_and_lifetimes() -> None:
+    """Rust generics with nested ``<>`` and lifetimes must be parsed correctly."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub async fn await_scoped_vec<F: Future<Output = T> + Send, T: Send + 'static>(\n"
+        "    f: impl IntoIterator<Item = F>,\n"
+        ") -> Result<Vec<T>, JoinError> {\n"
+        "    unsafe { TokioScope::scope_and_collect(|scope| { f.into_iter().map(|f| scope.spawn(f)).collect::<Vec<_>>() }) }\n"
+        "        .await\n"
+        "        .1\n"
+        "        .into_iter()\n"
+        "        .collect::<Result<Vec<_>, _>>()\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "await_scoped_vec"
+    assert atoms[0].return_type == "i64"
+    assert any(param.name == "f" for param in atoms[0].params)
+
+
+def test_rust_contract_inference_handles_fn_trait_bound_arrow() -> None:
+    """The ``->`` arrow in ``FnOnce() -> T`` bounds must not close the generic list."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub async fn await_blocking<F: FnOnce() -> T + Send, T: Send + 'static>(f: F) -> Result<T, JoinError> {\n"
+        "    unsafe { TokioScope::scope_and_collect(|scope| scope.spawn_blocking(f)) }.await.1.pop().unwrap()\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "await_blocking"
+    assert atoms[0].return_type == "i64"
