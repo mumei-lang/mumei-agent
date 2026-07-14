@@ -507,15 +507,17 @@ def _mumei_safe_clause(clause: str) -> str:
     refutations while still preserving the lowerable arithmetic/comparison
     clauses that mumei can trust.
     """
-    normalized = _normalize_boolean_operators(clause).strip().rstrip(";")
-    if not normalized or normalized.lower() == "true":
+    clause = clause.strip().rstrip(";")
+    if not clause or clause.lower() == "true":
         return "true"
-    if normalized.lower() == "false":
+    if clause.lower() == "false":
         return "false"
+    # Split using the original clause so we can preserve the original ``&&``/``||``
+    # spelling; normalize a copy only for the Z3 parseability check.
     parts = (
-        [normalized]
-        if _has_top_level_disjunction(normalized)
-        else _split_top_level_conjuncts(normalized)
+        [clause]
+        if _has_top_level_disjunction(clause)
+        else _split_top_level_conjuncts(clause)
     )
     kept: list[str] = []
     for part in parts:
@@ -523,7 +525,8 @@ def _mumei_safe_clause(clause: str) -> str:
         if not part or part.lower() == "true":
             continue
         try:
-            tree = ast.parse(part, mode="eval")
+            normalized = _normalize_boolean_operators(part).strip()
+            tree = ast.parse(normalized, mode="eval")
             _ast_bool_to_z3(tree.body, {})
             kept.append(part)
         except (SyntaxError, ValueError, TypeError, KeyError):
