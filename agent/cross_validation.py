@@ -685,14 +685,25 @@ def validate_foreign_code(
     issues = _with_source_lines(_dedupe_issues([*llm_issues, *z3_issues]), source_line_map)
     if normalized_language == "solidity":
         issues.extend(_solidity_advisory_issues(code))
-    mumei_atoms = [
-        replace(
-            atom,
-            requires=_mumei_safe_clause(atom.requires),
-            ensures=_mumei_safe_clause(atom.ensures),
+
+    def _is_void_return_type(return_type: str) -> bool:
+        return return_type.strip().lower() in {"none", "void", "nonetype", "()", "unit"}
+
+    mumei_atoms: list[MumeiContractAtom] = []
+    for atom in atoms:
+        param_names = {param.name for param in atom.params}
+        requires_allowed = param_names | {"true", "false"}
+        allow_result = not _is_void_return_type(atom.return_type)
+        ensures_allowed = param_names | {"true", "false"}
+        if allow_result:
+            ensures_allowed |= {"result"}
+        mumei_atoms.append(
+            replace(
+                atom,
+                requires=_mumei_safe_clause(atom.requires, allowed_names=requires_allowed),
+                ensures=_mumei_safe_clause(atom.ensures, allowed_names=ensures_allowed),
+            )
         )
-        for atom in atoms
-    ]
     mumei_source = _atoms_to_mumei_module(mumei_atoms) if atoms else ""
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
