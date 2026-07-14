@@ -745,3 +745,20 @@ def test_solidity_contract_inference_preserves_bool_return_type() -> None:
     atoms = _infer_solidity_contracts(source)
     assert atoms[0].return_type == "bool"
     assert atoms[0].ensures == "result == true"
+
+
+def test_validate_foreign_code_void_functions_use_unit_body() -> None:
+    """Void foreign functions must produce a unit return type and a unit body."""
+    from agent.cross_validation import validate_foreign_code
+    from agent.config import AgentConfig
+
+    result = validate_foreign_code(
+        "package demo\nfunc noop() {}\n",
+        "go",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+    assert result.success is True
+    assert "-> ()" in result.mumei_source
+    assert "body: {\n        ()" in result.mumei_source
