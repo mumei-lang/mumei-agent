@@ -50,8 +50,24 @@ def _requires_clause(value: object) -> str:
     Small OSS models frequently emit ``false`` when there is no meaningful
     precondition.  A literal ``false`` precondition is unsatisfiable and would
     always refute the code, so treat it as the intended ``true`` (no
-    precondition).  Real postconditions that are ``false`` are left unchanged by
-    ``_contract_clause`` so that genuine contradictions can still be detected.
+    precondition).  This only applies to the LLM JSON payload path; other
+    call-sites can still use ``requires: false`` to express a genuine
+    unsatisfiable precondition.
+    """
+    clause = _contract_clause(value)
+    return "true" if clause.strip().lower() == "false" else clause
+
+
+def _ensures_clause(value: object) -> str:
+    """Normalize a postcondition clause from an LLM-extracted JSON payload.
+
+    Small OSS models also emit ``false`` for the postcondition when they cannot
+    infer a meaningful return value (or when the function has no return value).
+    A literal ``false`` postcondition is unsatisfiable and produces false
+    `refuted` verdicts for otherwise valid code, so treat it as the intended
+    ``true`` (no postcondition).  This only applies to the LLM JSON payload path;
+    manually-written specs and test fixtures can still use ``ensures: false`` to
+    express a genuine contradiction.
     """
     clause = _contract_clause(value)
     return "true" if clause.strip().lower() == "false" else clause
@@ -62,7 +78,7 @@ def _atom_from_mapping(value: dict[object, object], index: int) -> MumeiContract
     params = _params_from_value(value.get("params") or value.get("inputs"))
     return_type = _string_value(value, "return_type", "i64")
     requires = _requires_clause(value.get("requires"))
-    ensures = _contract_clause(value.get("ensures"))
+    ensures = _ensures_clause(value.get("ensures"))
     effects = _string_list(value.get("effects"))
     return MumeiContractAtom(
         name=name,
