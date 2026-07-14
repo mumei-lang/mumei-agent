@@ -843,3 +843,40 @@ def test_python_return_type_inference_with_nested_and_outer_returns() -> None:
     atoms = _infer_python_contracts(source)
     outer = [atom for atom in atoms if atom.name == "outer"][0]
     assert outer.return_type == "bool"
+
+
+def test_rust_contract_inference_handles_nested_generics_and_lifetimes() -> None:
+    """Rust generics with nested ``<>`` and lifetimes must be parsed correctly."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub async fn await_scoped_vec<F: Future<Output = T> + Send, T: Send + 'static>(\n"
+        "    f: impl IntoIterator<Item = F>,\n"
+        ") -> Result<Vec<T>, JoinError> {\n"
+        "    unsafe { TokioScope::scope_and_collect(|scope| { f.into_iter().map(|f| scope.spawn(f)).collect::<Vec<_>>() }) }\n"
+        "        .await\n"
+        "        .1\n"
+        "        .into_iter()\n"
+        "        .collect::<Result<Vec<_>, _>>()\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "await_scoped_vec"
+    assert atoms[0].return_type == "i64"
+    assert any(param.name == "f" for param in atoms[0].params)
+
+
+def test_rust_contract_inference_handles_fn_trait_bound_arrow() -> None:
+    """The ``->`` arrow in ``FnOnce() -> T`` bounds must not close the generic list."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub async fn await_blocking<F: FnOnce() -> T + Send, T: Send + 'static>(f: F) -> Result<T, JoinError> {\n"
+        "    unsafe { TokioScope::scope_and_collect(|scope| scope.spawn_blocking(f)) }.await.1.pop().unwrap()\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "await_blocking"
+    assert atoms[0].return_type == "i64"
