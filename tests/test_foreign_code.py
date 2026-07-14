@@ -812,3 +812,34 @@ def test_python_unannotated_float_return_uses_float_body() -> None:
     assert result.success is True
     assert "-> f64" in result.mumei_source
     assert "body: {\n        0.0" in result.mumei_source
+
+
+def test_python_return_type_inference_ignores_nested_function_returns() -> None:
+    """Return statements from nested functions must not influence the outer function."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    source = (
+        "def setup():\n"
+        "    def callback():\n"
+        "        return True\n"
+    )
+    atoms = _infer_python_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "setup"
+    assert atoms[0].return_type == "()"
+    assert "result == True" not in atoms[0].ensures
+
+
+def test_python_return_type_inference_with_nested_and_outer_returns() -> None:
+    """Outer returns take precedence when a nested function has a different type."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    source = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        return 42\n"
+        "    return True\n"
+    )
+    atoms = _infer_python_contracts(source)
+    outer = [atom for atom in atoms if atom.name == "outer"][0]
+    assert outer.return_type == "bool"

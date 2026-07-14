@@ -328,6 +328,23 @@ def _python_function_contract(function_node: ast.FunctionDef) -> tuple[str, str]
     return (f"result == {return_expr}" if return_expr else "true", return_expr)
 
 
+def _direct_returns(node: ast.AST) -> list[ast.Return]:
+    """Return ``Return`` nodes in ``node`` that are not inside nested functions/classes."""
+    returns: list[ast.Return] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(child, ast.Return):
+            returns.append(child)
+        returns.extend(_direct_returns(child))
+    return returns
+
+
+def _python_return_values(node: ast.AST) -> list[ast.expr]:
+    """Return values of ``Return`` nodes in ``node`` that are not inside nested functions/classes."""
+    return [ret.value for ret in _direct_returns(node) if ret.value is not None]
+
+
 def _python_mumei_return_type(function_node: ast.FunctionDef) -> str:
     """Return a Mumei return type for a Python function.
 
@@ -337,11 +354,7 @@ def _python_mumei_return_type(function_node: ast.FunctionDef) -> str:
     """
     if function_node.returns:
         return _mumei_return_type(ast.unparse(function_node.returns))
-    return_values = [
-        node.value
-        for node in ast.walk(function_node)
-        if isinstance(node, ast.Return) and node.value is not None
-    ]
+    return_values = _python_return_values(function_node)
     if not return_values:
         return "()"
     if len(return_values) == 1:
@@ -402,7 +415,7 @@ def _absolute_value_param(function_node: ast.FunctionDef) -> str:
     return_expr = _single_return_expr(function_node)
     if return_expr == f"abs({param})":
         return param
-    returns = [node for node in ast.walk(function_node) if isinstance(node, ast.Return)]
+    returns = _direct_returns(function_node)
     returned = {_normalized_python_return(node.value) for node in returns if node.value is not None}
     if {param, f"-{param}"}.issubset(returned):
         return param
@@ -417,7 +430,7 @@ def _normalized_python_return(node: ast.AST) -> str:
 
 
 def _single_return_expr(function_node: ast.FunctionDef) -> str:
-    returns = [node for node in ast.walk(function_node) if isinstance(node, ast.Return)]
+    returns = _direct_returns(function_node)
     if len(returns) != 1:
         return ""
     value = returns[0].value
