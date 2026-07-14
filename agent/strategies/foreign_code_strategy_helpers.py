@@ -393,12 +393,14 @@ def _mumei_type(type_name: str) -> str:
 
 def _default_literal(type_name: str) -> str:
     normalized = type_name.strip().lower()
-    if normalized == "bool":
+    if normalized in {"bool", "boolean"}:
         return "true"
-    if normalized == "string":
+    if normalized in {"str", "string"}:
         return '""'
     if normalized == "f64":
         return "0.0"
+    if normalized in {"()", "void", "unit", "none", "nonetype"}:
+        return "()"
     return "0"
 
 def _safe_identifier(value: str) -> str:

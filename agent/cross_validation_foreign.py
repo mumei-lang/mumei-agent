@@ -309,11 +309,16 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
             params = [ContractParam(name=arg.arg, type="i64") for arg in node.args.args]
             ensures, return_expr = _python_function_contract(node)
             requires = _safety_requires_for_expression(return_expr)
+            return_type = (
+                _mumei_return_type(ast.unparse(node.returns))
+                if node.returns
+                else "i64"
+            )
             atoms.append(
                 MumeiContractAtom(
                     name=_safe_identifier(node.name),
                     params=params,
-                    return_type="i64",
+                    return_type=return_type,
                     requires=requires,
                     ensures=ensures,
                 )
@@ -455,7 +460,7 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
                 params=params,
-                return_type="i64" if match.group("ret") else "bool",
+                return_type=_mumei_return_type(match.group("ret")),
                 requires=_rust_safety_requires_for_expression(safety_expr),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
@@ -482,7 +487,10 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
                 params=params,
-                return_type="i64" if returns_match else "bool",
+                return_type=_mumei_return_type(
+                    returns_match.group("ret") if returns_match else None,
+                    solidity_modifiers=True,
+                ),
                 requires=_solidity_safety_requires_for_expression(
                     raw_return_expr,
                     param_types,
@@ -679,7 +687,7 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
             MumeiContractAtom(
                 name=_safe_identifier(name),
                 params=params,
-                return_type="i64" if return_type else "bool",
+                return_type=_mumei_return_type(return_type),
                 requires=_go_safety_requires_for_expression(
                     safety_expr,
                     [param.name for param in params if param.name in nillable_names],
@@ -762,6 +770,41 @@ def _foreign_signature_type(type_text: str) -> str:
     if lowered in {"uint", "usize", "u8", "u16", "u32", "u64"}:
         return "u64"
     return "i64"
+
+
+# Solidity storage-location modifiers that can appear in return-type declarations.
+_SOLIDITY_MODIFIER_TOKENS = {"memory", "calldata", "storage", "payable", "indexed"}
+
+
+def _mumei_return_type(
+    type_text: str | None,
+    *,
+    solidity_modifiers: bool = False,
+) -> str:
+    """Map a foreign-language return-type string to a Mumei return type.
+
+    Void/unit/None annotations become ``()`` so the agent does not emit
+    ``result``-bearing postconditions for functions that do not return a value.
+    Tuple return types (e.g. Go ``(bool, error)``) are reduced to the first
+    component because the contract-inference path only models a single return
+    expression.
+    """
+    if not type_text:
+        return "()"
+    normalized = type_text.strip()
+    if normalized.startswith("(") and normalized.endswith(")"):
+        normalized = normalized[1:-1].strip()
+    if "," in normalized:
+        normalized = normalized.split(",")[0].strip()
+    if not normalized:
+        return "()"
+    lowered = normalized.lower()
+    if lowered in {"()", "void", "unit", "none", "nonetype"}:
+        return "()"
+    if solidity_modifiers:
+        tokens = [t for t in normalized.split() if t.lower() not in _SOLIDITY_MODIFIER_TOKENS]
+        normalized = " ".join(tokens) if tokens else normalized
+    return _foreign_signature_type(normalized)
 
 
 def _split_params(params_text: str) -> list[str]:

@@ -691,3 +691,74 @@ def test_cli_verify_foreign_writes_json_report(tmp_path: Path) -> None:
     assert result["success"] is True
     assert payload["success"] is True
     assert payload["specs"][0]["function_name"] == "add"
+
+
+def test_rust_contract_inference_preserves_bool_return_and_balanced_braces() -> None:
+    """Boolean Rust returns must keep ``bool`` and not be coerced to ``i64``."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = "pub fn flag(cond: bool) -> bool {\n    if cond { return true; }\n    false\n}\n"
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].return_type == "bool"
+    # Body extraction must reach the tail expression, not stop at the inner ``}``.
+    assert "result == false" in atoms[0].ensures
+
+
+def test_rust_contract_inference_preserves_unsigned_int_return_type() -> None:
+    """Rust ``usize``/``u64`` return types must map to Mumei ``u64``."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    atoms = _infer_rust_contracts("pub fn len(v: Vec<i64>) -> usize { v.len() }\n")
+    assert atoms[0].return_type == "u64"
+
+
+def test_go_contract_inference_preserves_bool_return_type() -> None:
+    """Go ``bool`` return types must map to Mumei ``bool``."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = "package demo\nfunc is_true() bool { return true }\n"
+    atoms = _infer_go_contracts(source)
+    assert atoms[0].return_type == "bool"
+    assert atoms[0].ensures == "result == true"
+
+
+def test_python_contract_inference_preserves_bool_return_type() -> None:
+    """Python ``-> bool`` annotations must map to Mumei ``bool``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    source = "def is_true() -> bool:\n    return True\n"
+    atoms = _infer_python_contracts(source)
+    assert atoms[0].return_type == "bool"
+    assert "result == True" in atoms[0].ensures
+
+
+def test_solidity_contract_inference_preserves_bool_return_type() -> None:
+    """Solidity ``returns (bool)`` must map to Mumei ``bool``."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = (
+        "function isPositive(uint256 x) public pure returns (bool) {\n"
+        "    return true;\n"
+        "}\n"
+    )
+    atoms = _infer_solidity_contracts(source)
+    assert atoms[0].return_type == "bool"
+    assert atoms[0].ensures == "result == true"
+
+
+def test_validate_foreign_code_void_functions_use_unit_body() -> None:
+    """Void foreign functions must produce a unit return type and a unit body."""
+    from agent.cross_validation import validate_foreign_code
+    from agent.config import AgentConfig
+
+    result = validate_foreign_code(
+        "package demo\nfunc noop() {}\n",
+        "go",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+    assert result.success is True
+    assert "-> ()" in result.mumei_source
+    assert "body: {\n        ()" in result.mumei_source
