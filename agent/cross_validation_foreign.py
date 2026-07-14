@@ -307,11 +307,7 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
             params = [ContractParam(name=arg.arg, type="i64") for arg in node.args.args]
             ensures, return_expr = _python_function_contract(node)
             requires = _safety_requires_for_expression(return_expr)
-            return_type = (
-                _mumei_return_type(ast.unparse(node.returns))
-                if node.returns
-                else "i64"
-            )
+            return_type = _python_mumei_return_type(node)
             atoms.append(
                 MumeiContractAtom(
                     name=_safe_identifier(node.name),
@@ -330,6 +326,72 @@ def _python_function_contract(function_node: ast.FunctionDef) -> tuple[str, str]
         return f"result >= 0 && (result == {abs_param} or result == -{abs_param})", abs_param
     return_expr = _single_return_expr(function_node)
     return (f"result == {return_expr}" if return_expr else "true", return_expr)
+
+
+def _python_mumei_return_type(function_node: ast.FunctionDef) -> str:
+    """Return a Mumei return type for a Python function.
+
+    Honors explicit annotations when present; otherwise infers the type from
+    the function's return values so unannotated boolean/comparison/string
+    returns do not get coerced to ``i64`` and then rejected by Mumei.
+    """
+    if function_node.returns:
+        return _mumei_return_type(ast.unparse(function_node.returns))
+    return_values = [
+        node.value
+        for node in ast.walk(function_node)
+        if isinstance(node, ast.Return) and node.value is not None
+    ]
+    if not return_values:
+        return "()"
+    if len(return_values) == 1:
+        return _mumei_type_from_python_value(return_values[0])
+    # Multiple returns: use the type if they all agree, otherwise default to i64.
+    types = {_mumei_type_from_python_value(value) for value in return_values}
+    return types.pop() if len(types) == 1 else "i64"
+
+
+def _mumei_type_from_python_value(value: ast.AST) -> str:
+    """Map a Python AST expression to a Mumei return type string."""
+    if isinstance(value, ast.Constant):
+        if isinstance(value.value, bool):
+            return "bool"
+        if isinstance(value.value, int):
+            return "i64"
+        if isinstance(value.value, float):
+            return "f64"
+        if isinstance(value.value, str):
+            return "string"
+        if value.value is None:
+            return "()"
+        return "i64"
+    if isinstance(value, ast.UnaryOp):
+        if isinstance(value.op, ast.Not):
+            return "bool"
+        return _mumei_type_from_python_value(value.operand)
+    if isinstance(value, (ast.BoolOp, ast.Compare)):
+        return "bool"
+    if isinstance(value, ast.BinOp):
+        if isinstance(value.op, ast.Div):
+            return "f64"
+        left = _mumei_type_from_python_value(value.left)
+        right = _mumei_type_from_python_value(value.right)
+        if isinstance(value.op, ast.Add) and left == "string" and right == "string":
+            return "string"
+        if left == "f64" or right == "f64":
+            return "f64"
+        return "i64"
+    if isinstance(value, ast.IfExp):
+        body = _mumei_type_from_python_value(value.body)
+        orelse = _mumei_type_from_python_value(value.orelse)
+        return body if body == orelse else "i64"
+    if isinstance(value, ast.Call):
+        func = value.func
+        if isinstance(func, ast.Name) and func.id == "isinstance":
+            return "bool"
+        if isinstance(func, ast.Name) and func.id in {"len", "abs"}:
+            return "i64"
+    return "i64"
 
 
 def _absolute_value_param(function_node: ast.FunctionDef) -> str:

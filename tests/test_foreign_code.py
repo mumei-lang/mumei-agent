@@ -762,3 +762,53 @@ def test_validate_foreign_code_void_functions_use_unit_body() -> None:
     assert result.success is True
     assert "-> ()" in result.mumei_source
     assert "body: {\n        ()" in result.mumei_source
+
+
+def test_python_unannotated_bool_return_type() -> None:
+    """Unannotated Python functions returning ``True``/``False`` must map to ``bool``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def is_true():\n    return True\n")
+    assert atoms[0].return_type == "bool"
+    assert "result == True" in atoms[0].ensures
+
+
+def test_python_unannotated_comparison_return_type() -> None:
+    """Unannotated Python comparison returns must map to ``bool``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def is_positive(x):\n    return x > 0\n")
+    assert atoms[0].return_type == "bool"
+
+
+def test_python_unannotated_isinstance_return_type() -> None:
+    """Unannotated Python ``isinstance`` calls return ``bool``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def is_int(x):\n    return isinstance(x, int)\n")
+    assert atoms[0].return_type == "bool"
+
+
+def test_python_unannotated_string_return_type() -> None:
+    """Unannotated Python string constants return ``string``."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    atoms = _infer_python_contracts("def greeting():\n    return 'hi'\n")
+    assert atoms[0].return_type == "string"
+
+
+def test_python_unannotated_float_return_uses_float_body() -> None:
+    """Unannotated Python float returns must map to ``f64`` and a ``0.0`` body."""
+    from agent.cross_validation import validate_foreign_code
+    from agent.config import AgentConfig
+
+    result = validate_foreign_code(
+        "def pi():\n    return 3.14\n",
+        "python",
+        config=AgentConfig(api_key=""),
+        use_llm=False,
+        run_mumei=False,
+    )
+    assert result.success is True
+    assert "-> f64" in result.mumei_source
+    assert "body: {\n        0.0" in result.mumei_source
