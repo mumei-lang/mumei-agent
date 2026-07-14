@@ -307,11 +307,7 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
             params = [ContractParam(name=arg.arg, type="i64") for arg in node.args.args]
             ensures, return_expr = _python_function_contract(node)
             requires = _safety_requires_for_expression(return_expr)
-            return_type = (
-                _mumei_return_type(ast.unparse(node.returns))
-                if node.returns
-                else "i64"
-            )
+            return_type = _python_mumei_return_type(node)
             atoms.append(
                 MumeiContractAtom(
                     name=_safe_identifier(node.name),
@@ -332,6 +328,85 @@ def _python_function_contract(function_node: ast.FunctionDef) -> tuple[str, str]
     return (f"result == {return_expr}" if return_expr else "true", return_expr)
 
 
+def _direct_returns(node: ast.AST) -> list[ast.Return]:
+    """Return ``Return`` nodes in ``node`` that are not inside nested functions/classes."""
+    returns: list[ast.Return] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(child, ast.Return):
+            returns.append(child)
+        returns.extend(_direct_returns(child))
+    return returns
+
+
+def _python_return_values(node: ast.AST) -> list[ast.expr]:
+    """Return values of ``Return`` nodes in ``node`` that are not inside nested functions/classes."""
+    return [ret.value for ret in _direct_returns(node) if ret.value is not None]
+
+
+def _python_mumei_return_type(function_node: ast.FunctionDef) -> str:
+    """Return a Mumei return type for a Python function.
+
+    Honors explicit annotations when present; otherwise infers the type from
+    the function's return values so unannotated boolean/comparison/string
+    returns do not get coerced to ``i64`` and then rejected by Mumei.
+    """
+    if function_node.returns:
+        return _mumei_return_type(ast.unparse(function_node.returns))
+    return_values = _python_return_values(function_node)
+    if not return_values:
+        return "()"
+    if len(return_values) == 1:
+        return _mumei_type_from_python_value(return_values[0])
+    # Multiple returns: use the type if they all agree, otherwise default to i64.
+    types = {_mumei_type_from_python_value(value) for value in return_values}
+    return types.pop() if len(types) == 1 else "i64"
+
+
+def _mumei_type_from_python_value(value: ast.AST) -> str:
+    """Map a Python AST expression to a Mumei return type string."""
+    if isinstance(value, ast.Constant):
+        if isinstance(value.value, bool):
+            return "bool"
+        if isinstance(value.value, int):
+            return "i64"
+        if isinstance(value.value, float):
+            return "f64"
+        if isinstance(value.value, str):
+            return "string"
+        if value.value is None:
+            return "()"
+        return "i64"
+    if isinstance(value, ast.UnaryOp):
+        if isinstance(value.op, ast.Not):
+            return "bool"
+        return _mumei_type_from_python_value(value.operand)
+    if isinstance(value, (ast.BoolOp, ast.Compare)):
+        return "bool"
+    if isinstance(value, ast.BinOp):
+        if isinstance(value.op, ast.Div):
+            return "f64"
+        left = _mumei_type_from_python_value(value.left)
+        right = _mumei_type_from_python_value(value.right)
+        if isinstance(value.op, ast.Add) and left == "string" and right == "string":
+            return "string"
+        if left == "f64" or right == "f64":
+            return "f64"
+        return "i64"
+    if isinstance(value, ast.IfExp):
+        body = _mumei_type_from_python_value(value.body)
+        orelse = _mumei_type_from_python_value(value.orelse)
+        return body if body == orelse else "i64"
+    if isinstance(value, ast.Call):
+        func = value.func
+        if isinstance(func, ast.Name) and func.id == "isinstance":
+            return "bool"
+        if isinstance(func, ast.Name) and func.id in {"len", "abs"}:
+            return "i64"
+    return "i64"
+
+
 def _absolute_value_param(function_node: ast.FunctionDef) -> str:
     params = [arg.arg for arg in function_node.args.args]
     if len(params) != 1:
@@ -340,7 +415,7 @@ def _absolute_value_param(function_node: ast.FunctionDef) -> str:
     return_expr = _single_return_expr(function_node)
     if return_expr == f"abs({param})":
         return param
-    returns = [node for node in ast.walk(function_node) if isinstance(node, ast.Return)]
+    returns = _direct_returns(function_node)
     returned = {_normalized_python_return(node.value) for node in returns if node.value is not None}
     if {param, f"-{param}"}.issubset(returned):
         return param
@@ -355,7 +430,7 @@ def _normalized_python_return(node: ast.AST) -> str:
 
 
 def _single_return_expr(function_node: ast.FunctionDef) -> str:
-    returns = [node for node in ast.walk(function_node) if isinstance(node, ast.Return)]
+    returns = _direct_returns(function_node)
     if len(returns) != 1:
         return ""
     value = returns[0].value
@@ -439,25 +514,244 @@ def _go_nil_dereference_values(
     return _dedupe_strings(values)
 
 
+def _advance_past_rust_tick(source: str, i: int) -> int:
+    """Skip a Rust char literal or lifetime starting at ``source[i] == "'"``.
+
+    Char literals are ``'x'`` or escaped forms such as ``'\\''``.  Lifetimes
+    such as ``'a`` or ``'static`` have no closing single quote.
+    """
+    if source[i] != "'":
+        return i + 1
+    if i + 1 < len(source) and source[i + 1] == "\\":
+        # escaped char literal: '\?', '\'', '\\', etc.
+        j = i + 2
+        while j < len(source):
+            if source[j] == "\\":
+                j += 2
+                continue
+            if source[j] == "'":
+                return j + 1
+            j += 1
+        return len(source)
+    if i + 2 < len(source) and source[i + 2] == "'" and source[i + 1] != "\\":
+        # plain char literal 'x'
+        return i + 3
+    # lifetime 'name
+    j = i + 1
+    while j < len(source) and (source[j].isalnum() or source[j] == "_"):
+        j += 1
+    return j
+
+
+def _skip_rust_whitespace_and_comments(source: str, start: int) -> int:
+    i = start
+    while i < len(source):
+        ch = source[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if source[i : i + 2] == "//":
+            j = source.find("\n", i + 2)
+            i = len(source) if j == -1 else j
+            continue
+        if source[i : i + 2] == "/*":
+            j = source.find("*/", i + 2)
+            i = len(source) if j == -1 else j + 2
+            continue
+        break
+    return i
+
+
+def _find_rust_balanced(
+    source: str, start: int, open_char: str, close_char: str
+) -> int | None:
+    """Return the index of the matching ``close_char`` for ``source[start]``.
+
+    Skips Rust line/block comments and string/char literals.  When matching
+    ``<...>`` pairs, the ``>`` in ``->`` and ``=>`` tokens is ignored so trait
+    bounds such as ``FnOnce() -> T`` do not close the generic list early.
+    """
+    if start >= len(source) or source[start] != open_char:
+        return None
+    depth = 1
+    i = start + 1
+    while i < len(source):
+        ch = source[i]
+        if ch == "/" and i + 1 < len(source):
+            if source[i + 1] == "/":
+                j = source.find("\n", i + 2)
+                i = len(source) if j == -1 else j
+                continue
+            if source[i + 1] == "*":
+                j = source.find("*/", i + 2)
+                i = len(source) if j == -1 else j + 2
+                continue
+        if ch == '"':
+            i += 1
+            while i < len(source):
+                if source[i] == "\\":
+                    i += 2
+                    continue
+                if source[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "'":
+            i = _advance_past_rust_tick(source, i)
+            continue
+        if close_char == ">" and ch == ">" and i > 0 and source[i - 1] in {"-", "="}:
+            i += 1
+            continue
+        if ch == open_char:
+            depth += 1
+        elif ch == close_char:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _find_rust_body_start(source: str, start: int) -> int | None:
+    """Return the index of the next ``{`` or ``;`` outside comments/strings."""
+    i = start
+    while i < len(source):
+        ch = source[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if source[i : i + 2] == "//":
+            j = source.find("\n", i + 2)
+            i = len(source) if j == -1 else j
+            continue
+        if source[i : i + 2] == "/*":
+            j = source.find("*/", i + 2)
+            i = len(source) if j == -1 else j + 2
+            continue
+        if ch == '"':
+            i += 1
+            while i < len(source):
+                if source[i] == "\\":
+                    i += 2
+                    continue
+                if source[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "'":
+            i = _advance_past_rust_tick(source, i)
+            continue
+        if ch in {"{", ";"}:
+            return i
+        i += 1
+    return None
+
+
+def _strip_rust_where_clause(return_text: str) -> str:
+    """Remove a trailing ``where`` clause from a Rust return type."""
+    depth = 0
+    in_string = False
+    quote = ""
+    i = 0
+    while i < len(return_text):
+        ch = return_text[i]
+        if in_string:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                in_string = False
+            i += 1
+            continue
+        if ch in {'"', "'"}:
+            in_string = True
+            quote = ch
+            i += 1
+            continue
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            # Ignore -> and => tokens.
+            if not (i > 0 and return_text[i - 1] in {"-", "="}):
+                depth = max(0, depth - 1)
+        if depth == 0 and return_text.startswith("where", i):
+            after = i + 5
+            if (after >= len(return_text) or return_text[after].isspace()) and (
+                i == 0 or return_text[i - 1].isspace()
+            ):
+                return return_text[:i].strip()
+        i += 1
+    return return_text
+
+
+def _rust_parse_signature(
+    source: str, name_end: int
+) -> tuple[str, str, int] | None:
+    """Parse a Rust function signature starting just after the function name.
+
+    Returns ``(params_text, return_type, body_start)``.  ``return_type`` may be an
+    empty string if the function returns ``()``.  Returns ``None`` when the text
+    at ``name_end`` is not a valid function signature.
+    """
+    i = _skip_rust_whitespace_and_comments(source, name_end)
+    if i >= len(source):
+        return None
+    if source[i] == "<":
+        generic_end = _find_rust_balanced(source, i, "<", ">")
+        if generic_end is None:
+            return None
+        i = _skip_rust_whitespace_and_comments(source, generic_end + 1)
+        if i >= len(source):
+            return None
+    if source[i] != "(":
+        return None
+    params_end = _find_rust_balanced(source, i, "(", ")")
+    if params_end is None:
+        return None
+    params_text = source[i + 1 : params_end]
+    i = _skip_rust_whitespace_and_comments(source, params_end + 1)
+    if i >= len(source):
+        return None
+    return_type = ""
+    if source.startswith("->", i):
+        i += 2
+        i = _skip_rust_whitespace_and_comments(source, i)
+        body_start = _find_rust_body_start(source, i)
+        if body_start is None:
+            return None
+        if source[body_start] == ";":
+            return params_text, "", body_start
+        return_type = _strip_rust_where_clause(source[i : body_start].strip())
+    elif source[i] == "{":
+        return params_text, "", i
+    else:
+        return None
+    return params_text, return_type, body_start
+
+
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
-    pattern = re.compile(
+    name_pattern = re.compile(
         r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
-        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-        r"(?:<[^>]+>)?\s*"
-        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?\s*\{",
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*",
         flags=re.DOTALL,
     )
-    for match in pattern.finditer(code):
-        params = _params_from_signature(match.group("params"))
-        body = _balanced_brace_body(code, match.end() - 1)
+    for match in name_pattern.finditer(code):
+        parsed = _rust_parse_signature(code, match.end())
+        if parsed is None:
+            continue
+        params_text, return_type, body_start = parsed
+        body = _balanced_brace_body(code, body_start)
+        params = _params_from_signature(params_text)
         return_expr = _last_expression(body)
         safety_expr = _last_expression(_strip_go_rust_literals_and_comments(body))
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
                 params=params,
-                return_type=_mumei_return_type(match.group("ret")),
+                return_type=_mumei_return_type(return_type),
                 requires=_rust_safety_requires_for_expression(safety_expr),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
