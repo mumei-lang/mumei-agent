@@ -250,4 +250,6 @@ def _default_literal(return_type: str) -> str:
         return "true"
     if normalized in {"str", "string"}:
         return '""'
+    if normalized in {"()", "void", "unit", "none", "nonetype"}:
+        return "()"
     return "0"
