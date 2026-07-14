@@ -542,7 +542,10 @@ def _mumei_safe_clause(
                 referenced = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
                 if referenced - allowed:
                     continue
-            kept.append(part)
+            # Mumei tokenizes ``===`` / ``!==`` incorrectly (as ``== =`` / ``!= =``),
+            # so rewrite strict equality/inequality to the operators mumei expects
+            # while preserving the original ``&&`` / ``||`` spelling.
+            kept.append(part.replace("===", "==").replace("!==", "!="))
         except (SyntaxError, ValueError, TypeError, KeyError):
             continue
     if not kept:
