@@ -150,6 +150,7 @@ from agent.cross_validation_z3 import (
     _detect_ambiguities,
     _detect_contradictions,
     _detect_overconstraints,
+    _mumei_safe_clause,
     _normalize_requirement_fragment,
     _split_requirement_fragments,
     _spec_has_matching_atom,
@@ -684,7 +685,15 @@ def validate_foreign_code(
     issues = _with_source_lines(_dedupe_issues([*llm_issues, *z3_issues]), source_line_map)
     if normalized_language == "solidity":
         issues.extend(_solidity_advisory_issues(code))
-    mumei_source = _atoms_to_mumei_module(atoms) if atoms else ""
+    mumei_atoms = [
+        replace(
+            atom,
+            requires=_mumei_safe_clause(atom.requires),
+            ensures=_mumei_safe_clause(atom.ensures),
+        )
+        for atom in atoms
+    ]
+    mumei_source = _atoms_to_mumei_module(mumei_atoms) if atoms else ""
     verification: dict[str, object] | None = None
     if run_mumei and atoms:
         skipped_clause_warnings = [
@@ -693,7 +702,7 @@ def validate_foreign_code(
             if warning.startswith("Skipped unsupported Z3 clause:")
         ]
         verification, mumei_issues, mumei_warnings = _verify_atoms_with_mumei(
-            atoms,
+            mumei_atoms,
             config,
             skipped_clause_warnings=skipped_clause_warnings,
         )
@@ -728,6 +737,23 @@ def validate_foreign_code(
         warnings=warnings,
     )
     success = verdict == "verified"
+    if success:
+        mumei_genuinely_failed = verification is not None and _mumei_report_has_failures(
+            verification.get("report")
+        )
+        substantive_issues: list[CrossValidationIssue] = []
+        for issue in issues:
+            if _is_unsubstantiated_unsat_claim(
+                issue,
+                satisfiable=satisfiable,
+                mumei_genuinely_failed=mumei_genuinely_failed,
+            ):
+                warnings.append(
+                    f"Advisory issue omitted from verified result: [{issue.kind}] {issue.message}"
+                )
+            else:
+                substantive_issues.append(issue)
+        issues = substantive_issues
     return ForeignCodeValidationResult(
         success=success,
         verdict=verdict,
