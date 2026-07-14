@@ -218,7 +218,7 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
                 code,
                 re.compile(
                     r"(?:export\s+)?(?:const|let)\s+"
-                    r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+                    r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*[^=]+?)?\s*=\s*"
                     r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
                     r"(?::\s*(?P<ret>[^=]+?))?\s*=>",
                     flags=re.DOTALL,
@@ -630,7 +630,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
         ),
         re.compile(
             r"(?:export\s+)?(?:const|let)\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*(?P<vartype>[^=]+?))?\s*=\s*"
             r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
             r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*"
             r"(?P<body>\{.*?\}|[^;\n]+)",

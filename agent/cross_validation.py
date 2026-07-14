@@ -646,7 +646,7 @@ def _is_function_name_in_source(name: str, code: str, language: str) -> bool:
     elif lang in {"typescript", "javascript"}:
         patterns = [
             rf"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+{esc}\s*[<(]",
-            rf"(?m)^\s*(?:export\s+)?(?:const|let|var)\s+{esc}\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::\s*[^{{=]+)?\s*=>",
+            rf"(?m)^\s*(?:export\s+)?(?:const|let|var)\s+{esc}\s*(?::\s*[^=]+?)?\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::\s*[^{{=]+)?\s*=>",
             rf"(?:^|[{{;])\s*(?:async\s+)?(?:abstract\s+)?(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+)*{esc}\s*\((?:[^()]|\([^)]*\))*\)\s*(?::\s*[^{{=]+)?\s*\{{",
         ]
     elif lang == "solidity":
