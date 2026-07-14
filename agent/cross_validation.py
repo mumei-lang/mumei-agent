@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, replace
 import os
@@ -632,6 +633,62 @@ def detect_intent_drift(
     return replace(report, report=_format_intent_drift_report(report, lang=lang))
 
 
+def _is_function_name_in_source(name: str, code: str, language: str) -> bool:
+    """Return True when ``name`` is declared as a function/method in ``code``."""
+    esc = re.escape(name)
+    lang = _normalize_foreign_language(language)
+    if lang == "python":
+        patterns = [rf"(?m)^\s*(?:async\s+)?def\s+{esc}\s*\("]
+    elif lang == "rust":
+        patterns = [rf"(?m)^\s*(?:pub\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+{esc}\s*[<(]"]
+    elif lang == "go":
+        patterns = [rf"(?m)^\s*func\s+(?:\([^)]*\)\s*)?{esc}\s*\("]
+    elif lang in {"typescript", "javascript"}:
+        patterns = [
+            rf"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+{esc}\s*[<(]",
+            rf"(?m)^\s*(?:export\s+)?(?:const|let|var)\s+{esc}\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::\s*[^{{=]+)?\s*=>",
+            rf"(?:^|[{{;])\s*(?:async\s+)?(?:abstract\s+)?(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+)*{esc}\s*\((?:[^()]|\([^)]*\))*\)\s*(?::\s*[^{{=]+)?\s*\{{",
+        ]
+    elif lang == "solidity":
+        patterns = [rf"\bfunction\s+{esc}\s*\("]
+    else:
+        return False
+    return any(re.search(pat, code, re.MULTILINE) is not None for pat in patterns)
+
+
+def _filter_atoms_to_source(
+    atoms: list[MumeiContractAtom],
+    code: str,
+    source_line_map: dict[str, int],
+    language: str,
+) -> tuple[list[MumeiContractAtom], list[str]]:
+    """Drop inferred atoms whose names cannot be found in the source code.
+
+    LLMs (especially small OSS models) sometimes invent functions for files
+    that contain only types/constants.  Prefer the regex-based source-line map,
+    and fall back to a language-specific function-declaration search for cases
+    the line-map misses (e.g. class methods, nested object methods).
+    """
+    if not atoms:
+        return atoms, []
+    allowed = set(source_line_map.keys())
+    kept: list[MumeiContractAtom] = []
+    dropped: list[str] = []
+    for atom in atoms:
+        if atom.name in allowed or _is_function_name_in_source(
+            atom.name, code, language
+        ):
+            kept.append(atom)
+        else:
+            dropped.append(atom.name)
+    warnings: list[str] = []
+    if dropped:
+        warnings.append(
+            f"Dropped inferred atom(s) not found in source: {', '.join(dropped)}"
+        )
+    return kept, warnings
+
+
 def validate_foreign_code(
     code: str,
     language: str,
@@ -677,6 +734,11 @@ def validate_foreign_code(
             atoms = llm_atoms
     elif use_llm:
         warnings.append("LLM contract inference skipped because LLM_API_KEY/OPENAI_API_KEY is not set.")
+
+    atoms, atom_filter_warnings = _filter_atoms_to_source(
+        atoms, code, source_line_map, normalized_language
+    )
+    warnings.extend(atom_filter_warnings)
 
     if not atoms:
         warnings.append("No functions were inferable from the input code.")
