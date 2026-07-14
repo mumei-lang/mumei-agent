@@ -497,7 +497,10 @@ def _clause_to_z3(
     return expressions, warnings
 
 
-def _mumei_safe_clause(clause: str) -> str:
+def _mumei_safe_clause(
+    clause: str,
+    allowed_names: set[str] | None = None,
+) -> str:
     """Return a clause string that mumei can parse by dropping unsupported fragments.
 
     Z3 already knows which fragments it can lower.  Fragments that Z3 cannot
@@ -506,6 +509,12 @@ def _mumei_safe_clause(clause: str) -> str:
     emitting the ``.mm`` module.  This prevents ``mumei verify`` false
     refutations while still preserving the lowerable arithmetic/comparison
     clauses that mumei can trust.
+
+    If ``allowed_names`` is provided, conjuncts that reference identifiers outside
+    that set (and outside the always-allowed boolean literals ``true``/``false``)
+    are also dropped.  This prevents hallucinated variables such as ``error`` or
+    ``result`` in the wrong clause/return-type context from reaching mumei and
+    producing false refutations.
     """
     clause = clause.strip().rstrip(";")
     if not clause or clause.lower() == "true":
@@ -519,6 +528,7 @@ def _mumei_safe_clause(clause: str) -> str:
         if _has_top_level_disjunction(clause)
         else _split_top_level_conjuncts(clause)
     )
+    allowed = allowed_names | {"true", "false"} if allowed_names else None
     kept: list[str] = []
     for part in parts:
         part = part.strip()
@@ -528,6 +538,10 @@ def _mumei_safe_clause(clause: str) -> str:
             normalized = _normalize_boolean_operators(part).strip()
             tree = ast.parse(normalized, mode="eval")
             _ast_bool_to_z3(tree.body, {})
+            if allowed is not None:
+                referenced = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+                if referenced - allowed:
+                    continue
             kept.append(part)
         except (SyntaxError, ValueError, TypeError, KeyError):
             continue
