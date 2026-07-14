@@ -199,8 +199,7 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
         return _infer_regex_source_line_map(
             code,
             re.compile(
-                r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-                r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?\s*\{",
+                r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
                 flags=re.DOTALL,
             ),
         )
@@ -692,7 +691,8 @@ def _go_function_declarations(code: str) -> list[tuple[str, str, str, str]]:
     pattern = re.compile(
         r"func\s+(?:(?P<receiver>\([^)]*\))\s*)?"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-        r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?\s*\{",
+        r"\((?P<params>[^)]*)\)\s*"
+        r"(?P<ret>(?:\([^)]*\)|[^{]+))?\s*\{",
         flags=re.DOTALL,
     )
     declarations: list[tuple[str, str, str, str]] = []
