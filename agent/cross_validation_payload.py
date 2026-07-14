@@ -44,11 +44,24 @@ def _atoms_from_payload(payload: dict[str, object]) -> list[MumeiContractAtom]:
     return atoms
 
 
+def _requires_clause(value: object) -> str:
+    """Normalize a precondition clause from an LLM-extracted JSON payload.
+
+    Small OSS models frequently emit ``false`` when there is no meaningful
+    precondition.  A literal ``false`` precondition is unsatisfiable and would
+    always refute the code, so treat it as the intended ``true`` (no
+    precondition).  Real postconditions that are ``false`` are left unchanged by
+    ``_contract_clause`` so that genuine contradictions can still be detected.
+    """
+    clause = _contract_clause(value)
+    return "true" if clause.strip().lower() == "false" else clause
+
+
 def _atom_from_mapping(value: dict[object, object], index: int) -> MumeiContractAtom:
     name = _safe_identifier(_string_value(value, "name", f"cross_validation_{index}"))
     params = _params_from_value(value.get("params") or value.get("inputs"))
     return_type = _string_value(value, "return_type", "i64")
-    requires = _contract_clause(value.get("requires"))
+    requires = _requires_clause(value.get("requires"))
     ensures = _contract_clause(value.get("ensures"))
     effects = _string_list(value.get("effects"))
     return MumeiContractAtom(
