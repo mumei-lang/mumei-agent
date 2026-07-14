@@ -227,6 +227,30 @@ def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
     assert result.inferred_atoms[0].return_type == "bool"
 
 
+def test_validate_foreign_code_typescript_const_with_type_annotation() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+    source = "type Auth = (req: Request) => { username: string; password: string } | undefined\nexport const auth: Auth = (req: Request) => {\n  return { username: 'a', password: 'b' }\n}\n"
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            source,
+            "typescript",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+
+    assert result.success is True
+    assert result.inferred_atoms[0].name == "auth"
+    assert result.inferred_atoms[0].params[0].type == "i64"
+    assert result.inferred_atoms[0].return_type == "i64"
+
+
 def test_validate_foreign_code_go_ignores_package_selector_for_nil_contract() -> None:
     mumei = MagicMock()
     mumei.verify.return_value = {

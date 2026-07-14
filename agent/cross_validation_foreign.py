@@ -189,9 +189,11 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
         return _infer_regex_source_line_map(
             code,
             re.compile(
-                r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
-                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
-                r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?",
+                r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
+                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+                r"(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\s*"
+                r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
+                r"(?:->\s*(?P<ret>[^{;\n]+?))?\s*\{",
                 flags=re.DOTALL,
             ),
         )
@@ -218,7 +220,7 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
                 code,
                 re.compile(
                     r"(?:export\s+)?(?:const|let)\s+"
-                    r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+                    r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*[^=]+?)?\s*=\s*"
                     r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
                     r"(?::\s*(?P<ret>[^=]+?))?\s*=>",
                     flags=re.DOTALL,
@@ -734,7 +736,7 @@ def _rust_parse_signature(
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     name_pattern = re.compile(
-        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*",
         flags=re.DOTALL,
     )
@@ -932,7 +934,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
         ),
         re.compile(
             r"(?:export\s+)?(?:const|let)\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*(?P<vartype>[^=]+?))?\s*=\s*"
             r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
             r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*"
             r"(?P<body>\{.*?\}|[^;\n]+)",
