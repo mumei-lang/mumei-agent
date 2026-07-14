@@ -496,6 +496,43 @@ def _clause_to_z3(
             warnings.append(f"Skipped unsupported Z3 clause: {part}")
     return expressions, warnings
 
+
+def _mumei_safe_clause(clause: str) -> str:
+    """Return a clause string that mumei can parse by dropping unsupported fragments.
+
+    Z3 already knows which fragments it can lower.  Fragments that Z3 cannot
+    lower are likely to use foreign syntax (``len(x)``, ``for all``, ``new T``,
+    method calls, etc.) that mumei will also reject, so remove them before
+    emitting the ``.mm`` module.  This prevents ``mumei verify`` false
+    refutations while still preserving the lowerable arithmetic/comparison
+    clauses that mumei can trust.
+    """
+    normalized = _normalize_boolean_operators(clause).strip().rstrip(";")
+    if not normalized or normalized.lower() == "true":
+        return "true"
+    if normalized.lower() == "false":
+        return "false"
+    parts = (
+        [normalized]
+        if _has_top_level_disjunction(normalized)
+        else _split_top_level_conjuncts(normalized)
+    )
+    kept: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part or part.lower() == "true":
+            continue
+        try:
+            tree = ast.parse(part, mode="eval")
+            _ast_bool_to_z3(tree.body, {})
+            kept.append(part)
+        except (SyntaxError, ValueError, TypeError, KeyError):
+            continue
+    if not kept:
+        return "true"
+    return " && ".join(kept)
+
+
 def _ast_bool_to_z3(
     node: ast.AST,
     symbols: dict[str, z3.IntNumRef | z3.ArithRef],
