@@ -731,7 +731,14 @@ def validate_foreign_code(
         )
         warnings.extend(llm_warnings)
         if llm_atoms:
-            atoms = llm_atoms
+            # Merge LLM atoms after the deterministic extractor, deduplicating by
+            # name.  This prevents an LLM that hallucinates entirely different
+            # function names from discarding valid pattern-extracted atoms.
+            seen = {atom.name for atom in atoms}
+            for atom in llm_atoms:
+                if atom.name not in seen:
+                    atoms.append(atom)
+                    seen.add(atom.name)
     elif use_llm:
         warnings.append("LLM contract inference skipped because LLM_API_KEY/OPENAI_API_KEY is not set.")
 

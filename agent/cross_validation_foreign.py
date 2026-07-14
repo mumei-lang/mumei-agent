@@ -189,9 +189,11 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
         return _infer_regex_source_line_map(
             code,
             re.compile(
-                r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
-                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
-                r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?",
+                r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
+                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+                r"(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\s*"
+                r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
+                r"(?:->\s*(?P<ret>[^{;\n]+?))?\s*\{",
                 flags=re.DOTALL,
             ),
         )
@@ -436,16 +438,17 @@ def _go_nil_dereference_values(
 
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
-    pattern = re.compile(
-        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+    header = re.compile(
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-        r"(?:<[^>]+>)?\s*"
-        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?\s*\{(?P<body>.*?)\}",
+        r"(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\s*"
+        r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
+        r"(?:->\s*(?P<ret>[^{;\n]+?))?\s*\{",
         flags=re.DOTALL,
     )
-    for match in pattern.finditer(code):
+    for match in header.finditer(code):
         params = _params_from_signature(match.group("params"))
-        body = match.group("body")
+        body = _balanced_brace_body(code, match.end() - 1)
         return_expr = _last_expression(body)
         safety_expr = _last_expression(_strip_go_rust_literals_and_comments(body))
         atoms.append(
