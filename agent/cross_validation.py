@@ -661,32 +661,95 @@ def _filter_atoms_to_source(
     code: str,
     source_line_map: dict[str, int],
     language: str,
-) -> tuple[list[MumeiContractAtom], list[str]]:
+) -> tuple[list[MumeiContractAtom], list[MumeiContractAtom], list[str]]:
     """Drop inferred atoms whose names cannot be found in the source code.
 
     LLMs (especially small OSS models) sometimes invent functions for files
     that contain only types/constants.  Prefer the regex-based source-line map,
     and fall back to a language-specific function-declaration search for cases
     the line-map misses (e.g. class methods, nested object methods).
+
+    Returns the kept atoms, the list of dropped atoms (so any per-atom issues
+    tied to those dropped atoms can also be discarded), and warnings.
     """
     if not atoms:
-        return atoms, []
+        return atoms, [], []
     allowed = set(source_line_map.keys())
     kept: list[MumeiContractAtom] = []
-    dropped: list[str] = []
+    dropped: list[MumeiContractAtom] = []
     for atom in atoms:
         if atom.name in allowed or _is_function_name_in_source(
             atom.name, code, language
         ):
             kept.append(atom)
         else:
-            dropped.append(atom.name)
+            dropped.append(atom)
     warnings: list[str] = []
     if dropped:
         warnings.append(
-            f"Dropped inferred atom(s) not found in source: {', '.join(dropped)}"
+            f"Dropped inferred atom(s) not found in source: {', '.join(sorted({atom.name for atom in dropped}))}"
         )
-    return kept, warnings
+    return kept, dropped, warnings
+
+
+def _filter_issues_to_atoms(
+    issues: list[CrossValidationIssue],
+    kept_atoms: list[MumeiContractAtom],
+    dropped_atoms: list[MumeiContractAtom],
+) -> list[CrossValidationIssue]:
+    """Drop issues that refer to atoms which were filtered out of the source.
+
+    Issues may have an explicit ``location`` or may mention the atom name in
+    the message/evidence.  When an unsatisfiability-style issue does not name
+    the atom, we also match it by the problematic clause (``requires``/``ensures``)
+    so that hallucinated atoms like ``AlgorithmTypes`` do not leave dangling
+    overconstraint issues behind.
+    """
+    if not dropped_atoms:
+        return issues
+    kept_names = {atom.name for atom in kept_atoms}
+    dropped_names = {atom.name for atom in dropped_atoms}
+    all_names = kept_names | dropped_names
+
+    def _atom_clauses(atoms: list[MumeiContractAtom]) -> set[str]:
+        return {
+            clause
+            for atom in atoms
+            for clause in (atom.requires, atom.ensures)
+            if clause and clause.lower() != "true"
+        }
+
+    kept_clauses = _atom_clauses(kept_atoms)
+    dropped_clauses = _atom_clauses(dropped_atoms)
+    filtered: list[CrossValidationIssue] = []
+    for issue in issues:
+        loc = issue.location.strip()
+        if loc in dropped_names:
+            continue
+        if loc in kept_names:
+            filtered.append(issue)
+            continue
+        text = f"{issue.message} {issue.evidence}"
+        mentioned = {name for name in all_names if re.search(rf"\b{re.escape(name)}\b", text)}
+        if mentioned & kept_names:
+            filtered.append(issue)
+            continue
+        if mentioned & dropped_names:
+            continue
+        # No atom name found.  If this is an unsatisfiability-family issue and
+        # it references a clause that only a dropped atom had, discard it.
+        if issue.kind in _UNSAT_CLAIM_KINDS:
+            if any(clause in text for clause in kept_clauses):
+                filtered.append(issue)
+                continue
+            if any(clause in text for clause in dropped_clauses):
+                continue
+            # No kept atoms remain, so any remaining unsat issue must belong to
+            # a dropped atom.
+            if not kept_atoms:
+                continue
+        filtered.append(issue)
+    return filtered
 
 
 def validate_foreign_code(
@@ -742,10 +805,11 @@ def validate_foreign_code(
     elif use_llm:
         warnings.append("LLM contract inference skipped because LLM_API_KEY/OPENAI_API_KEY is not set.")
 
-    atoms, atom_filter_warnings = _filter_atoms_to_source(
+    atoms, dropped_atoms, atom_filter_warnings = _filter_atoms_to_source(
         atoms, code, source_line_map, normalized_language
     )
     warnings.extend(atom_filter_warnings)
+    llm_issues = _filter_issues_to_atoms(llm_issues, atoms, dropped_atoms)
 
     if not atoms:
         warnings.append("No functions were inferable from the input code.")
