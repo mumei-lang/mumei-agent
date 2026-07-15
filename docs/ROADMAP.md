@@ -380,13 +380,37 @@ reentrancy について guard-state-machine の Z3 検証を実装済み（`solc
     アクセス誤認、ネスト添字 `a[b[c]]` の取りこぼしといった正規表現の構造的脆さが
     解消される。`solc` / `rustc` / `tsc` に依存せず、LLM credential なしで決定論的に
     同一結果を返す（`CI_FIXTURE_MODE` 経路を維持）。
-- **別軸（stage 2 では未対応）**: #281 / #295 / #296 のような偽陽性（`SafeCast` の誤認、
-  value 型への `!= nil` / `!= null` 誤付与、`constant` / `immutable` 除数・添字の偽
-  counterexample）は tree-sitter 化だけでは解消しない。これらは `known_constants` や
-  型情報を用いる **意味解析** の課題であり、stage 2 では既存の対策ロジック
-  （`known_constants` による除数/添字のピン留め、value 型の nil/null 除外、メンバ
-  アクセス/呼び出しレシーバの整数変数からの除外）を温存するに留め、新たな意味解析強化は
-  行わない。`known_constants` や型情報を使った意味解析強化として別課題で扱う。
+- **別軸（意味解析強化）✅ 実装済み**: #281 / #295 / #296 のような偽陽性（`SafeCast` の
+  誤認、value 型への `!= nil` / `!= null` 誤付与、`constant` / `immutable` 除数・添字の偽
+  counterexample）は tree-sitter 化（構文的事実の抽出）だけでは解消しない。抽出された
+  式・型・定数から安全性条件を導出する **意味解析層** を新規モジュール
+  `agent/semantic_safety.py` に集約し、散在していた個別分岐を型述語と定数モデルへ
+  統一した。
+  - **定数モデル（#296）**: `collect_declared_constants(source, language)` が Solidity
+    `constant` / `immutable`・Rust `const` / `static`・TypeScript `const` の整数リテラルを
+    言語横断で収集する。`divisor_provably_nonzero` / `known_nonnegative_index` を通じて、
+    除数がゼロになり得ない定数・添字が負になり得ない定数を検出し、除算ゼロ / 配列境界の
+    偽 counterexample を抑止する（従来 Solidity のみだった `known_constants` 参照を
+    Rust / TypeScript の検証・契約推論両経路へ拡張）。overflow は健全性維持のため定数で
+    抑止しない（自由変数側でオーバーフローし得るため）。
+  - **型述語（#295）**: `is_nullable_type(raw_type, language)` /
+    `should_flag_null_deref(...)` が「参照・ポインタ・nullable か」を言語横断で判定する
+    単一の述語となり、Go の nil 参照（`_go_type_is_nillable` を委譲）・Solidity value
+    型・Rust 参照・TypeScript primitive を統一的に扱う。value 型パラメータへの
+    `!= nil` / `!= null` 付与を言語横断で抑止し、契約推論経路の Solidity / Rust
+    `.length` / `.len` 誤付与（従来の全言語一律付与）を解消した。
+  - **メンバアクセス / 呼び出しレシーバ（#281）**: overflow オペランドがメンバアクセス
+    （`a.b`）・関数呼び出し（`f()`）である場合に自由整数変数として扱わない判定は、stage 2
+    の構文木情報（`tree_sitter_extract` の `_operand_is_receiver`）を主経路とし、tree-sitter
+    非利用時は正規表現 `_operand_is_member_or_call` にフォールバックする。
+  - 型・定数情報が取得できない場合は従来どおり保守的に安全性条件を生成する
+    （偽陽性は許容しても偽陰性で健全性を損なわない）フォールバックを維持し、決定論性・
+    no-LLM fixture（`CI_FIXTURE_MODE`）・コンパイラ非依存（`solc` / `rustc` / `tsc` 不要）・
+    Z3 健全性を損なわない。
+  - **残る未対応領域**: 定数畳み込み（`const` を参照する派生定数、算術式の初期化子）は
+    値解決せず保守側に倒す。TypeScript の非 optional value 型への null 抑止は既定で
+    nullable 扱いのまま（`x!.length` の非 null アサーションを尊重）。関数スコープを跨いだ
+    エイリアス解析・データフロー解析は範囲外（LLM 意味推論は導入しない）。
 
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 

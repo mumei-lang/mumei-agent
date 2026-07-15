@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import Callable, cast
 
-from agent import tree_sitter_extract
+from agent import semantic_safety, tree_sitter_extract
 from agent.config import AgentConfig
 from agent.cross_validation_models import (
     ContractParam,
@@ -511,7 +511,12 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
         return ""
 
 
-def _safety_requires_for_expression(expression: str, language: str = "python") -> str:
+def _safety_requires_for_expression(
+    expression: str,
+    language: str = "python",
+    known_constants: dict[str, int] | None = None,
+) -> str:
+    known_constants = known_constants or {}
     if not expression:
         return "true"
     canonical = _normalize_foreign_language(language)
@@ -521,9 +526,13 @@ def _safety_requires_for_expression(expression: str, language: str = "python") -
         # the regex heuristic, mirroring the Python ``SyntaxError`` fallback.
         findings = tree_sitter_extract.analyze_expression(expression, canonical)
         if findings is not None:
-            requirements = _generic_requirements_from_findings(findings)
+            requirements = _generic_requirements_from_findings(
+                findings, canonical, known_constants
+            )
             return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
-        requirements = _generic_safety_requires_for_expression(expression)
+        requirements = _generic_safety_requires_for_expression(
+            expression, known_constants, canonical
+        )
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements: list[str] = []
     try:
@@ -531,32 +540,48 @@ def _safety_requires_for_expression(expression: str, language: str = "python") -
         for node in ast.walk(tree):
             if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
                 divisor = ast.unparse(node.right)
-                requirements.append(f"{divisor} != 0")
+                if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
+                    requirements.append(f"{divisor} != 0")
     except (SyntaxError, ValueError):
-        requirements.extend(_generic_safety_requires_for_expression(expression))
+        requirements.extend(
+            _generic_safety_requires_for_expression(
+                expression, known_constants, canonical
+            )
+        )
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
-    requirements.extend(_generic_safety_requires_for_expression(expression))
+    requirements.extend(
+        _generic_safety_requires_for_expression(expression, known_constants, canonical)
+    )
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
 
 
 def _generic_requirements_from_findings(
     findings: tree_sitter_extract.ExpressionSafety,
+    language: str = "typescript",
+    known_constants: dict[str, int] | None = None,
 ) -> list[str]:
     """Divide-by-zero / bounds / null requirements from syntax-tree findings.
 
     Emits the same requirement strings, in the same order, as the regex
     ``_generic_safety_requires_for_expression`` (division, then bounds, then
     null/undefined), but driven by structural facts rather than text matching.
+    The shared semantic model suppresses divisors/indices that resolve to a
+    known constant (#296) and only emits a non-null contract when the language
+    permits a bare null dereference (#295).
     """
+    known_constants = known_constants or {}
     requirements: list[str] = []
     for divisor in findings.divisors:
-        requirements.append(f"{divisor} != 0")
+        if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
+            requirements.append(f"{divisor} != 0")
     for container, index in findings.index_accesses:
-        requirements.append(f"{index} >= 0")
+        if semantic_safety.known_nonnegative_index(index, known_constants) is None:
+            requirements.append(f"{index} >= 0")
         requirements.append(f"{index} < len_{container}")
     for value in findings.length_access_values:
-        requirements.append(f"{value} != null")
-        requirements.append(f"{value} != undefined")
+        if semantic_safety.should_flag_null_deref(value, None, language):
+            requirements.append(f"{value} != null")
+            requirements.append(f"{value} != undefined")
     return requirements
 
 
@@ -587,33 +612,44 @@ def _addition_pairs_regex(expression: str) -> list[tuple[str, str]]:
     return pairs
 
 
-def _generic_safety_requires_for_expression(expression: str) -> list[str]:
+def _generic_safety_requires_for_expression(
+    expression: str,
+    known_constants: dict[str, int] | None = None,
+    language: str = "typescript",
+) -> list[str]:
+    known_constants = known_constants or {}
     requirements: list[str] = []
     for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:/|%)\s*([A-Za-z_][A-Za-z0-9_]*)", expression):
-        requirements.append(f"{match.group(2)} != 0")
+        divisor = match.group(2)
+        if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
+            requirements.append(f"{divisor} != 0")
     for match in re.finditer(
         r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
         expression,
     ):
         container = match.group("container")
         index = match.group("index")
-        requirements.append(f"{index} >= 0")
+        if semantic_safety.known_nonnegative_index(index, known_constants) is None:
+            requirements.append(f"{index} >= 0")
         requirements.append(f"{index} < len_{container}")
     for match in re.finditer(
         r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
         expression,
     ):
-        requirements.append(f"{match.group('value')} != null")
-        requirements.append(f"{match.group('value')} != undefined")
+        value = match.group("value")
+        if semantic_safety.should_flag_null_deref(value, None, language):
+            requirements.append(f"{value} != null")
+            requirements.append(f"{value} != undefined")
     return requirements
 
 
 def _go_safety_requires_for_expression(
     expression: str,
     param_names: Iterable[str] = (),
+    known_constants: dict[str, int] | None = None,
 ) -> str:
     requirements: list[str] = []
-    base = _safety_requires_for_expression(expression, "go")
+    base = _safety_requires_for_expression(expression, "go", known_constants)
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     for value in _go_nil_dereference_values(expression, set(param_names)):
@@ -874,6 +910,7 @@ def _rust_parse_signature(
 
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
+    known_constants = semantic_safety.collect_declared_constants(code, "rust")
     name_pattern = re.compile(
         r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*",
@@ -893,7 +930,9 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
                 name=_safe_identifier(match.group("name")),
                 params=params,
                 return_type=_mumei_return_type(return_type),
-                requires=_rust_safety_requires_for_expression(safety_expr),
+                requires=_rust_safety_requires_for_expression(
+                    safety_expr, known_constants
+                ),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
         )
@@ -902,6 +941,7 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
 
 def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
+    known_constants = semantic_safety.collect_declared_constants(code, "solidity")
     header = re.compile(
         r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
         r"\((?P<params>(?:[^()]|\([^)]*\))*)\)"
@@ -926,6 +966,7 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
                 requires=_solidity_safety_requires_for_expression(
                     raw_return_expr,
                     param_types,
+                    known_constants,
                 ),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
@@ -973,9 +1014,10 @@ def _solidity_type_is_unsigned(type_text: str) -> bool:
 def _solidity_safety_requires_for_expression(
     expression: str,
     param_types: dict[str, str] | None = None,
+    known_constants: dict[str, int] | None = None,
 ) -> str:
     requirements: list[str] = []
-    base = _safety_requires_for_expression(expression, "solidity")
+    base = _safety_requires_for_expression(expression, "solidity", known_constants)
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     requirements.extend(
@@ -1026,9 +1068,12 @@ def _solidity_overflow_requires_for_expression(
     return requirements
 
 
-def _rust_safety_requires_for_expression(expression: str) -> str:
+def _rust_safety_requires_for_expression(
+    expression: str,
+    known_constants: dict[str, int] | None = None,
+) -> str:
     requirements = []
-    base = _safety_requires_for_expression(expression, "rust")
+    base = _safety_requires_for_expression(expression, "rust", known_constants)
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     requirements.extend(_integer_overflow_requires_for_expression(expression, "rust"))
@@ -1052,6 +1097,7 @@ def _integer_overflow_requires_for_expression(
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
+    known_constants = semantic_safety.collect_declared_constants(code, "typescript")
     # Each pattern is paired with a predicate that decides whether the body is
     # an arrow-function expression body (no braces).  Function and class-method
     # bodies are never expression bodies, while arrow functions may use either
@@ -1119,7 +1165,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     params=_params_from_signature(match.group("params")),
                     return_type=_typescript_return_type(match.group("ret") or "number"),
                     requires=_safety_requires_for_expression(
-                        raw_return_expr, "typescript"
+                        raw_return_expr, "typescript", known_constants
                     ),
                     ensures=f"result == {return_expr}" if return_expr else "true",
                 )
@@ -1129,6 +1175,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
 
 def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
+    known_constants = semantic_safety.collect_declared_constants(code, "go")
     for name, params_text, return_type, body in _go_function_declarations(code):
         params = _params_from_signature(params_text)
         # Only params whose declared Go type is nillable may carry a `!= nil`
@@ -1148,6 +1195,7 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
                 requires=_go_safety_requires_for_expression(
                     safety_expr,
                     [param.name for param in params if param.name in nillable_names],
+                    known_constants,
                 ),
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
@@ -1321,26 +1369,13 @@ def _split_params(params_text: str) -> list[str]:
     return params
 
 
-# Go types that can hold a nil value and therefore be nil-dereferenced. A bare
-# named/qualified type (e.g. `reflect.Value`, `time.Time`) is a value type here
-# and is intentionally treated as non-nillable.
-_GO_NILLABLE_TYPE_RE = re.compile(
-    r"^(?:"
-    r"\*"  # pointer *T
-    r"|\[\]"  # slice []T
-    r"|map\["  # map[K]V
-    r"|chan\b"  # chan T
-    r"|<-"  # <-chan T
-    r"|func\b"  # func(...) ...
-    r"|interface\s*\{"  # interface{ ... }
-    r"|any\b"
-    r"|error\b"
-    r")"
-)
+# Go nillability is decided by the shared type predicate so the nil-dereference
+# heuristic and the value-type exclusion (#295) use one source of truth.
+_GO_NILLABLE_TYPE_RE = semantic_safety._GO_NILLABLE_TYPE_RE
 
 
 def _go_type_is_nillable(raw_type: str) -> bool:
-    return bool(_GO_NILLABLE_TYPE_RE.match(raw_type.strip()))
+    return semantic_safety.go_type_is_nillable(raw_type)
 
 
 def _go_nillable_param_names(params_text: str) -> set[str]:

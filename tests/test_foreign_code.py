@@ -282,6 +282,73 @@ def test_rust_go_overflow_requires_ignore_method_call_receiver() -> None:
     assert any("a + b <=" in req for req in real)
 
 
+def test_rust_const_divisor_not_flagged_cross_language() -> None:
+    """A non-zero Rust ``const`` divisor is pinned like a Solidity constant (#296)."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = "const N: i64 = 7;\npub fn modn(a: i64) -> i64 { a % N }\n"
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("divide by" in issue.message for issue in issues)
+
+    # An unknown divisor is still flagged.
+    unknown = _detect_safety_issues(
+        "pub fn divide(a: i64, b: i64) -> i64 { a / b }\n", "rust"
+    )
+    assert any("divide by `b`" in issue.message for issue in unknown)
+
+
+def test_typescript_const_divisor_not_flagged_cross_language() -> None:
+    """A non-zero TypeScript ``const`` divisor is pinned like a Solidity constant (#296)."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = "const K = 5;\nexport function divk(a: number): number { return a / K; }\n"
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_infer_rust_const_divisor_requires_dropped() -> None:
+    """The contract-inference (requires) path also honors Rust ``const`` (#296)."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    atoms = _infer_rust_contracts(
+        "const N: i64 = 7;\npub fn modn(a: i64) -> i64 { a % N }\n"
+    )
+    assert atoms and "N != 0" not in atoms[0].requires
+    # Unknown divisor still yields a non-zero requirement.
+    unknown = _infer_rust_contracts("pub fn divide(a: i64, b: i64) -> i64 { a / b }\n")
+    assert unknown and "b != 0" in unknown[0].requires
+
+
+def test_value_type_length_not_flagged_null_cross_language() -> None:
+    """`.length`/`.len` on a value type is not a null dereference (#295).
+
+    Only TypeScript (where a value may genuinely be null/undefined) keeps the
+    contract; Solidity value types and Rust references never do.
+    """
+    from agent.cross_validation_foreign import _safety_requires_for_expression
+
+    assert _safety_requires_for_expression("signature.length", "solidity") == "true"
+    assert _safety_requires_for_expression("v.len()", "rust") == "true"
+    # TypeScript still guards a possibly-null receiver.
+    ts = _safety_requires_for_expression("name!.length", "typescript")
+    assert "name != null" in ts
+
+
+def test_generic_fallback_null_suppression_is_language_aware() -> None:
+    """The regex fallback path (used when tree-sitter is unavailable) also honors
+    per-language nullability (#295)."""
+    from agent.cross_validation_foreign import (
+        _generic_safety_requires_for_expression,
+    )
+
+    assert _generic_safety_requires_for_expression("v.len", language="rust") == []
+    assert (
+        _generic_safety_requires_for_expression("sig.length", language="solidity") == []
+    )
+    ts = _generic_safety_requires_for_expression("name.length", language="typescript")
+    assert "name != null" in ts and "name != undefined" in ts
+
+
 def test_verifier_reports_solidity_reentrancy_and_access_control_heuristics() -> None:
     source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
     mumei = MagicMock()
