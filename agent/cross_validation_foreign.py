@@ -1198,28 +1198,12 @@ def _raw_return_statement_expression(body: str) -> str:
 
     start = last_match.end()
     depth = 0
-    in_string = False
-    quote = ""
-    escape = False
-    for index in range(start, len(body)):
-        ch = body[index]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == quote:
-                in_string = False
-            continue
-        if ch in {'"', "'"}:
-            in_string = True
-            quote = ch
-            continue
+    for index in range(start, len(stripped)):
+        ch = stripped[index]
         if ch in "([{":
             depth += 1
-        elif ch in ")]}":
-            if depth > 0:
-                depth -= 1
+        elif ch in "])}" and depth > 0:
+            depth -= 1
         elif ch in ";\n" and depth == 0:
             return body[start:index].strip()
     return body[start:].strip()
