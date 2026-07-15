@@ -1066,3 +1066,35 @@ def test_typescript_contract_inference_class_method_with_callback_param_type() -
     assert len(atoms) == 1
     assert atoms[0].name == "onAbort"
     assert atoms[0].ensures == "true"
+
+
+def test_typescript_raw_return_expression_ignores_nested_callback_returns() -> None:
+    """A ``return`` inside a nested callback arrow function must not be counted as a top-level return."""
+    from agent.cross_validation_foreign import _typescript_raw_return_expression
+
+    body = (
+        "{\n"
+        "  items.forEach((item) => { return item * 2; });\n"
+        "  return items.length;\n"
+        "}"
+    )
+    expr = _typescript_raw_return_expression(body)
+    assert "items.length" in expr
+
+
+def test_typescript_contract_inference_ignores_nested_function_returns() -> None:
+    """A ``return`` inside a nested ``function`` declaration must not be counted as a top-level return."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export function outer(items: number[]): number {\n"
+        "  function inner(x: number): number {\n"
+        "    return x * 2;\n"
+        "  }\n"
+        "  return items.map(inner).length;\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "outer"
+    assert "items_map(inner).length" in atoms[0].ensures

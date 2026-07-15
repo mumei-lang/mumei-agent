@@ -1324,12 +1324,93 @@ def _typescript_raw_return_expression(body: str, is_expression_body: bool = Fals
         return body.strip().rstrip(";").strip()
 
     stripped_search = _strip_go_rust_literals_and_comments(body)
-    returns: list[re.Match[str]] = []
-    for match in re.finditer(r"\breturn\b", stripped_search):
-        end = match.end()
-        if end < len(stripped_search) and (stripped_search[end].isalnum() or stripped_search[end] == "_"):
-            continue
-        returns.append(match)
+    returns: list[int] = []
+    # Brace depth counts all (), [] and {}.  function_scope counts how many of
+    # those {} belong to nested arrow/function bodies; returns inside them are
+    # exits from the inner function, not from the function we are analysing.
+    depth = 0
+    function_scope = 0
+    curly_stack: list[bool] = []
+    arrow_pending = False
+    arrow_token_end = -1
+    arrow_depth = 0
+    function_pending = False
+    function_keyword_depth = 0
+    prev_non_space = ""
+    n = len(stripped_search)
+    i = 0
+    while i < n:
+        ch = stripped_search[i]
+        if ch in "([{":
+            if ch == "{":
+                is_func = False
+                if arrow_pending and depth == arrow_depth:
+                    is_func = True
+                    function_scope += 1
+                    arrow_pending = False
+                elif (
+                    function_pending
+                    and depth == function_keyword_depth
+                    and prev_non_space != ":"
+                ):
+                    is_func = True
+                    function_scope += 1
+                    function_pending = False
+                curly_stack.append(is_func)
+            depth += 1
+        elif ch in "])}" and depth > 0:
+            if ch == "}" and curly_stack:
+                was_func = curly_stack.pop()
+                if was_func:
+                    function_scope -= 1
+            depth -= 1
+        elif (
+            ch == "r"
+            and function_scope == 0
+            and i + 6 <= n
+            and stripped_search[i : i + 6] == "return"
+        ):
+            end = i + 6
+            word_after = end < n and (
+                stripped_search[end].isalnum() or stripped_search[end] == "_"
+            )
+            word_before = i > 0 and (
+                stripped_search[i - 1].isalnum() or stripped_search[i - 1] == "_"
+            )
+            property_name = end < n and stripped_search[end] == ":"
+            if not word_after and not word_before and not property_name:
+                returns.append(i)
+            i = end - 1
+        elif (
+            ch == ">"
+            and i > 0
+            and stripped_search[i - 1] == "="
+            and not (i > 1 and stripped_search[i - 2] == "=")
+        ):
+            # Arrow function token `=>`.  The body may be a block `{ ... }` or an
+            # expression; we only enter a new function scope when the next
+            # non-space token is `{`.
+            arrow_pending = True
+            arrow_token_end = i
+            arrow_depth = depth
+        elif (
+            i + 8 <= n
+            and stripped_search[i : i + 8] == "function"
+            and (i == 0 or not (stripped_search[i - 1].isalnum() or stripped_search[i - 1] == "_"))
+            and (i + 8 == n or not (stripped_search[i + 8].isalnum() or stripped_search[i + 8] == "_"))
+        ):
+            function_pending = True
+            function_keyword_depth = depth
+            i += 7
+
+        # Cancel a pending arrow expression body when we see the first
+        # non-space token after `=>` and it is not `{`.
+        if arrow_pending and i > arrow_token_end and not ch.isspace() and ch != "{":
+            arrow_pending = False
+
+        if not ch.isspace():
+            prev_non_space = ch
+        i += 1
     if not returns:
         return ""
     # Multiple top-level returns (e.g. ``if (...) { return x } return y``) do
@@ -1337,8 +1418,8 @@ def _typescript_raw_return_expression(body: str, is_expression_body: bool = Fals
     if len(returns) > 1:
         return ""
 
-    last_match = returns[-1]
-    start = last_match.end()
+    last_return = returns[-1]
+    start = last_return + 6
     depth = 0
     for index in range(start, len(stripped_search)):
         ch = stripped_search[index]
