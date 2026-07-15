@@ -166,6 +166,321 @@ def _remove_trailing_commas(text: str) -> str:
     return "".join(result)
 
 
+def _strip_markdown_fence(text: str) -> str:
+    """Extract JSON content from a markdown code fence if present.
+
+    Small OSS models sometimes wrap JSON in `` ```json ... ``` `` blocks.
+    This helper returns the content between the first pair of fences, or
+    the original text with any leading prose trimmed away.
+    """
+    stripped = text.strip()
+    fence_match = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        stripped,
+        flags=re.DOTALL,
+    )
+    if fence_match:
+        stripped = fence_match.group(1).strip()
+    start = stripped.find("{")
+    if start > 0:
+        stripped = stripped[start:]
+    return stripped
+
+
+def _tokenize_for_json_repair(text: str) -> list[tuple[str, str]]:
+    """Tokenize JSON-like text for repair, preserving strings and comments.
+
+    Quoted strings (double and backtick) are emitted as single ``STR``
+    tokens so that structural repairs do not mistake braces or commas
+    inside them for JSON syntax.  ``//`` and ``/* */`` comments outside
+    strings are dropped.
+    """
+    tokens: list[tuple[str, str]] = []
+    i = 0
+    n = len(text)
+    start = 0
+    quote: str | None = None
+
+    while i < n:
+        if quote is None:
+            ch = text[i]
+            if ch in ('"', "'", '`'):
+                start = i
+                quote = ch
+                i += 1
+                continue
+            if text[i : i + 2] == "//":
+                i += 2
+                while i < n and text[i] != "\n":
+                    i += 1
+                continue
+            if text[i : i + 2] == "/*":
+                i += 2
+                while i < n - 1 and not (text[i] == "*" and text[i + 1] == "/"):
+                    i += 1
+                if i < n - 1:
+                    i += 2
+                continue
+            if ch.isspace():
+                j = i
+                while i < n and text[i].isspace():
+                    i += 1
+                tokens.append(("WS", text[j:i]))
+                continue
+            tokens.append(("OTHER", ch))
+            i += 1
+        else:
+            if text[i] == "\\":
+                i += 2
+                continue
+            if text[i] == quote:
+                end = i + 1
+                tokens.append(("STR", text[start:end]))
+                quote = None
+                i += 1
+            else:
+                i += 1
+    if quote is not None:
+        # Unterminated string: keep it as a token so the repairer can still
+        # emit what was generated.
+        tokens.append(("STR", text[start:]))
+    return tokens
+
+
+def _next_non_ws_token(
+    tokens: list[tuple[str, str]],
+    index: int,
+) -> tuple[str, str] | None:
+    while index < len(tokens) and tokens[index][0] == "WS":
+        index += 1
+    return tokens[index] if index < len(tokens) else None
+
+
+def _consume_paren_value_as_string(
+    tokens: list[tuple[str, str]],
+    start: int,
+) -> tuple[int, str]:
+    """Consume a parenthesized expression and replace it with a JSON string.
+
+    Some small OSS models emit JavaScript tuples or arrow functions as an
+    ``ensures``/``requires`` value.  We cannot interpret that syntax, but
+    turning the whole ``(...)`` block into a single JSON string lets the
+    rest of the pipeline treat it as an opaque clause instead of aborting.
+    """
+    depth = 1
+    i = start + 1
+    while i < len(tokens) and depth > 0:
+        kind, text = tokens[i]
+        if kind == "OTHER":
+            if text == "(":
+                depth += 1
+            elif text == ")":
+                depth -= 1
+        if depth == 0:
+            break
+        i += 1
+    inner_raw = "".join(t[1] for t in tokens[start + 1 : i])
+    return i + 1, json.dumps(inner_raw, ensure_ascii=False)
+
+
+def _unquote_literal_string(token: str) -> str:
+    """Convert a single- or backtick-quoted literal to its raw contents.
+
+    Only the quotes themselves and the most common backslash escapes are
+    interpreted; everything else is preserved so foreign code copied by the
+    model remains intact.
+    """
+    if len(token) < 2:
+        return token
+    quote = token[0]
+    if token[-1] != quote:
+        # Unterminated literal; strip the opening quote and keep the rest.
+        return token[1:]
+    content = token[1:-1]
+    if quote == '`':
+        content = content.replace("\\`", '`').replace("\\\\", "\\")
+    elif quote == "'":
+        content = content.replace("\\'", "'").replace("\\\\", "\\")
+    return content
+
+
+def _decode_string_token(token: str) -> str | None:
+    """Return the decoded content of any supported string-literal token.
+
+    Returns ``None`` for non-string tokens or tokens that cannot be decoded.
+    """
+    if token.startswith('"'):
+        try:
+            content = json.loads(token, strict=False)
+        except json.JSONDecodeError:
+            return None
+        return content if isinstance(content, str) else str(content)
+    if token.startswith(("'", '`')):
+        return _unquote_literal_string(token)
+    return None
+
+
+def _merge_value_strings(
+    tokens: list[tuple[str, str]],
+    start: int,
+    in_object_value: bool = False,
+) -> tuple[int, str]:
+    """Merge adjacent string literals separated by ``+`` or continuation commas.
+
+    Local LLMs sometimes split a long ``ensures`` clause across multiple
+    quoted lines with ``+`` concatenations, or even omit the ``+`` and just
+    write a comma-separated continuation.  When the surrounding structure is
+    an object value (not an array element and not a new key), merge the
+    decoded string contents into one JSON string.
+    """
+    parts: list[str] = []
+    i = start
+    end = start + 1
+    while i < len(tokens) and tokens[i][0] == "STR":
+        content = _decode_string_token(tokens[i][1])
+        if content is None:
+            break
+        parts.append(content)
+
+        # Look for ``+`` or ``,`` followed by another string.
+        j = i + 1
+        while j < len(tokens) and tokens[j][0] == "WS":
+            j += 1
+        if j < len(tokens) and tokens[j][1] in ("+", ","):
+            sep = tokens[j][1]
+            k = j + 1
+            while k < len(tokens) and tokens[k][0] == "WS":
+                k += 1
+            if k < len(tokens) and tokens[k][0] == "STR":
+                # A comma separates array elements; do not merge it inside arrays.
+                if sep == "," and not in_object_value:
+                    break
+                # If the separator is a comma inside an object value, make sure
+                # the next string is not actually a new object key
+                # (``"key": ...``).
+                if sep == "," and in_object_value:
+                    m = k + 1
+                    while m < len(tokens) and tokens[m][0] == "WS":
+                        m += 1
+                    if m < len(tokens) and tokens[m][1] == ":":
+                        break
+                i = k
+                end = k + 1
+                continue
+        break
+    joined = "".join(parts)
+    return end, json.dumps(joined, ensure_ascii=False)
+
+
+def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
+    """Rebuild a repairable JSON string from tokens.
+
+    This pass also collapses ``+``/continuation string literals and converts
+    parenthesized values to strings while keeping braces, brackets, commas
+    and colons in their original positions.
+    """
+    out: list[str] = []
+    stack: list[tuple[str, bool]] = []  # container kind, expect_key for objects
+    i = 0
+    n = len(tokens)
+
+    while i < n:
+        kind, text = tokens[i]
+        if kind == "WS":
+            out.append(text)
+            i += 1
+            continue
+
+        if kind == "OTHER":
+            if text == "{":
+                stack.append(("obj", True))
+                out.append(text)
+                i += 1
+                continue
+            if text == "[":
+                stack.append(("arr", False))
+                out.append(text)
+                i += 1
+                continue
+            if text == "}":
+                if stack and stack[-1][0] == "obj":
+                    stack.pop()
+                    out.append(text)
+                # A stray ``}`` (e.g. a JS closing brace copied outside a
+                # string) is dropped so it does not close a mismatched container.
+                i += 1
+                continue
+            if text == "]":
+                if stack and stack[-1][0] == "arr":
+                    stack.pop()
+                    out.append(text)
+                # Likewise, a stray ``]`` is dropped when not closing an array.
+                i += 1
+                continue
+            if text == ":":
+                if stack and stack[-1][0] == "obj":
+                    stack[-1] = ("obj", False)
+                out.append(text)
+                i += 1
+                continue
+            if text == ",":
+                if stack and stack[-1][0] == "obj":
+                    stack[-1] = ("obj", True)
+                out.append(text)
+                i += 1
+                continue
+            if text == "(":
+                end, string_token = _consume_paren_value_as_string(tokens, i)
+                out.append(string_token)
+                i = end
+                continue
+            out.append(text)
+            i += 1
+            continue
+
+        if kind == "STR":
+            # A string is a key when inside an object and the next non-whitespace
+            # token is a colon (or we are still expecting a key after { or ,).
+            is_key = False
+            if stack and stack[-1][0] == "obj":
+                nxt = _next_non_ws_token(tokens, i + 1)
+                if stack[-1][1] or (nxt is not None and nxt[1] == ":"):
+                    is_key = True
+            if is_key:
+                out.append(text)
+                if stack and stack[-1][0] == "obj":
+                    stack[-1] = ("obj", False)
+                i += 1
+                continue
+            if text.startswith('"'):
+                in_object_value = bool(stack and stack[-1][0] == "obj")
+                end, merged = _merge_value_strings(tokens, i, in_object_value)
+                out.append(merged)
+                i = end
+                continue
+            if text.startswith(("'", '`')):
+                out.append(json.dumps(_unquote_literal_string(text), ensure_ascii=False))
+                i += 1
+                continue
+            out.append(text)
+            i += 1
+            continue
+
+    return "".join(out)
+
+
+def _repair_json_output(text: str) -> str:
+    """Apply structural repairs to small/OSS-LLM JSON output.
+
+    Removes JSON comments, merges split string literals, and wraps
+    parenthesized JavaScript expressions in strings so ``_json_from_text``
+    can decode the first JSON object even when the model deviates from
+    strict JSON syntax.
+    """
+    tokens = _tokenize_for_json_repair(text)
+    return _reconstruct_repaired_json(tokens)
+
+
 def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], int]:
     """Decode JSON, inserting missing commas reported by the decoder.
 
@@ -188,24 +503,17 @@ def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], 
 
 
 def _json_from_text(text: str) -> dict[str, object]:
-    stripped = text.strip()
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
-    if fence_match:
-        stripped = fence_match.group(1)
-    else:
-        # Tolerate a leading prose preamble by seeking the first object, and a
-        # trailing prose/second-object suffix by decoding only the first JSON
-        # value (small/OSS models routinely append an explanation after the
-        # JSON, which plain ``json.loads`` rejects with "Extra data").
-        start = stripped.find("{")
-        if start > 0:
-            stripped = stripped[start:]
+    stripped = _strip_markdown_fence(text)
+
     # Small OSS models may emit Python literals, invalid escape sequences,
-    # literal control characters, or trailing commas inside otherwise
-    # JSON-shaped output.  Repair those artifacts before decoding, and parse with
-    # ``strict=False`` so a literal newline in a string does not abort parsing.
-    stripped = _replace_python_literals_outside_strings(stripped)
+    # literal control characters, trailing commas, JavaScript-style comments,
+    # split string literals, or parenthesized expressions inside otherwise
+    # JSON-shaped output.  Repair those artifacts before decoding, and parse
+    # with ``strict=False`` so a literal newline in a string does not abort
+    # parsing.
     stripped = _repair_invalid_json_string_escapes(stripped)
+    stripped = _repair_json_output(stripped)
+    stripped = _replace_python_literals_outside_strings(stripped)
     stripped = _remove_trailing_commas(stripped)
 
     # Some models omit the comma between array/object entries.  Retry by

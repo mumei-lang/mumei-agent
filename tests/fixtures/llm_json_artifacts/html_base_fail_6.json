@@ -1,0 +1,106 @@
+```json
+{
+  "atoms": [
+    {
+      "name": "raw",
+      "params": [
+        {
+          "name": "value",
+          "type": "unknown"
+        },
+        {
+          "name": "callbacks",
+          "type": "{<T extends HtmlEscapedCallbackOpts>(opts: T): Promise<string> | undefined}"
+        }
+      ],
+      "return_type": "{isEscaped: true, callbacks?: {<T extends HtmlEscapedCallbackOpts>(opts: T): Promise<string> | undefined}[]}",
+      "requires": "true",
+      "ensures": "result.isEscaped === true && result.callbacks === callbacks",
+      "effects": [
+        "return"
+      ]
+    },
+    {
+      "name": "escapeToBuffer",
+      "params": [
+        {
+          "name": "str",
+          "type": "string"
+        },
+        {
+          "name": "buffer",
+          "type": "[string]"
+        }
+      ],
+      "return_type": "void",
+      "requires": "true",
+      "ensures": "false", // The function does not have an explicit invariant
+      "effects": [
+        "mutate buffer"
+      ]
+    },
+    {
+      "name": "resolveCallbackSync",
+      "params": [
+        {
+          "name": "str",
+          "type": "string | HtmlEscapedString"
+        }
+      ],
+      "return_type": "string",
+      "requires": "true",
+      "ensures": "result === str && callbacks?.length === 0",
+      "effects": [
+        "return"
+      ]
+    },
+    {
+      "name": "resolveCallback",
+      "params": [
+        {
+          "name": "str",
+          "type": "string | HtmlEscapedString | Promise<string>"
+        },
+        {
+          "name": "phase",
+          "type": "(typeof HtmlEscapedCallbackPhase)[keyof typeof HtmlEscapedCallbackPhase]"
+        },
+        {
+          "name": "preserveCallbacks",
+          "type": "boolean"
+        },
+        {
+          "name": "context",
+          "type": "object"
+        },
+        {
+          "name": "buffer",
+          "type": "[string] | undefined"
+        }
+      ],
+      "return_type": "Promise<string>",
+      "requires": "true",
+      "ensures": "resStr === result && callbacks?.length !== 0",
+      "effects": [
+        "mutate buffer"
+      ]
+    },
+    {
+      "name": "stringBufferToString",
+      "params": [
+        {
+          "name": "buffer",
+          "type": "[string]"
+        }
+      ],
+      "return_type": "{isEscaped: true, callbacks?: {<T extends HtmlEscapedCallbackOpts>(opts: T): Promise<string> | undefined}[]}",
+      "requires": "true",
+      "ensures": "result.isEscaped === true && result.callbacks !== undefined",
+      "effects": [
+        "return"
+      ]
+    }
+  ],
+  "issues": []
+}
+```
