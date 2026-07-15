@@ -1203,3 +1203,30 @@ def test_typescript_contract_inference_ignores_nested_function_returns() -> None
     assert len(atoms) == 1
     assert atoms[0].name == "outer"
     assert "items_map(inner).length" in atoms[0].ensures
+
+
+def test_last_expression_ignores_leading_dot_numeric_literal() -> None:
+    """A bare ``.0`` tuple-field/method-chain fragment must not be returned as the tail expression.
+
+    ``.0`` is valid Python syntax for the float literal ``0.0``, but in Rust it is a
+    fragment of a multi-line method/tuple chain such as
+    ``std::mem::take(...).0.into_iter()...``. The line-based tail-expression scanner
+    must not treat it as a complete return expression.
+    """
+    from agent.cross_validation_foreign import _last_expression
+
+    body = (
+        "Box::new(self.index.into_iter().enumerate().filter(|(_, i)| *i != NO_PAGE).flat_map(\n"
+        "    move |(i, index)| {\n"
+        "        let upper = i << LOG_PAGE_LEN;\n"
+        "        std::mem::take(&mut self.page_table[index as usize])\n"
+        "            .0\n"
+        "            .into_iter()\n"
+        "            .enumerate()\n"
+        "            .filter_map(move |(lower, v)| {\n"
+        "                v.map(|v| (Self::decompress_addr(upper + lower), v))\n"
+        "            })\n"
+        "    },\n"
+        "))\n"
+    )
+    assert _last_expression(body) == ""

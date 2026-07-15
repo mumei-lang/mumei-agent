@@ -1310,8 +1310,18 @@ def _last_expression(body: str) -> str:
             continue
         normalized = _normalize_foreign_expression(candidate)
         try:
-            ast.parse(normalized, mode="eval")
+            tree = ast.parse(normalized, mode="eval")
         except (SyntaxError, ValueError):
+            continue
+        # A line such as ``.0`` is valid Python as a float literal, but in
+        # foreign code it is a fragment of a multi-line method/tuple chain
+        # (e.g. Rust ``std::mem::take(...).0.into_iter()...``). Do not treat
+        # a leading-dot numeric literal as a complete tail expression.
+        if (
+            normalized.lstrip().startswith(".")
+            and isinstance(tree.body, ast.Constant)
+            and isinstance(tree.body.value, (int, float, complex))
+        ):
             continue
         return normalized
     return ""
