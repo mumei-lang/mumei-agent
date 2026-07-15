@@ -1626,6 +1626,14 @@ def test_json_from_text_tolerates_trailing_prose() -> None:
     assert _json_from_text(r'{"atoms": [{"name": "f", "ensures": "replace(/\\/|\\+/g, x)"}]}') == {
         "atoms": [{"name": "f", "ensures": "replace(/\\/|\\+/g, x)"}]
     }
+    # Trailing commas before closing braces/brackets are removed.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "effects": [],}], "issues": [],}'
+    ) == {"atoms": [{"name": "f", "effects": []}], "issues": []}
+    assert _json_from_text('{"atoms": [], "note": "a, b, c,"}') == {
+        "atoms": [],
+        "note": "a, b, c,",
+    }
     # A non-object first value is still rejected.
     with pytest.raises(json.JSONDecodeError):
         _json_from_text("[1, 2, 3]")
