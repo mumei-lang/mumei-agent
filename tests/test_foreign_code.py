@@ -744,6 +744,21 @@ def test_go_contract_inference_preserves_bool_return_type() -> None:
     assert atoms[0].ensures == "result == true"
 
 
+def test_go_contract_inference_captures_composite_literal_return() -> None:
+    """Go return statements with composite/struct literals must not be truncated at ``}``."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = (
+        "package demo\n"
+        "func new_timer(t int64, ch string) *systemTimer {\n"
+        "    return &systemTimer{t, ch}\n"
+        "}\n"
+    )
+    atoms = _infer_go_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].ensures == "result == &systemTimer{t, ch}"
+
+
 def test_python_contract_inference_preserves_bool_return_type() -> None:
     """Python ``-> bool`` annotations must map to Mumei ``bool``."""
     from agent.cross_validation_foreign import _infer_python_contracts
