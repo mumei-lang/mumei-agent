@@ -447,7 +447,12 @@ def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
                 if stack[-1][1] or (nxt is not None and nxt[1] == ":"):
                     is_key = True
             if is_key:
-                out.append(text)
+                # Models sometimes emit Python/JS-style quoted keys. Convert any
+                # non-JSON quote style to a proper JSON string key.
+                if text.startswith(("'", '`')):
+                    out.append(json.dumps(_unquote_literal_string(text), ensure_ascii=False))
+                else:
+                    out.append(text)
                 if stack and stack[-1][0] == "obj":
                     stack[-1] = ("obj", False)
                 i += 1

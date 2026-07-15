@@ -1702,3 +1702,11 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"atoms": [{"name": "f", "ensures": ["a", "b"\n          "c"\n        ]}]}'
     ) == {"atoms": [{"name": "f", "ensures": ["a", "b", "c"]}]}
+
+    # Single- or backtick-quoted object keys are normalized to JSON strings.
+    assert _json_from_text(
+        "{'name': 'f', \"ensures\": 'x'}"
+    ) == {"name": "f", "ensures": "x"}
+    assert _json_from_text(
+        '{`name`: `f`, "ensures": `x`}'
+    ) == {"name": "f", "ensures": "x"}
