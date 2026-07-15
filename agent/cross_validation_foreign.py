@@ -1284,17 +1284,26 @@ def _raw_return_statement_expression(body: str) -> str:
     that composite/struct literals such as ``&systemTimer{t, ch}`` or
     ``BlockNumberOrHash{number: blockNr}`` are captured in full instead of
     being truncated at the first ``}``.
+
+    If the body contains more than one ``return`` we cannot infer a single
+    deterministic postcondition, so we return the empty string and let the
+    caller default ``ensures`` to ``true``.
     """
     stripped = _strip_go_rust_literals_and_comments(body)
-    last_match: re.Match[str] | None = None
+    returns: list[re.Match[str]] = []
     for match in re.finditer(r"\breturn\b", stripped):
         end = match.end()
         if end < len(stripped) and (stripped[end].isalnum() or stripped[end] == "_"):
             continue
-        last_match = match
-    if last_match is None:
+        returns.append(match)
+    if not returns:
+        return ""
+    # Multiple exits (e.g. early ``return false`` inside ``if``/``for``) do not
+    # have a single tail expression that describes every path.
+    if len(returns) > 1:
         return ""
 
+    last_match = returns[-1]
     start = last_match.end()
     depth = 0
     for index in range(start, len(stripped)):
