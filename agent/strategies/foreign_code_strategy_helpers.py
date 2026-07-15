@@ -12,6 +12,7 @@ from typing import Iterable
 
 import z3
 
+from agent import tree_sitter_extract
 from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _dedupe_strings,
@@ -429,10 +430,12 @@ def _normalize_language(language: str) -> str:
 def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
     normalized = _normalize_language(language)
     if normalized == "rust":
-        stripped_source = _strip_go_rust_literals_and_comments(source)
+        # Function boundaries come from tree-sitter (or the regex fallback,
+        # which strips literals/comments itself); ``_detect_block_safety_issues``
+        # re-strips each body before the regex safety heuristics run.
         return _detect_block_safety_issues(
-            stripped_source,
-            _rust_function_blocks(stripped_source),
+            source,
+            _rust_function_blocks(source),
             "Rust",
         )
     if normalized == "typescript":
@@ -866,6 +869,9 @@ def _z3_solidity_overflow_counterexample(left_name: str, right_name: str) -> dic
     return {left_name: SOLIDITY_UINT256_MAX, right_name: 1}
 
 def _solidity_function_blocks(source: str) -> list[tuple[str, str]]:
+    ts_blocks = tree_sitter_extract.function_blocks(source, "solidity", _safe_identifier)
+    if ts_blocks is not None:
+        return ts_blocks
     blocks: list[tuple[str, str]] = []
     for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source):
         body = _balanced_brace_body(source, match.end() - 1)
@@ -1255,15 +1261,29 @@ def _solidity_statement_is_local_declaration(statement_prefix: str) -> bool:
     return bool(_SOLIDITY_LOCAL_DECLARATION_PATTERN.match(statement_prefix))
 
 def _rust_function_blocks(source: str) -> list[tuple[str, str]]:
+    ts_blocks = tree_sitter_extract.function_blocks(source, "rust", _safe_identifier)
+    if ts_blocks is not None:
+        return ts_blocks
+    # Regex fallback: strip literals/comments first so ``fn``/braces inside
+    # strings or comments do not confuse the pattern (the tree-sitter path
+    # handles this natively).
+    stripped = _strip_go_rust_literals_and_comments(source)
     pattern = re.compile(
         r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
-        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?\s*\{(?P<body>.*?)\}",
+        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?\s*\{",
         re.DOTALL,
     )
-    return [(_safe_identifier(match.group("name")), match.group("body")) for match in pattern.finditer(source)]
+    blocks: list[tuple[str, str]] = []
+    for match in pattern.finditer(stripped):
+        body = _balanced_brace_body(stripped, match.end() - 1)
+        blocks.append((_safe_identifier(match.group("name")), body))
+    return blocks
 
 def _go_function_blocks(source: str) -> list[tuple[str, str]]:
+    ts_blocks = tree_sitter_extract.function_blocks(source, "go", _safe_identifier)
+    if ts_blocks is not None:
+        return ts_blocks
     pattern = re.compile(
         r"func\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
         r"\((?P<params>[^)]*)\)\s*(?P<ret>[\*\[\]A-Za-z0-9_]+)?\s*\{",
@@ -1288,6 +1308,9 @@ def _balanced_brace_body(source: str, opening_brace: int) -> str:
     return source[opening_brace + 1 :]
 
 def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
+    ts_blocks = tree_sitter_extract.function_blocks(source, "typescript", _safe_identifier)
+    if ts_blocks is not None:
+        return ts_blocks
     blocks: list[tuple[str, str]] = []
     function_pattern = re.compile(
         r"(?:export\s+)?(?:async\s+)?function\s+"

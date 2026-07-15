@@ -15,6 +15,14 @@ dependencies = [
     "python-dotenv>=1.0",
     "streamlit>=1.30",
     "z3-solver>=4.12",
+    # Layer B stage 1 — deterministic syntactic function/block extraction.
+    # tree-sitter is a pure in-process parser (no solc/rustc/tsc, no network),
+    # so it preserves the LLM-credential-free deterministic fixture path.
+    "tree-sitter>=0.23,<0.27",
+    "tree-sitter-rust>=0.23",
+    "tree-sitter-go>=0.23",
+    "tree-sitter-typescript>=0.23",
+    "tree-sitter-solidity>=1.2",
 ]
 
 [project.optional-dependencies]

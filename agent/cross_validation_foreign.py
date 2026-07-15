@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from typing import Callable, cast
 
+from agent import tree_sitter_extract
 from agent.config import AgentConfig
 from agent.cross_validation_models import (
     ContractParam,
@@ -185,6 +186,12 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
     language = _normalize_foreign_language(language)
     if language == "python":
         return _infer_python_source_line_map(code)
+    if language in tree_sitter_extract.SUPPORTED_LANGUAGES:
+        ts_line_map = tree_sitter_extract.function_line_map(
+            code, language, _safe_identifier
+        )
+        if ts_line_map is not None:
+            return ts_line_map
     if language == "rust":
         return _infer_regex_source_line_map(
             code,
