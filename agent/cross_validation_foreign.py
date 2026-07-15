@@ -248,7 +248,7 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
             code,
             re.compile(
                 r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
-                r"\((?P<params>[^)]*)\)",
+                r"\((?P<params>(?:[^()]|\([^)]*\))*)\)",
                 flags=re.DOTALL,
             ),
         )
@@ -796,7 +796,7 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     header = re.compile(
         r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
-        r"\((?P<params>[^)]*)\)"
+        r"\((?P<params>(?:[^()]|\([^)]*\))*)\)"
         r"(?P<attrs>[^{;]*?)\{",
         flags=re.DOTALL,
     )
@@ -831,7 +831,7 @@ def _solidity_params_from_signature(
     params: list[ContractParam] = []
     param_types: dict[str, str] = {}
     modifiers = {"memory", "calldata", "storage", "payable", "indexed"}
-    for index, raw in enumerate(part.strip() for part in params_text.split(",") if part.strip()):
+    for index, raw in enumerate(part for part in _split_signature_params(params_text) if part.strip()):
         tokens = [token for token in raw.split() if token.lower() not in modifiers]
         if len(tokens) >= 2:
             type_text, name_text = tokens[0], tokens[-1]

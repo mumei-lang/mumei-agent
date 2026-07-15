@@ -849,6 +849,26 @@ def test_solidity_contract_inference_preserves_bool_return_type() -> None:
     assert atoms[0].ensures == "result == true"
 
 
+def test_solidity_contract_inference_balances_function_type_params() -> None:
+    """Function-type parameters must not stop the top-level parameter parser early."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = (
+        "function sort(\n"
+        "    bytes32[] memory array,\n"
+        "    function(bytes32, bytes32) pure returns (bool) comp\n"
+        ") internal pure returns (bytes32[] memory) {\n"
+        "    return array;\n"
+        "}\n"
+    )
+    atoms = _infer_solidity_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "sort"
+    assert atoms[0].return_type == "i64"
+    assert [p.name for p in atoms[0].params] == ["array", "comp"]
+    assert atoms[0].ensures == "result == array"
+
+
 def test_typescript_source_line_map_includes_class_methods() -> None:
     """TypeScript class methods must be present in the source-line map."""
     from agent.cross_validation_foreign import _infer_foreign_source_line_map
