@@ -1230,3 +1230,88 @@ def test_last_expression_ignores_leading_dot_numeric_literal() -> None:
         "))\n"
     )
     assert _last_expression(body) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Layer B stage 2: syntax-tree expression analysis (with regex fallback)
+# --------------------------------------------------------------------------- #
+
+
+def test_syntax_tree_ignores_operators_inside_string_literal() -> None:
+    """`/`, `[`, `+` inside a Solidity string literal are not real operators."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    issues = _issues_for_expression("f", 'concat("a/b", "c[d]", "e+f")', "Solidity")
+    assert issues == []
+
+
+def test_syntax_tree_ignores_operators_inside_comment() -> None:
+    """Operators inside a Rust line comment must not trigger safety issues."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    issues = _issues_for_expression("f", "g() // a / b + c and d[e]", "Rust")
+    assert issues == []
+
+
+def test_syntax_tree_handles_nested_indexing() -> None:
+    """`a[b[c]]` yields bounds for the real index `c < len_b`, not `b < len_a`."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    issues = [i for i in _issues_for_expression("f", "a[b[c]]", "Rust") if "can index" in i.message]
+    contracts = {contract for issue in issues for contract in issue.required_contracts}
+    assert "c < len_b" in contracts
+    assert not any("len_a" in contract for contract in contracts)
+
+
+def test_syntax_tree_method_chain_operator_not_division() -> None:
+    """`obj.a / obj.b` divides by a member access, not a free variable `b`/`a`."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    issues = _issues_for_expression("f", "obj.a / obj.b", "Rust")
+    assert not any("divide by" in issue.message for issue in issues)
+
+    real = _issues_for_expression("f", "a / b", "Rust")
+    assert any("divide by `b`" in issue.message for issue in real)
+
+
+def test_syntax_tree_addition_inside_index_and_call_receiver() -> None:
+    """Additions embedded in a call receiver are excluded from overflow bounds."""
+    from agent.cross_validation_foreign import _integer_overflow_requires_for_expression
+
+    # `a + b.method()` -> `b` is a receiver, so no overflow pair is emitted.
+    assert _integer_overflow_requires_for_expression("a + b.method()", "rust") == []
+
+
+def test_regex_fallback_used_when_tree_sitter_unavailable(monkeypatch) -> None:
+    """With tree-sitter forced unavailable, the regex heuristics still fire."""
+    import agent.cross_validation_foreign as cvf
+    import agent.strategies.foreign_code_strategy_helpers as helpers
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    monkeypatch.setattr(cvf.tree_sitter_extract, "analyze_expression", lambda *a, **k: None)
+    monkeypatch.setattr(helpers.tree_sitter_extract, "analyze_expression", lambda *a, **k: None)
+
+    issues = _issues_for_expression("f", "a / b", "Rust")
+    assert any("divide by `b`" in issue.message for issue in issues)
+
+    idx = _issues_for_expression("f", "values[idx]", "Go")
+    assert any("can index `values[idx]`" in issue.message for issue in idx)
+
+    reqs = cvf._integer_overflow_requires_for_expression("a + b", "rust")
+    assert any("a + b <=" in req for req in reqs)
+
+
+def test_regex_fallback_matches_tree_sitter_for_multilanguage(monkeypatch) -> None:
+    """The tree-sitter and regex paths agree on canonical safety requirements."""
+    import agent.cross_validation_foreign as cvf
+
+    assert cvf._safety_requires_for_expression("values[idx]", "go") == (
+        "idx >= 0 && idx < len_values"
+    )
+    assert cvf._safety_requires_for_expression("a / b", "rust") == "b != 0"
+
+    monkeypatch.setattr(cvf.tree_sitter_extract, "analyze_expression", lambda *a, **k: None)
+    assert cvf._safety_requires_for_expression("values[idx]", "go") == (
+        "idx >= 0 && idx < len_values"
+    )
+    assert cvf._safety_requires_for_expression("a / b", "rust") == "b != 0"
