@@ -313,7 +313,7 @@ def _infer_foreign_contracts_with_code_to_spec(
     return _infer_foreign_contracts_with_patterns(code, language)
 
 
-def _is_python_overload_stub(node: ast.FunctionDef) -> bool:
+def _is_python_overload_stub(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """Detect ``@overload`` stubs and bodies that are just ``...``."""
     for decorator in node.decorator_list:
         if isinstance(decorator, ast.Name) and decorator.id == "overload":
@@ -333,27 +333,56 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
         tree = ast.parse(code)
     except SyntaxError:
         return atoms
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef):
-            if _is_python_overload_stub(node):
-                continue
-            params = [ContractParam(name=arg.arg, type="i64") for arg in node.args.args]
-            ensures, return_expr = _python_function_contract(node)
-            requires = _safety_requires_for_expression(return_expr)
-            return_type = _python_mumei_return_type(node)
-            atoms.append(
-                MumeiContractAtom(
-                    name=_safe_identifier(node.name),
-                    params=params,
-                    return_type=return_type,
-                    requires=requires,
-                    ensures=ensures,
-                )
+
+    def collect_functions(
+        node: ast.AST, in_class: bool = False
+    ) -> Iterable[tuple[ast.FunctionDef | ast.AsyncFunctionDef, bool]]:
+        for child in getattr(node, "body", []):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield child, in_class
+            elif isinstance(child, ast.ClassDef):
+                yield from collect_functions(child, in_class=True)
+
+    for node, in_class in collect_functions(tree):
+        if _is_python_overload_stub(node):
+            continue
+        params = _python_params_from_node(node, in_class)
+        ensures, return_expr = _python_function_contract(node)
+        requires = _safety_requires_for_expression(return_expr)
+        return_type = _python_mumei_return_type(node)
+        atoms.append(
+            MumeiContractAtom(
+                name=_safe_identifier(node.name),
+                params=params,
+                return_type=return_type,
+                requires=requires,
+                ensures=ensures,
             )
+        )
     return atoms
 
 
-def _python_function_contract(function_node: ast.FunctionDef) -> tuple[str, str]:
+def _is_python_staticmethod(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for decorator in node.decorator_list:
+        if isinstance(decorator, ast.Name) and decorator.id == "staticmethod":
+            return True
+    return False
+
+
+def _python_params_from_node(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool
+) -> list[ContractParam]:
+    args = node.args.args
+    if in_class and args and not _is_python_staticmethod(node):
+        first = args[0].arg
+        if first in {"self", "cls"}:
+            args = args[1:]
+    return [ContractParam(name=arg.arg, type="i64") for arg in args]
+
+
+def _python_function_contract(
+    function_node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[str, str]:
     abs_param = _absolute_value_param(function_node)
     if abs_param:
         return f"result >= 0 && (result == {abs_param} or result == -{abs_param})", abs_param
@@ -378,7 +407,7 @@ def _python_return_values(node: ast.AST) -> list[ast.expr]:
     return [ret.value for ret in _direct_returns(node) if ret.value is not None]
 
 
-def _python_mumei_return_type(function_node: ast.FunctionDef) -> str:
+def _python_mumei_return_type(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Return a Mumei return type for a Python function.
 
     Honors explicit annotations when present; otherwise infers the type from
@@ -440,7 +469,7 @@ def _mumei_type_from_python_value(value: ast.AST) -> str:
     return "i64"
 
 
-def _absolute_value_param(function_node: ast.FunctionDef) -> str:
+def _absolute_value_param(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     params = [arg.arg for arg in function_node.args.args]
     if len(params) != 1:
         return ""
@@ -462,7 +491,7 @@ def _normalized_python_return(node: ast.AST) -> str:
         return ""
 
 
-def _single_return_expr(function_node: ast.FunctionDef) -> str:
+def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     returns = _direct_returns(function_node)
     if len(returns) != 1:
         return ""
