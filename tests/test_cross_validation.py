@@ -1634,6 +1634,15 @@ def test_json_from_text_tolerates_trailing_prose() -> None:
         "atoms": [],
         "note": "a, b, c,",
     }
+    # Missing commas between array/object entries are inserted.
+    assert _json_from_text('{"atoms": [{"name": "f"} {"name": "g"}]}') == {
+        "atoms": [{"name": "f"}, {"name": "g"}]
+    }
+    assert _json_from_text('{"atoms": [], "a": 1 "b": 2}') == {
+        "atoms": [],
+        "a": 1,
+        "b": 2,
+    }
     # A non-object first value is still rejected.
     with pytest.raises(json.JSONDecodeError):
         _json_from_text("[1, 2, 3]")

@@ -166,6 +166,29 @@ def _remove_trailing_commas(text: str) -> str:
     return "".join(result)
 
 
+def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], int]:
+    """Decode JSON, inserting a missing comma at the failure point once.
+
+    Small OSS models sometimes omit the comma between two array/object
+    entries (e.g. ``{"atoms": [{...} {...}]}``).  When the decoder reports
+    ``Expecting ',' delimiter`` we can safely insert a comma at the reported
+    position and retry; if that still fails we raise the original error.
+    """
+    try:
+        return json.JSONDecoder(strict=False).raw_decode(text)
+    except json.JSONDecodeError as exc:
+        if "Expecting ',' delimiter" not in str(exc):
+            raise
+        if not (0 <= exc.pos < len(text)):
+            raise
+        repaired = text[: exc.pos] + "," + text[exc.pos :]
+        try:
+            return json.JSONDecoder(strict=False).raw_decode(repaired)
+        except json.JSONDecodeError:
+            # Raise the original exception to keep diagnostics accurate.
+            raise exc
+
+
 def _json_from_text(text: str) -> dict[str, object]:
     stripped = text.strip()
     fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
@@ -186,7 +209,11 @@ def _json_from_text(text: str) -> dict[str, object]:
     stripped = _replace_python_literals_outside_strings(stripped)
     stripped = _repair_invalid_json_string_escapes(stripped)
     stripped = _remove_trailing_commas(stripped)
-    payload, _end = json.JSONDecoder(strict=False).raw_decode(stripped)
+
+    # Some models omit the comma between array/object entries.  Retry by
+    # inserting a comma at the reported failure position when the parser
+    # complains about a missing ',' delimiter.
+    payload, _end = _raw_decode_with_missing_comma_retry(stripped)
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("expected JSON object", stripped, 0)
     return payload
