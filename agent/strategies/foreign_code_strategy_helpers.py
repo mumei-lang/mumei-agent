@@ -15,6 +15,7 @@ import z3
 from agent import tree_sitter_extract
 from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
+    _addition_pairs_regex,
     _dedupe_strings,
     _go_function_declarations,
     _go_nillable_param_names,
@@ -560,19 +561,139 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
             )
     return issues
 
-def _operand_is_member_or_call(expression: str, span: tuple[int, int]) -> bool:
-    """True when the identifier at ``span`` is a member access or call receiver.
+_LABEL_TO_TS_LANGUAGE = {
+    "Rust": "rust",
+    "Go": "go",
+    "TypeScript": "typescript",
+    "Solidity": "solidity",
+}
 
-    ``result + SafeCast.toUint(...)`` must not treat ``SafeCast`` as an integer
-    addend: it is a library/method-call receiver, not a variable. Modeling it as
-    a free ``uint256`` yields bogus overflow counterexamples (#281).
-    """
-    start, end = span
-    after = expression[end:].lstrip()
-    if after[:1] in {".", "("}:
-        return True
-    before = expression[:start].rstrip()
-    return before[-1:] == "."
+
+def _index_safety_issue(
+    function_name: str,
+    container: str,
+    index: str,
+    label: str,
+    known_constants: dict[str, int],
+) -> ForeignSafetyIssue | None:
+    # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
+    # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
+    # impossible negative index (#296). The upper bound is still a real
+    # concern, so we keep checking `index < len` rather than skipping it.
+    known_index = known_constants.get(index)
+    if known_index is not None and known_index < 0:
+        known_index = None
+    counterexample = _z3_index_counterexample(
+        index, f"len_{container}", known_index=known_index
+    )
+    if counterexample is None:
+        return None
+    required_contracts = (
+        (f"{index} < len_{container}",)
+        if known_index is not None
+        else (f"{index} >= 0", f"{index} < len_{container}")
+    )
+    return ForeignSafetyIssue(
+        function_name=function_name,
+        message=(
+            f"{label} function `{function_name}` can index `{container}[{index}]` "
+            f"without a bounds contract (Z3 counterexample: "
+            + ", ".join(f"{key}={value}" for key, value in counterexample.items())
+            + ")"
+        ),
+        required_contracts=required_contracts,
+        counterexample=counterexample,
+    )
+
+
+def _go_nil_safety_issue(function_name: str, value: str, label: str) -> ForeignSafetyIssue:
+    return ForeignSafetyIssue(
+        function_name=function_name,
+        message=(
+            f"{label} function `{function_name}` can dereference `{value}` "
+            "without a non-nil contract "
+            f"(Z3 counterexample: {value}_is_nil=true)"
+        ),
+        required_contracts=(f"{value} != nil",),
+        counterexample={f"{value}_is_nil": True},
+    )
+
+
+def _null_safety_issue(function_name: str, value: str, label: str) -> ForeignSafetyIssue:
+    return ForeignSafetyIssue(
+        function_name=function_name,
+        message=(
+            f"{label} function `{function_name}` can dereference `{value}` "
+            "without a non-null contract "
+            f"(Z3 counterexample: {value}_is_null=true)"
+        ),
+        required_contracts=(f"{value} != null", f"{value} != undefined"),
+        counterexample={f"{value}_is_null": True},
+    )
+
+
+def _division_safety_issue(
+    function_name: str,
+    divisor: str,
+    label: str,
+    known_constants: dict[str, int],
+) -> ForeignSafetyIssue | None:
+    # A non-zero `constant`/`immutable` divisor (e.g. `x % N` where N is the
+    # secp256r1 curve order) can never be zero, so don't emit a bogus
+    # divide-by-zero from modeling it as a free integer (#296).
+    if known_constants.get(divisor, 0) != 0:
+        return None
+    return ForeignSafetyIssue(
+        function_name=function_name,
+        message=(
+            f"{label} function `{function_name}` can divide by `{divisor}` "
+            f"without a non-zero contract (Z3 counterexample: {divisor}=0)"
+        ),
+        required_contracts=(f"{divisor} != 0",),
+        counterexample={divisor: 0},
+    )
+
+
+def _i64_overflow_safety_issue(
+    function_name: str, left: str, right: str, label: str
+) -> ForeignSafetyIssue:
+    counterexample = _z3_i64_overflow_counterexample(left, right)
+    return ForeignSafetyIssue(
+        function_name=function_name,
+        message=(
+            f"{label} function `{function_name}` can overflow `{left} + {right}` "
+            "without an arithmetic bounds contract "
+            "(Z3 counterexample: "
+            + ", ".join(f"{key}={value}" for key, value in counterexample.items())
+            + ")"
+        ),
+        required_contracts=(
+            f"{left} + {right} <= 9223372036854775807",
+            f"{left} + {right} >= -9223372036854775808",
+        ),
+        counterexample=counterexample,
+    )
+
+
+def _solidity_overflow_safety_issue(
+    function_name: str, left: str, right: str, label: str
+) -> ForeignSafetyIssue:
+    counterexample = _z3_solidity_overflow_counterexample(left, right)
+    return ForeignSafetyIssue(
+        function_name=function_name,
+        message=(
+            f"{label} function `{function_name}` can overflow `{left} + {right}` "
+            "without a uint256 bounds contract "
+            "(Z3 counterexample: "
+            + ", ".join(f"{key}={value}" for key, value in counterexample.items())
+            + ")"
+        ),
+        required_contracts=(
+            f"{left} + {right} <= {SOLIDITY_UINT256_MAX}",
+            f"{left} + {right} >= 0",
+        ),
+        counterexample=counterexample,
+    )
 
 
 def _issues_for_expression(
@@ -583,61 +704,38 @@ def _issues_for_expression(
     dereference_values: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
 ) -> list[ForeignSafetyIssue]:
+    known_constants = known_constants or {}
+    ts_language = _LABEL_TO_TS_LANGUAGE.get(label)
+    findings = (
+        tree_sitter_extract.analyze_expression(expression, ts_language)
+        if ts_language is not None
+        else None
+    )
+    if findings is not None:
+        return _issues_from_findings(
+            function_name,
+            expression,
+            findings,
+            label,
+            dereference_values=dereference_values,
+            known_constants=known_constants,
+        )
+    # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
         expression = _strip_go_rust_literals_and_comments(expression)
-    known_constants = known_constants or {}
     issues: list[ForeignSafetyIssue] = []
     for match in re.finditer(
         r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
         expression,
     ):
-        container = match.group("container")
-        index = match.group("index")
-        # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
-        # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
-        # impossible negative index (#296). The upper bound is still a real
-        # concern, so we keep checking `index < len` rather than skipping it.
-        known_index = known_constants.get(index)
-        if known_index is not None and known_index < 0:
-            known_index = None
-        counterexample = _z3_index_counterexample(
-            index, f"len_{container}", known_index=known_index
+        issue = _index_safety_issue(
+            function_name, match.group("container"), match.group("index"), label, known_constants
         )
-        if counterexample is None:
-            continue
-        required_contracts = (
-            (f"{index} < len_{container}",)
-            if known_index is not None
-            else (f"{index} >= 0", f"{index} < len_{container}")
-        )
-        issues.append(
-            ForeignSafetyIssue(
-                function_name=function_name,
-                message=(
-                    f"{label} function `{function_name}` can index `{container}[{index}]` "
-                    f"without a bounds contract (Z3 counterexample: "
-                    + ", ".join(f"{key}={value}" for key, value in counterexample.items())
-                    + ")"
-                ),
-                required_contracts=required_contracts,
-                counterexample=counterexample,
-            )
-        )
+        if issue is not None:
+            issues.append(issue)
     if label == "Go":
         for value in _go_nil_dereference_values(expression, dereference_values):
-            counterexample = {f"{value}_is_nil": True}
-            issues.append(
-                ForeignSafetyIssue(
-                    function_name=function_name,
-                    message=(
-                        f"{label} function `{function_name}` can dereference `{value}` "
-                        "without a non-nil contract "
-                        f"(Z3 counterexample: {value}_is_nil=true)"
-                    ),
-                    required_contracts=(f"{value} != nil",),
-                    counterexample=counterexample,
-                )
-            )
+            issues.append(_go_nil_safety_issue(function_name, value, label))
     elif label == "TypeScript":
         # null/undefined dereference is a JS/TS concept. Solidity value types
         # (`bytes`/`string`/structs) and Rust references are never null, so
@@ -646,103 +744,59 @@ def _issues_for_expression(
             r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
             expression,
         ):
-            value = match.group("value")
-            counterexample = {f"{value}_is_null": True}
-            issues.append(
-                ForeignSafetyIssue(
-                    function_name=function_name,
-                    message=(
-                        f"{label} function `{function_name}` can dereference `{value}` "
-                        "without a non-null contract "
-                        f"(Z3 counterexample: {value}_is_null=true)"
-                    ),
-                    required_contracts=(
-                        f"{value} != null",
-                        f"{value} != undefined",
-                    ),
-                    counterexample=counterexample,
-                )
-            )
+            issues.append(_null_safety_issue(function_name, match.group("value"), label))
     for match in re.finditer(
         r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
         expression,
     ):
-        divisor = match.group("right")
-        # A non-zero `constant`/`immutable` divisor (e.g. `x % N` where N is the
-        # secp256r1 curve order) can never be zero, so don't emit a bogus
-        # divide-by-zero from modeling it as a free integer (#296).
-        if known_constants.get(divisor, 0) != 0:
-            continue
-        counterexample = {divisor: 0}
-        issues.append(
-            ForeignSafetyIssue(
-                function_name=function_name,
-                message=(
-                    f"{label} function `{function_name}` can divide by `{divisor}` "
-                    f"without a non-zero contract (Z3 counterexample: {divisor}=0)"
-                ),
-                required_contracts=(f"{divisor} != 0",),
-                counterexample=counterexample,
-            )
-        )
+        issue = _division_safety_issue(function_name, match.group("right"), label, known_constants)
+        if issue is not None:
+            issues.append(issue)
     if label in {"Go", "Rust"}:
-        for match in re.finditer(
-            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
-            expression,
-        ):
-            if _operand_is_member_or_call(
-                expression, match.span("left")
-            ) or _operand_is_member_or_call(expression, match.span("right")):
-                continue
-            left = match.group("left")
-            right = match.group("right")
-            counterexample = _z3_i64_overflow_counterexample(left, right)
-            issues.append(
-                ForeignSafetyIssue(
-                    function_name=function_name,
-                    message=(
-                        f"{label} function `{function_name}` can overflow `{left} + {right}` "
-                        "without an arithmetic bounds contract "
-                        "(Z3 counterexample: "
-                        + ", ".join(f"{key}={value}" for key, value in counterexample.items())
-                        + ")"
-                    ),
-                    required_contracts=(
-                        f"{left} + {right} <= 9223372036854775807",
-                        f"{left} + {right} >= -9223372036854775808",
-                    ),
-                    counterexample=counterexample,
-                )
-            )
+        for left, right in _addition_pairs_regex(expression):
+            issues.append(_i64_overflow_safety_issue(function_name, left, right, label))
     if label == "Solidity":
-        for match in re.finditer(
-            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
-            expression,
-        ):
-            if _operand_is_member_or_call(
-                expression, match.span("left")
-            ) or _operand_is_member_or_call(expression, match.span("right")):
-                continue
-            left = match.group("left")
-            right = match.group("right")
-            counterexample = _z3_solidity_overflow_counterexample(left, right)
-            issues.append(
-                ForeignSafetyIssue(
-                    function_name=function_name,
-                    message=(
-                        f"{label} function `{function_name}` can overflow `{left} + {right}` "
-                        "without a uint256 bounds contract "
-                        "(Z3 counterexample: "
-                        + ", ".join(f"{key}={value}" for key, value in counterexample.items())
-                        + ")"
-                    ),
-                    required_contracts=(
-                        f"{left} + {right} <= {SOLIDITY_UINT256_MAX}",
-                        f"{left} + {right} >= 0",
-                    ),
-                    counterexample=counterexample,
-                )
-            )
+        for left, right in _addition_pairs_regex(expression):
+            issues.append(_solidity_overflow_safety_issue(function_name, left, right, label))
+    return issues
+
+
+def _issues_from_findings(
+    function_name: str,
+    expression: str,
+    findings: tree_sitter_extract.ExpressionSafety,
+    label: str,
+    *,
+    dereference_values: set[str] | None,
+    known_constants: dict[str, int],
+) -> list[ForeignSafetyIssue]:
+    """Build safety issues from syntax-tree findings.
+
+    Emits issues in the same category order as the regex path (index, then
+    nil/null, then division, then overflow) and reuses the shared issue
+    builders so messages, counterexamples and required contracts are identical.
+    """
+    issues: list[ForeignSafetyIssue] = []
+    for container, index in findings.index_accesses:
+        issue = _index_safety_issue(function_name, container, index, label, known_constants)
+        if issue is not None:
+            issues.append(issue)
+    if label == "Go":
+        for value in _go_nil_dereference_values(expression, dereference_values):
+            issues.append(_go_nil_safety_issue(function_name, value, label))
+    elif label == "TypeScript":
+        for value in findings.length_access_values:
+            issues.append(_null_safety_issue(function_name, value, label))
+    for divisor in findings.divisors:
+        issue = _division_safety_issue(function_name, divisor, label, known_constants)
+        if issue is not None:
+            issues.append(issue)
+    if label in {"Go", "Rust"}:
+        for left, right in findings.additions:
+            issues.append(_i64_overflow_safety_issue(function_name, left, right, label))
+    if label == "Solidity":
+        for left, right in findings.additions:
+            issues.append(_solidity_overflow_safety_issue(function_name, left, right, label))
     return issues
 
 def _filter_covered_safety_issues(
@@ -793,19 +847,32 @@ def _go_nil_dereference_values(
     expression: str,
     eligible_values: set[str] | None = None,
 ) -> list[str]:
+    findings = tree_sitter_extract.analyze_expression(expression, "go")
+    if findings is not None:
+        # Pointer derefs (``*value``) then selector receivers (``value.``),
+        # matching the legacy scan order.
+        candidates = [*findings.pointer_deref_values, *findings.member_access_values]
+    else:
+        candidates = _go_nil_dereference_values_regex(expression)
+    return _dedupe_strings(
+        [
+            value
+            for value in candidates
+            if eligible_values is None or value in eligible_values
+        ]
+    )
+
+
+def _go_nil_dereference_values_regex(expression: str) -> list[str]:
     values: list[str] = []
     for match in re.finditer(r"\*\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)", expression):
-        value = match.group("value")
-        if eligible_values is None or value in eligible_values:
-            values.append(value)
+        values.append(match.group("value"))
     for match in re.finditer(
         r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*\.",
         expression,
     ):
-        value = match.group("value")
-        if eligible_values is None or value in eligible_values:
-            values.append(value)
-    return _dedupe_strings(values)
+        values.append(match.group("value"))
+    return values
 
 def _z3_index_counterexample(
     index_name: str,

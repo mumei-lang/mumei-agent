@@ -511,9 +511,20 @@ def _single_return_expr(function_node: ast.FunctionDef | ast.AsyncFunctionDef) -
         return ""
 
 
-def _safety_requires_for_expression(expression: str) -> str:
+def _safety_requires_for_expression(expression: str, language: str = "python") -> str:
     if not expression:
         return "true"
+    canonical = _normalize_foreign_language(language)
+    if canonical != "python":
+        # Non-Python languages parse via tree-sitter (Layer B stage 2). When a
+        # grammar is unavailable or the fragment cannot be parsed, fall back to
+        # the regex heuristic, mirroring the Python ``SyntaxError`` fallback.
+        findings = tree_sitter_extract.analyze_expression(expression, canonical)
+        if findings is not None:
+            requirements = _generic_requirements_from_findings(findings)
+            return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+        requirements = _generic_safety_requires_for_expression(expression)
+        return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements: list[str] = []
     try:
         tree = ast.parse(expression, mode="eval")
@@ -526,6 +537,54 @@ def _safety_requires_for_expression(expression: str) -> str:
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements.extend(_generic_safety_requires_for_expression(expression))
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+
+
+def _generic_requirements_from_findings(
+    findings: tree_sitter_extract.ExpressionSafety,
+) -> list[str]:
+    """Divide-by-zero / bounds / null requirements from syntax-tree findings.
+
+    Emits the same requirement strings, in the same order, as the regex
+    ``_generic_safety_requires_for_expression`` (division, then bounds, then
+    null/undefined), but driven by structural facts rather than text matching.
+    """
+    requirements: list[str] = []
+    for divisor in findings.divisors:
+        requirements.append(f"{divisor} != 0")
+    for container, index in findings.index_accesses:
+        requirements.append(f"{index} >= 0")
+        requirements.append(f"{index} < len_{container}")
+    for value in findings.length_access_values:
+        requirements.append(f"{value} != null")
+        requirements.append(f"{value} != undefined")
+    return requirements
+
+
+def _i64_overflow_bounds(left: str, right: str) -> list[str]:
+    return [
+        f"{left} + {right} <= 9223372036854775807",
+        f"{left} + {right} >= -9223372036854775808",
+    ]
+
+
+def _addition_pairs_regex(expression: str) -> list[tuple[str, str]]:
+    """Regex fallback for ``a + b`` operand pairs (both simple identifiers).
+
+    Skips operands that are call receivers / member accesses (e.g. the
+    ``SafeCast`` in ``result + SafeCast.toUint(...)``), which are not integer
+    variables and must not be bounded as free integers (#281).
+    """
+    pairs: list[tuple[str, str]] = []
+    for match in re.finditer(
+        r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+        expression,
+    ):
+        if _operand_is_member_or_call(
+            expression, match.span("left")
+        ) or _operand_is_member_or_call(expression, match.span("right")):
+            continue
+        pairs.append((match.group("left"), match.group("right")))
+    return pairs
 
 
 def _generic_safety_requires_for_expression(expression: str) -> list[str]:
@@ -554,12 +613,12 @@ def _go_safety_requires_for_expression(
     param_names: Iterable[str] = (),
 ) -> str:
     requirements: list[str] = []
-    base = _safety_requires_for_expression(expression)
+    base = _safety_requires_for_expression(expression, "go")
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     for value in _go_nil_dereference_values(expression, set(param_names)):
         requirements.append(f"{value} != nil")
-    requirements.extend(_integer_overflow_requires_for_expression(expression))
+    requirements.extend(_integer_overflow_requires_for_expression(expression, "go"))
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
 
 
@@ -567,20 +626,33 @@ def _go_nil_dereference_values(
     expression: str,
     eligible_values: set[str] | None = None,
 ) -> list[str]:
+    findings = tree_sitter_extract.analyze_expression(expression, "go")
+    if findings is not None:
+        # Pointer derefs (``*value``) then selector receivers (``value.``),
+        # matching the legacy scan order.
+        candidates = [*findings.pointer_deref_values, *findings.member_access_values]
+    else:
+        candidates = _go_nil_dereference_values_regex(expression)
+    return _dedupe_strings(
+        [
+            value
+            for value in candidates
+            if eligible_values is None or value in eligible_values
+        ]
+    )
+
+
+def _go_nil_dereference_values_regex(expression: str) -> list[str]:
     expression = _strip_go_rust_literals_and_comments(expression)
     values: list[str] = []
     for match in re.finditer(r"\*\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)", expression):
-        value = match.group("value")
-        if eligible_values is None or value in eligible_values:
-            values.append(value)
+        values.append(match.group("value"))
     for match in re.finditer(
         r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*\.",
         expression,
     ):
-        value = match.group("value")
-        if eligible_values is None or value in eligible_values:
-            values.append(value)
-    return _dedupe_strings(values)
+        values.append(match.group("value"))
+    return values
 
 
 def _advance_past_rust_tick(source: str, i: int) -> int:
@@ -903,7 +975,7 @@ def _solidity_safety_requires_for_expression(
     param_types: dict[str, str] | None = None,
 ) -> str:
     requirements: list[str] = []
-    base = _safety_requires_for_expression(expression)
+    base = _safety_requires_for_expression(expression, "solidity")
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     requirements.extend(
@@ -932,20 +1004,14 @@ def _solidity_overflow_requires_for_expression(
     param_types: dict[str, str] | None = None,
 ) -> list[str]:
     param_types = param_types or {}
+    findings = tree_sitter_extract.analyze_expression(expression, "solidity")
+    additions = (
+        list(findings.additions)
+        if findings is not None
+        else _addition_pairs_regex(expression)
+    )
     requirements: list[str] = []
-    for match in re.finditer(
-        r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
-        expression,
-    ):
-        # Skip operands that are actually call receivers / member accesses
-        # (e.g. the `SafeCast` in `result + SafeCast.toUint(...)`), which are
-        # not integer variables and must not be bounded as free uint256.
-        if _operand_is_member_or_call(
-            expression, match.span("left")
-        ) or _operand_is_member_or_call(expression, match.span("right")):
-            continue
-        left = match.group("left")
-        right = match.group("right")
+    for left, right in additions:
         unsigned = _solidity_type_is_unsigned(
             param_types.get(left, "")
         ) or _solidity_type_is_unsigned(param_types.get(right, ""))
@@ -962,30 +1028,25 @@ def _solidity_overflow_requires_for_expression(
 
 def _rust_safety_requires_for_expression(expression: str) -> str:
     requirements = []
-    base = _safety_requires_for_expression(expression)
+    base = _safety_requires_for_expression(expression, "rust")
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
-    requirements.extend(_integer_overflow_requires_for_expression(expression))
+    requirements.extend(_integer_overflow_requires_for_expression(expression, "rust"))
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
 
 
-def _integer_overflow_requires_for_expression(expression: str) -> list[str]:
+def _integer_overflow_requires_for_expression(
+    expression: str, language: str = "rust"
+) -> list[str]:
+    findings = tree_sitter_extract.analyze_expression(expression, language)
+    additions = (
+        list(findings.additions)
+        if findings is not None
+        else _addition_pairs_regex(expression)
+    )
     requirements: list[str] = []
-    for match in re.finditer(
-        r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
-        expression,
-    ):
-        # Skip operands that are call receivers / member accesses (e.g. the
-        # `SomeStruct` in `a + SomeStruct.method()`), which are not integer
-        # variables and must not be bounded as free integers (#281).
-        if _operand_is_member_or_call(
-            expression, match.span("left")
-        ) or _operand_is_member_or_call(expression, match.span("right")):
-            continue
-        left = match.group("left")
-        right = match.group("right")
-        requirements.append(f"{left} + {right} <= 9223372036854775807")
-        requirements.append(f"{left} + {right} >= -9223372036854775808")
+    for left, right in additions:
+        requirements.extend(_i64_overflow_bounds(left, right))
     return requirements
 
 
@@ -1057,7 +1118,9 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     name=_safe_identifier(match.group("name")),
                     params=_params_from_signature(match.group("params")),
                     return_type=_typescript_return_type(match.group("ret") or "number"),
-                    requires=_safety_requires_for_expression(raw_return_expr),
+                    requires=_safety_requires_for_expression(
+                        raw_return_expr, "typescript"
+                    ),
                     ensures=f"result == {return_expr}" if return_expr else "true",
                 )
             )

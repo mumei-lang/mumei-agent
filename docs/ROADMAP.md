@@ -358,14 +358,35 @@ reentrancy について guard-state-machine の Z3 検証を実装済み（`solc
     `{}` や `fn`/`func`/`function` の誤検出、class メソッドやネスト関数の取りこぼし）が
     解消され、対症療法だった `_balanced_brace_body` / `_strip_go_rust_literals_and_comments`
     は関数境界特定については不要化した（安全性推論側の body 前処理では引き続き使用）。
-- **stage 2**: stage 1 の効果確認後、安全性条件推論の式パース部分
-  （`_safety_requires_for_expression` の非 Python 経路、および
-  `agent/strategies/foreign_code_strategy_helpers.py` の式解析）も構文木ベースへ
-  段階拡張する。
-- **別軸**: #281 / #295 / #296 のような偽陽性（`SafeCast` の誤認、value 型への
-  `!= nil` 誤付与、`constant` / `immutable` 除数の偽 counterexample）は
-  tree-sitter 化では解消しない。`known_constants` や型情報を使った意味解析強化として
-  別課題で扱う。
+- **stage 2 ✅ 実装済み**: 安全性条件推論の式パース部分を構文木ベースへ拡張した。
+  除算ゼロ (`/` `%`)・配列境界 (`container[index]`)・null/undefined (`.length` /
+  `.len` / `.is_empty`)・nil 参照 (`*value` / `value.member`)・integer overflow
+  (`a + b`) の各パターン検出を、正規表現の文字列マッチではなく構文ノード走査で行う。
+  - `agent/tree_sitter_extract.py` に `analyze_expression` を追加。式を各言語文法が
+    受理する最小の構文へラップして tree-sitter でパースし、除数・添字アクセス・
+    `.length` レシーバ・メンバアクセス・ポインタ deref・加算ペアを **構文的事実** として
+    抽出した `ExpressionSafety` を返す。tree-sitter または文法が未導入、パース失敗
+    (`root_node.has_error`)、非対応言語の場合は `None` を返し、既存の正規表現経路へ
+    フォールバックする（Python の `_safety_requires_for_expression` が
+    `SyntaxError` 時に正規表現へ戻る方針と対称）。Python は従来どおり標準 `ast` 経路。
+  - 置き換えた経路: `agent/cross_validation_foreign.py` の
+    `_safety_requires_for_expression`（非 Python）/ `_generic_safety_requires_for_expression`
+    相当 / `_integer_overflow_requires_for_expression` / `_go_nil_dereference_values` /
+    Solidity overflow、`agent/strategies/foreign_code_strategy_helpers.py` の
+    `_issues_for_expression`（境界・除算・null/nil・overflow）と `_go_nil_dereference_values`。
+    戻り値インタフェース（`ForeignSafetyIssue` のリスト、`requires` 文字列、
+    counterexample、required_contracts）と出力順序は不変。
+  - これにより文字列/コメント内の `/` `[]` `+` の誤検出、`obj.a / obj.b` のメンバ
+    アクセス誤認、ネスト添字 `a[b[c]]` の取りこぼしといった正規表現の構造的脆さが
+    解消される。`solc` / `rustc` / `tsc` に依存せず、LLM credential なしで決定論的に
+    同一結果を返す（`CI_FIXTURE_MODE` 経路を維持）。
+- **別軸（stage 2 では未対応）**: #281 / #295 / #296 のような偽陽性（`SafeCast` の誤認、
+  value 型への `!= nil` / `!= null` 誤付与、`constant` / `immutable` 除数・添字の偽
+  counterexample）は tree-sitter 化だけでは解消しない。これらは `known_constants` や
+  型情報を用いる **意味解析** の課題であり、stage 2 では既存の対策ロジック
+  （`known_constants` による除数/添字のピン留め、value 型の nil/null 除外、メンバ
+  アクセス/呼び出しレシーバの整数変数からの除外）を温存するに留め、新たな意味解析強化は
+  行わない。`known_constants` や型情報を使った意味解析強化として別課題で扱う。
 
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 
