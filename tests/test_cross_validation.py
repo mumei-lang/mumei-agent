@@ -564,6 +564,48 @@ def test_benign_llm_advisory_does_not_flip_verdict_to_refuted() -> None:
     )
 
 
+def test_validate_code_filters_llm_issues_for_dropped_hallucinated_atoms() -> None:
+    """Issues tied to LLM-invented atoms must be discarded when those atoms are dropped."""
+    response = MagicMock()
+    response.choices = [MagicMock()]
+    response.choices[0].message.content = json.dumps(
+        {
+            "atoms": [
+                {
+                    "name": "AlgorithmTypes",
+                    "params": [],
+                    "return_type": "i64",
+                    "requires": "result > x && result < x",
+                    "ensures": "result == x",
+                }
+            ],
+            "issues": [
+                {
+                    "kind": "overconstraint",
+                    "message": "The inferred contract for AlgorithmTypes is unsatisfiable.",
+                    "evidence": "result > x && result < x",
+                    "severity": "error",
+                }
+            ],
+        }
+    )
+    client = MagicMock()
+    client.chat.completions.create.return_value = response
+    config = AgentConfig(api_key="test", model="test-model")
+    config.create_client = MagicMock(return_value=client)
+
+    result = validate_foreign_code(
+        "export const AlgorithmTypes = { RSA: 'RSA' } as const\n",
+        "typescript",
+        config=config,
+        use_llm=True,
+        run_mumei=False,
+    )
+
+    assert result.verdict == "unverifiable"
+    assert not any("AlgorithmTypes" in issue.message for issue in result.issues)
+
+
 def test_unsubstantiated_unsat_claim_does_not_refute_verified_code() -> None:
     """LLM unsat claims need formal corroboration before refuting (#312)."""
     from agent.cross_validation import _validate_foreign_code_verdict
