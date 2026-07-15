@@ -232,8 +232,8 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
             _infer_regex_source_line_map(
                 code,
                 re.compile(
-                    r"(?m)^\s*(?:async\s+)?(?:abstract\s+)?"
-                    r"(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+)*"
+                    r"(?m)^\s*(?:abstract\s+)?"
+                    r"(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+|async\s+)*"
                     r"(?P<name>(?!(?:if|while|for|switch|catch|with)\b)"
                     r"[A-Za-z_$][\w$]*)\s*"
                     r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"

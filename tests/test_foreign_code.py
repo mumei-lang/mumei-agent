@@ -759,11 +759,15 @@ def test_typescript_source_line_map_includes_class_methods() -> None:
         "  abort() {\n"
         "    this.aborted = true\n"
         "  }\n"
+        "  private static async bar(x: number) {\n"
+        "    return x\n"
+        "  }\n"
         "}\n"
     )
     line_map = _infer_foreign_source_line_map(source, "typescript")
     assert "write" in line_map
     assert "abort" in line_map
+    assert "bar" in line_map
 
 
 def test_validate_foreign_code_void_functions_use_unit_body() -> None:
