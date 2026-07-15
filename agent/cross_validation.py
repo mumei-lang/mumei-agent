@@ -16,6 +16,7 @@ from typing import Literal, cast
 
 import z3
 
+from agent import tree_sitter_extract
 from agent.ambiguity_detector import AmbiguityDetector
 from agent.config import AgentConfig
 from agent.code_to_spec import CodeToSpecConverter
@@ -634,9 +635,18 @@ def detect_intent_drift(
 
 
 def _is_function_name_in_source(name: str, code: str, language: str) -> bool:
-    """Return True when ``name`` is declared as a function/method in ``code``."""
-    esc = re.escape(name)
+    """Return True when ``name`` is declared as a function/method in ``code``.
+
+    The deterministic tree-sitter function-name set is authoritative when
+    available; a miss still falls through to the legacy regex patterns so that
+    node forms tree-sitter does not model are never dropped (backward compat).
+    """
     lang = _normalize_foreign_language(language)
+    if lang in tree_sitter_extract.SUPPORTED_LANGUAGES:
+        ts_names = tree_sitter_extract.function_names(code, lang, _safe_identifier)
+        if ts_names is not None and _safe_identifier(name) in ts_names:
+            return True
+    esc = re.escape(name)
     if lang == "python":
         patterns = [rf"(?m)^\s*(?:async\s+)?def\s+{esc}\s*\("]
     elif lang == "rust":

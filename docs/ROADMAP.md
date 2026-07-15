@@ -332,16 +332,32 @@ reentrancy について guard-state-machine の Z3 検証を実装済み（`solc
 `_is_function_name_in_source`（幻覚関数フィルタ）といった対症療法コードが必要になる。
 この構造的脆さは主に「関数/ブロック抽出」に局在しているため、次の段階に分けて移行する:
 
-- **stage 1（第一歩・最優先）**: 関数/ブロック抽出だけを tree-sitter 等の構文ベースへ
-  置き換える。`solc` / `rustc` / `tsc` を要求せず、LLM credential なしの決定論的
-  fixture 経路を維持できる軽量パーサを前提とする。`pyproject.toml` に新規パーサ依存を
-  追加する場合も、決定論性・LLM credential 非依存・外部言語コンパイラ非依存という
-  既存要件を満たすことを必須条件とする。除算ゼロ・overflow・bounds・nil などの
-  安全性条件推論は当面 `_generic_safety_requires_for_expression` 等の正規表現
-  ヒューリスティクスに残す。Python が採る「関数抽出は `ast`、安全性推論は
-  フォールバックで正規表現」という構成と対称にし、blast radius を抽出層に閉じる。
-  対象は `_rust_function_blocks` / `_go_function_blocks` /
-  `_infer_foreign_source_line_map` 系の関数抽出経路。
+- **stage 1（第一歩・最優先）✅ 実装済み**: 関数/ブロック抽出だけを tree-sitter による
+  構文解析へ置き換えた。導入範囲は Rust / TypeScript / Go / Solidity の
+  **関数/ブロック境界抽出のみ**で、安全性条件推論（除算ゼロ・overflow・bounds・nil、
+  reentrancy / CEI / access-control 等）は当面 `_generic_safety_requires_for_expression`
+  など正規表現ヒューリスティクスに残す（= stage 2 の範囲）。Python が採る
+  「関数抽出は `ast`、安全性推論はフォールバックで正規表現」という構成と対称にし、
+  blast radius を抽出層に閉じる。
+  - 新規モジュール `agent/tree_sitter_extract.py` が `function_blocks` /
+    `function_line_map` / `function_names` を提供し、tree-sitter またはいずれかの
+    言語文法が未導入・パース不能な場合は `None` を返して既存の正規表現経路へ
+    フォールバックする（Python の `extract_python` が `SyntaxError` 時に空を返すのと
+    同じ堅牢性方針）。
+  - 置き換えた経路: `agent/strategies/foreign_code_strategy_helpers.py` の
+    `_rust_function_blocks` / `_go_function_blocks` / `_typescript_function_blocks` /
+    `_solidity_function_blocks`、`agent/cross_validation_foreign.py` の
+    `_infer_foreign_source_line_map`（Rust / TypeScript / Go / Solidity）、
+    `agent/cross_validation.py` の `_is_function_name_in_source`（幻覚 atom フィルタ）。
+  - 依存: `pyproject.toml` に `tree-sitter` 本体と `tree-sitter-rust` /
+    `tree-sitter-go` / `tree-sitter-typescript` / `tree-sitter-solidity` の文法 wheel を
+    追加。いずれも純粋な in-process パーサで `solc` / `rustc` / `tsc` やネットワークを
+    要求せず、LLM credential なしで決定論的に同一結果を返す（`CI_FIXTURE_MODE`
+    経路を維持）。
+  - これにより正規表現由来の構造的脆さ（ネスト波括弧の取りこぼし、文字列/コメント内の
+    `{}` や `fn`/`func`/`function` の誤検出、class メソッドやネスト関数の取りこぼし）が
+    解消され、対症療法だった `_balanced_brace_body` / `_strip_go_rust_literals_and_comments`
+    は関数境界特定については不要化した（安全性推論側の body 前処理では引き続き使用）。
 - **stage 2**: stage 1 の効果確認後、安全性条件推論の式パース部分
   （`_safety_requires_for_expression` の非 Python 経路、および
   `agent/strategies/foreign_code_strategy_helpers.py` の式解析）も構文木ベースへ
