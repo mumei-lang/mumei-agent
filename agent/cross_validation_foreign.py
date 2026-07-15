@@ -1092,6 +1092,7 @@ def _integer_overflow_requires_for_expression(
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
+    known_constants = semantic_safety.collect_declared_constants(code, "typescript")
     # Each pattern is paired with a predicate that decides whether the body is
     # an arrow-function expression body (no braces).  Function and class-method
     # bodies are never expression bodies, while arrow functions may use either
@@ -1159,7 +1160,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     params=_params_from_signature(match.group("params")),
                     return_type=_typescript_return_type(match.group("ret") or "number"),
                     requires=_safety_requires_for_expression(
-                        raw_return_expr, "typescript"
+                        raw_return_expr, "typescript", known_constants
                     ),
                     ensures=f"result == {return_expr}" if return_expr else "true",
                 )
