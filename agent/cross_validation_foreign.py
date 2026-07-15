@@ -193,7 +193,7 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
                 r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
                 r"(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\s*"
                 r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
-                r"(?:->\s*(?P<ret>[^{;\n]+?))?\s*\{",
+                r"(?P<ret>[^;{]*?)?\s*\{",
                 flags=re.DOTALL,
             ),
         )
@@ -1033,9 +1033,47 @@ def _balanced_brace_body(source: str, opening_brace: int) -> str:
     return source[opening_brace + 1 :]
 
 
+def _split_signature_params(params_text: str) -> list[str]:
+    """Split a parameter list on top-level commas, ignoring commas inside
+    parentheses, brackets, braces, and angle brackets.
+
+    Naively splitting on ``,`` misparses Rust generics such as
+    ``table: impl IntoIterator<Item = (K, &'a V)> + 'a,`` into multiple
+    spurious parameters.
+    """
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    n = len(params_text)
+    i = 0
+    while i < n:
+        ch = params_text[i]
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}":
+            if depth > 0:
+                depth -= 1
+        elif ch == ">":
+            # Avoid treating ``->`` or ``>=`` as an angle-bracket close.
+            if i > 0 and params_text[i - 1] in "-=":
+                pass
+            elif depth > 0:
+                depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(params_text[start:i].strip())
+            start = i + 1
+        i += 1
+    tail = params_text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def _params_from_signature(params_text: str) -> list[ContractParam]:
     params: list[ContractParam] = []
-    for index, raw in enumerate(part.strip() for part in params_text.split(",") if part.strip()):
+    for index, raw in enumerate(_split_signature_params(params_text)):
+        if not raw:
+            continue
         pieces = raw.split(":")
         name = pieces[0].strip().split()[0].rstrip("?") if pieces[0].strip() else f"arg{index}"
         type_text = pieces[1].strip() if len(pieces) > 1 else "i64"
