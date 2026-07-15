@@ -482,6 +482,29 @@ def test_clause_mixed_and_or_preserves_precedence() -> None:
     assert solver.check() == z3.sat
 
 
+def test_mumei_safe_clause_normalizes_strict_equality() -> None:
+    """TypeScript/JS-style strict equality (``===``/``!==``) must be rewritten to
+    the operators mumei parses, while unsupported conjuncts are still dropped."""
+    from agent.cross_validation_z3 import _mumei_safe_clause
+
+    assert _mumei_safe_clause("result !== false", {"result"}) == "result != false"
+    assert _mumei_safe_clause("result === headers", {"result", "headers"}) == "result == headers"
+    assert (
+        _mumei_safe_clause(
+            "(result => [object Object]) && result !== headers",
+            {"result", "headers"},
+        )
+        == "result != headers"
+    )
+    assert (
+        _mumei_safe_clause(
+            "result !== false && x === y",
+            {"result", "x", "y"},
+        )
+        == "result != false && x == y"
+    )
+
+
 def test_benign_llm_advisory_does_not_flip_verdict_to_refuted() -> None:
     """A generic ``llm`` advisory must not refute code that Z3 finds satisfiable and
     mumei verifies (#309)."""
