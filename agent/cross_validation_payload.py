@@ -167,26 +167,24 @@ def _remove_trailing_commas(text: str) -> str:
 
 
 def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], int]:
-    """Decode JSON, inserting a missing comma at the failure point once.
+    """Decode JSON, inserting missing commas reported by the decoder.
 
-    Small OSS models sometimes omit the comma between two array/object
+    Small OSS models sometimes omit commas between two array/object
     entries (e.g. ``{"atoms": [{...} {...}]}``).  When the decoder reports
-    ``Expecting ',' delimiter`` we can safely insert a comma at the reported
-    position and retry; if that still fails we raise the original error.
+    ``Expecting ',' delimiter`` we insert a comma at the reported position and
+    retry.  This is repeated up to ``max_attempts`` because a single LLM output
+    may contain several missing commas.  If the error persists for any other
+    reason we raise the most recent exception.
     """
-    try:
-        return json.JSONDecoder(strict=False).raw_decode(text)
-    except json.JSONDecodeError as exc:
-        if "Expecting ',' delimiter" not in str(exc):
-            raise
-        if not (0 <= exc.pos < len(text)):
-            raise
-        repaired = text[: exc.pos] + "," + text[exc.pos :]
+    max_attempts = 10
+    for _ in range(max_attempts):
         try:
-            return json.JSONDecoder(strict=False).raw_decode(repaired)
-        except json.JSONDecodeError:
-            # Raise the original exception to keep diagnostics accurate.
-            raise exc
+            return json.JSONDecoder(strict=False).raw_decode(text)
+        except json.JSONDecodeError as exc:
+            if "Expecting ',' delimiter" not in str(exc) or not (0 <= exc.pos < len(text)):
+                raise
+            text = text[: exc.pos] + "," + text[exc.pos :]
+    return json.JSONDecoder(strict=False).raw_decode(text)
 
 
 def _json_from_text(text: str) -> dict[str, object]:

@@ -1643,6 +1643,9 @@ def test_json_from_text_tolerates_trailing_prose() -> None:
         "a": 1,
         "b": 2,
     }
+    assert _json_from_text('{"atoms": [{"name": "a"} {"name": "b"} {"name": "c"}]}') == {
+        "atoms": [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+    }
     # A non-object first value is still rejected.
     with pytest.raises(json.JSONDecodeError):
         _json_from_text("[1, 2, 3]")
