@@ -1605,6 +1605,27 @@ def test_json_from_text_tolerates_trailing_prose() -> None:
     assert _json_from_text(
         '```json\n{"atoms": [{"name": "f", "params": []}]}\n```'
     ) == {"atoms": [{"name": "f", "params": []}]}
+    # Small OSS models may mix Python ``None``/``True``/``False`` into JSON.
+    # These must be normalized to JSON literals without touching the same words
+    # when they appear inside string values.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "return_type": None, "requires": True, "ensures": False}]}'
+    ) == {"atoms": [{"name": "f", "return_type": None, "requires": True, "ensures": False}]}
+    assert _json_from_text(
+        '{"atoms": [], "note": "None of the True or False values here"}'
+    ) == {"atoms": [], "note": "None of the True or False values here"}
+    # A literal control character inside a string should not abort parsing.
+    assert _json_from_text('{"atoms": [{"name": "f", "ensures": "x\\ny"}]}') == {
+        "atoms": [{"name": "f", "ensures": "x\ny"}]
+    }
+    assert _json_from_text('{"atoms": [{"name": "f", "ensures": "x\ny"}]}') == {
+        "atoms": [{"name": "f", "ensures": "x\ny"}]
+    }
+    # Invalid escape sequences copied from foreign regexes/literals are repaired
+    # so the original character sequence is preserved.
+    assert _json_from_text(r'{"atoms": [{"name": "f", "ensures": "replace(/\\/|\\+/g, x)"}]}') == {
+        "atoms": [{"name": "f", "ensures": "replace(/\\/|\\+/g, x)"}]
+    }
     # A non-object first value is still rejected.
     with pytest.raises(json.JSONDecodeError):
         _json_from_text("[1, 2, 3]")
