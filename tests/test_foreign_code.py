@@ -783,6 +783,29 @@ def test_solidity_contract_inference_preserves_bool_return_type() -> None:
     assert atoms[0].ensures == "result == true"
 
 
+def test_typescript_source_line_map_includes_class_methods() -> None:
+    """TypeScript class methods must be present in the source-line map."""
+    from agent.cross_validation_foreign import _infer_foreign_source_line_map
+
+    source = (
+        "export class StreamingApi {\n"
+        "  async write(input: Uint8Array | string): Promise<StreamingApi> {\n"
+        "    return this\n"
+        "  }\n"
+        "  abort() {\n"
+        "    this.aborted = true\n"
+        "  }\n"
+        "  private static async bar(x: number) {\n"
+        "    return x\n"
+        "  }\n"
+        "}\n"
+    )
+    line_map = _infer_foreign_source_line_map(source, "typescript")
+    assert "write" in line_map
+    assert "abort" in line_map
+    assert "bar" in line_map
+
+
 def test_validate_foreign_code_void_functions_use_unit_body() -> None:
     """Void foreign functions must produce a unit return type and a unit body."""
     from agent.cross_validation import validate_foreign_code
