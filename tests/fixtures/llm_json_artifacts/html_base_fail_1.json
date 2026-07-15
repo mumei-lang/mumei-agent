@@ -1,0 +1,118 @@
+{
+  "atoms": [
+    {
+      "name": "processString",
+      "params": [
+        {
+          "name": "str",
+          "type": "string"
+        },
+        {
+          "name": "callbacks",
+          "type": "(HtmlEscapedCallback | undefined)[].array()"
+        }
+      ],
+      "return_type": "Promise<string>",
+      "requires": "true",
+      "ensures": (
+        (r) => `!r.includes("&") && !r.includes("<") && !r.includes(">")`,
+        `!r.includes("'") && r.length === str.length`
+      ),
+      "effects": []
+    },
+    {
+      "name": "escapeToBuffer",
+      "params": [
+        {
+          "name": "str",
+          "type": "string"
+        },
+        {
+          "name": "buffer",
+          "type": "(string | Promise<string>)[]"
+        }
+      ],
+      "return_type": "void",
+      "requires": "true",
+      "ensures": (
+        (r) => `!r.includes("&") && !r.includes("<") && !r.includes(">")`,
+        `!r.includes("'") && r.length === str.length`
+      ),
+      "effects": [
+        "assignable(buffer)"
+      ]
+    },
+    {
+      "name": "raw",
+      "params": [
+        {
+          "name": "value",
+          "type": "unknown"
+        },
+        {
+          "name": "callbacks",
+          "type": "(HtmlEscapedCallback | undefined)[].array()"
+        }
+      ],
+      "return_type": "string & HtmlEscaped",
+      "requires": "true",
+      "ensures": (
+        (r) => `!r.includes("&") && !r.includes("<") && !r.includes(">")`,
+        `!r.includes("'") && r.length === str.length`
+      ),
+      "effects": [
+        "assignable(r)"
+      ]
+    },
+    {
+      "name": "resolveCallback",
+      "params": [
+        {
+          "name": "str",
+          "type": "(string | HtmlEscapedString | Promise<string>)"
+        },
+        {
+          "name": "phase",
+          "type": "(HtmlEscapedCallbackPhase)[keyof typeof HtmlEscapedCallbackPhase]"
+        },
+        {
+          "name": "preserveCallbacks",
+          "type": "boolean"
+        },
+        {
+          "name": "context",
+          "type": "object"
+        }
+      ],
+      "return_type": "Promise<string>",
+      "requires": "true",
+      "ensures": (
+        (r) => `!r.includes("&") && !r.includes("<") && !r.includes(">")`,
+        `!r.includes("'") && r.length === str.length`
+      ),
+      "effects": [
+        "assignable(r)",
+        "all(resolvedCallbacks)`includesCallback`: `true`"
+      ]
+    },
+    {
+      "name": "resolveCallbackSync",
+      "params": [
+        {
+          "name": "str",
+          "type": "(string | HtmlEscapedString)"
+        }
+      ],
+      "return_type": "string",
+      "requires": "true",
+      "ensures": (
+        (r) => `!r.includes("&") && !r.includes("<") && !r.includes(">")`,
+        `!r.includes("'") && r.length === str.length`
+      ),
+      "effects": [
+        "assignable(r)"
+      ]
+    }
+  ],
+  "issues": []
+}

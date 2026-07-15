@@ -1649,3 +1649,64 @@ def test_json_from_text_tolerates_trailing_prose() -> None:
     # A non-object first value is still rejected.
     with pytest.raises(json.JSONDecodeError):
         _json_from_text("[1, 2, 3]")
+
+
+def test_json_from_text_repairs_oss_llm_artifacts() -> None:
+    from agent.cross_validation_payload import _json_from_text
+
+    fixtures = Path(__file__).parent / "fixtures" / "llm_json_artifacts"
+
+    # Model emitted a parenthesized JavaScript tuple as the ``ensures`` value.
+    paren_raw = (fixtures / "html_base_fail_1.json").read_text(encoding="utf-8")
+    payload = _json_from_text(paren_raw)
+    assert isinstance(payload, dict)
+    assert payload["atoms"][0]["name"] == "processString"
+    assert isinstance(payload["atoms"][0]["ensures"], str)
+
+    # Model emitted ``//`` line comments and other non-JSON fragments.
+    comment_raw = (fixtures / "html_base_fail_6.json").read_text(encoding="utf-8")
+    payload = _json_from_text(comment_raw)
+    assert isinstance(payload, dict)
+    assert payload["atoms"][0]["name"] == "raw"
+    assert isinstance(payload["atoms"][0]["ensures"], str)
+
+    # Split string literals joined with ``+`` are merged into one clause.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "ensures": "a === 1 " + "&& b === 2"}]}'
+    ) == {"atoms": [{"name": "f", "ensures": "a === 1 && b === 2"}]}
+
+    # A continuation string after a comma is merged into the previous value.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "ensures": "a === 1", "b === 2", "x": 1}]}'
+    ) == {"atoms": [{"name": "f", "ensures": "a === 1b === 2", "x": 1}]}
+
+    # ``//`` line comments and ``/* */`` block comments are stripped outside strings.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f"}], // ignored\n "issues": []}'
+    ) == {"atoms": [{"name": "f"}], "issues": []}
+    assert _json_from_text(
+        '{"atoms": [{"name": "f"}], /* ignored */ "issues": []}'
+    ) == {"atoms": [{"name": "f"}], "issues": []}
+
+    # Backtick or single-quoted JavaScript literals in value positions are
+    # converted to JSON strings.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "ensures": `result === x`}]}'
+    ) == {"atoms": [{"name": "f", "ensures": "result === x"}]}
+    assert _json_from_text(
+        "{\"atoms\": [{\"name\": \"f\", \"ensures\": ''}]}"
+    ) == {"atoms": [{"name": "f", "ensures": ""}]}
+
+    # An ``ensures`` array with a missing comma between elements and a stray
+    # closing brace copied from a JS ``if`` block is repaired.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "ensures": ["a", "b"\n          "c"\n        ]}]}'
+    ) == {"atoms": [{"name": "f", "ensures": ["a", "b", "c"]}]}
+
+    # Single- or backtick-quoted object keys are normalized to JSON strings.
+    assert _json_from_text(
+        "{'name': 'f', \"ensures\": 'x'}"
+    ) == {"name": "f", "ensures": "x"}
+    assert _json_from_text(
+        '{`name`: `f`, "ensures": `x`}'
+    ) == {"name": "f", "ensures": "x"}
