@@ -759,6 +759,25 @@ def test_go_contract_inference_captures_composite_literal_return() -> None:
     assert atoms[0].ensures == "result == &systemTimer{t, ch}"
 
 
+def test_go_contract_inference_avoids_false_postcondition_for_multiple_returns() -> None:
+    """Functions with early returns must not be summarised by their final ``return`` only."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = (
+        "package demo\n"
+        "func isHex(str string) bool {\n"
+        "    if len(str)%2 != 0 { return false }\n"
+        "    for _, c := range []byte(str) {\n"
+        "        if !isHexCharacter(c) { return false }\n"
+        "    }\n"
+        "    return true\n"
+        "}\n"
+    )
+    atoms = _infer_go_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].ensures == "true"
+
+
 def test_params_from_signature_handles_nested_commas_in_generics() -> None:
     """Generic Rust parameters must not be split on commas inside nested parentheses."""
     from agent.cross_validation_foreign import _params_from_signature
