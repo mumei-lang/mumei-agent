@@ -967,3 +967,134 @@ def test_rust_contract_inference_handles_fn_trait_bound_arrow() -> None:
     assert len(atoms) == 1
     assert atoms[0].name == "await_blocking"
     assert atoms[0].return_type == "i64"
+
+
+def test_typescript_return_type_recognizes_type_predicates() -> None:
+    """TypeScript ``value is SomeType`` and ``asserts`` return types map to ``bool``."""
+    from agent.cross_validation_foreign import _typescript_return_type
+
+    assert _typescript_return_type("obj is TokenHeader") == "bool"
+    assert _typescript_return_type("value is string") == "bool"
+    assert _typescript_return_type("asserts obj is SomeType") == "bool"
+
+
+def test_typescript_raw_return_expression_captures_multiline_parenthesized_return() -> None:
+    """A single parenthesised return expression that spans several lines is captured whole."""
+    from agent.cross_validation_foreign import _typescript_raw_return_expression
+
+    body = (
+        "{\n"
+        "  return (\n"
+        "    'alg' in objWithAlg &&\n"
+        "    true\n"
+        "  )\n"
+        "}"
+    )
+    expr = _typescript_raw_return_expression(body)
+    assert "'alg' in objWithAlg" in expr
+    assert expr.endswith(")")
+
+
+def test_typescript_raw_return_expression_returns_empty_for_multiple_returns() -> None:
+    """Multiple top-level returns do not have a single deterministic postcondition."""
+    from agent.cross_validation_foreign import _typescript_raw_return_expression
+
+    body = "{\n  if (x) { return 1; }\n  return 2;\n}"
+    assert _typescript_raw_return_expression(body) == ""
+
+
+def test_typescript_contract_inference_balances_body_with_type_literal() -> None:
+    """Nested type literals and ``if``/``return`` branches must not truncate the body
+    or produce a contradictory ``result == false`` postcondition.
+    """
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export function isTokenHeader(obj: unknown): obj is TokenHeader {\n"
+        "  if (typeof obj === 'object' && obj !== null) {\n"
+        "    const objWithAlg = obj as { [key: string]: unknown }\n"
+        "    return (\n"
+        "      'alg' in objWithAlg &&\n"
+        "      true\n"
+        "    )\n"
+        "  }\n"
+        "  return false\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].return_type == "bool"
+    assert atoms[0].ensures == "true"
+
+
+def test_typescript_contract_inference_extracts_class_methods() -> None:
+    """Class methods without the ``function`` keyword must be inferable as atoms."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export class StreamingApi {\n"
+        "  async write(input: Uint8Array | string): Promise<StreamingApi> {\n"
+        "    return this\n"
+        "  }\n"
+        "  abort() {\n"
+        "    this.aborted = true\n"
+        "  }\n"
+        "  private static async bar(x: number) {\n"
+        "    return x\n"
+        "  }\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    names = {atom.name for atom in atoms}
+    assert "write" in names
+    assert "abort" in names
+    assert "bar" in names
+
+
+def test_typescript_contract_inference_class_method_with_callback_param_type() -> None:
+    """A ``=>`` inside a class-method parameter type must not be mistaken for an arrow body."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "class Api {\n"
+        "  onAbort(listener: () => void | Promise<void>) {\n"
+        "    this.subscribers.push(listener)\n"
+        "  }\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "onAbort"
+    assert atoms[0].ensures == "true"
+
+
+def test_typescript_raw_return_expression_ignores_nested_callback_returns() -> None:
+    """A ``return`` inside a nested callback arrow function must not be counted as a top-level return."""
+    from agent.cross_validation_foreign import _typescript_raw_return_expression
+
+    body = (
+        "{\n"
+        "  items.forEach((item) => { return item * 2; });\n"
+        "  return items.length;\n"
+        "}"
+    )
+    expr = _typescript_raw_return_expression(body)
+    assert "items.length" in expr
+
+
+def test_typescript_contract_inference_ignores_nested_function_returns() -> None:
+    """A ``return`` inside a nested ``function`` declaration must not be counted as a top-level return."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export function outer(items: number[]): number {\n"
+        "  function inner(x: number): number {\n"
+        "    return x * 2;\n"
+        "  }\n"
+        "  return items.map(inner).length;\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "outer"
+    assert "items_map(inner).length" in atoms[0].ensures

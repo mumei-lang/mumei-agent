@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 import re
-from typing import cast
+from typing import Callable, cast
 
 from agent.config import AgentConfig
 from agent.cross_validation_models import (
@@ -939,32 +939,66 @@ def _integer_overflow_requires_for_expression(expression: str) -> list[str]:
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
-    patterns = [
-        re.compile(
-            r"(?:export\s+)?(?:async\s+)?function\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
-            r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?\s*"
-            r"\{(?P<body>.*?)\}",
-            flags=re.DOTALL,
+    # Each pattern is paired with a predicate that decides whether the body is
+    # an arrow-function expression body (no braces).  Function and class-method
+    # bodies are never expression bodies, while arrow functions may use either
+    # form.
+    patterns: list[tuple[re.Pattern[str], Callable[[str], bool]]] = [
+        (
+            re.compile(
+                r"(?:export\s+)?(?:async\s+)?function\s+"
+                r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
+                r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?\s*"
+                r"\{(?P<body>.*?)\}",
+                flags=re.DOTALL,
+            ),
+            lambda raw: False,
         ),
-        re.compile(
-            r"(?:export\s+)?(?:const|let)\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*(?P<vartype>[^=]+?))?\s*=\s*"
-            r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
-            r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*"
-            r"(?P<body>\{.*?\}|[^;\n]+)",
-            flags=re.DOTALL,
+        (
+            re.compile(
+                r"(?:export\s+)?(?:const|let)\s+"
+                r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*(?P<vartype>[^=]+?))?\s*=\s*"
+                r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
+                r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*"
+                r"(?P<body>\{.*?\}|[^;\n]+)",
+                flags=re.DOTALL,
+            ),
+            lambda raw: not raw.startswith("{"),
+        ),
+        # Class/object methods do not use the ``function`` keyword.
+        (
+            re.compile(
+                r"(?m)^\s*(?:abstract\s+)?"
+                r"(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+|async\s+)*"
+                r"(?P<name>(?!(?:if|while|for|switch|catch|with)\b)"
+                r"[A-Za-z_$][\w$]*)\s*"
+                r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
+                r"(?::\s*(?P<ret>[^{=\n]+?))?\s*"
+                r"\{(?P<body>.*?)\}",
+                flags=re.DOTALL,
+            ),
+            lambda raw: False,
         ),
     ]
     seen: set[tuple[str, int]] = set()
-    for pattern in patterns:
+    for pattern, is_expr_fn in patterns:
         for match in pattern.finditer(code):
             key = (match.group("name"), match.start())
             if key in seen:
                 continue
             seen.add(key)
-            body = match.group("body") or ""
-            raw_return_expr = _typescript_raw_return_expression(body)
+            raw_body = match.group("body") or ""
+            is_expression_body = is_expr_fn(raw_body)
+            # The regex patterns are non-greedy and stop at the first ``}``.
+            # Re-extract the body with proper brace balancing so nested blocks
+            # and type literals (``{ [key: string]: unknown }``) do not truncate.
+            body_start = match.start("body")
+            body = raw_body
+            if raw_body.startswith("{"):
+                body = _balanced_brace_body(code, body_start)
+            elif body_start > 0 and code[body_start - 1] == "{":
+                body = _balanced_brace_body(code, body_start - 1)
+            raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
             return_expr = _normalize_foreign_expression(raw_return_expr)
             atoms.append(
                 MumeiContractAtom(
@@ -1274,14 +1308,128 @@ def _raw_return_statement_expression(body: str) -> str:
     return body[start:].strip()
 
 
-def _typescript_raw_return_expression(body: str) -> str:
-    stripped = body.strip()
-    if stripped.startswith("{"):
-        match = re.search(r"\breturn\s+([^;\n}]+)", stripped)
-        return match.group(1).strip() if match else ""
-    if stripped.startswith("return "):
-        return stripped.removeprefix("return ").rstrip(";").strip()
-    return stripped.rstrip(";")
+def _typescript_raw_return_expression(body: str, is_expression_body: bool = False) -> str:
+    """Return the expression from the last ``return`` statement in ``body``.
+
+    For block-bodied functions this walks from the last ``return`` keyword,
+    balancing ``()``, ``[]`` and ``{}`` so composite literals and parenthesised
+    expressions are captured in full.  For arrow functions with an expression
+    body (no braces), the whole expression is returned.
+
+    If the body contains more than one top-level ``return`` we cannot infer a
+    single deterministic postcondition, so we return the empty string and let the
+    caller default ``ensures`` to ``true``.
+    """
+    if is_expression_body:
+        return body.strip().rstrip(";").strip()
+
+    stripped_search = _strip_go_rust_literals_and_comments(body)
+    returns: list[int] = []
+    # Brace depth counts all (), [] and {}.  function_scope counts how many of
+    # those {} belong to nested arrow/function bodies; returns inside them are
+    # exits from the inner function, not from the function we are analysing.
+    depth = 0
+    function_scope = 0
+    curly_stack: list[bool] = []
+    arrow_pending = False
+    arrow_token_end = -1
+    arrow_depth = 0
+    function_pending = False
+    function_keyword_depth = 0
+    prev_non_space = ""
+    n = len(stripped_search)
+    i = 0
+    while i < n:
+        ch = stripped_search[i]
+        if ch in "([{":
+            if ch == "{":
+                is_func = False
+                if arrow_pending and depth == arrow_depth:
+                    is_func = True
+                    function_scope += 1
+                    arrow_pending = False
+                elif (
+                    function_pending
+                    and depth == function_keyword_depth
+                    and prev_non_space != ":"
+                ):
+                    is_func = True
+                    function_scope += 1
+                    function_pending = False
+                curly_stack.append(is_func)
+            depth += 1
+        elif ch in "])}" and depth > 0:
+            if ch == "}" and curly_stack:
+                was_func = curly_stack.pop()
+                if was_func:
+                    function_scope -= 1
+            depth -= 1
+        elif (
+            ch == "r"
+            and function_scope == 0
+            and i + 6 <= n
+            and stripped_search[i : i + 6] == "return"
+        ):
+            end = i + 6
+            word_after = end < n and (
+                stripped_search[end].isalnum() or stripped_search[end] == "_"
+            )
+            word_before = i > 0 and (
+                stripped_search[i - 1].isalnum() or stripped_search[i - 1] == "_"
+            )
+            property_name = end < n and stripped_search[end] == ":"
+            if not word_after and not word_before and not property_name:
+                returns.append(i)
+            i = end - 1
+        elif (
+            ch == ">"
+            and i > 0
+            and stripped_search[i - 1] == "="
+            and not (i > 1 and stripped_search[i - 2] == "=")
+        ):
+            # Arrow function token `=>`.  The body may be a block `{ ... }` or an
+            # expression; we only enter a new function scope when the next
+            # non-space token is `{`.
+            arrow_pending = True
+            arrow_token_end = i
+            arrow_depth = depth
+        elif (
+            i + 8 <= n
+            and stripped_search[i : i + 8] == "function"
+            and (i == 0 or not (stripped_search[i - 1].isalnum() or stripped_search[i - 1] == "_"))
+            and (i + 8 == n or not (stripped_search[i + 8].isalnum() or stripped_search[i + 8] == "_"))
+        ):
+            function_pending = True
+            function_keyword_depth = depth
+            i += 7
+
+        # Cancel a pending arrow expression body when we see the first
+        # non-space token after `=>` and it is not `{`.
+        if arrow_pending and i > arrow_token_end and not ch.isspace() and ch != "{":
+            arrow_pending = False
+
+        if not ch.isspace():
+            prev_non_space = ch
+        i += 1
+    if not returns:
+        return ""
+    # Multiple top-level returns (e.g. ``if (...) { return x } return y``) do
+    # not have a single tail expression that describes every exit path.
+    if len(returns) > 1:
+        return ""
+
+    last_return = returns[-1]
+    start = last_return + 6
+    depth = 0
+    for index in range(start, len(stripped_search)):
+        ch = stripped_search[index]
+        if ch in "([{":
+            depth += 1
+        elif ch in "])}" and depth > 0:
+            depth -= 1
+        elif ch in ";\n" and depth == 0:
+            return body[start:index].strip()
+    return body[start:].strip()
 
 
 def _typescript_return_type(type_text: str) -> str:
@@ -1293,6 +1441,10 @@ def _typescript_return_type(type_text: str) -> str:
         return "bool"
     if lowered in {"string", "str"}:
         return "string"
+    # TypeScript type predicates (``value is SomeType``) and assertion
+    # signatures (``asserts value is SomeType``) are always boolean-like.
+    if re.search(r"\bis\s", lowered) or lowered.startswith("asserts "):
+        return "bool"
     return "i64"
 
 
