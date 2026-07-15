@@ -1179,8 +1179,50 @@ def _return_statement_expression(body: str) -> str:
 
 
 def _raw_return_statement_expression(body: str) -> str:
-    matches = list(re.finditer(r"\breturn\s+([^;\n}]+)", body))
-    return matches[-1].group(1).strip() if matches else ""
+    """Return the expression from the last ``return`` statement in ``body``.
+
+    Stops at the end of the statement, balancing ``()``, ``[]`` and ``{}`` so
+    that composite/struct literals such as ``&systemTimer{t, ch}`` or
+    ``BlockNumberOrHash{number: blockNr}`` are captured in full instead of
+    being truncated at the first ``}``.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    last_match: re.Match[str] | None = None
+    for match in re.finditer(r"\breturn\b", stripped):
+        end = match.end()
+        if end < len(stripped) and (stripped[end].isalnum() or stripped[end] == "_"):
+            continue
+        last_match = match
+    if last_match is None:
+        return ""
+
+    start = last_match.end()
+    depth = 0
+    in_string = False
+    quote = ""
+    escape = False
+    for index in range(start, len(body)):
+        ch = body[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                in_string = False
+            continue
+        if ch in {'"', "'"}:
+            in_string = True
+            quote = ch
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth > 0:
+                depth -= 1
+        elif ch in ";\n" and depth == 0:
+            return body[start:index].strip()
+    return body[start:].strip()
 
 
 def _typescript_raw_return_expression(body: str) -> str:
