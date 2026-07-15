@@ -967,3 +967,61 @@ def test_rust_contract_inference_handles_fn_trait_bound_arrow() -> None:
     assert len(atoms) == 1
     assert atoms[0].name == "await_blocking"
     assert atoms[0].return_type == "i64"
+
+
+def test_typescript_return_type_recognizes_type_predicates() -> None:
+    """TypeScript ``value is SomeType`` and ``asserts`` return types map to ``bool``."""
+    from agent.cross_validation_foreign import _typescript_return_type
+
+    assert _typescript_return_type("obj is TokenHeader") == "bool"
+    assert _typescript_return_type("value is string") == "bool"
+    assert _typescript_return_type("asserts obj is SomeType") == "bool"
+
+
+def test_typescript_raw_return_expression_captures_multiline_parenthesized_return() -> None:
+    """A single parenthesised return expression that spans several lines is captured whole."""
+    from agent.cross_validation_foreign import _typescript_raw_return_expression
+
+    body = (
+        "{\n"
+        "  return (\n"
+        "    'alg' in objWithAlg &&\n"
+        "    true\n"
+        "  )\n"
+        "}"
+    )
+    expr = _typescript_raw_return_expression(body)
+    assert "'alg' in objWithAlg" in expr
+    assert expr.endswith(")")
+
+
+def test_typescript_raw_return_expression_returns_empty_for_multiple_returns() -> None:
+    """Multiple top-level returns do not have a single deterministic postcondition."""
+    from agent.cross_validation_foreign import _typescript_raw_return_expression
+
+    body = "{\n  if (x) { return 1; }\n  return 2;\n}"
+    assert _typescript_raw_return_expression(body) == ""
+
+
+def test_typescript_contract_inference_balances_body_with_type_literal() -> None:
+    """Nested type literals and ``if``/``return`` branches must not truncate the body
+    or produce a contradictory ``result == false`` postcondition.
+    """
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export function isTokenHeader(obj: unknown): obj is TokenHeader {\n"
+        "  if (typeof obj === 'object' && obj !== null) {\n"
+        "    const objWithAlg = obj as { [key: string]: unknown }\n"
+        "    return (\n"
+        "      'alg' in objWithAlg &&\n"
+        "      true\n"
+        "    )\n"
+        "  }\n"
+        "  return false\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].return_type == "bool"
+    assert atoms[0].ensures == "true"

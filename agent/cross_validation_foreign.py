@@ -963,8 +963,18 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
             if key in seen:
                 continue
             seen.add(key)
-            body = match.group("body") or ""
-            raw_return_expr = _typescript_raw_return_expression(body)
+            raw_body = match.group("body") or ""
+            is_expression_body = not raw_body.startswith("{") and "=>" in code[match.start() : match.start("body")]
+            # The regex patterns are non-greedy and stop at the first ``}``.
+            # Re-extract the body with proper brace balancing so nested blocks
+            # and type literals (``{ [key: string]: unknown }``) do not truncate.
+            body_start = match.start("body")
+            body = raw_body
+            if raw_body.startswith("{"):
+                body = _balanced_brace_body(code, body_start)
+            elif body_start > 0 and code[body_start - 1] == "{":
+                body = _balanced_brace_body(code, body_start - 1)
+            raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
             return_expr = _normalize_foreign_expression(raw_return_expr)
             atoms.append(
                 MumeiContractAtom(
@@ -1274,14 +1284,47 @@ def _raw_return_statement_expression(body: str) -> str:
     return body[start:].strip()
 
 
-def _typescript_raw_return_expression(body: str) -> str:
-    stripped = body.strip()
-    if stripped.startswith("{"):
-        match = re.search(r"\breturn\s+([^;\n}]+)", stripped)
-        return match.group(1).strip() if match else ""
-    if stripped.startswith("return "):
-        return stripped.removeprefix("return ").rstrip(";").strip()
-    return stripped.rstrip(";")
+def _typescript_raw_return_expression(body: str, is_expression_body: bool = False) -> str:
+    """Return the expression from the last ``return`` statement in ``body``.
+
+    For block-bodied functions this walks from the last ``return`` keyword,
+    balancing ``()``, ``[]`` and ``{}`` so composite literals and parenthesised
+    expressions are captured in full.  For arrow functions with an expression
+    body (no braces), the whole expression is returned.
+
+    If the body contains more than one top-level ``return`` we cannot infer a
+    single deterministic postcondition, so we return the empty string and let the
+    caller default ``ensures`` to ``true``.
+    """
+    if is_expression_body:
+        return body.strip().rstrip(";").strip()
+
+    stripped_search = _strip_go_rust_literals_and_comments(body)
+    returns: list[re.Match[str]] = []
+    for match in re.finditer(r"\breturn\b", stripped_search):
+        end = match.end()
+        if end < len(stripped_search) and (stripped_search[end].isalnum() or stripped_search[end] == "_"):
+            continue
+        returns.append(match)
+    if not returns:
+        return ""
+    # Multiple top-level returns (e.g. ``if (...) { return x } return y``) do
+    # not have a single tail expression that describes every exit path.
+    if len(returns) > 1:
+        return ""
+
+    last_match = returns[-1]
+    start = last_match.end()
+    depth = 0
+    for index in range(start, len(stripped_search)):
+        ch = stripped_search[index]
+        if ch in "([{":
+            depth += 1
+        elif ch in "])}" and depth > 0:
+            depth -= 1
+        elif ch in ";\n" and depth == 0:
+            return body[start:index].strip()
+    return body[start:].strip()
 
 
 def _typescript_return_type(type_text: str) -> str:
@@ -1293,6 +1336,10 @@ def _typescript_return_type(type_text: str) -> str:
         return "bool"
     if lowered in {"string", "str"}:
         return "string"
+    # TypeScript type predicates (``value is SomeType``) and assertion
+    # signatures (``asserts value is SomeType``) are always boolean-like.
+    if re.search(r"\bis\s", lowered) or lowered.startswith("asserts "):
+        return "bool"
     return "i64"
 
 
