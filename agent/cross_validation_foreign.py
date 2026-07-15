@@ -313,6 +313,20 @@ def _infer_foreign_contracts_with_code_to_spec(
     return _infer_foreign_contracts_with_patterns(code, language)
 
 
+def _is_python_overload_stub(node: ast.FunctionDef) -> bool:
+    """Detect ``@overload`` stubs and bodies that are just ``...``."""
+    for decorator in node.decorator_list:
+        if isinstance(decorator, ast.Name) and decorator.id == "overload":
+            return True
+        if isinstance(decorator, ast.Attribute) and decorator.attr == "overload":
+            return True
+    if len(node.body) == 1:
+        stmt = node.body[0]
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            return stmt.value.value is Ellipsis
+    return False
+
+
 def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     try:
@@ -321,6 +335,8 @@ def _infer_python_contracts(code: str) -> list[MumeiContractAtom]:
         return atoms
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
+            if _is_python_overload_stub(node):
+                continue
             params = [ContractParam(name=arg.arg, type="i64") for arg in node.args.args]
             ensures, return_expr = _python_function_contract(node)
             requires = _safety_requires_for_expression(return_expr)

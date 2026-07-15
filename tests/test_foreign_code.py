@@ -797,6 +797,25 @@ def test_python_contract_inference_preserves_bool_return_type() -> None:
     assert "result == True" in atoms[0].ensures
 
 
+def test_python_contract_inference_skips_overload_stubs() -> None:
+    """Python ``@overload`` stubs and ``...`` bodies must not be inferred as atoms."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    source = (
+        "from typing import overload\n"
+        "@overload\n"
+        "def f(x: int) -> int: ...\n"
+        "@overload\n"
+        "def f(x: str) -> str: ...\n"
+        "def f(x):\n"
+        "    return x\n"
+    )
+    atoms = _infer_python_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "f"
+    assert atoms[0].ensures == "result == x"
+
+
 def test_solidity_contract_inference_preserves_bool_return_type() -> None:
     """Solidity ``returns (bool)`` must map to Mumei ``bool``."""
     from agent.cross_validation_foreign import _infer_solidity_contracts
