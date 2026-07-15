@@ -14,6 +14,179 @@ from agent.cross_validation_models import (
 )
 
 
+def _replace_python_literals_outside_strings(text: str) -> str:
+    """Replace unquoted Python ``None``/``True``/``False`` with JSON equivalents.
+
+    Small OSS models frequently mix Python literals into otherwise JSON-shaped
+    output (e.g. ``"return_type": None,``).  This helper only rewrites whole
+    words that are outside of JSON string literals, so legitimate string
+    contents are preserved.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+    replacements = {
+        "None": "null",
+        "True": "true",
+        "False": "false",
+    }
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            result.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            result.append(ch)
+            i += 1
+            continue
+        replaced = False
+        for token, replacement in replacements.items():
+            end = i + len(token)
+            if (
+                text[i:end] == token
+                and (i == 0 or not text[i - 1].isalnum() and text[i - 1] != "_")
+                and (end >= n or not text[end].isalnum() and text[end] != "_")
+            ):
+                result.append(replacement)
+                i = end
+                replaced = True
+                break
+        if not replaced:
+            result.append(ch)
+            i += 1
+    return "".join(result)
+
+
+def _repair_invalid_json_string_escapes(text: str) -> str:
+    r"""Escape backslashes that begin an invalid JSON escape sequence.
+
+    Small OSS models often copy regex or string literals such as ``\+`` or
+    ``\'`` verbatim into JSON strings.  JSON only allows ``\"``, ``\\``,
+    ``\/``, ``\b``, ``\f``, ``\n``, ``\r``, ``\t`` and ``\uXXXX``; every
+    other backslash is an error.  This helper doubles those backslashes so the
+    original character sequence is preserved (e.g. ``\+`` becomes ``\\+`` in
+    the source, which decodes to the literal characters ``\+``).
+    """
+    valid_escape = frozenset('"\\/bfnrtu')
+    hex_digits = frozenset("0123456789abcdefABCDEF")
+    result: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                result.append(ch)
+                escape = False
+            elif ch == "\\":
+                if i + 1 < n and text[i + 1] in valid_escape:
+                    if text[i + 1] == "u":
+                        # ``\u`` must be followed by exactly four hex digits.
+                        if (
+                            i + 6 <= n
+                            and len(text) >= i + 6
+                            and all(c in hex_digits for c in text[i + 2 : i + 6])
+                        ):
+                            result.append(ch)
+                            escape = True
+                        else:
+                            # Invalid ``\u``; escape the backslash.
+                            result.append("\\\\")
+                    else:
+                        result.append(ch)
+                        escape = True
+                else:
+                    # Invalid escape: escape the backslash so the next char is
+                    # interpreted as a literal character.
+                    result.append("\\\\")
+            elif ch == '"':
+                in_string = False
+                result.append(ch)
+            else:
+                result.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def _remove_trailing_commas(text: str) -> str:
+    r"""Remove trailing commas that appear just before a closing ``}`` or ``]``.
+
+    Small OSS models frequently emit lists or objects with a trailing comma
+    (e.g. ``"effects": [],`` before a closing ``}``).  JSON does not allow
+    trailing commas, so this helper removes them without touching commas inside
+    string literals.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            result.append(ch)
+        elif ch == ',':
+            # Look ahead for the next non-whitespace character.  If it closes the
+            # current object/array, drop the comma.
+            j = i + 1
+            while j < n and text[j] in " \t\n\r":
+                j += 1
+            if j < n and text[j] in "}]":
+                i = j
+                continue
+            result.append(ch)
+        elif ch == '"':
+            in_string = True
+            result.append(ch)
+        else:
+            result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], int]:
+    """Decode JSON, inserting missing commas reported by the decoder.
+
+    Small OSS models sometimes omit commas between two array/object
+    entries (e.g. ``{"atoms": [{...} {...}]}``).  When the decoder reports
+    ``Expecting ',' delimiter`` we insert a comma at the reported position and
+    retry.  This is repeated up to ``max_attempts`` because a single LLM output
+    may contain several missing commas.  If the error persists for any other
+    reason we raise the most recent exception.
+    """
+    max_attempts = 10
+    for _ in range(max_attempts):
+        try:
+            return json.JSONDecoder(strict=False).raw_decode(text)
+        except json.JSONDecodeError as exc:
+            if "Expecting ',' delimiter" not in str(exc) or not (0 <= exc.pos < len(text)):
+                raise
+            text = text[: exc.pos] + "," + text[exc.pos :]
+    return json.JSONDecoder(strict=False).raw_decode(text)
+
+
 def _json_from_text(text: str) -> dict[str, object]:
     stripped = text.strip()
     fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
@@ -27,7 +200,18 @@ def _json_from_text(text: str) -> dict[str, object]:
         start = stripped.find("{")
         if start > 0:
             stripped = stripped[start:]
-    payload, _end = json.JSONDecoder().raw_decode(stripped)
+    # Small OSS models may emit Python literals, invalid escape sequences,
+    # literal control characters, or trailing commas inside otherwise
+    # JSON-shaped output.  Repair those artifacts before decoding, and parse with
+    # ``strict=False`` so a literal newline in a string does not abort parsing.
+    stripped = _replace_python_literals_outside_strings(stripped)
+    stripped = _repair_invalid_json_string_escapes(stripped)
+    stripped = _remove_trailing_commas(stripped)
+
+    # Some models omit the comma between array/object entries.  Retry by
+    # inserting a comma at the reported failure position when the parser
+    # complains about a missing ',' delimiter.
+    payload, _end = _raw_decode_with_missing_comma_retry(stripped)
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("expected JSON object", stripped, 0)
     return payload
