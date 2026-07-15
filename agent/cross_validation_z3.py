@@ -384,18 +384,35 @@ def _alignment_contradiction_type(
 def _split_top_level_conjuncts(expr: str) -> list[str]:
     """Split ``expr`` on top-level ``&&`` / ``and`` conjunctions only.
 
-    Paren/bracket/brace-aware, so a compound clause such as
+    Paren/bracket/brace- and string-literal-aware, so a compound clause such as
     ``(a && b) || (c && d)`` (whose top-level operator is ``||``) is returned
     whole instead of being shredded into unbalanced fragments like ``(a`` and
-    ``b) || (c``. Mirrors mumei's ``split_top_level_conjunctions``.
+    ``b) || (c``. String literals such as ``' && '`` are also skipped, so the
+    operator is not mistaken for a top-level conjunction. Mirrors mumei's
+    ``split_top_level_conjunctions``.
     """
     parts: list[str] = []
     depth = 0
+    in_string: str | None = None
+    escape = False
     start = 0
     i = 0
     n = len(expr)
     while i < n:
         ch = expr[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_string = ch
+            i += 1
+            continue
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
@@ -441,12 +458,30 @@ def _has_top_level_disjunction(expr: str) -> bool:
     Such a clause must be lowered whole because its lowest-precedence operator is
     the disjunction; splitting on top-level ``&&`` would mis-bind precedence, e.g.
     ``a && b || c`` means ``(a && b) || c`` (not ``a && (b || c)``).
+
+    String literals are skipped so ``' || '`` inside a string is not treated as a
+    top-level disjunction.
     """
     depth = 0
+    in_string: str | None = None
+    escape = False
     i = 0
     n = len(expr)
     while i < n:
         ch = expr[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_string = ch
+            i += 1
+            continue
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
