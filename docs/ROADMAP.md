@@ -317,6 +317,40 @@ reentrancy について guard-state-machine の Z3 検証を実装済み（`solc
 - **stage 3**: mumei-lean の `SmartContract.lean` / `GuardState` / `runGuard` モデルと
   `no_external_call_without_lock` 系 theorem による Lean 証明証跡化
 
+#### 次タスク候補: 層B パーサの構文解析移行
+
+層B のうち Python は `agent/strategies/foreign_code_strategy.py` の `extract_python` と
+`agent/cross_validation_foreign.py` の `_infer_python_source_line_map` で標準 `ast` による
+構文解析を使う。一方、Rust / TypeScript / Go / Solidity は
+`agent/cross_validation_foreign.py` の `_infer_foreign_contracts_with_patterns` や
+`agent/strategies/foreign_code_strategy_helpers.py` の `_rust_function_blocks` /
+`_go_function_blocks` など、正規表現ベースの抽出に依存している。
+
+正規表現は文脈自由なネスト構造を正確に扱えないため、その回避として
+`_balanced_brace_body`（波括弧の手動カウント）、
+`_strip_go_rust_literals_and_comments`（リテラル/コメント除去の前処理）、
+`_is_function_name_in_source`（幻覚関数フィルタ）といった対症療法コードが必要になる。
+この構造的脆さは主に「関数/ブロック抽出」に局在しているため、次の段階に分けて移行する:
+
+- **stage 1（第一歩・最優先）**: 関数/ブロック抽出だけを tree-sitter 等の構文ベースへ
+  置き換える。`solc` / `rustc` / `tsc` を要求せず、LLM credential なしの決定論的
+  fixture 経路を維持できる軽量パーサを前提とする。`pyproject.toml` に新規パーサ依存を
+  追加する場合も、決定論性・LLM credential 非依存・外部言語コンパイラ非依存という
+  既存要件を満たすことを必須条件とする。除算ゼロ・overflow・bounds・nil などの
+  安全性条件推論は当面 `_generic_safety_requires_for_expression` 等の正規表現
+  ヒューリスティクスに残す。Python が採る「関数抽出は `ast`、安全性推論は
+  フォールバックで正規表現」という構成と対称にし、blast radius を抽出層に閉じる。
+  対象は `_rust_function_blocks` / `_go_function_blocks` /
+  `_infer_foreign_source_line_map` 系の関数抽出経路。
+- **stage 2**: stage 1 の効果確認後、安全性条件推論の式パース部分
+  （`_safety_requires_for_expression` の非 Python 経路、および
+  `agent/strategies/foreign_code_strategy_helpers.py` の式解析）も構文木ベースへ
+  段階拡張する。
+- **別軸**: #281 / #295 / #296 のような偽陽性（`SafeCast` の誤認、value 型への
+  `!= nil` 誤付与、`constant` / `immutable` 除数の偽 counterexample）は
+  tree-sitter 化では解消しない。`known_constants` や型情報を使った意味解析強化として
+  別課題で扱う。
+
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 
 自然言語仕様、既存コード、抽出された `.mm` を双方向に照合し、multi-file cross-spec
