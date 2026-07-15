@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 import re
-from typing import cast
+from typing import Callable, cast
 
 from agent.config import AgentConfig
 from agent.cross_validation_models import (
@@ -939,32 +939,56 @@ def _integer_overflow_requires_for_expression(expression: str) -> list[str]:
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
-    patterns = [
-        re.compile(
-            r"(?:export\s+)?(?:async\s+)?function\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
-            r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?\s*"
-            r"\{(?P<body>.*?)\}",
-            flags=re.DOTALL,
+    # Each pattern is paired with a predicate that decides whether the body is
+    # an arrow-function expression body (no braces).  Function and class-method
+    # bodies are never expression bodies, while arrow functions may use either
+    # form.
+    patterns: list[tuple[re.Pattern[str], Callable[[str], bool]]] = [
+        (
+            re.compile(
+                r"(?:export\s+)?(?:async\s+)?function\s+"
+                r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
+                r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?\s*"
+                r"\{(?P<body>.*?)\}",
+                flags=re.DOTALL,
+            ),
+            lambda raw: False,
         ),
-        re.compile(
-            r"(?:export\s+)?(?:const|let)\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*(?P<vartype>[^=]+?))?\s*=\s*"
-            r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
-            r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*"
-            r"(?P<body>\{.*?\}|[^;\n]+)",
-            flags=re.DOTALL,
+        (
+            re.compile(
+                r"(?:export\s+)?(?:const|let)\s+"
+                r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*(?P<vartype>[^=]+?))?\s*=\s*"
+                r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
+                r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*"
+                r"(?P<body>\{.*?\}|[^;\n]+)",
+                flags=re.DOTALL,
+            ),
+            lambda raw: not raw.startswith("{"),
+        ),
+        # Class/object methods do not use the ``function`` keyword.
+        (
+            re.compile(
+                r"(?m)^\s*(?:abstract\s+)?"
+                r"(?:private\s+|protected\s+|public\s+|static\s+|readonly\s+|async\s+)*"
+                r"(?P<name>(?!(?:if|while|for|switch|catch|with)\b)"
+                r"[A-Za-z_$][\w$]*)\s*"
+                r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
+                r"(?::\s*(?P<ret>[^{=\n]+?))?\s*"
+                r"\{(?P<body>.*?)\}",
+                flags=re.DOTALL,
+            ),
+            lambda raw: False,
         ),
     ]
     seen: set[tuple[str, int]] = set()
-    for pattern in patterns:
+    for pattern, is_expr_fn in patterns:
         for match in pattern.finditer(code):
             key = (match.group("name"), match.start())
             if key in seen:
                 continue
             seen.add(key)
             raw_body = match.group("body") or ""
-            is_expression_body = not raw_body.startswith("{") and "=>" in code[match.start() : match.start("body")]
+            is_expression_body = is_expr_fn(raw_body)
             # The regex patterns are non-greedy and stop at the first ``}``.
             # Re-extract the body with proper brace balancing so nested blocks
             # and type literals (``{ [key: string]: unknown }``) do not truncate.

@@ -1025,3 +1025,44 @@ def test_typescript_contract_inference_balances_body_with_type_literal() -> None
     assert len(atoms) == 1
     assert atoms[0].return_type == "bool"
     assert atoms[0].ensures == "true"
+
+
+def test_typescript_contract_inference_extracts_class_methods() -> None:
+    """Class methods without the ``function`` keyword must be inferable as atoms."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export class StreamingApi {\n"
+        "  async write(input: Uint8Array | string): Promise<StreamingApi> {\n"
+        "    return this\n"
+        "  }\n"
+        "  abort() {\n"
+        "    this.aborted = true\n"
+        "  }\n"
+        "  private static async bar(x: number) {\n"
+        "    return x\n"
+        "  }\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    names = {atom.name for atom in atoms}
+    assert "write" in names
+    assert "abort" in names
+    assert "bar" in names
+
+
+def test_typescript_contract_inference_class_method_with_callback_param_type() -> None:
+    """A ``=>`` inside a class-method parameter type must not be mistaken for an arrow body."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "class Api {\n"
+        "  onAbort(listener: () => void | Promise<void>) {\n"
+        "    this.subscribers.push(listener)\n"
+        "  }\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "onAbort"
+    assert atoms[0].ensures == "true"
