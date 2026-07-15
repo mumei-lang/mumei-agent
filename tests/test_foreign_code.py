@@ -759,6 +759,34 @@ def test_go_contract_inference_captures_composite_literal_return() -> None:
     assert atoms[0].ensures == "result == &systemTimer{t, ch}"
 
 
+def test_params_from_signature_handles_nested_commas_in_generics() -> None:
+    """Generic Rust parameters must not be split on commas inside nested parentheses."""
+    from agent.cross_validation_foreign import _params_from_signature
+
+    signature = "table: impl IntoIterator<Item = (K, &'a V)> + 'a, hide_zeros: bool"
+    params = _params_from_signature(signature)
+    assert [param.name for param in params] == ["table", "hide_zeros"]
+
+
+def test_rust_source_line_map_handles_where_clauses_and_impl_returns() -> None:
+    """Rust source-line map must include functions with ``where`` clauses and ``impl`` return types."""
+    from agent.cross_validation_foreign import _infer_foreign_source_line_map
+
+    source = (
+        "pub fn sorted_table_lines<'a, K, V>(\n"
+        "    table: impl IntoIterator<Item = (K, &'a V)> + 'a,\n"
+        ") -> (usize, impl Iterator<Item = (String, &'a V)>)\n"
+        "where\n"
+        "    K: Ord + Display + 'a,\n"
+        "    V: Ord + Display + 'a,\n"
+        "{\n"
+        "    (0, std::iter::empty())\n"
+        "}\n"
+    )
+    line_map = _infer_foreign_source_line_map(source, "rust")
+    assert "sorted_table_lines" in line_map
+
+
 def test_python_contract_inference_preserves_bool_return_type() -> None:
     """Python ``-> bool`` annotations must map to Mumei ``bool``."""
     from agent.cross_validation_foreign import _infer_python_contracts
