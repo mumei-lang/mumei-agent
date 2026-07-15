@@ -1168,9 +1168,21 @@ def _last_expression(body: str) -> str:
     if not stripped:
         return ""
     lines = [line.strip() for line in stripped.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    return _normalize_foreign_expression(lines[-1].removeprefix("return ").strip())
+    while lines:
+        candidate = lines.pop().removeprefix("return ").strip().rstrip(";")
+        if not candidate or re.fullmatch(r"[\)\}\];,]+", candidate):
+            continue
+        # A trailing comma or semicolon usually means the expression continues
+        # on the next line, so this line is not a complete tail expression.
+        if candidate.endswith((",", ";")):
+            continue
+        normalized = _normalize_foreign_expression(candidate)
+        try:
+            ast.parse(normalized, mode="eval")
+        except (SyntaxError, ValueError):
+            continue
+        return normalized
+    return ""
 
 
 def _return_statement_expression(body: str) -> str:
