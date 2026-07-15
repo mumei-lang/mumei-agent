@@ -334,6 +334,21 @@ def test_value_type_length_not_flagged_null_cross_language() -> None:
     assert "name != null" in ts
 
 
+def test_generic_fallback_null_suppression_is_language_aware() -> None:
+    """The regex fallback path (used when tree-sitter is unavailable) also honors
+    per-language nullability (#295)."""
+    from agent.cross_validation_foreign import (
+        _generic_safety_requires_for_expression,
+    )
+
+    assert _generic_safety_requires_for_expression("v.len", language="rust") == []
+    assert (
+        _generic_safety_requires_for_expression("sig.length", language="solidity") == []
+    )
+    ts = _generic_safety_requires_for_expression("name.length", language="typescript")
+    assert "name != null" in ts and "name != undefined" in ts
+
+
 def test_verifier_reports_solidity_reentrancy_and_access_control_heuristics() -> None:
     source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
     mumei = MagicMock()

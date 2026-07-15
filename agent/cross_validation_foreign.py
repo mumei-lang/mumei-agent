@@ -531,7 +531,7 @@ def _safety_requires_for_expression(
             )
             return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
         requirements = _generic_safety_requires_for_expression(
-            expression, known_constants
+            expression, known_constants, canonical
         )
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements: list[str] = []
@@ -544,11 +544,13 @@ def _safety_requires_for_expression(
                     requirements.append(f"{divisor} != 0")
     except (SyntaxError, ValueError):
         requirements.extend(
-            _generic_safety_requires_for_expression(expression, known_constants)
+            _generic_safety_requires_for_expression(
+                expression, known_constants, canonical
+            )
         )
         return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
     requirements.extend(
-        _generic_safety_requires_for_expression(expression, known_constants)
+        _generic_safety_requires_for_expression(expression, known_constants, canonical)
     )
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
 
@@ -613,6 +615,7 @@ def _addition_pairs_regex(expression: str) -> list[tuple[str, str]]:
 def _generic_safety_requires_for_expression(
     expression: str,
     known_constants: dict[str, int] | None = None,
+    language: str = "typescript",
 ) -> list[str]:
     known_constants = known_constants or {}
     requirements: list[str] = []
@@ -633,8 +636,10 @@ def _generic_safety_requires_for_expression(
         r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
         expression,
     ):
-        requirements.append(f"{match.group('value')} != null")
-        requirements.append(f"{match.group('value')} != undefined")
+        value = match.group("value")
+        if semantic_safety.should_flag_null_deref(value, None, language):
+            requirements.append(f"{value} != null")
+            requirements.append(f"{value} != undefined")
     return requirements
 
 
