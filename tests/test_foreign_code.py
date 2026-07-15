@@ -705,6 +705,27 @@ def test_rust_contract_inference_preserves_bool_return_and_balanced_braces() -> 
     assert "result == false" in atoms[0].ensures
 
 
+def test_rust_contract_inference_skips_trailing_punctuation_in_tail_expression() -> None:
+    """Tail expressions that end with a closing brace/comma are not valid Rust expressions."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub fn add_u8_range_check(&mut self, a: u8, b: u8) {\n"
+        "    self.add_byte_lookup_event(ByteLookupEvent {\n"
+        "        opcode: ByteOpcode::U8Range,\n"
+        "        a: 0,\n"
+        "        b: a,\n"
+        "        c: b,\n"
+        "    });\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    # The method call spans multiple lines and cannot be captured as a single-line tail;
+    # the extractor must not emit ``result == }`` or ``result == c,`` garbage.
+    assert atoms[0].ensures == "true"
+
+
 def test_rust_contract_inference_preserves_unsigned_int_return_type() -> None:
     """Rust ``usize``/``u64`` return types must map to Mumei ``u64``."""
     from agent.cross_validation_foreign import _infer_rust_contracts
