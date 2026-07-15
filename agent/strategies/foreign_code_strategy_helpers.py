@@ -12,7 +12,7 @@ from typing import Iterable
 
 import z3
 
-from agent import tree_sitter_extract
+from agent import semantic_safety, tree_sitter_extract
 from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _addition_pairs_regex,
@@ -433,17 +433,23 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
     if normalized == "rust":
         # Function boundaries come from tree-sitter (or the regex fallback,
         # which strips literals/comments itself); ``_detect_block_safety_issues``
-        # re-strips each body before the regex safety heuristics run.
+        # re-strips each body before the regex safety heuristics run. Declared
+        # ``const`` values are collected so a non-zero constant divisor/index is
+        # not modeled as a free integer (#296, generalized across languages).
         return _detect_block_safety_issues(
             source,
             _rust_function_blocks(source),
             "Rust",
+            known_constants=semantic_safety.collect_declared_constants(source, "rust"),
         )
     if normalized == "typescript":
         return _detect_block_safety_issues(
             source,
             _typescript_function_blocks(source),
             "TypeScript",
+            known_constants=semantic_safety.collect_declared_constants(
+                source, "typescript"
+            ),
         )
     if normalized == "go":
         stripped_source = _strip_go_rust_literals_and_comments(source)
@@ -462,36 +468,15 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
     return []
 
 
-_SOLIDITY_CONST_RE = re.compile(
-    r"\b(?:u?int\d*|address|bytes\d*|bool)\s+"
-    r"(?:(?:public|private|internal|external)\s+)*"
-    r"(?:constant|immutable)\s+"
-    r"(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>[^;]+);"
-)
-
-
-def _parse_int_literal(text: str) -> int | None:
-    text = text.strip().replace("_", "")
-    try:
-        return int(text, 16) if text.lower().startswith("0x") else int(text, 10)
-    except ValueError:
-        return None
-
-
 def _solidity_declared_constants(source: str) -> dict[str, int]:
     """Map Solidity ``constant``/``immutable`` names to their integer literal.
 
-    Used so the divide-by-zero and out-of-bounds heuristics don't model a named
-    constant (e.g. curve order ``N``, radix ``EVM_TREE_RADIX``) as a free Z3
-    integer that can be picked as ``0`` / ``-1`` (#296). Non-literal initializers
-    (expressions referencing other constants) are skipped.
+    Thin wrapper over the shared cross-language constant model so the
+    divide-by-zero and out-of-bounds heuristics don't model a named constant
+    (e.g. curve order ``N``, radix ``EVM_TREE_RADIX``) as a free Z3 integer that
+    can be picked as ``0`` / ``-1`` (#296).
     """
-    constants: dict[str, int] = {}
-    for match in _SOLIDITY_CONST_RE.finditer(source):
-        value = _parse_int_literal(match.group("value"))
-        if value is not None:
-            constants[match.group("name")] = value
-    return constants
+    return semantic_safety.collect_declared_constants(source, "solidity")
 
 def _first_counterexample_payload(
     issues: list[ForeignSafetyIssue],
