@@ -435,6 +435,37 @@ def test_clause_split_is_paren_aware_and_balanced() -> None:
         assert fragment.count("(") == fragment.count(")"), warning
 
 
+def test_clause_split_is_string_literal_aware() -> None:
+    """Top-level &&/|| split must not shred operators inside string literals."""
+    from agent.cross_validation_z3 import (
+        _clause_to_z3,
+        _has_top_level_disjunction,
+        _split_top_level_conjuncts,
+    )
+
+    # ' && ' inside a string must not be treated as a conjunction.
+    clause_with_and = (
+        "result == ' && '.join(_dedupe_strings(requirements)) if requirements else 'true'"
+    )
+    assert _split_top_level_conjuncts(clause_with_and) == [clause_with_and]
+
+    # ' || ' inside a string must not be treated as a disjunction.
+    clause_with_or = "result == ' || '.join(parts)"
+    assert _has_top_level_disjunction(clause_with_or) is False
+    assert _split_top_level_conjuncts(clause_with_or) == [clause_with_or]
+
+    # Real top-level conjunctions mixed with a string containing && stay split.
+    mixed = "result == ' && ' && x > 0"
+    assert _split_top_level_conjuncts(mixed) == ["result == ' && ' ", " x > 0"]
+
+    # A clause that was previously split into unbalanced fragments is now skipped
+    # as a single unsupported clause.
+    exprs, warnings = _clause_to_z3(clause_with_and, {})
+    assert exprs == []
+    assert len(warnings) == 1
+    assert "Skipped unsupported Z3 clause: " in warnings[0]
+
+
 def test_clause_disjunction_is_lowered_not_skipped() -> None:
     """`||` clauses must lower to z3.Or instead of being silently skipped (#303)."""
     import z3
