@@ -835,6 +835,53 @@ def test_python_contract_inference_skips_overload_stubs() -> None:
     assert atoms[0].ensures == "result == x"
 
 
+def test_python_contract_inference_includes_class_methods_and_skips_self() -> None:
+    """Python class methods and async methods must be inferable, with self/cls skipped."""
+    from agent.cross_validation_foreign import _infer_python_contracts
+
+    source = (
+        "class Series:\n"
+        "    @property\n"
+        "    def name(self) -> str:\n"
+        "        return self._name\n"
+        "    @name.setter\n"
+        "    def name(self, value: str) -> None:\n"
+        "        self._name = value\n"
+        "    @staticmethod\n"
+        "    def static_name(x: int) -> int:\n"
+        "        return x\n"
+        "    @classmethod\n"
+        "    def from_dict(cls, d: dict) -> 'Series':\n"
+        "        return cls(d)\n"
+        "    async def refresh(self) -> bool:\n"
+        "        return True\n"
+        "\n"
+        "def top(x: int) -> int:\n"
+        "    return x\n"
+    )
+    atoms = _infer_python_contracts(source)
+    names = [atom.name for atom in atoms]
+    assert "name" in names
+    assert "static_name" in names
+    assert "from_dict" in names
+    assert "refresh" in names
+    assert "top" in names
+
+    name_getter = [atom for atom in atoms if atom.name == "name" and not atom.params][0]
+    assert name_getter.return_type == "string"
+    assert name_getter.ensures == "result == self._name"
+
+    static = [atom for atom in atoms if atom.name == "static_name"][0]
+    assert [p.name for p in static.params] == ["x"]
+
+    from_dict = [atom for atom in atoms if atom.name == "from_dict"][0]
+    assert [p.name for p in from_dict.params] == ["d"]
+
+    refresh = [atom for atom in atoms if atom.name == "refresh"][0]
+    assert refresh.return_type == "bool"
+    assert not refresh.params
+
+
 def test_solidity_contract_inference_preserves_bool_return_type() -> None:
     """Solidity ``returns (bool)`` must map to Mumei ``bool``."""
     from agent.cross_validation_foreign import _infer_solidity_contracts
