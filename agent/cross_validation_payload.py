@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
+from pathlib import Path
 
 from agent.cross_validation_foreign import _safe_identifier
 from agent.cross_validation_models import (
@@ -645,7 +648,17 @@ def _json_from_text(text: str) -> dict[str, object]:
     # Some models omit the comma between array/object entries.  Retry by
     # inserting a comma at the reported failure position when the parser
     # complains about a missing ',' delimiter.
-    payload, _end = _raw_decode_with_missing_comma_retry(stripped)
+    try:
+        payload, _end = _raw_decode_with_missing_comma_retry(stripped)
+    except json.JSONDecodeError:
+        debug_dir = os.environ.get("MUMEI_DEBUG_JSON_FAIL_DIR")
+        if debug_dir:
+            dump_dir = Path(debug_dir)
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            stamp = os.environ.get("MUMEI_DEBUG_JSON_STAMP") or f"{os.getpid()}_{time.time_ns()}"
+            (dump_dir / f"raw_{stamp}.txt").write_text(text, encoding="utf-8")
+            (dump_dir / f"repaired_{stamp}.txt").write_text(stripped, encoding="utf-8")
+        raise
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("expected JSON object", stripped, 0)
 

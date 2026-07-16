@@ -1773,3 +1773,23 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"atoms": [{"name": "f", "effects": {}}]}'
     ) == {"atoms": [{"name": "f", "effects": {}}]}
+
+
+def test_json_from_text_debug_dump_on_failure(tmp_path: Path) -> None:
+    """When MUMEI_DEBUG_JSON_FAIL_DIR is set, raw and repaired JSON are dumped."""
+    import os
+    from agent.cross_validation_payload import _json_from_text
+
+    debug_dir = tmp_path / "json_fails"
+    os.environ["MUMEI_DEBUG_JSON_FAIL_DIR"] = str(debug_dir)
+    os.environ["MUMEI_DEBUG_JSON_STAMP"] = "test_stamp"
+    try:
+        with pytest.raises(json.JSONDecodeError):
+            _json_from_text('{"atoms": [1, 2,}')
+        raw_file = debug_dir / "raw_test_stamp.txt"
+        repaired_file = debug_dir / "repaired_test_stamp.txt"
+        assert raw_file.read_text() == '{"atoms": [1, 2,}'
+        assert repaired_file.exists()
+    finally:
+        os.environ.pop("MUMEI_DEBUG_JSON_FAIL_DIR", None)
+        os.environ.pop("MUMEI_DEBUG_JSON_STAMP", None)
