@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
+from pathlib import Path
 
 from agent.cross_validation_foreign import _safe_identifier
 from agent.cross_validation_models import (
@@ -394,6 +397,10 @@ def _merge_value_strings(
                         m += 1
                     if m < len(tokens) and tokens[m][1] == ":":
                         break
+                    # The next string may itself be a malformed key/value token
+                    # such as ``"ensures': 'value"``.  Do not merge it.
+                    if _split_mixed_quote_key_value(tokens[k][1]) is not None:
+                        break
                 # Preserve union/intersection operators inside the merged string;
                 # ``+`` and continuation commas are dropped.
                 if sep in ("|", "&"):
@@ -458,6 +465,41 @@ def _consume_keyless_brace_as_string(
     return i, json.dumps("{" + inner + "}", ensure_ascii=False)
 
 
+_MIXED_QUOTE_KV_RE = re.compile(
+    r"^\s*['\"]?\s*(?P<key>[^'\":\s][^'\":\s]*)\s*['\"]?\s*:\s*['\"]?(?P<value>.*?)\s*['\"]?\s*$",
+    re.DOTALL,
+)
+
+
+def _split_mixed_quote_key_value(token: str) -> tuple[str, str] | None:
+    """Split a string token that accidentally contains a whole key/value pair.
+
+    Some OSS models emit a key with mismatched quotes such as
+    ``"ensures': 'result == ..."``.  The whole line is tokenized as one string.
+    If the token content looks like ``key: value`` (with optional quotes and
+    spaces), return the JSON-ready key and value fragments.  Returns ``None``
+    when the token does not contain a clean key/value separator.
+    """
+    content = _decode_string_token(token)
+    if content is None:
+        content = _unquote_literal_string(token)
+    match = _MIXED_QUOTE_KV_RE.match(content)
+    if not match:
+        return None
+    key = match.group("key").strip()
+    value = match.group("value").strip()
+    if not key or not value:
+        return None
+    key_json = json.dumps(key, ensure_ascii=False)
+    # Leave JSON literals and numbers unquoted; otherwise quote as a string.
+    stripped = value.strip("'\"")
+    if stripped in ("true", "false", "null") or re.fullmatch(r"-?\d+(\.\d+)?([eE][+-]?\d+)?", stripped):
+        value_json = stripped
+    else:
+        value_json = json.dumps(stripped, ensure_ascii=False)
+    return key_json, value_json
+
+
 def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
     """Rebuild a repairable JSON string from tokens.
 
@@ -500,6 +542,36 @@ def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
                 continue
             if text == "}":
                 if stack and stack[-1][0] == "obj":
+                    # Some models close an object before a trailing field such
+                    # as ``effects`` and then emit that key outside the object.
+                    # When the object is an array element and the next token is
+                    # a known trailing key followed by a colon, keep the object
+                    # open so the field is merged back in.
+                    stray_key = None
+                    if len(stack) >= 2 and stack[-2][0] == "arr":
+                        j = i + 1
+                        while j < n and tokens[j][0] == "WS":
+                            j += 1
+                        # The model may emit a trailing comma on the same line as
+                        # the stray closing brace (``},``).  Skip it to find the
+                        # actual next key/value.
+                        if j < n and tokens[j][1] == ",":
+                            j += 1
+                            while j < n and tokens[j][0] == "WS":
+                                j += 1
+                        if j < n and tokens[j][0] == "STR":
+                            key_text = _decode_string_token(tokens[j][1])
+                            if key_text in ("effects",):
+                                k = j + 1
+                                while k < n and tokens[k][0] == "WS":
+                                    k += 1
+                                if k < n and tokens[k][1] == ":":
+                                    stray_key = tokens[j][1]
+                    if stray_key is not None:
+                        # Leave the object open; the following comma/key will
+                        # be processed as part of this object.
+                        i += 1
+                        continue
                     stack.pop()
                     out.append(text)
                 # A stray ``}`` (e.g. a JS closing brace copied outside a
@@ -543,6 +615,20 @@ def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
                 if stack[-1][1] or (nxt is not None and nxt[1] == ":"):
                     is_key = True
             if is_key:
+                # The token may be a malformed key that also contains the value
+                # (e.g. ``"ensures': 'result == ..."``).  If the next token is not
+                # a colon, split the token into a key/value pair.
+                if nxt is None or nxt[1] != ":":
+                    split = _split_mixed_quote_key_value(text)
+                    if split is not None:
+                        key_json, value_json = split
+                        out.append(key_json)
+                        out.append(":")
+                        out.append(value_json)
+                        if stack and stack[-1][0] == "obj":
+                            stack[-1] = ("obj", False)
+                        i += 1
+                        continue
                 # Models sometimes emit Python/JS-style quoted keys. Convert any
                 # non-JSON quote style to a proper JSON string key.
                 if text.startswith(("'", '`')):
@@ -645,7 +731,17 @@ def _json_from_text(text: str) -> dict[str, object]:
     # Some models omit the comma between array/object entries.  Retry by
     # inserting a comma at the reported failure position when the parser
     # complains about a missing ',' delimiter.
-    payload, _end = _raw_decode_with_missing_comma_retry(stripped)
+    try:
+        payload, _end = _raw_decode_with_missing_comma_retry(stripped)
+    except json.JSONDecodeError:
+        debug_dir = os.environ.get("MUMEI_DEBUG_JSON_FAIL_DIR")
+        if debug_dir:
+            dump_dir = Path(debug_dir)
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            stamp = os.environ.get("MUMEI_DEBUG_JSON_STAMP") or f"{os.getpid()}_{time.time_ns()}"
+            (dump_dir / f"raw_{stamp}.txt").write_text(text, encoding="utf-8")
+            (dump_dir / f"repaired_{stamp}.txt").write_text(stripped, encoding="utf-8")
+        raise
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("expected JSON object", stripped, 0)
 
