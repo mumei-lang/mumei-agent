@@ -31,6 +31,9 @@ def _replace_python_literals_outside_strings(text: str) -> str:
         "None": "null",
         "True": "true",
         "False": "false",
+        "undefined": "null",
+        "NaN": "null",
+        "Infinity": "null",
     }
     while i < n:
         ch = text[i]
@@ -57,6 +60,18 @@ def _replace_python_literals_outside_strings(text: str) -> str:
                 and (i == 0 or not text[i - 1].isalnum() and text[i - 1] != "_")
                 and (end >= n or not text[end].isalnum() and text[end] != "_")
             ):
+                # JavaScript signed infinities (`-Infinity`) and signed NaN
+                # (`-NaN`) are emitted as two tokens; consume the leading minus
+                # so the result is a single JSON `null` instead of `-null`.
+                if (
+                    token in ("Infinity", "NaN")
+                    and i > 0
+                    and text[i - 1] == "-"
+                    and (i - 1 == 0 or not text[i - 2].isalnum() and text[i - 2] != "_")
+                    and result
+                    and result[-1] == "-"
+                ):
+                    result.pop()
                 result.append(replacement)
                 i = end
                 replaced = True
