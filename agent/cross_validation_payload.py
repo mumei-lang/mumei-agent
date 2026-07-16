@@ -406,6 +406,54 @@ def _merge_value_strings(
     return end, json.dumps(joined, ensure_ascii=False)
 
 
+def _consume_keyless_brace_as_string(
+    tokens: list[tuple[str, str]],
+    start: int,
+) -> tuple[int, str] | None:
+    """Consume a brace-enclosed block with no keys and turn it into a string.
+
+    Some small OSS models emit an expression-like value wrapped in braces and
+    containing comma-separated sub-expressions, but without JSON key/value
+    syntax (e.g. ``{`_MODULE_NAME == 'x'`, `is_builtin('x')`}``).  JSON does
+    not allow an object with values but no keys, so if the block contains no
+    top-level ``:`` or ``//`` comments we treat the whole thing as a single
+    JSON string, preserving the braces and commas.  Returns ``None`` if the
+    block appears to be a normal keyed object.
+    """
+    depth = 1
+    i = start + 1
+    parts: list[str] = []
+    while i < len(tokens) and depth > 0:
+        kind, text = tokens[i]
+        if kind == "OTHER":
+            if text == "{":
+                depth += 1
+            elif text == "}":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            elif text == "[":
+                depth += 1
+            elif text == "]":
+                depth -= 1
+            elif text == ":" and depth == 1:
+                # This is a keyed object; do not consume it.
+                return None
+        if depth > 0:
+            if kind == "STR":
+                decoded = _decode_string_token(text)
+                parts.append(decoded if decoded is not None else text)
+            else:
+                parts.append(text)
+        i += 1
+    if depth > 0:
+        # Unterminated block; let the normal reconstruction handle it.
+        return None
+    inner = "".join(parts)
+    return i, json.dumps("{" + inner + "}", ensure_ascii=False)
+
+
 def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
     """Rebuild a repairable JSON string from tokens.
 
@@ -427,11 +475,21 @@ def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
 
         if kind == "OTHER":
             if text == "{":
+                # Some models emit a keyless brace expression where a string
+                # value is expected (e.g. comma-separated backtick clauses inside
+                # ``requires``).  Convert that whole block to a single string.
+                keyless = _consume_keyless_brace_as_string(tokens, i)
+                if keyless is not None:
+                    end, string_token = keyless
+                    out.append(string_token)
+                    i = end
+                    continue
                 stack.append(("obj", True))
                 out.append(text)
                 i += 1
                 continue
             if text == "[":
+
                 stack.append(("arr", False))
                 out.append(text)
                 i += 1

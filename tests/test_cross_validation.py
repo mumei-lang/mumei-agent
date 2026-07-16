@@ -1757,3 +1757,13 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
             }
         ]
     }
+
+    # Keyless brace expressions (common in model ``requires``/``ensures``
+    # hallucinations with backtick-quoted sub-expressions) are collapsed to a
+    # single string; nested braces without keys are preserved.
+    assert _json_from_text(
+        '{"requires": {`_a == 1`, `b > 2`}}'
+    ) == {"requires": "{_a == 1, b > 2}"}
+    assert _json_from_text(
+        '{"type": { as_json == True -> {True} otherwise -> { if x then "a" else "b" } }}'
+    ) == {"type": "{ as_json == True -> {True} otherwise -> { if x then a else b } }"}
