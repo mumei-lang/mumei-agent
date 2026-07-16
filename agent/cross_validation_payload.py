@@ -397,6 +397,10 @@ def _merge_value_strings(
                         m += 1
                     if m < len(tokens) and tokens[m][1] == ":":
                         break
+                    # The next string may itself be a malformed key/value token
+                    # such as ``"ensures': 'value"``.  Do not merge it.
+                    if _split_mixed_quote_key_value(tokens[k][1]) is not None:
+                        break
                 # Preserve union/intersection operators inside the merged string;
                 # ``+`` and continuation commas are dropped.
                 if sep in ("|", "&"):
@@ -459,6 +463,41 @@ def _consume_keyless_brace_as_string(
         # decoded as a real empty object, not a string literal.
         return None
     return i, json.dumps("{" + inner + "}", ensure_ascii=False)
+
+
+_MIXED_QUOTE_KV_RE = re.compile(
+    r"^\s*['\"]?\s*(?P<key>[^'\":\s][^'\":\s]*)\s*['\"]?\s*:\s*['\"]?(?P<value>.*?)\s*['\"]?\s*$",
+    re.DOTALL,
+)
+
+
+def _split_mixed_quote_key_value(token: str) -> tuple[str, str] | None:
+    """Split a string token that accidentally contains a whole key/value pair.
+
+    Some OSS models emit a key with mismatched quotes such as
+    ``"ensures': 'result == ..."``.  The whole line is tokenized as one string.
+    If the token content looks like ``key: value`` (with optional quotes and
+    spaces), return the JSON-ready key and value fragments.  Returns ``None``
+    when the token does not contain a clean key/value separator.
+    """
+    content = _decode_string_token(token)
+    if content is None:
+        content = _unquote_literal_string(token)
+    match = _MIXED_QUOTE_KV_RE.match(content)
+    if not match:
+        return None
+    key = match.group("key").strip()
+    value = match.group("value").strip()
+    if not key or not value:
+        return None
+    key_json = json.dumps(key, ensure_ascii=False)
+    # Leave JSON literals and numbers unquoted; otherwise quote as a string.
+    stripped = value.strip("'\"")
+    if stripped in ("true", "false", "null") or re.fullmatch(r"-?\d+(\.\d+)?([eE][+-]?\d+)?", stripped):
+        value_json = stripped
+    else:
+        value_json = json.dumps(stripped, ensure_ascii=False)
+    return key_json, value_json
 
 
 def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
@@ -576,6 +615,20 @@ def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
                 if stack[-1][1] or (nxt is not None and nxt[1] == ":"):
                     is_key = True
             if is_key:
+                # The token may be a malformed key that also contains the value
+                # (e.g. ``"ensures': 'result == ..."``).  If the next token is not
+                # a colon, split the token into a key/value pair.
+                if nxt is None or nxt[1] != ":":
+                    split = _split_mixed_quote_key_value(text)
+                    if split is not None:
+                        key_json, value_json = split
+                        out.append(key_json)
+                        out.append(":")
+                        out.append(value_json)
+                        if stack and stack[-1][0] == "obj":
+                            stack[-1] = ("obj", False)
+                        i += 1
+                        continue
                 # Models sometimes emit Python/JS-style quoted keys. Convert any
                 # non-JSON quote style to a proper JSON string key.
                 if text.startswith(("'", '`')):

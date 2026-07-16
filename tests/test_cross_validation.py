@@ -1780,6 +1780,12 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
         '{"atoms": [{"name": "f", "ensures": "x"}, "effects": []}]}'
     ) == {"atoms": [{"name": "f", "ensures": "x", "effects": []}]}
 
+    # A string token that accidentally contains both key and value due to
+    # mismatched quotes is split into a proper key/value pair.
+    assert _json_from_text(
+        """{"atoms": [{"name": "f", "ensures': 'x"}]}"""
+    ) == {"atoms": [{"name": "f", "ensures": "x"}]}
+
 
 def test_json_from_text_debug_dump_on_failure(tmp_path: Path) -> None:
     """When MUMEI_DEBUG_JSON_FAIL_DIR is set, raw and repaired JSON are dumped."""
