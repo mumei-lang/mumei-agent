@@ -1725,3 +1725,12 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"msg": "undefined is not a function"}'
     ) == {"msg": "undefined is not a function"}
+
+    # Adjacent string literals in an object value (no ``+`` or comma) are merged
+    # into a single string, while an adjacent object key is not swallowed.
+    assert _json_from_text(
+        '{"name": "f", "requires": "part1,\\n" "part2"}'
+    ) == {"name": "f", "requires": "part1,\npart2"}
+    assert _json_from_text(
+        '{"name": "f" "requires": "x"}'
+    ) == {"name": "f", "requires": "x"}

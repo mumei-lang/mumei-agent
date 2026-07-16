@@ -340,13 +340,14 @@ def _merge_value_strings(
     start: int,
     in_object_value: bool = False,
 ) -> tuple[int, str]:
-    """Merge adjacent string literals separated by ``+`` or continuation commas.
+    """Merge adjacent string literals separated by ``+``, continuation commas,
+    or only whitespace.
 
-    Local LLMs sometimes split a long ``ensures`` clause across multiple
-    quoted lines with ``+`` concatenations, or even omit the ``+`` and just
-    write a comma-separated continuation.  When the surrounding structure is
-    an object value (not an array element and not a new key), merge the
-    decoded string contents into one JSON string.
+    Local LLMs sometimes split a long ``ensures`` or ``requires`` clause across
+    multiple quoted lines with ``+`` concatenations, a continuation comma, or
+    even no operator at all.  When the surrounding structure is an object value
+    (not an array element and not a new key), merge the decoded string contents
+    into one JSON string.
     """
     parts: list[str] = []
     i = start
@@ -357,10 +358,23 @@ def _merge_value_strings(
             break
         parts.append(content)
 
-        # Look for ``+`` or ``,`` followed by another string.
+        # Look for ``+``, ``,``, or only whitespace followed by another string.
         j = i + 1
         while j < len(tokens) and tokens[j][0] == "WS":
             j += 1
+        if j < len(tokens) and tokens[j][0] == "STR":
+            # Adjacent string with no operator.  Only merge when we are inside an
+            # object value and the following string is not a new key.
+            if not in_object_value:
+                break
+            m = j + 1
+            while m < len(tokens) and tokens[m][0] == "WS":
+                m += 1
+            if m < len(tokens) and tokens[m][1] == ":":
+                break
+            i = j
+            end = j + 1
+            continue
         if j < len(tokens) and tokens[j][1] in ("+", ","):
             sep = tokens[j][1]
             k = j + 1
