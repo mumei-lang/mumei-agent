@@ -451,6 +451,10 @@ def _consume_keyless_brace_as_string(
         # Unterminated block; let the normal reconstruction handle it.
         return None
     inner = "".join(parts)
+    if not inner.strip():
+        # Empty or whitespace-only object (e.g. ``{}`` or ``{ }``) should be
+        # decoded as a real empty object, not a string literal.
+        return None
     return i, json.dumps("{" + inner + "}", ensure_ascii=False)
 
 

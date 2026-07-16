@@ -1767,3 +1767,9 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"type": { as_json == True -> {True} otherwise -> { if x then "a" else "b" } }}'
     ) == {"type": "{ as_json == True -> {True} otherwise -> { if x then a else b } }"}
+
+    # Empty objects are not swallowed by the keyless-brace repair.
+    assert _json_from_text('{}') == {}
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "effects": {}}]}'
+    ) == {"atoms": [{"name": "f", "effects": {}}]}
