@@ -503,6 +503,36 @@ def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
                 continue
             if text == "}":
                 if stack and stack[-1][0] == "obj":
+                    # Some models close an object before a trailing field such
+                    # as ``effects`` and then emit that key outside the object.
+                    # When the object is an array element and the next token is
+                    # a known trailing key followed by a colon, keep the object
+                    # open so the field is merged back in.
+                    stray_key = None
+                    if len(stack) >= 2 and stack[-2][0] == "arr":
+                        j = i + 1
+                        while j < n and tokens[j][0] == "WS":
+                            j += 1
+                        # The model may emit a trailing comma on the same line as
+                        # the stray closing brace (``},``).  Skip it to find the
+                        # actual next key/value.
+                        if j < n and tokens[j][1] == ",":
+                            j += 1
+                            while j < n and tokens[j][0] == "WS":
+                                j += 1
+                        if j < n and tokens[j][0] == "STR":
+                            key_text = _decode_string_token(tokens[j][1])
+                            if key_text in ("effects",):
+                                k = j + 1
+                                while k < n and tokens[k][0] == "WS":
+                                    k += 1
+                                if k < n and tokens[k][1] == ":":
+                                    stray_key = tokens[j][1]
+                    if stray_key is not None:
+                        # Leave the object open; the following comma/key will
+                        # be processed as part of this object.
+                        i += 1
+                        continue
                     stack.pop()
                     out.append(text)
                 # A stray ``}`` (e.g. a JS closing brace copied outside a

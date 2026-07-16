@@ -1774,6 +1774,12 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
         '{"atoms": [{"name": "f", "effects": {}}]}'
     ) == {"atoms": [{"name": "f", "effects": {}}]}
 
+    # Trailing fields (e.g. ``effects``) emitted after an object's closing
+    # brace are merged back into the object.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "ensures": "x"}, "effects": []}]}'
+    ) == {"atoms": [{"name": "f", "ensures": "x", "effects": []}]}
+
 
 def test_json_from_text_debug_dump_on_failure(tmp_path: Path) -> None:
     """When MUMEI_DEBUG_JSON_FAIL_DIR is set, raw and repaired JSON are dumped."""
