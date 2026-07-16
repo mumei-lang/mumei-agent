@@ -1734,3 +1734,12 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"name": "f" "requires": "x"}'
     ) == {"name": "f", "requires": "x"}
+
+    # Type-union and intersection literals split into separate quoted fragments
+    # are merged back into one string, preserving the operator.
+    assert _json_from_text(
+        '{"return_type": "str"|"None"}'
+    ) == {"return_type": "str|None"}
+    assert _json_from_text(
+        '{"type": "string" & "number"}'
+    ) == {"type": "string&number"}

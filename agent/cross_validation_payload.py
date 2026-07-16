@@ -341,13 +341,14 @@ def _merge_value_strings(
     in_object_value: bool = False,
 ) -> tuple[int, str]:
     """Merge adjacent string literals separated by ``+``, continuation commas,
-    or only whitespace.
+    type-union ``|``/``&``, or only whitespace.
 
     Local LLMs sometimes split a long ``ensures`` or ``requires`` clause across
     multiple quoted lines with ``+`` concatenations, a continuation comma, or
-    even no operator at all.  When the surrounding structure is an object value
-    (not an array element and not a new key), merge the decoded string contents
-    into one JSON string.
+    even no operator at all.  They also write union/intersection type strings
+    as two quoted fragments such as ``"str"|"None"``.  When the surrounding
+    structure is a value (not a new key), merge the decoded string contents into
+    one JSON string, preserving ``|`` and ``&`` as part of the value.
     """
     parts: list[str] = []
     i = start
@@ -375,7 +376,7 @@ def _merge_value_strings(
             i = j
             end = j + 1
             continue
-        if j < len(tokens) and tokens[j][1] in ("+", ","):
+        if j < len(tokens) and tokens[j][1] in ("+", ",", "|", "&"):
             sep = tokens[j][1]
             k = j + 1
             while k < len(tokens) and tokens[k][0] == "WS":
@@ -384,15 +385,19 @@ def _merge_value_strings(
                 # A comma separates array elements; do not merge it inside arrays.
                 if sep == "," and not in_object_value:
                     break
-                # If the separator is a comma inside an object value, make sure
-                # the next string is not actually a new object key
-                # (``"key": ...``).
-                if sep == "," and in_object_value:
+                # If the separator is a comma, ``|``, or ``&`` inside an object
+                # value, make sure the next string is not actually a new object
+                # key (``"key": ...``).
+                if sep in (",", "|", "&") and in_object_value:
                     m = k + 1
                     while m < len(tokens) and tokens[m][0] == "WS":
                         m += 1
                     if m < len(tokens) and tokens[m][1] == ":":
                         break
+                # Preserve union/intersection operators inside the merged string;
+                # ``+`` and continuation commas are dropped.
+                if sep in ("|", "&"):
+                    parts.append(sep)
                 i = k
                 end = k + 1
                 continue
