@@ -52,6 +52,9 @@ class AgentConfig:
     max_context_tokens: int = field(
         default_factory=lambda: int(os.getenv("MAX_CONTEXT_TOKENS", "16000"))
     )
+    llm_max_tokens: int | None = field(
+        default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "0")) or None
+    )
     prompt_report_truncate_chars: int = field(
         default_factory=lambda: int(os.getenv("PROMPT_REPORT_TRUNCATE_CHARS", "4000"))
     )

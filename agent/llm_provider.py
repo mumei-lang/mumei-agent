@@ -76,10 +76,13 @@ class OpenAILLMProvider:
             base_url = getattr(self.config, "base_url", None) if self.config else None
             if base_url:
                 span.set_attribute("server.address", base_url)
-            response = self._ensure_client().chat.completions.create(
-                model=model,
-                messages=list(messages),
-            )
+            max_tokens = getattr(self.config, "llm_max_tokens", None)
+            if max_tokens:
+                span.set_attribute("gen_ai.request.max_tokens", max_tokens)
+            kwargs: dict[str, object] = {"model": model, "messages": list(messages)}
+            if max_tokens:
+                kwargs["max_tokens"] = max_tokens
+            response = self._ensure_client().chat.completions.create(**kwargs)
             _annotate_response(span, response, model)
             return _extract_openai_text(response)
 
