@@ -541,6 +541,31 @@ def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], 
     return json.JSONDecoder(strict=False).raw_decode(text)
 
 
+def _normalize_type_fields(payload: dict[str, object]) -> dict[str, object]:
+    """Ensure `type` and `return_type` are strings, flattening any schema objects.
+
+    OSS LLMs sometimes emit `type` or `return_type` as JSON schema objects
+    (e.g. ``{"type": "dict", "properties": ...}``) instead of the expected
+    simple Mumei type string.  Convert those objects (or arrays) back to a
+    JSON string so downstream consumers receive a string as documented in the
+    output schema.
+    """
+    atoms_value = payload.get("atoms")
+    if not isinstance(atoms_value, list):
+        return payload
+    for atom in atoms_value:
+        if not isinstance(atom, dict):
+            continue
+        if isinstance(atom.get("return_type"), (dict, list)):
+            atom["return_type"] = json.dumps(atom["return_type"], ensure_ascii=False)
+        params_value = atom.get("params")
+        if isinstance(params_value, list):
+            for param in params_value:
+                if isinstance(param, dict) and isinstance(param.get("type"), (dict, list)):
+                    param["type"] = json.dumps(param["type"], ensure_ascii=False)
+    return payload
+
+
 def _json_from_text(text: str) -> dict[str, object]:
     stripped = _strip_markdown_fence(text)
 
@@ -561,6 +586,11 @@ def _json_from_text(text: str) -> dict[str, object]:
     payload, _end = _raw_decode_with_missing_comma_retry(stripped)
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("expected JSON object", stripped, 0)
+
+    # Some models emit `type`/`return_type` as JSON schema objects.  Normalize
+    # them back to strings so the rest of the pipeline expects the documented
+    # schema.
+    payload = _normalize_type_fields(payload)
     return payload
 
 

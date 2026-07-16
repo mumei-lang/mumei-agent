@@ -1743,3 +1743,17 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"type": "string" & "number"}'
     ) == {"type": "string&number"}
+
+    # `type` and `return_type` emitted as JSON schema objects are flattened to
+    # strings to match the expected schema.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "return_type": {"type": "dict", "of": "i64"}, "params": [{"name": "x", "type": {"type": "array", "items": "i64"}}]}]}'
+    ) == {
+        "atoms": [
+            {
+                "name": "f",
+                "return_type": '{"type": "dict", "of": "i64"}',
+                "params": [{"name": "x", "type": '{"type": "array", "items": "i64"}'}],
+            }
+        ]
+    }
