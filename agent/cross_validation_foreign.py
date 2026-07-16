@@ -1432,6 +1432,38 @@ def _last_expression(body: str) -> str:
     return ""
 
 
+def _is_multi_value_return_expression(expr: str) -> bool:
+    """True when ``expr`` returns more than one value (Go tuple, Solidity tuple).
+
+    Ignores commas inside nested parentheses, brackets, or braces so that
+    single composite literals and function calls are not mistaken for multi-value
+    returns.
+    """
+    expr = expr.strip()
+    # Strip one matching outer pair of parentheses so that ``(a, b)`` is treated
+    # the same as ``a, b``.
+    if expr.startswith("(") and expr.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(expr):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    if i == len(expr) - 1:
+                        expr = expr[1:-1].strip()
+                    break
+    depth = 0
+    for ch in expr:
+        if ch in "([{":
+            depth += 1
+        elif ch in "])}" and depth > 0:
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
 def _return_statement_expression(body: str) -> str:
     raw = _raw_return_statement_expression(body)
     return _normalize_foreign_expression(raw) if raw else ""
@@ -1448,6 +1480,10 @@ def _raw_return_statement_expression(body: str) -> str:
     If the body contains more than one ``return`` we cannot infer a single
     deterministic postcondition, so we return the empty string and let the
     caller default ``ensures`` to ``true``.
+
+    Multi-value returns (e.g. Go ``return sum, carryOut != 0`` or Solidity
+    ``return (a, b);``) cannot be expressed as a single ``result`` equality, so
+    they are also normalised to the empty string.
     """
     stripped = _strip_go_rust_literals_and_comments(body)
     returns: list[re.Match[str]] = []
@@ -1473,7 +1509,11 @@ def _raw_return_statement_expression(body: str) -> str:
         elif ch in "])}" and depth > 0:
             depth -= 1
         elif ch in ";\n" and depth == 0:
+            if _is_multi_value_return_expression(stripped[start:index].strip()):
+                return ""
             return body[start:index].strip()
+    if _is_multi_value_return_expression(stripped[start:].strip()):
+        return ""
     return body[start:].strip()
 
 
