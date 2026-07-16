@@ -1509,14 +1509,12 @@ def _raw_return_statement_expression(body: str) -> str:
         elif ch in "])}" and depth > 0:
             depth -= 1
         elif ch in ";\n" and depth == 0:
-            expr = body[start:index].strip()
-            if _is_multi_value_return_expression(expr):
+            if _is_multi_value_return_expression(stripped[start:index].strip()):
                 return ""
-            return expr
-    expr = body[start:].strip()
-    if _is_multi_value_return_expression(expr):
+            return body[start:index].strip()
+    if _is_multi_value_return_expression(stripped[start:].strip()):
         return ""
-    return expr
+    return body[start:].strip()
 
 
 def _typescript_raw_return_expression(body: str, is_expression_body: bool = False) -> str:

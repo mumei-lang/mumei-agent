@@ -861,6 +861,14 @@ def test_go_contract_inference_ignores_multi_value_return() -> None:
     assert atoms[0].ensures == "true"
 
 
+def test_raw_return_statement_expression_keeps_single_value_with_comma_in_string() -> None:
+    """A comma inside a returned string literal must not be read as a multi-value return."""
+    from agent.cross_validation_foreign import _raw_return_statement_expression
+
+    source = 'package demo\nfunc greeting() string {\n    return "hello, world"\n}\n'
+    assert _raw_return_statement_expression(source) == '"hello, world"'
+
+
 def test_params_from_signature_handles_nested_commas_in_generics() -> None:
     """Generic Rust parameters must not be split on commas inside nested parentheses."""
     from agent.cross_validation_foreign import _params_from_signature
