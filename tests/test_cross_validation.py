@@ -1720,5 +1720,8 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
         '{"value": NaN, "other": Infinity}'
     ) == {"value": None, "other": None}
     assert _json_from_text(
+        '{"value": -Infinity, "other": -NaN}'
+    ) == {"value": None, "other": None}
+    assert _json_from_text(
         '{"msg": "undefined is not a function"}'
     ) == {"msg": "undefined is not a function"}
