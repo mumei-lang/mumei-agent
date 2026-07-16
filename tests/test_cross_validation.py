@@ -1710,3 +1710,15 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{`name`: `f`, "ensures": `x`}'
     ) == {"name": "f", "ensures": "x"}
+
+    # JavaScript ``undefined``, ``NaN``, and ``Infinity`` literals outside of
+    # strings are converted to JSON ``null`` (whole-word only).
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "ensures": undefined, "return_type": null}]}'
+    ) == {"atoms": [{"name": "f", "ensures": None, "return_type": None}]}
+    assert _json_from_text(
+        '{"value": NaN, "other": Infinity}'
+    ) == {"value": None, "other": None}
+    assert _json_from_text(
+        '{"msg": "undefined is not a function"}'
+    ) == {"msg": "undefined is not a function"}

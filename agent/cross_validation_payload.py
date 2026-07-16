@@ -31,6 +31,9 @@ def _replace_python_literals_outside_strings(text: str) -> str:
         "None": "null",
         "True": "true",
         "False": "false",
+        "undefined": "null",
+        "NaN": "null",
+        "Infinity": "null",
     }
     while i < n:
         ch = text[i]
