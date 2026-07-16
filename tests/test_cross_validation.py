@@ -1725,3 +1725,51 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"msg": "undefined is not a function"}'
     ) == {"msg": "undefined is not a function"}
+
+    # Adjacent string literals in an object value (no ``+`` or comma) are merged
+    # into a single string, while an adjacent object key is not swallowed.
+    assert _json_from_text(
+        '{"name": "f", "requires": "part1,\\n" "part2"}'
+    ) == {"name": "f", "requires": "part1,\npart2"}
+    assert _json_from_text(
+        '{"name": "f" "requires": "x"}'
+    ) == {"name": "f", "requires": "x"}
+
+    # Type-union and intersection literals split into separate quoted fragments
+    # are merged back into one string, preserving the operator.
+    assert _json_from_text(
+        '{"return_type": "str"|"None"}'
+    ) == {"return_type": "str|None"}
+    assert _json_from_text(
+        '{"type": "string" & "number"}'
+    ) == {"type": "string&number"}
+
+    # `type` and `return_type` emitted as JSON schema objects are flattened to
+    # strings to match the expected schema.
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "return_type": {"type": "dict", "of": "i64"}, "params": [{"name": "x", "type": {"type": "array", "items": "i64"}}]}]}'
+    ) == {
+        "atoms": [
+            {
+                "name": "f",
+                "return_type": '{"type": "dict", "of": "i64"}',
+                "params": [{"name": "x", "type": '{"type": "array", "items": "i64"}'}],
+            }
+        ]
+    }
+
+    # Keyless brace expressions (common in model ``requires``/``ensures``
+    # hallucinations with backtick-quoted sub-expressions) are collapsed to a
+    # single string; nested braces without keys are preserved.
+    assert _json_from_text(
+        '{"requires": {`_a == 1`, `b > 2`}}'
+    ) == {"requires": "{_a == 1, b > 2}"}
+    assert _json_from_text(
+        '{"type": { as_json == True -> {True} otherwise -> { if x then "a" else "b" } }}'
+    ) == {"type": "{ as_json == True -> {True} otherwise -> { if x then a else b } }"}
+
+    # Empty objects are not swallowed by the keyless-brace repair.
+    assert _json_from_text('{}') == {}
+    assert _json_from_text(
+        '{"atoms": [{"name": "f", "effects": {}}]}'
+    ) == {"atoms": [{"name": "f", "effects": {}}]}

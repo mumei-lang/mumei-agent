@@ -340,13 +340,15 @@ def _merge_value_strings(
     start: int,
     in_object_value: bool = False,
 ) -> tuple[int, str]:
-    """Merge adjacent string literals separated by ``+`` or continuation commas.
+    """Merge adjacent string literals separated by ``+``, continuation commas,
+    type-union ``|``/``&``, or only whitespace.
 
-    Local LLMs sometimes split a long ``ensures`` clause across multiple
-    quoted lines with ``+`` concatenations, or even omit the ``+`` and just
-    write a comma-separated continuation.  When the surrounding structure is
-    an object value (not an array element and not a new key), merge the
-    decoded string contents into one JSON string.
+    Local LLMs sometimes split a long ``ensures`` or ``requires`` clause across
+    multiple quoted lines with ``+`` concatenations, a continuation comma, or
+    even no operator at all.  They also write union/intersection type strings
+    as two quoted fragments such as ``"str"|"None"``.  When the surrounding
+    structure is a value (not a new key), merge the decoded string contents into
+    one JSON string, preserving ``|`` and ``&`` as part of the value.
     """
     parts: list[str] = []
     i = start
@@ -357,11 +359,24 @@ def _merge_value_strings(
             break
         parts.append(content)
 
-        # Look for ``+`` or ``,`` followed by another string.
+        # Look for ``+``, ``,``, or only whitespace followed by another string.
         j = i + 1
         while j < len(tokens) and tokens[j][0] == "WS":
             j += 1
-        if j < len(tokens) and tokens[j][1] in ("+", ","):
+        if j < len(tokens) and tokens[j][0] == "STR":
+            # Adjacent string with no operator.  Only merge when we are inside an
+            # object value and the following string is not a new key.
+            if not in_object_value:
+                break
+            m = j + 1
+            while m < len(tokens) and tokens[m][0] == "WS":
+                m += 1
+            if m < len(tokens) and tokens[m][1] == ":":
+                break
+            i = j
+            end = j + 1
+            continue
+        if j < len(tokens) and tokens[j][1] in ("+", ",", "|", "&"):
             sep = tokens[j][1]
             k = j + 1
             while k < len(tokens) and tokens[k][0] == "WS":
@@ -370,21 +385,77 @@ def _merge_value_strings(
                 # A comma separates array elements; do not merge it inside arrays.
                 if sep == "," and not in_object_value:
                     break
-                # If the separator is a comma inside an object value, make sure
-                # the next string is not actually a new object key
-                # (``"key": ...``).
-                if sep == "," and in_object_value:
+                # If the separator is a comma, ``|``, or ``&`` inside an object
+                # value, make sure the next string is not actually a new object
+                # key (``"key": ...``).
+                if sep in (",", "|", "&") and in_object_value:
                     m = k + 1
                     while m < len(tokens) and tokens[m][0] == "WS":
                         m += 1
                     if m < len(tokens) and tokens[m][1] == ":":
                         break
+                # Preserve union/intersection operators inside the merged string;
+                # ``+`` and continuation commas are dropped.
+                if sep in ("|", "&"):
+                    parts.append(sep)
                 i = k
                 end = k + 1
                 continue
         break
     joined = "".join(parts)
     return end, json.dumps(joined, ensure_ascii=False)
+
+
+def _consume_keyless_brace_as_string(
+    tokens: list[tuple[str, str]],
+    start: int,
+) -> tuple[int, str] | None:
+    """Consume a brace-enclosed block with no keys and turn it into a string.
+
+    Some small OSS models emit an expression-like value wrapped in braces and
+    containing comma-separated sub-expressions, but without JSON key/value
+    syntax (e.g. ``{`_MODULE_NAME == 'x'`, `is_builtin('x')`}``).  JSON does
+    not allow an object with values but no keys, so if the block contains no
+    top-level ``:`` or ``//`` comments we treat the whole thing as a single
+    JSON string, preserving the braces and commas.  Returns ``None`` if the
+    block appears to be a normal keyed object.
+    """
+    depth = 1
+    i = start + 1
+    parts: list[str] = []
+    while i < len(tokens) and depth > 0:
+        kind, text = tokens[i]
+        if kind == "OTHER":
+            if text == "{":
+                depth += 1
+            elif text == "}":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            elif text == "[":
+                depth += 1
+            elif text == "]":
+                depth -= 1
+            elif text == ":" and depth == 1:
+                # This is a keyed object; do not consume it.
+                return None
+        if depth > 0:
+            if kind == "STR":
+                decoded = _decode_string_token(text)
+                parts.append(decoded if decoded is not None else text)
+            else:
+                parts.append(text)
+        i += 1
+    if depth > 0:
+        # Unterminated block; let the normal reconstruction handle it.
+        return None
+    inner = "".join(parts)
+    if not inner.strip():
+        # Empty or whitespace-only object (e.g. ``{}`` or ``{ }``) should be
+        # decoded as a real empty object, not a string literal.
+        return None
+    return i, json.dumps("{" + inner + "}", ensure_ascii=False)
 
 
 def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
@@ -408,11 +479,21 @@ def _reconstruct_repaired_json(tokens: list[tuple[str, str]]) -> str:
 
         if kind == "OTHER":
             if text == "{":
+                # Some models emit a keyless brace expression where a string
+                # value is expected (e.g. comma-separated backtick clauses inside
+                # ``requires``).  Convert that whole block to a single string.
+                keyless = _consume_keyless_brace_as_string(tokens, i)
+                if keyless is not None:
+                    end, string_token = keyless
+                    out.append(string_token)
+                    i = end
+                    continue
                 stack.append(("obj", True))
                 out.append(text)
                 i += 1
                 continue
             if text == "[":
+
                 stack.append(("arr", False))
                 out.append(text)
                 i += 1
@@ -522,6 +603,31 @@ def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], 
     return json.JSONDecoder(strict=False).raw_decode(text)
 
 
+def _normalize_type_fields(payload: dict[str, object]) -> dict[str, object]:
+    """Ensure `type` and `return_type` are strings, flattening any schema objects.
+
+    OSS LLMs sometimes emit `type` or `return_type` as JSON schema objects
+    (e.g. ``{"type": "dict", "properties": ...}``) instead of the expected
+    simple Mumei type string.  Convert those objects (or arrays) back to a
+    JSON string so downstream consumers receive a string as documented in the
+    output schema.
+    """
+    atoms_value = payload.get("atoms")
+    if not isinstance(atoms_value, list):
+        return payload
+    for atom in atoms_value:
+        if not isinstance(atom, dict):
+            continue
+        if isinstance(atom.get("return_type"), (dict, list)):
+            atom["return_type"] = json.dumps(atom["return_type"], ensure_ascii=False)
+        params_value = atom.get("params")
+        if isinstance(params_value, list):
+            for param in params_value:
+                if isinstance(param, dict) and isinstance(param.get("type"), (dict, list)):
+                    param["type"] = json.dumps(param["type"], ensure_ascii=False)
+    return payload
+
+
 def _json_from_text(text: str) -> dict[str, object]:
     stripped = _strip_markdown_fence(text)
 
@@ -542,6 +648,11 @@ def _json_from_text(text: str) -> dict[str, object]:
     payload, _end = _raw_decode_with_missing_comma_retry(stripped)
     if not isinstance(payload, dict):
         raise json.JSONDecodeError("expected JSON object", stripped, 0)
+
+    # Some models emit `type`/`return_type` as JSON schema objects.  Normalize
+    # them back to strings so the rest of the pipeline expects the documented
+    # schema.
+    payload = _normalize_type_fields(payload)
     return payload
 
 

@@ -48,6 +48,8 @@ def build_code_cross_validation_prompt(code: str, language: str) -> str:
             "- Infer one atom per function or method with externally visible behavior.",
             "- Include safety preconditions, such as non-zero divisors and bounds checks.",
             "- Use decidable arithmetic-friendly `requires` and `ensures` clauses.",
+            "- `type` (in `params`) and `return_type` must be simple Mumei type strings such as `i64`, `string`, `bool`, `void`, or `str|None`. Do not emit JSON schema objects, nested `type`/`properties` structures, or type descriptions.",
+            "- Use only JSON double-quoted strings for text values. Do not use backticks (`) or single quotes as string delimiters.",
             "- Return JSON only.",
             "",
             "# Output schema",
