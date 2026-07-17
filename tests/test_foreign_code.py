@@ -1406,3 +1406,54 @@ def test_regex_fallback_matches_tree_sitter_for_multilanguage(monkeypatch) -> No
         "idx >= 0 && idx < len_values"
     )
     assert cvf._safety_requires_for_expression("a / b", "rust") == "b != 0"
+
+
+def test_normalize_foreign_expression_strips_trailing_line_comments() -> None:
+    """Trailing ``//`` comments must not leak into Mumei contract clauses."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("x > 0 // always positive") == "x > 0"
+
+
+def test_normalize_foreign_expression_preserves_comment_markers_inside_strings() -> None:
+    """``//`` or ``/*`` inside string literals must not be treated as comments."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression('"a // b"') == '"a // b"'
+    assert _normalize_foreign_expression("'/* not a comment */'") == "'/* not a comment */'"
+
+
+def test_normalize_foreign_expression_strips_block_comments() -> None:
+    """``/* ... */`` block comments must be removed before Mumei normalization."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("x + 1 /* increment */ > 0") == "x + 1  > 0"
+
+
+def test_normalize_foreign_expression_preserves_regex_literals_with_slashes() -> None:
+    """JS/TS regex literals containing ``/`` must not be truncated as ``//`` comments."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("str.replace(/\\//g, '_')") == "str_replace(/\\//g, '_')"
+    assert _normalize_foreign_expression("str.replace(/_|_/g, '_')") == "str_replace(/_|_/g, '_')"
+    assert _normalize_foreign_expression("x / /a/g") == "x / /a/g"
+
+
+def test_normalize_foreign_expression_does_not_treat_division_as_regex() -> None:
+    """Ordinary division ``a / b`` must not be consumed as a regex literal."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("a / b") == "a / b"
+    assert _normalize_foreign_expression("(a + b) / c") == "(a + b) / c"
+
+
+def test_typescript_contract_inference_strips_trailing_comments() -> None:
+    """Arrow-function expression bodies with trailing line comments must not include the comment in ``ensures``."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "const isRaw = (request: unknown): request is Request => 'headers' in request // comment\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].ensures == "result == 'headers' in request"

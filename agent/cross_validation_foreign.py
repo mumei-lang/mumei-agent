@@ -1657,8 +1657,183 @@ def _typescript_return_type(type_text: str) -> str:
     return "i64"
 
 
+def _is_regex_context(prefix: str) -> bool:
+    """Return whether a ``/`` at the current position can start a JS/TS regex literal.
+
+    This is a conservative heuristic based on the previous significant token.
+    Regex literals are allowed after operators, delimiters, and certain keywords;
+    they are not allowed after value tokens such as identifiers, literals,
+    closing brackets, or postfix ``++``/``--``.
+    """
+    text = prefix.rstrip()
+    if text.endswith("..."):
+        return True
+    i = len(text) - 1
+    while i >= 0 and text[i].isspace():
+        i -= 1
+    if i < 0:
+        return True
+    ch = text[i]
+    # Value-like closing brackets and quotes
+    if ch in ")}]\"'`":
+        return False
+    # Numbers (including a trailing dot)
+    if ch.isdigit() or ch == ".":
+        return False
+    # Identifiers or keywords
+    if ch.isalnum() or ch in "$_":
+        start = i
+        while i >= 0 and (text[i].isalnum() or text[i] in "$_"):
+            i -= 1
+        word = text[i + 1 : start + 1].lower()
+        if word in {
+            "return",
+            "typeof",
+            "void",
+            "delete",
+            "case",
+            "else",
+            "await",
+            "yield",
+            "new",
+            "in",
+            "of",
+            "instanceof",
+            "do",
+            "while",
+            "for",
+            "if",
+            "switch",
+            "with",
+            "catch",
+            "throw",
+            "then",
+        }:
+            return True
+        # Value keywords and all other identifiers are value tokens
+        return False
+    # ++ / -- are postfix after a value, prefix otherwise
+    if ch in "+-":
+        if i - 1 >= 0 and text[i - 1] == ch:
+            before = i - 2
+            while before >= 0 and text[before].isspace():
+                before -= 1
+            if before < 0:
+                return True
+            bch = text[before]
+            if bch.isalnum() or bch in "$_)]}\"'`":
+                return False
+            return True
+        return True
+    # Operators and delimiters that admit a regex on their right
+    if ch in "=([{,;?!~*/%<>|&^:":
+        return True
+    return False
+
+
+def _consume_regex_literal(expression: str, start: int) -> tuple[int, str] | None:
+    """Consume a JS/TS regex literal ``/pattern/flags`` starting at ``start``.
+
+    Respects ``\\`` escapes and ``[...]`` character classes.  Returns the new
+    index and the consumed text if a valid regex literal is found; otherwise
+    returns ``None`` so the caller can treat ``/`` as division.
+    """
+    n = len(expression)
+    if expression[start] != "/":
+        return None
+    i = start + 1
+    in_class = False
+    escape = False
+    while i < n:
+        ch = expression[i]
+        if escape:
+            escape = False
+            i += 1
+            continue
+        if ch == "\\":
+            escape = True
+            i += 1
+            continue
+        if in_class:
+            if ch == "]":
+                in_class = False
+            i += 1
+            continue
+        if ch == "[":
+            in_class = True
+            i += 1
+            continue
+        if ch == "/":
+            # Consume optional flags (gimsuvy)
+            j = i + 1
+            while j < n and expression[j].isalpha():
+                j += 1
+            return j, expression[start:j]
+        if ch == "\n":
+            break
+        i += 1
+    return None
+
+
+def _strip_comments(expression: str) -> str:
+    """Remove ``//`` line comments and ``/* ... */`` block comments while preserving strings.
+
+    This is a small state-machine scanner so ``//`` or ``/*`` inside string or
+    regex literals are not treated as comment starts.  It is used before Mumei
+    normalization so trailing source comments do not leak into contract clauses.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(expression)
+    in_string: str | None = None
+    escape = False
+    while i < n:
+        ch = expression[i]
+        if in_string:
+            result.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch in "\"'`":
+            in_string = ch
+            result.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            if expression[i + 1] == "/":
+                # Skip until end of line, but keep the newline itself.
+                i += 2
+                while i < n and expression[i] != "\n":
+                    i += 1
+                continue
+            if expression[i + 1] == "*":
+                # Skip block comment entirely.
+                i += 2
+                while i + 1 < n and not (expression[i] == "*" and expression[i + 1] == "/"):
+                    i += 1
+                i += 2
+                continue
+            # Could be a regex literal; only consume it when the context allows.
+            if _is_regex_context("".join(result)):
+                consumed = _consume_regex_literal(expression, i)
+                if consumed is not None:
+                    j, lit = consumed
+                    result.append(lit)
+                    i = j
+                    continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _normalize_foreign_expression(expression: str) -> str:
-    normalized = expression.replace("&&", "and").replace("||", "or")
+    normalized = _strip_comments(expression).strip()
+    normalized = normalized.replace("&&", "and").replace("||", "or")
     normalized = normalized.replace("===", "==").replace("!==", "!=")
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\.length\b", r"len_\1", normalized)
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)!?\.", r"\1_", normalized)
