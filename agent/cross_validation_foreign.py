@@ -394,7 +394,17 @@ def _python_function_contract(
     if abs_param:
         return f"result >= 0 && (result == {abs_param} or result == -{abs_param})", abs_param
     return_expr = _single_return_expr(function_node)
-    return (f"result == {return_expr}" if return_expr else "true", return_expr)
+    if not return_expr:
+        return "true", return_expr
+    # Emit mumei's canonical boolean literal spelling so the ensures clause
+    # (``result == true``) lowers as a boolean equality rather than a comparison
+    # against a fabricated ``True`` symbol.
+    return f"result == {_canonical_boolean_literal(return_expr)}", return_expr
+
+
+def _canonical_boolean_literal(expr: str) -> str:
+    """Rewrite a bare Python ``True``/``False`` return to mumei's ``true``/``false``."""
+    return {"True": "true", "False": "false"}.get(expr.strip(), expr)
 
 
 def _direct_returns(node: ast.AST) -> list[ast.Return]:

@@ -572,7 +572,11 @@ def _mumei_safe_clause(
         try:
             normalized = _normalize_boolean_operators(part).strip()
             tree = ast.parse(normalized, mode="eval")
-            _ast_bool_to_z3(tree.body, {})
+            # mumei's own lowering has no string theory, so a clause that only
+            # survives via Z3's SuffixOf/PrefixOf/Contains would still fail (or be
+            # skipped) inside mumei. Drop those here instead of emitting a clause
+            # mumei cannot lower.
+            _ast_bool_to_z3(tree.body, {}, allow_string_theory=False)
             if allowed is not None:
                 referenced = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
                 if referenced - allowed:
@@ -588,13 +592,151 @@ def _mumei_safe_clause(
     return " && ".join(kept)
 
 
+# Boolean literals accepted from foreign specs (Python ``True``/``False`` and the
+# mumei/JS/Go/Rust ``true``/``false`` spelling).
+_BOOLEAN_LITERALS: dict[str, bool] = {"true": True, "false": False}
+
+# String method predicates the Z3 string theory can lower. ``endsWith`` maps to
+# ``SuffixOf``, ``startsWith`` to ``PrefixOf`` and ``contains``/``includes`` to
+# ``Contains``. Spelling variants across Python/JS/Go/Rust are folded to lower
+# case before lookup.
+_STRING_SUFFIX_METHODS = frozenset({"endswith", "hassuffix"})
+_STRING_PREFIX_METHODS = frozenset({"startswith", "hasprefix"})
+_STRING_CONTAINS_METHODS = frozenset({"contains", "includes", "hassubstr"})
+
+
+def _boolean_literal_value(node: ast.AST) -> bool | None:
+    """Return the boolean value of ``node`` when it is a boolean literal.
+
+    Handles both the Python ``True``/``False`` constants (parsed as ``ast.Constant``
+    whose ``value`` is a ``bool``) and the bare ``true``/``false`` identifiers used
+    by mumei and foreign languages (parsed as ``ast.Name``).
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.Name):
+        return _BOOLEAN_LITERALS.get(node.id.lower())
+    return None
+
+
+def _ast_operand_to_bool(
+    node: ast.AST,
+    symbols: dict[str, z3.IntNumRef | z3.ArithRef],
+    *,
+    allow_string_theory: bool,
+) -> z3.BoolRef:
+    """Lower ``node`` to a boolean expression for a boolean-literal comparison."""
+    literal = _boolean_literal_value(node)
+    if literal is not None:
+        return z3.BoolVal(literal)
+    if isinstance(node, ast.Name):
+        return z3.Bool(node.id)
+    return _ast_bool_to_z3(node, symbols, allow_string_theory=allow_string_theory)
+
+
+def _boolean_literal_comparison(
+    node: ast.Compare,
+    symbols: dict[str, z3.IntNumRef | z3.ArithRef],
+    *,
+    allow_string_theory: bool,
+) -> z3.BoolRef | None:
+    """Lower ``x == true`` / ``x != false`` style comparisons as boolean equality.
+
+    Returns ``None`` when neither operand is a boolean literal so the caller falls
+    back to the integer/arithmetic comparison path. ``==`` against a boolean
+    literal asserts (or negates) the truth of the other operand rather than an
+    integer equality against a fabricated ``true`` symbol.
+    """
+    op = node.ops[0]
+    if not isinstance(op, (ast.Eq, ast.NotEq)):
+        return None
+    left_literal = _boolean_literal_value(node.left)
+    right_literal = _boolean_literal_value(node.comparators[0])
+    if left_literal is None and right_literal is None:
+        return None
+    eq = isinstance(op, ast.Eq)
+    if left_literal is not None and right_literal is not None:
+        same = left_literal == right_literal
+        return z3.BoolVal(same if eq else not same)
+    if left_literal is not None:
+        literal, other = left_literal, node.comparators[0]
+    else:
+        literal, other = cast(bool, right_literal), node.left
+    other_bool = _ast_operand_to_bool(other, symbols, allow_string_theory=allow_string_theory)
+    positive = literal == eq
+    return other_bool if positive else z3.Not(other_bool)
+
+
+def _ast_to_z3_string(node: ast.AST) -> z3.SeqRef | None:
+    """Lower ``node`` to a Z3 string term, or ``None`` when it is not string-like."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return z3.StringVal(node.value)
+    if isinstance(node, ast.Name):
+        return z3.String(node.id)
+    if isinstance(node, ast.Attribute):
+        name = _dotted_attribute_name(node)
+        if name is not None:
+            return z3.String(name)
+    return None
+
+
+def _dotted_attribute_name(node: ast.Attribute) -> str | None:
+    """Flatten ``a.b.c`` attribute access into a single dotted identifier."""
+    parts: list[str] = [node.attr]
+    current: ast.AST = node.value
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _ast_string_predicate_to_z3(node: ast.Call) -> z3.BoolRef | None:
+    """Lower ``x.endsWith(y)`` / ``x.startsWith(y)`` / ``x.contains(y)`` calls.
+
+    Uses the Z3 string theory (``SuffixOf`` / ``PrefixOf`` / ``Contains``) so path
+    and string-suffix predicates are reasoned about instead of triggering
+    ``encoding-gap`` noise. Returns ``None`` for anything that is not a supported
+    single-argument string method so the caller can decide to skip it.
+    """
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if node.keywords or len(node.args) != 1:
+        return None
+    method = func.attr.lower()
+    receiver = _ast_to_z3_string(func.value)
+    argument = _ast_to_z3_string(node.args[0])
+    if receiver is None or argument is None:
+        return None
+    if method in _STRING_SUFFIX_METHODS:
+        return z3.SuffixOf(argument, receiver)
+    if method in _STRING_PREFIX_METHODS:
+        return z3.PrefixOf(argument, receiver)
+    if method in _STRING_CONTAINS_METHODS:
+        return z3.Contains(receiver, argument)
+    return None
+
+
 def _ast_bool_to_z3(
     node: ast.AST,
     symbols: dict[str, z3.IntNumRef | z3.ArithRef],
+    *,
+    allow_string_theory: bool = True,
 ) -> z3.BoolRef:
+    literal = _boolean_literal_value(node)
+    if literal is not None:
+        return z3.BoolVal(literal)
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1 or len(node.comparators) != 1:
             raise ValueError("chained comparisons are unsupported")
+        boolean_eq = _boolean_literal_comparison(
+            node, symbols, allow_string_theory=allow_string_theory
+        )
+        if boolean_eq is not None:
+            return boolean_eq
         left = _ast_arith_to_z3(node.left, symbols)
         right = _ast_arith_to_z3(node.comparators[0], symbols)
         op = node.ops[0]
@@ -610,14 +752,25 @@ def _ast_bool_to_z3(
             return left < right
         if isinstance(op, ast.LtE):
             return left <= right
+    if isinstance(node, ast.Call):
+        if allow_string_theory:
+            predicate = _ast_string_predicate_to_z3(node)
+            if predicate is not None:
+                return predicate
+        raise ValueError("unsupported call expression")
     if isinstance(node, ast.BoolOp):
-        values = [_ast_bool_to_z3(value, symbols) for value in node.values]
+        values = [
+            _ast_bool_to_z3(value, symbols, allow_string_theory=allow_string_theory)
+            for value in node.values
+        ]
         if isinstance(node.op, ast.And):
             return z3.And(*values)
         if isinstance(node.op, ast.Or):
             return z3.Or(*values)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return z3.Not(_ast_bool_to_z3(node.operand, symbols))
+        return z3.Not(
+            _ast_bool_to_z3(node.operand, symbols, allow_string_theory=allow_string_theory)
+        )
     raise ValueError("unsupported boolean expression")
 
 def _ast_arith_to_z3(
