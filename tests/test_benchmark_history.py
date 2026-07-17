@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import json
 
-from scripts.select_benchmark_model import parse_history_rows, select_model
+from scripts.select_benchmark_model import (
+    DEFAULT_HISTORY_PATH,
+    parse_history_rows,
+    select_model,
+)
 from scripts.update_benchmark_history import update_history
 
 
@@ -176,6 +180,44 @@ def test_select_model_prefers_success_then_shorter_code(tmp_path):
     assert select_model(history, fallback="fallback") == "concise-model"
 
 
+def test_select_model_prefers_shorter_code_over_lower_runtime(tmp_path):
+    # Isolates the tie-break priority: at equal success rate, the model with
+    # shorter generated code must win even when it has a *higher* runtime.
+    # Policy order is success_rate -> shorter code -> lower runtime.
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+            "|------|-------|--------------|-----------------|-------------:|",
+            "| 2026-05-01 | fast-but-verbose | 0.900 | 500.0 | 0.100 |",
+            "| 2026-05-02 | concise-but-slow | 0.900 | 100.0 | 5.000 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert select_model(history, fallback="fallback") == "concise-but-slow"
+
+
+def test_select_model_breaks_code_tie_by_lower_runtime(tmp_path):
+    # When success rate and code length tie, lower runtime wins.
+    history = tmp_path / "BENCHMARK_HISTORY.md"
+    history.write_text(
+        "\n".join([
+            "# LLM Benchmark History",
+            "",
+            "| Date | Model | Success Rate | Avg Code Length | Avg Time (s) |",
+            "|------|-------|--------------|-----------------|-------------:|",
+            "| 2026-05-01 | slow-model | 0.900 | 100.0 | 5.000 |",
+            "| 2026-05-02 | fast-model | 0.900 | 100.0 | 1.000 |",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert select_model(history, fallback="fallback") == "fast-model"
+
+
 def test_select_model_ignores_non_generation_sections(tmp_path):
     history = tmp_path / "BENCHMARK_HISTORY.md"
     history.write_text(
@@ -202,6 +244,24 @@ def test_select_model_ignores_non_generation_sections(tmp_path):
 
 def test_select_model_uses_fallback_without_rows(tmp_path):
     assert select_model(tmp_path / "missing.md", fallback="fallback-model") == "fallback-model"
+
+
+def test_committed_history_is_consistent_with_documented_winner():
+    # The recommended-model policy note in docs/BENCHMARK_HISTORY.md records
+    # qwen3.5:4b as the current local winner. Guard against drift between the
+    # narrative policy and what select_model actually computes from the
+    # committed generation-benchmark rows.
+    history_text = DEFAULT_HISTORY_PATH.read_text(encoding="utf-8")
+    assert "`qwen3.5:4b`" in history_text
+    assert select_model(DEFAULT_HISTORY_PATH, fallback="fallback") == "qwen3.5:4b"
+    assert (
+        select_model(
+            DEFAULT_HISTORY_PATH,
+            fallback="qwen3.5:4b",
+            profile="ollama-local",
+        )
+        == "qwen3.5:4b"
+    )
 
 
 def test_select_model_filters_to_ollama_allowlist(tmp_path):
