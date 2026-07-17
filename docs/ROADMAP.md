@@ -319,11 +319,25 @@ Solidity（`.sol`）は関数レベルの契約（pre/postcondition）と `uint2
 
 Solidity の Layer B は stage 1 として、CEI/reentrancy と access control 欠落の
 **決定論的ヒューリスティック警告**を実装済み（Z3 証明ではない）。stage 2 では
-reentrancy について guard-state-machine の Z3 検証を実装済み（`solc` 依存なし）。残タスクは
-次の段階に分ける:
+reentrancy について guard-state-machine の Z3 検証を実装済み（`solc` 依存なし）。
+stage 3 も実装完了しており、本タスクは全 stage が完了済み:
 
-- **stage 3**: mumei-lean の `SmartContract.lean` / `GuardState` / `runGuard` モデルと
-  `no_external_call_without_lock` 系 theorem による Lean 証明証跡化
+- **stage 3 ✅ 実装済み**: mumei-lean の `SmartContract.lean` / `GuardState` / `runGuard`
+  モデルと `no_external_call_without_lock` 系 theorem による Lean 証明証跡化を完了。
+  mumei-agent 側は `agent/strategies/foreign_code_strategy_helpers.py` の
+  `extract_solidity_guard_trace_atoms` / `build_solidity_guard_trace_proof_certificate`
+  が Solidity の guard-trace atom（`obligation_class == "smart_contract_guard_trace_obligation"`,
+  `logic_fragment_tag == "smart_contract_guard_trace"`）を抽出し、mumei-lean の
+  `scripts/expr_translator.py`（`OBLIGATION_CLASS_SMART_CONTRACT_GUARD_TRACE` /
+  `render_guard_trace_theorem` / `normalize_guard_trace_translator_ir`）が
+  `runGuard` トレース theorem を生成、Lake ビルドで `z3_check_result == "lean_verified"`
+  へ昇格する。回帰ゲートは以下の CI 必須テスト:
+  - mumei-agent: `tests/test_foreign_code.py` の guard-trace 証明証跡テストと
+    `tests/test_audit.py::test_audit_pipeline_emits_guard_trace_certificate_and_upgrades_via_lean_bridge`
+    （`.github/workflows/ci.yml` の "Guard-trace regression gate" ステップで明示実行）。
+  - mumei-lean: `tests/test_lean_bridge_e2e.py::test_guard_trace_fixture_upgrades_unknown_to_lean_verified`
+    （`z3_check_result == "lean_verified"` を検証）と
+    `tests/test_ingest_cert.py::test_guard_trace_fixture_renders_run_guard_theorems_and_imports`。
 
 #### 次タスク候補: 層B パーサの構文解析移行
 
