@@ -791,8 +791,14 @@ def _find_rust_balanced(
 
 
 def _find_rust_body_start(source: str, start: int) -> int | None:
-    """Return the index of the next ``{`` or ``;`` outside comments/strings."""
+    """Return the index of the next top-level ``{`` or ``;`` in a signature.
+
+    Brackets inside the return type (``[u8; 32]``, ``Result<T, E>``,
+    ``Fn() -> i32``) are tracked so a semicolon inside an array length or a
+    generic argument is not mistaken for the end of the signature.
+    """
     i = start
+    bracket_depth = 0
     while i < len(source):
         ch = source[i]
         if ch.isspace():
@@ -820,7 +826,15 @@ def _find_rust_body_start(source: str, start: int) -> int | None:
         if ch == "'":
             i = _advance_past_rust_tick(source, i)
             continue
-        if ch in {"{", ";"}:
+        if ch in {"<", "(", "["}:
+            bracket_depth += 1
+        elif ch in {">", ")", "]"}:
+            # Ignore ``->`` and ``=>`` arrow tokens.
+            if ch == ">" and i > 0 and source[i - 1] in {"-", "="}:
+                pass
+            else:
+                bracket_depth = max(0, bracket_depth - 1)
+        elif ch in {"{", ";"} and bracket_depth == 0:
             return i
         i += 1
     return None

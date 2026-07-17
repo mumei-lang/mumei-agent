@@ -916,6 +916,21 @@ def test_rust_trait_methods_skip_lifetime_annotated_self() -> None:
         assert [p.name for p in atom.params] == ["input"]
 
 
+def test_rust_fixed_size_array_return_is_not_misclassified_as_external() -> None:
+    """A function returning ``[T; N]`` must have its body analyzed, not trusted."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub fn digest() -> [u8; 32] {\n"
+        "    arr\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].return_type == "i64"
+    assert atoms[0].ensures == "result == arr"
+
+
 def test_rust_source_line_map_handles_where_clauses_and_impl_returns() -> None:
     """Rust source-line map must include functions with ``where`` clauses and ``impl`` return types."""
     from agent.cross_validation_foreign import _infer_foreign_source_line_map
