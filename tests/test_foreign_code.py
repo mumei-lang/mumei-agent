@@ -878,6 +878,28 @@ def test_params_from_signature_handles_nested_commas_in_generics() -> None:
     assert [param.name for param in params] == ["table", "hide_zeros"]
 
 
+def test_rust_trait_methods_are_extracted_as_trusted_atoms() -> None:
+    """Rust trait declarations without a body must still produce atoms."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub trait ComputeInstructions {\n"
+        "    fn add(&mut self, rd: u32, rs1: u32, rs2: u32);\n"
+        "    fn result(&self) -> u64;\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 2
+    add = [a for a in atoms if a.name == "add"][0]
+    assert [p.name for p in add.params] == ["rd", "rs1", "rs2"]
+    assert add.return_type == "()"
+    assert add.requires == "true"
+    assert add.ensures == "true"
+    result = [a for a in atoms if a.name == "result"][0]
+    assert result.return_type == "u64"
+    assert [p.name for p in result.params] == []
+
+
 def test_rust_source_line_map_handles_where_clauses_and_impl_returns() -> None:
     """Rust source-line map must include functions with ``where`` clauses and ``impl`` return types."""
     from agent.cross_validation_foreign import _infer_foreign_source_line_map
