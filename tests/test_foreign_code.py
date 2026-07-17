@@ -878,6 +878,59 @@ def test_params_from_signature_handles_nested_commas_in_generics() -> None:
     assert [param.name for param in params] == ["table", "hide_zeros"]
 
 
+def test_rust_trait_methods_are_extracted_as_trusted_atoms() -> None:
+    """Rust trait declarations without a body must still produce atoms."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub trait ComputeInstructions {\n"
+        "    fn add(&mut self, rd: u32, rs1: u32, rs2: u32);\n"
+        "    fn result(&self) -> u64;\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 2
+    add = [a for a in atoms if a.name == "add"][0]
+    assert [p.name for p in add.params] == ["rd", "rs1", "rs2"]
+    assert add.return_type == "()"
+    assert add.requires == "true"
+    assert add.ensures == "true"
+    result = [a for a in atoms if a.name == "result"][0]
+    assert result.return_type == "u64"
+    assert [p.name for p in result.params] == []
+
+
+def test_rust_trait_methods_skip_lifetime_annotated_self() -> None:
+    """Rust receivers with lifetimes such as ``&'a self`` and ``&'a mut self`` are skipped."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub trait Parser {\n"
+        "    fn parse<'a>(&'a self, input: &'a str) -> &'a str;\n"
+        "    fn parse_mut<'a>(&'a mut self, input: &'a str) -> &'a str;\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 2
+    for atom in atoms:
+        assert [p.name for p in atom.params] == ["input"]
+
+
+def test_rust_fixed_size_array_return_is_not_misclassified_as_external() -> None:
+    """A function returning ``[T; N]`` must have its body analyzed, not trusted."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub fn digest() -> [u8; 32] {\n"
+        "    arr\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].return_type == "i64"
+    assert atoms[0].ensures == "result == arr"
+
+
 def test_rust_source_line_map_handles_where_clauses_and_impl_returns() -> None:
     """Rust source-line map must include functions with ``where`` clauses and ``impl`` return types."""
     from agent.cross_validation_foreign import _infer_foreign_source_line_map

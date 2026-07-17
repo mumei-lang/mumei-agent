@@ -791,8 +791,14 @@ def _find_rust_balanced(
 
 
 def _find_rust_body_start(source: str, start: int) -> int | None:
-    """Return the index of the next ``{`` or ``;`` outside comments/strings."""
+    """Return the index of the next top-level ``{`` or ``;`` in a signature.
+
+    Brackets inside the return type (``[u8; 32]``, ``Result<T, E>``,
+    ``Fn() -> i32``) are tracked so a semicolon inside an array length or a
+    generic argument is not mistaken for the end of the signature.
+    """
     i = start
+    bracket_depth = 0
     while i < len(source):
         ch = source[i]
         if ch.isspace():
@@ -820,7 +826,15 @@ def _find_rust_body_start(source: str, start: int) -> int | None:
         if ch == "'":
             i = _advance_past_rust_tick(source, i)
             continue
-        if ch in {"{", ";"}:
+        if ch in {"<", "(", "["}:
+            bracket_depth += 1
+        elif ch in {">", ")", "]"}:
+            # Ignore ``->`` and ``=>`` arrow tokens.
+            if ch == ">" and i > 0 and source[i - 1] in {"-", "="}:
+                pass
+            else:
+                bracket_depth = max(0, bracket_depth - 1)
+        elif ch in {"{", ";"} and bracket_depth == 0:
             return i
         i += 1
     return None
@@ -898,11 +912,11 @@ def _rust_parse_signature(
         body_start = _find_rust_body_start(source, i)
         if body_start is None:
             return None
-        if source[body_start] == ";":
-            return params_text, "", body_start
         return_type = _strip_rust_where_clause(source[i : body_start].strip())
     elif source[i] == "{":
-        return params_text, "", i
+        body_start = i
+    elif source[i] == ";":
+        body_start = i
     else:
         return None
     return params_text, return_type, body_start
@@ -921,19 +935,30 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
         if parsed is None:
             continue
         params_text, return_type, body_start = parsed
-        body = _balanced_brace_body(code, body_start)
-        params = _params_from_signature(params_text)
-        return_expr = _last_expression(body)
-        safety_expr = _last_expression(_strip_go_rust_literals_and_comments(body))
+        # Trait methods and external function declarations terminate with `;`
+        # and have no body to analyze, so emit them as trusted atoms.
+        if body_start < len(code) and code[body_start] == ";":
+            return_expr = ""
+            requires = "true"
+            ensures = "true"
+        else:
+            body = _balanced_brace_body(code, body_start)
+            params = _params_from_signature(params_text)
+            return_expr = _last_expression(body)
+            safety_expr = _last_expression(
+                _strip_go_rust_literals_and_comments(body)
+            )
+            requires = _rust_safety_requires_for_expression(
+                safety_expr, known_constants
+            )
+            ensures = f"result == {return_expr}" if return_expr else "true"
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
-                params=params,
+                params=_params_from_signature(params_text),
                 return_type=_mumei_return_type(return_type),
-                requires=_rust_safety_requires_for_expression(
-                    safety_expr, known_constants
-                ),
-                ensures=f"result == {return_expr}" if return_expr else "true",
+                requires=requires,
+                ensures=ensures,
             )
         )
     return atoms
@@ -1385,6 +1410,14 @@ def _params_from_signature(params_text: str) -> list[ContractParam]:
     params: list[ContractParam] = []
     for index, raw in enumerate(_split_signature_params(params_text)):
         if not raw:
+            continue
+        # Skip Rust/TS method receivers such as `&mut self`, `&'a mut self`,
+        # `self: &mut Self`, etc.
+        if re.fullmatch(
+            r"&?\s*(?:'[A-Za-z_][A-Za-z0-9_]*\s+)?(?:mut\s+)?self(?:\s*:\s*.+)?",
+            raw.strip(),
+            flags=re.IGNORECASE,
+        ):
             continue
         pieces = raw.split(":")
         name = pieces[0].strip().split()[0].rstrip("?") if pieces[0].strip() else f"arg{index}"
