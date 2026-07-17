@@ -1657,6 +1657,124 @@ def _typescript_return_type(type_text: str) -> str:
     return "i64"
 
 
+def _is_regex_context(prefix: str) -> bool:
+    """Return whether a ``/`` at the current position can start a JS/TS regex literal.
+
+    This is a conservative heuristic based on the previous significant token.
+    Regex literals are allowed after operators, delimiters, and certain keywords;
+    they are not allowed after value tokens such as identifiers, literals,
+    closing brackets, or postfix ``++``/``--``.
+    """
+    text = prefix.rstrip()
+    if text.endswith("..."):
+        return True
+    i = len(text) - 1
+    while i >= 0 and text[i].isspace():
+        i -= 1
+    if i < 0:
+        return True
+    ch = text[i]
+    # Value-like closing brackets and quotes
+    if ch in ")}]\"'`":
+        return False
+    # Numbers (including a trailing dot)
+    if ch.isdigit() or ch == ".":
+        return False
+    # Identifiers or keywords
+    if ch.isalnum() or ch in "$_":
+        start = i
+        while i >= 0 and (text[i].isalnum() or text[i] in "$_"):
+            i -= 1
+        word = text[i + 1 : start + 1].lower()
+        if word in {
+            "return",
+            "typeof",
+            "void",
+            "delete",
+            "case",
+            "else",
+            "await",
+            "yield",
+            "new",
+            "in",
+            "of",
+            "instanceof",
+            "do",
+            "while",
+            "for",
+            "if",
+            "switch",
+            "with",
+            "catch",
+            "throw",
+            "then",
+        }:
+            return True
+        # Value keywords and all other identifiers are value tokens
+        return False
+    # ++ / -- are postfix after a value, prefix otherwise
+    if ch in "+-":
+        if i - 1 >= 0 and text[i - 1] == ch:
+            before = i - 2
+            while before >= 0 and text[before].isspace():
+                before -= 1
+            if before < 0:
+                return True
+            bch = text[before]
+            if bch.isalnum() or bch in "$_)]}\"'`":
+                return False
+            return True
+        return True
+    # Operators and delimiters that admit a regex on their right
+    if ch in "=([{,;?!~*/%<>|&^:":
+        return True
+    return False
+
+
+def _consume_regex_literal(expression: str, start: int) -> tuple[int, str] | None:
+    """Consume a JS/TS regex literal ``/pattern/flags`` starting at ``start``.
+
+    Respects ``\\`` escapes and ``[...]`` character classes.  Returns the new
+    index and the consumed text if a valid regex literal is found; otherwise
+    returns ``None`` so the caller can treat ``/`` as division.
+    """
+    n = len(expression)
+    if expression[start] != "/":
+        return None
+    i = start + 1
+    in_class = False
+    escape = False
+    while i < n:
+        ch = expression[i]
+        if escape:
+            escape = False
+            i += 1
+            continue
+        if ch == "\\":
+            escape = True
+            i += 1
+            continue
+        if in_class:
+            if ch == "]":
+                in_class = False
+            i += 1
+            continue
+        if ch == "[":
+            in_class = True
+            i += 1
+            continue
+        if ch == "/":
+            # Consume optional flags (gimsuvy)
+            j = i + 1
+            while j < n and expression[j].isalpha():
+                j += 1
+            return j, expression[start:j]
+        if ch == "\n":
+            break
+        i += 1
+    return None
+
+
 def _strip_comments(expression: str) -> str:
     """Remove ``//`` line comments and ``/* ... */`` block comments while preserving strings.
 
@@ -1700,6 +1818,14 @@ def _strip_comments(expression: str) -> str:
                     i += 1
                 i += 2
                 continue
+            # Could be a regex literal; only consume it when the context allows.
+            if _is_regex_context("".join(result)):
+                consumed = _consume_regex_literal(expression, i)
+                if consumed is not None:
+                    j, lit = consumed
+                    result.append(lit)
+                    i = j
+                    continue
         result.append(ch)
         i += 1
     return "".join(result)
