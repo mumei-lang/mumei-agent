@@ -1306,8 +1306,13 @@ def _params_from_signature(params_text: str) -> list[ContractParam]:
     for index, raw in enumerate(_split_signature_params(params_text)):
         if not raw:
             continue
-        # Skip Rust/TS method receivers such as `&mut self`, `self: &mut Self`, etc.
-        if re.fullmatch(r"&?\s*(?:mut\s+)?self(?:\s*:\s*.+)?", raw.strip(), flags=re.IGNORECASE):
+        # Skip Rust/TS method receivers such as `&mut self`, `&'a mut self`,
+        # `self: &mut Self`, etc.
+        if re.fullmatch(
+            r"&?\s*(?:'[A-Za-z_][A-Za-z0-9_]*\s+)?(?:mut\s+)?self(?:\s*:\s*.+)?",
+            raw.strip(),
+            flags=re.IGNORECASE,
+        ):
             continue
         pieces = raw.split(":")
         name = pieces[0].strip().split()[0].rstrip("?") if pieces[0].strip() else f"arg{index}"

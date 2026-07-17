@@ -900,6 +900,22 @@ def test_rust_trait_methods_are_extracted_as_trusted_atoms() -> None:
     assert [p.name for p in result.params] == []
 
 
+def test_rust_trait_methods_skip_lifetime_annotated_self() -> None:
+    """Rust receivers with lifetimes such as ``&'a self`` and ``&'a mut self`` are skipped."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "pub trait Parser {\n"
+        "    fn parse<'a>(&'a self, input: &'a str) -> &'a str;\n"
+        "    fn parse_mut<'a>(&'a mut self, input: &'a str) -> &'a str;\n"
+        "}\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 2
+    for atom in atoms:
+        assert [p.name for p in atom.params] == ["input"]
+
+
 def test_rust_source_line_map_handles_where_clauses_and_impl_returns() -> None:
     """Rust source-line map must include functions with ``where`` clauses and ``impl`` return types."""
     from agent.cross_validation_foreign import _infer_foreign_source_line_map
