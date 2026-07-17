@@ -1173,11 +1173,17 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
             if name_node is None or name_node.type != "identifier":
                 continue
             params_node = arrow.child_by_field_name("parameters")
+            single_param_node = arrow.child_by_field_name("parameter")
             return_type_node = arrow.child_by_field_name("return_type")
             body_node = arrow.child_by_field_name("body")
             if body_node is None:
                 continue
-            params_text = _text(params_node).strip()[1:-1].strip() if params_node is not None else ""
+            if params_node is not None:
+                params_text = _text(params_node).strip()[1:-1].strip()
+            elif single_param_node is not None:
+                params_text = _text(single_param_node).strip()
+            else:
+                params_text = ""
             return_type_text = (
                 _text(return_type_node).lstrip(":").strip()
                 if return_type_node is not None

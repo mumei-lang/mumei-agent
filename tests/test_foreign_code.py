@@ -1366,6 +1366,18 @@ def test_typescript_arrow_functions_dedup_with_non_ascii_prefix() -> None:
     assert [p.name for p in atoms[0].params] == ["x"]
 
 
+def test_typescript_contract_inference_extracts_unparenthesized_arrow_functions() -> None:
+    """Single-parameter arrow functions without parentheses must keep their parameter."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "const inc = x => x + 1\n"
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "inc"
+    assert [p.name for p in atoms[0].params] == ["x"]
+    assert atoms[0].ensures == "result == x + 1"
+
+
 def test_typescript_raw_return_expression_ignores_nested_callback_returns() -> None:
     """A ``return`` inside a nested callback arrow function must not be counted as a top-level return."""
     from agent.cross_validation_foreign import _typescript_raw_return_expression
