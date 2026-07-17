@@ -133,12 +133,15 @@ def select_model(
     if not rows:
         return fallback
 
+    # Policy: maximize success rate, then prefer shorter generated code,
+    # then lower average runtime. Ties fall back to the most recent row
+    # (date, then insertion order) so the newest measurement wins.
     best = max(
         rows,
         key=lambda row: (
             row.success_rate,
-            -row.avg_time_seconds,
             -row.avg_code_length,
+            -row.avg_time_seconds,
             row.date,
             row.order,
         ),

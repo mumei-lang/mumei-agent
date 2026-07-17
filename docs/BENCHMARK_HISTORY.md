@@ -6,7 +6,7 @@ Time-series summary of proliferate LLM benchmark runs. The generation table is k
 
 - **Current recorded local winner:** `qwen3.5:4b` (latest generation benchmark: 0.857 success rate).
 - **Remote profile default:** keep `gpt-4o-mini` until remote benchmark rows are recorded; workflow dispatch can still override `llm_model`.
-- **Tie-breakers:** maximize success rate, then prefer lower average runtime, then shorter generated code.
+- **Tie-breakers:** maximize success rate, then prefer shorter generated code, then lower average runtime. Remaining ties resolve to the most recent benchmark row. This is the order implemented by `scripts/select_benchmark_model.py::select_model`.
 
 ## Generation Benchmark Runs
 

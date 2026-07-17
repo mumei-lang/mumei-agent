@@ -60,4 +60,4 @@ No remaining roadmap gaps require a new `forge_tasks/vstd_*.json` file at this c
 
 ## Benchmark recommendation
 
-The benchmark history currently records `qwen3.5:4b` as the best local model (`0.857` latest generation success rate). The proliferate workflow still supports explicit `llm_model` overrides; for unattended local runs, `scripts/select_benchmark_model.py --profile ollama-local` should prefer the highest success rate in `docs/BENCHMARK_HISTORY.md`, then lower runtime, then shorter generated code.
+The benchmark history currently records `qwen3.5:4b` as the best local model (`0.857` latest generation success rate). The proliferate workflow still supports explicit `llm_model` overrides; for unattended local runs, `scripts/select_benchmark_model.py --profile ollama-local` should prefer the highest success rate in `docs/BENCHMARK_HISTORY.md`, then shorter generated code, then lower runtime.
