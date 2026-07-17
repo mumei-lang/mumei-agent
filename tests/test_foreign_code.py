@@ -1351,6 +1351,49 @@ def test_typescript_contract_inference_class_method_with_callback_param_type() -
     assert atoms[0].ensures == "true"
 
 
+def test_typescript_contract_inference_extracts_generic_arrow_functions() -> None:
+    """Generic arrow functions like ``const f = <T>(x: T) => ...`` must produce atoms."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export const create = <T>(value: T): T => {\n"
+        "  const boxed = { value }\n"
+        "  return boxed.value\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "create"
+    assert [p.name for p in atoms[0].params] == ["value"]
+    assert atoms[0].return_type == "i64"
+
+
+def test_typescript_arrow_functions_dedup_with_non_ascii_prefix() -> None:
+    """Top-level arrow functions must not be duplicated when non-ASCII characters precede them."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        '// コメント\n'
+        'const double = (x: number): number => x * 2\n'
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "double"
+    assert [p.name for p in atoms[0].params] == ["x"]
+
+
+def test_typescript_contract_inference_extracts_unparenthesized_arrow_functions() -> None:
+    """Single-parameter arrow functions without parentheses must keep their parameter."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = "const inc = x => x + 1\n"
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "inc"
+    assert [p.name for p in atoms[0].params] == ["x"]
+    assert atoms[0].ensures == "result == x + 1"
+
+
 def test_typescript_raw_return_expression_ignores_nested_callback_returns() -> None:
     """A ``return`` inside a nested callback arrow function must not be counted as a top-level return."""
     from agent.cross_validation_foreign import _typescript_raw_return_expression

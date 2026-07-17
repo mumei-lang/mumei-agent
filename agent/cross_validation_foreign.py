@@ -1129,9 +1129,107 @@ def _integer_overflow_requires_for_expression(
     return requirements
 
 
+def _infer_typescript_arrow_functions_with_tree_sitter(
+    code: str,
+    known_constants: dict[str, int],
+) -> list[tuple[MumeiContractAtom, int]]:
+    """Extract generic arrow-function contracts deterministically via tree-sitter."""
+    parser = tree_sitter_extract._get_parser("typescript")
+    if parser is None:
+        return []
+    source_bytes = code.encode("utf-8")
+    try:
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return []
+    root = tree.root_node
+    function_ancestor_types = frozenset(
+        {"arrow_function", "function_declaration", "function_expression", "method_definition"}
+    )
+
+    def _is_top_level(node) -> bool:
+        n = node.parent
+        while n is not None:
+            if n.type in function_ancestor_types:
+                return False
+            n = n.parent
+        return True
+
+    def _text(node) -> str:
+        return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
+
+    results: list[tuple[MumeiContractAtom, int]] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "variable_declarator":
+            arrow = node.child_by_field_name("value")
+            if arrow is None or arrow.type != "arrow_function":
+                stack.extend(reversed(node.children))
+                continue
+            if not _is_top_level(node):
+                continue
+            name_node = node.child_by_field_name("name")
+            if name_node is None or name_node.type != "identifier":
+                continue
+            params_node = arrow.child_by_field_name("parameters")
+            single_param_node = arrow.child_by_field_name("parameter")
+            return_type_node = arrow.child_by_field_name("return_type")
+            body_node = arrow.child_by_field_name("body")
+            if body_node is None:
+                continue
+            if params_node is not None:
+                params_text = _text(params_node).strip()[1:-1].strip()
+            elif single_param_node is not None:
+                params_text = _text(single_param_node).strip()
+            else:
+                params_text = ""
+            return_type_text = (
+                _text(return_type_node).lstrip(":").strip()
+                if return_type_node is not None
+                else "number"
+            )
+            if body_node.type == "statement_block":
+                body = source_bytes[
+                    body_node.start_byte + 1 : body_node.end_byte - 1
+                ].decode("utf-8", "replace")
+                is_expression_body = False
+            else:
+                body = _text(body_node)
+                is_expression_body = True
+            raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
+            return_expr = _normalize_foreign_expression(raw_return_expr)
+            raw_name = _text(name_node)
+            start_char = len(
+                source_bytes[: name_node.start_byte].decode("utf-8", "replace")
+            )
+            atom = MumeiContractAtom(
+                name=_safe_identifier(raw_name),
+                params=_params_from_signature(params_text),
+                return_type=_typescript_return_type(return_type_text or "number"),
+                requires=_safety_requires_for_expression(
+                    raw_return_expr, "typescript", known_constants
+                ),
+                ensures=f"result == {return_expr}" if return_expr else "true",
+            )
+            results.append((atom, _safe_identifier(raw_name), start_char))
+            continue
+        stack.extend(reversed(node.children))
+    return results
+
+
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     known_constants = semantic_safety.collect_declared_constants(code, "typescript")
+    # Generic arrow functions (``const f = <T>(x: T) => ...``) are parsed with
+    # tree-sitter so nested ``<>`` and ``=>`` arrows in type parameters do not
+    # confuse the regex-based extractor.
+    seen: set[tuple[str, int]] = set()
+    for atom, raw_name, start_char in _infer_typescript_arrow_functions_with_tree_sitter(
+        code, known_constants
+    ):
+        atoms.append(atom)
+        seen.add((raw_name, start_char))
     # Each pattern is paired with a predicate that decides whether the body is
     # an arrow-function expression body (no braces).  Function and class-method
     # bodies are never expression bodies, while arrow functions may use either
@@ -1173,10 +1271,9 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
             lambda raw: False,
         ),
     ]
-    seen: set[tuple[str, int]] = set()
     for pattern, is_expr_fn in patterns:
         for match in pattern.finditer(code):
-            key = (match.group("name"), match.start())
+            key = (_safe_identifier(match.group("name")), match.start("name"))
             if key in seen:
                 continue
             seen.add(key)
