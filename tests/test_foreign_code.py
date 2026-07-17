@@ -1282,6 +1282,23 @@ def test_typescript_contract_inference_class_method_with_callback_param_type() -
     assert atoms[0].ensures == "true"
 
 
+def test_typescript_contract_inference_extracts_generic_arrow_functions() -> None:
+    """Generic arrow functions like ``const f = <T>(x: T) => ...`` must produce atoms."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        "export const create = <T>(value: T): T => {\n"
+        "  const boxed = { value }\n"
+        "  return boxed.value\n"
+        "}\n"
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "create"
+    assert [p.name for p in atoms[0].params] == ["value"]
+    assert atoms[0].return_type == "i64"
+
+
 def test_typescript_raw_return_expression_ignores_nested_callback_returns() -> None:
     """A ``return`` inside a nested callback arrow function must not be counted as a top-level return."""
     from agent.cross_validation_foreign import _typescript_raw_return_expression
