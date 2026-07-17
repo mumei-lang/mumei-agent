@@ -8,6 +8,14 @@
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
 
+Run the local contract vocabulary gate before opening a PR that touches docs, README, CLI help, or MCP docstrings:
+
+```bash
+uv run pytest tests/test_contract_vocabulary.py -q
+```
+
+CI enforces the same gate through `.github/workflows/contract-vocabulary.yml` on pull requests into `develop`. This is the mumei-agent complement to the canonical `mumei/scripts/check_contract_vocabulary.py` gate; keep both green in the same changeset when contract vocabulary moves.
+
 `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the single top-level roadmap. This file only records mumei-agent-local acceptance details and must keep terminology aligned to `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, and `lean_verified`. Current priority is docs-sync and harness-contract regression prevention, not new portability/runtime scope.
 
 Audit/spec/MCP vocabulary is fixed as:
