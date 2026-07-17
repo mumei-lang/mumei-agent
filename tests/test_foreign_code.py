@@ -861,6 +861,22 @@ def test_go_contract_inference_ignores_multi_value_return() -> None:
     assert atoms[0].ensures == "true"
 
 
+def test_go_contract_inference_extracts_assembly_forward_declarations() -> None:
+    """Go assembly forward declarations without a body produce trusted atoms."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = (
+        "package demo\n"
+        "//go:noescape\n"
+        "func add(c, a, b *Int)\n"
+        "func scale(out, in *Int, n uint64)\n"
+    )
+    atoms = _infer_go_contracts(source)
+    names = {atom.name for atom in atoms}
+    assert names == {"add", "scale"}
+    assert all(atom.requires == "true" and atom.ensures == "true" for atom in atoms)
+
+
 def test_raw_return_statement_expression_keeps_single_value_with_comma_in_string() -> None:
     """A comma inside a returned string literal must not be read as a multi-value return."""
     from agent.cross_validation_foreign import _raw_return_statement_expression

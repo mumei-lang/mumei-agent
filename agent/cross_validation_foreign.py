@@ -1209,6 +1209,18 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
                 ensures=f"result == {return_expr}" if return_expr else "true",
             )
         )
+    # Assembly forward declarations and other external function signatures have
+    # no Go body; emit them as trusted atoms.
+    for name, params_text, return_type, _start in _go_external_declarations(code):
+        atoms.append(
+            MumeiContractAtom(
+                name=_safe_identifier(name),
+                params=_params_from_signature(params_text),
+                return_type=_mumei_return_type(return_type),
+                requires="true",
+                ensures="true",
+            )
+        )
     return atoms
 
 
@@ -1236,6 +1248,49 @@ def _go_function_declarations(code: str) -> list[tuple[str, str, str, str]]:
                 params,
                 match.group("ret") or "",
                 body,
+            )
+        )
+    return declarations
+
+
+def _go_external_declarations(code: str) -> list[tuple[str, str, str, int]]:
+    """Return Go function signatures that have no body (assembly forward declarations)."""
+    pattern = re.compile(
+        r"(?:^[ \t]*//[^\n]*\n)*"
+        r"^[ \t]*func[ \t]+(?:(?P<receiver>\([^)]*\))[ \t]*)?"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)[ \t]*"
+        r"\((?P<params>[^)]*)\)[ \t]*"
+        r"(?P<ret>(?:\([^)]*\)|[^{;\n/]+?))?"
+        r"[ \t]*(?://[^\n]*)?$",
+        flags=re.MULTILINE,
+    )
+    declarations: list[tuple[str, str, str, int]] = []
+    for match in pattern.finditer(code):
+        pos = match.end()
+        while pos < len(code):
+            ch = code[pos]
+            if ch.isspace():
+                pos += 1
+                continue
+            if code.startswith("//", pos):
+                newline = code.find("\n", pos)
+                pos = newline + 1 if newline != -1 else len(code)
+                continue
+            break
+        # A real function definition has a ``{`` body; skip those.
+        if pos < len(code) and code[pos] == "{":
+            continue
+        receiver = (match.group("receiver") or "").strip()
+        receiver = receiver.removeprefix("(").removesuffix(")").strip()
+        params = ", ".join(
+            part for part in (receiver, match.group("params")) if part
+        )
+        declarations.append(
+            (
+                match.group("name"),
+                params,
+                (match.group("ret") or "").strip(),
+                match.start(),
             )
         )
     return declarations
