@@ -1657,8 +1657,57 @@ def _typescript_return_type(type_text: str) -> str:
     return "i64"
 
 
+def _strip_comments(expression: str) -> str:
+    """Remove ``//`` line comments and ``/* ... */`` block comments while preserving strings.
+
+    This is a small state-machine scanner so ``//`` or ``/*`` inside string or
+    regex literals are not treated as comment starts.  It is used before Mumei
+    normalization so trailing source comments do not leak into contract clauses.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(expression)
+    in_string: str | None = None
+    escape = False
+    while i < n:
+        ch = expression[i]
+        if in_string:
+            result.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == in_string:
+                in_string = None
+            i += 1
+            continue
+        if ch in "\"'`":
+            in_string = ch
+            result.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            if expression[i + 1] == "/":
+                # Skip until end of line, but keep the newline itself.
+                i += 2
+                while i < n and expression[i] != "\n":
+                    i += 1
+                continue
+            if expression[i + 1] == "*":
+                # Skip block comment entirely.
+                i += 2
+                while i + 1 < n and not (expression[i] == "*" and expression[i + 1] == "/"):
+                    i += 1
+                i += 2
+                continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _normalize_foreign_expression(expression: str) -> str:
-    normalized = expression.replace("&&", "and").replace("||", "or")
+    normalized = _strip_comments(expression).strip()
+    normalized = normalized.replace("&&", "and").replace("||", "or")
     normalized = normalized.replace("===", "==").replace("!==", "!=")
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\.length\b", r"len_\1", normalized)
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)!?\.", r"\1_", normalized)
