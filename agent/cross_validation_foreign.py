@@ -945,16 +945,29 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
     header = re.compile(
         r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
         r"\((?P<params>(?:[^()]|\([^)]*\))*)\)"
-        r"(?P<attrs>[^{;]*?)\{",
+        r"(?P<attrs>[^{;]*?)(?P<delim>[{;])",
         flags=re.DOTALL,
     )
     for match in header.finditer(code):
         params, param_types = _solidity_params_from_signature(match.group("params"))
         attrs = match.group("attrs") or ""
         returns_match = re.search(r"returns\s*\((?P<ret>[^)]*)\)", attrs)
-        body = _balanced_brace_body(code, match.end() - 1)
-        raw_return_expr = _raw_return_statement_expression(body)
-        return_expr = _normalize_foreign_expression(raw_return_expr)
+        is_interface = match.group("delim") == ";"
+        if is_interface:
+            raw_return_expr = ""
+            return_expr = ""
+            requires = "true"
+            ensures = "true"
+        else:
+            body = _balanced_brace_body(code, match.end() - 1)
+            raw_return_expr = _raw_return_statement_expression(body)
+            return_expr = _normalize_foreign_expression(raw_return_expr)
+            requires = _solidity_safety_requires_for_expression(
+                raw_return_expr,
+                param_types,
+                known_constants,
+            )
+            ensures = f"result == {return_expr}" if return_expr else "true"
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
@@ -963,12 +976,8 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
                     returns_match.group("ret") if returns_match else None,
                     solidity_modifiers=True,
                 ),
-                requires=_solidity_safety_requires_for_expression(
-                    raw_return_expr,
-                    param_types,
-                    known_constants,
-                ),
-                ensures=f"result == {return_expr}" if return_expr else "true",
+                requires=requires,
+                ensures=ensures,
             )
         )
     return atoms

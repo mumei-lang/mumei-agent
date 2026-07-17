@@ -1007,6 +1007,24 @@ def test_solidity_contract_inference_balances_function_type_params() -> None:
     assert atoms[0].ensures == "result == array"
 
 
+def test_solidity_interface_functions_are_extracted_as_trusted_atoms() -> None:
+    """Solidity interface declarations without a body must still produce atoms."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = (
+        "interface IERC2981 {\n"
+        "    function royaltyInfo(uint256 tokenId, uint256 salePrice)\n"
+        "        external view returns (address receiver, uint256 royaltyAmount);\n"
+        "}\n"
+    )
+    atoms = _infer_solidity_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "royaltyInfo"
+    assert atoms[0].requires == "true"
+    assert atoms[0].ensures == "true"
+    assert [p.name for p in atoms[0].params] == ["tokenId", "salePrice"]
+
+
 def test_typescript_source_line_map_includes_class_methods() -> None:
     """TypeScript class methods must be present in the source-line map."""
     from agent.cross_validation_foreign import _infer_foreign_source_line_map
