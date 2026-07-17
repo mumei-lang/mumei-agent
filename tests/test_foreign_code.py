@@ -1299,6 +1299,20 @@ def test_typescript_contract_inference_extracts_generic_arrow_functions() -> Non
     assert atoms[0].return_type == "i64"
 
 
+def test_typescript_arrow_functions_dedup_with_non_ascii_prefix() -> None:
+    """Top-level arrow functions must not be duplicated when non-ASCII characters precede them."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = (
+        '// コメント\n'
+        'const double = (x: number): number => x * 2\n'
+    )
+    atoms = _infer_typescript_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].name == "double"
+    assert [p.name for p in atoms[0].params] == ["x"]
+
+
 def test_typescript_raw_return_expression_ignores_nested_callback_returns() -> None:
     """A ``return`` inside a nested callback arrow function must not be counted as a top-level return."""
     from agent.cross_validation_foreign import _typescript_raw_return_expression
