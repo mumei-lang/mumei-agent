@@ -23,6 +23,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra test --frozen
 
+      # Regression gate for A1 stage 3 / L3: the Solidity guard-trace obligation
+      # class must keep extracting guard-trace atoms and upgrading them through
+      # the mumei-lean Lean bridge to `lean_verified`. Run these fail-fast
+      # before the full suite so a guard-trace regression is unmistakable.
+      - name: Guard-trace regression gate (A1 stage 3 / L3)
+        run: uv run pytest tests/test_foreign_code.py tests/test_audit.py -k "guard_trace" -v --tb=short -m "not integration"
+
       # NOTE: Integration tests (marked @pytest.mark.integration) are excluded
       # from CI. Run them locally with: uv run pytest -m integration
       - name: Run tests with coverage
