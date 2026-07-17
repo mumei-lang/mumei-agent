@@ -973,7 +973,8 @@ def test_python_contract_inference_preserves_bool_return_type() -> None:
     source = "def is_true() -> bool:\n    return True\n"
     atoms = _infer_python_contracts(source)
     assert atoms[0].return_type == "bool"
-    assert "result == True" in atoms[0].ensures
+    # ``True`` is normalized to mumei's canonical ``true`` boolean literal.
+    assert "result == true" in atoms[0].ensures
 
 
 def test_python_contract_inference_skips_overload_stubs() -> None:
@@ -1140,7 +1141,8 @@ def test_python_unannotated_bool_return_type() -> None:
 
     atoms = _infer_python_contracts("def is_true():\n    return True\n")
     assert atoms[0].return_type == "bool"
-    assert "result == True" in atoms[0].ensures
+    # ``True`` is normalized to mumei's canonical ``true`` boolean literal.
+    assert "result == true" in atoms[0].ensures
 
 
 def test_python_unannotated_comparison_return_type() -> None:

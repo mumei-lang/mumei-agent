@@ -536,6 +536,91 @@ def test_mumei_safe_clause_normalizes_strict_equality() -> None:
     )
 
 
+def test_clause_boolean_literal_comparison_is_lowered_as_bool() -> None:
+    """``result == true`` / ``!= false`` must lower to boolean (not integer) equality.
+
+    Previously the ``true``/``false`` literal was treated as a fabricated integer
+    symbol, so ``result == true`` and ``result == false`` were mutually satisfiable.
+    They must now contradict each other.
+    """
+    import z3
+
+    from agent.cross_validation_z3 import _clause_to_z3
+
+    exprs_true, warnings_true = _clause_to_z3("result == true", {})
+    assert warnings_true == []
+    assert len(exprs_true) == 1
+
+    exprs_false, warnings_false = _clause_to_z3("result == false", {})
+    assert warnings_false == []
+    assert len(exprs_false) == 1
+
+    solver = z3.Solver()
+    solver.add(exprs_true[0])
+    solver.add(exprs_false[0])
+    assert solver.check() == z3.unsat
+
+    # Capitalized Python ``True``/``False`` and ``!=`` lower the same way.
+    exprs_cap, warnings_cap = _clause_to_z3("result == True", {})
+    assert warnings_cap == []
+    exprs_neq, warnings_neq = _clause_to_z3("result != false", {})
+    assert warnings_neq == []
+    neq_solver = z3.Solver()
+    neq_solver.add(exprs_cap[0])
+    neq_solver.add(exprs_neq[0])
+    assert neq_solver.check() == z3.sat
+
+
+def test_clause_string_suffix_predicate_is_lowered_with_string_theory() -> None:
+    """``directory_path.endsWith('/std/')`` must lower via Z3 string theory (#audit)."""
+    import z3
+
+    from agent.cross_validation_z3 import _clause_to_z3
+
+    exprs, warnings = _clause_to_z3("directory_path.endsWith('/std/')", {})
+    assert warnings == []
+    assert len(exprs) == 1
+
+    solver = z3.Solver()
+    solver.add(exprs[0])
+    solver.add(z3.String("directory_path") == z3.StringVal("/repo/std/"))
+    assert solver.check() == z3.sat
+
+    unsat_solver = z3.Solver()
+    unsat_solver.add(exprs[0])
+    unsat_solver.add(z3.String("directory_path") == z3.StringVal("/repo/src/"))
+    assert unsat_solver.check() == z3.unsat
+
+    # startsWith / contains variants lower too.
+    prefix_exprs, prefix_warnings = _clause_to_z3("path.startsWith('/std')", {})
+    assert prefix_warnings == []
+    assert len(prefix_exprs) == 1
+    contains_exprs, contains_warnings = _clause_to_z3("name.contains('std')", {})
+    assert contains_warnings == []
+    assert len(contains_exprs) == 1
+
+
+def test_mumei_safe_clause_drops_string_predicate_but_keeps_bool_literal() -> None:
+    """mumei has no string theory, so suffix predicates are dropped before emit.
+
+    Boolean-literal comparisons remain because mumei lowers them natively.
+    """
+    from agent.cross_validation_z3 import _mumei_safe_clause
+
+    assert (
+        _mumei_safe_clause("directory_path.endsWith('/std/')", {"directory_path"})
+        == "true"
+    )
+    assert _mumei_safe_clause("result == true", {"result"}) == "result == true"
+    assert (
+        _mumei_safe_clause(
+            "result == true && directory_path.endsWith('/std/')",
+            {"result", "directory_path"},
+        )
+        == "result == true"
+    )
+
+
 def test_benign_llm_advisory_does_not_flip_verdict_to_refuted() -> None:
     """A generic ``llm`` advisory must not refute code that Z3 finds satisfiable and
     mumei verifies (#309)."""

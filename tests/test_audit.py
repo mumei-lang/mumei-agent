@@ -149,6 +149,36 @@ def test_spec_health_unsupported_clause_errors_are_encoding_gaps() -> None:
     assert all(issue.startswith("encoding-gap:") for issue in issues)
 
 
+def test_spec_health_dogfood_string_and_bool_lowering_are_encoding_gaps() -> None:
+    """Regression for the develop-audit findings (AUDIT_LOG_2026-06-21).
+
+    The ``directory_path.endsWith('/std/')`` and ``result == true`` clauses that
+    older mumei binaries reported as hard lowering failures must be classified as
+    ``encoding-gap`` noise, never as genuine spec contradictions.
+    """
+    report = SpecHealthReport(
+        contradictions=[
+            ContradictionInfo(
+                atom="analyze_metrics",
+                details=(
+                    "spec_lowering_failed: failed to lower requires clause: "
+                    "Verification Error: Unknown function: directory_path.endsWith"
+                ),
+            ),
+            ContradictionInfo(
+                atom="generate_markdown_report",
+                details="spec_lowering_failed: Expected bool for ==",
+            ),
+        ]
+    )
+
+    issues = _spec_health_issue_strings(report)
+
+    assert len(issues) == 2
+    assert all(issue.startswith("encoding-gap:") for issue in issues)
+    assert not any(issue.startswith("contradiction:") for issue in issues)
+
+
 def test_spec_health_genuine_contradiction_remains_a_contradiction() -> None:
     report = SpecHealthReport(
         contradictions=[
