@@ -1455,6 +1455,42 @@ def test_last_expression_ignores_leading_dot_numeric_literal() -> None:
     assert _last_expression(body) == ""
 
 
+def test_last_expression_skips_return_inside_nested_closures() -> None:
+    """``return`` statements inside closures/blocks must not be mistaken for the function tail."""
+    from agent.cross_validation_foreign import _last_expression
+
+    body = (
+        "if code.is_empty() { return None; }\n"
+        "let mut partial_match = None;\n"
+        "self.iter()\n"
+        "    .find(|(_, contract)| {\n"
+        "        let Some(deployed_code) = &contract.deployed_bytecode else {\n"
+        "            return false;\n"
+        "        };\n"
+        "        false\n"
+        "    })\n"
+        "    .or(partial_match)\n"
+    )
+    # The tail is a multi-line method chain that cannot be captured as a single line;
+    # the nested ``return false`` must not be used as ``result == false``.
+    assert _last_expression(body) == ""
+
+
+def test_last_expression_ignores_braces_inside_string_literals() -> None:
+    """Braces inside string/char literals must not corrupt depth tracking."""
+    from agent.cross_validation_foreign import _last_expression
+
+    body = (
+        'let msg = "}";\n'
+        "for x in v {\n"
+        "    return 3;\n"
+        "}\n"
+        "0\n"
+    )
+    # The real tail is the final ``0`` on the top level, not the nested ``return 3``.
+    assert _last_expression(body) == "0"
+
+
 # --------------------------------------------------------------------------- #
 # Layer B stage 2: syntax-tree expression analysis (with regex fallback)
 # --------------------------------------------------------------------------- #
@@ -1589,3 +1625,57 @@ def test_typescript_contract_inference_strips_trailing_comments() -> None:
     atoms = _infer_typescript_contracts(source)
     assert len(atoms) == 1
     assert atoms[0].ensures == "result == 'headers' in request"
+
+
+def test_go_contract_inference_skips_blank_identifier_and_test_entry_points() -> None:
+    """Go blank-identifier compile checks and test entry points must not become atoms."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = (
+        "package ent\n"
+        "func _() {}\n"
+        "func TestFoo(t *testing.T) {}\n"
+        "func BenchmarkBar(b *testing.B) {}\n"
+        "func String() string { return \"\" }\n"
+    )
+    atoms = _infer_go_contracts(source)
+    names = {atom.name for atom in atoms}
+    assert names == {"String"}
+
+
+def test_go_source_line_map_skips_blank_identifier_and_test_entry_points() -> None:
+    """The Go source line map must also exclude test entry points and the blank identifier."""
+    from agent.cross_validation_foreign import _infer_foreign_source_line_map
+
+    source = (
+        "package ent\n"
+        "func _() {}\n"
+        "func TestFoo() {}\n"
+        "func String() string { return \"\" }\n"
+    )
+    line_map = _infer_foreign_source_line_map(source, "go")
+    assert "String" in line_map
+    assert "cross_validation_atom" not in line_map
+    assert "TestFoo" not in line_map
+
+
+def test_rust_contract_inference_skips_test_attribute_functions() -> None:
+    """Rust functions annotated with ``#[test]`` or ``#[bench]`` must not become atoms."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    #[test]\n"
+        "    fn calc_mean_empty() {}\n"
+        "    #[bench]\n"
+        "    fn bench_foo() {}\n"
+        "    #[test]\n"
+        "    #[should_panic]\n"
+        "    fn ignored_test() {}\n"
+        "}\n"
+        "pub fn mean() -> u64 { 0 }\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    names = {atom.name for atom in atoms}
+    assert names == {"mean"}
