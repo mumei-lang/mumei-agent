@@ -25,3 +25,29 @@ the fallback metrics.
 
 See [Lean Fallback Troubleshooting](./LEAN_FALLBACK_TROUBLESHOOTING.md) for
 diagnostic codes and remediation steps.
+
+## Agent README CI Verification Gate
+
+## CI Verification Gate
+
+mumei-agent includes a CI verification pipeline that automatically verifies `.mm` files in pull requests.
+
+### Usage in your project
+
+Add to your `.github/workflows/verify.yml`:
+
+```yaml
+name: Mumei Verify
+on: [pull_request]
+jobs:
+  verify:
+    uses: mumei-lang/mumei-agent/.github/workflows/mumei-verify.yml@develop
+    with:
+      proof-cert: true
+```
+
+Or use the standalone script:
+
+```bash
+python scripts/ci_verify.py src/*.mm --proof-cert
+```
