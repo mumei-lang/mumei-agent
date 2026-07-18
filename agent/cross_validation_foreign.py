@@ -182,6 +182,48 @@ def _infer_foreign_contracts_with_patterns(code: str, language: str) -> list[Mum
     return []
 
 
+def _filter_foreign_line_map(
+    code: str, language: str, line_map: dict[str, int]
+) -> dict[str, int]:
+    """Drop test/placeholder entries that regex/tree-sitter line maps cannot distinguish.
+
+    Go test entry points (``Test*``, ``Benchmark*``, ``Example*``, ``Fuzz*``) and the
+    blank-identifier compile-check function ``func _()`` carry no verifiable contract.
+    Rust functions annotated with ``#[test]`` or ``#[bench]`` are also skipped.
+    """
+    if language not in ("go", "rust") or not line_map:
+        return line_map
+    lines = code.splitlines()
+
+    def _rust_line_is_test(line_number: int) -> bool:
+        # 1-based line number from tree-sitter/regex map.
+        idx = line_number - 1
+        if idx < 0 or idx >= len(lines):
+            return False
+        for prev in range(idx - 1, max(-1, idx - 10), -1):
+            stripped = re.sub(r"//.*", "", lines[prev]).strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("#[test]", "#[bench]")):
+                return True
+            # Stop scanning once we hit another item or non-attribute line.
+            if not stripped.startswith("#"):
+                return False
+        return False
+
+    filtered: dict[str, int] = {}
+    for name, line in line_map.items():
+        if language == "go":
+            if name == "cross_validation_atom" or name.startswith(
+                ("Test", "Benchmark", "Example", "Fuzz")
+            ):
+                continue
+        if language == "rust" and _rust_line_is_test(line):
+            continue
+        filtered[name] = line
+    return filtered
+
+
 def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
     language = _normalize_foreign_language(language)
     if language == "python":
@@ -191,25 +233,35 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
             code, language, _safe_identifier
         )
         if ts_line_map is not None:
+            if language in ("go", "rust"):
+                ts_line_map = _filter_foreign_line_map(code, language, ts_line_map)
             return ts_line_map
     if language == "rust":
-        return _infer_regex_source_line_map(
+        return _filter_foreign_line_map(
             code,
-            re.compile(
-                r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
-                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
-                r"(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\s*"
-                r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
-                r"(?P<ret>[^;{]*?)?\s*\{",
-                flags=re.DOTALL,
+            "rust",
+            _infer_regex_source_line_map(
+                code,
+                re.compile(
+                    r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+"
+                    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+                    r"(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>)?\s*"
+                    r"\((?P<params>(?:[^()]|\([^)]*\))*)\)\s*"
+                    r"(?P<ret>[^;{]*?)?\s*\{",
+                    flags=re.DOTALL,
+                ),
             ),
         )
     if language == "go":
-        return _infer_regex_source_line_map(
+        return _filter_foreign_line_map(
             code,
-            re.compile(
-                r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
-                flags=re.DOTALL,
+            "go",
+            _infer_regex_source_line_map(
+                code,
+                re.compile(
+                    r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(",
+                    flags=re.DOTALL,
+                ),
             ),
         )
     if language == "typescript":
@@ -932,6 +984,19 @@ def _rust_parse_signature(
     return params_text, return_type, body_start
 
 
+def _has_rust_test_attribute(code: str, fn_start: int) -> bool:
+    """True when the Rust function at ``fn_start`` is annotated with ``#[test]`` or ``#[bench]``."""
+    line_start = code.rfind("\n", 0, fn_start) + 1
+    prev = line_start - 1
+    while prev > 0 and code[prev] == "\n":
+        prev -= 1
+    if prev <= 0:
+        return False
+    prev_line_start = code.rfind("\n", 0, prev) + 1
+    prev_line = re.sub(r"//.*", "", code[prev_line_start : prev + 1]).strip()
+    return prev_line.startswith(("#[test]", "#[bench]"))
+
+
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
     atoms: list[MumeiContractAtom] = []
     known_constants = semantic_safety.collect_declared_constants(code, "rust")
@@ -941,6 +1006,8 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
         flags=re.DOTALL,
     )
     for match in name_pattern.finditer(code):
+        if _has_rust_test_attribute(code, match.start()):
+            continue
         parsed = _rust_parse_signature(code, match.end())
         if parsed is None:
             continue
@@ -1356,6 +1423,13 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
     return atoms
 
 
+def _is_go_test_name(name: str) -> bool:
+    """True for Go identifiers that are the blank identifier or standard test entry points."""
+    if name == "_":
+        return True
+    return name.startswith(("Test", "Benchmark", "Example", "Fuzz"))
+
+
 def _go_function_declarations(code: str) -> list[tuple[str, str, str, str]]:
     pattern = re.compile(
         r"func\s+(?:(?P<receiver>\([^)]*\))\s*)?"
@@ -1366,6 +1440,8 @@ def _go_function_declarations(code: str) -> list[tuple[str, str, str, str]]:
     )
     declarations: list[tuple[str, str, str, str]] = []
     for match in pattern.finditer(code):
+        if _is_go_test_name(match.group("name")):
+            continue
         body = _balanced_brace_body(code, match.end() - 1)
         receiver = (match.group("receiver") or "").strip()
         receiver = receiver.removeprefix("(").removesuffix(")").strip()

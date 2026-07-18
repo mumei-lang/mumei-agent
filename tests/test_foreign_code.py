@@ -1589,3 +1589,54 @@ def test_typescript_contract_inference_strips_trailing_comments() -> None:
     atoms = _infer_typescript_contracts(source)
     assert len(atoms) == 1
     assert atoms[0].ensures == "result == 'headers' in request"
+
+
+def test_go_contract_inference_skips_blank_identifier_and_test_entry_points() -> None:
+    """Go blank-identifier compile checks and test entry points must not become atoms."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = (
+        "package ent\n"
+        "func _() {}\n"
+        "func TestFoo(t *testing.T) {}\n"
+        "func BenchmarkBar(b *testing.B) {}\n"
+        "func String() string { return \"\" }\n"
+    )
+    atoms = _infer_go_contracts(source)
+    names = {atom.name for atom in atoms}
+    assert names == {"String"}
+
+
+def test_go_source_line_map_skips_blank_identifier_and_test_entry_points() -> None:
+    """The Go source line map must also exclude test entry points and the blank identifier."""
+    from agent.cross_validation_foreign import _infer_foreign_source_line_map
+
+    source = (
+        "package ent\n"
+        "func _() {}\n"
+        "func TestFoo() {}\n"
+        "func String() string { return \"\" }\n"
+    )
+    line_map = _infer_foreign_source_line_map(source, "go")
+    assert "String" in line_map
+    assert "cross_validation_atom" not in line_map
+    assert "TestFoo" not in line_map
+
+
+def test_rust_contract_inference_skips_test_attribute_functions() -> None:
+    """Rust functions annotated with ``#[test]`` or ``#[bench]`` must not become atoms."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    #[test]\n"
+        "    fn calc_mean_empty() {}\n"
+        "    #[bench]\n"
+        "    fn bench_foo() {}\n"
+        "}\n"
+        "pub fn mean() -> u64 { 0 }\n"
+    )
+    atoms = _infer_rust_contracts(source)
+    names = {atom.name for atom in atoms}
+    assert names == {"mean"}
