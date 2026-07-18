@@ -91,25 +91,29 @@ def _match_function_pattern(
     source: str,
     fn: tree_sitter_extract.ExtractedFunction,
 ) -> re.Match[str] | None:
-    """Return the regex match whose ``name`` group sits inside ``fn``'s span."""
+    """Return the regex match whose ``name`` group sits inside ``fn``'s span.
+
+    ``fn.start_char`` / ``fn.end_char`` are character offsets into the ``str``
+    ``source``, so they can be compared directly with ``match.start("name")``.
+    """
     for pattern in patterns:
         for match in pattern.finditer(source):
             try:
                 name_start = match.start("name")
             except IndexError:
                 continue
-            if fn.start_byte <= name_start < fn.end_byte:
+            if fn.start_char <= name_start < fn.end_char:
                 return match
     return None
 
 
-def _preceding_doc_comment(source: str, start_byte: int, language: str) -> str:
+def _preceding_doc_comment(source: str, start_char: int, language: str) -> str:
     """Return the raw ``///`` / ``//`` / ``/** ... */`` text before a declaration."""
     if language == "typescript":
-        return _preceding_jsdoc(source, start_byte)
+        return _preceding_jsdoc(source, start_char)
     marker = "///" if language in ("rust", "solidity") else "//"
     lines: list[str] = []
-    for line in reversed(source[:start_byte].splitlines()):
+    for line in reversed(source[:start_char].splitlines()):
         stripped = line.strip()
         if stripped.startswith(marker):
             lines.insert(0, stripped)
@@ -197,7 +201,7 @@ def _extract_typescript_with_tree_sitter(source: str) -> list[ForeignCodeSpec] |
         match = _match_function_pattern(patterns, source, fn)
         if match is None:
             continue
-        comment = _clean_jsdoc(_preceding_jsdoc(source, fn.start_byte))
+        comment = _clean_jsdoc(_preceding_jsdoc(source, fn.start_char))
         preconditions, postconditions = _contract_lines(comment)
         specs.append(
             ForeignCodeSpec(
