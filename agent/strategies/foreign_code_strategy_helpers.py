@@ -20,6 +20,7 @@ from agent.cross_validation_foreign import (
     _go_function_declarations,
     _go_nillable_param_names,
     _go_type_is_nillable,
+    _is_go_test_name,
     _split_params,
     _strip_go_rust_literals_and_comments,
 )
@@ -534,7 +535,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     )
     if functions is not None:
         for fn in functions:
-            if not fn.has_body:
+            if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
             body = _strip_go_rust_literals_and_comments(fn.body)
             param_names = _go_nillable_param_names(fn.params_text)
