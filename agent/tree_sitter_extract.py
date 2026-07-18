@@ -57,6 +57,9 @@ class ExtractedFunction:
     params_text: str = ""
     return_type: str | None = None
     attributes: tuple[str, ...] = ()
+    # Solidity visibility/state-mutability/modifier/return-type text used by
+    # reentrancy and access-control heuristics.
+    attrs_text: str = ""
     # Byte and character offsets of the declaration and body. tree-sitter works
     # on UTF-8 bytes, but callers operate on Python ``str`` values (characters).
     # Both units are exposed so callers can slice strings with character offsets
@@ -509,6 +512,29 @@ def _solidity_signature(source_bytes: bytes, fn_node) -> tuple[str, str | None]:
     return params_text, return_type
 
 
+def _solidity_attrs(source_bytes: bytes, fn_node) -> str:
+    """Return visibility/state-mutability/modifier/return-type text for Solidity.
+
+    This is the source text between the closing ``)`` of the parameter list and
+    the opening ``{`` or terminating ``;`` of the function definition.
+    """
+    children = fn_node.children
+    try:
+        paren_close_idx = next(i for i, c in enumerate(children) if c.type == ")")
+    except StopIteration:
+        return ""
+    parts: list[bytes] = []
+    for child in children[paren_close_idx + 1 :]:
+        if child.type in {"function_body", ";"}:
+            break
+        if child.type in {",", "(", ")"}:
+            continue
+        parts.append(source_bytes[child.start_byte : child.end_byte])
+    if not parts:
+        return ""
+    return b" ".join(parts).decode("utf-8", "replace").strip()
+
+
 def _extract_full(
     source: str, language: str, safe_identifier: Callable[[str], str]
 ) -> list[ExtractedFunction] | None:
@@ -534,6 +560,7 @@ def _extract_full(
         params_text = ""
         return_type: str | None = None
         attributes: tuple[str, ...] = ()
+        attrs_text = ""
         if canonical == "rust":
             params_text, return_type = _rust_signature(source_bytes, fn_node)
             attributes = _rust_attribute_identifiers(source_bytes, fn_node)
@@ -545,6 +572,7 @@ def _extract_full(
             )
         elif canonical == "solidity":
             params_text, return_type = _solidity_signature(source_bytes, fn_node)
+            attrs_text = _solidity_attrs(source_bytes, fn_node)
         is_expression_body = (
             body_node is not None and body_node.type not in _BLOCK_NODE_TYPES
         )
@@ -558,6 +586,7 @@ def _extract_full(
                 params_text=params_text,
                 return_type=return_type,
                 attributes=attributes,
+                attrs_text=attrs_text,
                 start_byte=declaration_node.start_byte,
                 end_byte=declaration_node.end_byte,
                 body_start_byte=body_start_byte,

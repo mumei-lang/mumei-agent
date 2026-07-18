@@ -949,6 +949,16 @@ def _solidity_function_blocks(source: str) -> list[tuple[str, str]]:
     return blocks
 
 def _solidity_function_blocks_with_attrs(source: str) -> list[tuple[str, str, str]]:
+    functions = tree_sitter_extract.extract_contract_functions(
+        source, "solidity", _safe_identifier
+    )
+    if functions is not None:
+        return [
+            (fn.name, fn.attrs_text, fn.body)
+            for fn in functions
+            if fn.has_body
+        ]
+    # Regex fallback when tree-sitter / the grammar is unavailable.
     blocks: list[tuple[str, str, str]] = []
     for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source):
         body = _balanced_brace_body(source, match.end() - 1)
