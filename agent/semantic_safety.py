@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import re
 
+from agent import tree_sitter_extract
+
 _LANGUAGE_ALIASES = {
     "py": "python",
     "rs": "rust",
@@ -97,6 +99,9 @@ def collect_declared_constants(source: str, language: str) -> dict[str, int]:
     non-literal initializers (expressions referencing other constants) are
     skipped so only values we can reason about are pinned.
     """
+    ts_constants = tree_sitter_extract.extract_declared_constants(source, language)
+    if ts_constants is not None:
+        return ts_constants
     constants: dict[str, int] = {}
     for pattern in _CONST_PATTERNS.get(normalize_language(language), ()):  # noqa: E501
         for match in pattern.finditer(source):

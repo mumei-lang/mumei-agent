@@ -529,11 +529,28 @@ def _detect_block_safety_issues(
 
 def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
+    functions = tree_sitter_extract.extract_contract_functions(
+        source, "go", _safe_identifier
+    )
+    if functions is not None:
+        for fn in functions:
+            if not fn.has_body:
+                continue
+            body = _strip_go_rust_literals_and_comments(fn.body)
+            param_names = _go_nillable_param_names(fn.params_text)
+            for expression in _return_expressions(body):
+                issues.extend(
+                    _issues_for_expression(
+                        fn.name,
+                        expression,
+                        "Go",
+                        dereference_values=param_names,
+                    )
+                )
+        return issues
+    # Regex fallback when tree-sitter / the grammar is unavailable.
     for name, params_text, _return_type, body in _go_function_declarations(source):
         body = _strip_go_rust_literals_and_comments(body)
-        # Only nillable Go types (pointer/slice/map/chan/func/interface) may be
-        # nil-dereferenced. Value types (e.g. a `reflect.Value` struct) can never
-        # be nil, so flagging them produces false `refuted` verdicts (#295).
         param_names = _go_nillable_param_names(params_text)
         for expression in _return_expressions(body):
             issues.extend(

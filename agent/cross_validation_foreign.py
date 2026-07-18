@@ -1104,8 +1104,42 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
 
 
 def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
-    atoms: list[MumeiContractAtom] = []
     known_constants = semantic_safety.collect_declared_constants(code, "solidity")
+    extracted = tree_sitter_extract.extract_contract_functions(
+        code, "solidity", _safe_identifier
+    )
+    if extracted is not None:
+        atoms: list[MumeiContractAtom] = []
+        for fn in extracted:
+            params, param_types = _solidity_params_from_signature(fn.params_text)
+            if fn.has_body:
+                raw_return_expr = _raw_return_statement_expression(fn.body)
+                return_expr = _normalize_foreign_expression(raw_return_expr)
+                requires = _solidity_safety_requires_for_expression(
+                    raw_return_expr,
+                    param_types,
+                    known_constants,
+                )
+                ensures = f"result == {return_expr}" if return_expr else "true"
+            else:
+                raw_return_expr = ""
+                requires = "true"
+                ensures = "true"
+            atoms.append(
+                MumeiContractAtom(
+                    name=fn.name,
+                    params=params,
+                    return_type=_mumei_return_type(
+                        fn.return_type,
+                        solidity_modifiers=True,
+                    ),
+                    requires=requires,
+                    ensures=ensures,
+                )
+            )
+        return atoms
+    # Regex fallback when tree-sitter / the grammar is unavailable.
+    atoms: list[MumeiContractAtom] = []
     header = re.compile(
         r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
         r"\((?P<params>(?:[^()]|\([^)]*\))*)\)"
@@ -1358,21 +1392,41 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
 
 
 def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
-    atoms: list[MumeiContractAtom] = []
     known_constants = semantic_safety.collect_declared_constants(code, "typescript")
-    # Generic arrow functions (``const f = <T>(x: T) => ...``) are parsed with
-    # tree-sitter so nested ``<>`` and ``=>`` arrows in type parameters do not
-    # confuse the regex-based extractor.
-    seen: set[tuple[str, int]] = set()
-    for atom, raw_name, start_char in _infer_typescript_arrow_functions_with_tree_sitter(
-        code, known_constants
-    ):
-        atoms.append(atom)
-        seen.add((raw_name, start_char))
-    # Each pattern is paired with a predicate that decides whether the body is
-    # an arrow-function expression body (no braces).  Function and class-method
-    # bodies are never expression bodies, while arrow functions may use either
-    # form.
+    extracted = tree_sitter_extract.extract_contract_functions(
+        code, "typescript", _safe_identifier
+    )
+    if extracted is not None:
+        atoms: list[MumeiContractAtom] = []
+        for fn in extracted:
+            if not fn.is_top_level:
+                continue
+            if fn.has_body:
+                raw_return_expr = _typescript_raw_return_expression(
+                    fn.body, fn.is_expression_body
+                )
+                return_expr = _normalize_foreign_expression(raw_return_expr)
+                requires = _safety_requires_for_expression(
+                    raw_return_expr, "typescript", known_constants
+                )
+                ensures = f"result == {return_expr}" if return_expr else "true"
+            else:
+                requires = "true"
+                ensures = "true"
+            atoms.append(
+                MumeiContractAtom(
+                    name=fn.name,
+                    params=_params_from_signature(fn.params_text),
+                    return_type=_typescript_return_type(
+                        (fn.return_type or "number").strip()
+                    ),
+                    requires=requires,
+                    ensures=ensures,
+                )
+            )
+        return atoms
+    # Regex fallback when tree-sitter / the grammar is unavailable.
+    atoms: list[MumeiContractAtom] = []
     patterns: list[tuple[re.Pattern[str], Callable[[str], bool]]] = [
         (
             re.compile(
@@ -1412,15 +1466,8 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     ]
     for pattern, is_expr_fn in patterns:
         for match in pattern.finditer(code):
-            key = (_safe_identifier(match.group("name")), match.start("name"))
-            if key in seen:
-                continue
-            seen.add(key)
             raw_body = match.group("body") or ""
             is_expression_body = is_expr_fn(raw_body)
-            # The regex patterns are non-greedy and stop at the first ``}``.
-            # Re-extract the body with proper brace balancing so nested blocks
-            # and type literals (``{ [key: string]: unknown }``) do not truncate.
             body_start = match.start("body")
             body = raw_body
             if raw_body.startswith("{"):

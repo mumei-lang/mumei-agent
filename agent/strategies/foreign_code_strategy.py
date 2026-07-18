@@ -179,35 +179,19 @@ def _extract_typescript_with_tree_sitter(source: str) -> list[ForeignCodeSpec] |
     )
     if functions is None:
         return None
-    patterns = [
-        re.compile(
-            r"(?:export\s+)?(?:async\s+)?function\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
-            r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?",
-            re.DOTALL,
-        ),
-        re.compile(
-            r"(?:export\s+)?(?:const|let)\s+"
-            r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
-            r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
-            r"(?::\s*(?P<ret>[^=]+?))?\s*=>",
-            re.DOTALL,
-        ),
-    ]
     specs: list[ForeignCodeSpec] = []
     for fn in functions:
         if not fn.has_body:
             continue
-        match = _match_function_pattern(patterns, source, fn)
-        if match is None:
-            continue
-        comment = _clean_jsdoc(_preceding_jsdoc(source, fn.start_char))
+        comment = _clean_jsdoc(_preceding_doc_comment(source, fn.start_char, "typescript"))
         preconditions, postconditions = _contract_lines(comment)
         specs.append(
             ForeignCodeSpec(
                 function_name=fn.name,
-                params=_typescript_params(match.group("params")),
-                return_type=_typescript_type((match.group("ret") or "").strip() or "void"),
+                params=_typescript_params(fn.params_text),
+                return_type=_typescript_type(
+                    (fn.return_type or "").strip() or "void"
+                ),
                 preconditions=preconditions,
                 postconditions=postconditions,
                 source_line=fn.line,
@@ -221,28 +205,17 @@ def _extract_rust_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
     functions = tree_sitter_extract.extract_functions(source, "rust", _safe_identifier)
     if functions is None:
         return None
-    pattern = re.compile(
-        r"(?P<comment>(?:\s*///[^\n]*\n)*)\s*"
-        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
-        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
-        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?"
-        r"\s*(?:\{|;)?",
-        re.DOTALL,
-    )
     specs: list[ForeignCodeSpec] = []
     for fn in functions:
         if not fn.has_body:
             continue
-        match = _match_function_pattern([pattern], source, fn)
-        if match is None:
-            continue
-        comment = _clean_rust_doc(match.group("comment") or "")
+        comment = _clean_rust_doc(_preceding_doc_comment(source, fn.start_char, "rust"))
         preconditions, postconditions = _contract_lines(comment)
         specs.append(
             ForeignCodeSpec(
                 function_name=fn.name,
-                params=_rust_params(match.group("params")),
-                return_type=_rust_type((match.group("ret") or "").strip() or "()"),
+                params=_rust_params(fn.params_text),
+                return_type=_rust_type((fn.return_type or "").strip() or "()"),
                 preconditions=preconditions,
                 postconditions=postconditions,
                 source_line=fn.line,
@@ -258,34 +231,19 @@ def _extract_solidity_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | N
     )
     if functions is None:
         return None
-    pattern = re.compile(
-        r"(?P<comment>(?:\s*///[^\n]*\n)*)\s*"
-        r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
-        r"\((?P<params>[^)]*)\)"
-        r"(?P<attrs>[^{;]*?)\{",
-        re.DOTALL,
-    )
     specs: list[ForeignCodeSpec] = []
     for fn in functions:
         if not fn.has_body:
             continue
-        match = _match_function_pattern([pattern], source, fn)
-        if match is None:
-            continue
-        comment = _clean_rust_doc(match.group("comment") or "")
-        preconditions, postconditions = _contract_lines(comment)
-        attrs = match.group("attrs") or ""
-        returns_match = re.search(r"returns\s*\((?P<ret>[^)]*)\)", attrs)
-        return_type = (
-            _solidity_type(returns_match.group("ret"))
-            if returns_match
-            else "void"
+        comment = _clean_rust_doc(
+            _preceding_doc_comment(source, fn.start_char, "solidity")
         )
+        preconditions, postconditions = _contract_lines(comment)
         specs.append(
             ForeignCodeSpec(
                 function_name=fn.name,
-                params=_solidity_params(match.group("params")),
-                return_type=return_type,
+                params=_solidity_params(fn.params_text),
+                return_type=_solidity_type(fn.return_type or "void"),
                 preconditions=preconditions,
                 postconditions=postconditions,
                 source_line=fn.line,
