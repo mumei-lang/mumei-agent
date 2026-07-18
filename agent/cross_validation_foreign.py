@@ -228,6 +228,23 @@ def _infer_foreign_source_line_map(code: str, language: str) -> dict[str, int]:
     language = _normalize_foreign_language(language)
     if language == "python":
         return _infer_python_source_line_map(code)
+    # Prefer tree-sitter's full function extraction so test/blank filtering is
+    # structural rather than regex/line based.
+    if language in ("go", "rust"):
+        ts_funcs = tree_sitter_extract.extract_contract_functions(
+            code, language, _safe_identifier
+        )
+        if ts_funcs is not None:
+            line_map: dict[str, int] = {}
+            for fn in ts_funcs:
+                if language == "go" and _is_go_test_name(fn.raw_name or fn.name):
+                    continue
+                if language == "rust" and (
+                    "test" in fn.attributes or "bench" in fn.attributes
+                ):
+                    continue
+                line_map.setdefault(fn.name, fn.line)
+            return line_map
     if language in tree_sitter_extract.SUPPORTED_LANGUAGES:
         ts_line_map = tree_sitter_extract.function_line_map(
             code, language, _safe_identifier
@@ -1008,7 +1025,41 @@ def _has_rust_test_attribute(code: str, fn_start: int) -> bool:
     return False
 
 
+def _infer_rust_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None:
+    """Use tree-sitter to extract Rust functions and signatures when available."""
+    extracted = tree_sitter_extract.extract_contract_functions(code, "rust", _safe_identifier)
+    if extracted is None:
+        return None
+    atoms: list[MumeiContractAtom] = []
+    known_constants = semantic_safety.collect_declared_constants(code, "rust")
+    for fn in extracted:
+        if "test" in fn.attributes or "bench" in fn.attributes:
+            continue
+        if not fn.body.strip():
+            # Trait methods and external function declarations have no body.
+            requires = "true"
+            ensures = "true"
+        else:
+            return_expr = _last_expression(fn.body)
+            safety_expr = _last_expression(_strip_go_rust_literals_and_comments(fn.body))
+            requires = _rust_safety_requires_for_expression(safety_expr, known_constants)
+            ensures = f"result == {return_expr}" if return_expr else "true"
+        atoms.append(
+            MumeiContractAtom(
+                name=fn.name,
+                params=_params_from_signature(fn.params_text),
+                return_type=_mumei_return_type(fn.return_type),
+                requires=requires,
+                ensures=ensures,
+            )
+        )
+    return atoms
+
+
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
+    ts_atoms = _infer_rust_contracts_tree_sitter(code)
+    if ts_atoms is not None:
+        return ts_atoms
     atoms: list[MumeiContractAtom] = []
     known_constants = semantic_safety.collect_declared_constants(code, "rust")
     name_pattern = re.compile(
@@ -1392,7 +1443,50 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     return atoms
 
 
+def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None:
+    """Use tree-sitter to extract Go functions and signatures when available."""
+    extracted = tree_sitter_extract.extract_contract_functions(code, "go", _safe_identifier)
+    if extracted is None:
+        return None
+    atoms: list[MumeiContractAtom] = []
+    known_constants = semantic_safety.collect_declared_constants(code, "go")
+    for fn in extracted:
+        if _is_go_test_name(fn.raw_name or fn.name):
+            continue
+        params = _params_from_signature(fn.params_text)
+        nillable_names = _go_nillable_param_names(fn.params_text)
+        if not fn.body.strip():
+            # Assembly forward declarations and other external signatures have no body.
+            requires = "true"
+            ensures = "true"
+        else:
+            raw_return_expr = _raw_return_statement_expression(fn.body)
+            safety_expr = _raw_return_statement_expression(
+                _strip_go_rust_literals_and_comments(fn.body)
+            )
+            return_expr = _normalize_foreign_expression(raw_return_expr)
+            requires = _go_safety_requires_for_expression(
+                safety_expr,
+                [param.name for param in params if param.name in nillable_names],
+                known_constants,
+            )
+            ensures = f"result == {return_expr}" if return_expr else "true"
+        atoms.append(
+            MumeiContractAtom(
+                name=fn.name,
+                params=params,
+                return_type=_mumei_return_type(fn.return_type),
+                requires=requires,
+                ensures=ensures,
+            )
+        )
+    return atoms
+
+
 def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
+    ts_atoms = _infer_go_contracts_tree_sitter(code)
+    if ts_atoms is not None:
+        return ts_atoms
     atoms: list[MumeiContractAtom] = []
     known_constants = semantic_safety.collect_declared_constants(code, "go")
     for name, params_text, return_type, body in _go_function_declarations(code):

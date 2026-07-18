@@ -46,6 +46,16 @@ class ExtractedFunction:
     name: str
     line: int
     body: str
+    # The identifier exactly as it appears in source. Callers use this for
+    # language-specific filtering (e.g. Go blank identifier ``_``) before the
+    # ``safe_identifier`` normalization stored in ``name``.
+    raw_name: str = ""
+    # Signature metadata used by contract inference. Empty/default values keep
+    # the original function-blocks API unchanged; callers that need signatures
+    # can read these fields.
+    params_text: str = ""
+    return_type: str | None = None
+    attributes: tuple[str, ...] = ()
 
 
 def _normalize_language(language: str) -> str:
@@ -112,7 +122,8 @@ def is_available(language: str) -> bool:
 
 # Node types that introduce a named function/method, per grammar.
 _FUNCTION_NODE_TYPES = {
-    "rust": {"function_item"},
+    # Rust traits use ``function_signature_item`` for methods without a body.
+    "rust": {"function_item", "function_signature_item"},
     "go": {"function_declaration", "method_declaration"},
     "typescript": {"function_declaration", "method_definition"},
     "solidity": {"function_definition"},
@@ -142,7 +153,7 @@ def _inner_body(source_bytes: bytes, body_node) -> str:
 
 
 def _iter_function_nodes(root, language: str):
-    """Yield ``(name_node, body_node)`` for every function/method in the tree."""
+    """Yield ``(name_node, body_node, function_node)`` for every function/method in the tree."""
     function_types = _FUNCTION_NODE_TYPES[language]
     stack = [root]
     while stack:
@@ -151,7 +162,7 @@ def _iter_function_nodes(root, language: str):
             name_node = node.child_by_field_name("name")
             body_node = node.child_by_field_name("body")
             if name_node is not None:
-                yield name_node, body_node
+                yield name_node, body_node, node
         elif language == "typescript" and node.type == "variable_declarator":
             value = node.child_by_field_name("value")
             name_node = node.child_by_field_name("name")
@@ -160,7 +171,7 @@ def _iter_function_nodes(root, language: str):
                 and value.type in _VALUE_FUNCTION_NODE_TYPES
                 and name_node is not None
             ):
-                yield name_node, value.child_by_field_name("body")
+                yield name_node, value.child_by_field_name("body"), node
         stack.extend(reversed(node.children))
 
 
@@ -186,13 +197,14 @@ def _extract(
     if tree is None:
         return None
     results: list[ExtractedFunction] = []
-    for name_node, body_node in _iter_function_nodes(tree.root_node, canonical):
+    for name_node, body_node, _ in _iter_function_nodes(tree.root_node, canonical):
         raw_name = _decode(source_bytes, name_node)
         results.append(
             ExtractedFunction(
                 name=safe_identifier(raw_name),
                 line=name_node.start_point[0] + 1,
                 body=_inner_body(source_bytes, body_node),
+                raw_name=raw_name,
             )
         )
     return results
@@ -231,6 +243,160 @@ def function_names(
     if extracted is None:
         return None
     return {fn.name for fn in extracted}
+
+
+# --------------------------------------------------------------------------- #
+# Full function extraction with signatures (Layer B stage 1, contract inference)
+#
+# Where the grammar supports it, recover the parameter list and return type
+# directly from the syntax tree instead of re-scanning with regular expressions.
+# The raw text is still returned so callers can apply their existing signature
+# parsers (e.g. ``_params_from_signature`` / ``_mumei_return_type``).
+# --------------------------------------------------------------------------- #
+
+
+def _rust_attribute_identifiers(source_bytes: bytes, fn_node) -> tuple[str, ...]:
+    """Return the identifiers of outer ``#[...]`` attributes preceding ``fn_node``."""
+    attributes: list[str] = []
+    prev = fn_node.prev_sibling
+    while prev is not None and prev.type == "attribute_item":
+        # ``attribute_item`` -> ``attribute`` -> ``identifier`` (or ``token_tree``).
+        for attr_child in prev.children:
+            if attr_child.type == "attribute":
+                for child in attr_child.children:
+                    if child.type == "identifier":
+                        attributes.append(_decode(source_bytes, child))
+        prev = prev.prev_sibling
+    return tuple(reversed(attributes))
+
+
+def _rust_signature(source_bytes: bytes, fn_node) -> tuple[str, str | None]:
+    """Return ``(params_text, return_type)`` for a Rust function/signature item."""
+    params_node = None
+    body_node = None
+    where_node = None
+    arrow_end = None
+    semicolon_node = None
+    for child in fn_node.children:
+        if child.type == "parameters":
+            params_node = child
+        elif child.type == "block":
+            body_node = child
+        elif child.type == "where_clause":
+            where_node = child
+        elif child.type == "->":
+            arrow_end = child.end_byte
+        elif child.type == ";":
+            semicolon_node = child
+    params_text = ""
+    if params_node is not None:
+        text = _decode(source_bytes, params_node).strip()
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        params_text = text
+    return_type: str | None = None
+    if arrow_end is not None:
+        if body_node is not None:
+            end_byte = body_node.start_byte
+        elif semicolon_node is not None:
+            end_byte = semicolon_node.start_byte
+        else:
+            end_byte = fn_node.end_byte
+        if where_node is not None and where_node.start_byte < end_byte:
+            end_byte = where_node.start_byte
+        raw = source_bytes[arrow_end:end_byte].decode("utf-8", "replace").strip(" ;")
+        return_type = raw or None
+    return params_text, return_type
+
+
+def _go_signature(source_bytes: bytes, fn_node, name_node) -> tuple[str, str | None]:
+    """Return ``(params_text, return_type)`` for a Go function/method declaration."""
+    param_lists: list = []
+    body_node = None
+    for child in fn_node.children:
+        if child.type == "parameter_list":
+            param_lists.append(child)
+        elif child.type == "block":
+            body_node = child
+            break
+    name_end = name_node.end_byte
+    # Receiver, if present, is the parameter list that ends before the name.
+    receiver_node = None
+    params_node = None
+    for pl in param_lists:
+        if pl.end_byte <= name_end:
+            receiver_node = pl
+        elif pl.start_byte >= name_end and params_node is None:
+            params_node = pl
+    if params_node is None:
+        params_node = param_lists[-1] if param_lists else None
+
+    def strip_parens(node) -> str:
+        if node is None:
+            return ""
+        text = _decode(source_bytes, node).strip()
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        return text
+
+    receiver_text = strip_parens(receiver_node)
+    params_text = strip_parens(params_node)
+    if receiver_text:
+        params_text = f"{receiver_text}, {params_text}" if params_text else receiver_text
+
+    return_type: str | None = None
+    if params_node is not None:
+        start = params_node.end_byte
+        end = body_node.start_byte if body_node is not None else fn_node.end_byte
+        raw = source_bytes[start:end].decode("utf-8", "replace").strip(" ;")
+        if raw:
+            return_type = raw
+    return params_text, return_type
+
+
+def _extract_full(
+    source: str, language: str, safe_identifier: Callable[[str], str]
+) -> list[ExtractedFunction] | None:
+    """Extract functions with signature metadata, or ``None`` to fall back."""
+    canonical = _normalize_language(language)
+    if canonical not in SUPPORTED_LANGUAGES:
+        return None
+    tree, source_bytes = _parse(source, canonical)
+    if tree is None:
+        return None
+    results: list[ExtractedFunction] = []
+    for name_node, body_node, fn_node in _iter_function_nodes(tree.root_node, canonical):
+        raw_name = _decode(source_bytes, name_node)
+        name = safe_identifier(raw_name)
+        line = name_node.start_point[0] + 1
+        body = _inner_body(source_bytes, body_node)
+        params_text = ""
+        return_type: str | None = None
+        attributes: tuple[str, ...] = ()
+        if canonical == "rust":
+            params_text, return_type = _rust_signature(source_bytes, fn_node)
+            attributes = _rust_attribute_identifiers(source_bytes, fn_node)
+        elif canonical == "go":
+            params_text, return_type = _go_signature(source_bytes, fn_node, name_node)
+        results.append(
+            ExtractedFunction(
+                name=name,
+                line=line,
+                body=body,
+                raw_name=raw_name,
+                params_text=params_text,
+                return_type=return_type,
+                attributes=attributes,
+            )
+        )
+    return results
+
+
+def extract_contract_functions(
+    source: str, language: str, safe_identifier: Callable[[str], str]
+) -> list[ExtractedFunction] | None:
+    """Return functions with signatures for contract inference, or ``None`` to fall back."""
+    return _extract_full(source, language, safe_identifier)
 
 
 # --------------------------------------------------------------------------- #
