@@ -1731,6 +1731,14 @@ def test_json_from_text_tolerates_trailing_prose() -> None:
     assert _json_from_text('{"atoms": [{"name": "a"} {"name": "b"} {"name": "c"}]}') == {
         "atoms": [{"name": "a"}, {"name": "b"}, {"name": "c"}]
     }
+    # Missing colons between property names and values are inserted.
+    assert _json_from_text('{"atoms": [{"name" "f"}]}') == {
+        "atoms": [{"name": "f"}]
+    }
+    assert _json_from_text('{"atoms": [], "count" 1}') == {
+        "atoms": [],
+        "count": 1,
+    }
     # A non-object first value is still rejected.
     with pytest.raises(json.JSONDecodeError):
         _json_from_text("[1, 2, 3]")
@@ -1852,6 +1860,12 @@ def test_json_from_text_repairs_oss_llm_artifacts() -> None:
     assert _json_from_text(
         '{"type": { as_json == True -> {True} otherwise -> { if x then "a" else "b" } }}'
     ) == {"type": "{ as_json == True -> {True} otherwise -> { if x then a else b } }"}
+
+    # Set-like braced lists with an odd number of quoted strings are still
+    # preserved as opaque strings, not forced into an invalid object parse.
+    assert _json_from_text('{"requires": {"a", "b", "c"}}') == {
+        "requires": "{a, b, c}"
+    }
 
     # Empty objects are not swallowed by the keyless-brace repair.
     assert _json_from_text('{}') == {}

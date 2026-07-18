@@ -426,10 +426,25 @@ def _consume_keyless_brace_as_string(
     top-level ``:`` or ``//`` comments we treat the whole thing as a single
     JSON string, preserving the braces and commas.  Returns ``None`` if the
     block appears to be a normal keyed object.
+
+    A block consisting only of two or more top-level string tokens separated by
+    whitespace is likely an object where the model omitted the colons; in that
+    case we let normal reconstruction and the delimiter-repair decoder handle
+    it instead of turning it into an opaque string.  Blocks that contain only
+    double-quoted strings and commas are also treated as objects when the number
+    of strings and commas is compatible with key/value pairs (even number of
+    strings, comma count one less than half the string count), because the
+    commas are then likely property separators in a malformed JSON object.
     """
     depth = 1
     i = start + 1
     parts: list[str] = []
+    has_nesting = False
+    has_non_comma_other = False
+    has_comma = False
+    comma_count = 0
+    all_top_str_double_quoted = True
+    top_level_str_count = 0
     while i < len(tokens) and depth > 0:
         kind, text = tokens[i]
         if kind == "OTHER":
@@ -447,6 +462,19 @@ def _consume_keyless_brace_as_string(
             elif text == ":" and depth == 1:
                 # This is a keyed object; do not consume it.
                 return None
+            elif depth == 1 and text == ",":
+                has_comma = True
+                comma_count += 1
+            elif depth == 1 and text != "}":
+                # Operators or other non-string tokens at the top level indicate
+                # an expression-like value rather than missing colons.
+                has_non_comma_other = True
+        if depth > 1:
+            has_nesting = True
+        if depth == 1 and kind == "STR":
+            top_level_str_count += 1
+            if not text.startswith('"'):
+                all_top_str_double_quoted = False
         if depth > 0:
             if kind == "STR":
                 decoded = _decode_string_token(text)
@@ -461,6 +489,25 @@ def _consume_keyless_brace_as_string(
     if not inner.strip():
         # Empty or whitespace-only object (e.g. ``{}`` or ``{ }``) should be
         # decoded as a real empty object, not a string literal.
+        return None
+
+    def _looks_like_key_value_pairs() -> bool:
+        if has_nesting or has_non_comma_other or top_level_str_count < 2:
+            return False
+        if not all_top_str_double_quoted:
+            return False
+        if top_level_str_count % 2 != 0:
+            return False
+        if not has_comma:
+            # No commas: the model omitted both colons and commas, so the
+            # delimiter-repair decoder will insert them from the pairs.
+            return True
+        # With commas, they should separate key/value pairs, not list items.
+        expected_commas = top_level_str_count // 2 - 1
+        return comma_count == expected_commas
+
+    if _looks_like_key_value_pairs():
+        # Likely an object with omitted colons; let reconstruction try.
         return None
     return i, json.dumps("{" + inner + "}", ensure_ascii=False)
 
@@ -668,24 +715,34 @@ def _repair_json_output(text: str) -> str:
     return _reconstruct_repaired_json(tokens)
 
 
-def _raw_decode_with_missing_comma_retry(text: str) -> tuple[dict[str, object], int]:
-    """Decode JSON, inserting missing commas reported by the decoder.
+def _raw_decode_with_missing_delimiter_retry(text: str) -> tuple[dict[str, object], int]:
+    """Decode JSON, inserting missing commas or colons reported by the decoder.
 
     Small OSS models sometimes omit commas between two array/object
-    entries (e.g. ``{"atoms": [{...} {...}]}``).  When the decoder reports
-    ``Expecting ',' delimiter`` we insert a comma at the reported position and
-    retry.  This is repeated up to ``max_attempts`` because a single LLM output
-    may contain several missing commas.  If the error persists for any other
-    reason we raise the most recent exception.
+    entries (e.g. ``{"atoms": [{...} {...}]}``) or the colon after a property
+    name (e.g. ``{"name" "value"}``).  When the decoder reports
+    ``Expecting ',' delimiter`` we insert a comma at the reported position.
+    When it reports ``Expecting ':' delimiter`` we insert a colon; if the
+    unexpected character is a comma the model used a comma instead of a colon,
+    so we replace it rather than inserting before it.  This is repeated up to
+    ``max_attempts`` because a single LLM output may contain several missing
+    delimiters.  If the error persists for any other reason we raise the most
+    recent exception.
     """
     max_attempts = 10
     for _ in range(max_attempts):
         try:
             return json.JSONDecoder(strict=False).raw_decode(text)
         except json.JSONDecodeError as exc:
-            if "Expecting ',' delimiter" not in str(exc) or not (0 <= exc.pos < len(text)):
+            if "Expecting ',' delimiter" in str(exc) and 0 <= exc.pos < len(text):
+                text = text[: exc.pos] + "," + text[exc.pos :]
+            elif "Expecting ':' delimiter" in str(exc) and 0 <= exc.pos < len(text):
+                if text[exc.pos] == ",":
+                    text = text[: exc.pos] + ":" + text[exc.pos + 1 :]
+                else:
+                    text = text[: exc.pos] + ":" + text[exc.pos :]
+            else:
                 raise
-            text = text[: exc.pos] + "," + text[exc.pos :]
     return json.JSONDecoder(strict=False).raw_decode(text)
 
 
@@ -732,7 +789,7 @@ def _json_from_text(text: str) -> dict[str, object]:
     # inserting a comma at the reported failure position when the parser
     # complains about a missing ',' delimiter.
     try:
-        payload, _end = _raw_decode_with_missing_comma_retry(stripped)
+        payload, _end = _raw_decode_with_missing_delimiter_retry(stripped)
     except json.JSONDecodeError:
         debug_dir = os.environ.get("MUMEI_DEBUG_JSON_FAIL_DIR")
         if debug_dir:
