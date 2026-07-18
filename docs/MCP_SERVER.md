@@ -1,5 +1,51 @@
 # MCP Server Reference
 
+## Relationship with MCP Server / Other AI Agents
+
+**mumei-agent** is a turnkey solution — it integrates LLM calls, `mumei verify`, and retry logic into a single autonomous fix loop. It invokes the mumei CLI directly via subprocess (no MCP required).
+
+The [mumei](https://github.com/mumei-lang/mumei) compiler repository also ships an **MCP Server** (`mcp_server.py`, implemented as FastMCP("Mumei-Forge")), which allows any MCP-compatible AI agent (Claude Code, Devin, Codex, Qwen, etc.) to access mumei's verification capabilities directly over the Model Context Protocol. The agent MCP server complements that with proof-friendly specification guidance so clients can request decidable-fragment hints before generating contracts.
+
+```mermaid
+graph TD
+    subgraph "Turnkey Solution"
+        MA["mumei-agent"] -->|"subprocess (default)"| CLI["mumei CLI"]
+        MA -->|"OpenAI-compatible API"| LLM["LLM (Ollama/OpenAI/etc.)"]
+        MA -.->|"USE_MCP_CLIENT=true (opt-in)"| MCPF["mcp_server.py (Mumei-Forge)"]
+    end
+    subgraph "MCP Integration"
+        D1["Claude Code"] -->|"MCP"| MCPF
+        D2["Devin"] -->|"MCP"| MCPF
+        D3["Other MCP Agents"] -->|"MCP"| MCPF
+        D1 -.->|"MCP"| MCPA["agent/mcp_server.py (Mumei-Agent)"]
+        D2 -.->|"MCP"| MCPA
+        D3 -.->|"MCP"| MCPA
+        MCPA -.->|"USE_MCP_SAMPLING=true (sampling)"| D2
+        MCPF -->|"subprocess"| CLI2["mumei CLI"]
+        MCPA -->|"forge / heal / health"| MA
+    end
+```
+
+By default, `agent/mcp_server.py` uses the same OpenAI-compatible LLM endpoint
+as the CLI. Set `USE_MCP_SAMPLING=true` to make all LLM-backed MCP tools request
+completion through standard MCP sampling from the connected client instead, so
+Devin or another MCP client supplies the LLM role without `LLM_API_KEY` being
+configured in mumei-agent. If the client does not support sampling, or sampling
+fails, the agent falls back to the OpenAI-compatible path.
+
+See [`docs/AGENT_HARNESS_SPEC.md`](./AGENT_HARNESS_SPEC.md) § *MCP sampling
+provider* for the sampling-capable tool list, the MCP 2025-11-25 spec mapping,
+and capability-detection details. The `mumei/mcp_server.py` **Mumei-Forge**
+server remains verification-only; sampling is implemented only in `mumei-agent`
+so the forge/heal loop is not duplicated in the compiler repository.
+
+### When to Use Which
+
+- **mumei-agent**: Run `uv run mumei-agent file.mm` for a fully automated fix loop. LLM provider is configured via `.env` (Ollama, OpenAI, DashScope, etc.). Best when you want a single-command experience.
+- **MCP Server**: Start `python mcp_server.py` in the [mumei repository](https://github.com/mumei-lang/mumei) and connect from any MCP-compatible agent. The agent calls tools like `validate_logic`, `forge_blade`, and `get_inferred_effects`, and uses its own LLM to decide how to fix issues. Best when you already use an MCP-capable agent and want to integrate mumei verification into your existing workflow.
+
+Both approaches are **complementary** — choose based on your use case, or combine them as needed.
+
 ## MCP Server
 
 `uv run mumei-agent mcp-server` runs mumei-agent as a `FastMCP("Mumei-Agent")`

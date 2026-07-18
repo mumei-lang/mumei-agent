@@ -21,6 +21,13 @@ docker-compose.yml                     docker-compose.yml
 
 The detailed generate flow, MCP relationships, and harness vocabulary are in [`docs/CLI_GUIDE.md`](docs/CLI_GUIDE.md) and [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md).
 
+## Background
+
+This repository was extracted from the [mumei](https://github.com/mumei-lang/mumei)
+compiler repository. The self-healing agent and Streamlit visualizer were originally
+developed in-tree and moved here as a standalone project
+(see [mumei-lang/mumei#90](https://github.com/mumei-lang/mumei/pull/90)).
+
 ## Prerequisites
 
 - Python 3.10+ and [uv](https://docs.astral.sh/uv/)
