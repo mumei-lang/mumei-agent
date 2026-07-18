@@ -992,9 +992,20 @@ def _has_rust_test_attribute(code: str, fn_start: int) -> bool:
         prev -= 1
     if prev <= 0:
         return False
-    prev_line_start = code.rfind("\n", 0, prev) + 1
-    prev_line = re.sub(r"//.*", "", code[prev_line_start : prev + 1]).strip()
-    return prev_line.startswith(("#[test]", "#[bench]"))
+    # Walk backwards over consecutive attribute lines (e.g. #[test] #[should_panic]).
+    while prev > 0:
+        prev_line_start = code.rfind("\n", 0, prev) + 1
+        prev_line = re.sub(r"//.*", "", code[prev_line_start : prev + 1]).strip()
+        if not prev_line:
+            break
+        if prev_line.startswith(("#[test]", "#[bench]")):
+            return True
+        if not prev_line.startswith("#"):
+            break
+        prev = prev_line_start - 1
+        while prev > 0 and code[prev] == "\n":
+            prev -= 1
+    return False
 
 
 def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:

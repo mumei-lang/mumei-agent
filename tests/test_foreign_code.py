@@ -1634,6 +1634,9 @@ def test_rust_contract_inference_skips_test_attribute_functions() -> None:
         "    fn calc_mean_empty() {}\n"
         "    #[bench]\n"
         "    fn bench_foo() {}\n"
+        "    #[test]\n"
+        "    #[should_panic]\n"
+        "    fn ignored_test() {}\n"
         "}\n"
         "pub fn mean() -> u64 { 0 }\n"
     )
