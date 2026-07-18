@@ -117,3 +117,38 @@ directly.
 
 - Anthropic NLAE research: https://www.anthropic.com/research/natural-language-autoencoders
 - Reference implementation: https://github.com/kitft/natural_language_autoencoders
+
+## P9 NLAE Integration
+
+P9-F and P9-G connect mumei-agent to the four-repository NLAE pipeline:
+
+```text
+spec / intent
+  ↓
+mumei-agent NLAEPipeline (Module A / AV)
+  ↓ generated .mm
+mumei verify --emit loss-vector (Module B / AR)
+  ↓ Loss Vector JSON
+uv run mumei-agent self-correct
+  ↓ proof certificate
+mumei-lean Fidelity Checker
+  ↓
+mumei-demo Evaluation Loop
+```
+
+Run the Loss Vector driven self-correction loop directly:
+
+```bash
+uv run mumei-agent self-correct examples/effect_test.mm --max-iterations 3
+```
+
+MCP clients can run the full P9-G integration with `run_nlae_pipeline`:
+
+```json
+{
+  "spec": "vault withdraw safety",
+  "mumei_lean_repo": "../mumei-lean",
+  "work_dir": ".nlae-work",
+  "no_build": true
+}
+```
