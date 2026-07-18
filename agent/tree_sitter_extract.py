@@ -17,6 +17,7 @@ extraction and never raise.
 """
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass
 from functools import lru_cache
@@ -69,6 +70,8 @@ class ExtractedFunction:
     body_start_char: int = 0
     body_end_char: int = 0
     has_body: bool = True
+    is_expression_body: bool = False
+    is_top_level: bool = True
 
 
 def _normalize_language(language: str) -> str:
@@ -143,6 +146,8 @@ _FUNCTION_NODE_TYPES = {
 }
 # Expression-valued function forms bound to a variable (TypeScript arrows).
 _VALUE_FUNCTION_NODE_TYPES = {"arrow_function", "function_expression"}
+# Body node types that wrap a brace-enclosed statement block.
+_BLOCK_NODE_TYPES = {"block", "statement_block", "function_body"}
 
 
 def _decode(source_bytes: bytes, node) -> str:
@@ -166,6 +171,19 @@ def _inner_body_offsets(source_bytes: bytes, body_node) -> tuple[str, int, int]:
     if stripped.startswith("{") and stripped.endswith("}"):
         return stripped[1:-1], start + 1, end - 1
     return text, start, end
+
+
+def _is_top_level_function(node, language: str) -> bool:
+    """Return True when ``node`` is not nested inside another function."""
+    function_types = _FUNCTION_NODE_TYPES[language] | _VALUE_FUNCTION_NODE_TYPES | {
+        "function_expression"
+    }
+    n = node.parent
+    while n is not None:
+        if n.type in function_types:
+            return False
+        n = n.parent
+    return True
 
 
 def _outer_declaration_node(node, language: str):
@@ -261,6 +279,10 @@ def _extract(
         body, body_start_byte, body_end_byte = _inner_body_offsets(
             source_bytes, body_node
         )
+        is_expression_body = (
+            body_node is not None and body_node.type not in _BLOCK_NODE_TYPES
+        )
+        is_top_level = _is_top_level_function(fn_node, canonical)
         results.append(
             ExtractedFunction(
                 name=safe_identifier(raw_name),
@@ -276,6 +298,8 @@ def _extract(
                 body_start_char=char_offsets[body_start_byte],
                 body_end_char=char_offsets[body_end_byte],
                 has_body=body_node is not None,
+                is_expression_body=is_expression_body,
+                is_top_level=is_top_level,
             )
         )
     return results
@@ -425,6 +449,66 @@ def _go_signature(source_bytes: bytes, fn_node, name_node) -> tuple[str, str | N
     return params_text, return_type
 
 
+def _typescript_signature(
+    source_bytes: bytes, fn_node, name_node
+) -> tuple[str, str | None]:
+    """Return ``(params_text, return_type)`` for a TypeScript function/arrow/method."""
+    value_node = fn_node
+    if fn_node.type == "variable_declarator":
+        value_node = fn_node.child_by_field_name("value")
+    if value_node is None or value_node.type not in {
+        "function_declaration",
+        "method_definition",
+        "function_expression",
+        "arrow_function",
+    }:
+        return "", None
+    params_node = value_node.child_by_field_name(
+        "parameters"
+    ) or value_node.child_by_field_name("parameter")
+    params_text = ""
+    if params_node is not None:
+        text = _decode(source_bytes, params_node).strip()
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        params_text = text
+    return_type: str | None = None
+    return_type_node = value_node.child_by_field_name("return_type")
+    if return_type_node is not None:
+        raw = _decode(source_bytes, return_type_node).strip()
+        if raw.startswith(":"):
+            raw = raw[1:].strip()
+        return_type = raw or None
+    if return_type is None and fn_node.type == "variable_declarator":
+        # Variables annotated with a function type (e.g. ``const f: (x) => number``)
+        # carry the return type on the declarator itself.
+        type_annotation = fn_node.child_by_field_name("type")
+        if type_annotation is not None:
+            raw = _decode(source_bytes, type_annotation).strip()
+            if raw.startswith(":"):
+                raw = raw[1:].strip()
+            if "=>" in raw:
+                return_type = raw.rsplit("=>", 1)[-1].strip()
+    return params_text, return_type
+
+
+def _solidity_signature(source_bytes: bytes, fn_node) -> tuple[str, str | None]:
+    """Return ``(params_text, return_type)`` for a Solidity function definition."""
+    params: list[str] = []
+    for child in fn_node.children:
+        if child.type == "parameter":
+            params.append(_decode(source_bytes, child))
+    params_text = ", ".join(params)
+    return_type: str | None = None
+    return_type_node = fn_node.child_by_field_name("return_type")
+    if return_type_node is not None:
+        raw = _decode(source_bytes, return_type_node).strip()
+        match = re.search(r"returns\s*\((.*)\)", raw, flags=re.DOTALL)
+        if match:
+            return_type = match.group(1).strip()
+    return params_text, return_type
+
+
 def _extract_full(
     source: str, language: str, safe_identifier: Callable[[str], str]
 ) -> list[ExtractedFunction] | None:
@@ -455,6 +539,16 @@ def _extract_full(
             attributes = _rust_attribute_identifiers(source_bytes, fn_node)
         elif canonical == "go":
             params_text, return_type = _go_signature(source_bytes, fn_node, name_node)
+        elif canonical == "typescript":
+            params_text, return_type = _typescript_signature(
+                source_bytes, fn_node, name_node
+            )
+        elif canonical == "solidity":
+            params_text, return_type = _solidity_signature(source_bytes, fn_node)
+        is_expression_body = (
+            body_node is not None and body_node.type not in _BLOCK_NODE_TYPES
+        )
+        is_top_level = _is_top_level_function(fn_node, canonical)
         results.append(
             ExtractedFunction(
                 name=name,
@@ -473,6 +567,8 @@ def _extract_full(
                 body_start_char=char_offsets[body_start_byte],
                 body_end_char=char_offsets[body_end_byte],
                 has_body=body_node is not None,
+                is_expression_body=is_expression_body,
+                is_top_level=is_top_level,
             )
         )
     return results
@@ -490,6 +586,99 @@ def extract_functions(
 ) -> list[ExtractedFunction] | None:
     """Return full function metadata (signatures + offsets), or ``None`` to fall back."""
     return _extract_full(source, language, safe_identifier)
+
+
+def _parse_constant_value(text: str) -> int | None:
+    """Parse an integer literal, mirroring the semantic-safety parser."""
+    text = text.strip()
+    if not text:
+        return None
+    # Drop trailing casts/suffixes such as ``as const`` or Rust type suffixes.
+    text = re.split(r"\s+as\b", text, maxsplit=1)[0].strip()
+    text = re.sub(
+        r"[iu](?:8|16|32|64|128|size)$", "", text, flags=re.IGNORECASE
+    ).strip()
+    text = text.replace("_", "")
+    if not text:
+        return None
+    try:
+        if text.lower().startswith(("0x", "0b", "0o")):
+            return int(text, 0)
+        return int(text, 10)
+    except ValueError:
+        return None
+
+
+def _is_constant_declaration(node, source_bytes: bytes, language: str) -> bool:
+    """Return True when ``node`` is a constant/immutable declaration."""
+    if language == "solidity":
+        if node.type == "constant_variable_declaration":
+            return True
+        if node.type != "state_variable_declaration":
+            return False
+        for child in node.children:
+            if child.type in {"constant", "immutable"}:
+                return True
+        return False
+    # Rust: const_item / static_item
+    return node.type in {"const_item", "static_item"}
+
+
+def _constant_name_value(node, source_bytes: bytes) -> tuple[str, str] | None:
+    """Return ``(name, raw_value_text)`` for a constant declaration node."""
+    name_node = node.child_by_field_name("name")
+    value_node = node.child_by_field_name("value")
+    if name_node is None or value_node is None:
+        return None
+    name = _decode(source_bytes, name_node)
+    if not name.isidentifier():
+        return None
+    return name, _decode(source_bytes, value_node)
+
+
+def _is_typescript_const_declaration(node) -> bool:
+    """True when ``node`` is a ``const`` lexical declaration."""
+    return node.type == "lexical_declaration" and bool(
+        node.children and node.children[0].type == "const"
+    )
+
+
+def extract_declared_constants(source: str, language: str) -> dict[str, int] | None:
+    """Map declared integer constant names to their value, or ``None`` to fall back.
+
+    Covers Rust ``const`` / ``static``, TypeScript ``const``, and Solidity
+    ``constant`` / ``immutable`` declarations.
+    """
+    canonical = _normalize_language(language)
+    if canonical not in SUPPORTED_LANGUAGES:
+        return None
+    tree, source_bytes = _parse(source, canonical)
+    if tree is None:
+        return None
+    constants: dict[str, int] = {}
+
+    def walk(node):
+        if canonical == "typescript" and _is_typescript_const_declaration(node):
+            for child in node.children:
+                if child.type == "variable_declarator":
+                    result = _constant_name_value(child, source_bytes)
+                    if result is not None:
+                        name, raw = result
+                        value = _parse_constant_value(raw)
+                        if value is not None:
+                            constants.setdefault(name, value)
+        elif _is_constant_declaration(node, source_bytes, canonical):
+            result = _constant_name_value(node, source_bytes)
+            if result is not None:
+                name, raw = result
+                value = _parse_constant_value(raw)
+                if value is not None:
+                    constants.setdefault(name, value)
+        for child in node.children:
+            walk(child)
+
+    walk(tree.root_node)
+    return constants
 
 
 # --------------------------------------------------------------------------- #
