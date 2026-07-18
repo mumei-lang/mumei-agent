@@ -1455,6 +1455,27 @@ def test_last_expression_ignores_leading_dot_numeric_literal() -> None:
     assert _last_expression(body) == ""
 
 
+def test_last_expression_skips_return_inside_nested_closures() -> None:
+    """``return`` statements inside closures/blocks must not be mistaken for the function tail."""
+    from agent.cross_validation_foreign import _last_expression
+
+    body = (
+        "if code.is_empty() { return None; }\n"
+        "let mut partial_match = None;\n"
+        "self.iter()\n"
+        "    .find(|(_, contract)| {\n"
+        "        let Some(deployed_code) = &contract.deployed_bytecode else {\n"
+        "            return false;\n"
+        "        };\n"
+        "        false\n"
+        "    })\n"
+        "    .or(partial_match)\n"
+    )
+    # The tail is a multi-line method chain that cannot be captured as a single line;
+    # the nested ``return false`` must not be used as ``result == false``.
+    assert _last_expression(body) == ""
+
+
 # --------------------------------------------------------------------------- #
 # Layer B stage 2: syntax-tree expression analysis (with regex fallback)
 # --------------------------------------------------------------------------- #

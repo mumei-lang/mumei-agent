@@ -1695,9 +1695,38 @@ def _last_expression(body: str) -> str:
     stripped = body.strip().rstrip(";")
     if not stripped:
         return ""
-    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
-    while lines:
-        candidate = lines.pop().removeprefix("return ").strip().rstrip(";")
+    raw_lines = [line for line in stripped.splitlines()]
+    # Compute brace depth at the start of each line so we ignore ``return``
+    # statements and tail expressions that live inside nested closures or
+    # blocks (e.g. Rust closure ``|x| { return false }`` inside a method call).
+    start_depths: list[int] = []
+    depth = 0
+    for line in raw_lines:
+        start_depths.append(depth)
+        for ch in line:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+    lines = [line.strip() for line in raw_lines if line.strip()]
+    for idx in range(len(raw_lines) - 1, -1, -1):
+        line = raw_lines[idx].strip()
+        if not line:
+            continue
+        # Skip anything nested inside a closure/block; only the function's
+        # top-level (depth 0) tail or return expression is meaningful.
+        if start_depths[idx] != 0:
+            continue
+        # If this line is the start of a multi-line method chain or call that
+        # continues on the next line, do not treat it as a complete expression.
+        next_idx = idx + 1
+        while next_idx < len(raw_lines) and not raw_lines[next_idx].strip():
+            next_idx += 1
+        if next_idx < len(raw_lines):
+            next_line = raw_lines[next_idx].strip()
+            if re.match(r"^[.\(\)\->::]", next_line):
+                continue
+        candidate = line.removeprefix("return ").strip().rstrip(";")
         if not candidate or re.fullmatch(r"[\)\}\];,]+", candidate):
             continue
         # A trailing comma or semicolon usually means the expression continues
