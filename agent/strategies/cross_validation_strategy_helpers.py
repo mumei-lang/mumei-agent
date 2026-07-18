@@ -1,8 +1,17 @@
-"""Pure regex-based extraction helpers for cross-validation strategy."""
+"""Extraction helpers for cross-validation strategy.
+
+Function and body extraction prefers tree-sitter for the supported foreign
+languages and falls back to the legacy regular-expression path when tree-sitter
+or a grammar is unavailable.
+"""
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
+
+from agent import tree_sitter_extract
+from agent.strategies.foreign_code_strategy_helpers import _safe_identifier
 
 
 def _canonical_symbol(name: str) -> str:
@@ -46,14 +55,42 @@ _GO_FUNC_RE = re.compile(
 )
 
 
+def _canonical_language(language: str) -> str:
+    """Normalize caller-supplied language names to the canonical form."""
+    aliases = {
+        "py": "python",
+        "rs": "rust",
+        "ts": "typescript",
+        "tsx": "typescript",
+        "javascript": "typescript",
+        "js": "typescript",
+        "jsx": "typescript",
+        "golang": "go",
+        "sol": "solidity",
+    }
+    return aliases.get(language.strip().lower(), language.strip().lower())
+
+
 def _extract_functions(source: str, language: str) -> list[str]:
     """Extract top-level function names from implementation source."""
-    lang = language.strip().lower()
+    lang = _canonical_language(language)
     if lang == "python":
-        return [m.group(1) for m in _PYTHON_FUNC_RE.finditer(source)]
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return []
+        return [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+    if lang in tree_sitter_extract.SUPPORTED_LANGUAGES:
+        names = tree_sitter_extract.function_names(source, lang, _safe_identifier)
+        if names is not None:
+            return list(names)
     if lang == "rust":
         return [m.group(1) for m in _RUST_FUNC_RE.finditer(source)]
-    if lang in ("typescript", "ts", "javascript", "js"):
+    if lang in ("typescript", "javascript"):
         names = [m.group(1) for m in _TS_FUNC_RE.finditer(source)]
         names.extend(m.group(1) for m in _TS_ARROW_RE.finditer(source))
         return names
@@ -98,8 +135,15 @@ def _extract_spec_atoms(spec_source: str) -> list[dict[str, Any]]:
 
 
 def _extract_function_body(source: str, language: str, function_name: str) -> str:
+    """Return the body of ``function_name`` or the empty string if not found."""
     escaped = re.escape(function_name)
-    lang = language.strip().lower()
+    lang = _canonical_language(language)
+    if lang in tree_sitter_extract.SUPPORTED_LANGUAGES:
+        blocks = tree_sitter_extract.function_blocks(source, lang, _safe_identifier)
+        if blocks is not None:
+            for name, body in blocks:
+                if name == function_name:
+                    return body
     patterns: list[re.Pattern[str]] = []
     if lang == "python":
         patterns.append(
@@ -115,7 +159,7 @@ def _extract_function_body(source: str, language: str, function_name: str) -> st
                 re.MULTILINE,
             )
         )
-    elif lang in {"typescript", "ts", "javascript", "js"}:
+    elif lang in ("typescript", "javascript"):
         patterns.extend(
             [
                 re.compile(

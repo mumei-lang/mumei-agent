@@ -46,6 +46,16 @@ class ExtractedFunction:
     name: str
     line: int
     body: str
+    # The source-level name (before identifier normalization) and byte offsets
+    # of the declaration and body. These are used by callers that need to
+    # re-extract signatures or preceding comments after tree-sitter has located
+    # the real function node.
+    raw_name: str = ""
+    start_byte: int = 0
+    end_byte: int = 0
+    body_start_byte: int = 0
+    body_end_byte: int = 0
+    has_body: bool = True
 
 
 def _normalize_language(language: str) -> str:
@@ -125,24 +135,55 @@ def _decode(source_bytes: bytes, node) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
 
-def _inner_body(source_bytes: bytes, body_node) -> str:
-    """Return the text inside the outermost braces of ``body_node``.
+def _inner_body_offsets(
+    source_bytes: bytes, body_node
+) -> tuple[str, int, int]:
+    """Return the text and byte range inside the outermost braces of ``body_node``.
 
     Matches the legacy ``_balanced_brace_body`` semantics (content between the
     first ``{`` and the last ``}``). Expression bodies (a braceless arrow body)
     are returned verbatim.
     """
     if body_node is None:
-        return ""
+        # ``len(source_bytes)`` is a safe sentinel that always sits at EOF.
+        return "", len(source_bytes), len(source_bytes)
+    start = body_node.start_byte
+    end = body_node.end_byte
     text = _decode(source_bytes, body_node)
     stripped = text.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        return stripped[1:-1]
-    return text
+        return stripped[1:-1], start + 1, end - 1
+    return text, start, end
+
+
+def _outer_declaration_node(node, language: str):
+    """Return the outer-most statement node that owns a function declaration.
+
+    For TypeScript this surfaces ``export_statement`` / ``lexical_declaration``
+    so callers can extract preceding JSDoc from the correct declaration start.
+    """
+    if language != "typescript":
+        return node
+    if node.type == "function_declaration" and node.parent is not None:
+        if node.parent.type == "export_statement":
+            return node.parent
+        return node
+    if node.type == "variable_declarator" and node.parent is not None:
+        value = node.child_by_field_name("value")
+        if value is not None and value.type in _VALUE_FUNCTION_NODE_TYPES:
+            lexical = node.parent
+            if (
+                lexical is not None
+                and lexical.parent is not None
+                and lexical.parent.type == "export_statement"
+            ):
+                return lexical.parent
+            return lexical
+    return node
 
 
 def _iter_function_nodes(root, language: str):
-    """Yield ``(name_node, body_node)`` for every function/method in the tree."""
+    """Yield ``(name_node, body_node, declaration_node)`` for every function/method."""
     function_types = _FUNCTION_NODE_TYPES[language]
     stack = [root]
     while stack:
@@ -151,7 +192,7 @@ def _iter_function_nodes(root, language: str):
             name_node = node.child_by_field_name("name")
             body_node = node.child_by_field_name("body")
             if name_node is not None:
-                yield name_node, body_node
+                yield name_node, body_node, _outer_declaration_node(node, language)
         elif language == "typescript" and node.type == "variable_declarator":
             value = node.child_by_field_name("value")
             name_node = node.child_by_field_name("name")
@@ -160,7 +201,15 @@ def _iter_function_nodes(root, language: str):
                 and value.type in _VALUE_FUNCTION_NODE_TYPES
                 and name_node is not None
             ):
-                yield name_node, value.child_by_field_name("body")
+                body_node = value.child_by_field_name("body")
+                declaration_node = _outer_declaration_node(node, language)
+                if declaration_node.type == "variable_declarator":
+                    # ``_outer_declaration_node`` may return the variable_declarator
+                    # when the parent is not a lexical/export statement.  Promote it
+                    # to the lexical_declaration/var statement for a stable start.
+                    if node.parent is not None:
+                        declaration_node = node.parent
+                yield name_node, body_node, declaration_node
         stack.extend(reversed(node.children))
 
 
@@ -186,16 +235,32 @@ def _extract(
     if tree is None:
         return None
     results: list[ExtractedFunction] = []
-    for name_node, body_node in _iter_function_nodes(tree.root_node, canonical):
+    for name_node, body_node, declaration_node in _iter_function_nodes(
+        tree.root_node, canonical
+    ):
         raw_name = _decode(source_bytes, name_node)
+        body, body_start, body_end = _inner_body_offsets(source_bytes, body_node)
         results.append(
             ExtractedFunction(
                 name=safe_identifier(raw_name),
+                raw_name=raw_name,
                 line=name_node.start_point[0] + 1,
-                body=_inner_body(source_bytes, body_node),
+                body=body,
+                start_byte=declaration_node.start_byte,
+                end_byte=declaration_node.end_byte,
+                body_start_byte=body_start,
+                body_end_byte=body_end,
+                has_body=body_node is not None,
             )
         )
     return results
+
+
+def extract_functions(
+    source: str, language: str, safe_identifier: Callable[[str], str]
+) -> list[ExtractedFunction] | None:
+    """Return full ``ExtractedFunction`` metadata, or ``None`` to fall back."""
+    return _extract(source, language, safe_identifier)
 
 
 def function_blocks(

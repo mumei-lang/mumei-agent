@@ -12,6 +12,7 @@ from typing import Iterable
 
 import z3
 
+from agent import tree_sitter_extract
 from agent.cross_validation import (
     _dedupe_strings,
     _infer_foreign_source_line_map,
@@ -85,6 +86,210 @@ def _is_inconclusive_verify(verification: dict[str, object] | None) -> bool:
     return status in _INCONCLUSIVE_VERIFY_STATUSES and not failed and not counterexample
 
 
+def _match_function_pattern(
+    patterns: list[re.Pattern[str]],
+    source: str,
+    fn: tree_sitter_extract.ExtractedFunction,
+) -> re.Match[str] | None:
+    """Return the regex match whose ``name`` group sits inside ``fn``'s span."""
+    for pattern in patterns:
+        for match in pattern.finditer(source):
+            try:
+                name_start = match.start("name")
+            except IndexError:
+                continue
+            if fn.start_byte <= name_start < fn.end_byte:
+                return match
+    return None
+
+
+def _preceding_doc_comment(source: str, start_byte: int, language: str) -> str:
+    """Return the raw ``///`` / ``//`` / ``/** ... */`` text before a declaration."""
+    if language == "typescript":
+        return _preceding_jsdoc(source, start_byte)
+    marker = "///" if language in ("rust", "solidity") else "//"
+    lines: list[str] = []
+    for line in reversed(source[:start_byte].splitlines()):
+        stripped = line.strip()
+        if stripped.startswith(marker):
+            lines.insert(0, stripped)
+        elif not stripped:
+            continue
+        else:
+            break
+    return "\n".join(lines)
+
+
+def _extract_go_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
+    """Extract Go ``func`` declarations using tree-sitter, falling back to ``None``."""
+    functions = tree_sitter_extract.extract_functions(source, "go", _safe_identifier)
+    if functions is None:
+        return None
+    inferred_atoms = {atom.name: atom for atom in _infer_go_contracts(source)}
+    pattern = re.compile(
+        r"(?P<comment>(?:\s*//[^\n]*\n)*)\s*"
+        r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+        r"\((?P<params>[^)]*)\)\s*"
+        r"(?P<ret>(?:\([^)]*\)|[^{]+))?\s*\{",
+        re.DOTALL,
+    )
+    specs: list[ForeignCodeSpec] = []
+    for fn in functions:
+        if not fn.has_body:
+            continue
+        match = _match_function_pattern([pattern], source, fn)
+        if match is None:
+            continue
+        function_name = fn.name
+        comment = _clean_go_doc(match.group("comment") or "")
+        preconditions, postconditions = _contract_lines(comment)
+        inferred = inferred_atoms.get(function_name)
+        if inferred is not None and inferred.ensures != "true":
+            postconditions = _dedupe_strings([*postconditions, inferred.ensures])
+        specs.append(
+            ForeignCodeSpec(
+                function_name=function_name,
+                params={
+                    param.name: param.type
+                    for param in inferred.params
+                }
+                if inferred is not None
+                else _go_params(match.group("params")),
+                return_type=(
+                    inferred.return_type
+                    if inferred is not None
+                    else _go_type(match.group("ret") or "bool")
+                ),
+                preconditions=preconditions,
+                postconditions=postconditions,
+                source_line=fn.line,
+            )
+        )
+    return specs
+
+
+def _extract_typescript_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
+    """Extract TypeScript functions using tree-sitter, falling back to ``None``."""
+    functions = tree_sitter_extract.extract_functions(
+        source, "typescript", _safe_identifier
+    )
+    if functions is None:
+        return None
+    patterns = [
+        re.compile(
+            r"(?:export\s+)?(?:async\s+)?function\s+"
+            r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
+            r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?",
+            re.DOTALL,
+        ),
+        re.compile(
+            r"(?:export\s+)?(?:const|let)\s+"
+            r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+            r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
+            r"(?::\s*(?P<ret>[^=]+?))?\s*=>",
+            re.DOTALL,
+        ),
+    ]
+    specs: list[ForeignCodeSpec] = []
+    for fn in functions:
+        if not fn.has_body:
+            continue
+        match = _match_function_pattern(patterns, source, fn)
+        if match is None:
+            continue
+        comment = _clean_jsdoc(_preceding_jsdoc(source, fn.start_byte))
+        preconditions, postconditions = _contract_lines(comment)
+        specs.append(
+            ForeignCodeSpec(
+                function_name=fn.name,
+                params=_typescript_params(match.group("params")),
+                return_type=_typescript_type((match.group("ret") or "").strip() or "void"),
+                preconditions=preconditions,
+                postconditions=postconditions,
+                source_line=fn.line,
+            )
+        )
+    return specs
+
+
+def _extract_rust_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
+    """Extract Rust ``fn`` declarations using tree-sitter, falling back to ``None``."""
+    functions = tree_sitter_extract.extract_functions(source, "rust", _safe_identifier)
+    if functions is None:
+        return None
+    pattern = re.compile(
+        r"(?P<comment>(?:\s*///[^\n]*\n)*)\s*"
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
+        r"\((?P<params>[^)]*)\)\s*(?:->\s*(?P<ret>[^{;\n]+))?"
+        r"\s*(?:\{|;)?",
+        re.DOTALL,
+    )
+    specs: list[ForeignCodeSpec] = []
+    for fn in functions:
+        if not fn.has_body:
+            continue
+        match = _match_function_pattern([pattern], source, fn)
+        if match is None:
+            continue
+        comment = _clean_rust_doc(match.group("comment") or "")
+        preconditions, postconditions = _contract_lines(comment)
+        specs.append(
+            ForeignCodeSpec(
+                function_name=fn.name,
+                params=_rust_params(match.group("params")),
+                return_type=_rust_type((match.group("ret") or "").strip() or "()"),
+                preconditions=preconditions,
+                postconditions=postconditions,
+                source_line=fn.line,
+            )
+        )
+    return specs
+
+
+def _extract_solidity_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
+    """Extract Solidity ``function`` declarations using tree-sitter, falling back to ``None``."""
+    functions = tree_sitter_extract.extract_functions(
+        source, "solidity", _safe_identifier
+    )
+    if functions is None:
+        return None
+    pattern = re.compile(
+        r"(?P<comment>(?:\s*///[^\n]*\n)*)\s*"
+        r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
+        r"\((?P<params>[^)]*)\)"
+        r"(?P<attrs>[^{;]*?)\{",
+        re.DOTALL,
+    )
+    specs: list[ForeignCodeSpec] = []
+    for fn in functions:
+        if not fn.has_body:
+            continue
+        match = _match_function_pattern([pattern], source, fn)
+        if match is None:
+            continue
+        comment = _clean_rust_doc(match.group("comment") or "")
+        preconditions, postconditions = _contract_lines(comment)
+        attrs = match.group("attrs") or ""
+        returns_match = re.search(r"returns\s*\((?P<ret>[^)]*)\)", attrs)
+        return_type = (
+            _solidity_type(returns_match.group("ret"))
+            if returns_match
+            else "void"
+        )
+        specs.append(
+            ForeignCodeSpec(
+                function_name=fn.name,
+                params=_solidity_params(match.group("params")),
+                return_type=return_type,
+                preconditions=preconditions,
+                postconditions=postconditions,
+                source_line=fn.line,
+            )
+        )
+    return specs
+
+
 class ForeignCodeExtractor:
     """Extract function signatures and comment contracts from foreign code."""
 
@@ -139,6 +344,13 @@ class ForeignCodeExtractor:
 
     def extract_go(self, source: str) -> list[ForeignCodeSpec]:
         """Extract Go ``func`` declarations, ``//`` contracts, and safe-path hints."""
+        specs = _extract_go_with_tree_sitter(source)
+        if specs is not None:
+            return specs
+        return self._extract_go_regex(source)
+
+    def _extract_go_regex(self, source: str) -> list[ForeignCodeSpec]:
+        """Regex fallback for Go ``func`` extraction."""
         pattern = re.compile(
             r"(?P<comment>(?:\s*//[^\n]*\n)*)\s*"
             r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
@@ -183,6 +395,13 @@ class ForeignCodeExtractor:
 
     def extract_typescript(self, source: str) -> list[ForeignCodeSpec]:
         """Extract TypeScript function declarations and JSDoc contracts."""
+        specs = _extract_typescript_with_tree_sitter(source)
+        if specs is not None:
+            return specs
+        return self._extract_typescript_regex(source)
+
+    def _extract_typescript_regex(self, source: str) -> list[ForeignCodeSpec]:
+        """Regex fallback for TypeScript function extraction."""
         specs: list[ForeignCodeSpec] = []
         patterns = [
             re.compile(
@@ -223,6 +442,13 @@ class ForeignCodeExtractor:
 
     def extract_rust(self, source: str) -> list[ForeignCodeSpec]:
         """Extract Rust ``fn`` declarations and preceding ``///`` contracts."""
+        specs = _extract_rust_with_tree_sitter(source)
+        if specs is not None:
+            return specs
+        return self._extract_rust_regex(source)
+
+    def _extract_rust_regex(self, source: str) -> list[ForeignCodeSpec]:
+        """Regex fallback for Rust ``fn`` extraction."""
         pattern = re.compile(
             r"(?P<comment>(?:\s*///[^\n]*\n)*)\s*"
             r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
@@ -249,6 +475,13 @@ class ForeignCodeExtractor:
 
     def extract_solidity(self, source: str) -> list[ForeignCodeSpec]:
         """Extract Solidity ``function`` declarations and preceding ``///`` NatSpec."""
+        specs = _extract_solidity_with_tree_sitter(source)
+        if specs is not None:
+            return specs
+        return self._extract_solidity_regex(source)
+
+    def _extract_solidity_regex(self, source: str) -> list[ForeignCodeSpec]:
+        """Regex fallback for Solidity ``function`` extraction."""
         pattern = re.compile(
             r"(?P<comment>(?:\s*///[^\n]*\n)*)\s*"
             r"function\s+(?P<name>[A-Za-z_$][\w$]*)\s*"
