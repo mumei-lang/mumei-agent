@@ -1476,6 +1476,21 @@ def test_last_expression_skips_return_inside_nested_closures() -> None:
     assert _last_expression(body) == ""
 
 
+def test_last_expression_ignores_braces_inside_string_literals() -> None:
+    """Braces inside string/char literals must not corrupt depth tracking."""
+    from agent.cross_validation_foreign import _last_expression
+
+    body = (
+        'let msg = "}";\n'
+        "for x in v {\n"
+        "    return 3;\n"
+        "}\n"
+        "0\n"
+    )
+    # The real tail is the final ``0`` on the top level, not the nested ``return 3``.
+    assert _last_expression(body) == "0"
+
+
 # --------------------------------------------------------------------------- #
 # Layer B stage 2: syntax-tree expression analysis (with regex fallback)
 # --------------------------------------------------------------------------- #

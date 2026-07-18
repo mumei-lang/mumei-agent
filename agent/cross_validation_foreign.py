@@ -1699,9 +1699,13 @@ def _last_expression(body: str) -> str:
     # Compute brace depth at the start of each line so we ignore ``return``
     # statements and tail expressions that live inside nested closures or
     # blocks (e.g. Rust closure ``|x| { return false }`` inside a method call).
+    # Count braces on a literal/comment-stripped copy so that ``{``/``}`` inside
+    # string or char literals do not corrupt the depth tracking.
+    masked_body = _strip_go_rust_literals_and_comments(stripped)
+    masked_lines = [line for line in masked_body.splitlines()]
     start_depths: list[int] = []
     depth = 0
-    for line in raw_lines:
+    for line in masked_lines:
         start_depths.append(depth)
         for ch in line:
             if ch == "{":
@@ -1720,10 +1724,10 @@ def _last_expression(body: str) -> str:
         # If this line is the start of a multi-line method chain or call that
         # continues on the next line, do not treat it as a complete expression.
         next_idx = idx + 1
-        while next_idx < len(raw_lines) and not raw_lines[next_idx].strip():
+        while next_idx < len(masked_lines) and not masked_lines[next_idx].strip():
             next_idx += 1
-        if next_idx < len(raw_lines):
-            next_line = raw_lines[next_idx].strip()
+        if next_idx < len(masked_lines):
+            next_line = masked_lines[next_idx].strip()
             if re.match(r"^[.\(\)\->::]", next_line):
                 continue
         candidate = line.removeprefix("return ").strip().rstrip(";")
