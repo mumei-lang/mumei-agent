@@ -56,6 +56,19 @@ class ExtractedFunction:
     params_text: str = ""
     return_type: str | None = None
     attributes: tuple[str, ...] = ()
+    # Byte and character offsets of the declaration and body. tree-sitter works
+    # on UTF-8 bytes, but callers operate on Python ``str`` values (characters).
+    # Both units are exposed so callers can slice strings with character offsets
+    # while still comparing against tree-sitter byte positions when needed.
+    start_byte: int = 0
+    end_byte: int = 0
+    body_start_byte: int = 0
+    body_end_byte: int = 0
+    start_char: int = 0
+    end_char: int = 0
+    body_start_char: int = 0
+    body_end_char: int = 0
+    has_body: bool = True
 
 
 def _normalize_language(language: str) -> str:
@@ -136,20 +149,62 @@ def _decode(source_bytes: bytes, node) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
 
-def _inner_body(source_bytes: bytes, body_node) -> str:
-    """Return the text inside the outermost braces of ``body_node``.
+def _inner_body_offsets(source_bytes: bytes, body_node) -> tuple[str, int, int]:
+    """Return the text and byte offsets inside the outermost braces of ``body_node``.
 
     Matches the legacy ``_balanced_brace_body`` semantics (content between the
     first ``{`` and the last ``}``). Expression bodies (a braceless arrow body)
     are returned verbatim.
     """
     if body_node is None:
-        return ""
+        # ``len(source_bytes)`` is a safe sentinel that always sits at EOF.
+        return "", len(source_bytes), len(source_bytes)
+    start = body_node.start_byte
+    end = body_node.end_byte
     text = _decode(source_bytes, body_node)
     stripped = text.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
-        return stripped[1:-1]
-    return text
+        return stripped[1:-1], start + 1, end - 1
+    return text, start, end
+
+
+def _outer_declaration_node(node, language: str):
+    """Return the outer-most statement node that owns a function declaration.
+
+    For TypeScript this surfaces ``export_statement`` / ``lexical_declaration``
+    so callers can extract preceding JSDoc from the correct declaration start.
+    """
+    if language != "typescript":
+        return node
+    if node.type == "function_declaration" and node.parent is not None:
+        if node.parent.type == "export_statement":
+            return node.parent
+        return node
+    if node.type == "variable_declarator" and node.parent is not None:
+        value = node.child_by_field_name("value")
+        if value is not None and value.type in _VALUE_FUNCTION_NODE_TYPES:
+            lexical = node.parent
+            if (
+                lexical is not None
+                and lexical.parent is not None
+                and lexical.parent.type == "export_statement"
+            ):
+                return lexical.parent
+            return lexical
+    return node
+
+
+def _char_offsets(source_bytes: bytes) -> list[int]:
+    """Return a list mapping each byte index to its character index."""
+    offsets = [0] * (len(source_bytes) + 1)
+    char_count = 0
+    for i, byte in enumerate(source_bytes):
+        offsets[i] = char_count
+        # UTF-8 continuation bytes are 0x80-0xBF; they do not start a character.
+        if byte < 0x80 or byte >= 0xC0:
+            char_count += 1
+    offsets[len(source_bytes)] = char_count
+    return offsets
 
 
 def _iter_function_nodes(root, language: str):
@@ -196,15 +251,31 @@ def _extract(
     tree, source_bytes = _parse(source, canonical)
     if tree is None:
         return None
+    char_offsets = _char_offsets(source_bytes)
     results: list[ExtractedFunction] = []
-    for name_node, body_node, _ in _iter_function_nodes(tree.root_node, canonical):
+    for name_node, body_node, fn_node in _iter_function_nodes(
+        tree.root_node, canonical
+    ):
         raw_name = _decode(source_bytes, name_node)
+        declaration_node = _outer_declaration_node(fn_node, canonical)
+        body, body_start_byte, body_end_byte = _inner_body_offsets(
+            source_bytes, body_node
+        )
         results.append(
             ExtractedFunction(
                 name=safe_identifier(raw_name),
                 line=name_node.start_point[0] + 1,
-                body=_inner_body(source_bytes, body_node),
+                body=body,
                 raw_name=raw_name,
+                start_byte=declaration_node.start_byte,
+                end_byte=declaration_node.end_byte,
+                body_start_byte=body_start_byte,
+                body_end_byte=body_end_byte,
+                start_char=char_offsets[declaration_node.start_byte],
+                end_char=char_offsets[declaration_node.end_byte],
+                body_start_char=char_offsets[body_start_byte],
+                body_end_char=char_offsets[body_end_byte],
+                has_body=body_node is not None,
             )
         )
     return results
@@ -364,12 +435,18 @@ def _extract_full(
     tree, source_bytes = _parse(source, canonical)
     if tree is None:
         return None
+    char_offsets = _char_offsets(source_bytes)
     results: list[ExtractedFunction] = []
-    for name_node, body_node, fn_node in _iter_function_nodes(tree.root_node, canonical):
+    for name_node, body_node, fn_node in _iter_function_nodes(
+        tree.root_node, canonical
+    ):
         raw_name = _decode(source_bytes, name_node)
         name = safe_identifier(raw_name)
         line = name_node.start_point[0] + 1
-        body = _inner_body(source_bytes, body_node)
+        declaration_node = _outer_declaration_node(fn_node, canonical)
+        body, body_start_byte, body_end_byte = _inner_body_offsets(
+            source_bytes, body_node
+        )
         params_text = ""
         return_type: str | None = None
         attributes: tuple[str, ...] = ()
@@ -387,6 +464,15 @@ def _extract_full(
                 params_text=params_text,
                 return_type=return_type,
                 attributes=attributes,
+                start_byte=declaration_node.start_byte,
+                end_byte=declaration_node.end_byte,
+                body_start_byte=body_start_byte,
+                body_end_byte=body_end_byte,
+                start_char=char_offsets[declaration_node.start_byte],
+                end_char=char_offsets[declaration_node.end_byte],
+                body_start_char=char_offsets[body_start_byte],
+                body_end_char=char_offsets[body_end_byte],
+                has_body=body_node is not None,
             )
         )
     return results
@@ -396,6 +482,13 @@ def extract_contract_functions(
     source: str, language: str, safe_identifier: Callable[[str], str]
 ) -> list[ExtractedFunction] | None:
     """Return functions with signatures for contract inference, or ``None`` to fall back."""
+    return _extract_full(source, language, safe_identifier)
+
+
+def extract_functions(
+    source: str, language: str, safe_identifier: Callable[[str], str]
+) -> list[ExtractedFunction] | None:
+    """Return full function metadata (signatures + offsets), or ``None`` to fall back."""
     return _extract_full(source, language, safe_identifier)
 
 
