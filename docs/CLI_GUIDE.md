@@ -188,5 +188,5 @@ Create/replace tasks whose atoms provide explicit `body` values and set
 LLM credential; `vstd_core_predicates.json` and `vstd_crypto_primitives.json`
 exercise this no-LLM path.
 
-See [`forge_tasks/README.md`](forge_tasks/README.md) for the full task
+See [`forge_tasks/README.md`](../forge_tasks/README.md) for the full task
 spec schema.
