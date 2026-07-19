@@ -1679,3 +1679,34 @@ def test_rust_contract_inference_skips_test_attribute_functions() -> None:
     atoms = _infer_rust_contracts(source)
     names = {atom.name for atom in atoms}
     assert names == {"mean"}
+
+
+def test_verifier_treats_solidity_struct_only_as_no_functions() -> None:
+    """Issue 1: struct-only Solidity files should not produce a verification error."""
+    source = """pragma solidity >=0.6.2;
+
+struct PoolKey {
+    address currency0;
+    address currency1;
+    uint24 fee;
+    int24 tickSpacing;
+    address hooks;
+}
+"""
+    result = ForeignCodeVerifier(mumei_bin="mumei").verify(source, "solidity")
+    assert result["success"] is True
+    assert result["errors"] == []
+    assert result["verification"] is not None
+    assert any("No function signatures were extracted" in w for w in result["warnings"])
+
+
+def test_source_has_function_declarations() -> None:
+    """_source_has_function_declarations correctly detects Solidity functions and struct-only sources."""
+    from agent.strategies.foreign_code_strategy import _source_has_function_declarations
+
+    assert _source_has_function_declarations("function f() {}", "solidity") is True
+    assert (
+        _source_has_function_declarations("struct S { uint x; }", "solidity") is False
+    )
+    assert _source_has_function_declarations("func F() {}", "go") is True
+    assert _source_has_function_declarations("pub fn f() {}", "rust") is True

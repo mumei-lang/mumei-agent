@@ -475,6 +475,40 @@ class ForeignCodeExtractor:
             )
         return specs
 
+def _source_has_function_declarations(source: str, language: str) -> bool | None:
+    """Return True when ``source`` contains at least one function declaration.
+
+    ``None`` means the check was inconclusive (e.g., unsupported language or
+    unparseable source); callers should treat ``None`` as "could have functions".
+    """
+    normalized = _normalize_language(language)
+    if normalized in tree_sitter_extract.SUPPORTED_LANGUAGES:
+        names = tree_sitter_extract.function_names(source, normalized, _safe_identifier)
+        if names is not None:
+            return bool(names)
+
+    if normalized == "python":
+        try:
+            tree = ast.parse(source)
+            return any(
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for node in ast.walk(tree)
+            )
+        except SyntaxError:
+            return None
+
+    patterns = {
+        "go": re.compile(r"\bfunc\s+[A-Za-z_]\w*"),
+        "rust": re.compile(r"\bfn\s+[A-Za-z_]\w*"),
+        "typescript": re.compile(r"\bfunction\s+[A-Za-z_]\w*"),
+        "solidity": re.compile(r"\bfunction\s+[A-Za-z_]\w*"),
+    }
+    pattern = patterns.get(normalized)
+    if pattern is not None:
+        return bool(pattern.search(source))
+    return None
+
+
 class ForeignCodeVerifier:
     """Verify extracted foreign-code atoms with ``mumei verify --json``."""
 
@@ -498,6 +532,24 @@ class ForeignCodeVerifier:
         atoms = [to_mumei_atom(spec) for spec in specs]
         mumei_source = "\n\n".join(atoms) + ("\n" if atoms else "")
         if not specs:
+            has_functions = _source_has_function_declarations(
+                source_code, normalized_language
+            )
+            if has_functions is False and not safety_issues:
+                return {
+                    "success": True,
+                    "language": normalized_language,
+                    "specs": [],
+                    "atoms": [],
+                    "source_line_map": {},
+                    "mumei_source": "",
+                    "verification": {"success": True, "report": {"status": "verified"}},
+                    "errors": [],
+                    "warnings": [
+                        "No function signatures were extracted; source contains no function declarations."
+                    ],
+                    **_first_counterexample_payload([]),
+                }
             return {
                 "success": False,
                 "language": normalized_language,

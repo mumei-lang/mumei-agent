@@ -1726,3 +1726,37 @@ def test_foreign_go_verifier_does_not_treat_package_selector_as_nil() -> None:
     assert result["success"] is True
     assert result["errors"] == []
     assert all("math" not in message for message in result["errors"])
+
+
+def test_forge_atom_to_mumei_coerces_natural_language_clauses() -> None:
+    """Issue 2: natural-language requires/ensures are coerced to valid boolean clauses."""
+    from agent.audit_reporting import _forge_atom_to_mumei
+
+    atom = {
+        "name": "toId",
+        "inputs": [{"name": "poolKey", "type": "u64"}],
+        "return_type": "u64",
+        "requires": "poolKey has at least 32 bytes, poolKey does not contain null",
+        "ensures": "! result.layout.allocator",
+    }
+    source = _forge_atom_to_mumei(atom)
+    assert "requires: true;" in source
+    assert "ensures: true;" in source
+    assert "poolKey has at least 32 bytes" not in source
+    assert "! result.layout.allocator" not in source
+
+
+def test_forge_atom_to_mumei_keeps_boolean_clauses() -> None:
+    """Valid boolean expressions are not coerced away."""
+    from agent.audit_reporting import _forge_atom_to_mumei
+
+    atom = {
+        "name": "add",
+        "inputs": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+        "return_type": "i64",
+        "requires": "a >= 0 && b >= 0",
+        "ensures": "result == a + b",
+    }
+    source = _forge_atom_to_mumei(atom)
+    assert "requires: a >= 0 && b >= 0;" in source
+    assert "ensures: result == a + b;" in source

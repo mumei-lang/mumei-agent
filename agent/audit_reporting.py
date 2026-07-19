@@ -26,8 +26,12 @@ def _forge_atom_to_mumei(atom: dict[str, object]) -> str:
     name = _safe_identifier(_string_value(atom.get("name"), "audited_atom"))
     params = _format_params(atom.get("params") or atom.get("inputs"))
     return_type = _string_value(atom.get("return_type"), "i64")
-    requires = _contract_text(atom.get("requires"), "true")
-    ensures = _contract_text(atom.get("ensures"), "true")
+    requires = _coerce_to_boolean_clause(
+        _contract_text(atom.get("requires"), "true")
+    )
+    ensures = _coerce_to_boolean_clause(
+        _contract_text(atom.get("ensures"), "true")
+    )
     default_value = _default_literal(return_type)
     return "\n".join(
         [
@@ -61,6 +65,57 @@ def _contract_text(value: object, default: str) -> str:
         parts = [item.strip() for item in value if isinstance(item, str) and item.strip()]
         return " && ".join(parts) if parts else default
     return default
+
+
+_NATURAL_LANGUAGE_RE = re.compile(
+    r"\b(?:has|have|contains?|holds?|includes?|excludes?|does|did|is|are|was|were|"
+    r"be|been|being|am|not|no|yes|any|all|each|every|some|none|least|most|exactly|only|"
+    r"always|never|should|must|will|would|can|could|may|might|shall|often|sometimes|usually|"
+    r"already|still|yet|just|also|too|very|such|so|like|than|then|into|onto|upon|within|"
+    r"without|outside|inside|across|around|over|under|off|on|in|at|by|with|from|to|of|for|"
+    r"and|or|but|above|below|between|among|through|during|before|after|while|when|where|"
+    r"because|since|although|unless|until|if|else|whether|rather|instead)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_natural_language_word(clause: str) -> bool:
+    """Return True when ``clause`` contains an English word used as prose."""
+    for match in _NATURAL_LANGUAGE_RE.finditer(clause):
+        after = clause[match.end():]
+        # Method/function calls like ``contains(x)`` or ``s.contains(x)`` are not prose.
+        if re.match(r"\s*\(", after):
+            continue
+        before = clause[:match.start()]
+        if re.search(r"\.\s*$", before):
+            continue
+        return True
+    return False
+
+
+def _is_boolean_like_clause(clause: str) -> bool:
+    """Heuristic: does ``clause`` look like a Mumei boolean expression?"""
+    text = clause.strip()
+    if not text:
+        return True
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return True
+    # Contains a comparison/logical operator or a quantifier.
+    if re.search(r"==|!=|<=|>=|<|>|\|\||&&|\bforall\b|\bexists\b", lowered):
+        return True
+    # Unary ``!`` applied to a field path is typically a non-boolean null check
+    # in Mumei (e.g., ``! result.layout.allocator``), so treat it as prose.
+    if re.fullmatch(r"!\s*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+", text):
+        return False
+    if _has_natural_language_word(text):
+        return False
+    return True
+
+
+def _coerce_to_boolean_clause(clause: str, default: str = "true") -> str:
+    """Return ``clause`` if it looks boolean, otherwise ``default`` (typically ``true``)."""
+    return clause if _is_boolean_like_clause(clause) else default
 
 
 _MALFORMED_HEX_LITERAL_RE = re.compile(r"\b\d+\s+x[0-9a-fA-F]+")

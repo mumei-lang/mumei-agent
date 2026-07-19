@@ -208,3 +208,88 @@ def test_extension_map_matches_language_type() -> None:
     allowed = set(typing.get_args(Language))
     ext_languages = set(CodeToSpecExtractor.EXTENSION_MAP.values())
     assert ext_languages <= allowed, f"EXTENSION_MAP has languages not in Language type: {ext_languages - allowed}"
+
+
+def test_align_llm_spec_maps_safe_prefix_and_drops_hallucinated_atoms() -> None:
+    """Issue 3: hallucinated safe_* atoms and generate_* atoms are reconciled."""
+    from agent.code_to_spec import _align_llm_spec_with_source
+
+    code = """
+function toBeforeSwapDelta(int128 a, int128 b) pure returns (BeforeSwapDelta) {
+    return BeforeSwapDelta.wrap(0);
+}
+function getSpecifiedDelta(BeforeSwapDelta d) internal pure returns (int128) {
+    return 0;
+}
+function getUnspecifiedDelta(BeforeSwapDelta d) internal pure returns (int128) {
+    return 0;
+}
+"""
+    deterministic = CodeToSpecConverter(AgentConfig()).convert_source(code, "solidity")
+    llm_spec = {
+        "task_id": "x",
+        "target_file": "std/x.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "safe_swapping_delta",
+                "description": "d",
+                "inputs": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "true",
+                "ensures": "true",
+                "effects": [],
+            },
+            {
+                "name": "generate_pool_key",
+                "description": "d",
+                "inputs": [],
+                "return_type": "i64",
+                "requires": "true",
+                "ensures": "true",
+                "effects": [],
+            },
+        ],
+    }
+    warnings: list[str] = []
+    aligned = _align_llm_spec_with_source(
+        llm_spec, deterministic.atoms, Path("x.sol"), warnings
+    )
+    names = [atom["name"] for atom in aligned["atoms"]]
+    assert "toBeforeSwapDelta" in names
+    assert "getSpecifiedDelta" in names
+    assert "getUnspecifiedDelta" in names
+    assert "safe_swapping_delta" not in names
+    assert "generate_pool_key" not in names
+    assert any("generate_pool_key" in w for w in warnings)
+
+
+def test_align_llm_spec_maps_safe_constant_time_compare() -> None:
+    """Issue 3: safe_constant_time_compare should map to ConstantTimeCompare."""
+    from agent.code_to_spec import _align_llm_spec_with_source
+
+    code = """
+func ConstantTimeCompare(x, y []byte) int { return 0 }
+"""
+    deterministic = CodeToSpecConverter(AgentConfig()).convert_source(code, "go")
+    llm_spec = {
+        "task_id": "x",
+        "target_file": "std/x.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "safe_constant_time_compare",
+                "description": "d",
+                "inputs": [
+                    {"name": "x", "type": "i64"},
+                    {"name": "y", "type": "i64"},
+                ],
+                "return_type": "i64",
+                "requires": "true",
+                "ensures": "true",
+                "effects": [],
+            }
+        ],
+    }
+    aligned = _align_llm_spec_with_source(llm_spec, deterministic.atoms, Path("x.go"), [])
+    assert [atom["name"] for atom in aligned["atoms"]] == ["ConstantTimeCompare"]
