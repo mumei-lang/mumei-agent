@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 import chardet
 from openai import OpenAI
@@ -175,6 +175,159 @@ def _forge_task_spec_from_atoms(
             for atom in atoms
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Helpers for aligning LLM-extracted forge specs with deterministic source atoms
+# ---------------------------------------------------------------------------
+
+_GENERIC_NAME_TOKENS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "am",
+    "has", "have", "had", "do", "does", "did", "can", "could", "will", "would",
+    "shall", "should", "may", "might", "must", "and", "or", "not", "no", "yes",
+    "any", "all", "each", "every", "some", "none", "to", "get", "set", "in", "on",
+    "at", "by", "with", "from", "of", "for", "as", "into", "onto", "over", "under",
+    "above", "below", "before", "after", "during", "through", "across", "around",
+    "between", "among", "within", "without", "outside", "inside", "off", "out", "up",
+    "down",
+})
+
+
+def _canonicalize_name(name: str) -> str:
+    """Return a case- and underscore-insensitive key for matching symbol names."""
+    return name.strip().replace("_", "").lower()
+
+
+def _strip_safe_prefix(name: str) -> str | None:
+    """Remove a leading ``safe_`` / ``Safe`` prefix from hallucinated atom names."""
+    lowered = name.lower()
+    if lowered.startswith("safe_"):
+        return name[5:]
+    if lowered.startswith("safe") and len(name) > 4 and name[4].isupper():
+        rest = name[4:]
+        return rest[0].lower() + rest[1:]
+    return None
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Split a camelCase / snake_case identifier into lowercase tokens."""
+    spaced = re.sub(r"(?<!^)(?=[A-Z])", "_", name)
+    return [t.lower() for t in re.split(r"[^A-Za-z0-9]+", spaced) if t and not t.isdigit()]
+
+
+def _token_match(llm_token: str, source_token: str) -> bool:
+    """True when two name tokens match exactly or one contains the other."""
+    if llm_token == source_token:
+        return True
+    if len(llm_token) < 3 or len(source_token) < 3:
+        return False
+    return llm_token in source_token or source_token in llm_token
+
+
+def _filtered_tokens(tokens: list[str]) -> list[str]:
+    return [t for t in tokens if t not in _GENERIC_NAME_TOKENS and len(t) >= 2]
+
+
+def _token_score(llm_name: str, source_name: str) -> int:
+    """Score how many non-generic tokens of ``llm_name`` match ``source_name``."""
+    llm_tokens = _filtered_tokens(_name_tokens(llm_name))
+    source_tokens = _filtered_tokens(_name_tokens(source_name))
+    if not llm_tokens:
+        return 0
+    score = 0
+    for lt in llm_tokens:
+        for st in source_tokens:
+            if _token_match(lt, st):
+                score += 1
+                break
+    return score
+
+
+def _best_matching_source_atom(
+    name: str,
+    source_atoms: list[ContractLike],
+    source_by_canon: dict[str, ContractLike],
+) -> ContractLike | None:
+    """Map an LLM atom name to the most likely deterministic source atom."""
+    canon = _canonicalize_name(name)
+    if canon in source_by_canon:
+        return source_by_canon[canon]
+
+    stripped = _strip_safe_prefix(name)
+    if stripped is not None:
+        canon = _canonicalize_name(stripped)
+        if canon in source_by_canon:
+            return source_by_canon[canon]
+
+    if not source_atoms:
+        return None
+
+    candidate = stripped if stripped is not None else name
+    llm_tokens = _filtered_tokens(_name_tokens(candidate))
+    if not llm_tokens:
+        return None
+    threshold = max(1, (len(llm_tokens) + 1) // 2)
+    best: ContractLike | None = None
+    best_score = -1
+    for source_atom in source_atoms:
+        score = _token_score(candidate, source_atom.name)
+        if score >= threshold and score > best_score:
+            best_score = score
+            best = source_atom
+    return best
+
+
+def _align_llm_spec_with_source(
+    forge_task_spec: dict[str, object],
+    source_atoms: list[ContractLike],
+    code_path: Path,
+    warnings: list[str],
+) -> dict[str, object]:
+    """Replace hallucinated LLM atom names with actual source function names.
+
+    Atoms that cannot be matched to a source function are dropped, and source
+    functions missing from the LLM spec are added from the deterministic parser.
+    """
+    if not isinstance(forge_task_spec, dict):
+        return forge_task_spec
+
+    atoms = forge_task_spec.get("atoms")
+    if not isinstance(atoms, list):
+        return forge_task_spec
+
+    source_by_canon = {_canonicalize_name(atom.name): atom for atom in source_atoms}
+    matched_by_canon: dict[str, dict[str, object]] = {}
+
+    for atom in atoms:
+        if not isinstance(atom, dict):
+            continue
+        name = atom.get("name", "")
+        if not name or not isinstance(name, str):
+            continue
+        source_atom = _best_matching_source_atom(name, source_atoms, source_by_canon)
+        if source_atom is None:
+            warnings.append(
+                f"Dropping spec atom '{name}' with no matching source function."
+            )
+            continue
+        atom["name"] = source_atom.name
+        canon = _canonicalize_name(source_atom.name)
+        if canon in matched_by_canon:
+            warnings.append(f"Duplicate spec atom mapping for '{source_atom.name}'.")
+            continue
+        matched_by_canon[canon] = atom
+
+    final_atoms: list[dict[str, object]] = []
+    for source_atom in source_atoms:
+        canon = _canonicalize_name(source_atom.name)
+        if canon in matched_by_canon:
+            final_atoms.append(cast(dict[str, object], matched_by_canon[canon]))
+        else:
+            base = _forge_task_spec_from_atoms(code_path, [source_atom])
+            final_atoms.extend(base["atoms"])
+
+    forge_task_spec["atoms"] = final_atoms
+    return forge_task_spec
 
 
 class CodeToSpecExtractor:
@@ -378,6 +531,13 @@ class CodeToSpecExtractor:
                 mumei_client=mumei_client,
                 max_retries=max_retries,
             )
+            if forge_task_spec and not deterministic.errors:
+                forge_task_spec = _align_llm_spec_with_source(
+                    forge_task_spec,
+                    deterministic.atoms,
+                    code_path,
+                    warnings,
+                )
             return CodeToSpecResult(
                 success=True,
                 natural_language_spec=natural_language_spec,

@@ -77,7 +77,10 @@ from agent.llm_provider import LLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
-from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
+from agent.strategies.foreign_code_strategy import (
+    ForeignCodeVerifier,
+    _source_has_function_declarations,
+)
 from agent.strategies.foreign_code_strategy_helpers import (
     build_solidity_guard_trace_proof_certificate,
 )
@@ -263,7 +266,10 @@ class AuditPipeline:
         )
         spec_source = _forge_task_to_mumei_source(extraction.forge_task_spec)
         if not spec_source:
-            errors.append("No Mumei atoms were generated from the extracted forge task spec.")
+            if _source_has_function_declarations(source_code, audit_language) is not False:
+                errors.append(
+                    "No Mumei atoms were generated from the extracted forge task spec."
+                )
 
         spec_health_issues: list[str] = malformed_extraction_issues
         verification_violations: list[str] = []
