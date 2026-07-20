@@ -42,7 +42,7 @@ from agent.audit import AuditPipeline, AUDIT_SCHEMA_KEYS
 from agent.dogfood_triage import triage_directory_result
 res = AuditPipeline(config=AgentConfig()).audit_directory("<dir>", "python")
 rep = triage_directory_result(res)
-assert all(hasattr(res, k) for k in AUDIT_SCHEMA_KEYS)  # 7 fixed keys still present
+assert all(hasattr(res, k) for k in AUDIT_SCHEMA_KEYS)  # 8 fixed keys still present
 ```
 (run with `env MUMEI_BIN=/home/ubuntu/repos/mumei/target/debug/mumei uv run python ...`)
 
