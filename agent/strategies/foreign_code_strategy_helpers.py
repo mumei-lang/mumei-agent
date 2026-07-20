@@ -615,6 +615,64 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
     return contracts
 
 
+def _go_is_known_interface_method(
+    name: str,
+    params_text: str,
+    return_type: str | None,
+) -> bool:
+    """Return True for pointer-receiver methods implementing common Go interfaces.
+
+    Interface methods are always invoked on non-nil concrete values, so nil
+    receiver counterexamples are caller-contract noise.
+    """
+    if not name or not params_text:
+        return False
+    ret = return_type or ""
+    if name == "RoundTrip" and "*http.Request" in params_text and "*http.Response" in ret:
+        return True
+    if (
+        name == "Authorize"
+        and "authorizer.Attributes" in params_text
+        and "authorizer.Decision" in ret
+    ):
+        return True
+    if name == "ServeHTTP" and "http.ResponseWriter" in params_text and "*http.Request" in params_text:
+        return True
+    if name in {"Read", "Write"} and "[]byte" in params_text and "int, error" in ret.replace(" ", ""):
+        return True
+    if name == "Close" and ret.strip().endswith("error"):
+        return True
+    return False
+
+
+def _go_first_param_name(params_text: str) -> str | None:
+    """Return the first parameter name (receiver or first argument)."""
+    first = params_text.split(",", 1)[0].strip()
+    match = re.match(r"([A-Za-z_]\w*)\s+", first)
+    return match.group(1) if match else None
+
+
+def _go_callback_function_names(source: str, functions: list) -> set[str]:
+    """Top-level function names that are used as values in composite/map literals.
+
+    Such functions are callbacks invoked with a non-nil first argument by the
+    container that stores them (e.g. ``addF: amd64Add`` in an ``Arch`` literal).
+    """
+    method_names: set[str] = set()
+    for fn in functions:
+        decl = source[fn.start_char : fn.body_start_char].lstrip()
+        if decl.startswith("func ("):
+            method_names.add(fn.name)
+
+    top_level = {fn.name for fn in functions if fn.name not in method_names}
+    if not top_level:
+        return set()
+    pattern = re.compile(
+        r":\s*(" + "|".join(re.escape(n) for n in top_level) + r")\b"
+    )
+    return {m.group(1) for m in pattern.finditer(source)}
+
+
 def _is_nil_contract_for_value(issue: ForeignSafetyIssue, value: str | None) -> bool:
     """Return True when ``issue`` is exactly a ``value != nil`` precondition."""
     if value is None or not issue.required_contracts:
@@ -763,6 +821,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     if functions is not None:
         flag_value_types = _go_flag_value_receiver_types(functions)
         caller_contract_types = _go_caller_contract_receiver_types(source)
+        callback_names = _go_callback_function_names(source, functions)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -779,10 +838,16 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 and rtype is not None
                 and rtype in flag_value_types
             )
+            is_method = source[fn.start_char : fn.body_start_char].lstrip().startswith("func (")
             suppress_receiver_nil = (
                 rtype is not None
-                and rtype.lstrip("*") in caller_contract_types
+                and (
+                    rtype.lstrip("*") in caller_contract_types
+                    or _go_is_known_interface_method(fn.name, fn.params_text, fn.return_type)
+                )
             )
+            first_param = _go_first_param_name(fn.params_text)
+            suppress_callback_nil = not is_method and fn.name in callback_names and first_param is not None
             for index, expression in enumerate(expressions):
                 expr_issues = _issues_for_expression(
                     fn.name,
@@ -818,6 +883,12 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                         for issue in expr_issues
                         if not _is_nil_contract_for_value(issue, receiver_name)
                     ]
+                if suppress_callback_nil:
+                    expr_issues = [
+                        issue
+                        for issue in expr_issues
+                        if not _is_nil_contract_for_value(issue, first_param)
+                    ]
                 if fn.name in {"Less", "Swap"}:
                     expr_issues = [
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
@@ -831,6 +902,8 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         for name, params_text, _, _ in go_decls
     ])
     caller_contract_types = _go_caller_contract_receiver_types(source)
+    # Regex fallback cannot reliably distinguish methods from top-level
+    # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
@@ -846,7 +919,10 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         )
         suppress_receiver_nil = (
             rtype is not None
-            and rtype.lstrip("*") in caller_contract_types
+            and (
+                rtype.lstrip("*") in caller_contract_types
+                or _go_is_known_interface_method(name, params_text, _return_type)
+            )
         )
         for index, expression in enumerate(expressions):
             expr_issues = _issues_for_expression(

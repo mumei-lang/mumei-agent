@@ -2259,3 +2259,44 @@ def test_rust_contract_inference_falls_back_bool_ensures() -> None:
     assert len(atoms) == 1
     assert atoms[0].return_type == "bool"
     assert atoms[0].ensures == "true"
+
+
+def test_go_safety_suppresses_interface_method_nil_receiver() -> None:
+    """Pointer-receiver methods implementing standard interfaces are caller-contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package authorizer
+
+import (
+    "context"
+    "k8s.io/apiserver/pkg/authorization/authorizer"
+)
+
+type GrafanaAuthorizer struct{ auth authorizer.Authorizer }
+
+func (a *GrafanaAuthorizer) Authorize(ctx context.Context, attr authorizer.Attributes) (authorizer.Decision, string, error) {
+    return a.auth.Authorize(ctx, attr)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("GrafanaAuthorizer" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_top_level_callback_first_param_nil() -> None:
+    """Top-level functions stored as struct/map callbacks are invoked with non-nil first arg."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package asmgen
+
+type Asm struct{}
+type Reg int
+type Carry int
+
+func amd64Add(a *Asm, src1, src2 Reg, dst Reg, carry Carry) bool {
+    return a.Enabled(0)
+}
+
+var arch = struct{ addF func(*Asm, Reg, Reg, Reg, Carry) bool }{addF: amd64Add}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("amd64Add" in i.message for i in issues)
