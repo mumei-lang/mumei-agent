@@ -488,6 +488,7 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             "Solidity",
             known_constants=_solidity_declared_constants(source),
             mapping_names=mapping_names,
+            guaranteed_nonzero=_solidity_guaranteed_nonzero_params(source),
         )
         issues.extend(_detect_solidity_contract_issues(source))
         return issues
@@ -521,6 +522,44 @@ def _solidity_declared_constants(source: str) -> dict[str, int]:
     can be picked as ``0`` / ``-1`` (#296).
     """
     return semantic_safety.collect_declared_constants(source, "solidity")
+
+
+def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
+    """Infer parameter names that are guaranteed non-zero from MIN_* constants.
+
+    If a file declares ``MIN_FOO = 1`` (or any positive constant whose name
+    starts with ``MIN_``), any function parameter whose normalized name matches
+    the suffix is treated as strictly positive. This suppresses divide-by-zero
+    false positives for parameters whose valid range is documented by constants
+    (e.g. Uniswap ``TickMath``'s ``tickSpacing`` with ``MIN_TICK_SPACING``).
+    """
+    constants = _solidity_declared_constants(source)
+    min_constants = {
+        name[4:]: value
+        for name, value in constants.items()
+        if name.startswith("MIN_") and value > 0
+    }
+    if not min_constants:
+        return set()
+
+    guaranteed: set[str] = set()
+    functions = tree_sitter_extract.extract_contract_functions(
+        source, "solidity", _safe_identifier
+    )
+    if functions is None:
+        functions = [
+            type("Fn", (), {"name": _safe_identifier(match.group("name")), "params_text": match.group("params")})()
+            for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source)
+        ]
+    for fn in functions:
+        for param_name in _solidity_params(fn.params_text or "").keys():
+            normalized = param_name.lower().replace("_", "")
+            for suffix in min_constants:
+                if normalized == suffix.lower().replace("_", "") or normalized in suffix.lower().replace("_", ""):
+                    guaranteed.add(param_name)
+                    break
+    return guaranteed
+
 
 def _first_counterexample_payload(
     issues: list[ForeignSafetyIssue],
@@ -557,6 +596,7 @@ def _detect_block_safety_issues(
     known_constants: dict[str, int] | None = None,
     nullable_params: dict[str, set[str]] | None = None,
     mapping_names: set[str] | None = None,
+    guaranteed_nonzero: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     fallback = label == "TypeScript"
@@ -577,6 +617,7 @@ def _detect_block_safety_issues(
                     dereference_values=dereference_values,
                     known_constants=known_constants,
                     mapping_names=mapping_names,
+                    guaranteed_nonzero=guaranteed_nonzero,
                 )
             )
     return issues
@@ -648,6 +689,20 @@ def _go_is_known_interface_method(
     if name == "Close" and re.search(r"\berror\b", ret):
         return True
     return False
+
+
+def _go_interface_method_names(source: str) -> set[str]:
+    """Return method names declared by interface types in the source.
+
+    Any concrete method with the same name is treated as an interface
+    implementation, so nil receiver counterexamples are suppressed.
+    """
+    names: set[str] = set()
+    for match in re.finditer(r"type\s+\w+\s+interface\s*\{(.*?)\}", source, flags=re.DOTALL):
+        body = match.group(1)
+        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", body):
+            names.add(m.group(1))
+    return names
 
 
 def _go_first_param_name(params_text: str) -> str | None:
@@ -827,6 +882,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         flag_value_types = _go_flag_value_receiver_types(functions)
         caller_contract_types = _go_caller_contract_receiver_types(source)
         callback_names = _go_callback_function_names(source, functions)
+        interface_method_names = _go_interface_method_names(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -849,6 +905,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 and (
                     rtype.lstrip("*") in caller_contract_types
                     or _go_is_known_interface_method(fn.name, fn.params_text, fn.return_type)
+                    or fn.name in interface_method_names
                 )
             )
             first_param = _go_first_param_name(fn.params_text)
@@ -907,6 +964,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         for name, params_text, _, _ in go_decls
     ])
     caller_contract_types = _go_caller_contract_receiver_types(source)
+    interface_method_names = _go_interface_method_names(source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
@@ -927,6 +985,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
             and (
                 rtype.lstrip("*") in caller_contract_types
                 or _go_is_known_interface_method(name, params_text, _return_type)
+                or name in interface_method_names
             )
         )
         for index, expression in enumerate(expressions):
@@ -1253,9 +1312,10 @@ def _issues_for_expression(
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
+    guaranteed_nonzero: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
-    guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression)
+    guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
     ts_language = _LABEL_TO_TS_LANGUAGE.get(label)
     findings = (
         tree_sitter_extract.analyze_expression(expression, ts_language)
