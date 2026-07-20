@@ -21,6 +21,7 @@ from agent.cross_validation_foreign import (
     _go_function_declarations,
     _go_nillable_param_names,
     _go_type_is_nillable,
+    _go_param_types,
     _is_go_test_name,
     _local_variable_names,
     _mask_nested_function_literals,
@@ -731,6 +732,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 continue
             body = fn.body
             param_names = _go_nillable_param_names(fn.params_text)
+            param_types = _go_param_types(fn.params_text)
             local_names = _local_variable_names(body, "go")
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
@@ -752,6 +754,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                     "Go",
                     dereference_values=param_names,
                     local_names=local_names,
+                    param_types=param_types,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -794,6 +797,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     caller_contract_types = _go_caller_contract_receiver_types(source)
     for name, params_text, _return_type, body in go_decls:
         param_names = _go_nillable_param_names(params_text)
+        param_types = _go_param_types(params_text)
         local_names = _local_variable_names(body, "go")
         expressions = _return_expressions(body, fallback=False, language="go")
         guarded = _go_nil_guarded_return_values(body)
@@ -815,6 +819,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 "Go",
                 dereference_values=param_names,
                 local_names=local_names,
+                param_types=param_types,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -879,11 +884,17 @@ def _index_safety_issue(
     index: str,
     label: str,
     known_constants: dict[str, int],
+    param_types: dict[str, str] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
     # impossible negative index (#296). The upper bound is still a real
     # concern, so we keep checking `index < len` rather than skipping it.
+    if label == "Go" and param_types:
+        container_type = param_types.get(container, "")
+        if container_type.startswith("map["):
+            # Map key access is always safe (returns zero value if missing).
+            return None
     known_index = known_constants.get(index)
     if known_index is not None and known_index < 0:
         known_index = None
@@ -1119,6 +1130,7 @@ def _issues_for_expression(
     dereference_values: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
     local_names: set[str] | None = None,
+    param_types: dict[str, str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression)
@@ -1138,6 +1150,7 @@ def _issues_for_expression(
             known_constants=known_constants,
             guaranteed_nonzero=guaranteed_nonzero,
             local_names=local_names,
+            param_types=param_types,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1154,7 +1167,7 @@ def _issues_for_expression(
                 # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
                 continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants
+                function_name, container, index, label, known_constants, param_types=param_types
             )
             if issue is not None:
                 issues.append(issue)
@@ -1206,6 +1219,7 @@ def _issues_from_findings(
     known_constants: dict[str, int],
     guaranteed_nonzero: set[str] | None = None,
     local_names: set[str] | None = None,
+    param_types: dict[str, str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1216,7 +1230,7 @@ def _issues_from_findings(
     issues: list[ForeignSafetyIssue] = []
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":
