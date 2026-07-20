@@ -28,6 +28,7 @@ from agent.audit_reporting import (
 from agent.audit_reporting import _verification_status_from_foreign_result
 from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
+from agent.dogfood_triage import triage_directory_result
 from agent.mm_migration_advisor import MigrationHint
 from agent.strategies.cross_validation_strategy import CrossValidationReport
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
@@ -35,6 +36,100 @@ from agent.strategies.spec_health_strategy import SpecHealthReport
 from agent.strategies.spec_health_strategy_helpers import ContradictionInfo
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _triage_file(
+    source_file: str,
+    status: str | None,
+    *,
+    spec_extracted: bool = True,
+    errors: list[str] | None = None,
+    spec_health_issues: list[str] | None = None,
+    skipped_rate_limited: bool = False,
+) -> AuditResult:
+    return AuditResult(
+        success=status == "verified",
+        source_file=source_file,
+        language="python",
+        spec_extracted=spec_extracted,
+        verification_status=status,
+        errors=errors or [],
+        spec_health_issues=spec_health_issues or [],
+        skipped_rate_limited=skipped_rate_limited,
+    )
+
+
+def test_dogfood_triage_buckets_verdicts_and_unverifiable_noise() -> None:
+    files = [
+        _triage_file("refuted.py", "refuted"),
+        _triage_file("verified.py", "verified"),
+        _triage_file("rate.py", None, errors=["HTTP 429 rate limit"]),
+        _triage_file("timeout.py", "unverifiable", errors=["request timed out"]),
+        _triage_file(
+            "encoding.py",
+            None,
+            spec_health_issues=["encoding-gap: unsupported expression"],
+        ),
+        _triage_file(
+            "missing.py",
+            None,
+            spec_extracted=False,
+            errors=["No Mumei atoms were extracted"],
+        ),
+        _triage_file("other.py", "unverifiable", errors=["unexpected failure"]),
+    ]
+
+    report = triage_directory_result(
+        AuditDirectoryResult(
+            success=False,
+            source_dir="fixtures",
+            language="python",
+            file_results=files,
+        )
+    )
+
+    assert report.human_review == ["refuted.py"]
+    assert report.verified == ["verified.py"]
+    assert report.unverifiable == {
+        "skipped_rate_limited": ["rate.py"],
+        "timeout": ["timeout.py"],
+        "encoding_gap": ["encoding.py"],
+        "no_function_declarations": ["missing.py"],
+        "other": ["other.py"],
+    }
+    assert report.total_files == 7
+    assert report.human_review_count == 1
+    assert report.verified_count == 1
+    assert report.unverifiable_count == 5
+    assert report.unverifiable_counts == {
+        "skipped_rate_limited": 1,
+        "timeout": 1,
+        "encoding_gap": 1,
+        "no_function_declarations": 1,
+        "other": 1,
+    }
+    assert report.to_dict()["total_files"] == 7
+
+
+def test_dogfood_triage_rate_limit_has_priority_over_timeout() -> None:
+    report = triage_directory_result(
+        AuditDirectoryResult(
+            success=False,
+            source_dir="fixtures",
+            language="python",
+            file_results=[
+                _triage_file(
+                    "priority.py",
+                    "unverifiable",
+                    errors=["429 rate limit; request timed out"],
+                )
+            ],
+            skipped_rate_limited_files=["priority.py"],
+        )
+    )
+
+    assert report.unverifiable["skipped_rate_limited"] == ["priority.py"]
+    assert report.unverifiable["timeout"] == []
 
 
 def _forge_spec() -> dict[str, object]:
