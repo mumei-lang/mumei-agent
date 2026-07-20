@@ -666,6 +666,7 @@ def _detect_block_safety_issues(
                     known_constants=known_constants,
                     mapping_names=mapping_names,
                     guaranteed_nonzero=per_function_nonzero,
+                    body=body,
                 )
             )
     return issues
@@ -736,7 +737,40 @@ def _go_is_known_interface_method(
         return True
     if name == "Close" and re.search(r"\berror\b", ret):
         return True
+    # cipher.AEAD implementation methods (Seal/Open/Overhead/NonceSize) are
+    # always called on a non-nil concrete value, so nil receiver counterexamples
+    # are noise.
+    if name == "Seal" and "[]byte" in params_text and "[]byte" in ret and "error" not in ret:
+        return True
+    if name == "Open" and "[]byte" in params_text and "error" in ret:
+        return True
+    if name in {"Overhead", "NonceSize"} and re.search(r"\bint\b", ret) and "[]byte" not in params_text:
+        return True
+    # hash.Hash interface methods (Sum/Size/BlockSize) are called on non-nil
+    # concrete values.
+    if name == "Sum" and "[]byte" in params_text and "[]byte" in ret:
+        return True
+    if name in {"Size", "BlockSize"} and re.search(r"\bint\b", ret) and "[]byte" not in params_text:
+        return True
     return False
+
+
+def _go_map_names(source: str) -> set[str]:
+    """Return package-level variable names declared as Go ``map`` types."""
+    names: set[str] = set()
+    # Single-line top-level ``var x = map[K]V{...}`` or ``var x map[K]V``.
+    for match in re.finditer(
+        r"^\s*var\s+(\w+)\s*(?:=\s*map\[|\s+map\[)", source, re.MULTILINE
+    ):
+        names.add(match.group(1))
+    # ``var ( ... )`` blocks where each line declares a map.
+    for match in re.finditer(r"^\s*var\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL):
+        block = match.group(1)
+        for m in re.finditer(
+            r"^\s*(\w+)\s*(?:=\s*map\[|\s+map\[)", block, re.MULTILINE
+        ):
+            names.add(m.group(1))
+    return names
 
 
 def _go_interface_method_names(source: str) -> set[str]:
@@ -943,6 +977,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         caller_contract_types = _go_caller_contract_receiver_types(source)
         callback_names = _go_callback_function_names(source, functions)
         interface_method_names = _go_interface_method_names(source)
+        go_map_names = _go_map_names(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -978,6 +1013,8 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                     dereference_values=param_names,
                     local_names=local_names,
                     param_types=param_types,
+                    mapping_names=go_map_names,
+                    body=body,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1025,6 +1062,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     ])
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
+    go_map_names = _go_map_names(source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
@@ -1056,6 +1094,8 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 dereference_values=param_names,
                 local_names=local_names,
                 param_types=param_types,
+                mapping_names=go_map_names,
+                body=body,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -1122,6 +1162,7 @@ def _index_safety_issue(
     known_constants: dict[str, int],
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
+    body: str = "",
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
@@ -1131,6 +1172,17 @@ def _index_safety_issue(
         container_type = param_types.get(container, "")
         if container_type.startswith("map["):
             # Map key access is always safe (returns zero value if missing).
+            return None
+    if label == "Go" and body:
+        # If the index variable is assigned ``idx = ... % len(container)`` in the
+        # function body, the resulting value is provably in bounds (modulo by
+        # the container length yields a value in ``[0, len)``). This suppresses
+        # false positives such as test helpers that hash a string into a slice.
+        modulo_pattern = re.compile(
+            rf"\b{re.escape(index)}\s*:?=\s*[^;\n]*%\s*len\s*\(\s*{re.escape(container)}\s*\)",
+            re.DOTALL,
+        )
+        if modulo_pattern.search(body):
             return None
     if mapping_names and container in mapping_names:
         # Solidity mapping key access is always safe.
@@ -1373,6 +1425,7 @@ def _issues_for_expression(
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     guaranteed_nonzero: set[str] | None = None,
+    body: str = "",
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1394,6 +1447,7 @@ def _issues_for_expression(
             local_names=local_names,
             param_types=param_types,
             mapping_names=mapping_names,
+            body=body,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1410,7 +1464,7 @@ def _issues_for_expression(
                 # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
                 continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names
+                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, body=body
             )
             if issue is not None:
                 issues.append(issue)
@@ -1464,6 +1518,7 @@ def _issues_from_findings(
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
+    body: str = "",
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1474,7 +1529,7 @@ def _issues_from_findings(
     issues: list[ForeignSafetyIssue] = []
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, body=body)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":
