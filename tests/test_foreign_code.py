@@ -1756,3 +1756,77 @@ def test_source_has_function_declarations() -> None:
     )
     assert _source_has_function_declarations("func F() {}", "go") is True
     assert _source_has_function_declarations("pub fn f() {}", "rust") is True
+
+
+def test_normalize_foreign_expression_coerces_undefined_and_bang() -> None:
+    """``undefined`` comparisons and prefix ``!`` lower to Mumei booleans."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert (
+        _normalize_foreign_expression("x !== undefined && !x")
+        == "(x == false)"
+    )
+    assert _normalize_foreign_expression("x === undefined") == "false"
+    assert _normalize_foreign_expression("x != undefined") == "true"
+
+
+def test_typescript_return_type_infers_boolean_from_expression() -> None:
+    """Arrow functions without an explicit return type are inferred as ``bool`` when appropriate."""
+    from agent.cross_validation_foreign import _typescript_return_type
+
+    assert _typescript_return_type("number", "typeof x !== 'undefined'") == "bool"
+    assert _typescript_return_type("", "a > 0 && b < 10") == "bool"
+    assert _typescript_return_type("number", "Array.from(...).filter(...)") == "i64"
+    assert _typescript_return_type("number", "x + 1") == "i64"
+
+
+def test_generic_safety_requires_skips_typescript_divisors() -> None:
+    """JS/TS ``/`` and ``%`` by zero are not exceptions and must not add ``divisor != 0``."""
+    from agent.cross_validation_foreign import _generic_safety_requires_for_expression
+
+    assert _generic_safety_requires_for_expression("a / b", language="typescript") == []
+    assert _generic_safety_requires_for_expression("a % b", language="javascript") == []
+    assert _generic_safety_requires_for_expression("a / b", language="go") == ["b != 0"]
+
+
+def test_ensures_for_return_expression_falls_back_for_strings() -> None:
+    """String return types cannot be lowered, so ``ensures`` falls back to ``true``."""
+    from agent.cross_validation_foreign import _ensures_for_return_expression
+
+    assert _ensures_for_return_expression('"/" + suffix', "string") == "true"
+    assert _ensures_for_return_expression("(x > 0)", "bool") == "result == (x > 0)"
+
+
+def test_ensures_for_return_expression_falls_back_for_unknown_field_access() -> None:
+    """Boolean field accesses on parameters cannot be lowered, so ``ensures`` falls back to ``true``."""
+    from agent.cross_validation_foreign import _ensures_for_return_expression
+
+    assert _ensures_for_return_expression("(role_delegatable == false)", "bool", {"role"}) == "true"
+    # Known property/method names and method calls are still lowerable.
+    assert _ensures_for_return_expression("items_map(inner).length", "i64", {"items"}) == "result == items_map(inner).length"
+    assert _ensures_for_return_expression("fork_HashTreeRoot()", "i64", {"fork"}) == "result == fork_HashTreeRoot()"
+
+
+def test_normalize_bitwise_and_and_inline_constants() -> None:
+    """Solidity ``&`` rewrites to ``bit_and`` and constants are inlined."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("self & OVERRIDE_FEE_FLAG != 0", {"OVERRIDE_FEE_FLAG": 0x400000}) == "(bit_and(self, 4194304) != 0)"
+    assert _normalize_foreign_expression("self & REMOVE_OVERRIDE_MASK", {"REMOVE_OVERRIDE_MASK": 0xBFFFFF}) == "bit_and(self, 12582911)"
+
+
+def test_extract_go_caller_contracts_from_doc() -> None:
+    """Go doc comments such as ``r must not be empty`` are turned into ``requires r != nil``."""
+    from agent.strategies.foreign_code_strategy import _extract_go_caller_contracts
+
+    assert _extract_go_caller_contracts("Next returns the next ring element. r must not be empty.") == ["r != nil"]
+    assert _extract_go_caller_contracts("Move moves the ring. r must not be nil.") == ["r != nil"]
+    assert _extract_go_caller_contracts("No contract here.") == []
+
+
+def test_go_nil_guarded_return_values() -> None:
+    """``if x == nil { return }`` should prevent spurious nil-deref issues on the final return."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_nil_guarded_return_values
+
+    assert _go_nil_guarded_return_values("if fork == nil { return [] } return fork.HashTreeRoot()") == {"fork"}
+    assert _go_nil_guarded_return_values("if x != nil { return x } return y") == set()

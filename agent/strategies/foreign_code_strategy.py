@@ -124,6 +124,18 @@ def _preceding_doc_comment(source: str, start_char: int, language: str) -> str:
     return "\n".join(lines)
 
 
+def _extract_go_caller_contracts(comment: str) -> list[str]:
+    """Derive ``requires`` clauses from Go doc comments such as ``r must not be empty``."""
+    contracts: list[str] = []
+    for match in re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s+must\s+not\s+be\s+(?:nil|empty)\b",
+        comment,
+        flags=re.IGNORECASE,
+    ):
+        contracts.append(f"{match.group(1)} != nil")
+    return contracts
+
+
 def _extract_go_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
     """Extract Go ``func`` declarations using tree-sitter, falling back to ``None``."""
     functions = tree_sitter_extract.extract_functions(source, "go", _safe_identifier)
@@ -148,6 +160,7 @@ def _extract_go_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
         function_name = fn.name
         comment = _clean_go_doc(match.group("comment") or "")
         preconditions, postconditions = _contract_lines(comment)
+        preconditions = _dedupe_strings([*preconditions, *_extract_go_caller_contracts(comment)])
         inferred = inferred_atoms.get(function_name)
         if inferred is not None and inferred.ensures != "true":
             postconditions = _dedupe_strings([*postconditions, inferred.ensures])
@@ -329,6 +342,7 @@ class ForeignCodeExtractor:
             function_name = _safe_identifier(match.group("name"))
             comment = _clean_go_doc(match.group("comment") or "")
             preconditions, postconditions = _contract_lines(comment)
+            preconditions = _dedupe_strings([*preconditions, *_extract_go_caller_contracts(comment)])
             inferred = inferred_atoms.get(function_name)
             if inferred is not None:
                 if inferred.ensures != "true":
