@@ -635,6 +635,31 @@ def _solidity_require_nonzero_params(body: str) -> set[str]:
     return result
 
 
+def _solidity_guarded_indices(body: str) -> set[str]:
+    """Return index parameter names that are upper-bounded by ``require``/``assert``.
+
+    Matches guards such as ``require(index < totalSupply())`` or
+    ``require(balanceOf(owner) > index)``.
+    """
+    names: set[str] = set()
+    pattern = re.compile(
+        r"\b(?:require|assert)\s*\(\s*"
+        r"(?:"
+        r"(?P<a>[A-Za-z_]\w*)\s*(?:<=|<)\s*[^,;)]*"
+        r"|"
+        r"[^,;)]*\s*(?:>=|>)\s*(?P<b>[A-Za-z_]\w*)"
+        r")"
+        r"(?:\s*,|\s*\))",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(body):
+        if match.group("a"):
+            names.add(match.group("a"))
+        if match.group("b"):
+            names.add(match.group("b"))
+    return names
+
+
 def _solidity_early_return_nonzero_params(body: str) -> set[str]:
     """Return parameter names that are zero-checked by an early ``return``/``revert``.
 
@@ -708,9 +733,11 @@ def _detect_block_safety_issues(
         if label == "TypeScript" and nullable_params is not None:
             dereference_values = nullable_params.get(name)
         per_function_nonzero = (guaranteed_nonzero or set()).copy()
+        per_function_guarded_indices: set[str] = set()
         if label == "Solidity":
             per_function_nonzero |= _solidity_require_nonzero_params(body)
             per_function_nonzero |= _solidity_early_return_nonzero_params(body)
+            per_function_guarded_indices = _solidity_guarded_indices(body)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
@@ -723,6 +750,7 @@ def _detect_block_safety_issues(
                 known_constants=known_constants,
                 mapping_names=mapping_names,
                 guaranteed_nonzero=per_function_nonzero,
+                guarded_indices=per_function_guarded_indices,
             )
             if solidity_checked_arithmetic and not function_has_unchecked:
                 expr_issues = [
@@ -1314,11 +1342,15 @@ def _index_safety_issue(
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
+    guarded_indices: set[str] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
     # impossible negative index (#296). The upper bound is still a real
     # concern, so we keep checking `index < len` rather than skipping it.
+    if guarded_indices and index in guarded_indices:
+        # A Solidity ``require``/``assert`` already bounds this index in the body.
+        return None
     if label == "Go" and param_types:
         container_type = param_types.get(container, "")
         if container_type.startswith("map["):
@@ -1577,6 +1609,7 @@ def _issues_for_expression(
     mapping_names: set[str] | None = None,
     guaranteed_nonzero: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
+    guarded_indices: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1599,6 +1632,7 @@ def _issues_for_expression(
             param_types=param_types,
             mapping_names=mapping_names,
             parallel_slicing=parallel_slicing,
+            guarded_indices=guarded_indices,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1614,8 +1648,11 @@ def _issues_for_expression(
             if container == "map":
                 # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
                 continue
+            if mapping_names and container in mapping_names:
+                # Solidity / Rust mappings have no bounds; missing keys return zero.
+                continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing
+                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices
             )
             if issue is not None:
                 issues.append(issue)
@@ -1670,6 +1707,7 @@ def _issues_from_findings(
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
+    guarded_indices: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1680,7 +1718,7 @@ def _issues_from_findings(
     issues: list[ForeignSafetyIssue] = []
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":

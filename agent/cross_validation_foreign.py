@@ -2405,6 +2405,22 @@ def _is_expression_lowerable(
     allowed.update(param_names)
     if known_constants:
         allowed.update(known_constants)
+    # Array indexing in an ensures expression is only lowerable when both the
+    # container and the index are known parameters/constants.  State-variable or
+    # unknown arrays (e.g. Solidity ``_allTokens[index]``) cannot be lifted into a
+    # Mumei equality.
+    for match in re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^\[\]]*?)\s*\]",
+        no_strings,
+    ):
+        container = match.group(1)
+        index_expr = match.group(2).strip()
+        if container not in allowed:
+            return False
+        if index_expr and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*|\d+", index_expr):
+            return False
+        if index_expr and index_expr not in allowed and not re.fullmatch(r"\d+", index_expr):
+            return False
     # A bare, unknown single identifier is only lowerable when it is not a local
     # variable declared inside the same function body.  Globals/constants that
     # are not captured by ``known_constants`` are still allowed because Mumei can
