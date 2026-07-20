@@ -264,6 +264,31 @@ function getUnspecifiedDelta(BeforeSwapDelta d) internal pure returns (int128) {
     assert any("generate_pool_key" in w for w in warnings)
 
 
+def test_extract_from_file_skips_llm_for_struct_only_solidity(
+    tmp_path: Path,
+) -> None:
+    """Struct-only .sol files should not trigger expensive LLM extraction."""
+    source = tmp_path / "PoolOperation.sol"
+    source.write_text(
+        "pragma solidity >=0.6.2;\n"
+        "\n"
+        "struct PoolOperation {\n"
+        "    int128 amount0;\n"
+        "    int128 amount1;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    config = AgentConfig(api_key="test")
+    extractor = CodeToSpecExtractor(config)
+
+    result = extractor.extract_from_file(source, language="solidity")
+
+    assert result.success is True
+    assert result.forge_task_spec is not None
+    assert result.forge_task_spec.get("atoms") == []
+    assert any("no inferable functions" in w for w in result.warnings)
+
+
 def test_align_llm_spec_maps_safe_constant_time_compare() -> None:
     """Issue 3: safe_constant_time_compare should map to ConstantTimeCompare."""
     from agent.code_to_spec import _align_llm_spec_with_source
