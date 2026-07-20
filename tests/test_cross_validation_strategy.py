@@ -212,6 +212,35 @@ class TestValidateSpecVsImpl:
         assert report.uncovered_atoms == []
         assert report.coverage_ratio == 1.0
 
+    def test_no_false_positive_spec_stronger_for_native_wrappers(self):
+        """Short call-forwarding bodies should not trigger spec-stronger-than-impl."""
+        from agent.strategies.cross_validation_strategy import _is_short_native_or_wrapper_body
+
+        assert _is_short_native_or_wrapper_body("return subtle.ConstantTimeCompare(x, y)")
+        assert not _is_short_native_or_wrapper_body("if x > 0 { return 1 } else { return 0 }")
+
+        spec = (
+            "atom ConstantTimeCompare(x: i64, y: i64) -> i64\n"
+            "  requires: x >= 0 && y >= 0\n"
+            "  ensures: result == 1 || result == 0\n"
+            "{\n  0\n}\n"
+        )
+        spec_path = Path(self.tmpdir) / "const.mm"
+        spec_path.write_text(spec)
+        impl_path = Path(self.tmpdir) / "impl.go"
+        impl_path.write_text(
+            "package subtle\n"
+            "func ConstantTimeCompare(x, y []byte) int {\n"
+            "    return constanttime.Compare(x, y)\n"
+            "}\n"
+        )
+        report = self.validator.validate_spec_vs_impl(
+            spec_path=str(spec_path),
+            impl_path=str(impl_path),
+            language="go",
+        )
+        assert "ConstantTimeCompare" not in report.spec_stronger_than_impl
+
     def test_check_impl_coverage_normalization_tolerant(self):
         result = self.validator.check_impl_coverage(
             ["bytes2hex", "check_arg_length"],

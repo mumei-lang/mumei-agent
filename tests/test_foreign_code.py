@@ -79,6 +79,25 @@ pub fn widen(x: i64) -> i64 {
     ]
 
 
+def test_extract_go_generic_function_signature() -> None:
+    source = """
+package ssz
+
+// SliceRoot computes the root of a slice of hashable objects.
+func SliceRoot[T Hashable](slice []T, limit uint64) ([32]byte, error) {
+    return [32]byte{}, nil
+}
+"""
+
+    specs = ForeignCodeExtractor().extract_go(source)
+
+    assert len(specs) == 1
+    assert specs[0].function_name == "SliceRoot"
+    assert specs[0].params == {"slice": "i64", "limit": "i64"}
+    assert specs[0].return_type == "i64"
+    assert specs[0].source_line == 5
+
+
 def test_extract_solidity_function_contracts_from_natspec() -> None:
     source = (FIXTURES / "sample_solidity.sol").read_text(encoding="utf-8")
 
@@ -1580,7 +1599,7 @@ def test_normalize_foreign_expression_strips_trailing_line_comments() -> None:
     """Trailing ``//`` comments must not leak into Mumei contract clauses."""
     from agent.cross_validation_foreign import _normalize_foreign_expression
 
-    assert _normalize_foreign_expression("x > 0 // always positive") == "x > 0"
+    assert _normalize_foreign_expression("x > 0 // always positive") == "(x > 0)"
 
 
 def test_normalize_foreign_expression_preserves_comment_markers_inside_strings() -> None:
@@ -1595,7 +1614,7 @@ def test_normalize_foreign_expression_strips_block_comments() -> None:
     """``/* ... */`` block comments must be removed before Mumei normalization."""
     from agent.cross_validation_foreign import _normalize_foreign_expression
 
-    assert _normalize_foreign_expression("x + 1 /* increment */ > 0") == "x + 1  > 0"
+    assert _normalize_foreign_expression("x + 1 /* increment */ > 0") == "(x + 1  > 0)"
 
 
 def test_normalize_foreign_expression_preserves_regex_literals_with_slashes() -> None:
@@ -1613,6 +1632,33 @@ def test_normalize_foreign_expression_does_not_treat_division_as_regex() -> None
 
     assert _normalize_foreign_expression("a / b") == "a / b"
     assert _normalize_foreign_expression("(a + b) / c") == "(a + b) / c"
+
+
+def test_normalize_foreign_expression_parenthesizes_comparisons() -> None:
+    """Comparison expressions that feed ``result == ...`` must be grouped."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("i > i0") == "(i > i0)"
+    assert _normalize_foreign_expression("a && b") == "(a and b)"
+
+
+def test_normalize_foreign_expression_coerces_typeof_and_string_literals() -> None:
+    """``typeof`` and string-literal comparisons are coerced to ``true``."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert (
+        _normalize_foreign_expression("typeof value === 'object' && value !== null")
+        == "(value != null)"
+    )
+    assert _normalize_foreign_expression("x == 'foo'") == "true"
+
+
+def test_normalize_foreign_expression_rewrites_bit_shifts() -> None:
+    """Bit shifts are rewritten to exponentiation so Mumei can lower them."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("1 << n") == "(1 * 2**n)"
+    assert _normalize_foreign_expression("x >> k") == "(x / 2**k)"
 
 
 def test_typescript_contract_inference_strips_trailing_comments() -> None:
