@@ -650,7 +650,13 @@ def _generic_requirements_from_findings(
     """
     known_constants = known_constants or {}
     requirements: list[str] = []
+    # JavaScript / TypeScript ``/`` and ``%`` with a zero divisor do not throw;
+    # they return ``Infinity`` / ``NaN``.  Requiring a non-zero divisor for these
+    # languages produces spurious counterexamples (#305).
+    skip_divisors = language in {"typescript", "javascript"}
     for divisor in findings.divisors:
+        if skip_divisors:
+            continue
         if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
             requirements.append(f"{divisor} != 0")
     for container, index in findings.index_accesses:
@@ -698,10 +704,12 @@ def _generic_safety_requires_for_expression(
 ) -> list[str]:
     known_constants = known_constants or {}
     requirements: list[str] = []
-    for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:/|%)\s*([A-Za-z_][A-Za-z0-9_]*)", expression):
-        divisor = match.group(2)
-        if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
-            requirements.append(f"{divisor} != 0")
+    # JavaScript / TypeScript division/modulo by zero is not an exception.
+    if language not in {"typescript", "javascript"}:
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:/|%)\s*([A-Za-z_][A-Za-z0-9_]*)", expression):
+            divisor = match.group(2)
+            if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
+                requirements.append(f"{divisor} != 0")
     for match in re.finditer(
         r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
         expression,
@@ -1035,20 +1043,24 @@ def _infer_rust_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | No
     for fn in extracted:
         if "test" in fn.attributes or "bench" in fn.attributes:
             continue
+        return_type = _mumei_return_type(fn.return_type)
+        param_names = {p.name for p in _params_from_signature(fn.params_text)}
         if not fn.body.strip():
             # Trait methods and external function declarations have no body.
             requires = "true"
             ensures = "true"
         else:
-            return_expr = _last_expression(fn.body)
+            return_expr = _normalize_foreign_expression(
+                _last_expression(fn.body), known_constants
+            )
             safety_expr = _last_expression(_strip_go_rust_literals_and_comments(fn.body))
             requires = _rust_safety_requires_for_expression(safety_expr, known_constants)
-            ensures = f"result == {return_expr}" if return_expr else "true"
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
         atoms.append(
             MumeiContractAtom(
                 name=fn.name,
                 params=_params_from_signature(fn.params_text),
-                return_type=_mumei_return_type(fn.return_type),
+                return_type=return_type,
                 requires=requires,
                 ensures=ensures,
             )
@@ -1073,7 +1085,8 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
         parsed = _rust_parse_signature(code, match.end())
         if parsed is None:
             continue
-        params_text, return_type, body_start = parsed
+        params_text, return_type_text, body_start = parsed
+        mumei_return_type = _mumei_return_type(return_type_text)
         # Trait methods and external function declarations terminate with `;`
         # and have no body to analyze, so emit them as trusted atoms.
         if body_start < len(code) and code[body_start] == ";":
@@ -1083,19 +1096,22 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
         else:
             body = _balanced_brace_body(code, body_start)
             params = _params_from_signature(params_text)
-            return_expr = _last_expression(body)
+            param_names = {p.name for p in params}
+            return_expr = _normalize_foreign_expression(
+                _last_expression(body), known_constants
+            )
             safety_expr = _last_expression(
                 _strip_go_rust_literals_and_comments(body)
             )
             requires = _rust_safety_requires_for_expression(
                 safety_expr, known_constants
             )
-            ensures = f"result == {return_expr}" if return_expr else "true"
+            ensures = _ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants)
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
                 params=_params_from_signature(params_text),
-                return_type=_mumei_return_type(return_type),
+                return_type=mumei_return_type,
                 requires=requires,
                 ensures=ensures,
             )
@@ -1112,15 +1128,20 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
         atoms: list[MumeiContractAtom] = []
         for fn in extracted:
             params, param_types = _solidity_params_from_signature(fn.params_text)
+            param_names = {p.name for p in params}
+            return_type = _mumei_return_type(
+                fn.return_type,
+                solidity_modifiers=True,
+            )
             if fn.has_body:
                 raw_return_expr = _raw_return_statement_expression(fn.body)
-                return_expr = _normalize_foreign_expression(raw_return_expr)
+                return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
                 requires = _solidity_safety_requires_for_expression(
                     raw_return_expr,
                     param_types,
                     known_constants,
                 )
-                ensures = f"result == {return_expr}" if return_expr else "true"
+                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
             else:
                 raw_return_expr = ""
                 requires = "true"
@@ -1129,10 +1150,7 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
                 MumeiContractAtom(
                     name=fn.name,
                     params=params,
-                    return_type=_mumei_return_type(
-                        fn.return_type,
-                        solidity_modifiers=True,
-                    ),
+                    return_type=return_type,
                     requires=requires,
                     ensures=ensures,
                 )
@@ -1148,8 +1166,13 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
     )
     for match in header.finditer(code):
         params, param_types = _solidity_params_from_signature(match.group("params"))
+        param_names = {p.name for p in params}
         attrs = match.group("attrs") or ""
         returns_match = re.search(r"returns\s*\((?P<ret>[^)]*)\)", attrs)
+        return_type = _mumei_return_type(
+            returns_match.group("ret") if returns_match else None,
+            solidity_modifiers=True,
+        )
         is_interface = match.group("delim") == ";"
         if is_interface:
             raw_return_expr = ""
@@ -1159,21 +1182,18 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
         else:
             body = _balanced_brace_body(code, match.end() - 1)
             raw_return_expr = _raw_return_statement_expression(body)
-            return_expr = _normalize_foreign_expression(raw_return_expr)
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
             requires = _solidity_safety_requires_for_expression(
                 raw_return_expr,
                 param_types,
                 known_constants,
             )
-            ensures = f"result == {return_expr}" if return_expr else "true"
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
                 params=params,
-                return_type=_mumei_return_type(
-                    returns_match.group("ret") if returns_match else None,
-                    solidity_modifiers=True,
-                ),
+                return_type=return_type,
                 requires=requires,
                 ensures=ensures,
             )
@@ -1371,19 +1391,23 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
                 body = _text(body_node)
                 is_expression_body = True
             raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
-            return_expr = _normalize_foreign_expression(raw_return_expr)
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+            return_type = _typescript_return_type(
+                return_type_text or "number", raw_return_expr
+            )
             raw_name = _text(name_node)
             start_char = len(
                 source_bytes[: name_node.start_byte].decode("utf-8", "replace")
             )
+            param_names = {p.name for p in _params_from_signature(params_text)}
             atom = MumeiContractAtom(
                 name=_safe_identifier(raw_name),
                 params=_params_from_signature(params_text),
-                return_type=_typescript_return_type(return_type_text or "number"),
+                return_type=return_type,
                 requires=_safety_requires_for_expression(
                     raw_return_expr, "typescript", known_constants
                 ),
-                ensures=f"result == {return_expr}" if return_expr else "true",
+                ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants),
             )
             results.append((atom, _safe_identifier(raw_name), start_char))
             continue
@@ -1405,11 +1429,15 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                 raw_return_expr = _typescript_raw_return_expression(
                     fn.body, fn.is_expression_body
                 )
-                return_expr = _normalize_foreign_expression(raw_return_expr)
+                return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+                return_type = _typescript_return_type(
+                    (fn.return_type or "number").strip(), raw_return_expr
+                )
                 requires = _safety_requires_for_expression(
                     raw_return_expr, "typescript", known_constants
                 )
-                ensures = f"result == {return_expr}" if return_expr else "true"
+                param_names = {p.name for p in _params_from_signature(fn.params_text)}
+                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
             else:
                 requires = "true"
                 ensures = "true"
@@ -1417,9 +1445,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                 MumeiContractAtom(
                     name=fn.name,
                     params=_params_from_signature(fn.params_text),
-                    return_type=_typescript_return_type(
-                        (fn.return_type or "number").strip()
-                    ),
+                    return_type=return_type,
                     requires=requires,
                     ensures=ensures,
                 )
@@ -1475,16 +1501,20 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
             elif body_start > 0 and code[body_start - 1] == "{":
                 body = _balanced_brace_body(code, body_start - 1)
             raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
-            return_expr = _normalize_foreign_expression(raw_return_expr)
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+            return_type = _typescript_return_type(
+                match.group("ret") or "number", raw_return_expr
+            )
+            param_names = {p.name for p in _params_from_signature(match.group("params"))}
             atoms.append(
                 MumeiContractAtom(
                     name=_safe_identifier(match.group("name")),
                     params=_params_from_signature(match.group("params")),
-                    return_type=_typescript_return_type(match.group("ret") or "number"),
+                    return_type=return_type,
                     requires=_safety_requires_for_expression(
                         raw_return_expr, "typescript", known_constants
                     ),
-                    ensures=f"result == {return_expr}" if return_expr else "true",
+                    ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants),
                 )
             )
     return atoms
@@ -1502,6 +1532,7 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
             continue
         params = _params_from_signature(fn.params_text)
         nillable_names = _go_nillable_param_names(fn.params_text)
+        return_type = _mumei_return_type(fn.return_type)
         if not fn.body.strip():
             # Assembly forward declarations and other external signatures have no body.
             requires = "true"
@@ -1511,18 +1542,19 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
             safety_expr = _raw_return_statement_expression(
                 _strip_go_rust_literals_and_comments(fn.body)
             )
-            return_expr = _normalize_foreign_expression(raw_return_expr)
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+            param_names = {p.name for p in params}
             requires = _go_safety_requires_for_expression(
                 safety_expr,
                 [param.name for param in params if param.name in nillable_names],
                 known_constants,
             )
-            ensures = f"result == {return_expr}" if return_expr else "true"
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
         atoms.append(
             MumeiContractAtom(
                 name=fn.name,
                 params=params,
-                return_type=_mumei_return_type(fn.return_type),
+                return_type=return_type,
                 requires=requires,
                 ensures=ensures,
             )
@@ -1546,18 +1578,20 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
         safety_expr = _raw_return_statement_expression(
             _strip_go_rust_literals_and_comments(body)
         )
-        return_expr = _normalize_foreign_expression(raw_return_expr)
+        return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+        mumei_return_type = _mumei_return_type(return_type)
+        param_names = {p.name for p in params}
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(name),
                 params=params,
-                return_type=_mumei_return_type(return_type),
+                return_type=mumei_return_type,
                 requires=_go_safety_requires_for_expression(
                     safety_expr,
                     [param.name for param in params if param.name in nillable_names],
                     known_constants,
                 ),
-                ensures=f"result == {return_expr}" if return_expr else "true",
+                ensures=_ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants),
             )
         )
     # Assembly forward declarations and other external function signatures have
@@ -2106,7 +2140,7 @@ def _typescript_raw_return_expression(body: str, is_expression_body: bool = Fals
     return body[start:].strip()
 
 
-def _typescript_return_type(type_text: str) -> str:
+def _typescript_return_type(type_text: str, return_expr: str = "") -> str:
     normalized = type_text.strip()
     if "|" in normalized:
         normalized = normalized.split("|", 1)[0].strip()
@@ -2119,7 +2153,99 @@ def _typescript_return_type(type_text: str) -> str:
     # signatures (``asserts value is SomeType``) are always boolean-like.
     if re.search(r"\bis\s", lowered) or lowered.startswith("asserts "):
         return "bool"
+    # No explicit return type; try to infer from the expression.
+    if (not normalized or lowered in {"number", "any"}) and _looks_boolean(
+        return_expr
+    ):
+        return "bool"
     return "i64"
+
+
+def _looks_boolean(expression: str) -> bool:
+    """Heuristically decide whether a TypeScript return expression is boolean."""
+    if not expression:
+        return False
+    text = expression.strip()
+    lowered = text.lower()
+    if lowered in ("true", "false"):
+        return True
+    # Array/object constructors are not boolean even if they contain comparisons.
+    if re.search(
+        r"\bArray\.from\s*\(|\.filter\s*\(|\.map\s*\(|\.reduce\s*\(|new\s+Array\s*\(",
+        text,
+    ):
+        return False
+    if re.search(r"\b(?:=>|return\s+\[|return\s+\{)", text):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:typeof|in|instanceof)\b|(?:===|!==|==|!=|>=|<=|>|<|&&|\|\||\band\b|\bor\b|!)",
+            text,
+        )
+    )
+
+
+# Common JavaScript/TypeScript object/array properties and methods that are safe
+# to pass through to Mumei without treating them as unresolved field accesses.
+_KNOWN_PROPERTY_NAMES = frozenset({
+    "map", "filter", "reduce", "forEach", "find", "some", "every", "includes",
+    "indexOf", "lastIndexOf", "slice", "splice", "concat", "join", "split",
+    "replace", "substring", "substr", "trim", "toLowerCase", "toUpperCase",
+    "startsWith", "endsWith", "charAt", "charCodeAt", "fromCharCode", "length",
+    "push", "pop", "shift", "unshift", "reverse", "sort", "keys", "values",
+    "entries", "hasOwnProperty", "then", "catch", "finally", "toString",
+    "valueOf", "parseInt", "parseFloat", "isNaN", "isFinite", "from",
+})
+
+
+def _is_expression_lowerable(
+    expression: str,
+    param_names: set[str] | None = None,
+    known_constants: dict[str, int] | None = None,
+) -> bool:
+    """Detect unresolved object-field accesses that Mumei cannot lower.
+
+    Without parameter/type information, every identifier is assumed lowerable.
+    When parameter names are available, a token of the form ``param_field`` that
+    is not a method call and whose ``field`` is not a known property is treated
+    as an unresolvable field access.
+    """
+    if not param_names:
+        return True
+    allowed = {"true", "false", "null", "undefined", "and", "or", "not", "bit_and", "in"}
+    allowed.update(param_names)
+    if known_constants:
+        allowed.update(known_constants)
+    # Ignore words inside string literals.
+    no_strings = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", no_strings):
+        if token in allowed:
+            continue
+        if token.startswith("len_") and token[4:] in param_names:
+            continue
+        match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)_([A-Za-z_][A-Za-z0-9_]*)", token)
+        if match and match.group(1) in param_names:
+            # Method calls such as ``fork_HashTreeRoot()`` are still callable.
+            if re.search(rf"\b{re.escape(token)}\b\s*\(", no_strings):
+                continue
+            if match.group(2) in _KNOWN_PROPERTY_NAMES:
+                continue
+            return False
+    return True
+
+
+def _ensures_for_return_expression(
+    return_expr: str,
+    return_type: str,
+    param_names: set[str] | None = None,
+    known_constants: dict[str, int] | None = None,
+) -> str:
+    """Build a Mumei ``ensures`` clause, falling back to ``true`` for unverifiable types."""
+    if not return_expr or return_type == "string":
+        return "true"
+    if not _is_expression_lowerable(return_expr, param_names, known_constants):
+        return "true"
+    return f"result == {return_expr}"
 
 
 def _is_regex_context(prefix: str) -> bool:
@@ -2296,6 +2422,91 @@ def _strip_comments(expression: str) -> str:
     return "".join(result)
 
 
+def _coerce_undefined_and_bang(expression: str) -> str:
+    """Coerce ``undefined`` comparisons and rewrite prefix ``!`` for Mumei.
+
+    Mumei has no ``undefined`` value and no unary ``!`` operator.  Comparisons
+    against ``undefined`` are replaced with the corresponding boolean constant,
+    and ``!x`` / ``!(expr)`` become ``(x == false)`` / ``((expr) == false)``,
+    which Mumei can lower as boolean equalities.
+    """
+    normalized = re.sub(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(===|!==|==|!=)\s*undefined\b",
+        lambda m: "true" if m.group(2) in ("!==", "!=") else "false",
+        expression,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"\bundefined\s*(===|!==|==|!=)\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        lambda m: "true" if m.group(1) in ("!==", "!=") else "false",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    return _rewrite_not(normalized)
+
+
+def _rewrite_not(expression: str) -> str:
+    """Rewrite unary ``!`` into an equality with ``false``.
+
+    Skips ``!=`` / ``!==`` and leaves double negation untouched.  String
+    literals are preserved so that exclamation marks inside strings are not
+    rewritten.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(expression)
+    while i < n:
+        ch = expression[i]
+        if ch in '"\'':
+            q = ch
+            j = i + 1
+            while j < n and expression[j] != q:
+                if expression[j] == "\\":
+                    j += 2
+                else:
+                    j += 1
+            result.append(expression[i : j + 1])
+            i = j + 1
+            continue
+        if ch == "!":
+            j = i + 1
+            while j < n and expression[j].isspace():
+                j += 1
+            if j < n and expression[j] == "=":
+                # part of != or !==
+                result.append("!")
+                i += 1
+                continue
+            if j < n and expression[j] == "!":
+                # leave double negation as-is
+                result.append("!")
+                i += 1
+                continue
+            if j < n and expression[j] == "(":
+                k = j + 1
+                depth = 1
+                while k < n and depth > 0:
+                    if expression[k] == "(":
+                        depth += 1
+                    elif expression[k] == ")":
+                        depth -= 1
+                    k += 1
+                operand = expression[j:k]
+                result.append(f"({operand} == false)")
+                i = k
+                continue
+            k = j
+            while k < n and (expression[k].isalnum() or expression[k] == "_"):
+                k += 1
+            operand = expression[j:k]
+            result.append(f"({operand} == false)")
+            i = k
+            continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _coerce_typeof_and_string_literals(expression: str) -> str:
     """Replace ``typeof x === 'foo'`` and other string comparisons with ``true``.
 
@@ -2406,17 +2617,204 @@ def _normalize_bit_shifts(expression: str) -> str:
     return normalized
 
 
-def _normalize_foreign_expression(expression: str) -> str:
+def _maybe_unparenthesize(expression: str) -> str:
+    """Strip a single pair of surrounding parentheses if the whole expr is grouped."""
+    text = expression.strip()
+    if not (text.startswith("(") and text.endswith(")")):
+        return text
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth == 0 and i < len(text) - 1:
+            return text
+    return text[1:-1]
+
+
+def _bitwise_operand_left(expression: str, pos: int) -> tuple[int, int] | None:
+    """Return the (start, end) range of the operand immediately left of ``pos``."""
+    i = pos - 1
+    while i >= 0 and expression[i].isspace():
+        i -= 1
+    if i < 0:
+        return None
+    end = i + 1
+    ch = expression[i]
+    if ch == ")":
+        depth = 1
+        i -= 1
+        while i >= 0 and depth > 0:
+            if expression[i] == ")":
+                depth += 1
+            elif expression[i] == "(":
+                depth -= 1
+            i -= 1
+        # i now points to the char before the matching '('
+        start_paren = i + 1  # position of '('
+        # If the group is preceded by an identifier, it's a function call.
+        while i >= 0 and expression[i].isspace():
+            i -= 1
+        j = i
+        while j >= 0 and (expression[j].isalnum() or expression[j] == "_"):
+            j -= 1
+        if j < i:
+            start = j + 1
+        else:
+            start = start_paren
+        return (start, end)
+    if ch.isalnum() or ch == "_":
+        while i >= 0 and (expression[i].isalnum() or expression[i] == "_"):
+            i -= 1
+        return (i + 1, end)
+    return None
+
+
+def _bitwise_operand_right(expression: str, pos: int) -> tuple[int, int] | None:
+    """Return the (start, end) range of the operand immediately right of ``pos``."""
+    n = len(expression)
+    i = pos + 1
+    while i < n and expression[i].isspace():
+        i += 1
+    if i >= n:
+        return None
+    start = i
+    ch = expression[i]
+    if ch == "(":
+        depth = 1
+        i += 1
+        while i < n and depth > 0:
+            if expression[i] == "(":
+                depth += 1
+            elif expression[i] == ")":
+                depth -= 1
+            i += 1
+        return (start, i)
+    if ch.isalnum() or ch == "_":
+        while i < n and (expression[i].isalnum() or expression[i] == "_"):
+            i += 1
+        # If followed by '(', it's a function call; consume the arguments.
+        if i < n and expression[i].isspace():
+            j = i
+            while j < n and expression[j].isspace():
+                j += 1
+            if j < n and expression[j] == "(":
+                i = j
+        if i < n and expression[i] == "(":
+            depth = 1
+            i += 1
+            while i < n and depth > 0:
+                if expression[i] == "(":
+                    depth += 1
+                elif expression[i] == ")":
+                    depth -= 1
+                i += 1
+        return (start, i)
+    if ch.isdigit():
+        while i < n and (expression[i].isalnum() or expression[i] == "_"):
+            i += 1
+        return (start, i)
+    return None
+
+
+def _find_bitwise_and(expression: str, start: int = 0) -> int | None:
+    """Find the next bare ``&`` operator not inside a string or parentheses."""
+    i = start
+    n = len(expression)
+    in_string: str | None = None
+    paren_depth = 0
+    while i < n:
+        ch = expression[i]
+        if in_string:
+            if ch == in_string and (i == 0 or expression[i - 1] != "\\"):
+                in_string = None
+            i += 1
+            continue
+        if ch in '"\'':
+            in_string = ch
+            i += 1
+            continue
+        if ch in "([{":
+            paren_depth += 1
+            i += 1
+            continue
+        if ch in ")]}" and paren_depth > 0:
+            paren_depth -= 1
+            i += 1
+            continue
+        if ch == "&" and paren_depth == 0:
+            # Avoid matching '&&' (already replaced earlier) and '&='.
+            if (i + 1 < n and expression[i + 1] == "&") or (
+                i + 1 < n and expression[i + 1] == "=" or
+                (i > 0 and expression[i - 1] == "&")
+            ):
+                pass
+            else:
+                return i
+        i += 1
+    return None
+
+
+def _normalize_bitwise_and(expression: str) -> str:
+    """Rewrite ``a & b`` to ``bit_and(a, b)`` for Mumei lowering.
+
+    Handles chains such as ``a & b & c`` by iterating left-to-right and allows
+    function-call and parenthesised operands, e.g. ``bit_and(a, b) & c`` or
+    ``(a & b) & c``.
+    """
+    result = expression
+    i = 0
+    while True:
+        pos = _find_bitwise_and(result, i)
+        if pos is None:
+            break
+        left = _bitwise_operand_left(result, pos)
+        right = _bitwise_operand_right(result, pos)
+        if left is None or right is None:
+            i = pos + 1
+            continue
+        left_text = result[left[0] : left[1]]
+        right_text = result[right[0] : right[1]]
+        # Recursively rewrite any nested & inside operand parentheses.
+        left_text = _normalize_bitwise_and(_maybe_unparenthesize(left_text))
+        right_text = _normalize_bitwise_and(_maybe_unparenthesize(right_text))
+        replacement = f"bit_and({left_text}, {right_text})"
+        result = result[: left[0]] + replacement + result[right[1] :]
+        i = left[0] + len(replacement)
+    return result
+
+
+def _inline_known_constants(
+    expression: str,
+    known_constants: dict[str, int] | None,
+) -> str:
+    """Replace declared constant names with integer values so Mumei can lower them."""
+    if not known_constants:
+        return expression
+    for name, value in known_constants.items():
+        expression = re.sub(rf"\b{re.escape(name)}\b", str(value), expression)
+    return expression
+
+
+def _normalize_foreign_expression(
+    expression: str,
+    known_constants: dict[str, int] | None = None,
+) -> str:
     normalized = _strip_comments(expression).strip()
     normalized = normalized.replace("&&", "and").replace("||", "or")
     normalized = normalized.replace("===", "==").replace("!==", "!=")
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\.length\b", r"len_\1", normalized)
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)!?\.", r"\1_", normalized)
+    normalized = _normalize_bitwise_and(normalized)
+    normalized = _inline_known_constants(normalized, known_constants)
     normalized = _coerce_typeof_and_string_literals(normalized)
+    normalized = _coerce_undefined_and_bang(normalized)
     normalized = _simplify_boolean_literals(normalized)
     normalized = _normalize_bit_shifts(normalized)
     normalized = _parenthesize_boolean_expression(normalized)
     return normalized
+
 
 def _safe_identifier(value: str) -> str:
     safe = re.sub(r"\W+", "_", value.strip())

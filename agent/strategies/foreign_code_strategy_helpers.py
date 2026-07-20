@@ -528,6 +528,18 @@ def _detect_block_safety_issues(
             )
     return issues
 
+def _go_nil_guarded_return_values(body: str) -> set[str]:
+    """Detect ``if x == nil { ... return ... }`` patterns that guard later returns."""
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\bif\s+([A-Za-z_][A-Za-z0-9_]*)\s*==\s*nil\s*\{[^}]*\breturn\b",
+        body,
+        flags=re.DOTALL,
+    ):
+        guarded.add(match.group(1))
+    return guarded
+
+
 def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     functions = tree_sitter_extract.extract_contract_functions(
@@ -539,29 +551,52 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 continue
             body = _strip_go_rust_literals_and_comments(fn.body)
             param_names = _go_nillable_param_names(fn.params_text)
-            for expression in _return_expressions(body):
-                issues.extend(
-                    _issues_for_expression(
-                        fn.name,
-                        expression,
-                        "Go",
-                        dereference_values=param_names,
-                    )
+            expressions = _return_expressions(body)
+            guarded = _go_nil_guarded_return_values(body)
+            for index, expression in enumerate(expressions):
+                expr_issues = _issues_for_expression(
+                    fn.name,
+                    expression,
+                    "Go",
+                    dereference_values=param_names,
                 )
+                # A final return after ``if x == nil { return }`` is known non-nil.
+                if index == len(expressions) - 1 and guarded:
+                    expr_issues = [
+                        issue
+                        for issue in expr_issues
+                        if not (
+                            issue.required_contracts
+                            and issue.required_contracts[0].split("!=")[0].strip() in guarded
+                            and issue.required_contracts[0].endswith("!= nil")
+                        )
+                    ]
+                issues.extend(expr_issues)
         return issues
     # Regex fallback when tree-sitter / the grammar is unavailable.
     for name, params_text, _return_type, body in _go_function_declarations(source):
         body = _strip_go_rust_literals_and_comments(body)
         param_names = _go_nillable_param_names(params_text)
-        for expression in _return_expressions(body):
-            issues.extend(
-                _issues_for_expression(
-                    _safe_identifier(name),
-                    expression,
-                    "Go",
-                    dereference_values=param_names,
-                )
+        expressions = _return_expressions(body)
+        guarded = _go_nil_guarded_return_values(body)
+        for index, expression in enumerate(expressions):
+            expr_issues = _issues_for_expression(
+                _safe_identifier(name),
+                expression,
+                "Go",
+                dereference_values=param_names,
             )
+            if index == len(expressions) - 1 and guarded:
+                expr_issues = [
+                    issue
+                    for issue in expr_issues
+                    if not (
+                        issue.required_contracts
+                        and issue.required_contracts[0].split("!=")[0].strip() in guarded
+                        and issue.required_contracts[0].endswith("!= nil")
+                    )
+                ]
+            issues.extend(expr_issues)
     return issues
 
 _LABEL_TO_TS_LANGUAGE = {
@@ -748,13 +783,14 @@ def _issues_for_expression(
             expression,
         ):
             issues.append(_null_safety_issue(function_name, match.group("value"), label))
-    for match in re.finditer(
-        r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
-        expression,
-    ):
-        issue = _division_safety_issue(function_name, match.group("right"), label, known_constants)
-        if issue is not None:
-            issues.append(issue)
+    if label not in {"TypeScript", "JavaScript"}:
+        for match in re.finditer(
+            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+            expression,
+        ):
+            issue = _division_safety_issue(function_name, match.group("right"), label, known_constants)
+            if issue is not None:
+                issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in _addition_pairs_regex(expression):
             issues.append(_i64_overflow_safety_issue(function_name, left, right, label))
@@ -790,10 +826,11 @@ def _issues_from_findings(
     elif label == "TypeScript":
         for value in findings.length_access_values:
             issues.append(_null_safety_issue(function_name, value, label))
-    for divisor in findings.divisors:
-        issue = _division_safety_issue(function_name, divisor, label, known_constants)
-        if issue is not None:
-            issues.append(issue)
+    if label not in {"TypeScript", "JavaScript"}:
+        for divisor in findings.divisors:
+            issue = _division_safety_issue(function_name, divisor, label, known_constants)
+            if issue is not None:
+                issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in findings.additions:
             issues.append(_i64_overflow_safety_issue(function_name, left, right, label))
