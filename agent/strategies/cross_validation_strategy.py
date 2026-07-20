@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,27 @@ from agent.strategies.cross_validation_strategy_helpers import (
     _extract_functions,
     _extract_spec_atoms,
 )
+
+
+def _is_short_native_or_wrapper_body(body: str) -> bool:
+    """Return True when ``body`` is a short call/return wrapper without local logic.
+
+    Constant-time helpers, forwarded calls, and other native wrappers often
+    have non-trivial safety ``requires`` (e.g. slice-length bounds) while the
+    body itself is just a single statement. Such cases should not be reported
+    as "spec stronger than implementation".
+    """
+    text = body.strip()
+    if not text:
+        return True
+    # Bodies with control flow are doing real validation/processing.
+    if re.search(r"\b(if|for|while|switch|range)\b", text, re.IGNORECASE):
+        return False
+    # A wrapper is usually one or two non-comment lines.
+    code_lines = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("//")]
+    if len(code_lines) > 2:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +187,8 @@ class CrossValidator:
             if has_complex_contract:
                 body = _extract_function_body(impl_source, language, impl_name)
                 if body and len(body.strip()) < len(atom["requires"]):
+                    if _is_short_native_or_wrapper_body(body):
+                        continue
                     report.spec_stronger_than_impl.append(atom["name"])
 
         # Semantic gap detection: impl stronger than spec

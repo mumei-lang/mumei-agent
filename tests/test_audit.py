@@ -234,6 +234,23 @@ def test_malformed_extraction_detector_ignores_valid_clauses() -> None:
     assert _malformed_extraction_issue_strings(spec) == []
 
 
+def test_malformed_extraction_detector_ignores_bit_shifts() -> None:
+    """Bit-shift operators ``<<`` and ``>>`` are valid, not garbled comparisons."""
+    from agent.audit_reporting import _malformed_extraction_issue_strings
+
+    spec: dict[str, object] = {
+        "atoms": [
+            {
+                "name": "PowerOf2",
+                "requires": "true",
+                "ensures": "result == 1 << n",
+            }
+        ]
+    }
+
+    assert _malformed_extraction_issue_strings(spec) == []
+
+
 def test_audit_malformed_extraction_is_unverifiable(tmp_path: Path) -> None:
     source = tmp_path / "common.py"
     source.write_text("def calc(offset, length):\n    return 0\n", encoding="utf-8")

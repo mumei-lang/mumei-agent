@@ -2296,12 +2296,126 @@ def _strip_comments(expression: str) -> str:
     return "".join(result)
 
 
+def _coerce_typeof_and_string_literals(expression: str) -> str:
+    """Replace ``typeof x === 'foo'`` and other string comparisons with ``true``.
+
+    Mumei cannot lower the ``typeof`` operator or string literals, so these
+    parts of a return expression are deterministically coerced to ``true``.
+    The surrounding conjunction/disjunction (e.g. ``&& value !== null``) is
+    preserved so that any non-string constraints remain verifiable.
+    """
+    # typeof x === 'object' / typeof x == 'object' / typeof x !== 'object' etc.
+    normalized = re.sub(
+        r"\btypeof\s+([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=)\s*['\"]([^'\"]*)['\"]",
+        "true",
+        expression,
+    )
+    # Coerce any remaining equality against a string literal to ``true``.
+    normalized = re.sub(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*==\s*['\"]([^'\"]*)['\"]",
+        "true",
+        normalized,
+    )
+    return normalized
+
+
+def _simplify_boolean_literals(expression: str) -> str:
+    """Fold trivial ``true``/``false`` sub-expressions."""
+    changed = True
+    result = expression
+    while changed:
+        changed = False
+        # true and X -> X, X and true -> X
+        m = re.fullmatch(r"true\s+and\s+(.+)", result, re.IGNORECASE)
+        if m:
+            result = m.group(1).strip()
+            changed = True
+            continue
+        m = re.fullmatch(r"(.+?)\s+and\s+true", result, re.IGNORECASE)
+        if m and not re.search(r"\bor\b", m.group(1), re.IGNORECASE):
+            result = m.group(1).strip()
+            changed = True
+            continue
+        # true or X -> true, X or true -> true
+        m = re.fullmatch(r"true\s+or\s+.+|.+\s+or\s+true", result, re.IGNORECASE)
+        if m:
+            result = "true"
+            changed = True
+            continue
+        # false and X -> false, X and false -> false
+        m = re.fullmatch(r"false\s+and\s+.+|.+\s+and\s+false", result, re.IGNORECASE)
+        if m:
+            result = "false"
+            changed = True
+            continue
+    return result
+
+
+def _parenthesize_boolean_expression(expression: str) -> str:
+    """Wrap expressions containing boolean/comparison operators in parentheses.
+
+    Without parentheses Mumei parses ``result == i > i0`` left-to-right and
+    fails to lower the clause. Wrapping ensures the right-hand side is treated
+    as a single boolean term.
+    """
+    text = expression.strip()
+    if not text:
+        return text
+    # If the expression is already a single parenthesised group, leave it.
+    if text.startswith("(") and text.endswith(")"):
+        depth = 0
+        valid = True
+        for i, ch in enumerate(text):
+            if ch in "([{":
+                depth += 1
+            elif ch in "])}" and depth > 0:
+                depth -= 1
+            if depth == 0 and i < len(text) - 1:
+                valid = False
+                break
+        if valid and depth == 0:
+            return text
+    # Temporarily hide bit shifts so ``<<`` / ``>>`` are not treated as
+    # comparison operators.
+    placeholders = {"<<": " __LSHIFT__ ", ">>": " __RSHIFT__ "}
+    probe = text
+    for op, placeholder in placeholders.items():
+        probe = probe.replace(op, placeholder)
+    if re.search(r"\b(?:and|or)\b|>=|<=|==|!=|[<>]", probe):
+        return f"({text})"
+    return text
+
+
+def _normalize_bit_shifts(expression: str) -> str:
+    """Rewrite ``<<`` / ``>>`` to multiplication/division by powers of two.
+
+    Mumei does not have a bit-shift operator, so ``1 << n`` is parsed as two
+    ``<`` comparisons and fails to lower. Rewriting to ``(1 * 2**n)`` keeps the
+    arithmetic intent while staying within the subset Mumei can verify.
+    """
+    normalized = re.sub(
+        r"\b(\w+)\s*<<\s*(\w+)\b",
+        r"(\1 * 2**\2)",
+        expression,
+    )
+    normalized = re.sub(
+        r"\b(\w+)\s*>>\s*(\w+)\b",
+        r"(\1 / 2**\2)",
+        normalized,
+    )
+    return normalized
+
+
 def _normalize_foreign_expression(expression: str) -> str:
     normalized = _strip_comments(expression).strip()
     normalized = normalized.replace("&&", "and").replace("||", "or")
     normalized = normalized.replace("===", "==").replace("!==", "!=")
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)\.length\b", r"len_\1", normalized)
     normalized = re.sub(r"\b([A-Za-z_][A-Za-z0-9_]*)!?\.", r"\1_", normalized)
+    normalized = _coerce_typeof_and_string_literals(normalized)
+    normalized = _simplify_boolean_literals(normalized)
+    normalized = _normalize_bit_shifts(normalized)
+    normalized = _parenthesize_boolean_expression(normalized)
     return normalized
 
 def _safe_identifier(value: str) -> str:

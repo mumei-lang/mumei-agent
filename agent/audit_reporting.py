@@ -120,7 +120,7 @@ def _coerce_to_boolean_clause(clause: str, default: str = "true") -> str:
 
 _MALFORMED_HEX_LITERAL_RE = re.compile(r"\b\d+\s+x[0-9a-fA-F]+")
 _MALFORMED_OPERATOR_RE = re.compile(
-    r"(?:<=|>=|==|!=)\s*[<>]=?|[<>]\s*(?:<=|>=|==|!=|[<>])"
+    r"(?:<=|>=|==|!=)\s*[<>]=?|(?<![<>=!])[<>](?![<>=])\s*(?:<=|>=|==|!=|[<>])"
 )
 
 

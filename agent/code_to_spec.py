@@ -488,6 +488,23 @@ class CodeToSpecExtractor:
             code,
             detected_language,
         )
+        # If the source contains no inferable functions (e.g. a struct-only
+        # .sol file), skip the expensive LLM extraction and return an empty
+        # spec so the audit pipeline can proceed without a "no atoms" error.
+        if not deterministic.errors and not deterministic.atoms:
+            warnings.extend(deterministic.warnings)
+            warnings.append(
+                "LLM extraction skipped because source contains no inferable functions."
+            )
+            return CodeToSpecResult(
+                success=True,
+                natural_language_spec=deterministic.natural_language_spec,
+                forge_task_spec=_forge_task_spec_from_atoms(code_path, []),
+                detected_language=detected_language,
+                warnings=warnings,
+                errors=[],
+            )
+
         if deterministic.success and not self.config.api_key and self._injected_client is None:
             warnings.extend(deterministic.warnings)
             warnings.append("LLM extraction skipped because LLM_API_KEY/OPENAI_API_KEY is not set.")
