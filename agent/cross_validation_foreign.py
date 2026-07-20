@@ -2401,7 +2401,7 @@ def _is_expression_lowerable(
         return False
     if re.search(r"[\]\}]\s*\.", no_strings):
         return False
-    allowed = {"true", "false", "null", "undefined", "and", "or", "not", "bit_and", "in"}
+    allowed = {"true", "false", "null", "undefined", "and", "or", "not", "bit_and", "in", "len", "cap"}
     allowed.update(param_names)
     if known_constants:
         allowed.update(known_constants)
