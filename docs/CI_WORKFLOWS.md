@@ -51,3 +51,15 @@ Or use the standalone script:
 ```bash
 python scripts/ci_verify.py src/*.mm --proof-cert
 ```
+
+## 外部コード dogfooding 集計層（Planned / 未着手）
+
+> **ステータス: Planned（未着手）** — 実ワークフローファイルはまだ追加していない。詳細な受け入れ条件は
+> [`docs/ROADMAP.md`](./ROADMAP.md) の「外部コード dogfooding 堅牢性拡張（Planned / 未着手）」項目2を参照。
+
+次段階として、ディレクトリ / コーパス dogfood の出力を既存 verdict（`verified` / `refuted` / `unverifiable`）で
+バケット分けする集計 / ゲート層を、`.github/workflows/proliferate.yml` と同型のスケジュール実行ワークフロー
+（cron + `ollama-local` で外部依存ゼロ）として恒久運用に組み込む構想がある。`refuted`（実バグ候補）のみを
+human review に浮かせ、`unverifiable` を原因サブカテゴリ（`skipped_rate_limited` / `timeout` /
+`no_function_declarations` / `encoding_gap`）へ畳み込む。集計は 8 固定キー契約（`AUDIT_SCHEMA_KEYS`）と
+既存 verdict の上に載せ、新規分類や別名 alias は導入しない。実ワークフロー追加時に本ファイルへ運用手順を追記する。
