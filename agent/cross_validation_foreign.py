@@ -2370,6 +2370,8 @@ def _is_expression_lowerable(
     for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", no_strings):
         if token in allowed:
             continue
+        if local_names and token in local_names:
+            return False
         if token.startswith("len_") and token[4:] in param_names:
             continue
         match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)_([A-Za-z_][A-Za-z0-9_]*)", token)

@@ -270,6 +270,18 @@ def _extract_solidity_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | N
     specs: list[ForeignCodeSpec] = []
     for fn in functions:
         if not fn.has_body:
+            # Interface declarations and function stubs have no implementation;
+            # emit them as trusted specs so the file is not marked unverifiable.
+            specs.append(
+                ForeignCodeSpec(
+                    function_name=fn.name,
+                    params=_solidity_params(fn.params_text),
+                    return_type=_solidity_type(fn.return_type or "void"),
+                    preconditions=[],
+                    postconditions=[],
+                    source_line=fn.line,
+                )
+            )
             continue
         comment = _clean_rust_doc(
             _preceding_doc_comment(source, fn.start_char, "solidity")

@@ -1990,3 +1990,28 @@ def test_i64_overflow_safety_issue_skips_pointer_arithmetic() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _i64_overflow_safety_issue
 
     assert _i64_overflow_safety_issue("WaitListHead", "highBits", "mutexMOffset", "Go", "muintptr(highBits + mutexMOffset)") is None
+
+
+def test_is_expression_lowerable_rejects_multi_token_local_variables() -> None:
+    """Expressions that reference local variables must not be lowered into postconditions."""
+    from agent.cross_validation_foreign import _is_expression_lowerable
+
+    assert _is_expression_lowerable("epochStart and altairEpoch", {"slot"}, local_names={"epochStart", "altairEpoch"}) is False
+    assert _is_expression_lowerable("m > 0", set(), local_names={"m"}) is False
+    assert _is_expression_lowerable("slot + 1", {"slot"}, local_names=set()) is True
+
+
+def test_extract_solidity_interface_as_trusted_atoms() -> None:
+    """Solidity interfaces with no function body should be extracted as trusted specs."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+
+    source = '''
+interface IERC4626 {
+    function asset() external view returns (address assetTokenAddress);
+    function convertToShares(uint256 assets) external view returns (uint256 shares);
+}
+'''
+    specs = ForeignCodeExtractor().extract_solidity(source)
+    assert [s.function_name for s in specs] == ["asset", "convertToShares"]
+    assert all(s.return_type == "i64" for s in specs if s.function_name == "asset")
+    assert all(s.preconditions == [] for s in specs)
