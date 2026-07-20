@@ -1858,6 +1858,10 @@ def _mumei_return_type(
     if solidity_modifiers:
         tokens = [t for t in normalized.split() if t.lower() not in _SOLIDITY_MODIFIER_TOKENS]
         normalized = " ".join(tokens) if tokens else normalized
+        # Solidity return declarations may name the return value (e.g. ``bool flag``).
+        # Strip the name so it is not mistaken for an unknown type.
+        if normalized and " " in normalized:
+            normalized = normalized.split()[0]
     return _foreign_signature_type(normalized)
 
 
