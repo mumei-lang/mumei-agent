@@ -1420,3 +1420,58 @@ Phase 1 の残り — ✅ **完了**: 直接 `client.chat.completions.create` �
 **性能上の注意**:
 - 処理時間への影響は小さい（LLM 呼び出し回数は変わらない）
 - 精度（spec 抽出品質）の改善が主な目的
+
+---
+
+## 外部コード dogfooding 堅牢性拡張（Planned / 未着手）
+
+> **ステータス: Planned（未着手）** — 本節は実装ではなく「今後対応予定」の記録である。
+> 過去のドッグフーディングでは go-ethereum 等の外部 OSS コードを
+> `agent/cross_validation.py` の `validate_foreign_code`（python/rust/typescript/go/solidity 対応）へ通し、
+> 決定的抽出（`agent/cross_validation_foreign.py` の `_infer_go_contracts` →
+> `_raw_return_statement_expression`）が「多値 return から不正な `ensures`（例: `result == sum, carryOut != 0`）を
+> 生成する」クラスのバグを発見・修正した（PR #371）。
+> 既にプラン済みの直近作業（① 各言語の合成シグネチャコーパスによるパーサ堅牢性 property テスト、
+> ② dogfood 結果を既存 verdict でバケット分けする集計/トリアージ層）の **次段階** として、以下 2 施策を追加する。
+>
+> top-level 権威は `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` であり、本節は mumei-agent 側の
+> ローカル受け入れ詳細のみを記載する。用語は固定キー（`verification_status` = `verified` / `refuted` / `unverifiable`、
+> `verification_violations`、`cross_validation_gaps` 等）に揃え、別名 alias は導入しない。新規の verdict 分類も作らない。
+
+**推奨導入順**: 項目1（実 OSS コーパス拡大）→ 項目2（集計層の CI 恒久運用化）。
+両者とも既存の決定的抽出（`use_llm=False`）・既存 verdict・既存 oracle を信頼し、外部依存ゼロ（`ollama-local`）を維持する。
+
+### 項目1: コーパスの実 OSS サンプリング拡大（Planned / 未着手）
+
+- 現状の property / コーパステストは **合成シグネチャ中心** である前提を明記する。合成コーパスは決定的抽出の
+  構造的脆さ（多値 return、ネスト式、幻覚関数）を面で叩くには有効だが、実 OSS の多様な構文分布は覆いきれない。
+- 次段階として、ピン留め（バージョン固定）した **実 OSS ファイル群** を各対応言語（python / rust / typescript / go / solidity）から
+  サンプリングし、決定的抽出（`use_llm=False`）経由で `inferred_atoms` の `ensures` / `requires` が **常に妥当** であることを
+  面で検証する構想を記載する。妥当性は既存 oracle をそのまま流用する:
+  - `agent/audit_reporting.py` の `_malformed_extraction_issue_strings` が空であること。
+  - `agent/audit_reporting.py` の `_is_boolean_like_clause` が真であること。
+  - `agent/cross_validation_foreign.py` の `_is_multi_value_return_expression` で多値カンマ残存がないこと。
+- **前提条件**: `oss-dogfood` 配置と `local-llm-demo` blueprint はまだ未コミットである。実 OSS コーパスの固定
+  （ピン留めしたファイル群の取り込み）は、その基盤コミットが前提になる。基盤が入るまでは合成コーパスを主軸に維持する。
+- 🔍 **監視項目** — 実 OSS 固定コーパスの分量とパース時間（大きな関数・ループ・inline assembly・複雑な generics は
+  per-file timeout を超えやすい）。小さいファイル起点でサンプリングし、コーパス総体が CI 予算内に収まるよう調整する。
+
+### 項目2: dogfood 集計層の CI 恒久運用化（Planned / 未着手）
+
+- verdict 分類（`refuted` / `unverifiable` / `verified`）は **既に実装済み** である前提を明記する
+  （`agent/cross_validation_models.py` の `ForeignCodeVerdict`、`agent/cross_validation.py` の
+  `_validate_foreign_code_verdict`）。新規分類は作らず、既存 verdict をそのまま信頼する。
+- 次段階として、ディレクトリ / コーパス dogfood の出力を verdict でバケット分けする集計 / ゲート層を構想する:
+  - `refuted`（実バグ候補）のみを human review に浮かせる（`verification_violations` と counterexample を伴う）。
+  - `unverifiable` は原因サブカテゴリ（`skipped_rate_limited` / `timeout` / `no_function_declarations` / `encoding_gap`）へ
+    畳み込み、ノイズとして人間の注意から外す。
+  - `verified` は集計値として保持する。
+- この集計層は `.github/workflows/proliferate.yml` と同型の **スケジュール実行ワークフロー**（cron + `ollama-local` で
+  外部依存ゼロ）として恒久運用に組み込む構想とする。
+- **前提の順守**: 既存の 7 固定キー契約（`AUDIT_SCHEMA_KEYS`）を壊さない。集計は `verification_status` /
+  `verification_violations` / `cross_validation_gaps` 等の固定キーの上に載せ、別名 alias や新規レビュー入口キーは足さない
+  （human review 入口は既存の `next_steps` のまま）。
+- **ドキュメント**: 実ワークフローファイルを追加する段階で、`docs/CI_WORKFLOWS.md` に本ワークフローの説明節を後で追記する
+  必要がある（下記「Planned」節参照）。
+- 🔍 **監視項目** — verdict バケットの時系列（`refuted` 件数の急増は決定的抽出のリグレッション兆候、
+  `unverifiable` サブカテゴリの偏りは環境要因の兆候）。既存 proliferate の job summary 出力慣習に揃える。
