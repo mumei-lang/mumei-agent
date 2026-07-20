@@ -736,7 +736,40 @@ def _go_is_known_interface_method(
         return True
     if name == "Close" and re.search(r"\berror\b", ret):
         return True
+    # cipher.AEAD implementation methods (Seal/Open/Overhead/NonceSize) are
+    # always called on a non-nil concrete value, so nil receiver counterexamples
+    # are noise.
+    if name == "Seal" and "[]byte" in params_text and "[]byte" in ret and "error" not in ret:
+        return True
+    if name == "Open" and "[]byte" in params_text and "error" in ret:
+        return True
+    if name in {"Overhead", "NonceSize"} and re.search(r"\bint\b", ret) and "[]byte" not in params_text:
+        return True
+    # hash.Hash interface methods (Sum/Size/BlockSize) are called on non-nil
+    # concrete values.
+    if name == "Sum" and "[]byte" in params_text and "[]byte" in ret:
+        return True
+    if name in {"Size", "BlockSize"} and re.search(r"\bint\b", ret) and "[]byte" not in params_text:
+        return True
     return False
+
+
+def _go_map_names(source: str) -> set[str]:
+    """Return package-level variable names declared as Go ``map`` types."""
+    names: set[str] = set()
+    # Single-line top-level ``var x = map[K]V{...}`` or ``var x map[K]V``.
+    for match in re.finditer(
+        r"^\s*var\s+(\w+)\s*(?:=\s*map\[|\s+map\[)", source, re.MULTILINE
+    ):
+        names.add(match.group(1))
+    # ``var ( ... )`` blocks where each line declares a map.
+    for match in re.finditer(r"^\s*var\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL):
+        block = match.group(1)
+        for m in re.finditer(
+            r"^\s*(\w+)\s*(?:=\s*map\[|\s+map\[)", block, re.MULTILINE
+        ):
+            names.add(m.group(1))
+    return names
 
 
 def _go_interface_method_names(source: str) -> set[str]:
@@ -943,6 +976,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         caller_contract_types = _go_caller_contract_receiver_types(source)
         callback_names = _go_callback_function_names(source, functions)
         interface_method_names = _go_interface_method_names(source)
+        go_map_names = _go_map_names(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -978,6 +1012,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                     dereference_values=param_names,
                     local_names=local_names,
                     param_types=param_types,
+                    mapping_names=go_map_names,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1025,6 +1060,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     ])
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
+    go_map_names = _go_map_names(source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
@@ -1056,6 +1092,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 dereference_values=param_names,
                 local_names=local_names,
                 param_types=param_types,
+                mapping_names=go_map_names,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
