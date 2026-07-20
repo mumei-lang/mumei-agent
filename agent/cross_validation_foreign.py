@@ -2349,6 +2349,12 @@ def _is_expression_lowerable(
             return False
     if "=>" in no_strings or "function" in no_strings.lower():
         return False
+    # Object literals and method/field access on index/aggregate results cannot
+    # be lowered.
+    if re.search(r"\{[^}]*:", no_strings):
+        return False
+    if re.search(r"[\]\}]\s*\.", no_strings):
+        return False
     allowed = {"true", "false", "null", "undefined", "and", "or", "not", "bit_and", "in"}
     allowed.update(param_names)
     if known_constants:
