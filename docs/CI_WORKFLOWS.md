@@ -61,5 +61,5 @@ python scripts/ci_verify.py src/*.mm --proof-cert
 バケット分けする集計 / ゲート層を、`.github/workflows/proliferate.yml` と同型のスケジュール実行ワークフロー
 （cron + `ollama-local` で外部依存ゼロ）として恒久運用に組み込む構想がある。`refuted`（実バグ候補）のみを
 human review に浮かせ、`unverifiable` を原因サブカテゴリ（`skipped_rate_limited` / `timeout` /
-`no_function_declarations` / `encoding_gap`）へ畳み込む。集計は 7 固定キー契約（`AUDIT_SCHEMA_KEYS`）と
+`no_function_declarations` / `encoding_gap`）へ畳み込む。集計は 8 固定キー契約（`AUDIT_SCHEMA_KEYS`）と
 既存 verdict の上に載せ、新規分類や別名 alias は導入しない。実ワークフロー追加時に本ファイルへ運用手順を追記する。

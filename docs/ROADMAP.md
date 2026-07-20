@@ -1468,7 +1468,7 @@ Phase 1 の残り — ✅ **完了**: 直接 `client.chat.completions.create` �
   - `verified` は集計値として保持する。
 - この集計層は `.github/workflows/proliferate.yml` と同型の **スケジュール実行ワークフロー**（cron + `ollama-local` で
   外部依存ゼロ）として恒久運用に組み込む構想とする。
-- **前提の順守**: 既存の 7 固定キー契約（`AUDIT_SCHEMA_KEYS`）を壊さない。集計は `verification_status` /
+- **前提の順守**: 既存の 8 固定キー契約（`AUDIT_SCHEMA_KEYS`）を壊さない。集計は `verification_status` /
   `verification_violations` / `cross_validation_gaps` 等の固定キーの上に載せ、別名 alias や新規レビュー入口キーは足さない
   （human review 入口は既存の `next_steps` のまま）。
 - **ドキュメント**: 実ワークフローファイルを追加する段階で、`docs/CI_WORKFLOWS.md` に本ワークフローの説明節を後で追記する
