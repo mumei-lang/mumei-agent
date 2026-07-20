@@ -1926,3 +1926,49 @@ def test_go_nil_guarded_return_values() -> None:
 
     assert _go_nil_guarded_return_values("if fork == nil { return [] } return fork.HashTreeRoot()") == {"fork"}
     assert _go_nil_guarded_return_values("if x != nil { return x } return y") == set()
+
+
+def test_normalize_foreign_expression_inlines_go_char_literals() -> None:
+    """Go rune literals are lowered to integer code points for Mumei."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("'A'", language="go") == "65"
+    assert _normalize_foreign_expression("c >= 'A' && c <= 'Z'", language="go") == "(c >= 65 and c <= 90)"
+
+
+def test_raw_return_statement_expression_masks_nested_go_function_literals() -> None:
+    """Returns inside nested closures must not leak into the outer function."""
+    from agent.cross_validation_foreign import _raw_return_statement_expression, _all_return_expressions
+
+    body = 'sort.Slice(deps, func(i, j int) bool { return deps[i].order() < deps[j].order() })\nreturn nil'
+    assert _raw_return_statement_expression(body, "go") == "nil"
+    assert _all_return_expressions(body, "go") == ["nil"]
+
+
+def test_detect_go_safety_issues_skips_sort_interface_index_bounds() -> None:
+    """sort.Interface Less/Swap parameters are guaranteed in-bounds by the caller."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''
+package demo
+type byPos struct{ a []*T }
+func (x byPos) Less(i, j int) bool { return x.a[i].Pos() < x.a[j].Pos() }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("index" in issue.message for issue in issues)
+
+
+def test_issues_for_expression_respects_nonzero_guard() -> None:
+    """A preceding ``rate > 0`` guard suppresses divide-by-zero on ``rate``."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    expr = "rate > 0 && cheaprandu64()%rate == 0"
+    issues = _issues_for_expression("Sample", expr, "Go")
+    assert not any("divide" in issue.message.lower() for issue in issues)
+
+
+def test_i64_overflow_safety_issue_skips_pointer_arithmetic() -> None:
+    """Pointer conversions such as ``muintptr(x + y)`` should not emit i64 overflow issues."""
+    from agent.strategies.foreign_code_strategy_helpers import _i64_overflow_safety_issue
+
+    assert _i64_overflow_safety_issue("WaitListHead", "highBits", "mutexMOffset", "Go", "muintptr(highBits + mutexMOffset)") is None
