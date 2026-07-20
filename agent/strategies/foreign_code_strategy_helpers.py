@@ -786,6 +786,31 @@ def _go_is_known_interface_method(
     return False
 
 
+def _go_is_hash_internal_helper(
+    name: str,
+    params_text: str,
+    return_type: str | None,
+) -> bool:
+    """Return True for unexported internal helpers used by ``hash.Hash`` implementations.
+
+    Packages like ``crypto/internal/fips140/sha3`` split exported ``Write``/
+    ``Read``/``Sum`` methods into tiny unexported ``write``/``read``/``sum``
+    wrappers that dispatch to generic assembly or non-assembly code. These are
+    always invoked on a non-nil concrete ``*Digest``, so nil-receiver
+    counterexamples are caller-contract noise.
+    """
+    if not name or not params_text:
+        return False
+    ret = return_type or ""
+    if name == "write" and "[]byte" in params_text and re.search(r"\bint\b", ret) and re.search(r"\berror\b", ret):
+        return True
+    if name == "read" and "[]byte" in params_text and re.search(r"\bint\b", ret) and re.search(r"\berror\b", ret):
+        return True
+    if name == "sum" and "[]byte" in params_text and "[]byte" in ret and "error" not in ret:
+        return True
+    return False
+
+
 def _go_map_names(source: str) -> set[str]:
     """Return package-level variable names declared as Go ``map`` types."""
     names: set[str] = set()
@@ -1035,6 +1060,7 @@ def _detect_go_safety_issues(
                 and (
                     rtype.lstrip("*") in caller_contract_types
                     or _go_is_known_interface_method(fn.name, fn.params_text, fn.return_type)
+                    or _go_is_hash_internal_helper(fn.name, fn.params_text, fn.return_type)
                     or fn.name in interface_method_names
                 )
             )
@@ -1118,6 +1144,7 @@ def _detect_go_safety_issues(
             and (
                 rtype.lstrip("*") in caller_contract_types
                 or _go_is_known_interface_method(name, params_text, _return_type)
+                or _go_is_hash_internal_helper(name, params_text, _return_type)
                 or name in interface_method_names
             )
         )
