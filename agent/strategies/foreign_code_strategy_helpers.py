@@ -666,7 +666,6 @@ def _detect_block_safety_issues(
                     known_constants=known_constants,
                     mapping_names=mapping_names,
                     guaranteed_nonzero=per_function_nonzero,
-                    body=body,
                 )
             )
     return issues
@@ -1014,7 +1013,6 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                     local_names=local_names,
                     param_types=param_types,
                     mapping_names=go_map_names,
-                    body=body,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1095,7 +1093,6 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 local_names=local_names,
                 param_types=param_types,
                 mapping_names=go_map_names,
-                body=body,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -1162,7 +1159,6 @@ def _index_safety_issue(
     known_constants: dict[str, int],
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
-    body: str = "",
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
@@ -1172,17 +1168,6 @@ def _index_safety_issue(
         container_type = param_types.get(container, "")
         if container_type.startswith("map["):
             # Map key access is always safe (returns zero value if missing).
-            return None
-    if label == "Go" and body:
-        # If the index variable is assigned ``idx = ... % len(container)`` in the
-        # function body, the resulting value is provably in bounds (modulo by
-        # the container length yields a value in ``[0, len)``). This suppresses
-        # false positives such as test helpers that hash a string into a slice.
-        modulo_pattern = re.compile(
-            rf"\b{re.escape(index)}\s*:?=\s*[^;\n]*%\s*len\s*\(\s*{re.escape(container)}\s*\)",
-            re.DOTALL,
-        )
-        if modulo_pattern.search(body):
             return None
     if mapping_names and container in mapping_names:
         # Solidity mapping key access is always safe.
@@ -1425,7 +1410,6 @@ def _issues_for_expression(
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     guaranteed_nonzero: set[str] | None = None,
-    body: str = "",
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1447,7 +1431,6 @@ def _issues_for_expression(
             local_names=local_names,
             param_types=param_types,
             mapping_names=mapping_names,
-            body=body,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1464,7 +1447,7 @@ def _issues_for_expression(
                 # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
                 continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, body=body
+                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names
             )
             if issue is not None:
                 issues.append(issue)
@@ -1518,7 +1501,6 @@ def _issues_from_findings(
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
-    body: str = "",
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1529,7 +1511,7 @@ def _issues_from_findings(
     issues: list[ForeignSafetyIssue] = []
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, body=body)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":

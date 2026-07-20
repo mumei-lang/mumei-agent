@@ -1,14 +1,14 @@
 # 外部 OSS ドッグフーディング監査継続レポート（第 15 弾 / batch 16）
 
 - 実施日: 2026-07-24
-- 監査ツール: mumei-agent (`develop`, PR #405 マージ後 + batch 16 対応中)
+- 監査ツール: mumei-agent (`develop`, PR #405 マージ後)
 - LLM モデル: 未使用（`LLM_API_KEY=` no-LLM 決定論的スクリーニング）
 - 出力ディレクトリ: `/home/ubuntu/repos/mumei-agent/reports/dogfood_continue_16/`
 
 ## 結果サマリー
 
-- verified: 50 件
-- refuted: 0 件
+- verified: 49 件
+- refuted: 1 件
 - unverifiable: 0 件
 
 ## 修正対応済みのツール限界
@@ -17,7 +17,12 @@
 - Go 標準インターフェース実装メソッドの nil レシーバー誤検出を抑制:
   - `cipher.AEAD`: `Seal` / `Open` / `Overhead` / `NonceSize`
   - `hash.Hash`: `Sum` / `Size` / `BlockSize`
-- Go の「インデックス = ``... % len(container)``」という剰余による境界内インデックスを認識（`getDummyRenderedURL` 等のテストヘルパー）。
+
+## 残存 refuted（ツール限界）
+
+- `grafana/pkg/registry/apis/provisioning/webhooks/pullrequest/changes_test.go` (`getDummyRenderedURL`)
+  - Go の剰余インデックス `int(v) % len(dummy)` は signed `int` への cast により負の値を取りうるため、一律に bounds safe とみなすことは sound でない。
+  - 現時点では未対応の false positive として残す。将来、unsigned 被除数かつ container non-empty の dataflow 追跡ができれば再実装可能。
 
 ## 全ファイル一覧
 
@@ -55,7 +60,7 @@
 | uniswap-contracts | `src/briefcase/protocols/permit2/interfaces/IEIP712.sol` | solidity | verified |
 | go | `src/net/netcgo_on.go` | go | verified |
 | grafana | `public/app/features/alerting/unified/components/alert-groups/AlertGroupFilter.tsx` | typescript | verified |
-| grafana | `pkg/registry/apis/provisioning/webhooks/pullrequest/changes_test.go` | go | verified |
+| grafana | `pkg/registry/apis/provisioning/webhooks/pullrequest/changes_test.go` | go | refuted |
 | influxdb | `influxdb3_catalog/src/log.rs` | rust | verified |
 | go | `src/cmd/cgo/internal/test/issue24161e2/main.go` | go | verified |
 | prysm | `testing/spectest/shared/capella/epoch_processing/historical_summaries_update.go` | go | verified |
