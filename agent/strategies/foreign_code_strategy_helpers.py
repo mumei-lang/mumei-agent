@@ -638,9 +638,14 @@ def _go_is_known_interface_method(
         return True
     if name == "ServeHTTP" and "http.ResponseWriter" in params_text and "*http.Request" in params_text:
         return True
-    if name in {"Read", "Write"} and "[]byte" in params_text and "int, error" in ret.replace(" ", ""):
+    if (
+        name in {"Read", "Write"}
+        and "[]byte" in params_text
+        and re.search(r"\bint\b", ret)
+        and re.search(r"\berror\b", ret)
+    ):
         return True
-    if name == "Close" and ret.strip().endswith("error"):
+    if name == "Close" and re.search(r"\berror\b", ret):
         return True
     return False
 

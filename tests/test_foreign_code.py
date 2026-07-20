@@ -2300,3 +2300,27 @@ var arch = struct{ addF func(*Asm, Reg, Reg, Reg, Carry) bool }{addF: amd64Add}
 """
     issues = _detect_safety_issues(source, "go")
     assert not any("amd64Add" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_io_read_write_close_receivers() -> None:
+    """io.Reader/Writer/Closer pointer-receiver methods are caller-contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package rwc
+
+type Buffer struct{ data []byte }
+
+func (b *Buffer) Read(p []byte) (n int, err error) {
+    return b.readInto(p)
+}
+
+func (b *Buffer) Write(p []byte) (int, error) {
+    return b.append(p)
+}
+
+func (b *Buffer) Close() error {
+    return nil
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("Buffer" in i.message for i in issues)
