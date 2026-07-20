@@ -1895,6 +1895,29 @@ def test_ensures_for_return_expression_falls_back_for_map_index() -> None:
     assert _ensures_for_return_expression("(*m)[s]", "i64", {"m", "s"}, param_types={"m": "*map[string]int"}) == "true"
 
 
+def test_ensures_for_return_expression_falls_back_for_multi_declared_local() -> None:
+    """A return of a multi-variable short-declaration local should not be lowered."""
+    from agent.cross_validation_foreign import _ensures_for_return_expression, _local_variable_names
+
+    body = '''
+func QueryBool(name string) bool {
+    v, _ := strconv.ParseBool(name)
+    return v
+}
+'''
+    local_names = _local_variable_names(body, "go")
+    assert "v" in local_names
+    assert _ensures_for_return_expression("v", "bool", {"name"}, local_names=local_names) == "true"
+
+
+def test_is_expression_lowerable_rejects_jsx() -> None:
+    """JSX/TSX element literals cannot be lowered into Mumei equalities."""
+    from agent.cross_validation_foreign import _is_expression_lowerable
+
+    assert _is_expression_lowerable("(<Component prop={x} />", {"x"}) is False
+    assert _is_expression_lowerable("x + 1", {"x"}) is True
+
+
 def test_raw_return_statement_expression_handles_multiline_ternary() -> None:
     """Multi-line Solidity/TypeScript ternary returns must be captured in full."""
     from agent.cross_validation_foreign import _raw_return_statement_expression
@@ -2159,6 +2182,27 @@ contract C {
 '''
     issues = _detect_safety_issues(source, "solidity")
     assert not any("_values" in i.message for i in issues)
+
+
+def test_detect_ts_safety_issues_mask_nested_arrow_functions() -> None:
+    """Nested arrow functions in a TypeScript object literal must not leak into the outer function."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+export const getJoinByLabelsTransformer: () => any = () => ({
+  id: 'joinByLabels',
+  transformer: (options: any) => {
+    return (data: any[]) => {
+      if (!data || !data.length) {
+        return data;
+      }
+      return [data.map((frame) => frame.refId).join('-')];
+    };
+  },
+});
+'''
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("data" in i.message for i in issues)
 
 
 def test_detect_go_safety_issues_skips_map_key_access() -> None:

@@ -589,15 +589,20 @@ def _go_package_name(source: str) -> str:
 def _go_caller_contract_receiver_types(source: str) -> set[str]:
     """Return receiver type names whose nil-deref issues are caller-contract noise.
 
-    These are standard-library container types whose pointer-receiver methods are
+    These are framework/container types whose pointer-receiver methods are
     documented to be used on initialized/non-nil instances (e.g. ``flag.FlagSet``
-    via ``NewFlagSet`` / ``CommandLine``), so a nil receiver counterexample is a
-    false positive in normal usage.
+    via ``NewFlagSet`` / ``CommandLine``; web ``Context`` created per request),
+    so a nil receiver counterexample is a false positive in normal usage.
     """
     pkg = _go_package_name(source)
     contracts: set[str] = set()
     if pkg == "flag" and re.search(r"\btype\s+FlagSet\s+struct\b", source):
         contracts.add("FlagSet")
+    if pkg == "web" and re.search(r"\btype\s+Context\s+struct\b", source):
+        # Web framework request contexts (e.g. Grafana ``pkg/web``) are always
+        # created from an active HTTP request; nil receiver counterexamples on
+        # their methods are false positives.
+        contracts.add("Context")
     return contracts
 
 
