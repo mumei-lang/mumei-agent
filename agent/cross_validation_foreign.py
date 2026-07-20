@@ -1559,6 +1559,7 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
         if _is_go_test_name(fn.raw_name or fn.name):
             continue
         params = _params_from_signature(fn.params_text)
+        go_param_types = _go_param_types(fn.params_text)
         nillable_names = _go_nillable_param_names(fn.params_text)
         return_type = _mumei_return_type(fn.return_type)
         if not fn.body.strip():
@@ -1578,7 +1579,7 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
                 if req and req != "true":
                     requirements.extend(part.strip() for part in req.split("&&") if part.strip())
             requires = " && ".join(_dedupe_strings(requirements)) if requirements else "true"
-            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=go_param_types)
         atoms.append(
             MumeiContractAtom(
                 name=fn.name,
@@ -1603,6 +1604,7 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
         # precondition; value types (e.g. `reflect.Value`) can never be nil, so
         # inferring one produces a false `refuted` verdict (#295).
         nillable_names = _go_nillable_param_names(params_text)
+        go_param_types = _go_param_types(params_text)
         raw_return_expr = _raw_return_statement_expression(body, "go")
         return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "go")
         mumei_return_type = _mumei_return_type(return_type)
@@ -1621,7 +1623,7 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
                 params=params,
                 return_type=mumei_return_type,
                 requires=requires,
-                ensures=_ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants, local_names),
+                ensures=_ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants, local_names, param_types=go_param_types),
             )
         )
     # Assembly forward declarations and other external function signatures have
@@ -1767,6 +1769,19 @@ def _split_signature_params(params_text: str) -> list[str]:
     if tail:
         parts.append(tail)
     return parts
+
+
+def _go_param_types(params_text: str) -> dict[str, str]:
+    """Map Go parameter/receiver names to their raw Go type strings."""
+    types: dict[str, str] = {}
+    for raw in _split_signature_params(params_text):
+        raw = raw.strip()
+        if not raw:
+            continue
+        match = re.fullmatch(r"([A-Za-z_]\w*)\s+(.+)", raw)
+        if match:
+            types[match.group(1)] = match.group(2).strip()
+    return types
 
 
 def _params_from_signature(params_text: str) -> list[ContractParam]:
@@ -2328,6 +2343,7 @@ def _is_expression_lowerable(
     param_names: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
     local_names: set[str] | None = None,
+    param_types: dict[str, str] | None = None,
 ) -> bool:
     """Detect expressions that Mumei cannot lower.
 
@@ -2339,6 +2355,17 @@ def _is_expression_lowerable(
     """
     if param_names is None and local_names is None:
         return True
+    # Mumei arrays can only be indexed by integers.  Go map key access (e.g.
+    # ``m["abc"]`` or ``m[s]`` where ``m`` is ``map[string]int``) cannot be
+    # expressed as an ``ensures`` equality.
+    if re.search(r"\[\s*(['\"])[^'\"]*\1\s*\]", expression):
+        return False
+    if param_types:
+        for match in re.finditer(r"(?:\(\s*\*\s*)?([A-Za-z_]\w*)\s*\)?\s*\[\s*([A-Za-z_]\w*)\s*\]", expression):
+            container = match.group(1)
+            container_type = (param_types.get(container) or "").lstrip("*")
+            if container_type.startswith("map["):
+                return False
     no_strings = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
     # Ternary and arrow-function bodies cannot be lowered into a single Mumei
     # equality over ``result``.
@@ -2400,11 +2427,12 @@ def _ensures_for_return_expression(
     param_names: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
     local_names: set[str] | None = None,
+    param_types: dict[str, str] | None = None,
 ) -> str:
     """Build a Mumei ``ensures`` clause, falling back to ``true`` for unverifiable types."""
     if not return_expr or return_type == "string":
         return "true"
-    if not _is_expression_lowerable(return_expr, param_names, known_constants, local_names):
+    if not _is_expression_lowerable(return_expr, param_names, known_constants, local_names, param_types=param_types):
         return "true"
     return f"result == {return_expr}"
 
