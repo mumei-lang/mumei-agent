@@ -2403,3 +2403,26 @@ def test_solidity_guaranteed_nonzero_from_min_constant() -> None:
 """
     issues = _detect_safety_issues(source, "solidity")
     assert not any("tickSpacing" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_range_index_into_parallel_slice() -> None:
+    """``range`` loop variables and parallel ``make([]T, len(domain))`` slices are safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package evaluators
+
+func compareChainHeads(chainHeads []*ChainHead) error {
+    headEpochs := make([]uint64, len(chainHeads))
+    for i, ch := range chainHeads {
+        headEpochs[i] = ch.HeadEpoch
+    }
+    for i := range chainHeads {
+        if headEpochs[0] != headEpochs[i] {
+            return fmt.Errorf("mismatch %d %d", chainHeads[i].HeadEpoch, headEpochs[i])
+        }
+    }
+    return nil
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)

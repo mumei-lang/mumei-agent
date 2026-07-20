@@ -1060,6 +1060,41 @@ def _is_go_experimental(source: str) -> bool:
     return False
 
 
+def _go_parallel_slice_index_safe_pairs(body: str) -> set[tuple[str, str]]:
+    """Return safe ``(container, index)`` index pairs for parallel local slices.
+
+    If a function loops ``for i := range domain`` and also declares
+    ``parallel := make([]T, len(domain))``, then ``parallel[i]`` is guaranteed
+    in-bounds and should not be reported as a counter-example.
+    """
+    range_domains: dict[str, str] = {}
+    for match in re.finditer(r"\bfor\s+(\w+)\s*:=\s*range\s+(\w+)\b", body):
+        index, domain = match.group(1), match.group(2)
+        range_domains[index] = domain
+    for match in re.finditer(
+        r"\bfor\s+(\w+)\s*:=\s*0\s*;\s*\1\s*<\s*len\((\w+)\)\s*;",
+        body,
+    ):
+        index, domain = match.group(1), match.group(2)
+        range_domains[index] = domain
+
+    same_len_slices: dict[str, str] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*make\s*\([^,]+,\s*len\s*\((\w+)\)\)", body
+    ):
+        container, domain = match.group(1), match.group(2)
+        same_len_slices[container] = domain
+
+    safe: set[tuple[str, str]] = set()
+    for index, domain in range_domains.items():
+        # ``range domain`` guarantees ``0 <= index < len(domain)``.
+        safe.add((domain, index))
+        for container, container_domain in same_len_slices.items():
+            if container_domain == domain:
+                safe.add((container, index))
+    return safe
+
+
 def _detect_go_safety_issues(
     source: str,
     *,
@@ -1089,6 +1124,7 @@ def _detect_go_safety_issues(
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
             local_names = _local_variable_names(body, "go")
+            parallel_slicing = _go_parallel_slice_index_safe_pairs(body)
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
             rtype = _go_method_receiver_type(fn.params_text)
@@ -1120,6 +1156,7 @@ def _detect_go_safety_issues(
                     param_types=param_types,
                     mapping_names=go_map_names,
                     known_constants=known_constants or {},
+                    parallel_slicing=parallel_slicing,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1268,6 +1305,7 @@ def _index_safety_issue(
     known_constants: dict[str, int],
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
+    parallel_slicing: set[tuple[str, str]] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
@@ -1280,6 +1318,10 @@ def _index_safety_issue(
             return None
     if mapping_names and container in mapping_names:
         # Solidity mapping key access is always safe.
+        return None
+    if parallel_slicing and (container, index) in parallel_slicing:
+        # The index variable is known to be within ``len(container)`` because the
+        # container was allocated with the same length as the loop range.
         return None
     known_index = known_constants.get(index)
     if known_index is not None and known_index < 0:
@@ -1526,6 +1568,7 @@ def _issues_for_expression(
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     guaranteed_nonzero: set[str] | None = None,
+    parallel_slicing: set[tuple[str, str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1547,6 +1590,7 @@ def _issues_for_expression(
             local_names=local_names,
             param_types=param_types,
             mapping_names=mapping_names,
+            parallel_slicing=parallel_slicing,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1563,7 +1607,7 @@ def _issues_for_expression(
                 # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
                 continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names
+                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing
             )
             if issue is not None:
                 issues.append(issue)
@@ -1617,6 +1661,7 @@ def _issues_from_findings(
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
+    parallel_slicing: set[tuple[str, str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1627,7 +1672,7 @@ def _issues_from_findings(
     issues: list[ForeignSafetyIssue] = []
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":
