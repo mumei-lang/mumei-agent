@@ -78,14 +78,19 @@ _CONST_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
 
 
 def parse_int_literal(text: str) -> int | None:
-    """Parse a hex/decimal integer literal, ignoring ``_`` separators and casts."""
+    """Parse an integer literal, ignoring ``_`` separators and casts.
+
+    Supports decimal, hex ``0x``, binary ``0b`` and octal ``0o`` prefixes so
+    that Go/Rust/Solidity/TypeScript constants written in those bases are not
+    truncated or mis-read.
+    """
     text = text.strip()
     # Drop a trailing cast/suffix such as ``as const`` or a Rust type suffix.
     text = re.split(r"\s+as\b", text, maxsplit=1)[0].strip()
     text = re.split(r"[iu](?:8|16|32|64|128|size)$", text, maxsplit=1)[0].strip()
     text = text.replace("_", "")
     try:
-        return int(text, 16) if text.lower().startswith("0x") else int(text, 10)
+        return int(text, 0)
     except ValueError:
         return None
 
