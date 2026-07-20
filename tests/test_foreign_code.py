@@ -1809,10 +1809,13 @@ def test_ensures_for_return_expression_falls_back_for_unknown_field_access() -> 
 
 def test_normalize_bitwise_and_and_inline_constants() -> None:
     """Solidity ``&`` rewrites to ``bit_and`` and constants are inlined."""
-    from agent.cross_validation_foreign import _normalize_foreign_expression
+    from agent.cross_validation_foreign import _normalize_foreign_expression, _normalize_bitwise_and
 
     assert _normalize_foreign_expression("self & OVERRIDE_FEE_FLAG != 0", {"OVERRIDE_FEE_FLAG": 0x400000}) == "(bit_and(self, 4194304) != 0)"
     assert _normalize_foreign_expression("self & REMOVE_OVERRIDE_MASK", {"REMOVE_OVERRIDE_MASK": 0xBFFFFF}) == "bit_and(self, 12582911)"
+    # Chained ``&`` and parenthesised operands must also collapse to nested bit_and.
+    assert _normalize_bitwise_and("a & b & c") == "bit_and(bit_and(a, b), c)"
+    assert _normalize_bitwise_and("(a & b) & c") == "bit_and(bit_and(a, b), c)"
 
 
 def test_extract_go_caller_contracts_from_doc() -> None:

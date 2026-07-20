@@ -2617,17 +2617,171 @@ def _normalize_bit_shifts(expression: str) -> str:
     return normalized
 
 
+def _maybe_unparenthesize(expression: str) -> str:
+    """Strip a single pair of surrounding parentheses if the whole expr is grouped."""
+    text = expression.strip()
+    if not (text.startswith("(") and text.endswith(")")):
+        return text
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if depth == 0 and i < len(text) - 1:
+            return text
+    return text[1:-1]
+
+
+def _bitwise_operand_left(expression: str, pos: int) -> tuple[int, int] | None:
+    """Return the (start, end) range of the operand immediately left of ``pos``."""
+    i = pos - 1
+    while i >= 0 and expression[i].isspace():
+        i -= 1
+    if i < 0:
+        return None
+    end = i + 1
+    ch = expression[i]
+    if ch == ")":
+        depth = 1
+        i -= 1
+        while i >= 0 and depth > 0:
+            if expression[i] == ")":
+                depth += 1
+            elif expression[i] == "(":
+                depth -= 1
+            i -= 1
+        # i now points to the char before the matching '('
+        start_paren = i + 1  # position of '('
+        # If the group is preceded by an identifier, it's a function call.
+        while i >= 0 and expression[i].isspace():
+            i -= 1
+        j = i
+        while j >= 0 and (expression[j].isalnum() or expression[j] == "_"):
+            j -= 1
+        if j < i:
+            start = j + 1
+        else:
+            start = start_paren
+        return (start, end)
+    if ch.isalnum() or ch == "_":
+        while i >= 0 and (expression[i].isalnum() or expression[i] == "_"):
+            i -= 1
+        return (i + 1, end)
+    return None
+
+
+def _bitwise_operand_right(expression: str, pos: int) -> tuple[int, int] | None:
+    """Return the (start, end) range of the operand immediately right of ``pos``."""
+    n = len(expression)
+    i = pos + 1
+    while i < n and expression[i].isspace():
+        i += 1
+    if i >= n:
+        return None
+    start = i
+    ch = expression[i]
+    if ch == "(":
+        depth = 1
+        i += 1
+        while i < n and depth > 0:
+            if expression[i] == "(":
+                depth += 1
+            elif expression[i] == ")":
+                depth -= 1
+            i += 1
+        return (start, i)
+    if ch.isalnum() or ch == "_":
+        while i < n and (expression[i].isalnum() or expression[i] == "_"):
+            i += 1
+        # If followed by '(', it's a function call; consume the arguments.
+        if i < n and expression[i].isspace():
+            j = i
+            while j < n and expression[j].isspace():
+                j += 1
+            if j < n and expression[j] == "(":
+                i = j
+        if i < n and expression[i] == "(":
+            depth = 1
+            i += 1
+            while i < n and depth > 0:
+                if expression[i] == "(":
+                    depth += 1
+                elif expression[i] == ")":
+                    depth -= 1
+                i += 1
+        return (start, i)
+    if ch.isdigit():
+        while i < n and (expression[i].isalnum() or expression[i] == "_"):
+            i += 1
+        return (start, i)
+    return None
+
+
+def _find_bitwise_and(expression: str, start: int = 0) -> int | None:
+    """Find the next bare ``&`` operator not inside a string or parentheses."""
+    i = start
+    n = len(expression)
+    in_string: str | None = None
+    paren_depth = 0
+    while i < n:
+        ch = expression[i]
+        if in_string:
+            if ch == in_string and (i == 0 or expression[i - 1] != "\\"):
+                in_string = None
+            i += 1
+            continue
+        if ch in '"\'':
+            in_string = ch
+            i += 1
+            continue
+        if ch in "([{":
+            paren_depth += 1
+            i += 1
+            continue
+        if ch in ")]}" and paren_depth > 0:
+            paren_depth -= 1
+            i += 1
+            continue
+        if ch == "&" and paren_depth == 0:
+            # Avoid matching '&&' (already replaced earlier) and '&='.
+            if (i + 1 < n and expression[i + 1] == "&") or (
+                i + 1 < n and expression[i + 1] == "=" or
+                (i > 0 and expression[i - 1] == "&")
+            ):
+                pass
+            else:
+                return i
+        i += 1
+    return None
+
+
 def _normalize_bitwise_and(expression: str) -> str:
-    """Rewrite ``a & b`` to ``bit_and(a, b)`` for Mumei lowering."""
-    prev = None
+    """Rewrite ``a & b`` to ``bit_and(a, b)`` for Mumei lowering.
+
+    Handles chains such as ``a & b & c`` by iterating left-to-right and allows
+    function-call and parenthesised operands, e.g. ``bit_and(a, b) & c`` or
+    ``(a & b) & c``.
+    """
     result = expression
-    while prev != result:
-        prev = result
-        result = re.sub(
-            r"\b([A-Za-z_][A-Za-z0-9_]*)\s*&\s*([A-Za-z_][A-Za-z0-9_]*)\b",
-            r"bit_and(\1, \2)",
-            result,
-        )
+    i = 0
+    while True:
+        pos = _find_bitwise_and(result, i)
+        if pos is None:
+            break
+        left = _bitwise_operand_left(result, pos)
+        right = _bitwise_operand_right(result, pos)
+        if left is None or right is None:
+            i = pos + 1
+            continue
+        left_text = result[left[0] : left[1]]
+        right_text = result[right[0] : right[1]]
+        # Recursively rewrite any nested & inside operand parentheses.
+        left_text = _normalize_bitwise_and(_maybe_unparenthesize(left_text))
+        right_text = _normalize_bitwise_and(_maybe_unparenthesize(right_text))
+        replacement = f"bit_and({left_text}, {right_text})"
+        result = result[: left[0]] + replacement + result[right[1] :]
+        i = left[0] + len(replacement)
     return result
 
 
