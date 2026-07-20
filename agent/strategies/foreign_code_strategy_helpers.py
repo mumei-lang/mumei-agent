@@ -478,8 +478,9 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
     if normalized == "go":
         if _is_go_compiler_test(source):
             return []
+        known_constants = _go_declared_constants(source)
         stripped_source = _strip_go_rust_literals_and_comments(source)
-        return _detect_go_safety_issues(stripped_source)
+        return _detect_go_safety_issues(stripped_source, known_constants=known_constants)
     if normalized == "python":
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
@@ -524,6 +525,37 @@ def _solidity_declared_constants(source: str) -> dict[str, int]:
     can be picked as ``0`` / ``-1`` (#296).
     """
     return semantic_safety.collect_declared_constants(source, "solidity")
+
+
+def _go_declared_constants(source: str) -> dict[str, int]:
+    """Map top-level Go ``const`` names to their integer literal values.
+
+    Constants such as ``gcmStandardNonceSize = 12`` should not be modeled as
+    free Z3 integers that can be chosen negative or huge, which would cause
+    spurious overflow/index reports on constant-only expressions (#406).
+    """
+    constants: dict[str, int] = {}
+    # Single-line: ``const name = value`` or ``const name int = value``
+    for match in re.finditer(
+        r"^\s*const\s+(\w+)\s*(?:\w+\s*)?=\s*([+-]?\d+)", source, re.MULTILINE
+    ):
+        name, value = match.group(1), match.group(2)
+        try:
+            constants[name] = int(value)
+        except ValueError:
+            pass
+    # Block: ``const ( name = value; ... )``
+    for match in re.finditer(r"^\s*const\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL):
+        block = match.group(1)
+        for m in re.finditer(
+            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([+-]?\d+)", block, re.MULTILINE
+        ):
+            name, value = m.group(1), m.group(2)
+            try:
+                constants[name] = int(value)
+            except ValueError:
+                pass
+    return constants
 
 
 def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
@@ -964,7 +996,11 @@ def _is_go_compiler_test(source: str) -> bool:
     return False
 
 
-def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
+def _detect_go_safety_issues(
+    source: str,
+    *,
+    known_constants: dict[str, int] | None = None,
+) -> list[ForeignSafetyIssue]:
     if _is_go_compiler_test(source):
         return []
     issues: list[ForeignSafetyIssue] = []
@@ -1013,6 +1049,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                     local_names=local_names,
                     param_types=param_types,
                     mapping_names=go_map_names,
+                    known_constants=known_constants or {},
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1093,6 +1130,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 local_names=local_names,
                 param_types=param_types,
                 mapping_names=go_map_names,
+                known_constants=known_constants or {},
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -1353,6 +1391,7 @@ def _i64_overflow_safety_issue(
     label: str,
     expression: str = "",
     local_names: set[str] | None = None,
+    known_constants: dict[str, int] | None = None,
 ) -> ForeignSafetyIssue | None:
     if _is_pointer_arithmetic_expression(expression, left, right):
         return None
@@ -1360,6 +1399,12 @@ def _i64_overflow_safety_issue(
         # Arithmetic over local loop variables cannot be expressed as a
         # precondition on the atom's parameters, so treat it as trusted.
         return None
+    known = known_constants or {}
+    if left in known and right in known:
+        max_i64 = 9_223_372_036_854_775_807
+        min_i64 = -9_223_372_036_854_775_808
+        if min_i64 <= known[left] + known[right] <= max_i64:
+            return None
     counterexample = _z3_i64_overflow_counterexample(left, right)
     return ForeignSafetyIssue(
         function_name=function_name,
@@ -1479,7 +1524,7 @@ def _issues_for_expression(
     if label in {"Go", "Rust"}:
         for left, right in _addition_pairs_regex(expression):
             issue = _i64_overflow_safety_issue(
-                function_name, left, right, label, expression, local_names=local_names
+                function_name, left, right, label, expression, local_names=local_names, known_constants=known_constants
             )
             if issue is not None:
                 issues.append(issue)
@@ -1532,7 +1577,7 @@ def _issues_from_findings(
     if label in {"Go", "Rust"}:
         for left, right in findings.additions:
             issue = _i64_overflow_safety_issue(
-                function_name, left, right, label, expression, local_names=local_names
+                function_name, left, right, label, expression, local_names=local_names, known_constants=known_constants
             )
             if issue is not None:
                 issues.append(issue)
