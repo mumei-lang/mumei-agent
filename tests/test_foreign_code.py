@@ -2324,3 +2324,44 @@ func (b *Buffer) Close() error {
 """
     issues = _detect_safety_issues(source, "go")
     assert not any("Buffer" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_local_interface_method_receivers() -> None:
+    """Methods implementing a source-local interface are caller-contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package http2
+
+type writeFramer interface {
+    writeFrame(writeContext) error
+    staysWithinBuffer(int) bool
+}
+
+type writeData struct{ streamID uint32; p []byte; endStream bool }
+
+func (w *writeData) writeFrame(ctx writeContext) error {
+    return ctx.Framer().WriteData(w.streamID, w.endStream, w.p)
+}
+
+func (w *writeData) staysWithinBuffer(max int) bool {
+    return frameHeaderLen+len(w.p) <= max
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("writeData" in i.message for i in issues)
+
+
+def test_solidity_guaranteed_nonzero_from_min_constant() -> None:
+    """MIN_* constants imply matching parameters are non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """library TickMath {
+    int24 internal constant MIN_TICK_SPACING = 1;
+
+    function maxUsableTick(int24 tickSpacing) internal pure returns (int24) {
+        return (887272 / tickSpacing) * tickSpacing;
+    }
+}
+"""
+    issues = _detect_safety_issues(source, "solidity")
+    assert not any("tickSpacing" in i.message for i in issues)
