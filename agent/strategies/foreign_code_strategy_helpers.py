@@ -476,6 +476,8 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             nullable_params=nullable_params,
         )
     if normalized == "go":
+        if _is_go_compiler_test(source):
+            return []
         stripped_source = _strip_go_rust_literals_and_comments(source)
         return _detect_go_safety_issues(stripped_source)
     if normalized == "python":
@@ -561,6 +563,48 @@ def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
     return guaranteed
 
 
+def _solidity_require_nonzero_params(body: str) -> set[str]:
+    """Return parameter names guaranteed non-zero by ``require``/``assert`` in a function body.
+
+    Matches guards such as ``require(b > 0, "...")`` or ``require(b != 0)``.
+    """
+    result: set[str] = set()
+    pattern = re.compile(
+        r"\b(?:require|assert)\s*\(\s*"
+        r"(?:"
+        r"0\s*<\s*([A-Za-z_]\w*)"
+        r"|([A-Za-z_]\w*)\s*(?:>\s*0|>=\s*1|!=\s*0|!==\s*0)"
+        r")"
+        r"(?:\s*,|\s*\))",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(body):
+        result.add(match.group(1) or match.group(2))
+    return result
+
+
+def _solidity_early_return_nonzero_params(body: str) -> set[str]:
+    """Return parameter names that are zero-checked by an early ``return``/``revert``.
+
+    Matches ``if (b == 0) return (false, 0);`` and similar patterns that guard
+    later division/modulo by the same identifier.
+    """
+    result: set[str] = set()
+    for match in re.finditer(
+        r"\bif\s*\(\s*([A-Za-z_]\w*)\s*==\s*0\s*\)\s*(?:return|revert)\b",
+        body,
+        re.IGNORECASE,
+    ):
+        result.add(match.group(1))
+    for match in re.finditer(
+        r"\bif\s*\(\s*0\s*==\s*([A-Za-z_]\w*)\s*\)\s*(?:return|revert)\b",
+        body,
+        re.IGNORECASE,
+    ):
+        result.add(match.group(1))
+    return result
+
+
 def _first_counterexample_payload(
     issues: list[ForeignSafetyIssue],
 ) -> dict[str, object]:
@@ -608,6 +652,10 @@ def _detect_block_safety_issues(
         dereference_values = None
         if label == "TypeScript" and nullable_params is not None:
             dereference_values = nullable_params.get(name)
+        per_function_nonzero = (guaranteed_nonzero or set()).copy()
+        if label == "Solidity":
+            per_function_nonzero |= _solidity_require_nonzero_params(body)
+            per_function_nonzero |= _solidity_early_return_nonzero_params(body)
         for expression in expressions:
             issues.extend(
                 _issues_for_expression(
@@ -617,7 +665,7 @@ def _detect_block_safety_issues(
                     dereference_values=dereference_values,
                     known_constants=known_constants,
                     mapping_names=mapping_names,
-                    guaranteed_nonzero=guaranteed_nonzero,
+                    guaranteed_nonzero=per_function_nonzero,
                 )
             )
     return issues
@@ -873,7 +921,19 @@ def _nil_guarded_values_from_condition(condition: str) -> set[str]:
     return guarded
 
 
+def _is_go_compiler_test(source: str) -> bool:
+    """True for Go compiler/driver test files that are not runnable user code."""
+    for line in source.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return stripped.startswith(("// errorcheck", "// runoutput", "// compiledir"))
+    return False
+
+
 def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
+    if _is_go_compiler_test(source):
+        return []
     issues: list[ForeignSafetyIssue] = []
     functions = tree_sitter_extract.extract_contract_functions(
         source, "go", _safe_identifier
