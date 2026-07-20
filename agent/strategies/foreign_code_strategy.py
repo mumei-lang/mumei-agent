@@ -152,16 +152,38 @@ def _extract_go_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
     )
     specs: list[ForeignCodeSpec] = []
     for fn in functions:
+        function_name = fn.name
+        inferred = inferred_atoms.get(function_name)
         if not fn.has_body:
+            # Assembly forward declarations and external signatures have no body;
+            # emit a trusted atom so the file is not reported as unverifiable.
+            if inferred is None:
+                continue
+            specs.append(
+                ForeignCodeSpec(
+                    function_name=function_name,
+                    params={param.name: param.type for param in inferred.params},
+                    return_type=inferred.return_type,
+                    preconditions=[],
+                    postconditions=[],
+                    source_line=fn.line,
+                )
+            )
             continue
         match = _match_function_pattern([pattern], source, fn)
         if match is None:
             continue
-        function_name = fn.name
         comment = _clean_go_doc(match.group("comment") or "")
         preconditions, postconditions = _contract_lines(comment)
         preconditions = _dedupe_strings([*preconditions, *_extract_go_caller_contracts(comment)])
-        inferred = inferred_atoms.get(function_name)
+        if inferred is not None and inferred.requires not in ("", "true"):
+            # Inferred nil preconditions (e.g. ``c != nil`` from pointer-receiver
+            # dereferences) reflect caller contracts and should be part of the spec
+            # so safety issues are filtered and Mumei verifies under them.
+            for req in inferred.requires.split("&&"):
+                req = req.strip()
+                if req and "!= nil" in req and req not in preconditions:
+                    preconditions.append(req)
         if inferred is not None and inferred.ensures != "true":
             postconditions = _dedupe_strings([*postconditions, inferred.ensures])
         specs.append(
@@ -344,6 +366,11 @@ class ForeignCodeExtractor:
             preconditions, postconditions = _contract_lines(comment)
             preconditions = _dedupe_strings([*preconditions, *_extract_go_caller_contracts(comment)])
             inferred = inferred_atoms.get(function_name)
+            if inferred is not None and inferred.requires not in ("", "true"):
+                for req in inferred.requires.split("&&"):
+                    req = req.strip()
+                    if req and "!= nil" in req and req not in preconditions:
+                        preconditions.append(req)
             if inferred is not None:
                 if inferred.ensures != "true":
                     postconditions = _dedupe_strings([*postconditions, inferred.ensures])

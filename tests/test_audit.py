@@ -1692,25 +1692,29 @@ def test_audit_pipeline_reports_multilanguage_no_mm_violations(
 
 def test_audit_pipeline_reports_go_representative_violations(tmp_path: Path) -> None:
     fixtures = [
+        # (filename, source, expected_violation_substring, expected_success)
         (
             "lists.go",
             "package lists\nfunc nth(values []int, idx int) int { return values[idx] }\n",
             "bounds contract",
+            False,
         ),
         (
             "users.go",
             "package users\nfunc age(user *User) int { return user.Age }\n",
-            "non-nil contract",
+            None,
+            True,
         ),
         (
             "calc.go",
             "package calc\nfunc add(a int, b int) int { return a + b }\n",
             "can overflow",
+            False,
         ),
     ]
     forbidden_aliases = {"recommendations", "repair_hints", "review_actions"}
 
-    for filename, source_text, expected_violation in fixtures:
+    for filename, source_text, expected_violation, expected_success in fixtures:
         source = tmp_path / filename
         source.write_text(source_text, encoding="utf-8")
         mumei = MagicMock()
@@ -1724,13 +1728,16 @@ def test_audit_pipeline_reports_go_representative_violations(tmp_path: Path) -> 
         payload = asdict(result)
 
         assert result.spec_extracted is True
-        assert result.success is False
+        assert result.success is expected_success
         assert result.language == "go"
         assert [key for key in AUDIT_SCHEMA_KEYS if key in payload] == AUDIT_SCHEMA_KEYS
         assert forbidden_aliases.isdisjoint(payload)
         assert result.next_steps
-        assert any(expected_violation in issue for issue in result.verification_violations)
-        assert result.counterexample_values
+        if expected_violation:
+            assert any(expected_violation in issue for issue in result.verification_violations)
+            assert result.counterexample_values
+        else:
+            assert result.verification_violations == []
 
 
 def test_foreign_go_verifier_does_not_treat_package_selector_as_nil() -> None:

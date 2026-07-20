@@ -1539,7 +1539,7 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
             ensures = "true"
         else:
             raw_return_expr = _raw_return_statement_expression(fn.body)
-            safety_expr = _raw_return_statement_expression(
+            safety_expr = _last_return_expression(
                 _strip_go_rust_literals_and_comments(fn.body)
             )
             return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
@@ -1575,7 +1575,7 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
         # inferring one produces a false `refuted` verdict (#295).
         nillable_names = _go_nillable_param_names(params_text)
         raw_return_expr = _raw_return_statement_expression(body)
-        safety_expr = _raw_return_statement_expression(
+        safety_expr = _last_return_expression(
             _strip_go_rust_literals_and_comments(body)
         )
         return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
@@ -1847,22 +1847,39 @@ def _go_type_is_nillable(raw_type: str) -> bool:
 def _go_nillable_param_names(params_text: str) -> set[str]:
     """Names of Go params/receiver whose declared type can actually be nil.
 
-    Go params are ``name type``; the type (everything after the name) decides
-    nillability. Grouped names sharing a trailing type (``a, b *T``) only bind
-    the type to the last name, so the untyped leaders are conservatively
-    omitted rather than assumed nillable.
+    Go parameter lists allow grouped names sharing a trailing type
+    (``a, b *T``). The type applies to every leading identifier in the same
+    group, including names from preceding comma-separated pieces.
     """
     names: set[str] = set()
-    for raw in _split_params(params_text):
+    pending: list[str] = []
+    for raw in _split_signature_params(params_text):
         raw = raw.strip()
         if not raw:
             continue
-        pieces = raw.split()
-        if len(pieces) < 2:
+        # Remove commas so ``a, b *T`` becomes ``a b *T``.
+        tokens = [t for t in raw.replace(",", " ").split() if t]
+        if not tokens:
             continue
-        name_text, raw_type = pieces[0], " ".join(pieces[1:])
+        type_start: int | None = None
+        for i, token in enumerate(tokens):
+            if token.startswith(("*", "[", "(", "chan", "<-", "func", "map")):
+                type_start = i
+                break
+        if type_start is None and len(tokens) >= 2:
+            # ``name type`` form; the last token is the type.
+            type_start = len(tokens) - 1
+        if type_start is None:
+            # No type yet; keep identifiers as pending names.
+            for token in tokens:
+                pending.append(_safe_identifier(token))
+            continue
+        for token in tokens[:type_start]:
+            pending.append(_safe_identifier(token))
+        raw_type = " ".join(tokens[type_start:])
         if _go_type_is_nillable(raw_type):
-            names.add(_safe_identifier(name_text))
+            names.update(pending)
+        pending = []
     return names
 
 
@@ -1968,13 +1985,41 @@ def _return_statement_expression(body: str) -> str:
     return _normalize_foreign_expression(raw) if raw else ""
 
 
+def _extract_return_expression(stripped: str, source: str, start: int) -> str:
+    """Extract the expression after a ``return`` keyword.
+
+    Balances ``()``, ``[]`` and ``{}`` and Solidity/TypeScript ternary ``?:``
+    pairs so that multi-line returns and ternaries are captured in full.
+    """
+    depth = 0
+    ternary_depth = 0
+    i = start
+    while i < len(stripped):
+        ch = stripped[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in "])}" and depth > 0:
+            depth -= 1
+        elif ch == "?" and depth == 0:
+            ternary_depth += 1
+        elif ch == ":" and depth == 0 and ternary_depth > 0:
+            ternary_depth -= 1
+        elif ch in ";}" and depth == 0 and ternary_depth == 0:
+            if _is_multi_value_return_expression(stripped[start:i].strip()):
+                return ""
+            return source[start:i].strip()
+        i += 1
+    if _is_multi_value_return_expression(stripped[start:].strip()):
+        return ""
+    return source[start:].strip()
+
+
 def _raw_return_statement_expression(body: str) -> str:
     """Return the expression from the last ``return`` statement in ``body``.
 
-    Stops at the end of the statement, balancing ``()``, ``[]`` and ``{}`` so
-    that composite/struct literals such as ``&systemTimer{t, ch}`` or
-    ``BlockNumberOrHash{number: blockNr}`` are captured in full instead of
-    being truncated at the first ``}``.
+    Stops at the end of the statement, balancing ``()``, ``[]``, ``{}`` and
+    ternary ``?:`` pairs so that composite/struct literals and multi-line
+    ternaries are captured in full instead of being truncated.
 
     If the body contains more than one ``return`` we cannot infer a single
     deterministic postcondition, so we return the empty string and let the
@@ -1998,22 +2043,26 @@ def _raw_return_statement_expression(body: str) -> str:
     if len(returns) > 1:
         return ""
 
-    last_match = returns[-1]
-    start = last_match.end()
-    depth = 0
-    for index in range(start, len(stripped)):
-        ch = stripped[index]
-        if ch in "([{":
-            depth += 1
-        elif ch in "])}" and depth > 0:
-            depth -= 1
-        elif ch in ";\n" and depth == 0:
-            if _is_multi_value_return_expression(stripped[start:index].strip()):
-                return ""
-            return body[start:index].strip()
-    if _is_multi_value_return_expression(stripped[start:].strip()):
+    return _extract_return_expression(stripped, body, returns[-1].end())
+
+
+def _last_return_expression(body: str) -> str:
+    """Return the expression from the last ``return`` statement, ignoring others.
+
+    Used for safety-requirement extraction where the fall-through ``return`` is
+    the only expression that can still dereference values.  Multi-value returns
+    are still discarded because they cannot be expressed as a single expression.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    returns: list[re.Match[str]] = []
+    for match in re.finditer(r"\breturn\b", stripped):
+        end = match.end()
+        if end < len(stripped) and (stripped[end].isalnum() or stripped[end] == "_"):
+            continue
+        returns.append(match)
+    if not returns:
         return ""
-    return body[start:].strip()
+    return _extract_return_expression(stripped, body, returns[-1].end())
 
 
 def _typescript_raw_return_expression(body: str, is_expression_body: bool = False) -> str:
@@ -2128,16 +2177,7 @@ def _typescript_raw_return_expression(body: str, is_expression_body: bool = Fals
 
     last_return = returns[-1]
     start = last_return + 6
-    depth = 0
-    for index in range(start, len(stripped_search)):
-        ch = stripped_search[index]
-        if ch in "([{":
-            depth += 1
-        elif ch in "])}" and depth > 0:
-            depth -= 1
-        elif ch in ";\n" and depth == 0:
-            return body[start:index].strip()
-    return body[start:].strip()
+    return _extract_return_expression(stripped_search, body, start)
 
 
 def _typescript_return_type(type_text: str, return_expr: str = "") -> str:
@@ -2203,33 +2243,45 @@ def _is_expression_lowerable(
     param_names: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
 ) -> bool:
-    """Detect unresolved object-field accesses that Mumei cannot lower.
+    """Detect expressions that Mumei cannot lower.
 
     Without parameter/type information, every identifier is assumed lowerable.
-    When parameter names are available, a token of the form ``param_field`` that
-    is not a method call and whose ``field`` is not a known property is treated
-    as an unresolvable field access.
+    When parameter names are available, a token must either be a known constant,
+    a parameter, a ``len_<param>`` length access, or a ``param_field`` method or
+    known property call.  Ternaries, arrow functions and any unknown identifier
+    cause a fallback to ``ensures true``.
     """
     if not param_names:
         return True
+    no_strings = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
+    # Ternary and arrow-function bodies cannot be lowered into a single Mumei
+    # equality over ``result``.
+    if re.search(r"\?\s*[^?:]*\s*:\s*", no_strings):
+        # Exclude object-type annotations of the form ``x is T`` which contain
+        # no runtime ``?:`` ternary.
+        if not re.search(r"\bis\s+[A-Za-z_]", no_strings):
+            return False
+    if "=>" in no_strings or "function" in no_strings.lower():
+        return False
     allowed = {"true", "false", "null", "undefined", "and", "or", "not", "bit_and", "in"}
     allowed.update(param_names)
     if known_constants:
         allowed.update(known_constants)
-    # Ignore words inside string literals.
-    no_strings = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
     for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", no_strings):
         if token in allowed:
             continue
         if token.startswith("len_") and token[4:] in param_names:
             continue
         match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)_([A-Za-z_][A-Za-z0-9_]*)", token)
-        if match and match.group(1) in param_names:
-            # Method calls such as ``fork_HashTreeRoot()`` are still callable.
-            if re.search(rf"\b{re.escape(token)}\b\s*\(", no_strings):
-                continue
-            if match.group(2) in _KNOWN_PROPERTY_NAMES:
-                continue
+        if match:
+            if match.group(1) in param_names:
+                # Method calls such as ``fork_HashTreeRoot()`` are still callable.
+                if re.search(rf"\b{re.escape(token)}\b\s*\(", no_strings):
+                    continue
+                if match.group(2) in _KNOWN_PROPERTY_NAMES:
+                    continue
+            # Any other ``unknown_something`` token is an unresolvable field/method
+            # access and cannot be lowered.
             return False
     return True
 
