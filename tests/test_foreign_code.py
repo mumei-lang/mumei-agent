@@ -2476,3 +2476,19 @@ def test_infer_solidity_named_bool_return_ensures_is_safe() -> None:
     atom = next(a for a in atoms if a.name == "isZero")
     assert atom.return_type == "bool"
     assert "result ==" not in atom.ensures
+
+
+def test_expression_lowerable_rejects_unknown_function_calls() -> None:
+    """Unknown function calls in a return expression cannot be lowered to Mumei ensures."""
+    from agent.cross_validation_foreign import _is_expression_lowerable
+
+    expr = 'query(ctx, netdir + "/cs", net + "!" + host + "!" + service, 128)'
+    assert not _is_expression_lowerable(expr, {"ctx", "net", "host", "service"}, {}, None)
+
+
+def test_expression_lowerable_rejects_string_concat_with_literals() -> None:
+    """String concatenation with literal operands is not arithmetic and cannot be lowered."""
+    from agent.cross_validation_foreign import _is_expression_lowerable
+
+    assert not _is_expression_lowerable('netdir + "/cs"', {"netdir"}, {}, None)
+    assert not _is_expression_lowerable('net + "!" + host', {"net", "host"}, {}, None)
