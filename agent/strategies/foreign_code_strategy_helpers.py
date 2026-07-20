@@ -17,6 +17,7 @@ from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _addition_pairs_regex,
     _dedupe_strings,
+    _extract_return_expression,
     _go_function_declarations,
     _go_nillable_param_names,
     _go_type_is_nillable,
@@ -444,13 +445,16 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             known_constants=semantic_safety.collect_declared_constants(source, "rust"),
         )
     if normalized == "typescript":
+        blocks = _typescript_function_blocks(source)
+        nullable_params = _typescript_nullable_param_names(source)
         return _detect_block_safety_issues(
             source,
-            _typescript_function_blocks(source),
+            blocks,
             "TypeScript",
             known_constants=semantic_safety.collect_declared_constants(
                 source, "typescript"
             ),
+            nullable_params=nullable_params,
         )
     if normalized == "go":
         stripped_source = _strip_go_rust_literals_and_comments(source)
@@ -512,6 +516,7 @@ def _detect_block_safety_issues(
     blocks: list[tuple[str, str]],
     label: str,
     known_constants: dict[str, int] | None = None,
+    nullable_params: dict[str, set[str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, body in blocks:
@@ -520,23 +525,98 @@ def _detect_block_safety_issues(
         expressions = _return_expressions(body)
         if not expressions and label == "Rust":
             expressions = [_last_rust_expression(body)]
+        dereference_values = None
+        if label == "TypeScript" and nullable_params is not None:
+            dereference_values = nullable_params.get(name)
         for expression in expressions:
             issues.extend(
                 _issues_for_expression(
-                    name, expression, label, known_constants=known_constants
+                    name,
+                    expression,
+                    label,
+                    dereference_values=dereference_values,
+                    known_constants=known_constants,
                 )
             )
     return issues
 
 def _go_nil_guarded_return_values(body: str) -> set[str]:
-    """Detect ``if x == nil { ... return ... }`` patterns that guard later returns."""
+    """Detect ``if x == nil { ... return ... }`` patterns that guard later returns.
+
+    Handles ``if c == nil || other == nil { return }`` so both ``c`` and
+    ``other`` are treated as non-nil on the fall-through path.
+    """
     guarded: set[str] = set()
     for match in re.finditer(
-        r"\bif\s+([A-Za-z_][A-Za-z0-9_]*)\s*==\s*nil\s*\{[^}]*\breturn\b",
+        r"\bif\s*\(?\s*([^;{}]*?)\s*\)?\s*\{[^}]*\breturn\b",
         body,
         flags=re.DOTALL,
     ):
-        guarded.add(match.group(1))
+        condition = match.group(1).strip()
+        # Strip a single pair of surrounding parentheses.
+        if condition.startswith("(") and condition.endswith(")"):
+            depth = 0
+            valid = True
+            for i, ch in enumerate(condition):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                if depth == 0 and i < len(condition) - 1:
+                    valid = False
+                    break
+            if valid:
+                condition = condition[1:-1].strip()
+        guarded |= _nil_guarded_values_from_condition(condition)
+    return guarded
+
+
+def _nil_guarded_values_from_condition(condition: str) -> set[str]:
+    """Return identifiers ``x`` for which ``x == nil`` guards the fall-through path.
+
+    Splits the condition on top-level ``||``.  A disjunct that is a single
+    ``x == nil`` clause means ``x`` is non-nil if execution continues.
+    """
+    guarded: set[str] = set()
+    if not condition:
+        return guarded
+    # Split on top-level ``||`` while respecting parentheses.
+    disjuncts: list[str] = []
+    start = 0
+    depth = 0
+    i = 0
+    while i < len(condition):
+        ch = condition[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth > 0:
+            depth -= 1
+        elif (
+            depth == 0
+            and condition[i] == "|"
+            and i + 1 < len(condition)
+            and condition[i + 1] == "|"
+        ):
+            disjuncts.append(condition[start:i].strip())
+            i += 2
+            start = i
+            continue
+        i += 1
+    disjuncts.append(condition[start:].strip())
+    for disjunct in disjuncts:
+        # Within a disjunct, ignore sub-expressions in parentheses.
+        cleaned = re.sub(r"\([^()]*\)", "", disjunct)
+        # Find all ``x == nil`` comparisons.  If the disjunct is exactly one
+        # such clause (optionally negated by ``!``), the variable is guarded.
+        nil_matches = re.findall(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\s*==\s*nil\b", cleaned
+        )
+        # Count comparison and boolean operators in the cleaned disjunct.
+        operator_count = len(
+            re.findall(r"\b(?:==|!=|<=|>=|<|>|&&|\|\|)\b", cleaned)
+        )
+        if len(nil_matches) == 1 and operator_count <= 1:
+            guarded.add(nil_matches[0])
     return guarded
 
 
@@ -762,15 +842,16 @@ def _issues_for_expression(
     if label in {"Go", "Rust"}:
         expression = _strip_go_rust_literals_and_comments(expression)
     issues: list[ForeignSafetyIssue] = []
-    for match in re.finditer(
-        r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
-        expression,
-    ):
-        issue = _index_safety_issue(
-            function_name, match.group("container"), match.group("index"), label, known_constants
-        )
-        if issue is not None:
-            issues.append(issue)
+    if label not in {"TypeScript", "JavaScript"}:
+        for match in re.finditer(
+            r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
+            expression,
+        ):
+            issue = _index_safety_issue(
+                function_name, match.group("container"), match.group("index"), label, known_constants
+            )
+            if issue is not None:
+                issues.append(issue)
     if label == "Go":
         for value in _go_nil_dereference_values(expression, dereference_values):
             issues.append(_go_nil_safety_issue(function_name, value, label))
@@ -782,7 +863,10 @@ def _issues_for_expression(
             r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
             expression,
         ):
-            issues.append(_null_safety_issue(function_name, match.group("value"), label))
+            value = match.group("value")
+            if dereference_values is not None and value not in dereference_values:
+                continue
+            issues.append(_null_safety_issue(function_name, value, label))
     if label not in {"TypeScript", "JavaScript"}:
         for match in re.finditer(
             r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
@@ -816,15 +900,18 @@ def _issues_from_findings(
     builders so messages, counterexamples and required contracts are identical.
     """
     issues: list[ForeignSafetyIssue] = []
-    for container, index in findings.index_accesses:
-        issue = _index_safety_issue(function_name, container, index, label, known_constants)
-        if issue is not None:
-            issues.append(issue)
+    if label not in {"TypeScript", "JavaScript"}:
+        for container, index in findings.index_accesses:
+            issue = _index_safety_issue(function_name, container, index, label, known_constants)
+            if issue is not None:
+                issues.append(issue)
     if label == "Go":
         for value in _go_nil_dereference_values(expression, dereference_values):
             issues.append(_go_nil_safety_issue(function_name, value, label))
     elif label == "TypeScript":
         for value in findings.length_access_values:
+            if dereference_values is not None and value not in dereference_values:
+                continue
             issues.append(_null_safety_issue(function_name, value, label))
     if label not in {"TypeScript", "JavaScript"}:
         for divisor in findings.divisors:
@@ -1453,13 +1540,78 @@ def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
     )
     return blocks
 
+
+def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
+    """Map each TypeScript function name to the set of possibly-null parameter names.
+
+    A parameter is treated as nullable when it has no type annotation, is
+    optional, or its type contains ``null``/``undefined``/``any``.  Non-null
+    array/object parameters are excluded so that ``.length`` and indexing do not
+    produce false positives for well-typed inputs.
+    """
+    result: dict[str, set[str]] = {}
+    function_pattern = re.compile(
+        r"(?:export\s+)?(?:async\s+)?function\s+"
+        r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>]+>)?\s*"
+        r"\((?P<params>[^)]*)\)\s*(?::\s*(?P<ret>[^{=\n]+))?\s*\{",
+        re.DOTALL,
+    )
+    arrow_pattern = re.compile(
+        r"(?:export\s+)?(?:const|let)\s+"
+        r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+        r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
+        r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*(?:\{.*?\}|[^;\n]+)",
+        re.DOTALL,
+    )
+    for match in (*function_pattern.finditer(source), *arrow_pattern.finditer(source)):
+        name = _safe_identifier(match.group("name"))
+        nullable: set[str] = set()
+        params_text = match.group("params")
+        if params_text:
+            for raw in _split_params(params_text):
+                if not raw.strip():
+                    continue
+                parts = raw.split(":", 1)
+                pname = parts[0].strip().split("=")[0].strip().rstrip("?")
+                if not pname:
+                    continue
+                if len(parts) < 2:
+                    # No type annotation: conservative.
+                    nullable.add(_safe_identifier(pname))
+                    continue
+                type_text = parts[1].strip()
+                is_optional = raw.strip().startswith(pname + "?") or type_text.endswith("?")
+                if (
+                    is_optional
+                    or "null" in type_text.lower()
+                    or "undefined" in type_text.lower()
+                    or type_text.lower() == "any"
+                ):
+                    nullable.add(_safe_identifier(pname))
+        result[name] = nullable
+    return result
+
+
 def _return_expressions(body: str) -> list[str]:
-    stripped = body.strip()
-    if stripped.startswith("{"):
-        stripped = stripped[1:-1]
-    expressions = [match.group(1).strip() for match in re.finditer(r"\breturn\s+([^;\n}]+)", stripped)]
-    if not expressions and stripped and "\n" not in stripped:
-        expressions.append(stripped.rstrip(";"))
+    """Return the expressions of all ``return`` statements in ``body``.
+
+    Balances parentheses, brackets, braces and ternary ``?:`` pairs so
+    multi-line returns are captured in full.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    expressions: list[str] = []
+    for match in re.finditer(r"\breturn\b", stripped):
+        end = match.end()
+        if end < len(stripped) and (stripped[end].isalnum() or stripped[end] == "_"):
+            continue
+        expr = _extract_return_expression(stripped, body, end)
+        if expr:
+            expressions.append(expr)
+    # For expression-bodied arrow functions with no ``return`` keyword.
+    if not expressions:
+        body_stripped = body.strip()
+        if body_stripped and "\n" not in body_stripped:
+            expressions.append(body_stripped.rstrip(";"))
     return expressions
 
 def _last_rust_expression(body: str) -> str:

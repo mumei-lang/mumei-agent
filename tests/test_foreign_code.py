@@ -287,6 +287,37 @@ def test_typescript_null_deref_still_flagged() -> None:
     assert any("non-null" in issue.message for issue in issues)
 
 
+def test_typescript_nullable_param_names_classify_optionality_and_types() -> None:
+    """Nullable TS parameters are identified by optional markers or null/undefined/any types."""
+    from agent.strategies.foreign_code_strategy_helpers import _typescript_nullable_param_names
+
+    source = (
+        "export function fn1(a: string, b?: string, c: string | null, d: any): number { return 1; }\n"
+        "export const fn2 = (items: number[], maybe: number | undefined) => items.length;\n"
+    )
+    names = _typescript_nullable_param_names(source)
+    assert names["fn1"] == {"b", "c", "d"}
+    assert names["fn2"] == {"maybe"}
+
+
+def test_typescript_safety_skips_non_nullable_array_params() -> None:
+    """Well-typed array/object parameters should not trigger false positive null/bounds issues."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = "export function last(items: number[]): number { return items[items.length - 1]; }\n"
+    issues = _detect_safety_issues(source, "typescript")
+    assert not issues
+
+
+def test_typescript_safety_ignores_index_bounds() -> None:
+    """JS/TS out-of-bounds access returns ``undefined``; do not emit index safety issues."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = "export function at(items: number[], i: number): number { return items[i]; }\n"
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("index" in issue.message.lower() for issue in issues)
+
+
 def test_rust_go_overflow_requires_ignore_method_call_receiver() -> None:
     """`a + SomeStruct.method()` must not bound `SomeStruct` as a free integer (#281)."""
     from agent.cross_validation_foreign import (
@@ -845,6 +876,30 @@ def test_go_contract_inference_captures_composite_literal_return() -> None:
     assert atoms[0].ensures == "result == &systemTimer{t, ch}"
 
 
+def test_go_contract_inference_guards_nil_with_or_condition() -> None:
+    """An ``if c == nil || other == nil { return }`` guard makes both non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_nil_guarded_return_values
+
+    body = "if c == nil || other == nil { return c == other }\nreturn bytes.Equal(c.Raw, other.Raw)"
+    assert _go_nil_guarded_return_values(body) == {"c", "other"}
+
+
+def test_go_contract_inference_uses_last_return_for_safety_multiple_returns() -> None:
+    """With multiple returns, the last (fall-through) return drives safety ``requires``."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = (
+        "package demo\n"
+        "func Equal(c, other *T) bool {\n"
+        "    if c == nil || other == nil { return c == other }\n"
+        "    return bytes.Equal(c.Raw, other.Raw)\n"
+        "}\n"
+    )
+    atoms = _infer_go_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].requires == "c != nil && other != nil"
+
+
 def test_go_contract_inference_avoids_false_postcondition_for_multiple_returns() -> None:
     """Functions with early returns must not be summarised by their final ``return`` only."""
     from agent.cross_validation_foreign import _infer_go_contracts
@@ -894,6 +949,23 @@ def test_go_contract_inference_extracts_assembly_forward_declarations() -> None:
     names = {atom.name for atom in atoms}
     assert names == {"add", "scale"}
     assert all(atom.requires == "true" and atom.ensures == "true" for atom in atoms)
+
+
+def test_foreign_code_verifier_accepts_go_assembly_forward_declarations() -> None:
+    """Files containing only build-tag guarded assembly stubs are verified, not unverifiable."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
+
+    source = (
+        "//go:build (loong64 || riscv64) && !purego\n"
+        "package sha512\n"
+        "//go:noescape\n"
+        "func block(dig *Digest, p []byte)\n"
+    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "errors": [], "warnings": []}
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "go")
+    assert result["success"] is True
+    assert result["errors"] == []
 
 
 def test_raw_return_statement_expression_keeps_single_value_with_comma_in_string() -> None:
@@ -1805,6 +1877,27 @@ def test_ensures_for_return_expression_falls_back_for_unknown_field_access() -> 
     # Known property/method names and method calls are still lowerable.
     assert _ensures_for_return_expression("items_map(inner).length", "i64", {"items"}) == "result == items_map(inner).length"
     assert _ensures_for_return_expression("fork_HashTreeRoot()", "i64", {"fork"}) == "result == fork_HashTreeRoot()"
+
+
+def test_ensures_for_return_expression_falls_back_for_ternary_and_closures() -> None:
+    """Ternary and arrow-function return bodies cannot be lowered, so ``ensures`` is ``true``."""
+    from agent.cross_validation_foreign import _ensures_for_return_expression
+
+    assert _ensures_for_return_expression("zeroForOne ? a : b", "i64", {"zeroForOne"}) == "true"
+    assert _ensures_for_return_expression("queries_some((q) => len_entries > 0)", "bool", {"queries"}) == "true"
+
+
+def test_raw_return_statement_expression_handles_multiline_ternary() -> None:
+    """Multi-line Solidity/TypeScript ternary returns must be captured in full."""
+    from agent.cross_validation_foreign import _raw_return_statement_expression
+
+    source = '''{
+        return zeroForOne
+            ? getNextSqrtPriceFromAmount0RoundingUp(s, l, a, true)
+            : getNextSqrtPriceFromAmount1RoundingDown(s, l, a, true);
+    }'''
+    expr = _raw_return_statement_expression(source)
+    assert "?" in expr and ":" in expr
 
 
 def test_normalize_bitwise_and_and_inline_constants() -> None:
