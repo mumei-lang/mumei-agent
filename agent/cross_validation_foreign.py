@@ -2280,6 +2280,10 @@ def _looks_boolean(expression: str) -> bool:
     lowered = text.lower()
     if lowered in ("true", "false"):
         return True
+    # String concatenation with string literals is not arithmetic and cannot be
+    # lowered (e.g. Go ``netdir + "/cs"`` or ``net + "!" + host``).
+    if re.search(r"['\"][^'\"]*['\"]\s*\+\s*|\s*\+\s*['\"][^'\"]*['\"]", text):
+        return False
     # Array/object constructors are not boolean even if they contain comparisons.
     if re.search(
         r"\bArray\.from\s*\(|\.filter\s*\(|\.map\s*\(|\.reduce\s*\(|new\s+Array\s*\(",
@@ -2366,6 +2370,10 @@ def _is_expression_lowerable(
     # JSX / TSX element literals cannot be lowered to a Mumei expression.
     if re.search(r"</|/>", expression):
         return False
+    # String concatenation with string literals is not arithmetic and cannot be
+    # lowered (e.g. Go ``netdir + "/cs"`` or ``net + "!" + host``).
+    if re.search(r"['\"][^'\"]*['\"]\s*\+\s*|\s*\+\s*['\"][^'\"]*['\"]", expression):
+        return False
     # Mumei arrays can only be indexed by integers.  Go map key access (e.g.
     # ``m["abc"]`` or ``m[s]`` where ``m`` is ``map[string]int``) cannot be
     # expressed as an ``ensures`` equality.
@@ -2393,7 +2401,7 @@ def _is_expression_lowerable(
         return False
     if re.search(r"[\]\}]\s*\.", no_strings):
         return False
-    allowed = {"true", "false", "null", "undefined", "and", "or", "not", "bit_and", "in"}
+    allowed = {"true", "false", "null", "undefined", "and", "or", "not", "bit_and", "in", "len", "cap"}
     allowed.update(param_names)
     if known_constants:
         allowed.update(known_constants)
@@ -2429,6 +2437,10 @@ def _is_expression_lowerable(
             # Any other ``unknown_something`` token is an unresolvable field/method
             # access and cannot be lowered.
             return False
+        # Unknown bare identifiers used as function calls cannot be lowered.
+        if re.search(rf"\b{re.escape(token)}\b\s*\(", no_strings):
+            return False
+        # Otherwise the identifier is assumed to be a global/external free variable.
     return True
 
 
