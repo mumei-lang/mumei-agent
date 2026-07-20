@@ -2316,11 +2316,15 @@ def _local_variable_names(body: str, language: str) -> set[str]:
     language = _normalize_foreign_language(language)
     names: set[str] = set()
     if language == "go":
-        # Short declarations ``x := ...`` and ``var x ...``.
-        for match in re.finditer(r"\b([A-Za-z_]\w*)\s*:=", body):
-            names.add(match.group(1))
-        for match in re.finditer(r"\bvar\s+([A-Za-z_]\w*)", body):
-            names.add(match.group(1))
+        # Short declarations ``x := ...`` may declare multiple names, e.g.
+        # ``v, _ := strconv.ParseBool(...)``.  Capture every identifier on the
+        # left-hand side before ``:=``.
+        for match in re.finditer(r"\b([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:=", body):
+            for name in re.findall(r"[A-Za-z_]\w*", match.group(1)):
+                names.add(name)
+        for match in re.finditer(r"\bvar\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)", body):
+            for name in re.findall(r"[A-Za-z_]\w*", match.group(1)):
+                names.add(name)
     elif language == "rust":
         for match in re.finditer(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)", body):
             names.add(match.group(1))
@@ -2355,6 +2359,9 @@ def _is_expression_lowerable(
     """
     if param_names is None and local_names is None:
         return True
+    # JSX / TSX element literals cannot be lowered to a Mumei expression.
+    if re.search(r"</|/>", expression):
+        return False
     # Mumei arrays can only be indexed by integers.  Go map key access (e.g.
     # ``m["abc"]`` or ``m[s]`` where ``m`` is ``map[string]int``) cannot be
     # expressed as an ``ensures`` equality.
@@ -3168,11 +3175,37 @@ def _mask_go_function_literals(body: str) -> str:
     return "".join(" " if mask[i] and body[i] not in "\n" else body[i] for i in range(len(body)))
 
 
+def _mask_typescript_function_literals(body: str) -> str:
+    """Mask bodies of nested TypeScript/JavaScript function and arrow literals."""
+    tree, source_bytes = tree_sitter_extract._parse(body, "typescript")
+    if tree is None or source_bytes is None:
+        return body
+    mask = bytearray(source_bytes)
+    node_types = tree_sitter_extract._VALUE_FUNCTION_NODE_TYPES | {
+        "function_expression",
+        "function_declaration",
+        "method_definition",
+    }
+
+    def _walk(node):
+        if node.type in node_types:
+            for i in range(node.start_byte, node.end_byte):
+                if source_bytes[i] != ord("\n"):
+                    mask[i] = ord(" ")
+        for child in node.children:
+            _walk(child)
+
+    _walk(tree.root_node)
+    return mask.decode("utf-8", "replace")
+
+
 def _mask_nested_function_literals(body: str, language: str) -> str:
     """Mask bodies of nested function literals for the given language."""
     language = _normalize_foreign_language(language)
     if language == "go":
         return _mask_go_function_literals(body)
+    if language in {"typescript", "javascript"}:
+        return _mask_typescript_function_literals(body)
     return body
 
 
