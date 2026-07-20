@@ -2441,6 +2441,17 @@ def _ensures_for_return_expression(
         return "true"
     if not _is_expression_lowerable(return_expr, param_names, known_constants, local_names, param_types=param_types):
         return "true"
+    # Mumei's vacuity-check lowerer only supports boolean equality with a bare
+    # boolean variable or literal on the RHS (e.g. ``result == x`` or
+    # ``result == true``).  Compound boolean expressions such as
+    # ``year % 400 == 0 or ...`` fail with "Expected bool for ==".
+    if return_type == "bool":
+        stripped = return_expr.strip()
+        if stripped in {"true", "false"}:
+            return f"result == {stripped}"
+        if param_names and stripped in param_names:
+            return f"result == {stripped}"
+        return "true"
     return f"result == {return_expr}"
 
 

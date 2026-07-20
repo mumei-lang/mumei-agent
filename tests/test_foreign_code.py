@@ -1742,7 +1742,7 @@ def test_typescript_contract_inference_strips_trailing_comments() -> None:
     )
     atoms = _infer_typescript_contracts(source)
     assert len(atoms) == 1
-    assert atoms[0].ensures == "result == 'headers' in request"
+    assert atoms[0].ensures == "true"
 
 
 def test_go_contract_inference_skips_blank_identifier_and_test_entry_points() -> None:
@@ -1862,11 +1862,15 @@ def test_generic_safety_requires_skips_typescript_divisors() -> None:
 
 
 def test_ensures_for_return_expression_falls_back_for_strings() -> None:
-    """String return types cannot be lowered, so ``ensures`` falls back to ``true``."""
+    """String and compound boolean return expressions cannot be lowered, so ``ensures`` falls back to ``true``."""
     from agent.cross_validation_foreign import _ensures_for_return_expression
 
     assert _ensures_for_return_expression('"/" + suffix', "string") == "true"
-    assert _ensures_for_return_expression("(x > 0)", "bool") == "result == (x > 0)"
+    # Mumei's vacuity-check lowerer only supports ``result == <bool var/lit>``.
+    assert _ensures_for_return_expression("(x > 0)", "bool") == "true"
+    assert _ensures_for_return_expression("(x and y)", "bool", {"x", "y"}) == "true"
+    assert _ensures_for_return_expression("x", "bool", {"x"}) == "result == x"
+    assert _ensures_for_return_expression("true", "bool") == "result == true"
 
 
 def test_ensures_for_return_expression_falls_back_for_unknown_field_access() -> None:
@@ -2226,3 +2230,97 @@ func LookupStringConversion2(m *map[string]int, bytes []byte) int {
     lookup2_issues = [i for i in issues if i.function_name == "LookupStringConversion2"]
     assert not lookup1_issues
     assert all("index" not in i.message.lower() for i in lookup2_issues)
+
+
+def test_rust_const_array_usize_cast_index_suppressed() -> None:
+    """``(param - N) as usize`` indexing a ``const`` array is a caller-contract pattern."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """const LAST_DAYS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+fn last_day_of_month(month: i32) -> u32 {
+    let idx = (month - 1) as usize;
+    LAST_DAYS[idx]
+}
+"""
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("LAST_DAYS" in i.message for i in issues)
+
+
+def test_rust_contract_inference_falls_back_bool_ensures() -> None:
+    """Complex boolean return expressions cannot be lowered to Mumei ``ensures``."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = """fn is_leap_year(year: i32) -> bool {
+    year % 400 == 0 || (year % 4 == 0 && year % 100 != 0)
+}
+"""
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].return_type == "bool"
+    assert atoms[0].ensures == "true"
+
+
+def test_go_safety_suppresses_interface_method_nil_receiver() -> None:
+    """Pointer-receiver methods implementing standard interfaces are caller-contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package authorizer
+
+import (
+    "context"
+    "k8s.io/apiserver/pkg/authorization/authorizer"
+)
+
+type GrafanaAuthorizer struct{ auth authorizer.Authorizer }
+
+func (a *GrafanaAuthorizer) Authorize(ctx context.Context, attr authorizer.Attributes) (authorizer.Decision, string, error) {
+    return a.auth.Authorize(ctx, attr)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("GrafanaAuthorizer" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_top_level_callback_first_param_nil() -> None:
+    """Top-level functions stored as struct/map callbacks are invoked with non-nil first arg."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package asmgen
+
+type Asm struct{}
+type Reg int
+type Carry int
+
+func amd64Add(a *Asm, src1, src2 Reg, dst Reg, carry Carry) bool {
+    return a.Enabled(0)
+}
+
+var arch = struct{ addF func(*Asm, Reg, Reg, Reg, Carry) bool }{addF: amd64Add}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("amd64Add" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_io_read_write_close_receivers() -> None:
+    """io.Reader/Writer/Closer pointer-receiver methods are caller-contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package rwc
+
+type Buffer struct{ data []byte }
+
+func (b *Buffer) Read(p []byte) (n int, err error) {
+    return b.readInto(p)
+}
+
+func (b *Buffer) Write(p []byte) (int, error) {
+    return b.append(p)
+}
+
+func (b *Buffer) Close() error {
+    return nil
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("Buffer" in i.message for i in issues)
