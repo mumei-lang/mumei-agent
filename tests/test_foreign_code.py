@@ -2426,3 +2426,53 @@ func compareChainHeads(chainHeads []*ChainHead) error {
 """
     issues = _detect_safety_issues(source, "go")
     assert not any("can index" in i.message for i in issues)
+
+
+def test_solidity_named_bool_return_ensures_is_safe() -> None:
+    """Named Solidity return values (``returns (bool flag)``) must not produce an i64-typed boolean expression."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+
+    source = """contract C {
+    function isZero(uint256, uint256 y) internal pure returns (bool flag) {
+        return (y == 0);
+    }
+}
+"""
+    specs = ForeignCodeExtractor().extract_solidity(source)
+    assert len(specs) == 1
+    assert specs[0].return_type == "bool"
+    assert "result ==" not in specs[0].postconditions
+
+
+def test_go_human_language_precondition_is_sanitized() -> None:
+    """Human-language ``Preconditions: X returns true`` should not be emitted as a Mumei requires clause."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+
+    source = """package runtime
+
+// printOneCgoTraceback prints the traceback of a single cgo caller.
+//
+// Preconditions: cgoSymbolizerAvailable returns true.
+func printOneCgoTraceback(pc uintptr, commitFrame func() (pr, stop bool), arg *cgoSymbolizerArg) bool {
+    return true
+}
+"""
+    specs = ForeignCodeExtractor().extract_go(source)
+    spec = next(s for s in specs if s.function_name == "printOneCgoTraceback")
+    assert "returns" not in " && ".join(spec.preconditions)
+
+
+def test_infer_solidity_named_bool_return_ensures_is_safe() -> None:
+    """Named Solidity return values must produce a bool return type and a safe ensures clause."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """contract C {
+    function isZero(uint256, uint256 y) internal pure returns (bool flag) {
+        return (y == 0);
+    }
+}
+"""
+    atoms = _infer_solidity_contracts(source)
+    atom = next(a for a in atoms if a.name == "isZero")
+    assert atom.return_type == "bool"
+    assert "result ==" not in atom.ensures

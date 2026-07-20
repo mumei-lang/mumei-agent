@@ -298,7 +298,12 @@ def _contract_lines(text: str) -> tuple[list[str], list[str]]:
                     marker = prefix
                     break
         if target is not None:
-            target.append(_strip_contract_marker(line, marker))
+            value = _strip_contract_marker(line, marker)
+            # Human-language contracts such as ``X returns true`` are not
+            # boolean Mumei expressions and would fail spec lowering.
+            if re.search(r"\breturns\b", value):
+                value = "true"
+            target.append(value)
     return preconditions, postconditions
 
 def _strip_contract_marker(line: str, marker: str) -> str:
@@ -329,6 +334,9 @@ def _solidity_type(type_name: str) -> str:
     normalized = type_name.strip().removesuffix("[]")
     for modifier in ("memory", "calldata", "storage", "payable"):
         normalized = normalized.replace(modifier, "").strip()
+    # Solidity declarations may include a parameter name (``bool flag``); keep only the type.
+    if normalized and " " in normalized:
+        normalized = normalized.split()[0]
     lowered = normalized.lower()
     if lowered.startswith("uint"):
         return "u64"

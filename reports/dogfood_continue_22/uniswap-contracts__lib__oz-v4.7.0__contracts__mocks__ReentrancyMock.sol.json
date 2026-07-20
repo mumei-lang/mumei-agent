@@ -1,0 +1,97 @@
+{
+  "success": false,
+  "source_file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/mocks/ReentrancyMock.sol",
+  "language": "solidity",
+  "spec_extracted": true,
+  "verification_status": "verified",
+  "spec_health_issues": [],
+  "verification_violations": [
+    "Solidity function `countThisRecursive` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless"
+  ],
+  "counterexample_values": [],
+  "cross_validation_gaps": [],
+  "migration_hints": [],
+  "healed_files": [],
+  "heal_errors": [],
+  "next_steps": [
+    {
+      "priority": "high",
+      "action": "migrate-suggest で .mm スケルトンを生成",
+      "command": "mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm"
+    }
+  ],
+  "proof_certificate": {
+    "version": "1.0",
+    "timestamp": "2026-07-20T20:33:36.038105Z",
+    "mumei_version": "agent",
+    "z3_version": "Z3 version 4.16.0",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/mocks/ReentrancyMock.sol",
+    "atoms": [
+      {
+        "name": "countThisRecursive_guard_trace",
+        "z3_check_result": "unknown",
+        "content_hash": "1ee2d28975324ff232646d0dae530ff2e5b722c4cb90f6b7649d7589da29c282",
+        "status": "unknown",
+        "proof_hash": "929b07e3e0bad79af0532e736880fe3d7f40b6d499b45fc4716a945f12c61f0d",
+        "requires": "true",
+        "ensures": "true",
+        "body_expr": "",
+        "body_summary": "guard trace proof for a guarded external call",
+        "z3_result_class": "unknown",
+        "escalation_reason": "sc",
+        "logic_fragment_tag": "smart_contract_guard_trace",
+        "logic_fragment_tags": [
+          "smart_contract",
+          "guard_trace"
+        ],
+        "translator_version": "mumei-lean-translator-ir-v2",
+        "binder_mapping": {},
+        "bridge_lemma_hash": "a3e9c1f4b7d2806e5f19347cab82d0963ef1a5bc70d4e8290f136d5ab7c84e11",
+        "translator_ir": {
+          "sort": "contract_obligation",
+          "binders": [],
+          "theorem_goal": "runGuard GuardState.Unlocked [GuardOp.lock, GuardOp.externalCall, GuardOp.unlock] = some GuardState.Unlocked",
+          "provenance_span": {
+            "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/mocks/ReentrancyMock.sol",
+            "line": 26,
+            "col": 1,
+            "len": 0
+          },
+          "lowering_rules": [
+            "smart_contract_guard_trace_lowering"
+          ],
+          "proof_trace_hints": [
+            "use the concrete guard trace with SmartContract.runGuard"
+          ],
+          "requires_bridge_lemmas": [
+            "MumeiLean.SmartContract.no_external_call_without_lock"
+          ],
+          "obligation_class": "smart_contract_guard_trace_obligation",
+          "guard_trace": {
+            "ops": [
+              "lock",
+              "externalCall",
+              "unlock"
+            ],
+            "expected_outcome": "safe"
+          },
+          "guard_trace_ops": [
+            "lock",
+            "externalCall",
+            "unlock"
+          ],
+          "guard_trace_expected_outcome": "safe"
+        },
+        "unknown_obligation_domain": "smart_contract"
+      }
+    ],
+    "package_name": "ReentrancyMock",
+    "package_version": "0",
+    "certificate_hash": "e8003368a530a63d9765db0593d45bd46a019b6802a447aa78cf32c695c0b4a3",
+    "all_verified": false
+  },
+  "lean_bridge": null,
+  "report": "Audit found issues: /home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/mocks/ReentrancyMock.sol\nlanguage: solidity\nspec_extracted: True\nverification_status: verified\nspec_health_issues: []\nverification_violations: ['Solidity function `countThisRecursive` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless']\ncounterexample_values: []\ncross_validation_gaps: []\nmigration_hints:\n  []\nhealed_files: []\nheal_errors: []\nnext_steps:\n  - priority: high\n    action: migrate-suggest で .mm スケルトンを生成\n    command: mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm",
+  "errors": [],
+  "skipped_rate_limited": false
+}
