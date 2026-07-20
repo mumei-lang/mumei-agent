@@ -555,7 +555,7 @@ def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
         for param_name in _solidity_params(fn.params_text or "").keys():
             normalized = param_name.lower().replace("_", "")
             for suffix in min_constants:
-                if normalized == suffix.lower().replace("_", "") or normalized in suffix.lower().replace("_", ""):
+                if normalized == suffix.lower().replace("_", ""):
                     guaranteed.add(param_name)
                     break
     return guaranteed
