@@ -1926,3 +1926,92 @@ def test_go_nil_guarded_return_values() -> None:
 
     assert _go_nil_guarded_return_values("if fork == nil { return [] } return fork.HashTreeRoot()") == {"fork"}
     assert _go_nil_guarded_return_values("if x != nil { return x } return y") == set()
+
+
+def test_normalize_foreign_expression_inlines_go_char_literals() -> None:
+    """Go rune literals are lowered to integer code points for Mumei."""
+    from agent.cross_validation_foreign import _normalize_foreign_expression
+
+    assert _normalize_foreign_expression("'A'", language="go") == "65"
+    assert _normalize_foreign_expression("c >= 'A' && c <= 'Z'", language="go") == "(c >= 65 and c <= 90)"
+
+
+def test_local_variable_names_detects_single_letter_locals() -> None:
+    """Single-letter locals declared with var/let/const must be recognised."""
+    from agent.cross_validation_foreign import _local_variable_names
+
+    assert _local_variable_names("var m = regMask{}", "go") == {"m"}
+    assert _local_variable_names("let m = 1;", "rust") == {"m"}
+    assert _local_variable_names("const m = 0;", "typescript") == {"m"}
+    assert _local_variable_names("uint m = 0;", "solidity") == {"m"}
+
+
+def test_raw_return_statement_expression_masks_nested_go_function_literals() -> None:
+    """Returns inside nested closures must not leak into the outer function."""
+    from agent.cross_validation_foreign import _raw_return_statement_expression, _all_return_expressions
+
+    body = 'sort.Slice(deps, func(i, j int) bool { return deps[i].order() < deps[j].order() })\nreturn nil'
+    assert _raw_return_statement_expression(body, "go") == "nil"
+    assert _all_return_expressions(body, "go") == ["nil"]
+
+
+def test_detect_go_safety_issues_skips_sort_interface_index_bounds() -> None:
+    """sort.Interface Less/Swap parameters are guaranteed in-bounds by the caller."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''
+package demo
+type byPos struct{ a []*T }
+func (x byPos) Less(i, j int) bool { return x.a[i].Pos() < x.a[j].Pos() }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("index" in issue.message for issue in issues)
+
+
+def test_issues_for_expression_respects_nonzero_guard() -> None:
+    """A preceding ``rate > 0`` guard suppresses divide-by-zero on ``rate``."""
+    from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
+
+    expr = "rate > 0 && cheaprandu64()%rate == 0"
+    issues = _issues_for_expression("Sample", expr, "Go")
+    assert not any("divide" in issue.message.lower() for issue in issues)
+
+
+def test_guaranteed_nonzero_with_no_spaces_around_operator() -> None:
+    """Short-circuit guard detection must work without whitespace around ``&&``."""
+    from agent.strategies.foreign_code_strategy_helpers import _guaranteed_nonzero_in_expression
+
+    assert "rate" in _guaranteed_nonzero_in_expression("rate>0&&(cheaprandu64()%rate==0)")
+    assert "x" in _guaranteed_nonzero_in_expression("(x!=0)&&(1/x)")
+
+
+def test_i64_overflow_safety_issue_skips_pointer_arithmetic() -> None:
+    """Pointer conversions such as ``muintptr(x + y)`` should not emit i64 overflow issues."""
+    from agent.strategies.foreign_code_strategy_helpers import _i64_overflow_safety_issue
+
+    assert _i64_overflow_safety_issue("WaitListHead", "highBits", "mutexMOffset", "Go", "muintptr(highBits + mutexMOffset)") is None
+
+
+def test_is_expression_lowerable_rejects_multi_token_local_variables() -> None:
+    """Expressions that reference local variables must not be lowered into postconditions."""
+    from agent.cross_validation_foreign import _is_expression_lowerable
+
+    assert _is_expression_lowerable("epochStart and altairEpoch", {"slot"}, local_names={"epochStart", "altairEpoch"}) is False
+    assert _is_expression_lowerable("m > 0", set(), local_names={"m"}) is False
+    assert _is_expression_lowerable("slot + 1", {"slot"}, local_names=set()) is True
+
+
+def test_extract_solidity_interface_as_trusted_atoms() -> None:
+    """Solidity interfaces with no function body should be extracted as trusted specs."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+
+    source = '''
+interface IERC4626 {
+    function asset() external view returns (address assetTokenAddress);
+    function convertToShares(uint256 assets) external view returns (uint256 shares);
+}
+'''
+    specs = ForeignCodeExtractor().extract_solidity(source)
+    assert [s.function_name for s in specs] == ["asset", "convertToShares"]
+    assert all(s.return_type == "i64" for s in specs if s.function_name == "asset")
+    assert all(s.preconditions == [] for s in specs)

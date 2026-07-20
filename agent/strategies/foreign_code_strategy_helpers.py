@@ -22,6 +22,7 @@ from agent.cross_validation_foreign import (
     _go_nillable_param_names,
     _go_type_is_nillable,
     _is_go_test_name,
+    _mask_nested_function_literals,
     _split_params,
     _strip_go_rust_literals_and_comments,
 )
@@ -519,10 +520,10 @@ def _detect_block_safety_issues(
     nullable_params: dict[str, set[str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
+    fallback = label == "TypeScript"
+    language = label.lower()
     for name, body in blocks:
-        if label in {"Go", "Rust"}:
-            body = _strip_go_rust_literals_and_comments(body)
-        expressions = _return_expressions(body)
+        expressions = _return_expressions(body, fallback=fallback, language=language)
         if not expressions and label == "Rust":
             expressions = [_last_rust_expression(body)]
         dereference_values = None
@@ -629,9 +630,9 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
-            body = _strip_go_rust_literals_and_comments(fn.body)
+            body = fn.body
             param_names = _go_nillable_param_names(fn.params_text)
-            expressions = _return_expressions(body)
+            expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
             for index, expression in enumerate(expressions):
                 expr_issues = _issues_for_expression(
@@ -651,13 +652,16 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                             and issue.required_contracts[0].endswith("!= nil")
                         )
                     ]
+                if fn.name in {"Less", "Swap"}:
+                    expr_issues = [
+                        issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
+                    ]
                 issues.extend(expr_issues)
         return issues
     # Regex fallback when tree-sitter / the grammar is unavailable.
     for name, params_text, _return_type, body in _go_function_declarations(source):
-        body = _strip_go_rust_literals_and_comments(body)
         param_names = _go_nillable_param_names(params_text)
-        expressions = _return_expressions(body)
+        expressions = _return_expressions(body, fallback=False, language="go")
         guarded = _go_nil_guarded_return_values(body)
         for index, expression in enumerate(expressions):
             expr_issues = _issues_for_expression(
@@ -676,8 +680,29 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                         and issue.required_contracts[0].endswith("!= nil")
                     )
                 ]
+            if name in {"Less", "Swap"}:
+                expr_issues = [
+                    issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
+                ]
             issues.extend(expr_issues)
     return issues
+
+
+def _is_sort_interface_index_issue(issue: ForeignSafetyIssue) -> bool:
+    """Return True when ``issue`` is a false-positive index-bound check for sort.Interface.
+
+    The Go ``sort`` package guarantees ``0 <= i, j < Len()`` when it calls
+    ``Less`` or ``Swap``, so bounds contracts on ``i``/``j`` are not useful.
+    """
+    if not issue.required_contracts:
+        return False
+    for contract in issue.required_contracts:
+        if not re.fullmatch(
+            r"\s*(i|j)\s*>=\s*0\s*|\s*(i|j)\s*<\s*len_\w+\s*",
+            contract,
+        ):
+            return False
+    return True
 
 _LABEL_TO_TS_LANGUAGE = {
     "Rust": "rust",
@@ -750,16 +775,95 @@ def _null_safety_issue(function_name: str, value: str, label: str) -> ForeignSaf
     )
 
 
+def _strip_outer_parentheses(part: str) -> str:
+    """Remove a single, balanced pair of surrounding parentheses if present."""
+    part = part.strip()
+    if part.startswith("(") and part.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(part):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if depth == 0 and i == len(part) - 1:
+                return part[1:-1].strip()
+    return part
+
+
+def _guaranteed_nonzero_in_expression(expression: str) -> set[str]:
+    """Return identifiers that are provably non-zero in ``expression``.
+
+    Handles short-circuiting boolean guards such as ``rate > 0 && x%rate``:
+    the left conjunct guarantees ``rate != 0`` whenever the right side is
+    evaluated.  This avoids false divide-by-zero reports for guarded modulus
+    or division operations.
+    """
+    result: set[str] = set()
+    for part in _split_top_level_operators(expression, ("&&", "and")):
+        part = _strip_outer_parentheses(part)
+        for pattern in (
+            r"^([A-Za-z_]\w*)\s*>\s*0$",
+            r"^([A-Za-z_]\w*)\s*>=\s*1$",
+            r"^([A-Za-z_]\w*)\s*!=\s*0$",
+            r"^([A-Za-z_]\w*)\s*!==\s*0$",
+            r"^([A-Za-z_]\w*)\s*<\s*0$",
+            r"^([A-Za-z_]\w*)\s*<=\s*-1$",
+            r"^0\s*<\s*([A-Za-z_]\w*)$",
+            r"^!\s*\(\s*([A-Za-z_]\w*)\s*==\s*0\s*\)$",
+        ):
+            m = re.match(pattern, part)
+            if m:
+                result.add(m.group(1))
+                break
+    return result
+
+
+def _split_top_level_operators(expression: str, operators: tuple[str, ...]) -> list[str]:
+    """Split ``expression`` on top-level occurrences of ``operators``.
+
+    Respects balanced parentheses and brackets so operators inside sub-
+    expressions are not used as split points.
+    """
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    i = 0
+    n = len(expression)
+    while i < n:
+        ch = expression[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if depth == 0:
+            matched = False
+            for op in operators:
+                if expression.startswith(op, i):
+                    parts.append(expression[start:i])
+                    i += len(op)
+                    start = i
+                    matched = True
+                    break
+            if matched:
+                continue
+        i += 1
+    parts.append(expression[start:])
+    return parts
+
+
 def _division_safety_issue(
     function_name: str,
     divisor: str,
     label: str,
     known_constants: dict[str, int],
+    guaranteed_nonzero: set[str] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A non-zero `constant`/`immutable` divisor (e.g. `x % N` where N is the
     # secp256r1 curve order) can never be zero, so don't emit a bogus
     # divide-by-zero from modeling it as a free integer (#296).
     if known_constants.get(divisor, 0) != 0:
+        return None
+    if guaranteed_nonzero and divisor in guaranteed_nonzero:
         return None
     return ForeignSafetyIssue(
         function_name=function_name,
@@ -772,9 +876,32 @@ def _division_safety_issue(
     )
 
 
+def _is_pointer_arithmetic_expression(expression: str, left: str, right: str) -> bool:
+    """Return True when ``left + right`` is an argument to a pointer conversion.
+
+    Go pointer arithmetic such as ``muintptr(highBits + mutexMOffset)`` is
+    bounded by the runtime's allocator invariants and cannot be expressed as a
+    plain i64 overflow check.  We treat these additions as trusted.
+    """
+    expression = expression.strip()
+    for type_name in ("muintptr", "uintptr", "guintptr", "unsafe.Pointer"):
+        prefix = f"{type_name}("
+        if expression.startswith(prefix) and expression.endswith(")"):
+            inner = expression[len(prefix) : -1]
+            pattern = (
+                rf"\b{re.escape(left)}\b\s*\+\s*\b{re.escape(right)}\b"
+                rf"|\b{re.escape(right)}\b\s*\+\s*\b{re.escape(left)}\b"
+            )
+            if re.search(pattern, inner):
+                return True
+    return False
+
+
 def _i64_overflow_safety_issue(
-    function_name: str, left: str, right: str, label: str
-) -> ForeignSafetyIssue:
+    function_name: str, left: str, right: str, label: str, expression: str = ""
+) -> ForeignSafetyIssue | None:
+    if _is_pointer_arithmetic_expression(expression, left, right):
+        return None
     counterexample = _z3_i64_overflow_counterexample(left, right)
     return ForeignSafetyIssue(
         function_name=function_name,
@@ -823,6 +950,7 @@ def _issues_for_expression(
     known_constants: dict[str, int] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
+    guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression)
     ts_language = _LABEL_TO_TS_LANGUAGE.get(label)
     findings = (
         tree_sitter_extract.analyze_expression(expression, ts_language)
@@ -837,6 +965,7 @@ def _issues_for_expression(
             label,
             dereference_values=dereference_values,
             known_constants=known_constants,
+            guaranteed_nonzero=guaranteed_nonzero,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -844,11 +973,16 @@ def _issues_for_expression(
     issues: list[ForeignSafetyIssue] = []
     if label not in {"TypeScript", "JavaScript"}:
         for match in re.finditer(
-            r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
+            r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\](?!\s*[\w{])",
             expression,
         ):
+            container = match.group("container")
+            index = match.group("index")
+            if container == "map":
+                # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
+                continue
             issue = _index_safety_issue(
-                function_name, match.group("container"), match.group("index"), label, known_constants
+                function_name, container, index, label, known_constants
             )
             if issue is not None:
                 issues.append(issue)
@@ -872,12 +1006,16 @@ def _issues_for_expression(
             r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
             expression,
         ):
-            issue = _division_safety_issue(function_name, match.group("right"), label, known_constants)
+            issue = _division_safety_issue(
+                function_name, match.group("right"), label, known_constants, guaranteed_nonzero
+            )
             if issue is not None:
                 issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in _addition_pairs_regex(expression):
-            issues.append(_i64_overflow_safety_issue(function_name, left, right, label))
+            issue = _i64_overflow_safety_issue(function_name, left, right, label, expression)
+            if issue is not None:
+                issues.append(issue)
     if label == "Solidity":
         for left, right in _addition_pairs_regex(expression):
             issues.append(_solidity_overflow_safety_issue(function_name, left, right, label))
@@ -892,6 +1030,7 @@ def _issues_from_findings(
     *,
     dereference_values: set[str] | None,
     known_constants: dict[str, int],
+    guaranteed_nonzero: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -915,12 +1054,16 @@ def _issues_from_findings(
             issues.append(_null_safety_issue(function_name, value, label))
     if label not in {"TypeScript", "JavaScript"}:
         for divisor in findings.divisors:
-            issue = _division_safety_issue(function_name, divisor, label, known_constants)
+            issue = _division_safety_issue(
+                function_name, divisor, label, known_constants, guaranteed_nonzero
+            )
             if issue is not None:
                 issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in findings.additions:
-            issues.append(_i64_overflow_safety_issue(function_name, left, right, label))
+            issue = _i64_overflow_safety_issue(function_name, left, right, label, expression)
+            if issue is not None:
+                issues.append(issue)
     if label == "Solidity":
         for left, right in findings.additions:
             issues.append(_solidity_overflow_safety_issue(function_name, left, right, label))
@@ -1592,12 +1735,13 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     return result
 
 
-def _return_expressions(body: str) -> list[str]:
+def _return_expressions(body: str, fallback: bool = True, language: str = "") -> list[str]:
     """Return the expressions of all ``return`` statements in ``body``.
 
     Balances parentheses, brackets, braces and ternary ``?:`` pairs so
     multi-line returns are captured in full.
     """
+    body = _mask_nested_function_literals(body, language)
     stripped = _strip_go_rust_literals_and_comments(body)
     expressions: list[str] = []
     for match in re.finditer(r"\breturn\b", stripped):
@@ -1608,7 +1752,7 @@ def _return_expressions(body: str) -> list[str]:
         if expr:
             expressions.append(expr)
     # For expression-bodied arrow functions with no ``return`` keyword.
-    if not expressions:
+    if not expressions and fallback:
         body_stripped = body.strip()
         if body_stripped and "\n" not in body_stripped:
             expressions.append(body_stripped.rstrip(";"))

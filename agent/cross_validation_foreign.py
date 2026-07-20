@@ -711,11 +711,14 @@ def _generic_safety_requires_for_expression(
             if not semantic_safety.divisor_provably_nonzero(divisor, known_constants):
                 requirements.append(f"{divisor} != 0")
     for match in re.finditer(
-        r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\]",
+        r"\b(?P<container>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>[A-Za-z_][A-Za-z0-9_]*)\s*\](?!\s*[\w{])",
         expression,
     ):
         container = match.group("container")
         index = match.group("index")
+        if container == "map":
+            # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
+            continue
         if semantic_safety.known_nonnegative_index(index, known_constants) is None:
             requirements.append(f"{index} >= 0")
         requirements.append(f"{index} < len_{container}")
@@ -1051,11 +1054,12 @@ def _infer_rust_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | No
             ensures = "true"
         else:
             return_expr = _normalize_foreign_expression(
-                _last_expression(fn.body), known_constants
+                _last_expression(fn.body), known_constants, "rust"
             )
             safety_expr = _last_expression(_strip_go_rust_literals_and_comments(fn.body))
             requires = _rust_safety_requires_for_expression(safety_expr, known_constants)
-            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
+            local_names = _local_variable_names(fn.body, "rust")
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
         atoms.append(
             MumeiContractAtom(
                 name=fn.name,
@@ -1098,7 +1102,7 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
             params = _params_from_signature(params_text)
             param_names = {p.name for p in params}
             return_expr = _normalize_foreign_expression(
-                _last_expression(body), known_constants
+                _last_expression(body), known_constants, "rust"
             )
             safety_expr = _last_expression(
                 _strip_go_rust_literals_and_comments(body)
@@ -1106,7 +1110,8 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
             requires = _rust_safety_requires_for_expression(
                 safety_expr, known_constants
             )
-            ensures = _ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants)
+            local_names = _local_variable_names(body, "rust")
+            ensures = _ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants, local_names)
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
@@ -1135,13 +1140,14 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
             )
             if fn.has_body:
                 raw_return_expr = _raw_return_statement_expression(fn.body)
-                return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+                return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "solidity")
                 requires = _solidity_safety_requires_for_expression(
                     raw_return_expr,
                     param_types,
                     known_constants,
                 )
-                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
+                local_names = _local_variable_names(fn.body, "solidity")
+                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
             else:
                 raw_return_expr = ""
                 requires = "true"
@@ -1182,13 +1188,14 @@ def _infer_solidity_contracts(code: str) -> list[MumeiContractAtom]:
         else:
             body = _balanced_brace_body(code, match.end() - 1)
             raw_return_expr = _raw_return_statement_expression(body)
-            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "solidity")
             requires = _solidity_safety_requires_for_expression(
                 raw_return_expr,
                 param_types,
                 known_constants,
             )
-            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
+            local_names = _local_variable_names(body, "solidity")
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
@@ -1307,6 +1314,22 @@ def _rust_safety_requires_for_expression(
     return " && ".join(_dedupe_strings(requirements)) if requirements else "true"
 
 
+def _is_pointer_arithmetic_expression(expression: str, left: str, right: str) -> bool:
+    """Return True when ``left + right`` is an argument to a pointer conversion."""
+    expression = expression.strip()
+    for type_name in ("muintptr", "uintptr", "guintptr", "unsafe.Pointer"):
+        prefix = f"{type_name}("
+        if expression.startswith(prefix) and expression.endswith(")"):
+            inner = expression[len(prefix) : -1]
+            pattern = (
+                rf"\b{re.escape(left)}\b\s*\+\s*\b{re.escape(right)}\b"
+                rf"|\b{re.escape(right)}\b\s*\+\s*\b{re.escape(left)}\b"
+            )
+            if re.search(pattern, inner):
+                return True
+    return False
+
+
 def _integer_overflow_requires_for_expression(
     expression: str, language: str = "rust"
 ) -> list[str]:
@@ -1318,6 +1341,8 @@ def _integer_overflow_requires_for_expression(
     )
     requirements: list[str] = []
     for left, right in additions:
+        if _is_pointer_arithmetic_expression(expression, left, right):
+            continue
         requirements.extend(_i64_overflow_bounds(left, right))
     return requirements
 
@@ -1391,7 +1416,7 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
                 body = _text(body_node)
                 is_expression_body = True
             raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
-            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "typescript")
             return_type = _typescript_return_type(
                 return_type_text or "number", raw_return_expr
             )
@@ -1400,6 +1425,7 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
                 source_bytes[: name_node.start_byte].decode("utf-8", "replace")
             )
             param_names = {p.name for p in _params_from_signature(params_text)}
+            local_names = _local_variable_names(body, "typescript")
             atom = MumeiContractAtom(
                 name=_safe_identifier(raw_name),
                 params=_params_from_signature(params_text),
@@ -1407,7 +1433,7 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
                 requires=_safety_requires_for_expression(
                     raw_return_expr, "typescript", known_constants
                 ),
-                ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants),
+                ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names),
             )
             results.append((atom, _safe_identifier(raw_name), start_char))
             continue
@@ -1429,7 +1455,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                 raw_return_expr = _typescript_raw_return_expression(
                     fn.body, fn.is_expression_body
                 )
-                return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+                return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "typescript")
                 return_type = _typescript_return_type(
                     (fn.return_type or "number").strip(), raw_return_expr
                 )
@@ -1437,7 +1463,8 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     raw_return_expr, "typescript", known_constants
                 )
                 param_names = {p.name for p in _params_from_signature(fn.params_text)}
-                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
+                local_names = _local_variable_names(fn.body, "typescript")
+                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
             else:
                 requires = "true"
                 ensures = "true"
@@ -1501,11 +1528,12 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
             elif body_start > 0 and code[body_start - 1] == "{":
                 body = _balanced_brace_body(code, body_start - 1)
             raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
-            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "typescript")
             return_type = _typescript_return_type(
                 match.group("ret") or "number", raw_return_expr
             )
             param_names = {p.name for p in _params_from_signature(match.group("params"))}
+            local_names = _local_variable_names(body, "typescript")
             atoms.append(
                 MumeiContractAtom(
                     name=_safe_identifier(match.group("name")),
@@ -1514,7 +1542,7 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     requires=_safety_requires_for_expression(
                         raw_return_expr, "typescript", known_constants
                     ),
-                    ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants),
+                    ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names),
                 )
             )
     return atoms
@@ -1538,18 +1566,19 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
             requires = "true"
             ensures = "true"
         else:
-            raw_return_expr = _raw_return_statement_expression(fn.body)
-            safety_expr = _last_return_expression(
-                _strip_go_rust_literals_and_comments(fn.body)
-            )
-            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+            raw_return_expr = _raw_return_statement_expression(fn.body, "go")
+            safety_exprs = _all_return_expressions(fn.body, "go")
+            return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "go")
             param_names = {p.name for p in params}
-            requires = _go_safety_requires_for_expression(
-                safety_expr,
-                [param.name for param in params if param.name in nillable_names],
-                known_constants,
-            )
-            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants)
+            local_names = _local_variable_names(fn.body, "go")
+            nillable_param_names = [param.name for param in params if param.name in nillable_names]
+            requirements: list[str] = []
+            for expr in safety_exprs:
+                req = _go_safety_requires_for_expression(expr, nillable_param_names, known_constants)
+                if req and req != "true":
+                    requirements.extend(part.strip() for part in req.split("&&") if part.strip())
+            requires = " && ".join(_dedupe_strings(requirements)) if requirements else "true"
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
         atoms.append(
             MumeiContractAtom(
                 name=fn.name,
@@ -1574,24 +1603,25 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
         # precondition; value types (e.g. `reflect.Value`) can never be nil, so
         # inferring one produces a false `refuted` verdict (#295).
         nillable_names = _go_nillable_param_names(params_text)
-        raw_return_expr = _raw_return_statement_expression(body)
-        safety_expr = _last_return_expression(
-            _strip_go_rust_literals_and_comments(body)
-        )
-        return_expr = _normalize_foreign_expression(raw_return_expr, known_constants)
+        raw_return_expr = _raw_return_statement_expression(body, "go")
+        return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "go")
         mumei_return_type = _mumei_return_type(return_type)
         param_names = {p.name for p in params}
+        local_names = _local_variable_names(body, "go")
+        nillable_param_names = [param.name for param in params if param.name in nillable_names]
+        requirements: list[str] = []
+        for expr in _all_return_expressions(body, "go"):
+            req = _go_safety_requires_for_expression(expr, nillable_param_names, known_constants)
+            if req and req != "true":
+                requirements.extend(part.strip() for part in req.split("&&") if part.strip())
+        requires = " && ".join(_dedupe_strings(requirements)) if requirements else "true"
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(name),
                 params=params,
                 return_type=mumei_return_type,
-                requires=_go_safety_requires_for_expression(
-                    safety_expr,
-                    [param.name for param in params if param.name in nillable_names],
-                    known_constants,
-                ),
-                ensures=_ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants),
+                requires=requires,
+                ensures=_ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants, local_names),
             )
         )
     # Assembly forward declarations and other external function signatures have
@@ -2014,10 +2044,10 @@ def _extract_return_expression(stripped: str, source: str, start: int) -> str:
     return source[start:].strip()
 
 
-def _raw_return_statement_expression(body: str) -> str:
+def _raw_return_statement_expression(body: str, language: str = "") -> str:
     """Return the expression from the last ``return`` statement in ``body``.
 
-    Stops at the end of the statement, balancing ``()``, ``[]``, ``{}`` and
+    Stops at the end of the statement, balancing ``()`` ``[]`` ``{}`` and
     ternary ``?:`` pairs so that composite/struct literals and multi-line
     ternaries are captured in full instead of being truncated.
 
@@ -2029,6 +2059,7 @@ def _raw_return_statement_expression(body: str) -> str:
     ``return (a, b);``) cannot be expressed as a single ``result`` equality, so
     they are also normalised to the empty string.
     """
+    body = _mask_nested_function_literals(body, language)
     stripped = _strip_go_rust_literals_and_comments(body)
     returns: list[re.Match[str]] = []
     for match in re.finditer(r"\breturn\b", stripped):
@@ -2046,13 +2077,33 @@ def _raw_return_statement_expression(body: str) -> str:
     return _extract_return_expression(stripped, body, returns[-1].end())
 
 
-def _last_return_expression(body: str) -> str:
+def _all_return_expressions(body: str, language: str = "") -> list[str]:
+    """Return the expressions from every ``return`` statement in ``body``.
+
+    Early returns may dereference values that the fall-through return does not,
+    so a complete safety analysis must consider all exit expressions.
+    """
+    body = _mask_nested_function_literals(body, language)
+    stripped = _strip_go_rust_literals_and_comments(body)
+    expressions: list[str] = []
+    for match in re.finditer(r"\breturn\b", stripped):
+        end = match.end()
+        if end < len(stripped) and (stripped[end].isalnum() or stripped[end] == "_"):
+            continue
+        expr = _extract_return_expression(stripped, body, end)
+        if expr:
+            expressions.append(expr)
+    return expressions
+
+
+def _last_return_expression(body: str, language: str = "") -> str:
     """Return the expression from the last ``return`` statement, ignoring others.
 
     Used for safety-requirement extraction where the fall-through ``return`` is
     the only expression that can still dereference values.  Multi-value returns
     are still discarded because they cannot be expressed as a single expression.
     """
+    body = _mask_nested_function_literals(body, language)
     stripped = _strip_go_rust_literals_and_comments(body)
     returns: list[re.Match[str]] = []
     for match in re.finditer(r"\breturn\b", stripped):
@@ -2063,6 +2114,7 @@ def _last_return_expression(body: str) -> str:
     if not returns:
         return ""
     return _extract_return_expression(stripped, body, returns[-1].end())
+
 
 
 def _typescript_raw_return_expression(body: str, is_expression_body: bool = False) -> str:
@@ -2238,10 +2290,44 @@ _KNOWN_PROPERTY_NAMES = frozenset({
 })
 
 
+def _local_variable_names(body: str, language: str) -> set[str]:
+    """Return the set of identifiers declared as local variables in ``body``.
+
+    This is a lightweight regex-based scan; tree-sitter extraction is preferred
+    when available, but the fallback must not shell out or depend on external
+    tools.  It is used to avoid lowering a reference to a local variable that
+    Mumei cannot resolve into a contract atom.
+    """
+    language = _normalize_foreign_language(language)
+    names: set[str] = set()
+    if language == "go":
+        # Short declarations ``x := ...`` and ``var x ...``.
+        for match in re.finditer(r"\b([A-Za-z_]\w*)\s*:=", body):
+            names.add(match.group(1))
+        for match in re.finditer(r"\bvar\s+([A-Za-z_]\w*)", body):
+            names.add(match.group(1))
+    elif language == "rust":
+        for match in re.finditer(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)", body):
+            names.add(match.group(1))
+    elif language in {"typescript", "javascript"}:
+        for match in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_]\w*)", body):
+            names.add(match.group(1))
+    elif language == "solidity":
+        # Simple local declarations like ``uint x = ...;`` or ``T x = ...;``.
+        for match in re.finditer(
+            r"\b(?:uint|int|bytes|string|address|bool|mapping)\s+(?:[A-Za-z_]\w+\s+)?([A-Za-z_]\w*)\s*=",
+
+            body,
+        ):
+            names.add(match.group(1))
+    return names
+
+
 def _is_expression_lowerable(
     expression: str,
     param_names: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
+    local_names: set[str] | None = None,
 ) -> bool:
     """Detect expressions that Mumei cannot lower.
 
@@ -2251,7 +2337,7 @@ def _is_expression_lowerable(
     known property call.  Ternaries, arrow functions and any unknown identifier
     cause a fallback to ``ensures true``.
     """
-    if not param_names:
+    if param_names is None and local_names is None:
         return True
     no_strings = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
     # Ternary and arrow-function bodies cannot be lowered into a single Mumei
@@ -2267,9 +2353,25 @@ def _is_expression_lowerable(
     allowed.update(param_names)
     if known_constants:
         allowed.update(known_constants)
+    # A bare, unknown single identifier is only lowerable when it is not a local
+    # variable declared inside the same function body.  Globals/constants that
+    # are not captured by ``known_constants`` are still allowed because Mumei can
+    # model them as free variables.
+    stripped = no_strings.strip()
+    single = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stripped)
+    if single:
+        token = single.group(0)
+        if token.startswith("len_") and token[4:] in param_names:
+            pass
+        elif token not in allowed:
+            if local_names and token in local_names:
+                return False
+            # Otherwise the identifier is assumed to be a global/external name.
     for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", no_strings):
         if token in allowed:
             continue
+        if local_names and token in local_names:
+            return False
         if token.startswith("len_") and token[4:] in param_names:
             continue
         match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)_([A-Za-z_][A-Za-z0-9_]*)", token)
@@ -2291,11 +2393,12 @@ def _ensures_for_return_expression(
     return_type: str,
     param_names: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
+    local_names: set[str] | None = None,
 ) -> str:
     """Build a Mumei ``ensures`` clause, falling back to ``true`` for unverifiable types."""
     if not return_expr or return_type == "string":
         return "true"
-    if not _is_expression_lowerable(return_expr, param_names, known_constants):
+    if not _is_expression_lowerable(return_expr, param_names, known_constants, local_names):
         return "true"
     return f"result == {return_expr}"
 
@@ -2550,9 +2653,27 @@ def _rewrite_not(expression: str) -> str:
             k = j
             while k < n and (expression[k].isalnum() or expression[k] == "_"):
                 k += 1
-            operand = expression[j:k]
+            identifier_end = k
+            while k < n and expression[k].isspace():
+                k += 1
+            if k < n and expression[k] == "(":
+                # ``!func(...)`` -> ``func(...) == false``
+                paren_start = k
+                depth = 1
+                k += 1
+                while k < n and depth > 0:
+                    if expression[k] == "(":
+                        depth += 1
+                    elif expression[k] == ")":
+                        depth -= 1
+                    k += 1
+                operand = expression[j:k]
+                result.append(f"({operand} == false)")
+                i = k
+                continue
+            operand = expression[j:identifier_end]
             result.append(f"({operand} == false)")
-            i = k
+            i = identifier_end
             continue
         result.append(ch)
         i += 1
@@ -2849,9 +2970,72 @@ def _inline_known_constants(
     return expression
 
 
+def _inline_character_literals(
+    expression: str,
+    language: str,
+) -> str:
+    """Replace Go/Rust character literals with integer constants.
+
+    Mumei has no character-literal syntax, so ``'A'`` is converted to ``65``.
+    Only single-quoted literals outside double-quoted strings are rewritten;
+    strings are left untouched.
+    """
+    if language not in {"go", "rust"}:
+        return expression
+    result: list[str] = []
+    i = 0
+    n = len(expression)
+    in_double = False
+    double_escape = False
+    while i < n:
+        ch = expression[i]
+        if in_double:
+            result.append(ch)
+            if double_escape:
+                double_escape = False
+            elif ch == "\\":
+                double_escape = True
+            elif ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == '"':
+            in_double = True
+            result.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            j = i + 1
+            char_escape = False
+            while j < n:
+                c = expression[j]
+                if char_escape:
+                    char_escape = False
+                elif c == "\\":
+                    char_escape = True
+                elif c == "'":
+                    break
+                j += 1
+            token = expression[i : j + 1]
+            try:
+                value = ast.literal_eval(token)
+                if isinstance(value, str) and len(value) == 1:
+                    result.append(str(ord(value)))
+                else:
+                    result.append(token)
+            except (ValueError, SyntaxError):
+                result.append(token)
+            i = j + 1
+            continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _normalize_foreign_expression(
     expression: str,
     known_constants: dict[str, int] | None = None,
+    language: str = "",
 ) -> str:
     normalized = _strip_comments(expression).strip()
     normalized = normalized.replace("&&", "and").replace("||", "or")
@@ -2864,8 +3048,98 @@ def _normalize_foreign_expression(
     normalized = _coerce_undefined_and_bang(normalized)
     normalized = _simplify_boolean_literals(normalized)
     normalized = _normalize_bit_shifts(normalized)
+    normalized = _inline_character_literals(normalized, _normalize_foreign_language(language))
     normalized = _parenthesize_boolean_expression(normalized)
     return normalized
+
+
+def _mask_go_function_literals(body: str) -> str:
+    """Replace nested Go function literal bodies with spaces.
+
+    Uses a stripped copy of ``body`` (string/comment contents replaced with
+    spaces) to locate literal boundaries, then applies the same ranges to the
+    original text so positions remain valid.  This prevents ``return``
+    statements inside closures from leaking into the outer function's safety
+    or contract inference.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    mask = [False] * len(body)
+
+    def _body_range(start: int) -> tuple[int, int] | None:
+        """Return the [start, end) range of the function literal body."""
+        paren = 0
+        bracket = 0
+        i = start
+        n = len(stripped)
+        while i < n:
+            ch = stripped[i]
+            if ch == "(":
+                paren += 1
+            elif ch == ")":
+                paren -= 1
+            elif ch == "[":
+                bracket += 1
+            elif ch == "]":
+                bracket -= 1
+            elif ch == "{" and paren == 0 and bracket == 0:
+                # Skip ``struct`` / ``interface`` type blocks, which can appear
+                # as result types or embedded composite types.
+                prev_start = i - 1
+                while prev_start >= 0 and stripped[prev_start].isspace():
+                    prev_start -= 1
+                while prev_start >= 0 and (
+                    stripped[prev_start].isalnum() or stripped[prev_start] == "_"
+                ):
+                    prev_start -= 1
+                prev_word = stripped[prev_start + 1 : i].strip()
+                if prev_word in {"struct", "interface"}:
+                    depth = 1
+                    i += 1
+                    while i < n and depth > 0:
+                        if stripped[i] == "{":
+                            depth += 1
+                        elif stripped[i] == "}":
+                            depth -= 1
+                        i += 1
+                    continue
+                # ``{`` is the function body; find its matching ``}``.
+                depth = 1
+                j = i + 1
+                while j < n and depth > 0:
+                    if stripped[j] == "{":
+                        depth += 1
+                    elif stripped[j] == "}":
+                        depth -= 1
+                    j += 1
+                return i, j
+            i += 1
+        return None
+
+    for match in re.finditer(r"\bfunc\b", stripped):
+        start = match.start()
+        # Only function literals inside this body are nested.  A bare ``func``
+        # immediately followed by an identifier (a declaration) cannot occur
+        # inside another function body.
+        j = match.end()
+        while j < len(stripped) and stripped[j].isspace():
+            j += 1
+        if j < len(stripped) and (stripped[j].isalnum() or stripped[j] == "_"):
+            continue
+        rng = _body_range(start)
+        if rng is not None:
+            for k in range(rng[0], rng[1]):
+                if not stripped[k].isspace() or stripped[k] == "\n":
+                    mask[k] = True
+
+    return "".join(" " if mask[i] and body[i] not in "\n" else body[i] for i in range(len(body)))
+
+
+def _mask_nested_function_literals(body: str, language: str) -> str:
+    """Mask bodies of nested function literals for the given language."""
+    language = _normalize_foreign_language(language)
+    if language == "go":
+        return _mask_go_function_literals(body)
+    return body
 
 
 def _safe_identifier(value: str) -> str:
