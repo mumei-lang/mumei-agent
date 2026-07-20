@@ -2015,3 +2015,36 @@ interface IERC4626 {
     assert [s.function_name for s in specs] == ["asset", "convertToShares"]
     assert all(s.return_type == "i64" for s in specs if s.function_name == "asset")
     assert all(s.preconditions == [] for s in specs)
+
+
+def test_go_method_receiver_type() -> None:
+    """Receiver types are extracted from Go method parameter lists."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_method_receiver_type
+
+    assert _go_method_receiver_type("f *durationOrCountFlag") == "*durationOrCountFlag"
+    assert _go_method_receiver_type("b *B, n int") == "*B"
+    assert _go_method_receiver_type("s string, n int") is None
+
+
+def test_go_flag_value_receiver_types() -> None:
+    """A type with String + Set methods and a pointer String receiver is recognised as flag.Value."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_flag_value_receiver_types
+
+    class Fn:
+        def __init__(self, name: str, params_text: str):
+            self.name = name
+            self.params_text = params_text
+
+    functions = [
+        Fn("String", "f *durationOrCountFlag"),
+        Fn("Set", "f *durationOrCountFlag, s string"),
+        Fn("String", "r BenchmarkResult"),
+    ]
+    assert _go_flag_value_receiver_types(functions) == {"*durationOrCountFlag"}
+
+
+def test_i64_overflow_safety_issue_skips_local_variables() -> None:
+    """Overflow checks cannot be expressed as preconditions on local variables."""
+    from agent.strategies.foreign_code_strategy_helpers import _i64_overflow_safety_issue
+
+    assert _i64_overflow_safety_issue("indexTagEnd", "res", "i", "Go", "res + i", local_names={"res", "i"}) is None
