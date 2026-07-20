@@ -2015,3 +2015,98 @@ interface IERC4626 {
     assert [s.function_name for s in specs] == ["asset", "convertToShares"]
     assert all(s.return_type == "i64" for s in specs if s.function_name == "asset")
     assert all(s.preconditions == [] for s in specs)
+
+
+def test_go_method_receiver_type() -> None:
+    """Receiver types are extracted from Go method parameter lists."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_method_receiver_type
+
+    assert _go_method_receiver_type("f *durationOrCountFlag") == "*durationOrCountFlag"
+    assert _go_method_receiver_type("b *B, n int") == "*B"
+    assert _go_method_receiver_type("s string, n int") is None
+
+
+def test_go_flag_value_receiver_types() -> None:
+    """A type with String + Set methods and a pointer String receiver is recognised as flag.Value."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_flag_value_receiver_types
+
+    class Fn:
+        def __init__(self, name: str, params_text: str):
+            self.name = name
+            self.params_text = params_text
+
+    functions = [
+        Fn("String", "f *durationOrCountFlag"),
+        Fn("Set", "f *durationOrCountFlag, s string"),
+        Fn("String", "r BenchmarkResult"),
+    ]
+    assert _go_flag_value_receiver_types(functions) == {"*durationOrCountFlag"}
+
+
+def test_i64_overflow_safety_issue_skips_local_variables() -> None:
+    """Overflow checks cannot be expressed as preconditions on local variables."""
+    from agent.strategies.foreign_code_strategy_helpers import _i64_overflow_safety_issue
+
+    assert _i64_overflow_safety_issue("indexTagEnd", "res", "i", "Go", "res + i", local_names={"res", "i"}) is None
+
+
+def test_go_method_receiver_helpers() -> None:
+    """Receiver name/type extraction distinguishes methods from functions."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _go_method_receiver_name,
+        _go_method_receiver_type,
+    )
+
+    assert _go_method_receiver_name("f *FlagSet") == "f"
+    assert _go_method_receiver_type("f *FlagSet") == "*FlagSet"
+    assert _go_method_receiver_name("name string, n int") is None
+    assert _go_method_receiver_type("name string, n int") is None
+
+
+def test_go_caller_contract_receiver_types_flagset() -> None:
+    """flag.FlagSet is identified as a caller-contract receiver type."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_caller_contract_receiver_types
+
+    source = "package flag\n\ntype FlagSet struct { formal map[string]*Flag }\n"
+    assert _go_caller_contract_receiver_types(source) == {"FlagSet"}
+    assert _go_caller_contract_receiver_types("package other\ntype FlagSet struct {}") == set()
+
+
+def test_detect_go_safety_issues_suppresses_flagset_nil() -> None:
+    """Nil-deref issues on *FlagSet methods are caller-contract false positives."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''
+package flag
+
+type FlagSet struct { formal map[string]*Flag }
+
+func (f *FlagSet) Lookup(name string) *Flag {
+    return f.formal[name]
+}
+
+func (f *FlagSet) Set(name, value string) error {
+    flag := f.formal[name]
+    _ = flag
+    return nil
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert all(i.function_name not in {"Lookup", "Set"} for i in issues)
+
+
+def test_detect_go_safety_issues_suppresses_flag_value_get() -> None:
+    """flag.Value Get methods are called by the flag package with non-nil receivers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''
+package flag
+
+type boolValue bool
+
+func (b *boolValue) Set(s string) error { *b = boolValue(s == "true"); return nil }
+func (b *boolValue) String() string { return strconv.FormatBool(bool(*b)) }
+func (b *boolValue) Get() any { return bool(*b) }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any(i.function_name in {"String", "Get"} for i in issues)

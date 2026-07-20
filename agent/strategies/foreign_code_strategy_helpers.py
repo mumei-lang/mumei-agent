@@ -22,6 +22,7 @@ from agent.cross_validation_foreign import (
     _go_nillable_param_names,
     _go_type_is_nillable,
     _is_go_test_name,
+    _local_variable_names,
     _mask_nested_function_literals,
     _split_params,
     _strip_go_rust_literals_and_comments,
@@ -541,6 +542,95 @@ def _detect_block_safety_issues(
             )
     return issues
 
+_GO_BUILTIN_TYPES = {
+    "string", "int", "int8", "int16", "int32", "int64",
+    "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+    "float32", "float64", "complex64", "complex128",
+    "bool", "byte", "rune", "error", "any", "comparable",
+}
+
+
+def _go_package_name(source: str) -> str:
+    """Return the Go package clause from ``source`` (without a path)."""
+    match = re.search(r"^\s*package\s+([A-Za-z_]\w*)", source, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def _go_caller_contract_receiver_types(source: str) -> set[str]:
+    """Return receiver type names whose nil-deref issues are caller-contract noise.
+
+    These are standard-library container types whose pointer-receiver methods are
+    documented to be used on initialized/non-nil instances (e.g. ``flag.FlagSet``
+    via ``NewFlagSet`` / ``CommandLine``), so a nil receiver counterexample is a
+    false positive in normal usage.
+    """
+    pkg = _go_package_name(source)
+    contracts: set[str] = set()
+    if pkg == "flag" and re.search(r"\btype\s+FlagSet\s+struct\b", source):
+        contracts.add("FlagSet")
+    return contracts
+
+
+def _is_nil_contract_for_value(issue: ForeignSafetyIssue, value: str | None) -> bool:
+    """Return True when ``issue`` is exactly a ``value != nil`` precondition."""
+    if value is None or not issue.required_contracts:
+        return False
+    return issue.required_contracts[0] == f"{value} != nil"
+
+
+def _go_method_receiver_name(params_text: str) -> str | None:
+    """Return the receiver variable name, or None if not a method."""
+    if _go_method_receiver_type(params_text) is None:
+        return None
+    params_text = params_text.strip()
+    if not params_text:
+        return None
+    first = params_text.split(",", 1)[0].strip()
+    match = re.match(r"([A-Za-z_]\w*)\s+", first)
+    return match.group(1) if match else None
+
+
+def _go_method_receiver_type(params_text: str) -> str | None:
+    """Return the receiver type of a Go method, or None for a standalone function."""
+    params_text = params_text.strip()
+    if not params_text:
+        return None
+    # The first parameter in a method declaration is the receiver.
+    first = params_text.split(",", 1)[0].strip()
+    # Split the first parameter into name and type.  Receivers are either a
+    # named type ``T`` or a pointer ``*T``; built-in scalar parameters such as
+    # ``s string`` are ordinary function arguments, not receivers.
+    match = re.fullmatch(r"[A-Za-z_]\w*\s+(\*?\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_]\w*)?)\.?", first)
+    if not match:
+        return None
+    rtype = match.group(1).replace(" ", "")
+    base = rtype.lstrip("*")
+    if base in _GO_BUILTIN_TYPES:
+        return None
+    return rtype
+
+
+def _go_flag_value_receiver_types(functions: list) -> set[str]:
+    """Return receiver types that implement ``flag.Value`` (String + Set methods).
+
+    Heuristic: the type defines both ``String()`` and ``Set(string) error`` and
+    the ``String`` method has a pointer receiver.
+    """
+    receiver_methods: dict[str, set[str]] = {}
+    receiver_pointer: dict[str, bool] = {}
+    for fn in functions:
+        rtype = _go_method_receiver_type(fn.params_text)
+        if rtype is None:
+            continue
+        receiver_methods.setdefault(rtype, set()).add(fn.name)
+        receiver_pointer[rtype] = rtype.startswith("*")
+    return {
+        rtype
+        for rtype, methods in receiver_methods.items()
+        if "String" in methods and "Set" in methods and receiver_pointer.get(rtype, False)
+    }
+
+
 def _go_nil_guarded_return_values(body: str) -> set[str]:
     """Detect ``if x == nil { ... return ... }`` patterns that guard later returns.
 
@@ -627,19 +717,34 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         source, "go", _safe_identifier
     )
     if functions is not None:
+        flag_value_types = _go_flag_value_receiver_types(functions)
+        caller_contract_types = _go_caller_contract_receiver_types(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
             body = fn.body
             param_names = _go_nillable_param_names(fn.params_text)
+            local_names = _local_variable_names(body, "go")
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
+            rtype = _go_method_receiver_type(fn.params_text)
+            receiver_name = _go_method_receiver_name(fn.params_text)
+            suppress_nil = (
+                fn.name in {"String", "Get"}
+                and rtype is not None
+                and rtype in flag_value_types
+            )
+            suppress_receiver_nil = (
+                rtype is not None
+                and rtype.lstrip("*") in caller_contract_types
+            )
             for index, expression in enumerate(expressions):
                 expr_issues = _issues_for_expression(
                     fn.name,
                     expression,
                     "Go",
                     dereference_values=param_names,
+                    local_names=local_names,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -652,6 +757,21 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                             and issue.required_contracts[0].endswith("!= nil")
                         )
                     ]
+                if suppress_nil:
+                    expr_issues = [
+                        issue
+                        for issue in expr_issues
+                        if not (
+                            issue.required_contracts
+                            and issue.required_contracts[0].endswith("!= nil")
+                        )
+                    ]
+                if suppress_receiver_nil:
+                    expr_issues = [
+                        issue
+                        for issue in expr_issues
+                        if not _is_nil_contract_for_value(issue, receiver_name)
+                    ]
                 if fn.name in {"Less", "Swap"}:
                     expr_issues = [
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
@@ -659,16 +779,35 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                 issues.extend(expr_issues)
         return issues
     # Regex fallback when tree-sitter / the grammar is unavailable.
-    for name, params_text, _return_type, body in _go_function_declarations(source):
+    go_decls = list(_go_function_declarations(source))
+    flag_value_types = _go_flag_value_receiver_types([
+        type("Fn", (), {"params_text": params_text, "name": name})()
+        for name, params_text, _, _ in go_decls
+    ])
+    caller_contract_types = _go_caller_contract_receiver_types(source)
+    for name, params_text, _return_type, body in go_decls:
         param_names = _go_nillable_param_names(params_text)
+        local_names = _local_variable_names(body, "go")
         expressions = _return_expressions(body, fallback=False, language="go")
         guarded = _go_nil_guarded_return_values(body)
+        rtype = _go_method_receiver_type(params_text)
+        receiver_name = _go_method_receiver_name(params_text)
+        suppress_nil = (
+            name in {"String", "Get"}
+            and rtype is not None
+            and rtype in flag_value_types
+        )
+        suppress_receiver_nil = (
+            rtype is not None
+            and rtype.lstrip("*") in caller_contract_types
+        )
         for index, expression in enumerate(expressions):
             expr_issues = _issues_for_expression(
                 _safe_identifier(name),
                 expression,
                 "Go",
                 dereference_values=param_names,
+                local_names=local_names,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -679,6 +818,21 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                         and issue.required_contracts[0].split("!=")[0].strip() in guarded
                         and issue.required_contracts[0].endswith("!= nil")
                     )
+                ]
+            if suppress_nil:
+                expr_issues = [
+                    issue
+                    for issue in expr_issues
+                    if not (
+                        issue.required_contracts
+                        and issue.required_contracts[0].endswith("!= nil")
+                    )
+                ]
+            if suppress_receiver_nil:
+                expr_issues = [
+                    issue
+                    for issue in expr_issues
+                    if not _is_nil_contract_for_value(issue, receiver_name)
                 ]
             if name in {"Less", "Swap"}:
                 expr_issues = [
@@ -898,9 +1052,18 @@ def _is_pointer_arithmetic_expression(expression: str, left: str, right: str) ->
 
 
 def _i64_overflow_safety_issue(
-    function_name: str, left: str, right: str, label: str, expression: str = ""
+    function_name: str,
+    left: str,
+    right: str,
+    label: str,
+    expression: str = "",
+    local_names: set[str] | None = None,
 ) -> ForeignSafetyIssue | None:
     if _is_pointer_arithmetic_expression(expression, left, right):
+        return None
+    if local_names and (left in local_names or right in local_names):
+        # Arithmetic over local loop variables cannot be expressed as a
+        # precondition on the atom's parameters, so treat it as trusted.
         return None
     counterexample = _z3_i64_overflow_counterexample(left, right)
     return ForeignSafetyIssue(
@@ -948,6 +1111,7 @@ def _issues_for_expression(
     *,
     dereference_values: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
+    local_names: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression)
@@ -966,6 +1130,7 @@ def _issues_for_expression(
             dereference_values=dereference_values,
             known_constants=known_constants,
             guaranteed_nonzero=guaranteed_nonzero,
+            local_names=local_names,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1013,7 +1178,9 @@ def _issues_for_expression(
                 issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in _addition_pairs_regex(expression):
-            issue = _i64_overflow_safety_issue(function_name, left, right, label, expression)
+            issue = _i64_overflow_safety_issue(
+                function_name, left, right, label, expression, local_names=local_names
+            )
             if issue is not None:
                 issues.append(issue)
     if label == "Solidity":
@@ -1031,6 +1198,7 @@ def _issues_from_findings(
     dereference_values: set[str] | None,
     known_constants: dict[str, int],
     guaranteed_nonzero: set[str] | None = None,
+    local_names: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1061,7 +1229,9 @@ def _issues_from_findings(
                 issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in findings.additions:
-            issue = _i64_overflow_safety_issue(function_name, left, right, label, expression)
+            issue = _i64_overflow_safety_issue(
+                function_name, left, right, label, expression, local_names=local_names
+            )
             if issue is not None:
                 issues.append(issue)
     if label == "Solidity":
