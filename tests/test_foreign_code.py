@@ -2492,3 +2492,55 @@ def test_expression_lowerable_rejects_string_concat_with_literals() -> None:
 
     assert not _is_expression_lowerable('netdir + "/cs"', {"netdir"}, {}, None)
     assert not _is_expression_lowerable('net + "!" + host', {"net", "host"}, {}, None)
+
+
+def test_expression_lowerable_rejects_unknown_array_index() -> None:
+    """Array indexing on an unknown state variable cannot be lowered into ensures."""
+    from agent.cross_validation_foreign import _is_expression_lowerable
+
+    assert not _is_expression_lowerable("_allTokens[index]", {"index"}, {}, None)
+    assert _is_expression_lowerable("ids[i]", {"ids", "i"}, {}, None)
+
+
+def test_solidity_require_bounds_suppresses_index_safety_issue() -> None:
+    """A Solidity ``require(index < ...)`` guard should suppress the index-bounds false positive."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_block_safety_issues
+
+    source = """// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract C {
+    uint256[] private _allTokens;
+
+    function totalSupply() public view returns (uint256) {
+        return _allTokens.length;
+    }
+
+    function tokenByIndex(uint256 index) public view returns (uint256) {
+        require(index < totalSupply(), "out of bounds");
+        return _allTokens[index];
+    }
+}
+"""
+    issues = _detect_block_safety_issues(source, [("tokenByIndex", "tokenByIndex")], "Solidity")
+    assert not any(i.function_name == "tokenByIndex" for i in issues)
+
+
+def test_solidity_mapping_key_access_skips_index_safety_issue() -> None:
+    """Nested Solidity mapping key access should not produce an index-bounds issue."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_block_safety_issues
+
+    source = """// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract C {
+    mapping(address => mapping(uint256 => uint256)) private _ownedTokens;
+
+    function tokenOfOwnerByIndex(address owner, uint256 index) public view returns (uint256) {
+        return _ownedTokens[owner][index];
+    }
+}
+"""
+    blocks = [("tokenOfOwnerByIndex", "tokenOfOwnerByIndex")]
+    issues = _detect_block_safety_issues(source, blocks, "Solidity")
+    assert not any("_ownedTokens[owner]" in i.message for i in issues)
