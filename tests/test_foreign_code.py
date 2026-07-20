@@ -2142,8 +2142,26 @@ def test_detect_safety_issues_skips_generated_files() -> None:
     assert _detect_safety_issues(source, "go") == []
 
 
+def test_detect_solidity_safety_issues_skips_mapping_key_access() -> None:
+    """Solidity mapping key access is always safe and should not require index bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+pragma solidity ^0.8.0;
+
+contract C {
+    mapping(uint256 => uint256) private _values;
+
+    function get(uint256 key) public view returns (uint256) {
+        return _values[key];
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "solidity")
+    assert not any("_values" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_skips_map_key_access() -> None:
-    """Go map key access is always safe and should not require index bounds."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
 
     source = '''

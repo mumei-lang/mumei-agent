@@ -472,15 +472,35 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
     if normalized == "python":
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
+        mapping_names = _solidity_mapping_names(source)
         issues = _detect_block_safety_issues(
             source,
             _solidity_function_blocks(source),
             "Solidity",
             known_constants=_solidity_declared_constants(source),
+            mapping_names=mapping_names,
         )
         issues.extend(_detect_solidity_contract_issues(source))
         return issues
     return []
+
+
+def _solidity_mapping_names(source: str) -> set[str]:
+    """Return the set of state-variable names declared as Solidity ``mapping`` types.
+
+    Mapping key access is always safe (a missing key returns the type's zero
+    value), so bounds contracts on mapping indices are false positives.
+    """
+    names: set[str] = set()
+    # ``mapping(KeyType => ValueType) visibility name;`` possibly with nested
+    # single-level parentheses inside the value type.
+    pattern = re.compile(
+        r"\bmapping\s*\((?:[^()]|\([^()]*\))*\)\s*(?:[A-Za-z_][\w]*\s+)*([A-Za-z_][\w]*)\s*[;=]",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(source):
+        names.add(match.group(1))
+    return names
 
 
 def _solidity_declared_constants(source: str) -> dict[str, int]:
@@ -527,6 +547,7 @@ def _detect_block_safety_issues(
     label: str,
     known_constants: dict[str, int] | None = None,
     nullable_params: dict[str, set[str]] | None = None,
+    mapping_names: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     fallback = label == "TypeScript"
@@ -546,6 +567,7 @@ def _detect_block_safety_issues(
                     label,
                     dereference_values=dereference_values,
                     known_constants=known_constants,
+                    mapping_names=mapping_names,
                 )
             )
     return issues
@@ -885,6 +907,7 @@ def _index_safety_issue(
     label: str,
     known_constants: dict[str, int],
     param_types: dict[str, str] | None = None,
+    mapping_names: set[str] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
@@ -895,6 +918,9 @@ def _index_safety_issue(
         if container_type.startswith("map["):
             # Map key access is always safe (returns zero value if missing).
             return None
+    if mapping_names and container in mapping_names:
+        # Solidity mapping key access is always safe.
+        return None
     known_index = known_constants.get(index)
     if known_index is not None and known_index < 0:
         known_index = None
@@ -1131,6 +1157,7 @@ def _issues_for_expression(
     known_constants: dict[str, int] | None = None,
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
+    mapping_names: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression)
@@ -1151,6 +1178,7 @@ def _issues_for_expression(
             guaranteed_nonzero=guaranteed_nonzero,
             local_names=local_names,
             param_types=param_types,
+            mapping_names=mapping_names,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1167,7 +1195,7 @@ def _issues_for_expression(
                 # ``map[K]V{...}`` is a Go map type/composite literal, not an index.
                 continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants, param_types=param_types
+                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names
             )
             if issue is not None:
                 issues.append(issue)
@@ -1220,6 +1248,7 @@ def _issues_from_findings(
     guaranteed_nonzero: set[str] | None = None,
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
+    mapping_names: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1230,7 +1259,7 @@ def _issues_from_findings(
     issues: list[ForeignSafetyIssue] = []
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":
