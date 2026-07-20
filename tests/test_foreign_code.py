@@ -2194,6 +2194,19 @@ def test_detect_safety_issues_skips_generated_files() -> None:
     assert _detect_safety_issues(source, "go") == []
 
 
+def test_detect_safety_issues_skips_goexperiment_files() -> None:
+    """Go files gated by ``goexperiment`` build tags are skipped on the production path."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """//go:build goexperiment.simd
+
+package simd_test
+
+func add[T number](x, y T) T { return x + y }
+"""
+    assert _detect_safety_issues(source, "go") == []
+
+
 def test_detect_solidity_safety_issues_skips_mapping_key_access() -> None:
     """Solidity mapping key access is always safe and should not require index bounds."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

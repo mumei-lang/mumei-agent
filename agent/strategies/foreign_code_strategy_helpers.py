@@ -476,7 +476,7 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             nullable_params=nullable_params,
         )
     if normalized == "go":
-        if _is_go_compiler_test(source):
+        if _is_go_compiler_test(source) or _is_go_experimental(source):
             return []
         known_constants = _go_declared_constants(source)
         stripped_source = _strip_go_rust_literals_and_comments(source)
@@ -1065,7 +1065,7 @@ def _detect_go_safety_issues(
     *,
     known_constants: dict[str, int] | None = None,
 ) -> list[ForeignSafetyIssue]:
-    if _is_go_compiler_test(source) or _is_go_experimental(source):
+    if _is_go_compiler_test(source):
         return []
     issues: list[ForeignSafetyIssue] = []
     functions = tree_sitter_extract.extract_contract_functions(
