@@ -550,6 +550,46 @@ _GO_BUILTIN_TYPES = {
 }
 
 
+def _go_package_name(source: str) -> str:
+    """Return the Go package clause from ``source`` (without a path)."""
+    match = re.search(r"^\s*package\s+([A-Za-z_]\w*)", source, re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def _go_caller_contract_receiver_types(source: str) -> set[str]:
+    """Return receiver type names whose nil-deref issues are caller-contract noise.
+
+    These are standard-library container types whose pointer-receiver methods are
+    documented to be used on initialized/non-nil instances (e.g. ``flag.FlagSet``
+    via ``NewFlagSet`` / ``CommandLine``), so a nil receiver counterexample is a
+    false positive in normal usage.
+    """
+    pkg = _go_package_name(source)
+    contracts: set[str] = set()
+    if pkg == "flag" and re.search(r"\btype\s+FlagSet\s+struct\b", source):
+        contracts.add("FlagSet")
+    return contracts
+
+
+def _is_nil_contract_for_value(issue: ForeignSafetyIssue, value: str | None) -> bool:
+    """Return True when ``issue`` is exactly a ``value != nil`` precondition."""
+    if value is None or not issue.required_contracts:
+        return False
+    return issue.required_contracts[0] == f"{value} != nil"
+
+
+def _go_method_receiver_name(params_text: str) -> str | None:
+    """Return the receiver variable name, or None if not a method."""
+    if _go_method_receiver_type(params_text) is None:
+        return None
+    params_text = params_text.strip()
+    if not params_text:
+        return None
+    first = params_text.split(",", 1)[0].strip()
+    match = re.match(r"([A-Za-z_]\w*)\s+", first)
+    return match.group(1) if match else None
+
+
 def _go_method_receiver_type(params_text: str) -> str | None:
     """Return the receiver type of a Go method, or None for a standalone function."""
     params_text = params_text.strip()
@@ -678,6 +718,7 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     )
     if functions is not None:
         flag_value_types = _go_flag_value_receiver_types(functions)
+        caller_contract_types = _go_caller_contract_receiver_types(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -687,10 +728,15 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
             rtype = _go_method_receiver_type(fn.params_text)
+            receiver_name = _go_method_receiver_name(fn.params_text)
             suppress_nil = (
-                fn.name == "String"
+                fn.name in {"String", "Get"}
                 and rtype is not None
                 and rtype in flag_value_types
+            )
+            suppress_receiver_nil = (
+                rtype is not None
+                and rtype.lstrip("*") in caller_contract_types
             )
             for index, expression in enumerate(expressions):
                 expr_issues = _issues_for_expression(
@@ -720,6 +766,12 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                             and issue.required_contracts[0].endswith("!= nil")
                         )
                     ]
+                if suppress_receiver_nil:
+                    expr_issues = [
+                        issue
+                        for issue in expr_issues
+                        if not _is_nil_contract_for_value(issue, receiver_name)
+                    ]
                 if fn.name in {"Less", "Swap"}:
                     expr_issues = [
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
@@ -732,16 +784,22 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         type("Fn", (), {"params_text": params_text, "name": name})()
         for name, params_text, _, _ in go_decls
     ])
+    caller_contract_types = _go_caller_contract_receiver_types(source)
     for name, params_text, _return_type, body in go_decls:
         param_names = _go_nillable_param_names(params_text)
         local_names = _local_variable_names(body, "go")
         expressions = _return_expressions(body, fallback=False, language="go")
         guarded = _go_nil_guarded_return_values(body)
         rtype = _go_method_receiver_type(params_text)
+        receiver_name = _go_method_receiver_name(params_text)
         suppress_nil = (
-            name == "String"
+            name in {"String", "Get"}
             and rtype is not None
             and rtype in flag_value_types
+        )
+        suppress_receiver_nil = (
+            rtype is not None
+            and rtype.lstrip("*") in caller_contract_types
         )
         for index, expression in enumerate(expressions):
             expr_issues = _issues_for_expression(
@@ -769,6 +827,12 @@ def _detect_go_safety_issues(source: str) -> list[ForeignSafetyIssue]:
                         issue.required_contracts
                         and issue.required_contracts[0].endswith("!= nil")
                     )
+                ]
+            if suppress_receiver_nil:
+                expr_issues = [
+                    issue
+                    for issue in expr_issues
+                    if not _is_nil_contract_for_value(issue, receiver_name)
                 ]
             if name in {"Less", "Swap"}:
                 expr_issues = [
