@@ -1936,6 +1936,16 @@ def test_normalize_foreign_expression_inlines_go_char_literals() -> None:
     assert _normalize_foreign_expression("c >= 'A' && c <= 'Z'", language="go") == "(c >= 65 and c <= 90)"
 
 
+def test_local_variable_names_detects_single_letter_locals() -> None:
+    """Single-letter locals declared with var/let/const must be recognised."""
+    from agent.cross_validation_foreign import _local_variable_names
+
+    assert _local_variable_names("var m = regMask{}", "go") == {"m"}
+    assert _local_variable_names("let m = 1;", "rust") == {"m"}
+    assert _local_variable_names("const m = 0;", "typescript") == {"m"}
+    assert _local_variable_names("uint m = 0;", "solidity") == {"m"}
+
+
 def test_raw_return_statement_expression_masks_nested_go_function_literals() -> None:
     """Returns inside nested closures must not leak into the outer function."""
     from agent.cross_validation_foreign import _raw_return_statement_expression, _all_return_expressions
@@ -1965,6 +1975,14 @@ def test_issues_for_expression_respects_nonzero_guard() -> None:
     expr = "rate > 0 && cheaprandu64()%rate == 0"
     issues = _issues_for_expression("Sample", expr, "Go")
     assert not any("divide" in issue.message.lower() for issue in issues)
+
+
+def test_guaranteed_nonzero_with_no_spaces_around_operator() -> None:
+    """Short-circuit guard detection must work without whitespace around ``&&``."""
+    from agent.strategies.foreign_code_strategy_helpers import _guaranteed_nonzero_in_expression
+
+    assert "rate" in _guaranteed_nonzero_in_expression("rate>0&&(cheaprandu64()%rate==0)")
+    assert "x" in _guaranteed_nonzero_in_expression("(x!=0)&&(1/x)")
 
 
 def test_i64_overflow_safety_issue_skips_pointer_arithmetic() -> None:

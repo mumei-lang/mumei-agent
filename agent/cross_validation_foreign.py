@@ -2304,18 +2304,19 @@ def _local_variable_names(body: str, language: str) -> set[str]:
         # Short declarations ``x := ...`` and ``var x ...``.
         for match in re.finditer(r"\b([A-Za-z_]\w*)\s*:=", body):
             names.add(match.group(1))
-        for match in re.finditer(r"\bvar\s+([A-Za-z_]\w+)", body):
+        for match in re.finditer(r"\bvar\s+([A-Za-z_]\w*)", body):
             names.add(match.group(1))
     elif language == "rust":
-        for match in re.finditer(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w+)", body):
+        for match in re.finditer(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)", body):
             names.add(match.group(1))
     elif language in {"typescript", "javascript"}:
-        for match in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_]\w+)", body):
+        for match in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_]\w*)", body):
             names.add(match.group(1))
     elif language == "solidity":
         # Simple local declarations like ``uint x = ...;`` or ``T x = ...;``.
         for match in re.finditer(
-            r"\b(?:uint|int|bytes|string|address|bool|mapping)\s+(?:[A-Za-z_]\w+\s+)?([A-Za-z_]\w+)\s*=",
+            r"\b(?:uint|int|bytes|string|address|bool|mapping)\s+(?:[A-Za-z_]\w+\s+)?([A-Za-z_]\w*)\s*=",
+
             body,
         ):
             names.add(match.group(1))

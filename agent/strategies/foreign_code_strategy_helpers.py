@@ -775,6 +775,21 @@ def _null_safety_issue(function_name: str, value: str, label: str) -> ForeignSaf
     )
 
 
+def _strip_outer_parentheses(part: str) -> str:
+    """Remove a single, balanced pair of surrounding parentheses if present."""
+    part = part.strip()
+    if part.startswith("(") and part.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(part):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if depth == 0 and i == len(part) - 1:
+                return part[1:-1].strip()
+    return part
+
+
 def _guaranteed_nonzero_in_expression(expression: str) -> set[str]:
     """Return identifiers that are provably non-zero in ``expression``.
 
@@ -785,7 +800,7 @@ def _guaranteed_nonzero_in_expression(expression: str) -> set[str]:
     """
     result: set[str] = set()
     for part in _split_top_level_operators(expression, ("&&", "and")):
-        part = part.strip()
+        part = _strip_outer_parentheses(part)
         for pattern in (
             r"^([A-Za-z_]\w*)\s*>\s*0$",
             r"^([A-Za-z_]\w*)\s*>=\s*1$",
@@ -821,12 +836,16 @@ def _split_top_level_operators(expression: str, operators: tuple[str, ...]) -> l
         elif ch in ")]}":
             depth -= 1
         if depth == 0:
+            matched = False
             for op in operators:
                 if expression.startswith(op, i):
                     parts.append(expression[start:i])
                     i += len(op)
                     start = i
-                    continue
+                    matched = True
+                    break
+            if matched:
+                continue
         i += 1
     parts.append(expression[start:])
     return parts
