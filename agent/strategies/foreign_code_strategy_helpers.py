@@ -537,24 +537,24 @@ def _go_declared_constants(source: str) -> dict[str, int]:
     constants: dict[str, int] = {}
     # Single-line: ``const name = value`` or ``const name int = value``
     for match in re.finditer(
-        r"^\s*const\s+(\w+)\s*(?:\w+\s*)?=\s*([+-]?\d+)", source, re.MULTILINE
+        r"^\s*const\s+(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", source, re.MULTILINE
     ):
         name, value = match.group(1), match.group(2)
-        try:
-            constants[name] = int(value)
-        except ValueError:
-            pass
+        value = _strip_go_rust_literals_and_comments(value).strip()
+        parsed = semantic_safety.parse_int_literal(value)
+        if parsed is not None:
+            constants[name] = parsed
     # Block: ``const ( name = value; ... )``
     for match in re.finditer(r"^\s*const\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL):
         block = match.group(1)
         for m in re.finditer(
-            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([+-]?\d+)", block, re.MULTILINE
+            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", block, re.MULTILINE
         ):
             name, value = m.group(1), m.group(2)
-            try:
-                constants[name] = int(value)
-            except ValueError:
-                pass
+            value = _strip_go_rust_literals_and_comments(value).strip()
+            parsed = semantic_safety.parse_int_literal(value)
+            if parsed is not None:
+                constants[name] = parsed
     return constants
 
 

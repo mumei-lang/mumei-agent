@@ -215,6 +215,31 @@ def test_solidity_declared_constants_parses_hex_and_decimal() -> None:
     assert "DERIVED" not in constants  # non-literal initializer skipped
 
 
+def test_go_declared_constants_parses_all_literal_bases_and_skips_expressions() -> None:
+    """Go const values may be hex, binary, octal, or have ``_`` separators."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_declared_constants
+
+    source = """
+const (
+    gcmStandardNonceSize = 12
+    gcmTagSize = 16
+    maxHex = 0x7FFFFFFFFFFFFFFF
+    withSep = 1_000_000
+    binLit = 0b101
+    octLit = 0o777
+    derived = 1 << 5
+)
+"""
+    constants = _go_declared_constants(source)
+    assert constants["gcmStandardNonceSize"] == 12
+    assert constants["gcmTagSize"] == 16
+    assert constants["maxHex"] == 0x7FFFFFFFFFFFFFFF
+    assert constants["withSep"] == 1_000_000
+    assert constants["binLit"] == 0b101
+    assert constants["octLit"] == 0o777
+    assert "derived" not in constants  # non-literal expression skipped
+
+
 def test_go_value_type_param_not_flagged_nil() -> None:
     """A Go value-type param (`reflect.Value`) can never be nil (#295)."""
     from agent.strategies.foreign_code_strategy_helpers import (
