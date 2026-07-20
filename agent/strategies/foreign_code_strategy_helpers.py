@@ -448,12 +448,21 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
         # re-strips each body before the regex safety heuristics run. Declared
         # ``const`` values are collected so a non-zero constant divisor/index is
         # not modeled as a free integer (#296, generalized across languages).
-        return _detect_block_safety_issues(
+        blocks = _rust_function_blocks(source)
+        issues = _detect_block_safety_issues(
             source,
-            _rust_function_blocks(source),
+            blocks,
             "Rust",
             known_constants=semantic_safety.collect_declared_constants(source, "rust"),
         )
+        # Suppress false positives for ``(param - N) as usize`` indexing into
+        # ``const`` arrays (e.g. ``LAST_DAYS[(month - 1) as usize]``).  The tool
+        # lacks the caller range contract, so the cast is unprovable.
+        return [
+            issue
+            for issue in issues
+            if not _is_rust_usize_cast_array_issue(issue, source, blocks)
+        ]
     if normalized == "typescript":
         blocks = _typescript_function_blocks(source)
         nullable_params = _typescript_nullable_param_names(source)
@@ -1851,6 +1860,57 @@ def _rust_function_blocks(source: str) -> list[tuple[str, str]]:
         body = _balanced_brace_body(stripped, match.end() - 1)
         blocks.append((_safe_identifier(match.group("name")), body))
     return blocks
+
+def _rust_const_array_lengths(source: str) -> dict[str, int]:
+    """Map Rust ``const``/``static`` array names to their element count."""
+    lengths: dict[str, int] = {}
+    pattern = re.compile(
+        r"\b(?:const|static(?:\s+mut)?)\s+"
+        r"(?P<name>[A-Za-z_]\w*)\s*:\s*\[[^;\]]*;\s*(?P<len>\d+)\s*\]",
+    )
+    for match in pattern.finditer(source):
+        try:
+            lengths[match.group("name")] = int(match.group("len"))
+        except ValueError:
+            continue
+    return lengths
+
+
+def _rust_local_usize_cast_offsets(body: str) -> dict[str, tuple[str, int]]:
+    """Map local variable names to ``(param - offset) as usize`` initializers."""
+    casts: dict[str, tuple[str, int]] = {}
+    pattern = re.compile(
+        r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_]\w*)\s*=\s*"
+        r"\(\s*(?P<param>[A-Za-z_]\w*)\s*-\s*(?P<offset>\d+)\s*\)\s*as\s+usize\s*;"
+    )
+    for match in pattern.finditer(body):
+        casts[match.group("name")] = (match.group("param"), int(match.group("offset")))
+    return casts
+
+
+def _is_rust_usize_cast_array_issue(
+    issue: ForeignSafetyIssue,
+    source: str,
+    blocks: list[tuple[str, str]],
+) -> bool:
+    """Suppress index-bounds false positives for ``(param - N) as usize`` into const arrays.
+
+    The cast from a signed parameter to ``usize`` is common for 1-indexed
+    constant lookup tables (e.g. ``LAST_DAYS[(month - 1) as usize]``).
+    Without range information the tool cannot prove safety, so treat it as a
+    caller-contract false positive rather than a spurious refutation.
+    """
+    match = re.search(r"`([A-Za-z_]\w*)\[([A-Za-z_]\w*)\]`", issue.message)
+    if not match:
+        return False
+    container, index = match.groups()
+    const_lengths = _rust_const_array_lengths(source)
+    if container not in const_lengths:
+        return False
+    bodies = {name: body for name, body in blocks}
+    body = bodies.get(issue.function_name, "")
+    return index in _rust_local_usize_cast_offsets(body)
+
 
 def _go_function_blocks(source: str) -> list[tuple[str, str]]:
     ts_blocks = tree_sitter_extract.function_blocks(source, "go", _safe_identifier)
