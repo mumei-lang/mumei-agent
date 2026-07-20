@@ -476,7 +476,7 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             nullable_params=nullable_params,
         )
     if normalized == "go":
-        if _is_go_compiler_test(source):
+        if _is_go_compiler_test(source) or _is_go_experimental(source):
             return []
         known_constants = _go_declared_constants(source)
         stripped_source = _strip_go_rust_literals_and_comments(source)
@@ -556,6 +556,18 @@ def _go_declared_constants(source: str) -> dict[str, int]:
             if parsed is not None:
                 constants[name] = parsed
     return constants
+
+
+def _solidity_is_default_checked_arithmetic(source: str) -> bool:
+    """Return True when the file's pragma indicates Solidity >=0.8.0.
+
+    Solidity 0.8 introduced default overflow/underflow checks, so ``a + b``
+    without an ``unchecked`` block reverts on overflow rather than wrapping.
+    """
+    return re.search(
+        r"pragma\s+solidity\s+[^;]*\b(?:[\^>=~]*\s*)?0\.([8-9]|[1-9]\d)(?:\.[0-9]+)?\b",
+        source,
+    ) is not None
 
 
 def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
@@ -677,6 +689,9 @@ def _detect_block_safety_issues(
     issues: list[ForeignSafetyIssue] = []
     fallback = label == "TypeScript"
     language = label.lower()
+    solidity_checked_arithmetic = (
+        label == "Solidity" and _solidity_is_default_checked_arithmetic(source)
+    )
     for name, body in blocks:
         expressions = _return_expressions(body, fallback=fallback, language=language)
         if not expressions and label == "Rust":
@@ -688,18 +703,26 @@ def _detect_block_safety_issues(
         if label == "Solidity":
             per_function_nonzero |= _solidity_require_nonzero_params(body)
             per_function_nonzero |= _solidity_early_return_nonzero_params(body)
+        function_has_unchecked = (
+            solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
+        )
         for expression in expressions:
-            issues.extend(
-                _issues_for_expression(
-                    name,
-                    expression,
-                    label,
-                    dereference_values=dereference_values,
-                    known_constants=known_constants,
-                    mapping_names=mapping_names,
-                    guaranteed_nonzero=per_function_nonzero,
-                )
+            expr_issues = _issues_for_expression(
+                name,
+                expression,
+                label,
+                dereference_values=dereference_values,
+                known_constants=known_constants,
+                mapping_names=mapping_names,
+                guaranteed_nonzero=per_function_nonzero,
             )
+            if solidity_checked_arithmetic and not function_has_unchecked:
+                expr_issues = [
+                    issue
+                    for issue in expr_issues
+                    if "can overflow" not in issue.message
+                ]
+            issues.extend(expr_issues)
     return issues
 
 _GO_BUILTIN_TYPES = {
@@ -1021,6 +1044,22 @@ def _is_go_compiler_test(source: str) -> bool:
     return False
 
 
+def _is_go_experimental(source: str) -> bool:
+    """True for Go files gated behind ``goexperiment`` build tags.
+
+    Experimental SIMD/generics code is not compiled by default and uses language
+    features (function types, closures, type parameters) that ``mumei verify``
+    cannot yet handle, so it is skipped from the no-LLM audit.
+    """
+    for line in source.splitlines():
+        match = re.match(r"^\s*//\s*(?:go:build|\+build)\s+(.+)$", line)
+        if match:
+            expr = match.group(1)
+            if re.search(r"(?<!!)\bgoexperiment", expr):
+                return True
+    return False
+
+
 def _detect_go_safety_issues(
     source: str,
     *,
@@ -1040,6 +1079,11 @@ def _detect_go_safety_issues(
         go_map_names = _go_map_names(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
+                continue
+            header = source[fn.start_char : fn.body_start_char]
+            if re.search(r"\]\s*\(", header):
+                # Generic functions such as ``add[T number](x, y T) T`` cannot be
+                # soundly analyzed without concrete type constraints.
                 continue
             body = fn.body
             param_names = _go_nillable_param_names(fn.params_text)

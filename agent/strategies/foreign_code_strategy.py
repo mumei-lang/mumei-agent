@@ -36,6 +36,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _detect_python_safety_issues,
     _detect_safety_issues,
     _filter_covered_safety_issues,
+    _is_go_experimental,
     _first_counterexample_payload,
     _go_function_blocks,
     _go_nil_dereference_values,
@@ -354,6 +355,8 @@ class ForeignCodeExtractor:
 
     def extract_go(self, source: str) -> list[ForeignCodeSpec]:
         """Extract Go ``func`` declarations, ``//`` contracts, and safe-path hints."""
+        if _is_go_experimental(source):
+            return []
         specs = _extract_go_with_tree_sitter(source)
         if specs is not None:
             return specs
@@ -537,6 +540,8 @@ def _source_has_function_declarations(source: str, language: str) -> bool | None
     unparseable source); callers should treat ``None`` as "could have functions".
     """
     normalized = _normalize_language(language)
+    if normalized == "go" and _is_go_experimental(source):
+        return False
     if normalized in tree_sitter_extract.SUPPORTED_LANGUAGES:
         names = tree_sitter_extract.function_names(source, normalized, _safe_identifier)
         if names is not None:
