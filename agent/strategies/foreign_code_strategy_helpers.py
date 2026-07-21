@@ -804,6 +804,29 @@ def _go_time_interval_nonzero_params(name: str, params_text: str) -> set[str]:
     }
 
 
+def _go_guarded_indices(body: str) -> set[str]:
+    """Return index variables guarded by ``0 <= i < len(arr)`` in an ``if`` block.
+
+    Matches guards such as:
+    ``if i >= 0 && i < len(arr)`` or ``if 0 <= i && int(i) < len(arr)``.
+    """
+    guarded: set[str] = set()
+    pattern = re.compile(
+        r"\bif\s+"
+        r"(?:"
+        r"(?P<lower>[A-Za-z_]\w*)\s*>=\s*0\s*&&\s*(?:int\(\s*\1\s*\)|\1)\s*<\s*len\(\s*[A-Za-z_]\w*\s*\)"
+        r"|"
+        r"0\s*<=\s*(?P<lower2>[A-Za-z_]\w*)\s*&&\s*(?:int\(\s*\2\s*\)|\2)\s*<\s*len\(\s*[A-Za-z_]\w*\s*\)"
+        r")",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(body):
+        idx = match.group("lower") or match.group("lower2")
+        if idx:
+            guarded.add(idx)
+    return guarded
+
+
 def _go_doc_comment_suppresses_bounds(source: str, start_char: int) -> bool:
     """Return True when the comment before a function declares bounds are assumed."""
     preceding = source[:start_char]
@@ -1096,6 +1119,8 @@ def _detect_block_safety_issues(
             per_function_nonzero |= _solidity_require_nonzero_params(body)
             per_function_nonzero |= _solidity_early_return_nonzero_params(body)
             per_function_guarded_indices = _solidity_guarded_indices(body)
+        if label == "Go":
+            per_function_guarded_indices = _go_guarded_indices(body)
         if label == "Rust":
             per_function_float_vars = _rust_float_variables(body)
             per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
@@ -1595,6 +1620,7 @@ def _detect_go_safety_issues(
             parallel_slicing = _go_parallel_slice_index_safe_pairs(body)
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
+            guarded_indices = _go_guarded_indices(body)
             rtype = _go_method_receiver_type(fn.params_text)
             receiver_name = _go_method_receiver_name(fn.params_text)
             suppress_nil = (
@@ -1650,6 +1676,7 @@ def _detect_go_safety_issues(
                     known_strings=known_strings,
                     known_array_keys=global_array_keys,
                     known_types=known_types,
+                    guarded_indices=guarded_indices,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:

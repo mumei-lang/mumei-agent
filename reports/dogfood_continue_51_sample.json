@@ -1,0 +1,252 @@
+[
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue6403.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/go/types/recording.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/nm/doc.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tsdb/grafana-postgresql-datasource/macros_test.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/iox_system_tables/src/system_tables.rs"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/encoding/ssz/query/generalized_index_test.go"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/mocks/ContextMock.sol"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/influxdb3_shutdown/src/tests.rs"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/proxy/Clones.sol"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/variables/datasource/actions.ts"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/api/server/middleware/middleware_test.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/influxdb_influxql_parser/src/test_util.rs"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/go/doc/synopsis_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/minimal/fulu__epoch_processing__pending_deposits_updates_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue80004.go"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/mocks/BitmapMock.sol"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/state/state-native/setters_proposer_lookahead.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/scripts/openapi3/openapi3conv.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/iox_query/src/exec/metrics.rs"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/core/hooks/useQueryParams.ts"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/encoding/bytesutil/bits.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/influxdb3_catalog/src/catalog/versions/v3/deletes.rs"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/influxdb3_commands/src/debug/catalog/render.rs"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/sync/error_test.go"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/deployers/v3-periphery/NonfungibleTokenPositionDescriptorDeployer.sol"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/net/tcpsockopt_plan9.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/link/testdata/linkname/ok.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/apiserver/auth/authorizer/resource_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/storage/unified/migrations/registry_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/provisioning/utils/utils_test.go"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/uniswapx/interfaces/IReactor.sol"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/iox_query/src/frontend/sql.rs"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/v2-periphery/interfaces/IUniswapV2Router02.sol"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/calibur/lib/account-abstraction/interfaces/PackedUserOperation.sol"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/uniswap-contracts/script/cli/src/util/chain_config.rs"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/log/slog/value.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/escape_unsafe.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/influxdb3_catalog/src/error/enterprise.rs"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/typecheck/typecheck.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/azuremonitor/components/TracesQueryEditor/TracesQueryEditor.tsx"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/validator/client/aggregator_selector_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/sync/service.go"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/calibur/interfaces/IERC7201.sol"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/ingester_query_grpc/build.rs"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-api-clients/src/clients/rtkq/rules.alerting/v0alpha1/index.ts"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/v4-core/libraries/FullMath.sol"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/accesscontrol/resourcepermissions/options.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/influxdb2_client/tests/setup.rs"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/cmd/helpers.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_bid_test.go"
+  }
+]
