@@ -2693,3 +2693,14 @@ async fn v1_password_parameter() {
 """
     atoms = _infer_rust_contracts(source)
     assert not any(a.name == "v1_password_parameter" for a in atoms)
+
+
+def test_infer_rust_contracts_cfg_test_not_skipped() -> None:
+    """Functions annotated with ``#[cfg(test)]`` are still audited."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = """#[cfg(test)]
+fn real_func() {}
+"""
+    atoms = _infer_rust_contracts(source)
+    assert any(a.name == "real_func" for a in atoms)

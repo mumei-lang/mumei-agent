@@ -363,6 +363,11 @@ def _rust_attribute_identifiers(source_bytes: bytes, fn_node) -> tuple[str, ...]
 
     def _collect_identifiers(node):
         for child in node.children:
+            if child.type == "token_tree":
+                # Argument token trees (e.g. ``(flavor = "multi_thread")`` or
+                # ``cfg(test)``) are not part of the attribute path, so descending
+                # into them would misclassify ``#[cfg(test)]`` as a test attribute.
+                continue
             if child.type == "identifier":
                 attributes.append(_decode(source_bytes, child))
             else:
