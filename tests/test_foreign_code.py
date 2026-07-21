@@ -3517,3 +3517,64 @@ func (w *s3ClientWrapper) Upload(ctx context.Context, input int) (int, error) {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_detect_rust_safety_issues_float_cast_division() -> None:
+    """Rust ``x as f64`` and ``100f64`` divisors are floating-point."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''pub fn percent(percentage: u64, total: u64) -> usize {
+    (percentage as f64 / 100f64 * total as f64).round() as usize
+}
+
+pub fn ratio(reserved: usize, detected: usize) -> bool {
+    detected > 0 && reserved as f64 / detected as f64 >= 0.9
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_rust_safety_issues_nonzero_numeric_literal_divisor() -> None:
+    """Non-zero numeric literals (e.g. ``8``) are safe divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''pub fn block(len: usize) -> usize {
+    len / 8
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_text_unmarshaler_non_nil() -> None:
+    """``encoding.TextUnmarshaler`` methods are invoked on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+type Level int
+
+func (l *Level) UnmarshalText(data []byte) error {
+    *l = Level(0)
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_uintn_offset_width_overflow() -> None:
+    """Go compiler object-writer ``UintN`` offset/width additions are trusted."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package objw
+
+import "cmd/internal/obj"
+
+func UintN(s *obj.LSym, off int, v uint64, wid int) int {
+    return off + wid
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("overflow" in issue.message for issue in issues)

@@ -1563,6 +1563,11 @@ def _go_is_known_interface_method(
         return True
     if name == "UnmarshalJSON" and "[]byte" in params_text and re.search(r"\berror\b", ret):
         return True
+    # encoding.TextMarshaler / TextUnmarshaler interface methods.
+    if name == "MarshalText" and ret.startswith("([]byte") and "error" in ret:
+        return True
+    if name == "UnmarshalText" and "[]byte" in params_text and "error" in ret:
+        return True
     # Uploader/Client ``Upload`` methods (e.g. image uploader, S3 client wrappers)
     # are interface methods invoked on non-nil concrete values.
     if name == "Upload" and "context.Context" in params_text and "error" in ret:
@@ -2382,6 +2387,44 @@ def _split_top_level_operators(expression: str, operators: tuple[str, ...]) -> l
     return parts
 
 
+def _is_nonzero_numeric_literal(value: str) -> bool:
+    """Return True when ``value`` is a non-zero integer or float literal."""
+    try:
+        cleaned = value.replace("_", "")
+        if cleaned.startswith(("0x", "0X", "0o", "0O", "0b", "0B")):
+            return int(cleaned, 0) != 0
+        if cleaned.endswith(("f32", "f64")):
+            return float(cleaned[:-3]) != 0
+        if cleaned.endswith(("F32", "F64")):
+            return float(cleaned[:-3]) != 0
+        if "." in cleaned or "e" in cleaned.lower():
+            return float(cleaned) != 0
+        return int(cleaned) != 0
+    except (ValueError, OverflowError):
+        return False
+
+
+def _is_float_expression(value: str, label: str) -> bool:
+    """Return True when ``value`` is a floating-point divisor expression."""
+    # Go explicit float casts.
+    if label == "Go" and value.startswith(("float32(", "float64(")):
+        return True
+    # Rust ``x as f64`` / ``x as f32`` casts (spaces are stripped by the
+    # tree-sitter source-text fallback, yielding ``xasf64``).
+    if label == "Rust" and re.search(r"asf(32|64)$", value):
+        return True
+    cleaned = value.replace("_", "")
+    if re.match(r"^-?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?[fF]?(?:32|64)?$", cleaned):
+        # Float literals contain a decimal point, exponent, or float suffix.
+        if any(c in cleaned for c in ".eE") or cleaned[-3:] in {"f32", "f64", "F32", "F64"}:
+            try:
+                float(cleaned.rstrip("fF").rstrip("32").rstrip("64") or "0")
+                return True
+            except ValueError:
+                return False
+    return False
+
+
 def _division_safety_issue(
     function_name: str,
     divisor: str,
@@ -2403,6 +2446,12 @@ def _division_safety_issue(
     if "." in divisor and (guaranteed_nonzero is None or divisor not in guaranteed_nonzero):
         # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
         # not provably non-zero are too noisy to model as a free variable.
+        return None
+    if _is_float_expression(divisor, label):
+        # Floating-point division is well-defined even when the divisor is zero.
+        return None
+    if _is_nonzero_numeric_literal(divisor):
+        # Non-zero numeric literals can never produce a divide-by-zero.
         return None
     return ForeignSafetyIssue(
         function_name=function_name,
@@ -2494,6 +2543,11 @@ def _i64_overflow_safety_issue(
     if local_names and (left in local_names or right in local_names):
         # Arithmetic over local loop variables cannot be expressed as a
         # precondition on the atom's parameters, so treat it as trusted.
+        return None
+    # Go compiler object-writer helpers such as ``UintN`` compute ``off + wid``
+    # where ``wid`` is a small positive width (1/2/4/8) and ``off`` is a symbol
+    # offset; these low-level additions are bounded by the writer contract.
+    if label == "Go" and function_name.startswith("Uint") and {"off", "wid"} <= {left, right}:
         return None
     known = known_constants or {}
     if left in known and right in known:
