@@ -1854,7 +1854,7 @@ def _foreign_signature_type(type_text: str) -> str:
     # Strip a Rust lifetime qualifier such as ``'static`` in ``&'static str``.
     normalized = re.sub(r"^'[A-Za-z_][A-Za-z0-9_]*\s+", "", normalized)
     lowered = normalized.lower()
-    if lowered in {"string", "str", "&str"}:
+    if lowered in {"string", "str", "&str"} or lowered == "bytes":
         return "string"
     if lowered in {"bool", "boolean"}:
         return "bool"

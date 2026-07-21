@@ -3006,6 +3006,21 @@ def test_infer_solidity_named_bool_return_ensures_is_safe() -> None:
     assert "result ==" not in atom.ensures
 
 
+def test_infer_solidity_bytes_memory_return_type_is_string() -> None:
+    """A Solidity ``bytes memory`` return with an empty string literal maps to Mumei ``string``."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """contract C {
+    function _defaultParams() internal view virtual returns (bytes memory) {
+        return "";
+    }
+}
+"""
+    atoms = _infer_solidity_contracts(source)
+    atom = next(a for a in atoms if a.name == "defaultParams")
+    assert atom.return_type == "string"
+
+
 def test_expression_lowerable_rejects_unknown_function_calls() -> None:
     """Unknown function calls in a return expression cannot be lowered to Mumei ensures."""
     from agent.cross_validation_foreign import _is_expression_lowerable
