@@ -450,6 +450,7 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
     if _is_generated_source(source):
         return []
     normalized = _normalize_language(language)
+    original_source = source
     if normalized == "rust":
         # Function boundaries come from tree-sitter (or the regex fallback,
         # which strips literals/comments itself); ``_detect_block_safety_issues``
@@ -488,7 +489,7 @@ def _detect_safety_issues(source: str, language: str) -> list[ForeignSafetyIssue
             return []
         known_constants = _go_declared_constants(source)
         stripped_source = _strip_go_rust_literals_and_comments(source)
-        return _detect_go_safety_issues(stripped_source, known_constants=known_constants)
+        return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source)
     if normalized == "python":
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
@@ -640,6 +641,45 @@ def _go_float_variables(body: str) -> set[str]:
                 float_vars.add(name)
                 changed = True
     return float_vars
+
+
+def _go_doc_comment_suppresses_bounds(source: str, start_char: int) -> bool:
+    """Return True when the comment before a function declares bounds are assumed."""
+    preceding = source[:start_char]
+    comments: list[str] = []
+    for line in reversed(preceding.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            comments.insert(0, stripped.lstrip("/").strip())
+        elif stripped:
+            break
+    text = " ".join(comments)
+    return bool(
+        re.search(r"\bassumes?\b", text, flags=re.IGNORECASE)
+        and re.search(r"\bvalid\b", text, flags=re.IGNORECASE)
+        and re.search(r"\bbounds?\b", text, flags=re.IGNORECASE)
+    )
+
+
+def _go_string_variables(source: str) -> set[str]:
+    """Return top-level Go identifiers declared with a string type or literal."""
+    strings: set[str] = set()
+    # Single-line ``var/const X string`` or ``var/const X = "..."``.
+    for match in re.finditer(
+        r"^\s*(?:var|const)\s+(\w+)\s*(?:string\b|=\s*\"|\?=\s*\")",
+        source,
+        flags=re.MULTILINE,
+    ):
+        strings.add(match.group(1))
+    # ``var ( ... )`` and ``const ( ... )`` blocks.
+    for block in re.finditer(
+        r"^\s*(?:var|const)\s*\((.*?)\)", source, flags=re.DOTALL | re.MULTILINE
+    ):
+        for match in re.finditer(r"\b(\w+)\s+string\b", block.group(1)):
+            strings.add(match.group(1))
+        for match in re.finditer(r"\b(\w+)\s*=\s*\"", block.group(1)):
+            strings.add(match.group(1))
+    return strings
 
 
 def _solidity_is_default_checked_arithmetic(source: str) -> bool:
@@ -1260,6 +1300,7 @@ def _detect_go_safety_issues(
     source: str,
     *,
     known_constants: dict[str, int] | None = None,
+    original_source: str | None = None,
 ) -> list[ForeignSafetyIssue]:
     if _is_go_compiler_test(source):
         return []
@@ -1313,8 +1354,17 @@ def _detect_go_safety_issues(
             )
             first_param = _go_first_param_name(fn.params_text)
             suppress_callback_nil = not is_method and fn.name in callback_names and first_param is not None
+            header = source[fn.start_char : fn.body_start_char]
+            orig_source = original_source or source
+            orig_start = orig_source.find(header) if original_source else -1
+            suppress_bounds = _go_doc_comment_suppresses_bounds(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             guaranteed_nonzero = _go_nonzero_constants(source)
             float_variables = _go_float_variables(body)
+            string_variables = _go_string_variables(original_source or source)
+            known_strings = string_variables | {
+                name for name, raw_type in param_types.items()
+                if raw_type.strip().lstrip("*") == "string"
+            }
             for index, expression in enumerate(expressions):
                 expr_issues = _issues_for_expression(
                     fn.name,
@@ -1328,6 +1378,7 @@ def _detect_go_safety_issues(
                     parallel_slicing=parallel_slicing,
                     guaranteed_nonzero=guaranteed_nonzero,
                     float_variables=float_variables,
+                    known_strings=known_strings,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1361,6 +1412,11 @@ def _detect_go_safety_issues(
                         for issue in expr_issues
                         if not _is_nil_contract_for_value(issue, first_param)
                     ]
+                if suppress_bounds:
+                    expr_issues = [
+                        issue for issue in expr_issues
+                        if "without a bounds contract" not in issue.message
+                    ]
                 if fn.name in {"Less", "Swap"}:
                     expr_issues = [
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
@@ -1377,6 +1433,7 @@ def _detect_go_safety_issues(
     interface_method_names = _go_interface_method_names(source)
     go_map_names = _go_map_names(source)
     guaranteed_nonzero = _go_nonzero_constants(source)
+    string_variables = _go_string_variables(original_source or source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
@@ -1384,6 +1441,10 @@ def _detect_go_safety_issues(
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
         nonnil_param_names = _go_nonnil_param_names(param_types)
+        known_strings = string_variables | {
+            name for name, raw_type in param_types.items()
+            if raw_type.strip().lstrip("*") == "string"
+        }
         local_names = _local_variable_names(body, "go")
         expressions = _return_expressions(body, fallback=False, language="go")
         guarded = _go_nil_guarded_return_values(body)
@@ -1415,6 +1476,7 @@ def _detect_go_safety_issues(
                 known_constants=known_constants or {},
                 guaranteed_nonzero=guaranteed_nonzero,
                 float_variables=float_variables,
+                known_strings=known_strings,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -1755,6 +1817,7 @@ def _issues_for_expression(
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
     float_variables: set[str] | None = None,
+    known_strings: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1779,6 +1842,7 @@ def _issues_for_expression(
             parallel_slicing=parallel_slicing,
             guarded_indices=guarded_indices,
             float_variables=float_variables,
+            known_strings=known_strings,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1834,6 +1898,8 @@ def _issues_for_expression(
                 issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in _addition_pairs_regex(expression):
+            if known_strings and (left in known_strings or right in known_strings):
+                continue
             issue = _i64_overflow_safety_issue(
                 function_name, left, right, label, expression, local_names=local_names, known_constants=known_constants
             )
@@ -1860,6 +1926,7 @@ def _issues_from_findings(
     mapping_names: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
+    known_strings: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1893,6 +1960,8 @@ def _issues_from_findings(
                 issues.append(issue)
     if label in {"Go", "Rust"}:
         for left, right in findings.additions:
+            if known_strings and (left in known_strings or right in known_strings):
+                continue
             issue = _i64_overflow_safety_issue(
                 function_name, left, right, label, expression, local_names=local_names, known_constants=known_constants
             )
