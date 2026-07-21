@@ -3673,3 +3673,38 @@ def test_detect_solidity_safety_issues_constant_expression_divisor() -> None:
 '''
     issues = _detect_safety_issues(source, "solidity")
     assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_extract_go_mumei_reserved_param_call() -> None:
+    """Go parameters named ``call`` are renamed so Mumei treats them as variables."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_safety_issues,
+        _filter_covered_safety_issues,
+    )
+
+    source = '''package types
+
+import "go/ast"
+
+func hasDots(call *ast.CallExpr) bool { return call.Ellipsis.IsValid() }
+'''
+    specs = ForeignCodeExtractor().extract(source, "go")
+    issues = _filter_covered_safety_issues(
+        _detect_safety_issues(source, "go"), specs
+    )
+    assert not any("dereference" in issue.message for issue in issues)
+    atom = next((s for s in specs if s.function_name == "hasDots"), None)
+    assert atom is not None
+    assert any("call_" in req for req in atom.preconditions)
+
+
+def test_solidity_declared_constants_pow_bounded() -> None:
+    """Exponentiation in Solidity constant expressions is bounded to avoid OOM."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _evaluate_solidity_constant_expression,
+    )
+
+    assert _evaluate_solidity_constant_expression("2 ** 1024", {}) is not None
+    assert _evaluate_solidity_constant_expression("2 ** 1025", {}) is None
+    assert _evaluate_solidity_constant_expression("2 ** -1", {}) is None
