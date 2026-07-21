@@ -2858,6 +2858,25 @@ func (p Point) Div(k int) Point {
     assert not any("divide" in i.message for i in issues)
 
 
+def test_go_zero_guarded_divisor_is_nonzero() -> None:
+    """A parameter checked with ``if x == 0 { return }`` before division is non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package runtime_test
+
+import "testing"
+
+func iterCount(b *testing.B, n int) int {
+    if n == 0 {
+        return b.N
+    }
+    return b.N / n
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in i.message for i in issues)
+
+
 def test_solidity_named_bool_return_ensures_is_safe() -> None:
     """Named Solidity return values (``returns (bool flag)``) must not produce an i64-typed boolean expression."""
     from agent.strategies.foreign_code_strategy import ForeignCodeExtractor

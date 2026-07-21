@@ -870,6 +870,30 @@ def _go_time_interval_nonzero_params(name: str, params_text: str) -> set[str]:
     }
 
 
+def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str]:
+    """Return parameters guarded by an ``if x == 0 { return }`` early return.
+
+    Code after ``if x == 0 { return ... }`` executes only when ``x != 0``,
+    so a subsequent division by ``x`` is safe.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    guarded: set[str] = set()
+    for param in param_names:
+        for match in re.finditer(rf"\bif\s+{re.escape(param)}\s*==\s*0\s*{{", stripped):
+            i = match.end()
+            depth = 1
+            block_start = i
+            while i < len(stripped) and depth > 0:
+                if stripped[i] == "{":
+                    depth += 1
+                elif stripped[i] == "}":
+                    depth -= 1
+                i += 1
+            if depth == 0 and re.search(r"\breturn\b", stripped[block_start : i - 1]):
+                guarded.add(param)
+    return guarded
+
+
 def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     """Return the integer divisor parameter for functions named ``Div``/``Mod`` as non-zero.
 
@@ -1839,6 +1863,7 @@ def _detect_go_safety_issues(
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
+                | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
                 | {"_W", "bits.UintSize"}
             )
             float_variables = _go_float_variables(body) | _go_float_param_names(fn.params_text)

@@ -1,0 +1,352 @@
+[
+  {
+    "repo": "uniswap-contracts",
+    "file": "lib/oz-v4.7.0/contracts/governance/IGovernor.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug377.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "packages/grafana-ui/src/themes/GlobalStyles/jsonFormatter.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/query_functions/src/sleep.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/trace_exporters/src/export.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "testing/spectest/shared/gloas/epoch_processing/rewards_and_penalties.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/authz/src/permission.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/rpc/eth/beacon/server.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/net/http/cookiejar/example_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/explore/hooks/useStateSync/synchronizer/fromURL.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/iox_http/src/write/v1.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "lib/oz-v4.7.0/contracts/utils/introspection/ERC165Checker.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/sync/rpc_execution_payload_envelopes_metrics.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/poll/iovec_solaris.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "lib/oz-v4.7.0/contracts/mocks/ERC20PausableMock.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/query/client/instance_provider.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "src/briefcase/protocols/v4-periphery/interfaces/IEIP712_v4.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/db/kv/archived_point_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/iox_query/src/physical_optimizer/chunk_extraction.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/poll/copy_file_range_freebsd.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/das/availability_columns_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/rpc/prysm/v1alpha1/beacon/config_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug074.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "src/briefcase/protocols/calibur/interfaces/IExecutionHook.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/map_benchmark_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/provisioning/components/Folders/analytics/types.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "packages/grafana-api-clients/src/generator/generate.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/plugins/datasource/azuremonitor/components/MetricsQueryEditor/MetricNameField.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/authz/src/iox_authorizer.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "lib/oz-v4.7.0/contracts/utils/introspection/ERC165.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/sync/pending_attestations_queue_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/iam/resourcepermission/validate.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "testing/spectest/shared/deneb/epoch_processing/registry_updates.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "src/briefcase/protocols/v4-core/libraries/SafeCast.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/iox_query/src/statistics/mod.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "src/briefcase/protocols/uniswapx/v4/interfaces/IHook.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "tools/specs-checker/main.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "influxdb3_write/src/paths.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "influxdb3_cache/src/distinct_cache/provider.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue65362.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apps/annotation/metrics.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/provisioning/controller/connection_tester_mock.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/closure7.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "src/briefcase/protocols/v4-core/types/BalanceDelta.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue26116.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "influxdb3_catalog/src/serialize/versions/mod.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "testing/spectest/minimal/deneb__epoch_processing__randao_mixes_reset_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "uniswap-contracts",
+    "file": "src/briefcase/protocols/uniswapx/interfaces/IReactorCallback.sol",
+    "lang": "solidity",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/syscall/zerrors_linux_ppc64.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/explore/spec/helper/interactions.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  }
+]
