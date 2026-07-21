@@ -46,7 +46,11 @@ def _dedupe_strings(values: list[str]) -> list[str]:
 
 def _strip_go_rust_literals_and_comments(text: str) -> str:
     def mask(span: str) -> str:
-        return "".join("\n" if char == "\n" else " " for char in span)
+        # Keep quote delimiters so the resulting source remains syntactically
+        # valid for tree-sitter; only mask the literal/comment contents.
+        if len(span) <= 2:
+            return span
+        return span[0] + "".join("\n" if char == "\n" else " " for char in span[1:-1]) + span[-1]
 
     def consume_string(index: int, quote: str) -> int:
         i = index + 1

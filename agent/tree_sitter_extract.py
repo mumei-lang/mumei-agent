@@ -898,7 +898,11 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
             right = node.child_by_field_name("right")
             if operator in {"/", "%"}:
                 divisor = _identifier_name(source_bytes, right)
-                if divisor is not None:
+                if divisor is None and right is not None:
+                    # Capture selectors such as ``time.Second`` or calls like ``len(x)``
+                    # that are not plain identifiers.
+                    divisor = re.sub(r"\s+", "", _decode(source_bytes, right).strip())
+                if divisor:
                     divisors.append(divisor)
             elif operator == "+":
                 left_name = _identifier_name(source_bytes, left)
