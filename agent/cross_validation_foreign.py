@@ -1578,13 +1578,15 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
         params = _params_from_signature(fn.params_text)
         go_param_types = _go_param_types(fn.params_text)
         nillable_names = _go_nillable_param_names(fn.params_text)
+        raw_return_expr = _raw_return_statement_expression(fn.body, "go")
         return_type = _mumei_return_type(fn.return_type)
+        if return_type in ("i64", "u64") and _is_go_string_literal(raw_return_expr):
+            return_type = "string"
         if not fn.body.strip():
             # Assembly forward declarations and other external signatures have no body.
             requires = "true"
             ensures = "true"
         else:
-            raw_return_expr = _raw_return_statement_expression(fn.body, "go")
             safety_exprs = _all_return_expressions(fn.body, "go")
             return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "go")
             param_names = {p.name for p in params}
@@ -1627,6 +1629,8 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
         raw_return_expr = _raw_return_statement_expression(body, "go")
         return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "go")
         mumei_return_type = _mumei_return_type(return_type)
+        if mumei_return_type in ("i64", "u64") and _is_go_string_literal(raw_return_expr):
+            mumei_return_type = "string"
         param_names = {p.name for p in params}
         local_names = _local_variable_names(body, "go")
         nillable_param_names = [param.name for param in params if param.name in nillable_names]
@@ -1863,6 +1867,11 @@ def _foreign_signature_type(type_text: str) -> str:
 
 # Solidity storage-location modifiers that can appear in return-type declarations.
 _SOLIDITY_MODIFIER_TOKENS = {"memory", "calldata", "storage", "payable", "indexed"}
+
+
+def _is_go_string_literal(expression: str) -> bool:
+    """True for a Go string literal (double-quoted or raw backtick)."""
+    return bool(re.fullmatch(r'\s*(?:"(?:[^"\\]|\\.)*"|`[^`]*`)\s*', expression))
 
 
 def _mumei_return_type(
