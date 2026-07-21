@@ -2823,6 +2823,23 @@ func (t *Target) Target() Target {
     assert target_atom.ensures == "true"
 
 
+def test_go_named_bool_return_type_is_recognized() -> None:
+    """A Go named return value ``(b bool)`` maps to the Mumei ``bool`` type."""
+    from agent.cross_validation import _infer_go_contracts
+
+    source = """package slog_test
+
+func panics(f func()) (b bool) {
+    defer func() { recover() }()
+    f()
+    return false
+}
+"""
+    atoms = _infer_go_contracts(source)
+    panics_atom = next(a for a in atoms if a.name == "panics")
+    assert panics_atom.return_type == "bool"
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
