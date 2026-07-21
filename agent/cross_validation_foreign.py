@@ -1791,15 +1791,29 @@ def _split_signature_params(params_text: str) -> list[str]:
 
 
 def _go_param_types(params_text: str) -> dict[str, str]:
-    """Map Go parameter/receiver names to their raw Go type strings."""
+    """Map Go parameter/receiver names to their raw Go type strings.
+
+    Supports grouped declarations such as ``a, b *T`` by propagating the
+    trailing type to all leading bare identifiers.
+    """
     types: dict[str, str] = {}
+    pending: list[str] = []
     for raw in _split_signature_params(params_text):
         raw = raw.strip()
         if not raw:
             continue
         match = re.fullmatch(r"([A-Za-z_]\w*)\s+(.+)", raw)
         if match:
-            types[match.group(1)] = match.group(2).strip()
+            name, typ = match.group(1), match.group(2).strip()
+            for pending_name in pending:
+                types[pending_name] = typ
+            types[name] = typ
+            pending.clear()
+        elif re.fullmatch(r"[A-Za-z_]\w*", raw):
+            # Bare identifier whose type is declared in a later segment.
+            pending.append(raw)
+        else:
+            pending.clear()
     return types
 
 

@@ -2602,6 +2602,33 @@ func (s *ProxySet) PauseAtIndex(i int) error {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_go_crypto_key_equal_methods_are_non_nil() -> None:
+    """``crypto.PublicKey``/``crypto.PrivateKey`` ``Equal`` methods are called on non-nil keys."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package rsa
+
+import "crypto"
+
+type PublicKey struct{ N, E int }
+
+func (pub *PublicKey) Equal(x crypto.PublicKey) bool {
+    xx, ok := x.(*PublicKey)
+    if !ok { return false }
+    return pub.N == xx.N && pub.E == xx.E
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_go_param_types_handles_grouped_params() -> None:
+    """Grouped parameter declarations ``a, b *T`` map the type to all identifiers."""
+    from agent.cross_validation_foreign import _go_param_types
+
+    assert _go_param_types("a, b *big.Int") == {"a": "*big.Int", "b": "*big.Int"}
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

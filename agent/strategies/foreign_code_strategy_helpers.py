@@ -1181,6 +1181,12 @@ _GO_BUILTIN_TYPES = {
 _GO_NONNIL_TYPE_SUFFIXES = {
     "Service", "Node", "Handler", "Manager", "Store",
     "Client", "Provider", "Server", "Resolver", "Registry", "Factory",
+    "Key",  # cryptographic key types (PublicKey, PrivateKey, etc.)
+}
+
+# Exact type basenames that are always non-nil when used as parameters.
+_GO_NONNIL_EXACT_TYPES = {
+    "Int",  # math/big.Int and similar big-integer wrappers
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -1277,6 +1283,14 @@ def _go_is_known_interface_method(
     if name == "Sum" and "[]byte" in params_text and "[]byte" in ret:
         return True
     if name in {"Size", "BlockSize"} and re.search(r"\bint\b", ret) and "[]byte" not in params_text:
+        return True
+    # ``crypto.PublicKey``/``crypto.PrivateKey`` interface ``Equal`` methods are
+    # invoked on non-nil key values by callers using the interface.
+    if (
+        name == "Equal"
+        and re.search(r"\bbool\b", ret)
+        and ("crypto.PublicKey" in params_text or "crypto.PrivateKey" in params_text)
+    ):
         return True
     # E2E component lifecycle methods such as ``Started() <-chan struct{}`` are
     # invoked on non-nil concrete components by the test runner.
@@ -1459,7 +1473,10 @@ def _go_nonnil_param_names(param_types: dict[str, str]) -> set[str]:
     return {
         name
         for name, raw_type in param_types.items()
-        if _go_type_basename(raw_type).removesuffix("?").endswith(tuple(_GO_NONNIL_TYPE_SUFFIXES))
+        if (
+            _go_type_basename(raw_type).removesuffix("?").endswith(tuple(_GO_NONNIL_TYPE_SUFFIXES))
+            or _go_type_basename(raw_type).removesuffix("?") in _GO_NONNIL_EXACT_TYPES
+        )
     }
 
 
