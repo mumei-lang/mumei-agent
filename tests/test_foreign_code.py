@@ -2652,6 +2652,61 @@ func RandaoReveal(beaconState ReadOnlyBeaconState, privKeys []SecretKey) ([]byte
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_mod_divisor_is_nonzero() -> None:
+    """A Go method named ``Mod`` with an integer parameter implies a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package primitives
+
+type ValidatorIndex uint64
+
+func (v ValidatorIndex) Mod(x uint64) ValidatorIndex {
+    return ValidatorIndex(uint64(v) % x)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in i.message for i in issues)
+
+
+def test_rust_size_variable_sums_do_not_overflow() -> None:
+    """Sums of memory-size/length variables are not i64 overflow false positives."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """pub struct Schema;
+impl Schema {
+    pub fn estimate_size(&self) -> usize {
+        let size_self = std::mem::size_of_val(self);
+        let size_inner = std::mem::size_of_val(&self);
+        size_self + size_inner
+    }
+}
+"""
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("overflow" in i.message for i in issues)
+
+
+def test_go_ssz_interface_methods_are_non_nil() -> None:
+    """SSZ marshaler/unmarshaler/hash-root methods are invoked on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package primitives
+
+type Hasher struct{}
+
+func (v *ValidatorIndex) UnmarshalSSZ(buf []byte) error {
+    *v = ValidatorIndex(0)
+    return nil
+}
+
+func (v *ValidatorIndex) HashTreeRootWith(hh *Hasher) error {
+    hh.PutUint64(uint64(*v))
+    return nil
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
