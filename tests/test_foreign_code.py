@@ -2741,6 +2741,21 @@ func offAddrToLevelIndex(level int, addr offAddr) int {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_rust_modulo_len_index_is_guarded() -> None:
+    """Rust ``let index = ... % container.len();`` bounds ``container[index]``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """pub fn get_spinner_frame() -> char {
+    let frames = ["_", "_", "_", "-", "`", "`", "'", "´", "-", "_", "_", "_"];
+    let time = 0usize;
+    let index = (time / 70) % frames.len();
+    frames[index].chars().next().unwrap()
+}
+"""
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("can index" in i.message for i in issues)
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

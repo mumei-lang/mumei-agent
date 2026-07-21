@@ -757,6 +757,26 @@ def _rust_float_variables(body: str) -> set[str]:
     return float_vars
 
 
+def _rust_guarded_indices(body: str) -> set[str]:
+    """Return Rust local variable names that are bounded by ``% .len()``.
+
+    Patterns such as ``let index = (time / 70) % frames.len();`` ensure
+    ``0 <= index < len(frames)``, so any subsequent ``frames[index]`` is safe.
+    """
+    guarded: set[str] = set()
+    body = _strip_go_rust_literals_and_comments(body)
+    # ``let index = ... % container.len();``  or ``... % (container.len());``
+    pattern = re.compile(
+        r"let\s+(?:mut\s+)?(\w+)\s*(?::\s*[\w<>,\s]+)?\s*=\s*([^;]+)\s*;",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(body):
+        name, rhs = match.group(1), match.group(2)
+        if re.search(r"%\s*[A-Za-z_]\w*\.\s*len\s*\(\s*\)", rhs):
+            guarded.add(name)
+    return guarded
+
+
 def _rust_doc_comment_nonzero_params(source: str, name: str) -> set[str]:
     """Extract parameter names whose doc comment states they must be non-zero.
 
@@ -1215,6 +1235,7 @@ def _detect_block_safety_issues(
             per_function_guarded_indices = _go_guarded_indices(body)
         if label == "Rust":
             per_function_float_vars = _rust_float_variables(body)
+            per_function_guarded_indices = _rust_guarded_indices(body)
             per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
