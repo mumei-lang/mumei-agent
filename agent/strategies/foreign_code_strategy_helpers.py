@@ -580,6 +580,25 @@ def _go_declared_constants(source: str) -> dict[str, int]:
     return constants
 
 
+def _go_actor_nonnil_params(param_types: dict[str, str]) -> set[str]:
+    """Return parameter names that are non-nil for ``Actor.Act`` implementations.
+
+    ``go/cmd/go/internal/work.Actor`` interface methods have signature
+    ``Act(*Builder, context.Context, *Action) error``. The concrete implementations
+    are always invoked with non-nil ``*Builder`` and ``*Action`` values by the
+    action graph executor, so nil-receiver counterexamples for those parameters are
+    caller-contract noise.
+    """
+    nonnil: set[str] = set()
+    type_by_name = {name: raw.strip() for name, raw in param_types.items()}
+    values = set(type_by_name.values())
+    if "*Builder" in values and "context.Context" in values and "*Action" in values:
+        for name, raw in type_by_name.items():
+            if raw in {"*Builder", "*Action"}:
+                nonnil.add(name)
+    return nonnil
+
+
 def _go_nonzero_constants(source: str) -> set[str]:
     """Return top-level Go identifiers that are provably non-zero.
 
@@ -923,6 +942,10 @@ def _go_guarded_indices(body: str) -> set[str]:
 
     Also recognizes the Go idiom ``idx, err := SomeIndex(...); if err != nil { return }``,
     where an ``Index`` helper returns a valid index on nil error.
+
+    Additionally, recognizes ``const m = len(container) - 1; if n <= m { container[n] }``
+    as a valid upper-bound guard, and treats ``m`` itself as a safe last-element index
+    into ``container``.
     """
     guarded: set[str] = set()
     pattern = re.compile(
@@ -946,6 +969,24 @@ def _go_guarded_indices(body: str) -> set[str]:
         re.DOTALL,
     ):
         guarded.add(match.group("idx"))
+    # ``const m = <type>(len(container) - 1)`` used as a last-index helper.
+    limit_consts: dict[str, str] = {}
+    for match in re.finditer(
+        r"\bconst\s+(\w+)\s*=\s*(?:\w+\()?len\(\s*(\w+)\s*\)\s*-\s*1(?:\))?",
+        body,
+    ):
+        limit_consts[match.group(1)] = match.group(2)
+    # ``if n <= m { container[n] }`` guards ``n`` for ``container``.
+    for const_name, container in limit_consts.items():
+        for match in re.finditer(
+            rf"\bif\s+(\w+)\s*<=\s*{re.escape(const_name)}\s*\{{[^}}]*{re.escape(container)}\s*\[\s*\1\s*\]",
+            body,
+            re.DOTALL,
+        ):
+            guarded.add(match.group(1))
+        # The constant ``m`` is the last valid index of ``container``.
+        if re.search(rf"{re.escape(container)}\s*\[\s*{re.escape(const_name)}\s*\]", body):
+            guarded.add(const_name)
     return guarded
 
 
@@ -1296,6 +1337,14 @@ _GO_BUILTIN_TYPES = {
     "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
     "float32", "float64", "complex64", "complex128",
     "bool", "byte", "rune", "error", "any", "comparable",
+}
+
+# Integer types that can never be negative.  Used to drop the lower-bound
+# contract from index-safety checks.
+_UNSIGNED_INTEGER_TYPES = {
+    "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+    "usize", "u8", "u16", "u32", "u64",
+    "byte",
 }
 
 # Framework/container types whose methods are always invoked on non-nil values.
@@ -1828,7 +1877,7 @@ def _detect_go_safety_issues(
             body = fn.body
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
-            nonnil_param_names = _go_nonnil_param_names(param_types)
+            nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(param_types)
             local_names = _local_variable_names(body, "go")
             parallel_slicing = _go_parallel_slice_index_safe_pairs(body)
             expressions = _return_expressions(body, fallback=False, language="go")
@@ -1958,7 +2007,7 @@ def _detect_go_safety_issues(
         float_variables = _go_float_variables(body) | _go_float_param_names(params_text)
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
-        nonnil_param_names = _go_nonnil_param_names(param_types)
+        nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(param_types)
         known_strings = string_variables | {
             name for name, raw_type in param_types.items()
             if raw_type.strip().lstrip("*") == "string"
@@ -2114,16 +2163,21 @@ def _index_safety_issue(
     known_index = known_constants.get(index)
     if known_index is not None and known_index < 0:
         known_index = None
+    index_is_unsigned = False
+    if param_types:
+        raw_type = param_types.get(index, "").strip().lstrip("*")
+        index_is_unsigned = raw_type.lower() in _UNSIGNED_INTEGER_TYPES
     counterexample = _z3_index_counterexample(
-        index, f"len_{container}", known_index=known_index
+        index, f"len_{container}", known_index=known_index, is_unsigned=index_is_unsigned
     )
     if counterexample is None:
         return None
-    required_contracts = (
-        (f"{index} < len_{container}",)
-        if known_index is not None
-        else (f"{index} >= 0", f"{index} < len_{container}")
-    )
+    if index_is_unsigned:
+        required_contracts = (f"{index} < len_{container}",)
+    elif known_index is not None:
+        required_contracts = (f"{index} < len_{container}",)
+    else:
+        required_contracts = (f"{index} >= 0", f"{index} < len_{container}")
     return ForeignSafetyIssue(
         function_name=function_name,
         message=(
@@ -2656,6 +2710,7 @@ def _z3_index_counterexample(
     index_name: str,
     length_name: str,
     known_index: int | None = None,
+    is_unsigned: bool = False,
 ) -> dict[str, int] | None:
     """Counterexample for an unbounded index access, or ``None`` if provably safe.
 
@@ -2663,11 +2718,18 @@ def _z3_index_counterexample(
     the index is pinned to that value so Z3 can't invent an impossible negative
     index (#296); the remaining, still-real concern is the upper bound
     (``index >= length``), so a shorter container is a genuine counterexample.
+
+    For unsigned indices (``uint64`` etc.) the lower-bound concern is impossible,
+    so only the upper bound is checked.
     """
     index = z3.Int(index_name)
     length = z3.Int(length_name)
     solver = z3.Solver()
-    solver.add(length >= 0, z3.Or(index < 0, index >= length))
+    solver.add(length >= 0)
+    if is_unsigned:
+        solver.add(index >= 0, index >= length)
+    else:
+        solver.add(z3.Or(index < 0, index >= length))
     if known_index is not None:
         solver.add(index == known_index)
     if solver.check() == z3.sat:

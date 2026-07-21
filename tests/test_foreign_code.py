@@ -2596,6 +2596,50 @@ func (k Kind) String() string {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_safety_suppresses_unsigned_index_guarded_by_len_minus_one() -> None:
+    """``const m = len(arr) - 1; if n <= m { arr[n] }`` guards an unsigned index."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package big
+
+var pow5tab = [...]uint64{1, 5}
+
+func (z *Float) pow5(n uint64) *Float {
+    const m = uint64(len(pow5tab) - 1)
+    if n <= m {
+        return z.SetUint64(pow5tab[n])
+    }
+    z.SetUint64(pow5tab[m])
+    return z
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
+    """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package work
+
+type Builder struct{}
+type Action struct{}
+
+type Actor interface {
+    Act(*Builder, context.Context, *Action) error
+}
+
+type buildActor struct{}
+
+func (ba *buildActor) Act(b *Builder, ctx context.Context, a *Action) error {
+    return b.build(ctx, a)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_go_safety_suppresses_component_runner_receiver_nil() -> None:
     """Pointer receivers embedding ``ComponentRunner`` are non-nil in e2e runners."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
