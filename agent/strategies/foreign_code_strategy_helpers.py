@@ -805,12 +805,13 @@ def _go_time_interval_nonzero_params(name: str, params_text: str) -> set[str]:
 
 
 def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
-    """Return the integer divisor parameter for functions named ``Div`` as non-zero.
+    """Return the integer divisor parameter for functions named ``Div``/``Mod`` as non-zero.
 
-    A function/method named ``Div`` that performs integer division implies the
-    divisor must be non-zero; otherwise the caller has passed an invalid value.
+    A function/method named ``Div`` or ``Mod`` that performs integer division
+    or modulo implies the divisor must be non-zero; otherwise the caller has
+    passed an invalid value.
     """
-    if name != "Div":
+    if name not in {"Div", "Mod"}:
         return set()
     int_types = {
         "int", "int8", "int16", "int32", "int64",
@@ -1015,7 +1016,11 @@ def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
     for fn in functions:
         for param_name, param_type in _solidity_params(fn.params_text or "").items():
             normalized = param_name.lower().replace("_", "")
-            if "sqrtratio" in normalized or "sqrtprice" in normalized:
+            if (
+                "sqrtratio" in normalized
+                or "sqrtprice" in normalized
+                or ("sqrt" in normalized and "x96" in normalized)
+            ):
                 if re.match(r"^[ui]\d+$", param_type):
                     guaranteed.add(param_name)
                     continue
@@ -1306,6 +1311,20 @@ def _go_is_known_interface_method(
     # E2E component lifecycle methods such as ``Started() <-chan struct{}`` are
     # invoked on non-nil concrete components by the test runner.
     if name == "Started" and "<-chan struct" in ret:
+        return True
+    # SSZ (Simple Serialize) interface methods are invoked by the SSZ encoder on
+    # non-nil concrete values.
+    if name == "MarshalSSZ" and "[]byte" in ret and "error" in ret:
+        return True
+    if name == "MarshalSSZTo" and "[]byte" in params_text and "[]byte" in ret and "error" in ret:
+        return True
+    if name == "UnmarshalSSZ" and "[]byte" in params_text and re.search(r"\berror\b", ret):
+        return True
+    if name == "SizeSSZ" and re.search(r"\buint\b", ret) and "[]byte" not in params_text:
+        return True
+    if name == "HashTreeRoot" and "[32]byte" in ret and "error" in ret:
+        return True
+    if name == "HashTreeRootWith" and "*fssz.Hasher" in params_text and re.search(r"\berror\b", ret):
         return True
     return False
 
@@ -2171,6 +2190,18 @@ def _is_roundup_expression(expression: str, left: str, right: str) -> bool:
     return bool(re.search(pattern, left_side))
 
 
+def _is_size_like_identifier(name: str) -> bool:
+    """Return True for identifiers that represent memory sizes or lengths.
+
+    Variables such as ``size_self``, ``size_inner``, ``len_buf`` and
+    ``capacity_fields`` are derived from ``size_of_val`` / ``len()`` /
+    ``capacity()`` and are non-negative; their sums are used for memory
+    accounting and should not trigger i64 overflow false positives.
+    """
+    lower = name.lower()
+    return lower.startswith(("size_", "len_", "capacity_")) or lower.endswith(("_size", "_len"))
+
+
 def _i64_overflow_safety_issue(
     function_name: str,
     left: str,
@@ -2183,6 +2214,9 @@ def _i64_overflow_safety_issue(
     if _is_pointer_arithmetic_expression(expression, left, right):
         return None
     if label == "Go" and _is_roundup_expression(expression, left, right):
+        return None
+    if _is_size_like_identifier(left) and _is_size_like_identifier(right):
+        # Memory-accounting sums of size/length values are not overflow bugs.
         return None
     if local_names and (left in local_names or right in local_names):
         # Arithmetic over local loop variables cannot be expressed as a
