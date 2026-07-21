@@ -212,7 +212,7 @@ def test_solidity_declared_constants_parses_hex_and_decimal() -> None:
     constants = _solidity_declared_constants(source)
     assert constants["N"] != 0
     assert constants["EVM_TREE_RADIX"] == 16
-    assert "DERIVED" not in constants  # non-literal initializer skipped
+    assert constants["DERIVED"] == 17  # derived constant expressions are resolved
 
 
 def test_go_declared_constants_parses_all_literal_bases_and_skips_expressions() -> None:
@@ -3592,3 +3592,119 @@ def test_detect_solidity_safety_issues_constant_power_divisor() -> None:
 '''
     issues = _detect_safety_issues(source, "solidity")
     assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_equal_length_slice_index() -> None:
+    """Index into a parallel slice is safe when lengths are checked equal."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+func shorterThan(s, t []string) bool {
+    if len(s) != len(t) {
+        return len(s) < len(t)
+    }
+    for i := range s {
+        if s[i] != t[i] {
+            return s[i] < t[i]
+        }
+    }
+    return false
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("index" in issue.message.lower() for issue in issues)
+
+
+def test_detect_go_safety_issues_error_interface_method_non_nil() -> None:
+    """``error`` interface ``Error``/``Unwrap`` methods are invoked on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+type PackageError struct{ Pos string; Err error }
+
+func (p *PackageError) Error() string {
+    return p.Pos + ": " + p.Err.Error()
+}
+
+func (p *PackageError) Unwrap() error {
+    return p.Err
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_detect_solidity_contract_issues_skips_mocks() -> None:
+    """OpenZeppelin-style test mocks under ``mocks/`` are test-only artifacts."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_solidity_contract_issues,
+    )
+
+    source = '''abstract contract BaseRelayMock {
+    address internal _currentSender;
+    function relayAs(address target, bytes calldata data, address sender) external virtual {
+        _currentSender = sender;
+        (bool success, bytes memory returndata) = target.call(data);
+        _currentSender = address(0);
+    }
+}
+'''
+    assert _detect_solidity_contract_issues(source) == []
+    assert _detect_solidity_contract_issues(
+        source, source_file="/contracts/mocks/crosschain/bridges.sol"
+    ) == []
+
+
+def test_detect_solidity_safety_issues_constant_expression_divisor() -> None:
+    """Composite constant expressions such as ``ADDR_SIZE + FEE_SIZE`` are non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''library Path {
+    uint256 private constant ADDR_SIZE = 20;
+    uint256 private constant FEE_SIZE = 3;
+    uint256 private constant NEXT_OFFSET = ADDR_SIZE + FEE_SIZE;
+
+    function numPools(bytes memory path) internal pure returns (uint256) {
+        return ((path.length - ADDR_SIZE) / NEXT_OFFSET);
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "solidity")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_extract_go_mumei_reserved_param_call() -> None:
+    """Go parameters named ``call`` are renamed so Mumei treats them as variables."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_safety_issues,
+        _filter_covered_safety_issues,
+    )
+
+    source = '''package types
+
+import "go/ast"
+
+func hasDots(call *ast.CallExpr) bool { return call.Ellipsis.IsValid() }
+'''
+    specs = ForeignCodeExtractor().extract(source, "go")
+    issues = _filter_covered_safety_issues(
+        _detect_safety_issues(source, "go"), specs
+    )
+    assert not any("dereference" in issue.message for issue in issues)
+    atom = next((s for s in specs if s.function_name == "hasDots"), None)
+    assert atom is not None
+    assert any("call_" in req for req in atom.preconditions)
+
+
+def test_solidity_declared_constants_pow_bounded() -> None:
+    """Exponentiation in Solidity constant expressions is bounded to avoid OOM."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _evaluate_solidity_constant_expression,
+    )
+
+    assert _evaluate_solidity_constant_expression("2 ** 1024", {}) is not None
+    assert _evaluate_solidity_constant_expression("2 ** 1025", {}) is None
+    assert _evaluate_solidity_constant_expression("2 ** -1", {}) is None

@@ -609,11 +609,13 @@ class ForeignCodeVerifier:
         self.mumei_client = mumei_client or create_mumei_client(mumei_bin)
         self.extractor = extractor or ForeignCodeExtractor()
 
-    def verify(self, source_code: str, language: str) -> dict[str, object]:
+    def verify(
+        self, source_code: str, language: str, source_file: str | None = None
+    ) -> dict[str, object]:
         normalized_language = _normalize_language(language)
         specs = self.extractor.extract(source_code, normalized_language)
         safety_issues = _filter_covered_safety_issues(
-            _detect_safety_issues(source_code, normalized_language),
+            _detect_safety_issues(source_code, normalized_language, source_file=source_file),
             specs,
         )
         atoms = [to_mumei_atom(spec) for spec in specs]
