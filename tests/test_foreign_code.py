@@ -3440,3 +3440,20 @@ def test_source_has_function_declarations_rust_async_test_skipped() -> None:
 
     assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}", "rust") is False
     assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}\nfn bar() {}", "rust") is True
+
+
+def test_strip_go_rust_comments_mask_slashes() -> None:
+    """Comment slashes are fully masked so they are not confused with division."""
+    from agent.cross_validation_foreign import _strip_go_rust_literals_and_comments
+
+    source = "let x = a / b; // s is not a divisor\nlet y = c / d;"
+    stripped = _strip_go_rust_literals_and_comments(source)
+    assert stripped.count("/") == 2
+
+
+def test_strip_go_rust_literals_preserve_quotes() -> None:
+    """String literal quote delimiters are preserved to keep source parseable."""
+    from agent.cross_validation_foreign import _strip_go_rust_literals_and_comments
+
+    assert _strip_go_rust_literals_and_comments('foo("", x)') == 'foo("", x)'
+    assert _strip_go_rust_literals_and_comments('foo("ab", x)') == 'foo("  ", x)'
