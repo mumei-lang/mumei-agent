@@ -2055,7 +2055,12 @@ def _extract_return_expression(stripped: str, source: str, start: int) -> str:
             ternary_depth += 1
         elif ch == ":" and depth == 0 and ternary_depth > 0:
             ternary_depth -= 1
-        elif depth == 0 and ternary_depth == 0 and re.match(r"(?:case|default)\b", stripped[i:]):
+        elif (
+            depth == 0
+            and ternary_depth == 0
+            and (i == 0 or not (stripped[i - 1].isalnum() or stripped[i - 1] == "_"))
+            and re.match(r"(?:case|default)\b", stripped[i:])
+        ):
             if _is_multi_value_return_expression(stripped[start:i].strip()):
                 return ""
             return source[start:i].strip()

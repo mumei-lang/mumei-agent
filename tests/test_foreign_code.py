@@ -2033,6 +2033,20 @@ return 0"""
     assert _all_return_expressions(body, "go") == ["1", "2", "3", "0"]
 
 
+def test_all_return_expressions_does_not_chop_case_suffixed_identifiers() -> None:
+    """Return values whose names contain ``case`` or ``default`` are not truncated."""
+    from agent.cross_validation_foreign import _all_return_expressions
+
+    body = """switch x {
+case 1:
+    return lowercase
+case 2:
+    return snake_case
+}
+return is_default"""
+    assert _all_return_expressions(body, "go") == ["lowercase", "snake_case", "is_default"]
+
+
 def test_infer_go_contracts_ignores_comments_in_switch_cases() -> None:
     """Comments with ``/`` inside a switch case must not produce spurious divisors."""
     from agent.cross_validation_foreign import _infer_go_contracts
