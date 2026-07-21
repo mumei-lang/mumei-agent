@@ -3457,3 +3457,63 @@ def test_strip_go_rust_literals_preserve_quotes() -> None:
 
     assert _strip_go_rust_literals_and_comments('foo("", x)') == 'foo("", x)'
     assert _strip_go_rust_literals_and_comments('foo("ab", x)') == 'foo("  ", x)'
+
+
+def test_detect_go_safety_issues_skips_compile_compiler_tests() -> None:
+    """Go compiler tests marked ``// compile`` are not runnable user code."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''// compile
+
+package p
+
+type S struct {
+\tn int
+\ta [2]int
+}
+
+func f(i int) int {
+\tvar arr [0]S
+\treturn arr[i].n
+}
+'''
+    assert _detect_safety_issues(source, "go") == []
+
+
+def test_detect_go_safety_issues_float_cast_division() -> None:
+    """``float64(x) / float64(y)`` is floating-point division and cannot panic."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+import "fmt"
+
+type byteCount int64
+
+func (b byteCount) String() string {
+\tvar divisor int64 = 1024
+\treturn fmt.Sprintf("%.1f", float64(b)/float64(divisor))
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_upload_interface_non_nil() -> None:
+    """``Upload`` methods implementing uploader/client interfaces are invoked on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+import "context"
+
+type s3ClientWrapper struct {
+\tuploader int
+}
+
+func (w *s3ClientWrapper) Upload(ctx context.Context, input int) (int, error) {
+\treturn w.uploader, nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
