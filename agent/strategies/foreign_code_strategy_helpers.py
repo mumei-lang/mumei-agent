@@ -1016,7 +1016,11 @@ def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
     for fn in functions:
         for param_name, param_type in _solidity_params(fn.params_text or "").items():
             normalized = param_name.lower().replace("_", "")
-            if "sqrtratio" in normalized or "sqrtprice" in normalized:
+            if (
+                "sqrtratio" in normalized
+                or "sqrtprice" in normalized
+                or ("sqrt" in normalized and "x96" in normalized)
+            ):
                 if re.match(r"^[ui]\d+$", param_type):
                     guaranteed.add(param_name)
                     continue

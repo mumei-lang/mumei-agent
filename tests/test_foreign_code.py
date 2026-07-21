@@ -2885,6 +2885,30 @@ library L {
     assert "sqrtRatioAX96" in _solidity_guaranteed_nonzero_params(source)
 
 
+def test_solidity_sqrtpx96_params_treated_as_nonzero() -> None:
+    """Uniswap-V3-style ``sqrtPX96`` parameters are never zero in the protocol."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_block_safety_issues,
+        _solidity_guaranteed_nonzero_params,
+    )
+
+    source = """// SPDX-License-Identifier: MIT
+pragma solidity >=0.5.0;
+
+library SqrtPriceMath {
+    function getNextSqrtPriceFromAmount0RoundingUp(uint160 sqrtPX96, uint128 liquidity, uint256 amountIn)
+        internal pure returns (uint160)
+    {
+        return (liquidity << 96) / sqrtPX96;
+    }
+}
+"""
+    blocks = [("getNextSqrtPriceFromAmount0RoundingUp", "getNextSqrtPriceFromAmount0RoundingUp")]
+    issues = _detect_block_safety_issues(source, blocks, "Solidity")
+    assert not any(i.function_name == "getNextSqrtPriceFromAmount0RoundingUp" for i in issues)
+    assert "sqrtPX96" in _solidity_guaranteed_nonzero_params(source)
+
+
 def test_go_sort_interface_methods_suppress_nil_receiver() -> None:
     """sort.Interface implementers (Len/Less/Swap) are called on non-nil values."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
