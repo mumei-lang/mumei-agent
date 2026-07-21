@@ -2015,6 +2015,58 @@ def test_raw_return_statement_expression_masks_nested_go_function_literals() -> 
     assert _all_return_expressions(body, "go") == ["nil"]
 
 
+def test_all_return_expressions_stops_at_case_labels() -> None:
+    """Go ``switch`` ``case`` / ``default`` labels terminate a return expression."""
+    from agent.cross_validation_foreign import _all_return_expressions
+
+    body = """switch x {
+case 1:
+    return 1
+case 2:
+    if y {
+        return 2
+    }
+default:
+    return 3
+}
+return 0"""
+    assert _all_return_expressions(body, "go") == ["1", "2", "3", "0"]
+
+
+def test_all_return_expressions_does_not_chop_case_suffixed_identifiers() -> None:
+    """Return values whose names contain ``case`` or ``default`` are not truncated."""
+    from agent.cross_validation_foreign import _all_return_expressions
+
+    body = """switch x {
+case 1:
+    return lowercase
+case 2:
+    return snake_case
+}
+return is_default"""
+    assert _all_return_expressions(body, "go") == ["lowercase", "snake_case", "is_default"]
+
+
+def test_infer_go_contracts_ignores_comments_in_switch_cases() -> None:
+    """Comments with ``/`` inside a switch case must not produce spurious divisors."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = '''package demo
+func f(x int) int {
+    switch x {
+    case 1:
+        // See: https://example.org/p/path
+        return 1
+    default:
+        return 0
+    }
+}
+'''
+    atoms = _infer_go_contracts(source)
+    f_atom = next(a for a in atoms if a.name == "f")
+    assert f_atom.requires == "true"
+
+
 def test_detect_go_safety_issues_skips_sort_interface_index_bounds() -> None:
     """sort.Interface Less/Swap parameters are guaranteed in-bounds by the caller."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
