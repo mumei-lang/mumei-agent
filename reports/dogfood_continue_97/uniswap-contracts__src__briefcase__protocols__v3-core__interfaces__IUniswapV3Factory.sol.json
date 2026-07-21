@@ -1,0 +1,37 @@
+{
+  "success": true,
+  "source_file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/v3-core/interfaces/IUniswapV3Factory.sol",
+  "language": "solidity",
+  "spec_extracted": true,
+  "verification_status": "verified",
+  "spec_health_issues": [],
+  "verification_violations": [],
+  "counterexample_values": [],
+  "cross_validation_gaps": [],
+  "migration_hints": [],
+  "healed_files": [],
+  "heal_errors": [],
+  "next_steps": [
+    {
+      "priority": "info",
+      "action": "監査完了。追加の .mm 移行は不要",
+      "command": ""
+    }
+  ],
+  "proof_certificate": {
+    "version": "1.0",
+    "timestamp": "2026-07-21T23:33:30.614035Z",
+    "mumei_version": "agent",
+    "z3_version": "Z3 version 4.16.0",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/v3-core/interfaces/IUniswapV3Factory.sol",
+    "atoms": [],
+    "package_name": "IUniswapV3Factory",
+    "package_version": "0",
+    "certificate_hash": "88bb164639e5690667470478523b46d7ca6bbded6794c31db4908d594e46e7c5",
+    "all_verified": false
+  },
+  "lean_bridge": null,
+  "report": "Audit passed: /home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/v3-core/interfaces/IUniswapV3Factory.sol\nlanguage: solidity\nspec_extracted: True\nverification_status: verified\nspec_health_issues: []\nverification_violations: []\ncounterexample_values: []\ncross_validation_gaps: []\nmigration_hints:\n  []\nhealed_files: []\nheal_errors: []\nnext_steps:\n  - priority: info\n    action: 監査完了。追加の .mm 移行は不要\n    command: ",
+  "errors": [],
+  "skipped_rate_limited": false
+}
