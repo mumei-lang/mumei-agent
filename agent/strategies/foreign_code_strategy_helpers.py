@@ -1233,6 +1233,10 @@ def _go_is_known_interface_method(
         return True
     if name in {"Size", "BlockSize"} and re.search(r"\bint\b", ret) and "[]byte" not in params_text:
         return True
+    # E2E component lifecycle methods such as ``Started() <-chan struct{}`` are
+    # invoked on non-nil concrete components by the test runner.
+    if name == "Started" and "<-chan struct" in ret:
+        return True
     return False
 
 
@@ -1313,6 +1317,24 @@ def _go_sort_interface_receiver_types(functions: list) -> set[str]:
         for rtype, names in methods.items()
         if {"Len", "Less", "Swap"} <= names
     }
+
+
+def _go_component_runner_receiver_types(source: str) -> set[str]:
+    """Return pointer receiver types that embed a ``ComponentRunner`` interface.
+
+    E2E component runners (e.g. Prysm ``ProxySet``/``Proxy``) embed an
+    interface such as ``e2etypes.ComponentRunner``. Their lifecycle methods
+    are invoked by the runner on non-nil concrete values, so nil-receiver
+    counterexamples are false positives.
+    """
+    types: set[str] = set()
+    for match in re.finditer(
+        r"type\s+(\w+)\s+struct\s*\{(.*?)\}", source, flags=re.DOTALL
+    ):
+        body = match.group(2)
+        if re.search(r"\b\w*ComponentRunner\b", body):
+            types.add(match.group(1))
+    return types
 
 
 def _go_first_param_name(params_text: str) -> str | None:
@@ -1576,6 +1598,7 @@ def _detect_go_safety_issues(
         callback_names = _go_callback_function_names(source, functions)
         interface_method_names = _go_interface_method_names(source)
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
+        component_runner_receivers = _go_component_runner_receiver_types(source)
         go_map_names = _go_map_names(source)
         global_array_keys = _go_global_array_keys(source)
         known_types = _go_type_names(source)
@@ -1614,6 +1637,7 @@ def _detect_go_safety_issues(
                         fn.name in {"Len", "Less", "Swap"}
                         and rtype.lstrip("*") in sort_interface_receivers
                     )
+                    or rtype.lstrip("*") in component_runner_receivers
                 )
             )
             first_param = _go_first_param_name(fn.params_text)
