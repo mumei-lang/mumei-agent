@@ -2596,6 +2596,50 @@ func (k Kind) String() string {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_safety_suppresses_unsigned_index_guarded_by_len_minus_one() -> None:
+    """``const m = len(arr) - 1; if n <= m { arr[n] }`` guards an unsigned index."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package big
+
+var pow5tab = [...]uint64{1, 5}
+
+func (z *Float) pow5(n uint64) *Float {
+    const m = uint64(len(pow5tab) - 1)
+    if n <= m {
+        return z.SetUint64(pow5tab[n])
+    }
+    z.SetUint64(pow5tab[m])
+    return z
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
+    """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package work
+
+type Builder struct{}
+type Action struct{}
+
+type Actor interface {
+    Act(*Builder, context.Context, *Action) error
+}
+
+type buildActor struct{}
+
+func (ba *buildActor) Act(b *Builder, ctx context.Context, a *Action) error {
+    return b.build(ctx, a)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_go_safety_suppresses_component_runner_receiver_nil() -> None:
     """Pointer receivers embedding ``ComponentRunner`` are non-nil in e2e runners."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -2960,6 +3004,21 @@ def test_infer_solidity_named_bool_return_ensures_is_safe() -> None:
     atom = next(a for a in atoms if a.name == "isZero")
     assert atom.return_type == "bool"
     assert "result ==" not in atom.ensures
+
+
+def test_infer_solidity_bytes_memory_return_type_is_string() -> None:
+    """A Solidity ``bytes memory`` return with an empty string literal maps to Mumei ``string``."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """contract C {
+    function _defaultParams() internal view virtual returns (bytes memory) {
+        return "";
+    }
+}
+"""
+    atoms = _infer_solidity_contracts(source)
+    atom = next(a for a in atoms if a.name == "defaultParams")
+    assert atom.return_type == "string"
 
 
 def test_expression_lowerable_rejects_unknown_function_calls() -> None:
@@ -3381,3 +3440,155 @@ def test_source_has_function_declarations_rust_async_test_skipped() -> None:
 
     assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}", "rust") is False
     assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}\nfn bar() {}", "rust") is True
+
+
+def test_strip_go_rust_comments_mask_slashes() -> None:
+    """Comment slashes are fully masked so they are not confused with division."""
+    from agent.cross_validation_foreign import _strip_go_rust_literals_and_comments
+
+    source = "let x = a / b; // s is not a divisor\nlet y = c / d;"
+    stripped = _strip_go_rust_literals_and_comments(source)
+    assert stripped.count("/") == 2
+
+
+def test_strip_go_rust_literals_preserve_quotes() -> None:
+    """String literal quote delimiters are preserved to keep source parseable."""
+    from agent.cross_validation_foreign import _strip_go_rust_literals_and_comments
+
+    assert _strip_go_rust_literals_and_comments('foo("", x)') == 'foo("", x)'
+    assert _strip_go_rust_literals_and_comments('foo("ab", x)') == 'foo("  ", x)'
+
+
+def test_detect_go_safety_issues_skips_compile_compiler_tests() -> None:
+    """Go compiler tests marked ``// compile`` are not runnable user code."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''// compile
+
+package p
+
+type S struct {
+\tn int
+\ta [2]int
+}
+
+func f(i int) int {
+\tvar arr [0]S
+\treturn arr[i].n
+}
+'''
+    assert _detect_safety_issues(source, "go") == []
+
+
+def test_detect_go_safety_issues_float_cast_division() -> None:
+    """``float64(x) / float64(y)`` is floating-point division and cannot panic."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+import "fmt"
+
+type byteCount int64
+
+func (b byteCount) String() string {
+\tvar divisor int64 = 1024
+\treturn fmt.Sprintf("%.1f", float64(b)/float64(divisor))
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_upload_interface_non_nil() -> None:
+    """``Upload`` methods implementing uploader/client interfaces are invoked on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+import "context"
+
+type s3ClientWrapper struct {
+\tuploader int
+}
+
+func (w *s3ClientWrapper) Upload(ctx context.Context, input int) (int, error) {
+\treturn w.uploader, nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_detect_rust_safety_issues_float_cast_division() -> None:
+    """Rust ``x as f64`` and ``100f64`` divisors are floating-point."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''pub fn percent(percentage: u64, total: u64) -> usize {
+    (percentage as f64 / 100f64 * total as f64).round() as usize
+}
+
+pub fn ratio(reserved: usize, detected: usize) -> bool {
+    detected > 0 && reserved as f64 / detected as f64 >= 0.9
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_rust_safety_issues_nonzero_numeric_literal_divisor() -> None:
+    """Non-zero numeric literals (e.g. ``8``) are safe divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''pub fn block(len: usize) -> usize {
+    len / 8
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_text_unmarshaler_non_nil() -> None:
+    """``encoding.TextUnmarshaler`` methods are invoked on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+type Level int
+
+func (l *Level) UnmarshalText(data []byte) error {
+    *l = Level(0)
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_uintn_offset_width_overflow() -> None:
+    """Go compiler object-writer ``UintN`` offset/width additions are trusted."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package objw
+
+import "cmd/internal/obj"
+
+func UintN(s *obj.LSym, off int, v uint64, wid int) int {
+    return off + wid
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("overflow" in issue.message for issue in issues)
+
+
+def test_detect_solidity_safety_issues_constant_power_divisor() -> None:
+    """Solidity constant exponentiation ``2**32`` is a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''library Oracle {
+    function currentCumulativePrices() internal pure returns (uint32) {
+        return uint32(block.timestamp % (2 ** 32));
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "solidity")
+    assert not any("divide by" in issue.message for issue in issues)
