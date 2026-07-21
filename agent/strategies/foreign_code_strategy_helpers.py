@@ -787,6 +787,15 @@ def _go_float_param_names(params_text: str) -> set[str]:
     }
 
 
+def _go_float_casts(expression: str) -> set[str]:
+    """Return source snippets of explicit ``float32(...)`` / ``float64(...)`` casts.
+
+    Go float division by zero is well-defined (produces +/-Inf or NaN), so
+    these cast expressions should not be reported as integer divide-by-zero.
+    """
+    return set(re.findall(r"\b(?:float32|float64)\s*\([^()]*\)", expression))
+
+
 _RUST_FLOAT_METHODS = (
     "round|floor|ceil|sqrt|powf|exp|ln|log|log2|log10|sin|cos|tan|"
     "asin|acos|atan|atan2|sinh|cosh|tanh|trunc|fract|recip|"
@@ -1554,6 +1563,10 @@ def _go_is_known_interface_method(
         return True
     if name == "UnmarshalJSON" and "[]byte" in params_text and re.search(r"\berror\b", ret):
         return True
+    # Uploader/Client ``Upload`` methods (e.g. image uploader, S3 client wrappers)
+    # are interface methods invoked on non-nil concrete values.
+    if name == "Upload" and "context.Context" in params_text and "error" in ret:
+        return True
     return False
 
 
@@ -1846,7 +1859,9 @@ def _is_go_compiler_test(source: str) -> bool:
         stripped = line.strip()
         if not stripped:
             continue
-        return stripped.startswith(("// errorcheck", "// run", "// runoutput", "// compiledir", "// asmcheck"))
+        return stripped.startswith(
+            ("// errorcheck", "// run", "// runoutput", "// compiledir", "// asmcheck", "// compile")
+        )
     return False
 
 
@@ -2546,6 +2561,8 @@ def _issues_for_expression(
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
+    if label == "Go":
+        float_variables = (float_variables or set()) | _go_float_casts(expression)
     ts_language = _LABEL_TO_TS_LANGUAGE.get(label)
     findings = (
         tree_sitter_extract.analyze_expression(expression, ts_language)
