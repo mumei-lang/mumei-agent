@@ -2707,6 +2707,40 @@ func (v *ValidatorIndex) HashTreeRootWith(hh *Hasher) error {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_go_runtime_page_constants_are_nonzero() -> None:
+    """Go runtime page-size constants are non-zero across per-file analysis."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package runtime
+
+const pallocChunkPages = 1 << logPallocChunkPages
+const logPallocChunkPages = 9
+var pallocChunkBytes = pallocChunkPages * pageSize
+
+func chunkPageIndex(p uintptr) uint {
+    return uint(p % pallocChunkBytes / pageSize)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in i.message for i in issues)
+
+
+def test_go_runtime_level_index_is_guarded() -> None:
+    """Go runtime ``level`` parameter indexing ``levelShift`` is bounds-safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package runtime
+
+var levelShift [5]uint
+
+func offAddrToLevelIndex(level int, addr offAddr) int {
+    return int((addr.a - arenaBaseOffset) >> levelShift[level])
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
