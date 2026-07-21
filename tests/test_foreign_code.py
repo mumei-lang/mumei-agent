@@ -2602,6 +2602,41 @@ func (s *ProxySet) PauseAtIndex(i int) error {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_go_compiler_run_tests_are_skipped() -> None:
+    """Go compiler test files marked ``// run`` are not runnable user code."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """// run
+
+package main
+
+var A, B int
+
+func divZero() int {
+    return A / B
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert issues == []
+
+
+def test_go_div_integer_parameter_is_nonzero() -> None:
+    """A function named ``Div`` with an integer parameter implies a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package image
+
+type Point struct{ X, Y int }
+
+// Div returns the vector p/k.
+func (p Point) Div(k int) Point {
+    return Point{p.X / k, p.Y / k}
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in i.message for i in issues)
+
+
 def test_solidity_named_bool_return_ensures_is_safe() -> None:
     """Named Solidity return values (``returns (bool flag)``) must not produce an i64-typed boolean expression."""
     from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
