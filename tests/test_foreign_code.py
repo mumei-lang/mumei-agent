@@ -2544,3 +2544,28 @@ contract C {
     blocks = [("tokenOfOwnerByIndex", "tokenOfOwnerByIndex")]
     issues = _detect_block_safety_issues(source, blocks, "Solidity")
     assert not any("_ownedTokens[owner]" in i.message for i in issues)
+
+
+def test_solidity_sqrt_ratio_params_treated_as_nonzero() -> None:
+    """Uniswap-V3-style sqrtRatio*X96 parameters are never zero in the protocol."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_block_safety_issues,
+        _solidity_guaranteed_nonzero_params,
+    )
+
+    source = """// SPDX-License-Identifier: MIT
+pragma solidity >=0.5.0;
+
+library L {
+    function getAmount0(uint160 sqrtRatioAX96, uint160 sqrtRatioBX96, uint128 liquidity)
+        internal pure returns (uint256 amount0)
+    {
+        if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+        return (uint256(liquidity) << 96) / sqrtRatioAX96;
+    }
+}
+"""
+    blocks = [("getAmount0", "getAmount0")]
+    issues = _detect_block_safety_issues(source, blocks, "Solidity")
+    assert not any(i.function_name == "getAmount0" for i in issues)
+    assert "sqrtRatioAX96" in _solidity_guaranteed_nonzero_params(source)

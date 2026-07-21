@@ -579,13 +579,17 @@ def _solidity_is_default_checked_arithmetic(source: str) -> bool:
 
 
 def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
-    """Infer parameter names that are guaranteed non-zero from MIN_* constants.
+    """Infer parameter names that are guaranteed non-zero from MIN_* constants or naming.
 
     If a file declares ``MIN_FOO = 1`` (or any positive constant whose name
     starts with ``MIN_``), any function parameter whose normalized name matches
     the suffix is treated as strictly positive. This suppresses divide-by-zero
     false positives for parameters whose valid range is documented by constants
     (e.g. Uniswap ``TickMath``'s ``tickSpacing`` with ``MIN_TICK_SPACING``).
+
+    Additionally, Uniswap-V3-style ``sqrtRatio*X96`` / ``sqrtPriceX96``
+    parameters are treated as strictly positive because they represent
+    fixed-point square-root prices that are never zero in the protocol.
     """
     constants = _solidity_declared_constants(source)
     min_constants = {
@@ -593,8 +597,6 @@ def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
         for name, value in constants.items()
         if name.startswith("MIN_") and value > 0
     }
-    if not min_constants:
-        return set()
 
     guaranteed: set[str] = set()
     functions = tree_sitter_extract.extract_contract_functions(
@@ -606,8 +608,12 @@ def _solidity_guaranteed_nonzero_params(source: str) -> set[str]:
             for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source)
         ]
     for fn in functions:
-        for param_name in _solidity_params(fn.params_text or "").keys():
+        for param_name, param_type in _solidity_params(fn.params_text or "").items():
             normalized = param_name.lower().replace("_", "")
+            if "sqrtratio" in normalized or "sqrtprice" in normalized:
+                if re.match(r"^[ui]\d+$", param_type):
+                    guaranteed.add(param_name)
+                    continue
             for suffix in min_constants:
                 if normalized == suffix.lower().replace("_", ""):
                     guaranteed.add(param_name)
