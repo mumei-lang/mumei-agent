@@ -2301,6 +2301,27 @@ contract C {
     assert not any("_values" in i.message for i in issues)
 
 
+def test_detect_solidity_safety_issues_default_checked_division_by_zero() -> None:
+    """Solidity >=0.8 reverts on division by zero by default, so no contract is needed."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+pragma solidity ^0.8.0;
+
+contract C {
+    function div(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a / b;
+    }
+
+    function mod(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a % b;
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "solidity")
+    assert not any("b" in i.message and "non-zero" in i.message for i in issues)
+
+
 def test_detect_ts_safety_issues_mask_nested_arrow_functions() -> None:
     """Nested arrow functions in a TypeScript object literal must not leak into the outer function."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
