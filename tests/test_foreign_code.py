@@ -3708,3 +3708,17 @@ def test_solidity_declared_constants_pow_bounded() -> None:
     assert _evaluate_solidity_constant_expression("2 ** 1024", {}) is not None
     assert _evaluate_solidity_constant_expression("2 ** 1025", {}) is None
     assert _evaluate_solidity_constant_expression("2 ** -1", {}) is None
+
+
+def test_source_has_function_declarations_rust_trait_signatures_no_body() -> None:
+    """Rust trait method signatures without bodies are not verifiable functions."""
+    from agent.strategies.foreign_code_strategy import _source_has_function_declarations
+
+    source = '''pub trait CatalogResource: Clone {
+    type Identifier;
+    const CATEGORY: &'static str;
+    fn id(&self) -> Self::Identifier;
+    fn name(&self) -> Arc<str>;
+}
+'''
+    assert _source_has_function_declarations(source, "rust") is False
