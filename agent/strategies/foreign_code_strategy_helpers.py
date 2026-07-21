@@ -1277,11 +1277,17 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Key",  # cryptographic key types (PublicKey, PrivateKey, etc.)
     "Alloc",  # runtime/pageAlloc-style allocators are embedded in a parent object
     "V1",  # Grafana provisioning API config DTOs (e.g. MuteTimeV1) are unmarshaled non-nil
+    "Conn",  # connection objects (e.g. net.Conn, ClientConn) are non-nil when used
+    "Transport",  # net/http transports and similar client/server transports
+    "Stream",  # HTTP/2 clientStream and similar stream handles
+    "ReadLoop",  # internal read-loop helpers such as http2 clientConnReadLoop
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
 _GO_NONNIL_EXACT_TYPES = {
     "Int",  # math/big.Int and similar big-integer wrappers
+    "Request",  # net/http.Request and similar request DTOs are non-nil in callers
+    "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
