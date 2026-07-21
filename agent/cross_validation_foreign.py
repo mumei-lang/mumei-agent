@@ -1013,7 +1013,12 @@ def _rust_parse_signature(
 
 
 def _has_rust_test_attribute(code: str, fn_start: int) -> bool:
-    """True when the Rust function at ``fn_start`` is annotated with ``#[test]`` or ``#[bench]``."""
+    """True when the Rust function at ``fn_start`` is annotated with ``#[test]``/``#[bench]``.
+
+    Also handles path-style attributes such as ``#[tokio::test]`` and
+    ``#[tokio::test(flavor = "multi_thread")]``.
+    """
+    test_attr_re = re.compile(r"#\[(?:[\w_]+::)*(?:test|bench)\b")
     line_start = code.rfind("\n", 0, fn_start) + 1
     prev = line_start - 1
     while prev > 0 and code[prev] == "\n":
@@ -1026,7 +1031,7 @@ def _has_rust_test_attribute(code: str, fn_start: int) -> bool:
         prev_line = re.sub(r"//.*", "", code[prev_line_start : prev + 1]).strip()
         if not prev_line:
             break
-        if prev_line.startswith(("#[test]", "#[bench]")):
+        if test_attr_re.search(prev_line):
             return True
         if not prev_line.startswith("#"):
             break
@@ -2039,6 +2044,8 @@ def _extract_return_expression(stripped: str, source: str, start: int) -> str:
 
     Balances ``()``, ``[]`` and ``{}`` and Solidity/TypeScript ternary ``?:``
     pairs so that multi-line returns and ternaries are captured in full.
+    Also stops at ``case`` / ``default`` labels, which terminate a statement
+    in Go ``switch`` / ``select`` blocks without an explicit semicolon.
     """
     depth = 0
     ternary_depth = 0
@@ -2053,6 +2060,15 @@ def _extract_return_expression(stripped: str, source: str, start: int) -> str:
             ternary_depth += 1
         elif ch == ":" and depth == 0 and ternary_depth > 0:
             ternary_depth -= 1
+        elif (
+            depth == 0
+            and ternary_depth == 0
+            and (i == 0 or not (stripped[i - 1].isalnum() or stripped[i - 1] == "_"))
+            and re.match(r"(?:case|default)\b", stripped[i:])
+        ):
+            if _is_multi_value_return_expression(stripped[start:i].strip()):
+                return ""
+            return source[start:i].strip()
         elif ch in ";}" and depth == 0 and ternary_depth == 0:
             if _is_multi_value_return_expression(stripped[start:i].strip()):
                 return ""

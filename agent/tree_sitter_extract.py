@@ -354,16 +354,23 @@ def function_names(
 
 
 def _rust_attribute_identifiers(source_bytes: bytes, fn_node) -> tuple[str, ...]:
-    """Return the identifiers of outer ``#[...]`` attributes preceding ``fn_node``."""
+    """Return the identifiers of outer ``#[...]`` attributes preceding ``fn_node``.
+
+    Recursively collects identifiers inside attribute paths (``tokio::test``)
+    and token trees (``#[tokio::test(flavor = "multi_thread")]``).
+    """
     attributes: list[str] = []
+
+    def _collect_identifiers(node):
+        for child in node.children:
+            if child.type == "identifier":
+                attributes.append(_decode(source_bytes, child))
+            else:
+                _collect_identifiers(child)
+
     prev = fn_node.prev_sibling
     while prev is not None and prev.type == "attribute_item":
-        # ``attribute_item`` -> ``attribute`` -> ``identifier`` (or ``token_tree``).
-        for attr_child in prev.children:
-            if attr_child.type == "attribute":
-                for child in attr_child.children:
-                    if child.type == "identifier":
-                        attributes.append(_decode(source_bytes, child))
+        _collect_identifiers(prev)
         prev = prev.prev_sibling
     return tuple(reversed(attributes))
 

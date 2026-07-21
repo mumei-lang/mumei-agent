@@ -2015,6 +2015,58 @@ def test_raw_return_statement_expression_masks_nested_go_function_literals() -> 
     assert _all_return_expressions(body, "go") == ["nil"]
 
 
+def test_all_return_expressions_stops_at_case_labels() -> None:
+    """Go ``switch`` ``case`` / ``default`` labels terminate a return expression."""
+    from agent.cross_validation_foreign import _all_return_expressions
+
+    body = """switch x {
+case 1:
+    return 1
+case 2:
+    if y {
+        return 2
+    }
+default:
+    return 3
+}
+return 0"""
+    assert _all_return_expressions(body, "go") == ["1", "2", "3", "0"]
+
+
+def test_all_return_expressions_does_not_chop_case_suffixed_identifiers() -> None:
+    """Return values whose names contain ``case`` or ``default`` are not truncated."""
+    from agent.cross_validation_foreign import _all_return_expressions
+
+    body = """switch x {
+case 1:
+    return lowercase
+case 2:
+    return snake_case
+}
+return is_default"""
+    assert _all_return_expressions(body, "go") == ["lowercase", "snake_case", "is_default"]
+
+
+def test_infer_go_contracts_ignores_comments_in_switch_cases() -> None:
+    """Comments with ``/`` inside a switch case must not produce spurious divisors."""
+    from agent.cross_validation_foreign import _infer_go_contracts
+
+    source = '''package demo
+func f(x int) int {
+    switch x {
+    case 1:
+        // See: https://example.org/p/path
+        return 1
+    default:
+        return 0
+    }
+}
+'''
+    atoms = _infer_go_contracts(source)
+    f_atom = next(a for a in atoms if a.name == "f")
+    assert f_atom.requires == "true"
+
+
 def test_detect_go_safety_issues_skips_sort_interface_index_bounds() -> None:
     """sort.Interface Less/Swap parameters are guaranteed in-bounds by the caller."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
@@ -2587,3 +2639,57 @@ func (d *testingData) Swap(i, j int) { d.data[i], d.data[j] = d.data[j], d.data[
 """
     issues = _detect_go_safety_issues(source)
     assert not any("testingData" in i.message for i in issues)
+
+
+def test_go_float_variables_detects_float_cast() -> None:
+    """Local variables initialized with ``float64`` casts are tracked as float."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_float_variables
+
+    body = """topicWeight := attestationTotalWeight / float64(subnetCount)
+return topicWeight"""
+    assert "topicWeight" in _go_float_variables(body)
+
+
+def test_detect_go_safety_issues_skips_float_division() -> None:
+    """Dividing by a float64 local variable does not panic in Go."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package demo
+
+func maxScore() float64 { return 1.0 }
+func f() float64 {
+    topicWeight := 1.0 / float64(2)
+    return -maxScore() / topicWeight
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("topicWeight" in i.message for i in issues)
+
+
+def test_detect_solidity_contract_issues_skips_named_return_assignment() -> None:
+    """Assigning to a named return parameter is a local write, not a state write."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """library L {
+    function deploy(bytes32 salt) internal returns (address reservesLens) {
+        (bool success, bytes memory ret) = F.call(abi.encodePacked(salt));
+        require(success);
+        reservesLens = address(uint160(bytes20(ret)));
+    }
+}
+"""
+    issues = _detect_solidity_contract_issues(source)
+    assert not any("reentrancy" in i.message for i in issues)
+
+
+def test_infer_rust_contracts_skips_tokio_test_attribute() -> None:
+    """Functions annotated with ``#[tokio::test]`` are not audited as contracts."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = """#[tokio::test]
+async fn v1_password_parameter() {
+    let x = ("db", "foo");
+}
+"""
+    atoms = _infer_rust_contracts(source)
+    assert not any(a.name == "v1_password_parameter" for a in atoms)
