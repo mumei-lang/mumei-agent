@@ -2704,3 +2704,25 @@ fn real_func() {}
 """
     atoms = _infer_rust_contracts(source)
     assert any(a.name == "real_func" for a in atoms)
+
+
+def test_detect_go_safety_issues_skips_nonnil_container_receiver() -> None:
+    """Methods on *Service and *Node receivers are not flagged for nil dereference."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package expr
+
+type baseNode struct{ refID string }
+
+func (b *baseNode) String() string { return b.refID }
+
+type CMDNode struct{ Command *CMDNode }
+
+func (gn *CMDNode) NeedsVars() []string { return gn.Command.NeedsVars() }
+
+type Service struct{ tracer int }
+
+func Execute(gn *CMDNode, s *Service) int { return s.tracer }
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
