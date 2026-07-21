@@ -908,6 +908,28 @@ def _go_interface_method_names(source: str) -> set[str]:
     return names
 
 
+def _go_sort_interface_receiver_types(functions: list) -> set[str]:
+    """Return receiver types that implement ``sort.Interface`` (Len/Less/Swap).
+
+    The sort package always invokes these methods on a non-nil value, so nil
+    receiver counterexamples for test helpers are false positives.
+    """
+    methods: dict[str, set[str]] = {}
+    for fn in functions:
+        rtype = _go_method_receiver_type(fn.params_text or "")
+        if not rtype:
+            continue
+        base = rtype.lstrip("*")
+        methods.setdefault(base, set()).add(fn.name)
+    # Require all three sort.Interface methods; ``Len`` and ``Less`` have the
+    # expected return types from tree-sitter extraction.
+    return {
+        rtype
+        for rtype, names in methods.items()
+        if {"Len", "Less", "Swap"} <= names
+    }
+
+
 def _go_first_param_name(params_text: str) -> str | None:
     """Return the first parameter name (receiver or first argument)."""
     first = params_text.split(",", 1)[0].strip()
@@ -1153,6 +1175,7 @@ def _detect_go_safety_issues(
         caller_contract_types = _go_caller_contract_receiver_types(source)
         callback_names = _go_callback_function_names(source, functions)
         interface_method_names = _go_interface_method_names(source)
+        sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         go_map_names = _go_map_names(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
@@ -1184,6 +1207,10 @@ def _detect_go_safety_issues(
                     or _go_is_known_interface_method(fn.name, fn.params_text, fn.return_type)
                     or _go_is_hash_internal_helper(fn.name, fn.params_text, fn.return_type)
                     or fn.name in interface_method_names
+                    or (
+                        fn.name in {"Len", "Less", "Swap"}
+                        and rtype.lstrip("*") in sort_interface_receivers
+                    )
                 )
             )
             first_param = _go_first_param_name(fn.params_text)
