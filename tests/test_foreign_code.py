@@ -2322,6 +2322,39 @@ contract C {
     assert not any("b" in i.message and "non-zero" in i.message for i in issues)
 
 
+def test_detect_rust_safety_issues_static_str_return() -> None:
+    """Rust functions returning ``&'static str`` should not produce int-ensures errors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+pub trait AsMetricStr {
+    fn as_metric_str(&self) -> &\'static str;
+}
+
+impl AsMetricStr for X {
+    fn as_metric_str(&self) -> &\'static str {
+        "restore"
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("restore" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_word_bits_nonzero() -> None:
+    """Go word-size constant ``_W`` is always nonzero and should not trigger divide-by-zero checks."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package bigmod
+func addMulVVW1024(z, x *uint, y uint) (c uint) {
+    return addMulVVWWasm(z, x, y, 1024/_W)
+}
+func addMulVVWWasm(z, x *uint, y uint, n uintptr) (carry uint) { return 0 }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("_W" in i.message and "non-zero" in i.message for i in issues)
+
+
 def test_detect_ts_safety_issues_mask_nested_arrow_functions() -> None:
     """Nested arrow functions in a TypeScript object literal must not leak into the outer function."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

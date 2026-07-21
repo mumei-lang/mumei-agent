@@ -1626,6 +1626,7 @@ def _detect_go_safety_issues(
                 _go_nonzero_constants(source)
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
+                | {"_W", "bits.UintSize"}
             )
             float_variables = _go_float_variables(body) | _go_float_param_names(fn.params_text)
             string_variables = _go_string_variables(original_source or source)
@@ -1702,7 +1703,7 @@ def _detect_go_safety_issues(
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     go_map_names = _go_map_names(source)
-    guaranteed_nonzero = _go_nonzero_constants(source)
+    guaranteed_nonzero = _go_nonzero_constants(source) | {"_W", "bits.UintSize"}
     string_variables = _go_string_variables(original_source or source)
     global_array_keys = _go_global_array_keys(source)
     known_types = _go_type_names(source)
