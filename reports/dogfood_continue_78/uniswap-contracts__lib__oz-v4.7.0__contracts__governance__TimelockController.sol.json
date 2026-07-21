@@ -1,0 +1,91 @@
+{
+  "success": true,
+  "source_file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/governance/TimelockController.sol",
+  "language": "solidity",
+  "spec_extracted": true,
+  "verification_status": "verified",
+  "spec_health_issues": [],
+  "verification_violations": [],
+  "counterexample_values": [],
+  "cross_validation_gaps": [],
+  "migration_hints": [],
+  "healed_files": [],
+  "heal_errors": [],
+  "next_steps": [
+    {
+      "priority": "info",
+      "action": "監査完了。追加の .mm 移行は不要",
+      "command": ""
+    }
+  ],
+  "proof_certificate": {
+    "version": "1.0",
+    "timestamp": "2026-07-21T22:04:37.490469Z",
+    "mumei_version": "agent",
+    "z3_version": "Z3 version 4.16.0",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/governance/TimelockController.sol",
+    "atoms": [
+      {
+        "name": "execute_guard_trace",
+        "z3_check_result": "unknown",
+        "content_hash": "8c70d0219d7ca0166ace76056e3e7577c5a1a510127913305010cb0544655b56",
+        "status": "unknown",
+        "proof_hash": "b3475571a1f3bda659fcec5d71031bc521ba5f8a4133cd52282160e4e98c78a7",
+        "requires": "true",
+        "ensures": "true",
+        "body_expr": "",
+        "body_summary": "guard trace proof for an unguarded external call",
+        "z3_result_class": "unknown",
+        "escalation_reason": "sc",
+        "logic_fragment_tag": "smart_contract_guard_trace",
+        "logic_fragment_tags": [
+          "smart_contract",
+          "guard_trace"
+        ],
+        "translator_version": "mumei-lean-translator-ir-v2",
+        "binder_mapping": {},
+        "bridge_lemma_hash": "a3e9c1f4b7d2806e5f19347cab82d0963ef1a5bc70d4e8290f136d5ab7c84e11",
+        "translator_ir": {
+          "sort": "contract_obligation",
+          "binders": [],
+          "theorem_goal": "runGuard GuardState.Unlocked [GuardOp.externalCall] = none",
+          "provenance_span": {
+            "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/governance/TimelockController.sol",
+            "line": 339,
+            "col": 1,
+            "len": 0
+          },
+          "lowering_rules": [
+            "smart_contract_guard_trace_lowering"
+          ],
+          "proof_trace_hints": [
+            "use the concrete guard trace with SmartContract.runGuard"
+          ],
+          "requires_bridge_lemmas": [
+            "MumeiLean.SmartContract.no_external_call_without_lock"
+          ],
+          "obligation_class": "smart_contract_guard_trace_obligation",
+          "guard_trace": {
+            "ops": [
+              "externalCall"
+            ],
+            "expected_outcome": "none"
+          },
+          "guard_trace_ops": [
+            "externalCall"
+          ],
+          "guard_trace_expected_outcome": "none"
+        },
+        "unknown_obligation_domain": "smart_contract"
+      }
+    ],
+    "package_name": "TimelockController",
+    "package_version": "0",
+    "certificate_hash": "e8f5d7b4e50ade29906a729347c33fbd7e36bcc5dcd368c7b04d7f5ab44da1f4",
+    "all_verified": false
+  },
+  "lean_bridge": null,
+  "report": "Audit passed: /home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/governance/TimelockController.sol\nlanguage: solidity\nspec_extracted: True\nverification_status: verified\nspec_health_issues: []\nverification_violations: []\ncounterexample_values: []\ncross_validation_gaps: []\nmigration_hints:\n  []\nhealed_files: []\nheal_errors: []\nnext_steps:\n  - priority: info\n    action: 監査完了。追加の .mm 移行は不要\n    command: ",
+  "errors": [],
+  "skipped_rate_limited": false
+}

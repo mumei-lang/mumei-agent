@@ -1868,6 +1868,17 @@ def _foreign_signature_type(type_text: str) -> str:
 # Solidity storage-location modifiers that can appear in return-type declarations.
 _SOLIDITY_MODIFIER_TOKENS = {"memory", "calldata", "storage", "payable", "indexed"}
 
+# Type keywords recognized by ``_foreign_signature_type``.  Used to decide
+# whether a spaced return-type declaration is ``Type name`` (Solidity) or
+# ``name Type`` (Go named return value).
+_MUMEI_KNOWN_TYPE_TOKENS = {
+    "string", "str", "bool", "boolean", "float", "double", "f32", "f64",
+    "uint", "usize", "u8", "u16", "u32", "u64",
+    "int", "int8", "int16", "int32", "int64", "uintptr",
+    "byte", "rune", "error",
+    "void", "unit", "none", "nonetype",
+}
+
 
 def _is_go_string_literal(expression: str) -> bool:
     """True for a Go string literal (double-quoted or raw backtick)."""
@@ -1906,6 +1917,14 @@ def _mumei_return_type(
         # Strip the name so it is not mistaken for an unknown type.
         if normalized and " " in normalized:
             normalized = normalized.split()[0]
+    elif normalized and " " in normalized:
+        # Go named return values are written ``name type`` (e.g. ``(b bool)``).
+        # If the first token is not a recognizable type keyword, drop it and use
+        # the remainder as the type.  This prevents ``result == false`` from being
+        # rejected when the return type was mis-mapped to i64.
+        tokens = normalized.split()
+        if tokens[0].lower() not in _MUMEI_KNOWN_TYPE_TOKENS:
+            normalized = " ".join(tokens[1:]).strip() or normalized
     return _foreign_signature_type(normalized)
 
 
