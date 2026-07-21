@@ -2890,6 +2890,21 @@ fn round_to_decimal_places<T: Float>(avg: T, num_places: u8) -> T {
     assert not any("factor_as_float" in i.message for i in issues)
 
 
+def test_detect_rust_safety_issues_doc_comment_nonzero_param() -> None:
+    """Doc comments that state a parameter must be non-zero avoid false positives."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''/// If `num_buckets` is zero, this will panic.
+#[inline(always)]
+pub fn bucket_for_tag_value(tag_value: &str, num_buckets: u32) -> u32 {
+    let hash = 0u32;
+    (hash & i32::MAX as u32) % num_buckets
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("num_buckets" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_interval_param_nonzero() -> None:
     """Interval-math functions treat a ``seconds`` parameter as non-zero."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

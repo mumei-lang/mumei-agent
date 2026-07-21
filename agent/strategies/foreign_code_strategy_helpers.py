@@ -716,6 +716,41 @@ def _rust_float_variables(body: str) -> set[str]:
     return float_vars
 
 
+def _rust_doc_comment_nonzero_params(source: str, name: str) -> set[str]:
+    """Extract parameter names whose doc comment states they must be non-zero.
+
+    Matches Rust doc comments such as:
+    ``If `num_buckets` is zero, this will panic.`` or
+    ``num_buckets MUST be non-zero.``
+    """
+    params: set[str] = set()
+    # Find the function and its preceding doc comment block.
+    for match in re.finditer(
+        r"(?P<doc>(?:[ \t]*///[^\n]*\n(?:[ \t]*///[^\n]*\n)*\s*)?)"
+        r"(?P<attrs>(?:\s*#\s*\[[^\]]*\]\s*)*)"
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        + re.escape(name)
+        + r"\b",
+        source,
+        re.DOTALL,
+    ):
+        doc = match.group("doc") or ""
+        patterns = [
+            r"If\s+[`']?(\w+)[`']?\s+is\s+(?:zero|0)[^\.]*panic",
+            r"[`']?(\w+)[`']?\s*(?:==|is)\s*(?:zero|0)[^\.]*panic",
+            r"(\w+)\s+MUST\s+be\s+(?:non-zero|nonzero|positive|greater than zero)",
+            r"(\w+)\s+must\s+not\s+be\s+(?:zero|0)",
+            r"Panics[^\.]*if\s+[`']?(\w+)[`']?\s+is\s+(?:zero|0)",
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, doc, re.IGNORECASE):
+                for group in m.groups():
+                    if group:
+                        params.add(group)
+                        break
+    return params
+
+
 def _go_scale_nonzero_params(name: str, params_text: str) -> set[str]:
     """Return ``scale`` parameter names for scaling functions as guaranteed non-zero.
 
@@ -1063,6 +1098,7 @@ def _detect_block_safety_issues(
             per_function_guarded_indices = _solidity_guarded_indices(body)
         if label == "Rust":
             per_function_float_vars = _rust_float_variables(body)
+            per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
