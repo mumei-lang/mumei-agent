@@ -2686,7 +2686,7 @@ impl Schema {
 
 
 def test_go_ssz_interface_methods_are_non_nil() -> None:
-    """SSZ marshaler/unmarshaler/hash-root methods are invoked on non-nil values."""
+    """SSZ marshaler/unmarshaler/hash-root/size methods are invoked on non-nil values."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 
     source = """package primitives
@@ -2696,6 +2696,10 @@ type Hasher struct{}
 func (v *ValidatorIndex) UnmarshalSSZ(buf []byte) error {
     *v = ValidatorIndex(0)
     return nil
+}
+
+func (v *ValidatorIndex) SizeSSZ() int {
+    return 8
 }
 
 func (v *ValidatorIndex) HashTreeRootWith(hh *Hasher) error {

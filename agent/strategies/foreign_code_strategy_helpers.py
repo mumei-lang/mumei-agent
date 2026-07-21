@@ -1399,7 +1399,7 @@ def _go_is_known_interface_method(
         return True
     if name == "UnmarshalSSZ" and "[]byte" in params_text and re.search(r"\berror\b", ret):
         return True
-    if name == "SizeSSZ" and re.search(r"\buint\b", ret) and "[]byte" not in params_text:
+    if name == "SizeSSZ" and re.search(r"\bint\b", ret) and "[]byte" not in params_text:
         return True
     if name == "HashTreeRoot" and "[32]byte" in ret and "error" in ret:
         return True
