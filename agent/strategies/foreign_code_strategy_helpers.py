@@ -1113,6 +1113,7 @@ def _detect_block_safety_issues(
                 guaranteed_nonzero=per_function_nonzero,
                 guarded_indices=per_function_guarded_indices,
                 float_variables=per_function_float_vars,
+                solidity_default_checks=solidity_checked_arithmetic,
             )
             if solidity_checked_arithmetic and not function_has_unchecked:
                 expr_issues = [
@@ -2148,6 +2149,7 @@ def _issues_for_expression(
     known_strings: set[str] | None = None,
     known_array_keys: dict[str, set[str]] | None = None,
     known_types: set[str] | None = None,
+    solidity_default_checks: bool = False,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -2175,6 +2177,7 @@ def _issues_for_expression(
             known_strings=known_strings,
             known_array_keys=known_array_keys,
             known_types=known_types,
+            solidity_default_checks=solidity_default_checks,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -2218,6 +2221,9 @@ def _issues_for_expression(
             r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
             expression,
         ):
+            # Solidity >=0.8 reverts on division/modulo by zero by default.
+            if label == "Solidity" and solidity_default_checks:
+                continue
             issue = _division_safety_issue(
                 function_name,
                 match.group("right"),
@@ -2261,6 +2267,7 @@ def _issues_from_findings(
     known_strings: set[str] | None = None,
     known_array_keys: dict[str, set[str]] | None = None,
     known_types: set[str] | None = None,
+    solidity_default_checks: bool = False,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -2286,6 +2293,9 @@ def _issues_from_findings(
     if label not in {"TypeScript", "JavaScript"}:
         for divisor in findings.divisors:
             if divisor in float_divisors:
+                continue
+            # Solidity >=0.8 reverts on division/modulo by zero by default.
+            if label == "Solidity" and solidity_default_checks:
                 continue
             issue = _division_safety_issue(
                 function_name, divisor, label, known_constants, guaranteed_nonzero, float_variables
