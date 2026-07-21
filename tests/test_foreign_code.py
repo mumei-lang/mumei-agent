@@ -2760,6 +2760,33 @@ def test_rust_modulo_len_index_is_guarded() -> None:
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_http2_container_types_are_non_nil() -> None:
+    """Go standard-library container types (Transport, ClientConn, etc.) are non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package http2
+
+type Transport struct{ t int }
+type ClientConn struct{ t int }
+type clientStream struct{ cc *ClientConn }
+type ClientRequest struct{ URL string }
+
+func (t *Transport) RoundTrip(req *ClientRequest) int {
+    return t.t + req.URL
+}
+
+func (cc *ClientConn) RoundTrip(req *ClientRequest) int {
+    return cc.t + req.URL
+}
+
+func (cs *clientStream) writeRequest(req *ClientRequest) int {
+    return cs.cc.t + req.URL
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
