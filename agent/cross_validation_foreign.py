@@ -46,7 +46,11 @@ def _dedupe_strings(values: list[str]) -> list[str]:
 
 def _strip_go_rust_literals_and_comments(text: str) -> str:
     def mask(span: str) -> str:
-        return "".join("\n" if char == "\n" else " " for char in span)
+        # Keep quote delimiters so the resulting source remains syntactically
+        # valid for tree-sitter; only mask the literal/comment contents.
+        if len(span) <= 2:
+            return span
+        return span[0] + "".join("\n" if char == "\n" else " " for char in span[1:-1]) + span[-1]
 
     def consume_string(index: int, quote: str) -> int:
         i = index + 1
@@ -1854,7 +1858,7 @@ def _foreign_signature_type(type_text: str) -> str:
     # Strip a Rust lifetime qualifier such as ``'static`` in ``&'static str``.
     normalized = re.sub(r"^'[A-Za-z_][A-Za-z0-9_]*\s+", "", normalized)
     lowered = normalized.lower()
-    if lowered in {"string", "str", "&str"}:
+    if lowered in {"string", "str", "&str"} or lowered == "bytes":
         return "string"
     if lowered in {"bool", "boolean"}:
         return "bool"

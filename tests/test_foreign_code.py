@@ -2596,6 +2596,50 @@ func (k Kind) String() string {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_safety_suppresses_unsigned_index_guarded_by_len_minus_one() -> None:
+    """``const m = len(arr) - 1; if n <= m { arr[n] }`` guards an unsigned index."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package big
+
+var pow5tab = [...]uint64{1, 5}
+
+func (z *Float) pow5(n uint64) *Float {
+    const m = uint64(len(pow5tab) - 1)
+    if n <= m {
+        return z.SetUint64(pow5tab[n])
+    }
+    z.SetUint64(pow5tab[m])
+    return z
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_actor_act_builder_param_nil() -> None:
+    """``Actor.Act`` implementations receive non-nil ``*Builder`` and ``*Action``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package work
+
+type Builder struct{}
+type Action struct{}
+
+type Actor interface {
+    Act(*Builder, context.Context, *Action) error
+}
+
+type buildActor struct{}
+
+func (ba *buildActor) Act(b *Builder, ctx context.Context, a *Action) error {
+    return b.build(ctx, a)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_go_safety_suppresses_component_runner_receiver_nil() -> None:
     """Pointer receivers embedding ``ComponentRunner`` are non-nil in e2e runners."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -2960,6 +3004,21 @@ def test_infer_solidity_named_bool_return_ensures_is_safe() -> None:
     atom = next(a for a in atoms if a.name == "isZero")
     assert atom.return_type == "bool"
     assert "result ==" not in atom.ensures
+
+
+def test_infer_solidity_bytes_memory_return_type_is_string() -> None:
+    """A Solidity ``bytes memory`` return with an empty string literal maps to Mumei ``string``."""
+    from agent.cross_validation_foreign import _infer_solidity_contracts
+
+    source = """contract C {
+    function _defaultParams() internal view virtual returns (bytes memory) {
+        return "";
+    }
+}
+"""
+    atoms = _infer_solidity_contracts(source)
+    atom = next(a for a in atoms if a.name == "defaultParams")
+    assert atom.return_type == "string"
 
 
 def test_expression_lowerable_rejects_unknown_function_calls() -> None:
