@@ -2890,6 +2890,21 @@ fn round_to_decimal_places<T: Float>(avg: T, num_places: u8) -> T {
     assert not any("factor_as_float" in i.message for i in issues)
 
 
+def test_detect_rust_safety_issues_doc_comment_nonzero_param() -> None:
+    """Doc comments that state a parameter must be non-zero avoid false positives."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''/// If `num_buckets` is zero, this will panic.
+#[inline(always)]
+pub fn bucket_for_tag_value(tag_value: &str, num_buckets: u32) -> u32 {
+    let hash = 0u32;
+    (hash & i32::MAX as u32) % num_buckets
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("num_buckets" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_interval_param_nonzero() -> None:
     """Interval-math functions treat a ``seconds`` parameter as non-zero."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -2915,3 +2930,21 @@ func rangeNum[T int, N int64](num N, t int) int { return 0 }
     issues = _detect_safety_issues(source, "go")
     assert not any("rangeNum" in i.message and "bounds" in i.message for i in issues)
 
+
+def test_detect_go_safety_issues_float_param_division() -> None:
+    """Dividing by a ``float64`` parameter is float division, not a panic."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package big
+func fdiv(a, b float64) float64 { return a / b }
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("b" in i.message and "non-zero" in i.message for i in issues)
+
+
+def test_source_has_function_declarations_rust_async_test_skipped() -> None:
+    """Async test functions are not considered non-test declarations."""
+    from agent.strategies.foreign_code_strategy import _source_has_function_declarations
+
+    assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}", "rust") is False
+    assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}\nfn bar() {}", "rust") is True

@@ -654,6 +654,15 @@ def _go_float_variables(body: str) -> set[str]:
     return float_vars
 
 
+def _go_float_param_names(params_text: str) -> set[str]:
+    """Return parameter names whose declared type is ``float32`` or ``float64``."""
+    return {
+        name
+        for name, raw_type in _go_param_types(params_text).items()
+        if raw_type.strip().lstrip("*").lower() in {"float32", "float64"}
+    }
+
+
 _RUST_FLOAT_METHODS = (
     "round|floor|ceil|sqrt|powf|exp|ln|log|log2|log10|sin|cos|tan|"
     "asin|acos|atan|atan2|sinh|cosh|tanh|trunc|fract|recip|"
@@ -705,6 +714,41 @@ def _rust_float_variables(body: str) -> set[str]:
                 float_vars.add(name)
                 changed = True
     return float_vars
+
+
+def _rust_doc_comment_nonzero_params(source: str, name: str) -> set[str]:
+    """Extract parameter names whose doc comment states they must be non-zero.
+
+    Matches Rust doc comments such as:
+    ``If `num_buckets` is zero, this will panic.`` or
+    ``num_buckets MUST be non-zero.``
+    """
+    params: set[str] = set()
+    # Find the function and its preceding doc comment block.
+    for match in re.finditer(
+        r"(?P<doc>(?:[ \t]*///[^\n]*\n(?:[ \t]*///[^\n]*\n)*\s*)?)"
+        r"(?P<attrs>(?:\s*#\s*\[[^\]]*\]\s*)*)"
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        + re.escape(name)
+        + r"\b",
+        source,
+        re.DOTALL,
+    ):
+        doc = match.group("doc") or ""
+        patterns = [
+            r"If\s+[`']?(\w+)[`']?\s+is\s+(?:zero|0)[^\.]*panic",
+            r"[`']?(\w+)[`']?\s*(?:==|is)\s*(?:zero|0)[^\.]*panic",
+            r"(\w+)\s+MUST\s+be\s+(?:non-zero|nonzero|positive|greater than zero)",
+            r"(\w+)\s+must\s+not\s+be\s+(?:zero|0)",
+            r"Panics[^\.]*if\s+[`']?(\w+)[`']?\s+is\s+(?:zero|0)",
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, doc, re.IGNORECASE):
+                for group in m.groups():
+                    if group:
+                        params.add(group)
+                        break
+    return params
 
 
 def _go_scale_nonzero_params(name: str, params_text: str) -> set[str]:
@@ -1054,6 +1098,7 @@ def _detect_block_safety_issues(
             per_function_guarded_indices = _solidity_guarded_indices(body)
         if label == "Rust":
             per_function_float_vars = _rust_float_variables(body)
+            per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
@@ -1581,7 +1626,7 @@ def _detect_go_safety_issues(
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
             )
-            float_variables = _go_float_variables(body)
+            float_variables = _go_float_variables(body) | _go_float_param_names(fn.params_text)
             string_variables = _go_string_variables(original_source or source)
             known_strings = string_variables | {
                 name for name, raw_type in param_types.items()
@@ -1663,7 +1708,7 @@ def _detect_go_safety_issues(
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
-        float_variables = _go_float_variables(body)
+        float_variables = _go_float_variables(body) | _go_float_param_names(params_text)
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
         nonnil_param_names = _go_nonnil_param_names(param_types)
