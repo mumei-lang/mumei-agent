@@ -611,6 +611,7 @@ def _go_expression_is_float(expression: str, float_vars: set[str]) -> bool:
     if re.search(r"\b\d+\.\d+(?:[eE][-+]?\d+)?\b|\b\d+[eE][-+]?\d+\b", text):
         return True
     # If any top-level operand is already float, the whole expression is float.
+    func_re = rf"\b(?:{'|'.join(_GO_FLOAT_FUNCTIONS)})\s*\("
     for part in _split_top_level_operators(text, ("+", "-", "*", "/", "%")):
         part = part.strip().lstrip("-").strip()
         if not part:
@@ -618,6 +619,8 @@ def _go_expression_is_float(expression: str, float_vars: set[str]) -> bool:
         if re.search(r"\b(?:float64|float32)\s*\(", part):
             return True
         if re.search(r"\b\d+\.\d+(?:[eE][-+]?\d+)?\b|\b\d+[eE][-+]?\d+\b", part):
+            return True
+        if re.search(func_re, part):
             return True
         # An operand that is a single known float variable is enough.
         if part in float_vars:
@@ -706,6 +709,31 @@ def _go_global_array_keys(source: str) -> dict[str, set[str]]:
         if key_set:
             keys[container] = key_set
     return keys
+
+
+def _go_type_names(source: str) -> set[str]:
+    """Return all declared Go type names from ``source``.
+
+    Includes top-level ``type X ...`` declarations and local type declarations
+    inside functions. These names are used to distinguish generic type
+    instantiations (``sendRequestJSON[T](...)``) from index access.
+    """
+    types: set[str] = set()
+    # Single ``type X ...`` and grouped ``type ( X ...; Y ... )``.
+    for match in re.finditer(
+        r"^\s*type\s+(\w+)|^\s*type\s*\((.*?)\)",
+        source,
+        flags=re.DOTALL | re.MULTILINE,
+    ):
+        if match.group(1):
+            types.add(match.group(1))
+        else:
+            block = match.group(2) or ""
+            for line in block.splitlines():
+                m = re.match(r"^\s*(\w+)", line)
+                if m:
+                    types.add(m.group(1))
+    return types
 
 
 def _go_string_variables(source: str) -> set[str]:
@@ -942,6 +970,20 @@ _GO_BUILTIN_TYPES = {
 _GO_NONNIL_TYPE_SUFFIXES = {
     "Service", "Node", "Handler", "Manager", "Store",
     "Client", "Provider", "Server", "Resolver", "Registry", "Factory",
+}
+
+# Functions in the Go ``math`` package that are known to return a floating-point
+# value.  Calls to these functions are treated as float when inferring local
+# variable types for safety analysis.
+_GO_FLOAT_FUNCTIONS = {
+    "Abs", "Acos", "Acosh", "Asin", "Asinh", "Atan", "Atan2", "Atanh",
+    "Cbrt", "Ceil", "Copysign", "Cos", "Cosh", "Dim", "Erf", "Erfc",
+    "Erfcinv", "Erfinv", "Exp", "Exp2", "Expm1", "FMA", "Floor", "Frexp",
+    "Gamma", "Hypot", "Ilogb", "Inf", "J0", "J1", "Jn", "Ldexp", "Lgamma",
+    "Log", "Log10", "Log1p", "Log2", "Logb", "Max", "Min", "Mod", "Modf",
+    "NaN", "Nextafter", "Nextafter32", "Pow", "Pow10", "Remainder",
+    "Remquo", "Round", "RoundToEven", "Signbit", "Sin", "Sincos", "Sinh",
+    "Sqrt", "Tan", "Tanh", "Trunc", "Y0", "Y1", "Yn",
 }
 
 
@@ -1363,6 +1405,7 @@ def _detect_go_safety_issues(
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         go_map_names = _go_map_names(source)
         global_array_keys = _go_global_array_keys(source)
+        known_types = _go_type_names(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -1428,6 +1471,7 @@ def _detect_go_safety_issues(
                     float_variables=float_variables,
                     known_strings=known_strings,
                     known_array_keys=global_array_keys,
+                    known_types=known_types,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1484,6 +1528,7 @@ def _detect_go_safety_issues(
     guaranteed_nonzero = _go_nonzero_constants(source)
     string_variables = _go_string_variables(original_source or source)
     global_array_keys = _go_global_array_keys(source)
+    known_types = _go_type_names(source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
@@ -1528,6 +1573,7 @@ def _detect_go_safety_issues(
                 float_variables=float_variables,
                 known_strings=known_strings,
                 known_array_keys=global_array_keys,
+                known_types=known_types,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -1597,6 +1643,7 @@ def _index_safety_issue(
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
     known_array_keys: dict[str, set[str]] | None = None,
+    known_types: set[str] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
@@ -1612,6 +1659,9 @@ def _index_safety_issue(
             return None
     if mapping_names and container in mapping_names:
         # Solidity mapping key access is always safe.
+        return None
+    if known_types and index in known_types:
+        # ``container[Type]`` in Go is a generic instantiation, not an index.
         return None
     if known_array_keys and index in known_array_keys.get(container, set()):
         # Go package-level keyed array literal: the key is valid by construction.
@@ -1915,6 +1965,7 @@ def _issues_for_expression(
     float_variables: set[str] | None = None,
     known_strings: set[str] | None = None,
     known_array_keys: dict[str, set[str]] | None = None,
+    known_types: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1941,6 +1992,7 @@ def _issues_for_expression(
             float_variables=float_variables,
             known_strings=known_strings,
             known_array_keys=known_array_keys,
+            known_types=known_types,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1960,7 +2012,7 @@ def _issues_for_expression(
                 # Solidity / Rust mappings have no bounds; missing keys return zero.
                 continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices, known_array_keys=known_array_keys
+                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices, known_array_keys=known_array_keys, known_types=known_types
             )
             if issue is not None:
                 issues.append(issue)
@@ -2026,6 +2078,7 @@ def _issues_from_findings(
     guarded_indices: set[str] | None = None,
     known_strings: set[str] | None = None,
     known_array_keys: dict[str, set[str]] | None = None,
+    known_types: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -2037,7 +2090,7 @@ def _issues_from_findings(
     float_divisors = float_variables or set()
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices, known_array_keys=known_array_keys)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices, known_array_keys=known_array_keys, known_types=known_types)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":

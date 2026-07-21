@@ -2797,11 +2797,8 @@ func expandRHS(n *Named) Type {
 def test_detect_go_safety_issues_skips_roundup_alignment_pattern() -> None:
     """The idiomatic ``(x + align - 1) &^ (align - 1)`` roundup is trusted."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
     source = """package routebsd
-
 var kernelAlign int
-
 func roundup(l int) int {
     if l == 0 {
         return kernelAlign
@@ -2811,3 +2808,32 @@ func roundup(l int) int {
 """
     issues = _detect_safety_issues(source, "go")
     assert not any("overflow" in i.message for i in issues)
+def test_detect_go_safety_issues_skips_math_float_division() -> None:
+    """Division by a local variable assigned a ``math`` float function is float."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+    source = """package math
+func cosh(x float64) float64 {
+    x = Abs(x)
+    if x > 21 {
+        return Exp(x) * 0.5
+    }
+    ex := Exp(x)
+    return (ex + 1/ex) * 0.5
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in i.message for i in issues)
+def test_detect_go_safety_issues_skips_generic_instantiation_index() -> None:
+    """``container[Type](args)`` is a generic call, not an array index."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+    source = """package alerting
+func DeleteSilence(t *testing.T, id string) (any, int, string) {
+    type dynamic struct {
+        Message string `json:"message"`
+    }
+    return sendRequestJSON[dynamic](t, nil, 200)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in i.message for i in issues)
+
