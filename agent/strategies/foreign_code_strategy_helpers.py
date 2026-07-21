@@ -804,6 +804,26 @@ def _go_time_interval_nonzero_params(name: str, params_text: str) -> set[str]:
     }
 
 
+def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
+    """Return the integer divisor parameter for functions named ``Div`` as non-zero.
+
+    A function/method named ``Div`` that performs integer division implies the
+    divisor must be non-zero; otherwise the caller has passed an invalid value.
+    """
+    if name != "Div":
+        return set()
+    int_types = {
+        "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        "byte", "rune",
+    }
+    # Pick the first integer parameter as the divisor.
+    for param_name, param_type in _go_param_types(params_text).items():
+        if param_type.strip().lstrip("*").lower() in int_types:
+            return {param_name}
+    return set()
+
+
 def _go_guarded_indices(body: str) -> set[str]:
     """Return index variables guarded by ``0 <= i < len(arr)`` in an ``if`` block.
 
@@ -1528,7 +1548,7 @@ def _is_go_compiler_test(source: str) -> bool:
         stripped = line.strip()
         if not stripped:
             continue
-        return stripped.startswith(("// errorcheck", "// runoutput", "// compiledir", "// asmcheck"))
+        return stripped.startswith(("// errorcheck", "// run", "// runoutput", "// compiledir", "// asmcheck"))
     return False
 
 
@@ -1652,6 +1672,7 @@ def _detect_go_safety_issues(
                 _go_nonzero_constants(source)
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
+                | _go_div_nonzero_params(fn.name, fn.params_text)
                 | {"_W", "bits.UintSize"}
             )
             float_variables = _go_float_variables(body) | _go_float_param_names(fn.params_text)
