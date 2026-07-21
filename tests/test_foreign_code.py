@@ -2578,6 +2578,30 @@ func (k Kind) String() string {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_safety_suppresses_component_runner_receiver_nil() -> None:
+    """Pointer receivers embedding ``ComponentRunner`` are non-nil in e2e runners."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package eth1
+
+type ComponentRunner interface { Started() <-chan struct{} }
+
+type ProxySet struct {
+    ComponentRunner
+    proxies []ComponentRunner
+}
+
+func (s *ProxySet) PauseAtIndex(i int) error {
+    if i >= len(s.proxies) {
+        return nil
+    }
+    return s.proxies[i].Pause()
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_solidity_named_bool_return_ensures_is_safe() -> None:
     """Named Solidity return values (``returns (bool flag)``) must not produce an i64-typed boolean expression."""
     from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
