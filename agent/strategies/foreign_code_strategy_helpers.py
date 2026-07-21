@@ -825,10 +825,13 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
 
 
 def _go_guarded_indices(body: str) -> set[str]:
-    """Return index variables guarded by ``0 <= i < len(arr)`` in an ``if`` block.
+    """Return index variables that are provably within bounds.
 
-    Matches guards such as:
+    Matches explicit guards such as:
     ``if i >= 0 && i < len(arr)`` or ``if 0 <= i && int(i) < len(arr)``.
+
+    Also recognizes the Go idiom ``idx, err := SomeIndex(...); if err != nil { return }``,
+    where an ``Index`` helper returns a valid index on nil error.
     """
     guarded: set[str] = set()
     pattern = re.compile(
@@ -844,6 +847,14 @@ def _go_guarded_indices(body: str) -> set[str]:
         idx = match.group("lower") or match.group("lower2")
         if idx:
             guarded.add(idx)
+    # ``idx, err := BeaconProposerIndex(...); if err != nil { return ... }``
+    for match in re.finditer(
+        r"(?P<idx>\w+(?:Idx|Index))\s*,\s*\w+\s*:=\s*[A-Za-z_][\w.]*Index\s*\((?P<args>.*?)\)\s*;?\s*"
+        r"if\s+\w+\s*!=\s*nil\s*\{[^}]*\breturn\b[^}]*\}",
+        body,
+        re.DOTALL,
+    ):
+        guarded.add(match.group("idx"))
     return guarded
 
 

@@ -2629,6 +2629,29 @@ def test_go_param_types_handles_grouped_params() -> None:
     assert _go_param_types("a, b *big.Int") == {"a": "*big.Int", "b": "*big.Int"}
 
 
+def test_go_guarded_indices_from_error_checked_index_call() -> None:
+    """``idx, err := BeaconProposerIndex(...); if err != nil { return }`` bounds ``idx``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package helpers
+
+type ReadOnlyBeaconState struct{}
+type SecretKey struct{}
+
+func BeaconProposerIndex(ctx interface{}, st ReadOnlyBeaconState) (int, error) { return 0, nil }
+
+func RandaoReveal(beaconState ReadOnlyBeaconState, privKeys []SecretKey) ([]byte, error) {
+    proposerIdx, err := BeaconProposerIndex(nil, beaconState)
+    if err != nil {
+        return nil, err
+    }
+    return privKeys[proposerIdx].Sign(nil), nil
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
