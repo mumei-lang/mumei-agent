@@ -580,6 +580,36 @@ def _go_declared_constants(source: str) -> dict[str, int]:
     return constants
 
 
+def _go_actor_nonnil_params(
+    param_types: dict[str, str],
+    function_name: str = "",
+    params_text: str = "",
+    return_type: str | None = None,
+) -> set[str]:
+    """Return parameter names that are non-nil for ``Actor.Act`` implementations.
+
+    ``go/cmd/go/internal/work.Actor`` interface methods have signature
+    ``Act(*Builder, context.Context, *Action) error``. The concrete implementations
+    are always invoked with non-nil ``*Builder`` and ``*Action`` values by the
+    action graph executor, so nil-receiver counterexamples for those parameters are
+    caller-contract noise.
+    """
+    if function_name != "Act":
+        return set()
+    if not _go_method_receiver_type(params_text or ""):
+        return set()
+    if return_type and "error" not in return_type:
+        return set()
+    nonnil: set[str] = set()
+    type_by_name = {name: raw.strip() for name, raw in param_types.items()}
+    values = set(type_by_name.values())
+    if "*Builder" in values and "context.Context" in values and "*Action" in values:
+        for name, raw in type_by_name.items():
+            if raw in {"*Builder", "*Action"}:
+                nonnil.add(name)
+    return nonnil
+
+
 def _go_nonzero_constants(source: str) -> set[str]:
     """Return top-level Go identifiers that are provably non-zero.
 
@@ -656,6 +686,54 @@ def _go_nonzero_constants(source: str) -> set[str]:
     return nonzero
 
 
+def _go_import_aliases(source: str) -> dict[str, str]:
+    """Return a mapping ``{alias: package}`` for Go import declarations.
+
+    Handles single imports ``import "time"`` and block imports. Blank imports
+    and dot imports are ignored.
+    """
+    aliases: dict[str, str] = {}
+    single = re.search(r'^\s*import\s+"([^"]+)"', source, re.MULTILINE)
+    if single:
+        pkg = single.group(1)
+        aliases[pkg.split("/")[-1]] = pkg
+    block = re.search(r'^\s*import\s*\((.*?)\)', source, re.MULTILINE | re.DOTALL)
+    if block:
+        for line in block.group(1).splitlines():
+            line = line.strip()
+            if not line or line.startswith("//"):
+                continue
+            m = re.match(r'^(?:(\w+)\s+)?["\']([^"\']+)["\']', line)
+            if m:
+                alias, pkg = m.group(1), m.group(2)
+                if alias is None:
+                    alias = pkg.split("/")[-1]
+                if alias != "_":
+                    aliases[alias] = pkg
+    return aliases
+
+
+def _go_known_nonzero_selectors(source: str) -> set[str]:
+    """Return imported package constants that are provably non-zero.
+
+    ``time.Second`` / ``time.Minute`` etc. and ``math.Pi`` / ``math.E`` etc. are
+    positive constants, so divisions by them are safe.
+    """
+    aliases = _go_import_aliases(source)
+    pkg_constants: dict[str, set[str]] = {
+        "time": {"Nanosecond", "Microsecond", "Millisecond", "Second", "Minute", "Hour"},
+        "math": {
+            "Pi", "E", "Phi", "Sqrt2", "SqrtPi", "SqrtE", "Ln2", "Log2E",
+            "MaxFloat32", "SmallestNonzeroFloat32", "MaxFloat64", "SmallestNonzeroFloat64",
+        },
+    }
+    nonzero: set[str] = set()
+    for alias, pkg in aliases.items():
+        for const in pkg_constants.get(pkg, set()):
+            nonzero.add(f"{alias}.{const}")
+    return nonzero
+
+
 def _go_expression_is_float(expression: str, float_vars: set[str]) -> bool:
     """Heuristic: is ``expression`` a Go floating-point expression?"""
     text = _strip_go_rust_literals_and_comments(expression)
@@ -707,6 +785,15 @@ def _go_float_param_names(params_text: str) -> set[str]:
         for name, raw_type in _go_param_types(params_text).items()
         if raw_type.strip().lstrip("*").lower() in {"float32", "float64"}
     }
+
+
+def _go_float_casts(expression: str) -> set[str]:
+    """Return source snippets of explicit ``float32(...)`` / ``float64(...)`` casts.
+
+    Go float division by zero is well-defined (produces +/-Inf or NaN), so
+    these cast expressions should not be reported as integer divide-by-zero.
+    """
+    return set(re.findall(r"\b(?:float32|float64)\s*\([^()]*\)", expression))
 
 
 _RUST_FLOAT_METHODS = (
@@ -923,6 +1010,10 @@ def _go_guarded_indices(body: str) -> set[str]:
 
     Also recognizes the Go idiom ``idx, err := SomeIndex(...); if err != nil { return }``,
     where an ``Index`` helper returns a valid index on nil error.
+
+    Additionally, recognizes ``const m = len(container) - 1; if n <= m { container[n] }``
+    as a valid upper-bound guard, and treats ``m`` itself as a safe last-element index
+    into ``container``.
     """
     guarded: set[str] = set()
     pattern = re.compile(
@@ -946,6 +1037,24 @@ def _go_guarded_indices(body: str) -> set[str]:
         re.DOTALL,
     ):
         guarded.add(match.group("idx"))
+    # ``const m = <type>(len(container) - 1)`` used as a last-index helper.
+    limit_consts: dict[str, str] = {}
+    for match in re.finditer(
+        r"\bconst\s+(\w+)\s*=\s*(?:\w+\()?len\(\s*(\w+)\s*\)\s*-\s*1(?:\))?",
+        body,
+    ):
+        limit_consts[match.group(1)] = match.group(2)
+    # ``if n <= m { container[n] }`` guards ``n`` for ``container``.
+    for const_name, container in limit_consts.items():
+        for match in re.finditer(
+            rf"\bif\s+(\w+)\s*<=\s*{re.escape(const_name)}\s*\{{[^}}]*{re.escape(container)}\s*\[\s*\1\s*\]",
+            body,
+            re.DOTALL,
+        ):
+            guarded.add(match.group(1))
+        # The constant ``m`` is the last valid index of ``container``.
+        if re.search(rf"{re.escape(container)}\s*\[\s*{re.escape(const_name)}\s*\]", body):
+            guarded.add(const_name)
     return guarded
 
 
@@ -1298,6 +1407,14 @@ _GO_BUILTIN_TYPES = {
     "bool", "byte", "rune", "error", "any", "comparable",
 }
 
+# Integer types that can never be negative.  Used to drop the lower-bound
+# contract from index-safety checks.
+_UNSIGNED_INTEGER_TYPES = {
+    "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+    "usize", "u8", "u16", "u32", "u64",
+    "byte",
+}
+
 # Framework/container types whose methods are always invoked on non-nil values.
 # These are caller-contract false positives rather than verifiable preconditions.
 _GO_NONNIL_TYPE_SUFFIXES = {
@@ -1367,6 +1484,24 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
     return contracts
 
 
+def _go_method_body_params_text(params_text: str) -> str:
+    """Return the parameter text of a Go method excluding the receiver.
+
+    Standalone function parameter lists are returned unchanged.
+    """
+    parts = [p.strip() for p in params_text.split(",")]
+    if len(parts) > 1:
+        return ", ".join(parts[1:])
+    # Single part: if it looks like a receiver (``name Type``), there are no
+    # body parameters; otherwise this is a standalone single-parameter list.
+    if re.fullmatch(
+        r"[A-Za-z_]\w*\s+(\*?\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_]\w*)?)\.?",
+        parts[0],
+    ):
+        return ""
+    return parts[0]
+
+
 def _go_is_known_interface_method(
     name: str,
     params_text: str,
@@ -1379,6 +1514,9 @@ def _go_is_known_interface_method(
     """
     if not name or not params_text:
         return False
+    # The first parameter is the receiver; interface signatures are about the
+    # remaining parameters.
+    params_text = _go_method_body_params_text(params_text)
     ret = return_type or ""
     if name == "RoundTrip" and "*http.Request" in params_text and "*http.Response" in ret:
         return True
@@ -1445,6 +1583,20 @@ def _go_is_known_interface_method(
     if name == "MarshalJSON" and "[]byte" in ret and "error" in ret:
         return True
     if name == "UnmarshalJSON" and "[]byte" in params_text and re.search(r"\berror\b", ret):
+        return True
+    # encoding.TextMarshaler / TextUnmarshaler interface methods.
+    if name == "MarshalText" and ret.startswith("([]byte") and "error" in ret:
+        return True
+    if name == "UnmarshalText" and "[]byte" in params_text and "error" in ret:
+        return True
+    # ``error`` interface methods are invoked on non-nil concrete error values.
+    if name == "Error" and not params_text.strip() and "string" in ret:
+        return True
+    if name == "Unwrap" and not params_text.strip() and "error" in ret:
+        return True
+    # Uploader/Client ``Upload`` methods (e.g. image uploader, S3 client wrappers)
+    # are interface methods invoked on non-nil concrete values.
+    if name == "Upload" and "context.Context" in params_text and "error" in ret:
         return True
     return False
 
@@ -1738,7 +1890,9 @@ def _is_go_compiler_test(source: str) -> bool:
         stripped = line.strip()
         if not stripped:
             continue
-        return stripped.startswith(("// errorcheck", "// run", "// runoutput", "// compiledir", "// asmcheck"))
+        return stripped.startswith(
+            ("// errorcheck", "// run", "// runoutput", "// compiledir", "// asmcheck", "// compile")
+        )
     return False
 
 
@@ -1793,6 +1947,47 @@ def _go_parallel_slice_index_safe_pairs(body: str) -> set[tuple[str, str]]:
     return safe
 
 
+def _go_equal_length_slice_index_safe_pairs(body: str) -> set[tuple[str, str]]:
+    """Return safe ``(container, index)`` pairs when slice lengths are checked equal.
+
+    A pattern like::
+
+        if len(a) != len(b) { return ... }
+        for i := range a { ... b[i] ... }
+
+    guarantees ``b[i]`` is in-bounds because the early return ensures
+    ``len(a) == len(b)`` and ``range a`` gives ``0 <= i < len(a)``.
+    """
+    safe: set[tuple[str, str]] = set()
+    # Find early-return length-equality checks.  The body of the ``if`` is
+    # assumed simple enough to be matched by a non-greedy/no-nested-brace
+    # pattern; this is only used for the common ``if len(x) != len(y) { return }``
+    # idiom.
+    equal_pairs: list[tuple[str, str]] = []
+    for match in re.finditer(
+        r"\bif\s+len\((\w+)\)\s*!=\s*len\((\w+)\)\s*\{[^}]*\breturn\b[^}]*\}",
+        body,
+    ):
+        a, b = match.group(1), match.group(2)
+        equal_pairs.extend([(a, b), (b, a)])
+
+    range_domains: dict[str, str] = {}
+    for match in re.finditer(r"\bfor\s+(\w+)\s*:=\s*range\s+(\w+)\b", body):
+        index, domain = match.group(1), match.group(2)
+        range_domains[domain] = index
+    for match in re.finditer(
+        r"\bfor\s+(\w+)\s*:=\s*0\s*;\s*\1\s*<\s*len\((\w+)\)\s*;",
+        body,
+    ):
+        index, domain = match.group(1), match.group(2)
+        range_domains[domain] = index
+
+    for domain, other in equal_pairs:
+        if domain in range_domains:
+            safe.add((other, range_domains[domain]))
+    return safe
+
+
 def _detect_go_safety_issues(
     source: str,
     *,
@@ -1828,9 +2023,14 @@ def _detect_go_safety_issues(
             body = fn.body
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
-            nonnil_param_names = _go_nonnil_param_names(param_types)
+            nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(
+                param_types,
+                function_name=fn.raw_name or fn.name,
+                params_text=fn.params_text,
+                return_type=fn.return_type,
+            )
             local_names = _local_variable_names(body, "go")
-            parallel_slicing = _go_parallel_slice_index_safe_pairs(body)
+            parallel_slicing = _go_parallel_slice_index_safe_pairs(body) | _go_equal_length_slice_index_safe_pairs(body)
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
             guarded_indices = _go_guarded_indices(body) | _go_runtime_level_guarded_indices(
@@ -1866,6 +2066,7 @@ def _detect_go_safety_issues(
             suppress_bounds = _go_doc_comment_suppresses_bounds(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             guaranteed_nonzero = (
                 _go_nonzero_constants(source)
+                | _go_known_nonzero_selectors(original_source or source)
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
@@ -1948,7 +2149,11 @@ def _detect_go_safety_issues(
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     go_map_names = _go_map_names(source)
-    guaranteed_nonzero = _go_nonzero_constants(source) | {"_W", "bits.UintSize"}
+    guaranteed_nonzero = (
+        _go_nonzero_constants(source)
+        | _go_known_nonzero_selectors(original_source or source)
+        | {"_W", "bits.UintSize"}
+    )
     string_variables = _go_string_variables(original_source or source)
     global_array_keys = _go_global_array_keys(source)
     known_types = _go_type_names(source)
@@ -1958,7 +2163,12 @@ def _detect_go_safety_issues(
         float_variables = _go_float_variables(body) | _go_float_param_names(params_text)
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
-        nonnil_param_names = _go_nonnil_param_names(param_types)
+        nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(
+            param_types,
+            function_name=name,
+            params_text=params_text,
+            return_type=_return_type,
+        )
         known_strings = string_variables | {
             name for name, raw_type in param_types.items()
             if raw_type.strip().lstrip("*") == "string"
@@ -2114,16 +2324,21 @@ def _index_safety_issue(
     known_index = known_constants.get(index)
     if known_index is not None and known_index < 0:
         known_index = None
+    index_is_unsigned = False
+    if param_types:
+        raw_type = param_types.get(index, "").strip().lstrip("*")
+        index_is_unsigned = raw_type.lower() in _UNSIGNED_INTEGER_TYPES
     counterexample = _z3_index_counterexample(
-        index, f"len_{container}", known_index=known_index
+        index, f"len_{container}", known_index=known_index, is_unsigned=index_is_unsigned
     )
     if counterexample is None:
         return None
-    required_contracts = (
-        (f"{index} < len_{container}",)
-        if known_index is not None
-        else (f"{index} >= 0", f"{index} < len_{container}")
-    )
+    if index_is_unsigned:
+        required_contracts = (f"{index} < len_{container}",)
+    elif known_index is not None:
+        required_contracts = (f"{index} < len_{container}",)
+    else:
+        required_contracts = (f"{index} >= 0", f"{index} < len_{container}")
     return ForeignSafetyIssue(
         function_name=function_name,
         message=(
@@ -2239,6 +2454,44 @@ def _split_top_level_operators(expression: str, operators: tuple[str, ...]) -> l
     return parts
 
 
+def _is_nonzero_numeric_literal(value: str) -> bool:
+    """Return True when ``value`` is a non-zero integer or float literal."""
+    try:
+        cleaned = value.replace("_", "")
+        if cleaned.startswith(("0x", "0X", "0o", "0O", "0b", "0B")):
+            return int(cleaned, 0) != 0
+        if cleaned.endswith(("f32", "f64")):
+            return float(cleaned[:-3]) != 0
+        if cleaned.endswith(("F32", "F64")):
+            return float(cleaned[:-3]) != 0
+        if "." in cleaned or "e" in cleaned.lower():
+            return float(cleaned) != 0
+        return int(cleaned) != 0
+    except (ValueError, OverflowError):
+        return False
+
+
+def _is_float_expression(value: str, label: str) -> bool:
+    """Return True when ``value`` is a floating-point divisor expression."""
+    # Go explicit float casts.
+    if label == "Go" and value.startswith(("float32(", "float64(")):
+        return True
+    # Rust ``x as f64`` / ``x as f32`` casts (spaces are stripped by the
+    # tree-sitter source-text fallback, yielding ``xasf64``).
+    if label == "Rust" and re.search(r"asf(32|64)$", value):
+        return True
+    cleaned = value.replace("_", "")
+    if re.match(r"^-?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?[fF]?(?:32|64)?$", cleaned):
+        # Float literals contain a decimal point, exponent, or float suffix.
+        if any(c in cleaned for c in ".eE") or cleaned[-3:] in {"f32", "f64", "F32", "F64"}:
+            try:
+                float(cleaned.rstrip("fF").rstrip("32").rstrip("64") or "0")
+                return True
+            except ValueError:
+                return False
+    return False
+
+
 def _division_safety_issue(
     function_name: str,
     divisor: str,
@@ -2257,6 +2510,24 @@ def _division_safety_issue(
     if float_variables and divisor in float_variables:
         # Go float division by zero produces +/-Inf or NaN, not a panic.
         return None
+    if "." in divisor and (guaranteed_nonzero is None or divisor not in guaranteed_nonzero):
+        # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
+        # not provably non-zero are too noisy to model as a free variable.
+        return None
+    if _is_float_expression(divisor, label):
+        # Floating-point division is well-defined even when the divisor is zero.
+        return None
+    if _is_nonzero_numeric_literal(divisor):
+        # Non-zero numeric literals can never produce a divide-by-zero.
+        return None
+    # Solidity constant exponentiation such as ``2**32`` or ``(2**32)`` is a
+    # compile-time non-zero value.
+    if re.fullmatch(r"\(?\d+\s*\*\*\s*\d+\)?", divisor):
+        try:
+            if eval(divisor) != 0:  # noqa: S307
+                return None
+        except Exception:
+            pass
     return ForeignSafetyIssue(
         function_name=function_name,
         message=(
@@ -2348,6 +2619,11 @@ def _i64_overflow_safety_issue(
         # Arithmetic over local loop variables cannot be expressed as a
         # precondition on the atom's parameters, so treat it as trusted.
         return None
+    # Go compiler object-writer helpers such as ``UintN`` compute ``off + wid``
+    # where ``wid`` is a small positive width (1/2/4/8) and ``off`` is a symbol
+    # offset; these low-level additions are bounded by the writer contract.
+    if label == "Go" and function_name.startswith("Uint") and {"off", "wid"} <= {left, right}:
+        return None
     known = known_constants or {}
     if left in known and right in known:
         max_i64 = 9_223_372_036_854_775_807
@@ -2414,6 +2690,8 @@ def _issues_for_expression(
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
+    if label == "Go":
+        float_variables = (float_variables or set()) | _go_float_casts(expression)
     ts_language = _LABEL_TO_TS_LANGUAGE.get(label)
     findings = (
         tree_sitter_extract.analyze_expression(expression, ts_language)
@@ -2479,7 +2757,7 @@ def _issues_for_expression(
             issues.append(_null_safety_issue(function_name, value, label))
     if label not in {"TypeScript", "JavaScript"}:
         for match in re.finditer(
-            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
+            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)",
             expression,
         ):
             # Solidity >=0.8 reverts on division/modulo by zero by default.
@@ -2656,6 +2934,7 @@ def _z3_index_counterexample(
     index_name: str,
     length_name: str,
     known_index: int | None = None,
+    is_unsigned: bool = False,
 ) -> dict[str, int] | None:
     """Counterexample for an unbounded index access, or ``None`` if provably safe.
 
@@ -2663,11 +2942,18 @@ def _z3_index_counterexample(
     the index is pinned to that value so Z3 can't invent an impossible negative
     index (#296); the remaining, still-real concern is the upper bound
     (``index >= length``), so a shorter container is a genuine counterexample.
+
+    For unsigned indices (``uint64`` etc.) the lower-bound concern is impossible,
+    so only the upper bound is checked.
     """
     index = z3.Int(index_name)
     length = z3.Int(length_name)
     solver = z3.Solver()
-    solver.add(length >= 0, z3.Or(index < 0, index >= length))
+    solver.add(length >= 0)
+    if is_unsigned:
+        solver.add(index >= 0, index >= length)
+    else:
+        solver.add(z3.Or(index < 0, index >= length))
     if known_index is not None:
         solver.add(index == known_index)
     if solver.check() == z3.sat:
