@@ -1,0 +1,252 @@
+[
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/mainnet/electra__operations__withdrawals_test.go"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/v4-core/libraries/Hooks.sol"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/link/cgo_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue63462.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/iox_query/src/exec/split.rs"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/os/eloop_other.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/state/state-native/custom-types/state_roots.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/common/ssz_static/ssz_static_example_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/apimachinery/utils/meta_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/p2p/subnets_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/live1.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/validator/client/beacon-api/attestation_data.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/loginattempt/loginattemptimpl/login_attempt_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/oserror/errors.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue52673.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-data/src/utils/fuzzySearch.ts"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue19182.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/mutable_batch/src/writer.rs"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/iox_system_tables/src/lib.rs"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/influxdb_influxql_parser/src/explain.rs"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/state/stateutil/field_root_eth1.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue74379.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/internal/obj/objfile.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/core/components/RolePicker/RoleMenuOption.tsx"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/os_linux.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/utils/storybook/DashboardStoryCanvas.tsx"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/iox_query_influxql/src/plan/test_utils.rs"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/influxdb3_clap_blocks/src/socket_addr.rs"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/notebook/pages/NotebookScenePage.tsx"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "solidity",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/interfaces/IERC1155MetadataURI.sol"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/alertmanager/consts.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/components/saved-searches/SavedSearches.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tsdb/cloudwatch/annotation_query_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/panel/geomap/layers/basemaps/maplibre.ts"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/net/sockopt_aix.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/storage/unified/client_test.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/influxdb3_telemetry/src/stats.rs"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/iox_query_influxql/src/plan/planner/metadata.rs"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/explore/state/query.ts"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/cache/sync_committee_head_state_test.go"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/core/object_store_metrics/src/log.rs"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/api/static/static_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/validator/keymanager/local/doc.go"
+  },
+  {
+    "repo": "uniswap-contracts",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/uniswap-contracts/script/cli/src/util/deployment_log.rs"
+  },
+  {
+    "repo": "influxdb",
+    "lang": "rust",
+    "file": "/home/ubuntu/repos/influxdb/influxdb3_catalog/src/catalog/versions/v3/transaction.rs"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/stubs3.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/endtoend/evaluators/slashing.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/crypto/ecdsa/utils.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue47317.dir/x.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/syscall/execenv/execenv_default.go"
+  }
+]
