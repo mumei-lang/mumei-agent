@@ -2889,3 +2889,22 @@ fn round_to_decimal_places<T: Float>(avg: T, num_places: u8) -> T {
     issues = _detect_safety_issues(source, "rust")
     assert not any("factor_as_float" in i.message for i in issues)
 
+
+def test_detect_go_safety_issues_float_param_division() -> None:
+    """Dividing by a ``float64`` parameter is float division, not a panic."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package big
+func fdiv(a, b float64) float64 { return a / b }
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("b" in i.message and "non-zero" in i.message for i in issues)
+
+
+def test_source_has_function_declarations_rust_async_test_skipped() -> None:
+    """Async test functions are not considered non-test declarations."""
+    from agent.strategies.foreign_code_strategy import _source_has_function_declarations
+
+    assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}", "rust") is False
+    assert _source_has_function_declarations("#[tokio::test]\nasync fn foo() {}\nfn bar() {}", "rust") is True
+

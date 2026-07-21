@@ -547,7 +547,7 @@ def _is_rust_test_function(source: str, name: str) -> bool:
     """
     return bool(
         re.search(
-            r"(?:#\s*\[[\s\S]*?test[\s\S]*?\]\s*){1,3}\s*fn\s+"
+            r"(?:#\s*\[[\s\S]*?test[\s\S]*?\]\s*){1,3}\s*(?:\b(?:async|const|unsafe)\b\s+)*fn\s+"
             + re.escape(name)
             + r"\b",
             source,
