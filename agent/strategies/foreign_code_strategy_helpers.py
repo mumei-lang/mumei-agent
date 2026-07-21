@@ -729,6 +729,29 @@ def _go_scale_nonzero_params(name: str, params_text: str) -> set[str]:
     }
 
 
+def _go_time_interval_nonzero_params(name: str, params_text: str) -> set[str]:
+    """Return time-interval parameter names as guaranteed non-zero for interval math.
+
+    Functions named around ``interval``/``period``/``rate`` operate on a positive
+    time quantum; a zero divisor would be a caller bug (e.g.
+    ``intervalNumber(t, seconds int64)`` doing ``t.Unix() / seconds``).
+    """
+    if not re.search(r"interval|period|rate", name, re.IGNORECASE):
+        return set()
+    int_types = {
+        "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        "byte", "rune",
+    }
+    interval_params = {"seconds", "period", "interval", "duration", "rate", "tick"}
+    return {
+        param_name
+        for param_name, param_type in _go_param_types(params_text).items()
+        if param_name.lower() in interval_params
+        and param_type.strip().lstrip("*").lower() in int_types
+    }
+
+
 def _go_doc_comment_suppresses_bounds(source: str, start_char: int) -> bool:
     """Return True when the comment before a function declares bounds are assumed."""
     preceding = source[:start_char]
@@ -816,6 +839,8 @@ def _go_type_names(source: str) -> set[str]:
                 m = re.match(r"^\s*(\w+)", line)
                 if m:
                     types.add(m.group(1))
+    # Predeclared identifiers used as type arguments (e.g. ``rangeNum[int]``).
+    types.update(_GO_BUILTIN_TYPES)
     return types
 
 
@@ -1543,7 +1568,11 @@ def _detect_go_safety_issues(
             orig_source = original_source or source
             orig_start = orig_source.find(header) if original_source else -1
             suppress_bounds = _go_doc_comment_suppresses_bounds(orig_source, orig_start if orig_start >= 0 else fn.start_char)
-            guaranteed_nonzero = _go_nonzero_constants(source) | _go_scale_nonzero_params(fn.name, fn.params_text)
+            guaranteed_nonzero = (
+                _go_nonzero_constants(source)
+                | _go_scale_nonzero_params(fn.name, fn.params_text)
+                | _go_time_interval_nonzero_params(fn.name, fn.params_text)
+            )
             float_variables = _go_float_variables(body)
             string_variables = _go_string_variables(original_source or source)
             known_strings = string_variables | {

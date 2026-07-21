@@ -2889,3 +2889,29 @@ fn round_to_decimal_places<T: Float>(avg: T, num_places: u8) -> T {
     issues = _detect_safety_issues(source, "rust")
     assert not any("factor_as_float" in i.message for i in issues)
 
+
+def test_detect_go_safety_issues_interval_param_nonzero() -> None:
+    """Interval-math functions treat a ``seconds`` parameter as non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package backfill
+import \"time\"
+func intervalNumber(t time.Time, seconds int64) int64 {
+    return t.Unix() / seconds
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("seconds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_generic_builtin_type_instantiation() -> None:
+    """Generic instantiation with a builtin type (``rangeNum[int]``) is not an index."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package reflect
+func Seq() { return rangeNum[int](0, nil) }
+func rangeNum[T int, N int64](num N, t int) int { return 0 }
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("rangeNum" in i.message and "bounds" in i.message for i in issues)
+
