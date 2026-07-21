@@ -2704,25 +2704,59 @@ fn real_func() {}
 """
     atoms = _infer_rust_contracts(source)
     assert any(a.name == "real_func" for a in atoms)
-
-
 def test_detect_go_safety_issues_skips_nonnil_container_receiver() -> None:
     """Methods on *Service and *Node receivers are not flagged for nil dereference."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
     source = """package expr
-
 type baseNode struct{ refID string }
-
 func (b *baseNode) String() string { return b.refID }
-
 type CMDNode struct{ Command *CMDNode }
-
 func (gn *CMDNode) NeedsVars() []string { return gn.Command.NeedsVars() }
-
 type Service struct{ tracer int }
-
 func Execute(gn *CMDNode, s *Service) int { return s.tracer }
 """
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in i.message for i in issues)
+def test_detect_go_safety_issues_skips_string_concatenation() -> None:
+    """Go ``+`` between string variables is concatenation, not arithmetic."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+    source = """package setting
+var AppUrl string
+func ToAbsUrl(relativeUrl string) string {
+    return AppUrl + relativeUrl
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("overflow" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_skips_string_concatenation_literal_initialized() -> None:
+    """Go ``+`` between string variables is concatenation even without explicit type."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package setting
+
+var AppUrl = "https://example.com"
+
+func ToAbsUrl(relativeUrl string) string {
+    return AppUrl + relativeUrl
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("overflow" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_skips_bounds_with_assumed_valid_comment() -> None:
+    """A comment that says the index is assumed valid suppresses bounds checks."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+    source = """package syntax
+var _token_index []int
+// tokStrFast is faster, which assumes that tok is one of the valid tokens -
+// and can thus skip bounds checks.
+func tokStrFast(tok int) string {
+    return _token_index[tok-1:_token_index[tok]]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in i.message for i in issues)
+
