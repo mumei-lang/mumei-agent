@@ -1013,7 +1013,12 @@ def _rust_parse_signature(
 
 
 def _has_rust_test_attribute(code: str, fn_start: int) -> bool:
-    """True when the Rust function at ``fn_start`` is annotated with ``#[test]`` or ``#[bench]``."""
+    """True when the Rust function at ``fn_start`` is annotated with ``#[test]``/``#[bench]``.
+
+    Also handles path-style attributes such as ``#[tokio::test]`` and
+    ``#[tokio::test(flavor = "multi_thread")]``.
+    """
+    test_attr_re = re.compile(r"#\[(?:[\w_]+::)*(?:test|bench)\b")
     line_start = code.rfind("\n", 0, fn_start) + 1
     prev = line_start - 1
     while prev > 0 and code[prev] == "\n":
@@ -1026,7 +1031,7 @@ def _has_rust_test_attribute(code: str, fn_start: int) -> bool:
         prev_line = re.sub(r"//.*", "", code[prev_line_start : prev + 1]).strip()
         if not prev_line:
             break
-        if prev_line.startswith(("#[test]", "#[bench]")):
+        if test_attr_re.search(prev_line):
             return True
         if not prev_line.startswith("#"):
             break

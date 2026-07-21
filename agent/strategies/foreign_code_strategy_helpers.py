@@ -566,6 +566,82 @@ def _go_declared_constants(source: str) -> dict[str, int]:
     return constants
 
 
+def _go_nonzero_constants(source: str) -> set[str]:
+    """Return top-level Go ``const`` names whose literal value is non-zero.
+
+    Includes both integer and floating-point constants so that divide-by-zero
+    checks do not flag divisions by named constants such as ``aggregateWeight = 0.5``.
+    """
+    nonzero: set[str] = set()
+
+    def _is_nonzero_literal(text: str) -> bool:
+        text = _strip_go_rust_literals_and_comments(text).strip()
+        parsed = semantic_safety.parse_int_literal(text)
+        if parsed is not None:
+            return parsed != 0
+        try:
+            return float(text) != 0.0
+        except ValueError:
+            return False
+
+    for match in re.finditer(
+        r"^\s*const\s+(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", source, re.MULTILINE
+    ):
+        name, value = match.group(1), match.group(2)
+        if _is_nonzero_literal(value):
+            nonzero.add(name)
+    for match in re.finditer(r"^\s*const\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL):
+        block = match.group(1)
+        for m in re.finditer(
+            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", block, re.MULTILINE
+        ):
+            name, value = m.group(1), m.group(2)
+            if _is_nonzero_literal(value):
+                nonzero.add(name)
+    return nonzero
+
+
+def _go_expression_is_float(expression: str, float_vars: set[str]) -> bool:
+    """Heuristic: is ``expression`` a Go floating-point expression?"""
+    text = _strip_go_rust_literals_and_comments(expression)
+    # Explicit float conversion or float literal.
+    if re.search(r"\b(?:float64|float32)\s*\(", text):
+        return True
+    if re.search(r"\b\d+\.\d+(?:[eE][-+]?\d+)?\b|\b\d+[eE][-+]?\d+\b", text):
+        return True
+    # If any top-level operand is already float, the whole expression is float.
+    for part in _split_top_level_operators(text, ("+", "-", "*", "/", "%")):
+        part = part.strip().lstrip("-").strip()
+        if not part:
+            continue
+        if re.search(r"\b(?:float64|float32)\s*\(", part):
+            return True
+        if re.search(r"\b\d+\.\d+(?:[eE][-+]?\d+)?\b|\b\d+[eE][-+]?\d+\b", part):
+            return True
+        # An operand that is a single known float variable is enough.
+        if part in float_vars:
+            return True
+    return False
+
+
+def _go_float_variables(body: str) -> set[str]:
+    """Return local variable names that are initialized with floating-point values."""
+    float_vars: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for match in re.finditer(
+            r"^\s*(\w+)\s*:=\s*([^;\n]+)$", body, re.MULTILINE
+        ):
+            name, rhs = match.group(1), match.group(2).strip()
+            if name in float_vars:
+                continue
+            if _go_expression_is_float(rhs, float_vars):
+                float_vars.add(name)
+                changed = True
+    return float_vars
+
+
 def _solidity_is_default_checked_arithmetic(source: str) -> bool:
     """Return True when the file's pragma indicates Solidity >=0.8.0.
 
@@ -1215,6 +1291,8 @@ def _detect_go_safety_issues(
             )
             first_param = _go_first_param_name(fn.params_text)
             suppress_callback_nil = not is_method and fn.name in callback_names and first_param is not None
+            guaranteed_nonzero = _go_nonzero_constants(source)
+            float_variables = _go_float_variables(body)
             for index, expression in enumerate(expressions):
                 expr_issues = _issues_for_expression(
                     fn.name,
@@ -1226,6 +1304,8 @@ def _detect_go_safety_issues(
                     mapping_names=go_map_names,
                     known_constants=known_constants or {},
                     parallel_slicing=parallel_slicing,
+                    guaranteed_nonzero=guaranteed_nonzero,
+                    float_variables=float_variables,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1274,9 +1354,11 @@ def _detect_go_safety_issues(
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     go_map_names = _go_map_names(source)
+    guaranteed_nonzero = _go_nonzero_constants(source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
+        float_variables = _go_float_variables(body)
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
         local_names = _local_variable_names(body, "go")
@@ -1308,6 +1390,8 @@ def _detect_go_safety_issues(
                 param_types=param_types,
                 mapping_names=go_map_names,
                 known_constants=known_constants or {},
+                guaranteed_nonzero=guaranteed_nonzero,
+                float_variables=float_variables,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -1530,6 +1614,7 @@ def _division_safety_issue(
     label: str,
     known_constants: dict[str, int],
     guaranteed_nonzero: set[str] | None = None,
+    float_variables: set[str] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A non-zero `constant`/`immutable` divisor (e.g. `x % N` where N is the
     # secp256r1 curve order) can never be zero, so don't emit a bogus
@@ -1537,6 +1622,9 @@ def _division_safety_issue(
     if known_constants.get(divisor, 0) != 0:
         return None
     if guaranteed_nonzero and divisor in guaranteed_nonzero:
+        return None
+    if float_variables and divisor in float_variables:
+        # Go float division by zero produces +/-Inf or NaN, not a panic.
         return None
     return ForeignSafetyIssue(
         function_name=function_name,
@@ -1643,6 +1731,7 @@ def _issues_for_expression(
     guaranteed_nonzero: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
+    float_variables: set[str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1666,6 +1755,7 @@ def _issues_for_expression(
             mapping_names=mapping_names,
             parallel_slicing=parallel_slicing,
             guarded_indices=guarded_indices,
+            float_variables=float_variables,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1710,7 +1800,12 @@ def _issues_for_expression(
             expression,
         ):
             issue = _division_safety_issue(
-                function_name, match.group("right"), label, known_constants, guaranteed_nonzero
+                function_name,
+                match.group("right"),
+                label,
+                known_constants,
+                guaranteed_nonzero,
+                float_variables,
             )
             if issue is not None:
                 issues.append(issue)
@@ -1737,6 +1832,7 @@ def _issues_from_findings(
     known_constants: dict[str, int],
     guaranteed_nonzero: set[str] | None = None,
     local_names: set[str] | None = None,
+    float_variables: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
@@ -1749,6 +1845,7 @@ def _issues_from_findings(
     builders so messages, counterexamples and required contracts are identical.
     """
     issues: list[ForeignSafetyIssue] = []
+    float_divisors = float_variables or set()
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
             issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices)
@@ -1764,8 +1861,10 @@ def _issues_from_findings(
             issues.append(_null_safety_issue(function_name, value, label))
     if label not in {"TypeScript", "JavaScript"}:
         for divisor in findings.divisors:
+            if divisor in float_divisors:
+                continue
             issue = _division_safety_issue(
-                function_name, divisor, label, known_constants, guaranteed_nonzero
+                function_name, divisor, label, known_constants, guaranteed_nonzero, float_variables
             )
             if issue is not None:
                 issues.append(issue)
@@ -1991,6 +2090,14 @@ def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
         return True
     return any(pattern.search(body) for pattern in _SOLIDITY_ACCESS_GUARD_PATTERNS)
 
+def _solidity_named_return_params(attrs: str) -> set[str]:
+    """Return the named return-parameter names declared in ``returns (...)``."""
+    match = re.search(r"\breturns\s*\(([^)]*)\)", attrs)
+    if not match:
+        return set()
+    return set(_solidity_params(match.group(1)).keys())
+
+
 def _solidity_cei_issue(name: str, attrs: str, body: str) -> ForeignSafetyIssue | None:
     trace_result = _solidity_reentrancy_trace(name, attrs, body)
     if trace_result is None:
@@ -2038,8 +2145,11 @@ def _solidity_call_snippet(body: str, offset: int, fallback: str) -> str:
         return fallback
     return tail[:120]
 
-def _solidity_ordered_op_trace(body: str) -> list[_SolidityOpTraceItem]:
+def _solidity_ordered_op_trace(
+    body: str, named_returns: set[str] | None = None
+) -> list[_SolidityOpTraceItem]:
     ops: list[_SolidityOpTraceItem] = []
+    named_returns = named_returns or set()
     for match in _SOLIDITY_OP_TRACE_PATTERN.finditer(body):
         if match.group("externalCall") is not None:
             offset = match.start("externalCall")
@@ -2052,6 +2162,9 @@ def _solidity_ordered_op_trace(body: str) -> list[_SolidityOpTraceItem]:
             continue
         if match.group("stateWrite") is not None:
             lhs = match.group("lhs") or ""
+            if lhs in named_returns:
+                # Assignments to named return parameters are local, not storage writes.
+                continue
             statement_start = max(
                 body.rfind(";", 0, match.start("stateWrite")),
                 body.rfind("{", 0, match.start("stateWrite")),
@@ -2091,7 +2204,7 @@ def _solidity_manual_lock_guard_present(body: str) -> bool:
     return False
 
 def _solidity_reentrancy_trace(name: str, attrs: str, body: str) -> tuple[str, list[str]] | None:
-    ops = _solidity_ordered_op_trace(body)
+    ops = _solidity_ordered_op_trace(body, named_returns=_solidity_named_return_params(attrs))
     if not any(op.kind == "externalCall" for op in ops):
         return None
     if not any(op.kind == "stateWrite" for op in ops):
@@ -2166,7 +2279,7 @@ def extract_solidity_guard_trace_atoms(
         body = _balanced_brace_body(source, match.end() - 1)
         ordered_ops = [
             op.kind
-            for op in _solidity_ordered_op_trace(body)
+            for op in _solidity_ordered_op_trace(body, named_returns=set())
             if op.kind == "externalCall"
         ]
         if not ordered_ops:

@@ -2639,3 +2639,68 @@ func (d *testingData) Swap(i, j int) { d.data[i], d.data[j] = d.data[j], d.data[
 """
     issues = _detect_go_safety_issues(source)
     assert not any("testingData" in i.message for i in issues)
+
+
+def test_go_float_variables_detects_float_cast() -> None:
+    """Local variables initialized with ``float64`` casts are tracked as float."""
+    from agent.strategies.foreign_code_strategy_helpers import _go_float_variables
+
+    body = """topicWeight := attestationTotalWeight / float64(subnetCount)
+return topicWeight"""
+    assert "topicWeight" in _go_float_variables(body)
+
+
+def test_detect_go_safety_issues_skips_float_division() -> None:
+    """Dividing by a float64 local variable does not panic in Go."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package demo
+
+func maxScore() float64 { return 1.0 }
+func f() float64 {
+    topicWeight := 1.0 / float64(2)
+    return -maxScore() / topicWeight
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("topicWeight" in i.message for i in issues)
+
+
+def test_detect_solidity_contract_issues_skips_named_return_assignment() -> None:
+    """Assigning to a named return parameter is a local write, not a state write."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """library L {
+    function deploy(bytes32 salt) internal returns (address reservesLens) {
+        (bool success, bytes memory ret) = F.call(abi.encodePacked(salt));
+        require(success);
+        reservesLens = address(uint160(bytes20(ret)));
+    }
+}
+"""
+    issues = _detect_solidity_contract_issues(source)
+    assert not any("reentrancy" in i.message for i in issues)
+
+
+def test_infer_rust_contracts_skips_tokio_test_attribute() -> None:
+    """Functions annotated with ``#[tokio::test]`` are not audited as contracts."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = """#[tokio::test]
+async fn v1_password_parameter() {
+    let x = ("db", "foo");
+}
+"""
+    atoms = _infer_rust_contracts(source)
+    assert not any(a.name == "v1_password_parameter" for a in atoms)
+
+
+def test_infer_rust_contracts_cfg_test_not_skipped() -> None:
+    """Functions annotated with ``#[cfg(test)]`` are still audited."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = """#[cfg(test)]
+fn real_func() {}
+"""
+    atoms = _infer_rust_contracts(source)
+    assert any(a.name == "real_func" for a in atoms)
