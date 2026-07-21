@@ -768,9 +768,9 @@ def _go_nil_dereference_values(
         candidates = _go_nil_dereference_values_regex(expression)
     return _dedupe_strings(
         [
-            value
+            _safe_identifier(value)
             for value in candidates
-            if eligible_values is None or value in eligible_values
+            if eligible_values is None or _safe_identifier(value) in eligible_values
         ]
     )
 
@@ -3333,6 +3333,9 @@ def _mask_nested_function_literals(body: str, language: str) -> str:
     return body
 
 
+_MUMEI_RESERVED_IDENTIFIERS = {"call"}
+
+
 def _safe_identifier(value: str) -> str:
     safe = re.sub(r"\W+", "_", value.strip())
     safe = safe.strip("_")
@@ -3340,4 +3343,6 @@ def _safe_identifier(value: str) -> str:
         return "cross_validation_atom"
     if safe[0].isdigit():
         return f"atom_{safe}"
+    if safe in _MUMEI_RESERVED_IDENTIFIERS:
+        return f"{safe}_"
     return safe

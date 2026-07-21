@@ -431,6 +431,11 @@ def _default_literal(type_name: str) -> str:
         return "()"
     return "0"
 
+_MUMEI_RESERVED_IDENTIFIERS = {
+    "call",
+}
+
+
 def _safe_identifier(value: str) -> str:
     safe = re.sub(r"\W+", "_", value.strip())
     safe = safe.strip("_")
@@ -438,6 +443,8 @@ def _safe_identifier(value: str) -> str:
         return "foreign_code_atom"
     if safe[0].isdigit():
         return f"atom_{safe}"
+    if safe in _MUMEI_RESERVED_IDENTIFIERS:
+        return f"{safe}_"
     return safe
 
 def _normalize_language(language: str) -> str:
@@ -583,10 +590,10 @@ def _evaluate_solidity_constant_expression(expr: str, constants: dict[str, int])
                     return None
                 return left // right
             if isinstance(node.op, ast.Pow):
-                try:
-                    return left ** right
-                except (ValueError, OverflowError):
+                if right < 0 or right > 1024:
                     return None
+                result = left ** right
+                return result if isinstance(result, int) else None
             return None
         if isinstance(node, ast.UnaryOp):
             operand = _eval(node.operand)
@@ -687,7 +694,7 @@ def _go_actor_nonnil_params(
     if "*Builder" in values and "context.Context" in values and "*Action" in values:
         for name, raw in type_by_name.items():
             if raw in {"*Builder", "*Action"}:
-                nonnil.add(name)
+                nonnil.add(_safe_identifier(name))
     return nonnil
 
 
@@ -1854,7 +1861,7 @@ def _go_type_basename(raw_type: str) -> str:
 def _go_nonnil_param_names(param_types: dict[str, str]) -> set[str]:
     """Names of params/receivers whose type marks them as non-nil containers."""
     return {
-        name
+        _safe_identifier(name)
         for name, raw_type in param_types.items()
         if (
             _go_type_basename(raw_type).removesuffix("?").endswith(tuple(_GO_NONNIL_TYPE_SUFFIXES))
@@ -2993,9 +3000,9 @@ def _go_nil_dereference_values(
         candidates = _go_nil_dereference_values_regex(expression)
     return _dedupe_strings(
         [
-            value
+            _safe_identifier(value)
             for value in candidates
-            if eligible_values is None or value in eligible_values
+            if eligible_values is None or _safe_identifier(value) in eligible_values
         ]
     )
 
