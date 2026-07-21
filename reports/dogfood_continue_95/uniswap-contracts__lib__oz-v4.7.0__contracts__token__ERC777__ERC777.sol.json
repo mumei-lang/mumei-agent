@@ -1,0 +1,40 @@
+{
+  "success": false,
+  "source_file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/token/ERC777/ERC777.sol",
+  "language": "solidity",
+  "spec_extracted": true,
+  "verification_status": "verified",
+  "spec_health_issues": [],
+  "verification_violations": [
+    "Solidity function `authorizeOperator` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless",
+    "Solidity function `revokeOperator` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless"
+  ],
+  "counterexample_values": [],
+  "cross_validation_gaps": [],
+  "migration_hints": [],
+  "healed_files": [],
+  "heal_errors": [],
+  "next_steps": [
+    {
+      "priority": "high",
+      "action": "migrate-suggest で .mm スケルトンを生成",
+      "command": "mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm"
+    }
+  ],
+  "proof_certificate": {
+    "version": "1.0",
+    "timestamp": "2026-07-21T23:27:52.712534Z",
+    "mumei_version": "agent",
+    "z3_version": "Z3 version 4.16.0",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/token/ERC777/ERC777.sol",
+    "atoms": [],
+    "package_name": "ERC777",
+    "package_version": "0",
+    "certificate_hash": "8b05b0ab30b915421a2dbc747c6a705dd786b66190512a4b3679a0d5232816bc",
+    "all_verified": false
+  },
+  "lean_bridge": null,
+  "report": "Audit found issues: /home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/token/ERC777/ERC777.sol\nlanguage: solidity\nspec_extracted: True\nverification_status: verified\nspec_health_issues: []\nverification_violations: ['Solidity function `authorizeOperator` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless', 'Solidity function `revokeOperator` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless']\ncounterexample_values: []\ncross_validation_gaps: []\nmigration_hints:\n  []\nhealed_files: []\nheal_errors: []\nnext_steps:\n  - priority: high\n    action: migrate-suggest で .mm スケルトンを生成\n    command: mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm",
+  "errors": [],
+  "skipped_rate_limited": false
+}

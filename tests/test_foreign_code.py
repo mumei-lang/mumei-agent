@@ -3592,3 +3592,45 @@ def test_detect_solidity_safety_issues_constant_power_divisor() -> None:
 '''
     issues = _detect_safety_issues(source, "solidity")
     assert not any("divide by" in issue.message for issue in issues)
+
+
+def test_detect_go_safety_issues_equal_length_slice_index() -> None:
+    """Index into a parallel slice is safe when lengths are checked equal."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+func shorterThan(s, t []string) bool {
+    if len(s) != len(t) {
+        return len(s) < len(t)
+    }
+    for i := range s {
+        if s[i] != t[i] {
+            return s[i] < t[i]
+        }
+    }
+    return false
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("index" in issue.message.lower() for issue in issues)
+
+
+def test_detect_go_safety_issues_error_interface_method_non_nil() -> None:
+    """``error`` interface ``Error``/``Unwrap`` methods are invoked on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package p
+
+type PackageError struct{ Pos string; Err error }
+
+func (p *PackageError) Error() string {
+    return p.Pos + ": " + p.Err.Error()
+}
+
+func (p *PackageError) Unwrap() error {
+    return p.Err
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)

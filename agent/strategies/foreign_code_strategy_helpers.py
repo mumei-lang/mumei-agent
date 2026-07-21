@@ -1484,6 +1484,24 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
     return contracts
 
 
+def _go_method_body_params_text(params_text: str) -> str:
+    """Return the parameter text of a Go method excluding the receiver.
+
+    Standalone function parameter lists are returned unchanged.
+    """
+    parts = [p.strip() for p in params_text.split(",")]
+    if len(parts) > 1:
+        return ", ".join(parts[1:])
+    # Single part: if it looks like a receiver (``name Type``), there are no
+    # body parameters; otherwise this is a standalone single-parameter list.
+    if re.fullmatch(
+        r"[A-Za-z_]\w*\s+(\*?\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_]\w*)?)\.?",
+        parts[0],
+    ):
+        return ""
+    return parts[0]
+
+
 def _go_is_known_interface_method(
     name: str,
     params_text: str,
@@ -1496,6 +1514,9 @@ def _go_is_known_interface_method(
     """
     if not name or not params_text:
         return False
+    # The first parameter is the receiver; interface signatures are about the
+    # remaining parameters.
+    params_text = _go_method_body_params_text(params_text)
     ret = return_type or ""
     if name == "RoundTrip" and "*http.Request" in params_text and "*http.Response" in ret:
         return True
@@ -1567,6 +1588,11 @@ def _go_is_known_interface_method(
     if name == "MarshalText" and ret.startswith("([]byte") and "error" in ret:
         return True
     if name == "UnmarshalText" and "[]byte" in params_text and "error" in ret:
+        return True
+    # ``error`` interface methods are invoked on non-nil concrete error values.
+    if name == "Error" and not params_text.strip() and "string" in ret:
+        return True
+    if name == "Unwrap" and not params_text.strip() and "error" in ret:
         return True
     # Uploader/Client ``Upload`` methods (e.g. image uploader, S3 client wrappers)
     # are interface methods invoked on non-nil concrete values.
@@ -1921,6 +1947,47 @@ def _go_parallel_slice_index_safe_pairs(body: str) -> set[tuple[str, str]]:
     return safe
 
 
+def _go_equal_length_slice_index_safe_pairs(body: str) -> set[tuple[str, str]]:
+    """Return safe ``(container, index)`` pairs when slice lengths are checked equal.
+
+    A pattern like::
+
+        if len(a) != len(b) { return ... }
+        for i := range a { ... b[i] ... }
+
+    guarantees ``b[i]`` is in-bounds because the early return ensures
+    ``len(a) == len(b)`` and ``range a`` gives ``0 <= i < len(a)``.
+    """
+    safe: set[tuple[str, str]] = set()
+    # Find early-return length-equality checks.  The body of the ``if`` is
+    # assumed simple enough to be matched by a non-greedy/no-nested-brace
+    # pattern; this is only used for the common ``if len(x) != len(y) { return }``
+    # idiom.
+    equal_pairs: list[tuple[str, str]] = []
+    for match in re.finditer(
+        r"\bif\s+len\((\w+)\)\s*!=\s*len\((\w+)\)\s*\{[^}]*\breturn\b[^}]*\}",
+        body,
+    ):
+        a, b = match.group(1), match.group(2)
+        equal_pairs.extend([(a, b), (b, a)])
+
+    range_domains: dict[str, str] = {}
+    for match in re.finditer(r"\bfor\s+(\w+)\s*:=\s*range\s+(\w+)\b", body):
+        index, domain = match.group(1), match.group(2)
+        range_domains[domain] = index
+    for match in re.finditer(
+        r"\bfor\s+(\w+)\s*:=\s*0\s*;\s*\1\s*<\s*len\((\w+)\)\s*;",
+        body,
+    ):
+        index, domain = match.group(1), match.group(2)
+        range_domains[domain] = index
+
+    for domain, other in equal_pairs:
+        if domain in range_domains:
+            safe.add((other, range_domains[domain]))
+    return safe
+
+
 def _detect_go_safety_issues(
     source: str,
     *,
@@ -1963,7 +2030,7 @@ def _detect_go_safety_issues(
                 return_type=fn.return_type,
             )
             local_names = _local_variable_names(body, "go")
-            parallel_slicing = _go_parallel_slice_index_safe_pairs(body)
+            parallel_slicing = _go_parallel_slice_index_safe_pairs(body) | _go_equal_length_slice_index_safe_pairs(body)
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
             guarded_indices = _go_guarded_indices(body) | _go_runtime_level_guarded_indices(
