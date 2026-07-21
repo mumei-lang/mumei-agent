@@ -1255,6 +1255,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Client", "Provider", "Server", "Resolver", "Registry", "Factory",
     "Key",  # cryptographic key types (PublicKey, PrivateKey, etc.)
     "Alloc",  # runtime/pageAlloc-style allocators are embedded in a parent object
+    "V1",  # Grafana provisioning API config DTOs (e.g. MuteTimeV1) are unmarshaled non-nil
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
