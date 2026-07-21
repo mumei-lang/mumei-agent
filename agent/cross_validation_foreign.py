@@ -46,8 +46,11 @@ def _dedupe_strings(values: list[str]) -> list[str]:
 
 def _strip_go_rust_literals_and_comments(text: str) -> str:
     def mask(span: str) -> str:
+        return "".join("\n" if char == "\n" else " " for char in span)
+
+    def mask_literal(span: str) -> str:
         # Keep quote delimiters so the resulting source remains syntactically
-        # valid for tree-sitter; only mask the literal/comment contents.
+        # valid for tree-sitter; only mask the literal contents.
         if len(span) <= 2:
             return span
         return span[0] + "".join("\n" if char == "\n" else " " for char in span[1:-1]) + span[-1]
@@ -147,24 +150,24 @@ def _strip_go_rust_literals_and_comments(text: str) -> str:
             continue
         raw_end = consume_rust_raw_string(i)
         if raw_end:
-            stripped.append(mask(text[i:raw_end]))
+            stripped.append(mask_literal(text[i:raw_end]))
             i = raw_end
             continue
         char = text[i]
         if char == '"':
             end = consume_string(i, char)
-            stripped.append(mask(text[i:end]))
+            stripped.append(mask_literal(text[i:end]))
             i = end
             continue
         if char == "'":
             end = consume_char_literal(i)
             if end:
-                stripped.append(mask(text[i:end]))
+                stripped.append(mask_literal(text[i:end]))
                 i = end
                 continue
         if char == "`":
             end = consume_string(i, char)
-            stripped.append(mask(text[i:end]))
+            stripped.append(mask_literal(text[i:end]))
             i = end
             continue
         stripped.append(char)
