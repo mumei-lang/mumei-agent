@@ -1,0 +1,37 @@
+{
+  "success": true,
+  "source_file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/utils/math/SafeMath.sol",
+  "language": "solidity",
+  "spec_extracted": true,
+  "verification_status": "verified",
+  "spec_health_issues": [],
+  "verification_violations": [],
+  "counterexample_values": [],
+  "cross_validation_gaps": [],
+  "migration_hints": [],
+  "healed_files": [],
+  "heal_errors": [],
+  "next_steps": [
+    {
+      "priority": "info",
+      "action": "監査完了。追加の .mm 移行は不要",
+      "command": ""
+    }
+  ],
+  "proof_certificate": {
+    "version": "1.0",
+    "timestamp": "2026-07-21T14:49:22.999254Z",
+    "mumei_version": "agent",
+    "z3_version": "Z3 version 4.16.0",
+    "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/utils/math/SafeMath.sol",
+    "atoms": [],
+    "package_name": "SafeMath",
+    "package_version": "0",
+    "certificate_hash": "40cded1ef6443aa771b13e54c766e4eca7b3f47cd7464413447a48370e392902",
+    "all_verified": false
+  },
+  "lean_bridge": null,
+  "report": "Audit passed: /home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/utils/math/SafeMath.sol\nlanguage: solidity\nspec_extracted: True\nverification_status: verified\nspec_health_issues: []\nverification_violations: []\ncounterexample_values: []\ncross_validation_gaps: []\nmigration_hints:\n  []\nhealed_files: []\nheal_errors: []\nnext_steps:\n  - priority: info\n    action: 監査完了。追加の .mm 移行は不要\n    command: ",
+  "errors": [],
+  "skipped_rate_limited": false
+}
