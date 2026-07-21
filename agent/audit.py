@@ -305,7 +305,9 @@ class AuditPipeline:
                 )
 
             try:
-                foreign_result = self.foreign_code_verifier.verify(source_code, audit_language)
+                foreign_result = self.foreign_code_verifier.verify(
+                    source_code, audit_language, source_file=str(source_path)
+                )
                 verification_violations = _verification_issue_strings(foreign_result)
                 counterexample_values = _counterexample_value_dicts(foreign_result)
                 verification_status = _verification_status_from_foreign_result(

@@ -212,7 +212,7 @@ def test_solidity_declared_constants_parses_hex_and_decimal() -> None:
     constants = _solidity_declared_constants(source)
     assert constants["N"] != 0
     assert constants["EVM_TREE_RADIX"] == 16
-    assert "DERIVED" not in constants  # non-literal initializer skipped
+    assert constants["DERIVED"] == 17  # derived constant expressions are resolved
 
 
 def test_go_declared_constants_parses_all_literal_bases_and_skips_expressions() -> None:
@@ -3634,3 +3634,42 @@ func (p *PackageError) Unwrap() error {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_detect_solidity_contract_issues_skips_mocks() -> None:
+    """OpenZeppelin-style test mocks under ``mocks/`` are test-only artifacts."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_solidity_contract_issues,
+    )
+
+    source = '''abstract contract BaseRelayMock {
+    address internal _currentSender;
+    function relayAs(address target, bytes calldata data, address sender) external virtual {
+        _currentSender = sender;
+        (bool success, bytes memory returndata) = target.call(data);
+        _currentSender = address(0);
+    }
+}
+'''
+    assert _detect_solidity_contract_issues(source) == []
+    assert _detect_solidity_contract_issues(
+        source, source_file="/contracts/mocks/crosschain/bridges.sol"
+    ) == []
+
+
+def test_detect_solidity_safety_issues_constant_expression_divisor() -> None:
+    """Composite constant expressions such as ``ADDR_SIZE + FEE_SIZE`` are non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''library Path {
+    uint256 private constant ADDR_SIZE = 20;
+    uint256 private constant FEE_SIZE = 3;
+    uint256 private constant NEXT_OFFSET = ADDR_SIZE + FEE_SIZE;
+
+    function numPools(bytes memory path) internal pure returns (uint256) {
+        return ((path.length - ADDR_SIZE) / NEXT_OFFSET);
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "solidity")
+    assert not any("divide by" in issue.message for issue in issues)
