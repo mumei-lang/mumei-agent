@@ -160,6 +160,11 @@ def to_mumei_atom(spec: ForeignCodeSpec) -> str:
         for name, type_name in spec.params.items()
     )
     return_type = _mumei_type(spec.return_type)
+    if return_type in ("i64", "u64") and any(
+        re.search(r'result\s*==\s*"[^"]*"', clause) for clause in spec.postconditions
+    ):
+        # Named string types (e.g. backendplugin.Target) return string literals.
+        return_type = "string"
     requires = _join_contracts(spec.preconditions)
     declared = {
         _safe_identifier(spec.function_name),
@@ -1591,6 +1596,7 @@ def _go_nonnil_param_names(param_types: dict[str, str]) -> set[str]:
         if (
             _go_type_basename(raw_type).removesuffix("?").endswith(tuple(_GO_NONNIL_TYPE_SUFFIXES))
             or _go_type_basename(raw_type).removesuffix("?") in _GO_NONNIL_EXACT_TYPES
+            or _go_type_basename(raw_type).removesuffix("?").startswith("Fake")
         )
     }
 

@@ -2787,6 +2787,42 @@ func (cs *clientStream) writeRequest(req *ClientRequest) int {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_go_fake_receivers_are_non_nil() -> None:
+    """Generated ``Fake*`` test-double receivers are non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package pluginfakes
+
+type FakePluginInstaller struct{ AddFunc func() }
+
+func (i *FakePluginInstaller) Add() {
+    if i.AddFunc != nil {
+        i.AddFunc()
+    }
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_go_named_string_return_type_inferred_from_literal() -> None:
+    """A Go function returning a string literal gets a string Mumei return type."""
+    from agent.cross_validation import _infer_go_contracts
+
+    source = """package p
+
+type Target string
+
+func (t *Target) Target() Target {
+    return "test-target"
+}
+"""
+    atoms = _infer_go_contracts(source)
+    target_atom = next(a for a in atoms if a.name == "Target")
+    assert target_atom.return_type == "string"
+    assert target_atom.ensures == "true"
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
