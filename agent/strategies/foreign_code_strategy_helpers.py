@@ -1810,6 +1810,33 @@ def _is_pointer_arithmetic_expression(expression: str, left: str, right: str) ->
     return False
 
 
+def _is_roundup_expression(expression: str, left: str, right: str) -> bool:
+    """Return True for the idiomatic Go alignment pattern.
+
+    ``(x + y - 1) &^ (y - 1)`` rounds ``x`` up to a multiple of ``y``.  The
+    intermediate ``+`` can overflow in the abstract, but the bitmask discards
+    the wrapped bits for valid (non-negative) ``y`` values, and this pattern is
+    widely used in runtime/network code where the alignment is a small positive
+    constant.
+    """
+    if "&^" not in expression:
+        return False
+    mask_match = re.search(
+        r"&\^\s*\(?\s*([A-Za-z_]\w*)\s*-\s*1", expression
+    )
+    if not mask_match:
+        return False
+    mask_var = mask_match.group(1)
+    if mask_var not in (left, right):
+        return False
+    left_side = expression[: mask_match.start()]
+    pattern = (
+        rf"\b{re.escape(left)}\b\s*\+\s*\b{re.escape(right)}\b(?:\s*-\s*1)?"
+        rf"|\b{re.escape(right)}\b\s*\+\s*\b{re.escape(left)}\b(?:\s*-\s*1)?"
+    )
+    return bool(re.search(pattern, left_side))
+
+
 def _i64_overflow_safety_issue(
     function_name: str,
     left: str,
@@ -1820,6 +1847,8 @@ def _i64_overflow_safety_issue(
     known_constants: dict[str, int] | None = None,
 ) -> ForeignSafetyIssue | None:
     if _is_pointer_arithmetic_expression(expression, left, right):
+        return None
+    if label == "Go" and _is_roundup_expression(expression, left, right):
         return None
     if local_names and (left in local_names or right in local_names):
         # Arithmetic over local loop variables cannot be expressed as a

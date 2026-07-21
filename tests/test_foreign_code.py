@@ -2794,3 +2794,20 @@ func expandRHS(n *Named) Type {
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in i.message for i in issues)
 
+def test_detect_go_safety_issues_skips_roundup_alignment_pattern() -> None:
+    """The idiomatic ``(x + align - 1) &^ (align - 1)`` roundup is trusted."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package routebsd
+
+var kernelAlign int
+
+func roundup(l int) int {
+    if l == 0 {
+        return kernelAlign
+    }
+    return (l + kernelAlign - 1) &^ (kernelAlign - 1)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("overflow" in i.message for i in issues)
