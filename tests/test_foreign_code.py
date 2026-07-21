@@ -2557,6 +2557,27 @@ func compareChainHeads(chainHeads []*ChainHead) error {
     assert not any("can index" in i.message for i in issues)
 
 
+def test_go_safety_suppresses_guarded_index_in_len_check() -> None:
+    """``if k >= 0 && int(k) < len(arr) { return arr[k] }`` is a bounds-safe guard."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package slog
+
+var kindStrings = []string{"Any", "Bool"}
+
+type Kind int
+
+func (k Kind) String() string {
+    if k >= 0 && int(k) < len(kindStrings) {
+        return kindStrings[k]
+    }
+    return "<unknown>"
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)
+
+
 def test_solidity_named_bool_return_ensures_is_safe() -> None:
     """Named Solidity return values (``returns (bool flag)``) must not produce an i64-typed boolean expression."""
     from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
