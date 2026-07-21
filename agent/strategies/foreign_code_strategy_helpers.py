@@ -850,6 +850,13 @@ _GO_BUILTIN_TYPES = {
     "bool", "byte", "rune", "error", "any", "comparable",
 }
 
+# Framework/container types whose methods are always invoked on non-nil values.
+# These are caller-contract false positives rather than verifiable preconditions.
+_GO_NONNIL_TYPE_SUFFIXES = {
+    "Service", "Node", "Handler", "Manager", "Store",
+    "Client", "Provider", "Server", "Resolver", "Registry", "Factory",
+}
+
 
 def _go_package_name(source: str) -> str:
     """Return the Go package clause from ``source`` (without a path)."""
@@ -1073,6 +1080,20 @@ def _go_method_receiver_type(params_text: str) -> str | None:
     return rtype
 
 
+def _go_type_basename(raw_type: str) -> str:
+    """Return the unqualified type name without leading stars or brackets."""
+    return raw_type.strip().lstrip("*").split(".")[-1].rstrip("]")
+
+
+def _go_nonnil_param_names(param_types: dict[str, str]) -> set[str]:
+    """Names of params/receivers whose type marks them as non-nil containers."""
+    return {
+        name
+        for name, raw_type in param_types.items()
+        if _go_type_basename(raw_type).removesuffix("?").endswith(tuple(_GO_NONNIL_TYPE_SUFFIXES))
+    }
+
+
 def _go_flag_value_receiver_types(functions: list) -> set[str]:
     """Return receiver types that implement ``flag.Value`` (String + Set methods).
 
@@ -1264,6 +1285,7 @@ def _detect_go_safety_issues(
             body = fn.body
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
+            nonnil_param_names = _go_nonnil_param_names(param_types)
             local_names = _local_variable_names(body, "go")
             parallel_slicing = _go_parallel_slice_index_safe_pairs(body)
             expressions = _return_expressions(body, fallback=False, language="go")
@@ -1298,7 +1320,7 @@ def _detect_go_safety_issues(
                     fn.name,
                     expression,
                     "Go",
-                    dereference_values=param_names,
+                    dereference_values=param_names - nonnil_param_names,
                     local_names=local_names,
                     param_types=param_types,
                     mapping_names=go_map_names,
@@ -1361,6 +1383,7 @@ def _detect_go_safety_issues(
         float_variables = _go_float_variables(body)
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
+        nonnil_param_names = _go_nonnil_param_names(param_types)
         local_names = _local_variable_names(body, "go")
         expressions = _return_expressions(body, fallback=False, language="go")
         guarded = _go_nil_guarded_return_values(body)
@@ -1385,7 +1408,7 @@ def _detect_go_safety_issues(
                 _safe_identifier(name),
                 expression,
                 "Go",
-                dereference_values=param_names,
+                dereference_values=param_names - nonnil_param_names,
                 local_names=local_names,
                 param_types=param_types,
                 mapping_names=go_map_names,
