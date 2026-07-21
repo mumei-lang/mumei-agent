@@ -2569,3 +2569,21 @@ library L {
     issues = _detect_block_safety_issues(source, blocks, "Solidity")
     assert not any(i.function_name == "getAmount0" for i in issues)
     assert "sqrtRatioAX96" in _solidity_guaranteed_nonzero_params(source)
+
+
+def test_go_sort_interface_methods_suppress_nil_receiver() -> None:
+    """sort.Interface implementers (Len/Less/Swap) are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = """package sort_test
+
+type testingData struct {
+    data []int
+}
+
+func (d *testingData) Len() int { return len(d.data) }
+func (d *testingData) Less(i, j int) bool { return d.data[i] < d.data[j] }
+func (d *testingData) Swap(i, j int) { d.data[i], d.data[j] = d.data[j], d.data[i] }
+"""
+    issues = _detect_go_safety_issues(source)
+    assert not any("testingData" in i.message for i in issues)
