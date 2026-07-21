@@ -656,8 +656,8 @@ def _go_float_variables(body: str) -> set[str]:
 
 _RUST_FLOAT_METHODS = (
     "round|floor|ceil|sqrt|powf|exp|ln|log|log2|log10|sin|cos|tan|"
-    "asin|acos|atan|atan2|sinh|cosh|tanh|trunc|fract|abs|signum|recip|"
-    "to_degrees|to_radians|mul_add|clamp|min|max"
+    "asin|acos|atan|atan2|sinh|cosh|tanh|trunc|fract|recip|"
+    "to_degrees|to_radians|mul_add"
 )
 
 
