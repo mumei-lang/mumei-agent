@@ -2760,3 +2760,37 @@ func tokStrFast(tok int) string {
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in i.message for i in issues)
 
+
+def test_detect_go_safety_issues_skips_global_lookup_table_index() -> None:
+    """Exported constant indexing an exported package-level table is a valid lookup."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package types2
+
+func expandRHS(n *Named) Type {
+    return Typ[Invalid]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_global_array_keys_all_entries() -> None:
+    """All keyed entries of a package-level array literal are recognized."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package types2
+
+var Typ = [...]*Basic{
+    Invalid: {Invalid, 0, "invalid"},
+    Bool:    {Bool, IsBoolean, "bool"},
+    Int:     {Int, IsInteger, "int"},
+}
+
+func expandRHS(n *Named) Type {
+    return Typ[Int]
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in i.message for i in issues)
+

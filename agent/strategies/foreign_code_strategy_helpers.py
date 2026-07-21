@@ -661,6 +661,53 @@ def _go_doc_comment_suppresses_bounds(source: str, start_char: int) -> bool:
     )
 
 
+def _go_global_array_keys(source: str) -> dict[str, set[str]]:
+    """Return keyed index names for package-level ``var`` array literals.
+
+    Go composite literals keyed by constants (e.g. ``var Typ = [...]*Basic{
+        Invalid: {...}, Bool: {...},``) are valid by construction, so bounds
+    checks on those exact keys are false positives.
+    """
+    keys: dict[str, set[str]] = {}
+    for start_match in re.finditer(
+        r"^\s*var\s+(\w+)\s*=\s*\[\.\.\.\][^\{]*\{",
+        source,
+        flags=re.MULTILINE,
+    ):
+        container = start_match.group(1)
+        i = start_match.end()
+        depth = 1
+        while i < len(source) and depth > 0:
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+            i += 1
+        body = source[start_match.end() : i - 1]
+        # Split only on commas at brace depth 1.
+        key_set: set[str] = set()
+        depth = 1
+        entry_start = 0
+        for j, ch in enumerate(body):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            elif ch == "," and depth == 1:
+                entry = body[entry_start:j].strip()
+                key_match = re.match(r"([A-Za-z_]\w*)\s*:", entry)
+                if key_match:
+                    key_set.add(key_match.group(1))
+                entry_start = j + 1
+        entry = body[entry_start:].strip()
+        key_match = re.match(r"([A-Za-z_]\w*)\s*:", entry)
+        if key_match:
+            key_set.add(key_match.group(1))
+        if key_set:
+            keys[container] = key_set
+    return keys
+
+
 def _go_string_variables(source: str) -> set[str]:
     """Return top-level Go identifiers declared with a string type or literal."""
     strings: set[str] = set()
@@ -1315,6 +1362,7 @@ def _detect_go_safety_issues(
         interface_method_names = _go_interface_method_names(source)
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         go_map_names = _go_map_names(source)
+        global_array_keys = _go_global_array_keys(source)
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -1379,6 +1427,7 @@ def _detect_go_safety_issues(
                     guaranteed_nonzero=guaranteed_nonzero,
                     float_variables=float_variables,
                     known_strings=known_strings,
+                    known_array_keys=global_array_keys,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -1434,6 +1483,7 @@ def _detect_go_safety_issues(
     go_map_names = _go_map_names(source)
     guaranteed_nonzero = _go_nonzero_constants(source)
     string_variables = _go_string_variables(original_source or source)
+    global_array_keys = _go_global_array_keys(source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
@@ -1477,6 +1527,7 @@ def _detect_go_safety_issues(
                 guaranteed_nonzero=guaranteed_nonzero,
                 float_variables=float_variables,
                 known_strings=known_strings,
+                known_array_keys=global_array_keys,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -1545,6 +1596,7 @@ def _index_safety_issue(
     mapping_names: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
+    known_array_keys: dict[str, set[str]] | None = None,
 ) -> ForeignSafetyIssue | None:
     # A declared `constant`/`immutable` index (e.g. `decoded[EVM_TREE_RADIX]`,
     # EVM_TREE_RADIX=16) is pinned to its value so Z3 can't invent an
@@ -1560,6 +1612,21 @@ def _index_safety_issue(
             return None
     if mapping_names and container in mapping_names:
         # Solidity mapping key access is always safe.
+        return None
+    if known_array_keys and index in known_array_keys.get(container, set()):
+        # Go package-level keyed array literal: the key is valid by construction.
+        return None
+    if (
+        label == "Go"
+        and container
+        and index
+        and container[0].isupper()
+        and index[0].isupper()
+        and (param_types is None or index not in param_types)
+    ):
+        # Cross-file package-level constant indexing an exported package-level
+        # container (e.g. ``Typ[Invalid]``) is a global lookup table; the index
+        # is part of the package API and is valid by convention.
         return None
     if parallel_slicing and (container, index) in parallel_slicing:
         # The index variable is known to be within ``len(container)`` because the
@@ -1818,6 +1885,7 @@ def _issues_for_expression(
     guarded_indices: set[str] | None = None,
     float_variables: set[str] | None = None,
     known_strings: set[str] | None = None,
+    known_array_keys: dict[str, set[str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -1843,6 +1911,7 @@ def _issues_for_expression(
             guarded_indices=guarded_indices,
             float_variables=float_variables,
             known_strings=known_strings,
+            known_array_keys=known_array_keys,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -1862,7 +1931,7 @@ def _issues_for_expression(
                 # Solidity / Rust mappings have no bounds; missing keys return zero.
                 continue
             issue = _index_safety_issue(
-                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices
+                function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices, known_array_keys=known_array_keys
             )
             if issue is not None:
                 issues.append(issue)
@@ -1927,6 +1996,7 @@ def _issues_from_findings(
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
     known_strings: set[str] | None = None,
+    known_array_keys: dict[str, set[str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -1938,7 +2008,7 @@ def _issues_from_findings(
     float_divisors = float_variables or set()
     if label not in {"TypeScript", "JavaScript"}:
         for container, index in findings.index_accesses:
-            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices)
+            issue = _index_safety_issue(function_name, container, index, label, known_constants, param_types=param_types, mapping_names=mapping_names, parallel_slicing=parallel_slicing, guarded_indices=guarded_indices, known_array_keys=known_array_keys)
             if issue is not None:
                 issues.append(issue)
     if label == "Go":
