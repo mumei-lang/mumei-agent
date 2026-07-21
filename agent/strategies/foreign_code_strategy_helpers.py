@@ -2453,6 +2453,14 @@ def _division_safety_issue(
     if _is_nonzero_numeric_literal(divisor):
         # Non-zero numeric literals can never produce a divide-by-zero.
         return None
+    # Solidity constant exponentiation such as ``2**32`` or ``(2**32)`` is a
+    # compile-time non-zero value.
+    if re.fullmatch(r"\(?\d+\s*\*\*\s*\d+\)?", divisor):
+        try:
+            if eval(divisor) != 0:  # noqa: S307
+                return None
+        except Exception:
+            pass
     return ForeignSafetyIssue(
         function_name=function_name,
         message=(
