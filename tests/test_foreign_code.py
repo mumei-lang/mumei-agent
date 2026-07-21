@@ -3578,3 +3578,17 @@ func UintN(s *obj.LSym, off int, v uint64, wid int) int {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("overflow" in issue.message for issue in issues)
+
+
+def test_detect_solidity_safety_issues_constant_power_divisor() -> None:
+    """Solidity constant exponentiation ``2**32`` is a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''library Oracle {
+    function currentCumulativePrices() internal pure returns (uint32) {
+        return uint32(block.timestamp % (2 ** 32));
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "solidity")
+    assert not any("divide by" in issue.message for issue in issues)
