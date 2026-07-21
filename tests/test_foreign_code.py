@@ -1853,6 +1853,21 @@ def test_source_has_function_declarations() -> None:
     )
     assert _source_has_function_declarations("func F() {}", "go") is True
     assert _source_has_function_declarations("pub fn f() {}", "rust") is True
+    assert _source_has_function_declarations("func TestFoo(t *testing.T) {}", "go") is False
+    assert _source_has_function_declarations("// errorcheck\nfunc f() {}", "go") is False
+
+
+def test_contract_lines_filters_go_human_language_preconditions() -> None:
+    """Natural-language Go preconditions are lowered to true instead of invalid Mumei."""
+    from agent.strategies.foreign_code_strategy_helpers import _contract_lines
+
+    comment = "Precondition: the Types, Uses and Defs maps are populated."
+    preconditions, _ = _contract_lines(comment)
+    assert preconditions == ["true"]
+
+    comment = "Precondition: path must not be empty."
+    preconditions, _ = _contract_lines(comment)
+    assert preconditions == ["true"]
 
 
 def test_normalize_foreign_expression_coerces_undefined_and_bang() -> None:

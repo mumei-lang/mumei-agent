@@ -62,6 +62,7 @@ from agent.cross_validation_foreign import (
     _infer_foreign_contracts_with_patterns,
     _infer_foreign_source_line_map,
     _infer_go_contracts,
+    _is_go_test_name,
     _infer_python_contracts,
     _infer_python_source_line_map,
     _infer_regex_source_line_map,
