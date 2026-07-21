@@ -1416,6 +1416,12 @@ def _go_is_known_interface_method(
         return True
     if name == "HashTreeRootWith" and "*fssz.Hasher" in params_text and re.search(r"\berror\b", ret):
         return True
+    # ``encoding/json.Marshaler`` / ``encoding/json.Unmarshaler`` methods are
+    # always invoked on non-nil concrete values by the encoder/decoder.
+    if name == "MarshalJSON" and "[]byte" in ret and "error" in ret:
+        return True
+    if name == "UnmarshalJSON" and "[]byte" in params_text and re.search(r"\berror\b", ret):
+        return True
     return False
 
 

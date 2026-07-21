@@ -2449,6 +2449,24 @@ func (a *GrafanaAuthorizer) Authorize(ctx context.Context, attr authorizer.Attri
     assert not any("GrafanaAuthorizer" in i.message for i in issues)
 
 
+def test_go_safety_suppresses_json_marshaler_nil_receiver() -> None:
+    """``MarshalJSON`` / ``UnmarshalJSON`` pointer-receiver methods are caller-contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package iface
+
+type BeaconCommitteeSelection struct {
+    SelectionProof []byte
+}
+
+func (b *BeaconCommitteeSelection) MarshalJSON() ([]byte, error) {
+    return []byte(b.SelectionProof), nil
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_go_safety_suppresses_top_level_callback_first_param_nil() -> None:
     """Top-level functions stored as struct/map callbacks are invoked with non-nil first arg."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
