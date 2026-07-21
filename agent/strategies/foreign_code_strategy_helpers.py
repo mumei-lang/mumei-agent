@@ -654,6 +654,81 @@ def _go_float_variables(body: str) -> set[str]:
     return float_vars
 
 
+_RUST_FLOAT_METHODS = (
+    "round|floor|ceil|sqrt|powf|exp|ln|log|log2|log10|sin|cos|tan|"
+    "asin|acos|atan|atan2|sinh|cosh|tanh|trunc|fract|abs|signum|recip|"
+    "to_degrees|to_radians|mul_add|clamp|min|max"
+)
+
+
+def _rust_expression_is_float(expression: str, float_vars: set[str]) -> bool:
+    """Heuristic: is ``expression`` a Rust floating-point expression?"""
+    text = _strip_go_rust_literals_and_comments(expression)
+    # Float literal (e.g. 100.0, 10_000.0, 1e9).
+    if re.search(r"\b\d[\d_]*\.\d[\d_]*(?:[eE][-+]?\d+)?\b|\b\d[\d_]*[eE][-+]?\d+\b", text):
+        return True
+    # Explicit cast to a float type.
+    if re.search(r"\b(?:as\s+(?:f32|f64)|f32::|f64::)\b", text):
+        return True
+    # num::cast of a float literal or a known float variable.
+    for match in re.finditer(r"\bnum::cast\s*\(\s*([^)]+)\s*\)", text):
+        arg = match.group(1).strip()
+        if arg in float_vars:
+            return True
+        if re.search(r"\b\d[\d_]*\.\d[\d_]*(?:[eE][-+]?\d+)?\b|\b\d[\d_]*[eE][-+]?\d+\b", arg):
+            return True
+    # Known float-returning method calls such as `.round()`.
+    if re.search(r"\.\s*(?:" + _RUST_FLOAT_METHODS + r")\s*\(", text):
+        return True
+    # The whole expression is a known float variable.
+    if text.strip() in float_vars:
+        return True
+    return False
+
+
+def _rust_float_variables(body: str) -> set[str]:
+    """Return local variable names that are initialized with floating-point values."""
+    body = _strip_go_rust_literals_and_comments(body)
+    float_vars: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for match in re.finditer(
+            r"let\s+(?:mut\s+)?(\w+)\s*(?::\s*[\w<>,\s]+)?\s*=\s*([^;]+);",
+            body,
+            re.DOTALL,
+        ):
+            name, rhs = match.group(1), match.group(2).strip()
+            if name in float_vars:
+                continue
+            if _rust_expression_is_float(rhs, float_vars):
+                float_vars.add(name)
+                changed = True
+    return float_vars
+
+
+def _go_scale_nonzero_params(name: str, params_text: str) -> set[str]:
+    """Return ``scale`` parameter names for scaling functions as guaranteed non-zero.
+
+    Functions whose name contains ``scale``/``scaled`` operate on a scaling
+    factor; a zero scale would be a caller bug, so we treat the ``scale``
+    parameter as guaranteed non-zero to avoid divide-by-zero false positives
+    (e.g. ``isScaledImmI(imm, nbits, scale int64)`` doing ``imm%scale``).
+    """
+    if not re.search(r"scale", name, re.IGNORECASE):
+        return set()
+    int_types = {
+        "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        "byte", "rune",
+    }
+    return {
+        param_name
+        for param_name, param_type in _go_param_types(params_text).items()
+        if param_name.lower() == "scale" and param_type.strip().lstrip("*").lower() in int_types
+    }
+
+
 def _go_doc_comment_suppresses_bounds(source: str, start_char: int) -> bool:
     """Return True when the comment before a function declares bounds are assumed."""
     preceding = source[:start_char]
@@ -939,10 +1014,13 @@ def _detect_block_safety_issues(
             dereference_values = nullable_params.get(name)
         per_function_nonzero = (guaranteed_nonzero or set()).copy()
         per_function_guarded_indices: set[str] = set()
+        per_function_float_vars: set[str] = set()
         if label == "Solidity":
             per_function_nonzero |= _solidity_require_nonzero_params(body)
             per_function_nonzero |= _solidity_early_return_nonzero_params(body)
             per_function_guarded_indices = _solidity_guarded_indices(body)
+        if label == "Rust":
+            per_function_float_vars = _rust_float_variables(body)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
@@ -956,6 +1034,7 @@ def _detect_block_safety_issues(
                 mapping_names=mapping_names,
                 guaranteed_nonzero=per_function_nonzero,
                 guarded_indices=per_function_guarded_indices,
+                float_variables=per_function_float_vars,
             )
             if solidity_checked_arithmetic and not function_has_unchecked:
                 expr_issues = [
@@ -1464,7 +1543,7 @@ def _detect_go_safety_issues(
             orig_source = original_source or source
             orig_start = orig_source.find(header) if original_source else -1
             suppress_bounds = _go_doc_comment_suppresses_bounds(orig_source, orig_start if orig_start >= 0 else fn.start_char)
-            guaranteed_nonzero = _go_nonzero_constants(source)
+            guaranteed_nonzero = _go_nonzero_constants(source) | _go_scale_nonzero_params(fn.name, fn.params_text)
             float_variables = _go_float_variables(body)
             string_variables = _go_string_variables(original_source or source)
             known_strings = string_variables | {

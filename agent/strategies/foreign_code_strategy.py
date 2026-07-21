@@ -539,6 +539,23 @@ class ForeignCodeExtractor:
             )
         return specs
 
+def _is_rust_test_function(source: str, name: str) -> bool:
+    """True when ``fn <name>`` is preceded by a Rust test attribute.
+
+    Matches ``#[test]``, ``#[tokio::test]``, ``#[test_log::test]`` and similar
+    attribute macros whose name ends with ``test``.
+    """
+    return bool(
+        re.search(
+            r"(?:#\s*\[[\s\S]*?test[\s\S]*?\]\s*){1,3}\s*fn\s+"
+            + re.escape(name)
+            + r"\b",
+            source,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _source_has_function_declarations(source: str, language: str) -> bool | None:
     """Return True when ``source`` contains at least one function declaration.
 
@@ -553,6 +570,8 @@ def _source_has_function_declarations(source: str, language: str) -> bool | None
         if names is not None:
             if normalized == "go":
                 names = [name for name in names if not _is_go_test_name(name)]
+            if normalized == "rust":
+                names = [name for name in names if not _is_rust_test_function(source, name)]
             return bool(names)
 
     if normalized == "python":

@@ -1855,6 +1855,14 @@ def test_source_has_function_declarations() -> None:
     assert _source_has_function_declarations("pub fn f() {}", "rust") is True
     assert _source_has_function_declarations("func TestFoo(t *testing.T) {}", "go") is False
     assert _source_has_function_declarations("// errorcheck\nfunc f() {}", "go") is False
+    assert (
+        _source_has_function_declarations("#[test]\nfn foo() {}", "rust") is False
+    )
+    assert (
+        _source_has_function_declarations("#[test_log::test]\nfn foo() {}", "rust")
+        is False
+    )
+    assert _source_has_function_declarations("#[test]\nfn foo() {}\nfn bar() {}", "rust") is True
 
 
 def test_contract_lines_filters_go_human_language_preconditions() -> None:
@@ -2851,4 +2859,33 @@ func DeleteSilence(t *testing.T, id string) (any, int, string) {
 """
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_scale_param_nonzero() -> None:
+    """Scaling functions treat an integer ``scale`` parameter as non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package riscv
+func isScaledImmI(imm int64, nbits uint, scale int64) bool {
+    return imm%scale == 0
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("scale" in i.message and "non-zero" in i.message for i in issues)
+
+
+def test_detect_rust_safety_issues_skips_float_division() -> None:
+    """Dividing by a Rust local assigned a float literal is float division, not panic."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """mod store {
+fn round_to_decimal_places<T: Float>(avg: T, num_places: u8) -> T {
+    let factor = if num_places == 4 { 10_000.0 } else { 100.0 };
+    let factor_as_float = num::cast(factor).unwrap();
+    (avg * factor_as_float).round() / factor_as_float
+}
+}
+"""
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("factor_as_float" in i.message for i in issues)
 
