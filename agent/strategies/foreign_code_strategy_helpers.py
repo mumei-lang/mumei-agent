@@ -736,7 +736,15 @@ def _go_time_interval_nonzero_params(name: str, params_text: str) -> set[str]:
     time quantum; a zero divisor would be a caller bug (e.g.
     ``intervalNumber(t, seconds int64)`` doing ``t.Unix() / seconds``).
     """
-    if not re.search(r"interval|period|rate", name, re.IGNORECASE):
+    # Require the keyword to be a distinct camel/underscore word, not a substring
+    # of an unrelated identifier (e.g. ``migrate``, ``generate``, ``aggregate``).
+    # ``(?i:...)`` makes the keyword case-insensitive while the surrounding
+    # boundaries remain case-sensitive so ``IntervalNumber`` matches but
+    # ``getRate`` and ``migrate`` do not.
+    if not re.search(
+        r"(?<![a-zA-Z])(?i:interval|period|rate)(?![a-z])",
+        name,
+    ):
         return set()
     int_types = {
         "int", "int8", "int16", "int32", "int64",
