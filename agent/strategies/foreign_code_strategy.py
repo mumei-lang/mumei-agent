@@ -18,6 +18,7 @@ from agent.cross_validation import (
     _infer_foreign_source_line_map,
     _go_function_declarations,
     _infer_go_contracts,
+    _is_go_test_name,
 )
 from agent.mumei_client import create_mumei_client
 
@@ -36,6 +37,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _detect_python_safety_issues,
     _detect_safety_issues,
     _filter_covered_safety_issues,
+    _is_go_compiler_test,
     _is_go_experimental,
     _first_counterexample_payload,
     _go_function_blocks,
@@ -139,6 +141,8 @@ def _extract_go_caller_contracts(comment: str) -> list[str]:
 
 def _extract_go_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
     """Extract Go ``func`` declarations using tree-sitter, falling back to ``None``."""
+    if _is_go_compiler_test(source):
+        return []
     functions = tree_sitter_extract.extract_functions(source, "go", _safe_identifier)
     if functions is None:
         return None
@@ -364,6 +368,8 @@ class ForeignCodeExtractor:
 
     def _extract_go_regex(self, source: str) -> list[ForeignCodeSpec]:
         """Regex fallback for Go ``func`` extraction."""
+        if _is_go_compiler_test(source):
+            return []
         pattern = re.compile(
             r"(?P<comment>(?:\s*//[^\n]*\n)*)\s*"
             r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
@@ -540,11 +546,13 @@ def _source_has_function_declarations(source: str, language: str) -> bool | None
     unparseable source); callers should treat ``None`` as "could have functions".
     """
     normalized = _normalize_language(language)
-    if normalized == "go" and _is_go_experimental(source):
+    if normalized == "go" and (_is_go_experimental(source) or _is_go_compiler_test(source)):
         return False
     if normalized in tree_sitter_extract.SUPPORTED_LANGUAGES:
         names = tree_sitter_extract.function_names(source, normalized, _safe_identifier)
         if names is not None:
+            if normalized == "go":
+                names = [name for name in names if not _is_go_test_name(name)]
             return bool(names)
 
     if normalized == "python":

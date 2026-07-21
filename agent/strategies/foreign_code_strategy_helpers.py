@@ -303,6 +303,14 @@ def _contract_lines(text: str) -> tuple[list[str], list[str]]:
             # boolean Mumei expressions and would fail spec lowering.
             if re.search(r"\breturns\b", value):
                 value = "true"
+            # Natural-language preconditions (``the maps are populated``) are not
+            # valid Mumei expressions; treat them as an unannotated contract.
+            if re.search(
+                r"\b(?:the|are|is|must|shall|populated|present|defined|maps?)\b",
+                value,
+                flags=re.IGNORECASE,
+            ):
+                value = "true"
             target.append(value)
     return preconditions, postconditions
 
@@ -1010,6 +1018,13 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # created from an active HTTP request; nil receiver counterexamples on
         # their methods are false positives.
         contracts.add("Context")
+    if pkg == "types":
+        # ``go/types`` containers (``Info``, ``ArgumentError``) are produced by
+        # the type checker and used by callers as non-nil values.
+        if re.search(r"\btype\s+Info\s+struct\b", source):
+            contracts.add("Info")
+        if re.search(r"\btype\s+ArgumentError\s+struct\b", source):
+            contracts.add("ArgumentError")
     return contracts
 
 
@@ -1330,7 +1345,7 @@ def _is_go_compiler_test(source: str) -> bool:
         stripped = line.strip()
         if not stripped:
             continue
-        return stripped.startswith(("// errorcheck", "// runoutput", "// compiledir"))
+        return stripped.startswith(("// errorcheck", "// runoutput", "// compiledir", "// asmcheck"))
     return False
 
 
@@ -1663,6 +1678,12 @@ def _index_safety_issue(
     if known_types and index in known_types:
         # ``container[Type]`` in Go is a generic instantiation, not an index.
         return None
+    if label == "Go" and param_types:
+        # In Go, slice/array indices must be integer; a string-typed operand
+        # means this is a map key access, which has no bounds.
+        index_type = param_types.get(index, "")
+        if index_type.startswith("string") or index_type == "string":
+            return None
     if known_array_keys and index in known_array_keys.get(container, set()):
         # Go package-level keyed array literal: the key is valid by construction.
         return None

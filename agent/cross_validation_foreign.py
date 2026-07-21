@@ -1553,8 +1553,20 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
     return atoms
 
 
+def _is_go_compiler_test_for_contracts(code: str) -> bool:
+    """True for Go compiler test files that are not runnable user code."""
+    for line in code.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        return stripped.startswith(("// errorcheck", "// runoutput", "// compiledir", "// asmcheck"))
+    return False
+
+
 def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None:
     """Use tree-sitter to extract Go functions and signatures when available."""
+    if _is_go_compiler_test_for_contracts(code):
+        return []
     extracted = tree_sitter_extract.extract_contract_functions(code, "go", _safe_identifier)
     if extracted is None:
         return None
@@ -1598,6 +1610,8 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
 
 
 def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
+    if _is_go_compiler_test_for_contracts(code):
+        return []
     ts_atoms = _infer_go_contracts_tree_sitter(code)
     if ts_atoms is not None:
         return ts_atoms
