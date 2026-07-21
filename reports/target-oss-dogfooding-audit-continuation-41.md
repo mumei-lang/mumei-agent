@@ -1,6 +1,6 @@
 # Target OSS no-LLM dogfooding audit — continuation 41 (batch 42)
 
-Run: 2026-07-21T09:58:14.320577+00:00
+Run: 2026-07-21T10:25:59.793104+00:00
 
 ## Summary
 
@@ -13,7 +13,7 @@ All 50 sampled files passed no-LLM verification.
 
 ## Tool-side fixes in this batch
 
-- Go ``float32``/``float64`` parameters are now treated as float variables, so ``a / b`` no longer triggers an integer divide-by-zero false positive.
+- Go ``float32``/``float64`` parameters are now treated as float variables, so ``fdiv(a, b float64)`` no longer triggers an integer divide-by-zero false positive.
 - Rust ``#[tokio::test] async fn ...`` test functions are now recognized as tests and skipped when checking whether a file has any non-test declarations.
 
 ## Sample details

@@ -1,0 +1,41 @@
+{
+  "success": false,
+  "source_file": "/home/ubuntu/repos/uniswap-contracts/script/smoke/V4SmokeTest.s.sol",
+  "language": "solidity",
+  "spec_extracted": true,
+  "verification_status": "verified",
+  "spec_health_issues": [],
+  "verification_violations": [
+    "Solidity function `approve` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless",
+    "Solidity function `transfer` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless",
+    "Solidity function `transferFrom` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless"
+  ],
+  "counterexample_values": [],
+  "cross_validation_gaps": [],
+  "migration_hints": [],
+  "healed_files": [],
+  "heal_errors": [],
+  "next_steps": [
+    {
+      "priority": "high",
+      "action": "migrate-suggest で .mm スケルトンを生成",
+      "command": "mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm"
+    }
+  ],
+  "proof_certificate": {
+    "version": "1.0",
+    "timestamp": "2026-07-21T10:24:12.825234Z",
+    "mumei_version": "agent",
+    "z3_version": "Z3 version 4.16.0",
+    "file": "/home/ubuntu/repos/uniswap-contracts/script/smoke/V4SmokeTest.s.sol",
+    "atoms": [],
+    "package_name": "V4SmokeTest.s",
+    "package_version": "0",
+    "certificate_hash": "6de41b1a60896e06c2c5796371d8a4b08de320e3938a64495857ada4bcfb277e",
+    "all_verified": false
+  },
+  "lean_bridge": null,
+  "report": "Audit found issues: /home/ubuntu/repos/uniswap-contracts/script/smoke/V4SmokeTest.s.sol\nlanguage: solidity\nspec_extracted: True\nverification_status: verified\nspec_health_issues: []\nverification_violations: ['Solidity function `approve` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless', 'Solidity function `transfer` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless', 'Solidity function `transferFrom` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless']\ncounterexample_values: []\ncross_validation_gaps: []\nmigration_hints:\n  []\nhealed_files: []\nheal_errors: []\nnext_steps:\n  - priority: high\n    action: migrate-suggest で .mm スケルトンを生成\n    command: mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm",
+  "errors": [],
+  "skipped_rate_limited": false
+}
