@@ -2707,6 +2707,55 @@ func (v *ValidatorIndex) HashTreeRootWith(hh *Hasher) error {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_go_runtime_page_constants_are_nonzero() -> None:
+    """Go runtime page-size constants are non-zero across per-file analysis."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package runtime
+
+const pallocChunkPages = 1 << logPallocChunkPages
+const logPallocChunkPages = 9
+var pallocChunkBytes = pallocChunkPages * pageSize
+
+func chunkPageIndex(p uintptr) uint {
+    return uint(p % pallocChunkBytes / pageSize)
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in i.message for i in issues)
+
+
+def test_go_runtime_level_index_is_guarded() -> None:
+    """Go runtime ``level`` parameter indexing ``levelShift`` is bounds-safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package runtime
+
+var levelShift [5]uint
+
+func offAddrToLevelIndex(level int, addr offAddr) int {
+    return int((addr.a - arenaBaseOffset) >> levelShift[level])
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can index" in i.message for i in issues)
+
+
+def test_rust_modulo_len_index_is_guarded() -> None:
+    """Rust ``let index = ... % container.len();`` bounds ``container[index]``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """pub fn get_spinner_frame() -> char {
+    let frames = ["_", "_", "_", "-", "`", "`", "'", "´", "-", "_", "_", "_"];
+    let time = 0usize;
+    let index = (time / 70) % frames.len();
+    frames[index].chars().next().unwrap()
+}
+"""
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("can index" in i.message for i in issues)
+
+
 def test_go_compiler_run_tests_are_skipped() -> None:
     """Go compiler test files marked ``// run`` are not runnable user code."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

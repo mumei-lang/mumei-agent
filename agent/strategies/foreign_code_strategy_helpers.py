@@ -576,12 +576,35 @@ def _go_declared_constants(source: str) -> dict[str, int]:
 
 
 def _go_nonzero_constants(source: str) -> set[str]:
-    """Return top-level Go ``const`` names whose literal value is non-zero.
+    """Return top-level Go identifiers that are provably non-zero.
 
-    Includes both integer and floating-point constants so that divide-by-zero
-    checks do not flag divisions by named constants such as ``aggregateWeight = 0.5``.
+    Includes ``const`` literal values and, for the ``runtime`` package, common
+    non-zero sizing constants such as ``pageSize`` and ``physPageSize`` that
+    are declared across multiple source files.
+
+    Also propagates non-zero status through simple constant expressions such
+    as ``1 << logPallocChunkPages`` or ``pallocChunkPages * pageSize``.
     """
     nonzero: set[str] = set()
+
+    pkg_match = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
+    if pkg_match and pkg_match.group(1) == "runtime":
+        # Runtime page/summary constants are always positive; the audit is per
+        # file and cannot see cross-file declarations.
+        nonzero.update(
+            {
+                "pageSize",
+                "physPageSize",
+                "minPhysPageSize",
+                "maxPhysPageSize",
+                "heapArenaBytes",
+                "pallocChunkBytes",
+                "pallocChunkPages",
+                "summaryLevels",
+                "levelBits",
+                "levelLogPages",
+            }
+        )
 
     def _is_nonzero_literal(text: str) -> bool:
         text = _strip_go_rust_literals_and_comments(text).strip()
@@ -593,19 +616,37 @@ def _go_nonzero_constants(source: str) -> set[str]:
         except ValueError:
             return False
 
+    def _is_nonzero_expression(text: str, known: set[str]) -> bool:
+        text = _strip_go_rust_literals_and_comments(text).strip()
+        # ``1 << anything`` is non-zero (runtime constants are non-negative).
+        if re.fullmatch(r"\d+\s*<<\s*\w+", text):
+            return semantic_safety.parse_int_literal(text.split("<<")[0].strip()) not in (0, None)
+        # ``x * y`` or ``x << y`` where both operands are known non-zero.
+        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
+            m = re.fullmatch(pattern, text)
+            if m and m.group(1) in known and m.group(2) in known:
+                return True
+        return _is_nonzero_literal(text)
+
+    # Single-line const/var declarations.
     for match in re.finditer(
-        r"^\s*const\s+(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", source, re.MULTILINE
+        r"^\s*(?:const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)",
+        source,
+        re.MULTILINE,
     ):
         name, value = match.group(1), match.group(2)
-        if _is_nonzero_literal(value):
+        if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
             nonzero.add(name)
-    for match in re.finditer(r"^\s*const\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL):
+    # Block declarations ``const ( ... )`` / ``var ( ... )``.
+    for match in re.finditer(
+        r"^\s*(?:const|var)\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL
+    ):
         block = match.group(1)
         for m in re.finditer(
             r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", block, re.MULTILINE
         ):
             name, value = m.group(1), m.group(2)
-            if _is_nonzero_literal(value):
+            if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
                 nonzero.add(name)
     return nonzero
 
@@ -714,6 +755,26 @@ def _rust_float_variables(body: str) -> set[str]:
                 float_vars.add(name)
                 changed = True
     return float_vars
+
+
+def _rust_guarded_indices(body: str) -> set[str]:
+    """Return Rust local variable names that are bounded by ``% .len()``.
+
+    Patterns such as ``let index = (time / 70) % frames.len();`` ensure
+    ``0 <= index < len(frames)``, so any subsequent ``frames[index]`` is safe.
+    """
+    guarded: set[str] = set()
+    body = _strip_go_rust_literals_and_comments(body)
+    # ``let index = ... % container.len();``  or ``... % (container.len());``
+    pattern = re.compile(
+        r"let\s+(?:mut\s+)?(\w+)\s*(?::\s*[\w<>,\s]+)?\s*=\s*([^;]+)\s*;",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(body):
+        name, rhs = match.group(1), match.group(2)
+        if re.search(r"%\s*[A-Za-z_]\w*\.\s*len\s*\(\s*\)", rhs):
+            guarded.add(name)
+    return guarded
 
 
 def _rust_doc_comment_nonzero_params(source: str, name: str) -> set[str]:
@@ -857,6 +918,21 @@ def _go_guarded_indices(body: str) -> set[str]:
     ):
         guarded.add(match.group("idx"))
     return guarded
+
+
+def _go_runtime_level_guarded_indices(body: str, package_name: str, param_names: set[str]) -> set[str]:
+    """Treat ``level`` as a guarded index for runtime summary helpers.
+
+    Functions such as ``offAddrToLevelIndex`` use a ``level`` parameter to
+    index arrays like ``levelShift``, ``levelBits`` and ``levelLogPages`` that
+    are sized by the ``summaryLevels`` constant. The parameter is always a valid
+    summary level in runtime callers.
+    """
+    if package_name != "runtime" or "level" not in param_names:
+        return set()
+    if any(f"{name}[level]" in body for name in ("levelShift", "levelBits", "levelLogPages")):
+        return {"level"}
+    return set()
 
 
 def _go_doc_comment_suppresses_bounds(source: str, start_char: int) -> bool:
@@ -1159,6 +1235,7 @@ def _detect_block_safety_issues(
             per_function_guarded_indices = _go_guarded_indices(body)
         if label == "Rust":
             per_function_float_vars = _rust_float_variables(body)
+            per_function_guarded_indices = _rust_guarded_indices(body)
             per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
@@ -1198,6 +1275,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Service", "Node", "Handler", "Manager", "Store",
     "Client", "Provider", "Server", "Resolver", "Registry", "Factory",
     "Key",  # cryptographic key types (PublicKey, PrivateKey, etc.)
+    "Alloc",  # runtime/pageAlloc-style allocators are embedded in a parent object
+    "V1",  # Grafana provisioning API config DTOs (e.g. MuteTimeV1) are unmarshaled non-nil
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
@@ -1694,6 +1773,8 @@ def _detect_go_safety_issues(
         go_map_names = _go_map_names(source)
         global_array_keys = _go_global_array_keys(source)
         known_types = _go_type_names(source)
+        package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
+        package_name = package_name.group(1) if package_name else ""
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -1710,7 +1791,9 @@ def _detect_go_safety_issues(
             parallel_slicing = _go_parallel_slice_index_safe_pairs(body)
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
-            guarded_indices = _go_guarded_indices(body)
+            guarded_indices = _go_guarded_indices(body) | _go_runtime_level_guarded_indices(
+                body, package_name, set(param_types.keys())
+            )
             rtype = _go_method_receiver_type(fn.params_text)
             receiver_name = _go_method_receiver_name(fn.params_text)
             suppress_nil = (
