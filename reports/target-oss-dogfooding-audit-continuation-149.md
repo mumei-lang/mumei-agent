@@ -1,0 +1,59 @@
+# Batch 150 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/internal/testlog/log.go`: verified
+- `go/src/internal/types/testdata/spec/receivers.go`: verified
+- `go/src/math/big/intconv.go`: verified
+- `go/src/net/http/internal/http2/ciphers.go`: verified
+- `go/src/net/rawconn_unix_test.go`: verified
+- `go/src/runtime/conv_wasm_test.go`: verified
+- `go/src/sync/pool.go`: verified
+- `go/test/fixedbugs/bug214.go`: verified
+- `go/test/fixedbugs/issue33739.dir/a.go`: verified
+- `go/test/fixedbugs/issue7760.go`: verified
+- `grafana/packages/grafana-api-clients/src/clients/rtkq/logsdrilldown/v1beta1/index.ts`: verified
+- `grafana/packages/grafana-schema/src/schema/dashboard/v2/v2_examples.ts`: verified
+- `grafana/packages/grafana-ui/src/components/Table/geo/OpenLayersContext.ts`: verified
+- `grafana/packages/grafana-ui/src/utils/slate.ts`: verified
+- `grafana/pkg/api/annotations_test.go`: verified
+- `grafana/pkg/registry/apis/dashboard/datasources.go`: verified
+- `grafana/pkg/registry/apps/alerting/notifications/routingtree/storage.go`: verified
+- `grafana/pkg/services/accesscontrol/evaluator.go`: verified
+- `grafana/pkg/services/correlations/correlationstest/fake.go`: verified
+- `grafana/pkg/services/frontend/request_config_test.go`: verified
+- `grafana/pkg/services/ngalert/provisioning/provisioning_test.go`: verified
+- `grafana/pkg/services/ssosettings/database/database_test.go`: verified
+- `grafana/pkg/services/star/starimpl/star.go`: verified
+- `grafana/pkg/storage/unified/search/embed/backfill/backfill_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/log_query.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/models/resources/dimension_keys_request_test.go`: verified
+- `grafana/public/app/core/reducers/navModel.test.ts`: verified
+- `grafana/public/app/features/provisioning/Migrate/sorting.ts`: verified
+- `grafana/public/app/features/variables/toStateKey.ts`: verified
+- `grafana/public/app/plugins/panel/canvas/components/connections/Connections2.tsx`: verified
+- `influxdb/core/object_store_mem_cache/src/object_store_cache_tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/catalog/migrations/v3/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/catalog/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/catalog/versions/v2/metrics/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/format/records/restore/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/format/records/table/tests.rs`: verified
+- `influxdb/influxdb3_internal_api/src/sll/tests.rs`: verified
+- `influxdb/influxdb3_server/src/http/tests.rs`: verified
+- `influxdb/influxdb3_system_tables/src/influxdb_schema/tests.rs`: verified
+- `influxdb/influxdb3_write/src/write_buffer/validator/tests.rs`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_submit_bid_test.go`: verified
+- `prysm/beacon-chain/sync/context_test.go`: verified
+- `prysm/beacon-chain/verification/batch_test.go`: verified
+- `prysm/beacon-chain/verification/blob.go`: verified
+- `prysm/config/params/testnet_e2e_config.go`: verified
+- `prysm/proto/testing/tags_test.go`: verified
+- `prysm/testing/spectest/mainnet/electra__epoch_processing__slashings_test.go`: verified
+- `prysm/testing/spectest/minimal/electra__light_client__single_merkle_proof_test.go`: verified
+- `prysm/validator/client/beacon-api/submit_aggregate_selection_proof_test.go`: verified
+- `prysm/validator/client/service_test.go`: verified
