@@ -1,0 +1,352 @@
+[
+  {
+    "repo": "grafana",
+    "file": "pkg/login/social/connectors/common.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/iox_query/src/physical_optimizer/dedup/dedup_null_columns.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "crypto/bls/signature_batch.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "runtime/logging/logrus-prefixed-formatter/formatter.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/explore/TraceView/components/TracePageHeader/TracePageHeader.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "testing/slasher/simulator/attestation_generator.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "monitoring/tracing/errors.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/sync/validate_voluntary_exit.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/state/state-native/getters_state.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/crypto/internal/sysrand/rand_netbsd.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/influxdb2_client/src/common.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/storage/unified/resource/usagestats/store.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "influxdb3_catalog/src/catalog/migrations/v2.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "validator/keymanager/remote-web3signer/types/mock/mocks.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/runtime/atomic/atomic_andor_generic.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "influxdb3_catalog/src/format/records/node.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/live/pipeline/condition_type.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/path/filepath/path.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/syscall/syscall_aix_ppc64.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/influxdb_iox_client/src/client/store.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/dashboard-scene/scene/dashboard-filters-overview/utils.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/math/big/natdiv.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/provisioning/components/ManagedBadge.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "encoding/bytesutil/bytes.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "e2e-playwright/test-plugins/grafana-extensionstest-app/tests/utils.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/alerting/unified/components/rule-editor/notificaton-preview/NotificationPreviewByAlertManager.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "apps/dashboard/pkg/migration/schemaversion/migration_utils.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/execution/metrics.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/compile/internal/inline/inlheur/analyze_func_returns.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/plugins/datasource/cloudwatch/components/styles.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/encoding/xml/marshal.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/go/internal/doc/pkgsite.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/net/cgo_sockold.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/object_store_mem_cache/src/cache_system/s3_fifo_cache/mod.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "testing/spectest/shared/fulu/operations/sync_committee.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/plugins/log/fake.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/link/internal/ld/outbuf_darwin.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/sqlstore/migrations/heartbeat_mig.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/trace_exporters/src/thrift/zipkincore.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "influxdb3_catalog/src/catalog/versions/v3/ops/trigger.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "beacon-chain/sync/initial-sync/blocks_fetcher_peers.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/api/plugin_resource.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "apps/iam/pkg/apis/iam/v0alpha1/createsearchexternalgroupmappings_request_params_types_gen.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "influxdb3_server/src/unified_service/service.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/alerting/unified/hooks/abilities/alertmanager/useNotificationPolicyAbility.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/plugins/datasource/cloudwatch/defaultQueries.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/plugins/panel/logs/LogsPanel.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/crypto/internal/fips140/subtle/xor.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "prysm",
+    "file": "async/multilock.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "influxdb",
+    "file": "core/iox_query_influxql/src/plan/ir.rs",
+    "lang": "rust",
+    "status": "verified",
+    "errors": []
+  }
+]
