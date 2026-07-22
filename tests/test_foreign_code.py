@@ -4718,3 +4718,45 @@ func (v *Verifier) VerifyValidProposalSlot(st state) error {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("VerifyValidProposalSlot" in issue.message and "bounds" in issue.message for issue in issues)
+
+
+def test_go_math_package_constants_and_denom_s_nonzero() -> None:
+    """``math`` package constants and ``s := 1 + z*P(z)`` denominators are nonzero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package math
+
+func y1(x float64) float64 {
+    return (2 / Pi) / x
+}
+
+func qone(x float64) float64 {
+    z := 1 / (x * x)
+    r := p[0] + z*(p[1]+z*p[2])
+    s := 1 + z*(q[0]+z*q[1])
+    return (0.375 + r/s) / x
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("y1" in issue.message and "non-zero" in issue.message for issue in issues)
+    assert not any("qone" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_generic_pointer_receiver_is_non_nil() -> None:
+    """Generic pointer receivers on container types are non-nil in practice."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package mvslice
+
+type Slice[V comparable] struct {
+    lock sync.RWMutex
+}
+
+func (s *Slice[V]) Len() int {
+    s.lock.RLock()
+    defer s.lock.RUnlock()
+    return 0
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("Len" in issue.message and "non-nil" in issue.message for issue in issues)
