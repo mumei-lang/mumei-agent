@@ -2823,6 +2823,14 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
     ):
         contracts.add(match.group(1))
     contracts |= _go_xorm_core_types(source)
+    # Grafana's pkg/api/response helpers (JSON/Error/Success) return *NormalResponse
+    # and *RedirectResponse/*StreamingResponse values; callers always use the
+    # non-nil result, so getter/setter methods on those response types are not
+    # meaningful on a nil receiver.
+    if pkg == "response" and re.search(r"\btype\s+NormalResponse\s+struct\b", source):
+        contracts.add("NormalResponse")
+        contracts.add("RedirectResponse")
+        contracts.add("StreamingResponse")
     return contracts
 
 
