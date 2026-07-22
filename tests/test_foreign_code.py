@@ -2866,6 +2866,29 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_unsigned_index_guard_with_leading_and() -> None:
+    """Unsigned ``size < len(table)`` guard works when prefixed by ``&&``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+var mallocNoScanTable = [...]func(uintptr, *_type, bool) unsafe.Pointer{}
+var mallocScanTable = [...]func(uintptr, *_type, bool) unsafe.Pointer{}
+
+func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
+	if cond && size < uintptr(len(mallocNoScanTable)) {
+		return mallocNoScanTable[size](size, typ, needzero)
+	}
+	if cond && size < uintptr(len(mallocScanTable)) {
+		return mallocScanTable[size](size, typ, needzero)
+	}
+	return nil
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("mallocNoScanTable" in i.message or "mallocScanTable" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_runtime_pages_per_arena_nonzero() -> None:
     """Runtime ``pagesPerArena`` is treated as a non-zero divisor."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

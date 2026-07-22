@@ -1843,10 +1843,12 @@ def _go_guarded_indices(
     # Reverse loops: ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }``
     guarded |= _go_reverse_loop_guarded_indices(body)
     # For unsigned variables, ``if x < len(arr)`` is a complete bounds guard.
+    # Allow preceding ``&&`` conditions such as ``if cond && size < len(arr)``.
     if unsigned_vars:
         names = "|".join(re.escape(name) for name in unsigned_vars)
+        cond_segment = r"(?:[^&{]|&(?!&))+"
         for match in re.finditer(
-            rf"\bif\s+(?P<idx>{names})\s*<\s*(?:\w+\(\s*)?len\(\s*(?P<arr>\w+)\s*\)(?:\s*\))?",
+            rf"\bif\s+(?:{cond_segment}\s*&&\s*)*(?P<idx>{names})\s*<\s*(?:\w+\(\s*)?len\(\s*(?P<arr>\w+)\s*\)(?:\s*\))?",
             body,
         ):
             guarded.add(match.group("idx"))
