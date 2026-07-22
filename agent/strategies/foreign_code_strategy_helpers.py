@@ -1195,11 +1195,13 @@ def _go_guarded_indices(body: str) -> set[str]:
         r"(?P<lower>[A-Za-z_]\w*)\s*>=\s*0\s*&&\s*(?:int\(\s*\1\s*\)|\1)\s*<\s*len\(\s*[A-Za-z_]\w*\s*\)"
         r"|"
         r"0\s*<=\s*(?P<lower2>[A-Za-z_]\w*)\s*&&\s*(?:int\(\s*\2\s*\)|\2)\s*<\s*len\(\s*[A-Za-z_]\w*\s*\)"
+        r"|"
+        r"0\s*<\s*(?P<lower3>[A-Za-z_]\w*)\s*&&\s*(?:int\(\s*\3\s*\)|\3)\s*<\s*len\(\s*[A-Za-z_]\w*\s*\)"
         r")",
         re.DOTALL,
     )
     for match in pattern.finditer(body):
-        idx = match.group("lower") or match.group("lower2")
+        idx = match.group("lower") or match.group("lower2") or match.group("lower3")
         if idx:
             guarded.add(idx)
     # ``if int(idx) < len(arr) && ...`` — safe when ``idx`` is unsigned.
@@ -1673,6 +1675,13 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``cmd/compile/internal/noder.reader`` is created by ``newReader`` and
         # ``asReader``; its methods are only invoked on initialized readers.
         contracts.add("reader")
+    if pkg == "x509" and re.search(r"\btype\s+Certificate\s+struct\b", source):
+        # ``crypto/x509.Certificate`` is parsed/unmarshaled before use; its public
+        # methods are only invoked on the non-nil result.
+        contracts.add("Certificate")
+    if pkg == "x509" and re.search(r"\btype\s+RevocationList\s+struct\b", source):
+        # ``crypto/x509.RevocationList`` is created by [CreateRevocationList].
+        contracts.add("RevocationList")
     return contracts
 
 
