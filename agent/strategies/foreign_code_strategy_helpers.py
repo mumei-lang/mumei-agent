@@ -1188,14 +1188,14 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
     """Return parameters guarded by an ``if x == 0 { return }`` early return.
 
     Code after ``if x == 0 { return ... }`` executes only when ``x != 0``,
-    so a subsequent division by ``x`` is safe. Also handles ``x <= 0`` and
-    ``x < 0`` guards, which imply ``x > 0`` after the return.
+    so a subsequent division by ``x`` is safe. Also handles ``x <= 0`` guards,
+    which imply ``x > 0`` after the return.
     """
     stripped = _strip_go_rust_literals_and_comments(body)
     guarded: set[str] = set()
     for param in param_names:
         for match in re.finditer(
-            rf"\bif\s+(?:[^;{{]*\b{re.escape(param)}\s*(?:<=?|==)\s*0[^;{{]*)\s*{{",
+            rf"\bif\s+(?:[^;{{]*\b{re.escape(param)}\s*(?:<=|==)\s*0[^;{{]*)\s*{{",
             stripped,
         ):
             i = match.end()
