@@ -733,7 +733,7 @@ def _go_nonzero_constants(source: str) -> set[str]:
     Also propagates non-zero status through simple constant expressions such
     as ``1 << logPallocChunkPages`` or ``pallocChunkPages * pageSize``.
     """
-    nonzero: set[str] = set()
+    nonzero: set[str] = set(_go_known_nonzero_selectors(source))
 
     pkg_match = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
     if pkg_match and pkg_match.group(1) == "runtime":
@@ -766,11 +766,13 @@ def _go_nonzero_constants(source: str) -> set[str]:
 
     def _is_nonzero_expression(text: str, known: set[str]) -> bool:
         text = _strip_go_rust_literals_and_comments(text).strip()
+        # Strip simple numeric casts so ``int64(time.Millisecond)`` is treated as ``time.Millisecond``.
+        text = re.sub(r"\b(?:int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|float32|float64|byte|rune)\s*\(\s*([^()]+)\s*\)", r"\1", text)
         # ``1 << anything`` is non-zero (runtime constants are non-negative).
         if re.fullmatch(r"\d+\s*<<\s*\w+", text):
             return semantic_safety.parse_int_literal(text.split("<<")[0].strip()) not in (0, None)
-        # ``x * y`` or ``x << y`` where both operands are known non-zero.
-        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
+        # ``x * y``, ``x / y`` or ``x << y`` where both operands are known non-zero.
+        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*/\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
             m = re.fullmatch(pattern, text)
             if m and m.group(1) in known and m.group(2) in known:
                 return True
@@ -778,7 +780,7 @@ def _go_nonzero_constants(source: str) -> set[str]:
 
     # Single-line const/var declarations.
     for match in re.finditer(
-        r"^\s*(?:const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)",
+        r"^\s*(?:const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
         source,
         re.MULTILINE,
     ):
@@ -1309,6 +1311,35 @@ def _go_math_denom_nonzero_locals(body: str, source: str) -> set[str]:
     return nonzero
 
 
+def _go_enum_string_array_guarded_indices(
+    body: str, function_name: str, receiver_name: str | None, source: str
+) -> set[str]:
+    """Guard the receiver in enum ``String()`` methods that index a package-level string array.
+
+    Methods such as ``func (kind ObjKind) String() string { return objKindStrings[kind] }``
+    are generated for enum-like types and are only invoked with valid enum values.
+    """
+    if function_name != "String" or not receiver_name:
+        return set()
+    stripped = _strip_go_rust_literals_and_comments(body)
+    m = re.search(
+        rf"\breturn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*{re.escape(receiver_name)}\s*\]",
+        stripped,
+    )
+    if not m:
+        return set()
+    array_name = m.group(1)
+    if array_name in _go_global_array_keys(source):
+        return {receiver_name}
+    # Also allow package-level ``[...]string{...}`` literal (possibly non-keyed).
+    if re.search(
+        rf"\bvar\s+{re.escape(array_name)}\s*=\s*\[\.\.\.\]\w+\s*\{{",
+        source,
+    ):
+        return {receiver_name}
+    return set()
+
+
 def _go_enum_string_guarded_indices(
     body: str, function_name: str, receiver_name: str | None
 ) -> set[str]:
@@ -1526,6 +1557,9 @@ def _go_guarded_indices(
         guarded |= _go_256_array_type_guarded_indices(body, param_types, source)
     # ``compress/bzip2.inverseBWT`` receives ``tt`` as a caller-validated slice.
     guarded |= _go_bzip2_inverse_bwt_guarded_indices(body, param_types, package_name)
+    # ``crypto.Hash`` values are guarded by ``h > 0 && h < maxHash`` before
+    # indexing ``digestSizes`` or ``hashes``.
+    guarded |= _go_crypto_hash_guarded_indices(body, param_types, source, package_name)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
         r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
@@ -1764,6 +1798,31 @@ def _go_bzip2_inverse_bwt_guarded_indices(
     if not re.search(r"\btt\s*\[\s*origPtr\s*\]", body):
         return set()
     return {"origPtr"}
+
+
+def _go_crypto_hash_guarded_indices(
+    body: str, param_types: dict[str, str] | None, source: str, package_name: str
+) -> set[str]:
+    """Guard ``crypto.Hash`` receiver/index ``h`` after ``h > 0 && h < maxHash``.
+
+    ``crypto.Hash`` is an enum-ish ``uint`` whose valid identifiers run from
+    ``1`` to ``maxHash-1``. ``Size`` and ``Available`` guard with
+    ``if h > 0 && h < maxHash`` before indexing ``digestSizes`` or ``hashes``.
+    """
+    if package_name != "crypto":
+        return set()
+    if not re.search(r"\btype\s+Hash\s+uint\b", source):
+        return set()
+    if not re.search(r"\bconst\s*\([^)]*maxHash", source, re.DOTALL):
+        return set()
+    if not re.search(r"\bh\s*<\s*maxHash\b", body):
+        return set()
+    guarded: set[str] = set()
+    for name, raw_type in (param_types or {}).items():
+        if _go_type_basename(raw_type) == "Hash":
+            if re.search(rf"\b(?:digestSizes|hashes)\s*\[\s*{re.escape(name)}\s*\]", body):
+                guarded.add(name)
+    return guarded
 
 
 def _go_enum_param_guarded_indices(
@@ -2457,6 +2516,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
     "StackRecord",  # runtime/pprof profiling records are live container objects
     "MemProfileRecord",
+    "cleanupBlock",  # runtime cleanupBlock allocated by persistentalloc and never nil
+    "cleanupQueue",
     "Timespec",  # syscall/unix time-value structs are always initialized pointers
     "Timeval",
     "DB",  # database/sql.DB handles are opened once and used through non-nil pointers
@@ -2580,12 +2641,33 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``mvslice.Slice`` is a generic multivalue container initialized via ``Init``;
         # its pointer-receiver methods (``Len``, ``At``, etc.) are not valid on nil.
         contracts.add("Slice")
-    # Constructors ``New`` / ``NewFoo`` returning ``*T`` indicate ``T`` is a
-    # container/utility type that callers use through non-nil pointer values.
+    # Constructors ``New`` / ``NewFoo`` / ``PopulateFrom*`` returning ``*T``
+    # indicate ``T`` is a container/utility type that callers use through non-nil
+    # pointer values.
     for match in re.finditer(
         r"\bfunc\s+New(?:[A-Z]\w*)?\s*\([^)]*\)\s*\*?\s*([A-Za-z_][A-Za-z0-9_]*)\b",
         source,
         re.DOTALL,
+    ):
+        contracts.add(match.group(1))
+    # ``PopulateFrom*`` constructors return ``*T`` or ``(*T, error)``.
+    for match in re.finditer(
+        r"\bfunc\s+PopulateFrom[A-Za-z0-9_]*\s*\([^)]*\)\s*\(\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
+        source,
+    ):
+        contracts.add(match.group(1))
+    for match in re.finditer(
+        r"\bfunc\s+PopulateFrom[A-Za-z0-9_]*\s*\([^)]*\)\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        source,
+    ):
+        contracts.add(match.group(1))
+    # Types with pointer-receiver ``MarshalJSON``/``UnmarshalJSON``/``MarshalYAML``/
+    # ``UnmarshalYAML``/``MarshalText``/``UnmarshalText`` are always used via non-nil
+    # concrete values when the encoder/decoder calls those interface methods.
+    for match in re.finditer(
+        r"\bfunc\s*\(\s*\w+\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*"
+        r"(?:Marshal|Unmarshal)(JSON|YAML|Text|Binary)\s*\(",
+        source,
     ):
         contracts.add(match.group(1))
     # Grafana ``migrator.Migrator.AddMigration`` is always called with a
@@ -2707,6 +2789,11 @@ def _go_is_known_interface_method(
         return True
     if name == "UnmarshalJSON" and "[]byte" in params_text and re.search(r"\berror\b", ret):
         return True
+    # ``gopkg.in/yaml`` / ``goccy/go-yaml`` ``Marshaler`` / ``Unmarshaler`` methods.
+    if name == "MarshalYAML" and "error" in ret:
+        return True
+    if name == "UnmarshalYAML" and "*yaml.Node" in params_text and "error" in ret:
+        return True
     # encoding.TextMarshaler / TextUnmarshaler interface methods.
     if name == "MarshalText" and ret.startswith("([]byte") and "error" in ret:
         return True
@@ -2770,6 +2857,30 @@ def _go_map_names(source: str) -> set[str]:
 def _go_local_map_names(body: str) -> set[str]:
     """Return short variable map declarations local to a function body."""
     return {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
+
+
+def _go_map_type_names(source: str) -> set[str]:
+    """Return names of declared types that are Go ``map`` types."""
+    return {
+        match.group(1)
+        for match in re.finditer(r"\btype\s+(\w+)\s+map\[", source)
+    }
+
+
+def _go_map_receiver_names(params_text: str, map_type_names: set[str]) -> set[str]:
+    """Return receiver/parameter names whose declared type is a map type."""
+    names: set[str] = set()
+    if not params_text:
+        return names
+    # Method receiver: ``(p MapType)`` or ``(p *MapType)``.
+    receiver_match = re.search(r"\(\s*(\w+)\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", params_text)
+    if receiver_match and receiver_match.group(2) in map_type_names:
+        names.add(receiver_match.group(1))
+    # Parameter declarations: ``func foo(m MapType)``.
+    for match in re.finditer(r"\b(\w+)\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\b", params_text):
+        if match.group(2) in map_type_names:
+            names.add(match.group(1))
+    return names
 
 
 def _go_float_array_names(source: str) -> set[str]:
@@ -2931,7 +3042,7 @@ def _go_type_basename(raw_type: str) -> str:
 def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set[str]:
     """Names of params/receivers whose type marks them as non-nil containers."""
     nonnil_basenames = set(_GO_NONNIL_EXACT_TYPES) | _go_xorm_core_types(source)
-    return {
+    result = {
         _safe_identifier(name)
         for name, raw_type in param_types.items()
         if (
@@ -2940,6 +3051,17 @@ def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set
             or _go_type_basename(raw_type).removesuffix("?").startswith("Fake")
         )
     }
+    # ``atomic`` packages (``sync/atomic``, ``internal/runtime/atomic``) implement
+    # low-level primitives whose first pointer/unsafe.Pointer argument is always
+    # a valid, non-nil address; callers must provide one, otherwise the program
+    # has already violated the atomic contract.
+    if _go_package_name(source) == "atomic":
+        for name, raw_type in param_types.items():
+            if name in {"ptr", "addr"} and (
+                raw_type.strip().startswith("*") or "unsafe.Pointer" in raw_type
+            ):
+                result.add(_safe_identifier(name))
+    return result
 
 
 def _go_flag_value_receiver_types(functions: list) -> set[str]:
@@ -3186,6 +3308,7 @@ def _detect_go_safety_issues(
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         component_runner_receivers = _go_component_runner_receiver_types(source)
         file_map_names = _go_map_names(source)
+        map_type_names = _go_map_type_names(source)
         global_array_keys = _go_global_array_keys(source)
         known_types = _go_type_names(source)
         go_float_arrays = _go_float_array_names(original_source or source)
@@ -3200,7 +3323,7 @@ def _detect_go_safety_issues(
                 # soundly analyzed without concrete type constraints.
                 continue
             body = fn.body
-            go_map_names = file_map_names | _go_local_map_names(body)
+            go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(fn.params_text, map_type_names)
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
             nonnil_param_names = _go_nonnil_param_names(param_types, source) | _go_actor_nonnil_params(
@@ -3232,7 +3355,7 @@ def _detect_go_safety_issues(
                 rtype=rtype,
             ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
-            ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name)
+            ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
             suppress_nil = (
                 fn.name in {"String", "Get"}
                 and rtype is not None
@@ -3262,7 +3385,7 @@ def _detect_go_safety_issues(
             orig_start = orig_source.find(header) if original_source else -1
             suppress_bounds = _go_doc_comment_suppresses_bounds(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             guaranteed_nonzero = (
-                _go_nonzero_constants(source)
+                _go_nonzero_constants(original_source or source)
                 | _go_known_nonzero_selectors(original_source or source)
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
@@ -3356,8 +3479,9 @@ def _detect_go_safety_issues(
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     file_map_names = _go_map_names(source)
+    map_type_names = _go_map_type_names(source)
     base_guaranteed_nonzero = (
-        _go_nonzero_constants(source)
+        _go_nonzero_constants(original_source or source)
         | _go_known_nonzero_selectors(original_source or source)
         | {"_W", "bits.UintSize"}
     )
@@ -3368,7 +3492,7 @@ def _detect_go_safety_issues(
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
-        go_map_names = file_map_names | _go_local_map_names(body)
+        go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(params_text, map_type_names)
         guaranteed_nonzero = (
             base_guaranteed_nonzero
             | _go_local_nonzero_variables(body)
@@ -3407,7 +3531,7 @@ def _detect_go_safety_issues(
             source=source,
             package_name=package_name,
             rtype=rtype,
-        ) | _go_enum_string_guarded_indices(body, name, receiver_name)
+        ) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
