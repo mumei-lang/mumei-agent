@@ -1,0 +1,59 @@
+# Batch 146 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ssa/func_test.go`: verified
+- `go/src/crypto/hmac/hmac.go`: verified
+- `go/src/internal/trace/testdata/generators/go122-syscall-steal-proc-sitting-in-syscall.go`: verified
+- `go/src/net/cgo_unix_cgo.go`: verified
+- `go/src/net/sock_stub.go`: verified
+- `go/src/runtime/string_test.go`: verified
+- `go/src/syscall/exec_libc2.go`: verified
+- `go/test/fixedbugs/bug339.go`: verified
+- `go/test/fixedbugs/issue48916.go`: verified
+- `go/test/fixedbugs/issue7690.go`: verified
+- `grafana/apps/alerting/alertenrichment/pkg/apis/alertenrichment/v1beta1/doc.go`: verified
+- `grafana/apps/dashboard/pkg/migration/schemaversion/v34_test.go`: verified
+- `grafana/e2e-playwright/dashboards-suite/textbox-variables.spec.ts`: verified
+- `grafana/packages/grafana-data/src/utils/docs.ts`: verified
+- `grafana/packages/grafana-i18n/src/eslint/no-translation-top-level/no-translation-top-level.test.js`: verified
+- `grafana/pkg/infra/usagestats/statscollector/concurrent_users.go`: verified
+- `grafana/pkg/registry/apis/iam/authorizer/external_group_mapping_test.go`: verified
+- `grafana/pkg/registry/apis/secret/contracts/secure_value.go`: verified
+- `grafana/pkg/registry/apis/secret/inline_mock.go`: verified
+- `grafana/pkg/registry/apis/secret/mutator/secure_value.go`: verified
+- `grafana/pkg/registry/apps/alerting/notifications/receiver/storage.go`: verified
+- `grafana/pkg/services/caching/fake_caching_service.go`: verified
+- `grafana/pkg/services/pluginsintegration/pluginconfig/request_test.go`: verified
+- `grafana/pkg/storage/unified/resource/datastore.go`: verified
+- `grafana/public/app/features/alerting/unified/components/rules/central-state-history/EventDetails.test.tsx`: verified
+- `grafana/public/app/features/provisioning/components/BulkActions/BulkActionJobStatus.tsx`: verified
+- `grafana/public/app/features/provisioning/components/Shared/ProvisioningAwareFolderPicker.test.tsx`: verified
+- `grafana/public/app/features/search/utils.test.ts`: verified
+- `grafana/public/app/features/variables-management/useVariableNameCollisionCheck.test.ts`: verified
+- `grafana/public/app/plugins/panel/news/constants.ts`: verified
+- `influxdb/core/iox_query/src/physical_optimizer/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/catalog/migrations/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/catalog/versions/v3/ops/table/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/format/apply/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/format/records/generation/tests.rs`: verified
+- `influxdb/influxdb3_id/src/tests.rs`: verified
+- `influxdb/influxdb3_processing_engine/src/plugins/tests.rs`: verified
+- `influxdb/influxdb3_telemetry/src/sender/tests.rs`: verified
+- `influxdb/influxdb3_test_helpers/src/object_store/mock/tests.rs`: verified
+- `influxdb/object_store_utils/src/observed_object_store/tests.rs`: verified
+- `prysm/beacon-chain/core/electra/deposit_fuzz_test.go`: verified
+- `prysm/beacon-chain/das/availability_blobs_test.go`: verified
+- `prysm/beacon-chain/state/state-native/getters_sync_committee.go`: verified
+- `prysm/beacon-chain/state/stategen/setter.go`: verified
+- `prysm/beacon-chain/sync/backfill/metrics.go`: verified
+- `prysm/testing/bls/aggregate_verify_test.go`: verified
+- `prysm/testing/endtoend/types/empty.go`: verified
+- `prysm/testing/spectest/shared/gloas/operations/deposit_request.go`: verified
+- `prysm/validator/accounts/cli_manager.go`: verified
+- `prysm/validator/node/log.go`: verified
