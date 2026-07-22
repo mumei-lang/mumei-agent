@@ -1573,6 +1573,35 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     return set()
 
 
+def _go_return_divisor_nonzero_params(body: str, params_text: str) -> set[str]:
+    """Return integer params used as the divisor/modulo in the sole return expression.
+
+    A function such as ``func randIntn(n int) int { return randInt() % n }``
+    panics when ``n`` is zero, so the parameter carries an implicit non-zero
+    precondition.
+    """
+    int_types = {
+        "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        "byte", "rune",
+    }
+    int_params = {
+        param_name
+        for param_name, param_type in _go_param_types(params_text).items()
+        if param_type.strip().lstrip("*").lower() in int_types
+    }
+    if not int_params:
+        return set()
+    expressions = _return_expressions(body, fallback=False, language="go")
+    if len(expressions) != 1:
+        return set()
+    expr = expressions[0]
+    for name in int_params:
+        if re.search(rf"(?:%|/)\s*{re.escape(name)}\b", expr):
+            return {name}
+    return set()
+
+
 def _go_math_big_nat_scan_guarded_indices(
     body: str, package_name: str, rtype: str | None
 ) -> set[str]:
@@ -3665,6 +3694,7 @@ def _detect_go_safety_issues(
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
+                | _go_return_divisor_nonzero_params(body, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
                 | _go_loop_count_nonzero_params(body, set(param_types.keys()))
                 | _go_local_nonzero_variables(body)

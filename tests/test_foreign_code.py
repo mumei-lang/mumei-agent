@@ -2550,6 +2550,21 @@ func Lookup(name string) *Info {
     assert not any("bounds" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_rand_modulo_param_nonzero() -> None:
+    """A function returning ``randInt() % n`` implicitly requires ``n != 0``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package net
+func runtime_rand() uint64
+func randInt() int { return int(uint(runtime_rand()) >> 1) }
+func randIntn(n int) int {
+    return randInt() % n
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("n=0" in str(i.counterexample) for i in issues)
+
+
 def test_detect_go_safety_issues_skips_map_key_access() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
 
