@@ -2823,7 +2823,7 @@ def _go_first_param(params_text: str) -> str | None:
     for i, ch in enumerate(params_text):
         if ch in "([{":
             depth += 1
-        elif ch in ")]}:":
+        elif ch in ")]}":
             depth -= 1
         elif ch == "," and depth == 0:
             return params_text[:i].strip()
