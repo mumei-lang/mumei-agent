@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-data/src/transformations/transformers/calculateField.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

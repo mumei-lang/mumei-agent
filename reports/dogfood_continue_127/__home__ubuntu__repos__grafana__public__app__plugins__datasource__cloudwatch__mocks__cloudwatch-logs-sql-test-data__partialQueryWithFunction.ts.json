@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/cloudwatch/mocks/cloudwatch-logs-sql-test-data/partialQueryWithFunction.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

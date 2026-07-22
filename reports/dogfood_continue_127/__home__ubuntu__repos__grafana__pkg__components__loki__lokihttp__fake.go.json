@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/components/loki/lokihttp/fake.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/manage-dashboards/components/PublicDashboardListTable/DeletePublicDashboardModal.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/fulu/operations/voluntary_exit.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

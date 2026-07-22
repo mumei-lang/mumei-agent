@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/runtime/vdso_linux_ppc64x.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

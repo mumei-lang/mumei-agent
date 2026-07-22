@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/syscall/windows/types_windows.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
