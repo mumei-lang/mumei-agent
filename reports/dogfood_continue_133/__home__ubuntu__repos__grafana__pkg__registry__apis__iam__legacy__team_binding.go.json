@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/iam/legacy/team_binding.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
