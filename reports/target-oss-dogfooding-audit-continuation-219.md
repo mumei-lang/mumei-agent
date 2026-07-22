@@ -1,0 +1,59 @@
+# Batch 220 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/archive/zip/example_test.go`: verified
+- `go/src/cmd/compile/internal/types2/pointer.go`: verified
+- `go/src/cmd/internal/obj/objfile_test.go`: verified
+- `go/src/internal/syscall/windows/registry/zsyscall_windows.go`: verified
+- `go/src/os/pidfd_other.go`: verified
+- `go/src/runtime/os_netbsd_arm.go`: verified
+- `go/src/runtime/runtime-gdb_unix_test.go`: verified
+- `go/src/runtime/signal_netbsd_arm64.go`: verified
+- `go/test/fixedbugs/issue10066.dir/b.go`: verified
+- `go/test/fixedbugs/issue11359.go`: verified
+- `go/test/fixedbugs/issue19113.go`: verified
+- `go/test/fixedbugs/issue4517b.go`: verified
+- `go/test/fixedbugs/issue60982.go`: verified
+- `go/test/typeparam/issue50993.go`: verified
+- `grafana/apps/alerting/notifications/pkg/apis/alertingnotifications/v1beta1/inhibitionrule_ext.go`: verified
+- `grafana/apps/dashvalidator/pkg/app/app.go`: verified
+- `grafana/pkg/cmd/grafana-cli/services/api_client_test.go`: verified
+- `grafana/pkg/components/imguploader/webdavuploader_test.go`: verified
+- `grafana/pkg/plugins/manager/pipeline/doc.go`: verified
+- `grafana/pkg/registry/apis/provisioning/connection_repositories.go`: verified
+- `grafana/pkg/registry/apps/shorturl/conversions.go`: verified
+- `grafana/pkg/services/anonymous/validator/service.go`: verified
+- `grafana/pkg/services/ngalert/api/hooks_test.go`: verified
+- `grafana/pkg/services/ngalert/models/instance_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/get_metric_data_executor_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/time_series_query_test.go`: verified
+- `grafana/pkg/tsdb/grafana-testdata-datasource/utils.go`: verified
+- `grafana/public/app/core/components/Branding/CloudEnterpriseBadge.tsx`: verified
+- `grafana/public/app/core/reducers/index.ts`: verified
+- `grafana/public/app/features/alerting/unified/components/import-to-gma/Wizard/CancelButton.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-editor/RuleEditorSection.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/scene/dashboard-filters-overview/DashboardFiltersOverview.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/settings/variables/VariableEditableElement.tsx`: verified
+- `grafana/public/app/features/provisioning/GettingStarted/SetupModal.tsx`: verified
+- `grafana/public/app/plugins/datasource/loki/mergeResponses.ts`: verified
+- `grafana/public/app/plugins/panel/annolist/AnnoListPanel.tsx`: verified
+- `grafana/public/test/helpers/asserts.ts`: verified
+- `prysm/api/server/structs/endpoints_validator.go`: verified
+- `prysm/beacon-chain/core/transition/transition_test.go`: verified
+- `prysm/beacon-chain/monitor/process_block_test.go`: verified
+- `prysm/beacon-chain/rpc/prysm/validator/validator_performance_test.go`: verified
+- `prysm/beacon-chain/state/state-native/custom-types/randao_mixes.go`: verified
+- `prysm/beacon-chain/sync/rpc_data_column_sidecars_by_root_test.go`: verified
+- `prysm/beacon-chain/sync/subscription_topic_handler.go`: verified
+- `prysm/beacon-chain/verification/error.go`: verified
+- `prysm/beacon-chain/verification/metrics.go`: verified
+- `prysm/cmd/beacon-chain/usage.go`: verified
+- `prysm/testing/spectest/minimal/fulu__rewards__rewards_test.go`: verified
+- `prysm/testing/spectest/shared/electra/epoch_processing/rewards_and_penalties.go`: verified
+- `prysm/validator/client/beacon-api/proposer_preferences.go`: verified
