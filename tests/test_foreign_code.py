@@ -3786,3 +3786,20 @@ func divRoundUp(x, y int) int {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("divide" in issue.message for issue in issues)
+
+
+def test_go_guarded_indices_int_cast_upper_bound() -> None:
+    """Go upper-bound guard ``int(idx) < len(arr)`` is recognized when the index is unsigned."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package version
+
+func EventName(typ uint8, s []T) string {
+    if int(typ) < len(s) && s[typ].Name != "" {
+        return s[typ].Name
+    }
+    return ""
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
