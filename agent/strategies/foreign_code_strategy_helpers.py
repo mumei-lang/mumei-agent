@@ -1245,6 +1245,25 @@ def _go_local_nonzero_variables(body: str) -> set[str]:
     }
 
 
+def _go_align_nonzero_params(body: str) -> set[str]:
+    """Return alignment parameters that are provably non-zero.
+
+    The standard round-up idiom ``y := x + a - 1; return y - y % a`` (or the
+    equivalent bitwise form) computes an aligned offset. The alignment ``a``
+    is positive by contract, so the division/modulo is safe.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    # ``y := x + a - 1`` followed by ``return y - y % a``.
+    for m in re.finditer(r"\b(\w+)\s*:=\s*(\w+)\s*\+\s*(\w+)\s*-\s*1\b", stripped):
+        var, base, align = m.group(1), m.group(2), m.group(3)
+        if re.search(rf"\breturn\s+{re.escape(var)}\s*-\s*{re.escape(var)}\s*%\s*{re.escape(align)}\b", stripped):
+            return {align}
+    # Bitwise equivalent: ``return (x + a - 1) &^ (a - 1)``.
+    for m in re.finditer(r"\breturn\s*\(\s*(\w+)\s*\+\s*(\w+)\s*-\s*1\s*\)\s*&\^\s*\(\s*\2\s*-\s*1\s*\)", stripped):
+        return {m.group(2)}
+    return set()
+
+
 def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     """Return the integer divisor parameter for functions named ``Div``/``Mod`` as non-zero.
 
@@ -2902,6 +2921,7 @@ def _detect_go_safety_issues(
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
                 | _go_local_nonzero_variables(body)
+                | _go_align_nonzero_params(body)
                 | _go_rounded_factor_nonzero(body)
                 | _go_beacon_config_nonzero_locals(body, original_source or source)
                 | {"_W", "bits.UintSize"}
@@ -2998,7 +3018,7 @@ def _detect_go_safety_issues(
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
         go_map_names = file_map_names | _go_local_map_names(body)
-        guaranteed_nonzero = base_guaranteed_nonzero | _go_local_nonzero_variables(body) | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
+        guaranteed_nonzero = base_guaranteed_nonzero | _go_local_nonzero_variables(body) | _go_align_nonzero_params(body) | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
         parallel_slicing = _go_flattened_index_safe_pairs(body)
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names

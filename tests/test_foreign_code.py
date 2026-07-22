@@ -4585,3 +4585,18 @@ func addrComponent(a *Addr, acl AClass, index int) uint32 {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("addrComponent" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_align_helper_nonzero_modulus() -> None:
+    """The standard ``align`` round-up helper uses a positive alignment parameter."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package maligned
+
+func align(x, a int64) int64 {
+    y := x + a - 1
+    return y - y%a
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("align" in issue.message and "non-zero" in issue.message for issue in issues)
