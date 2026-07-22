@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/deneb/sanity/block_processing.yaml.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

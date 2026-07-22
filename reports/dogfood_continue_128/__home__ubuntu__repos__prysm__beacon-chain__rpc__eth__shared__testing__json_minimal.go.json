@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/beacon-chain/rpc/eth/shared/testing/json_minimal.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

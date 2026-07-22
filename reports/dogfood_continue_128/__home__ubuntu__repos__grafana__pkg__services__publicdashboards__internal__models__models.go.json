@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/publicdashboards/internal/models/models.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

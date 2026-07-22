@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/live/pipeline/frame_output_conditional.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/mutable_batch/src/lib.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}
