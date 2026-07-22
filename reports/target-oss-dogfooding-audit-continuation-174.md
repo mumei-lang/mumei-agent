@@ -1,0 +1,59 @@
+# Batch 175 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/asm/internal/lex/tokenizer.go`: verified
+- `go/src/cmd/go/internal/base/signal_unix.go`: verified
+- `go/src/cmd/go/internal/modindex/syslist_test.go`: verified
+- `go/src/crypto/rand/rand.go`: verified
+- `go/src/internal/abi/abi_arm64.go`: verified
+- `go/src/net/sockoptip4_linux.go`: verified
+- `go/src/runtime/cgo/netbsd.go`: verified
+- `go/src/runtime/panic.go`: verified
+- `go/src/simd/archsimd/internal/simd_test/shift_wasm_test.go`: verified
+- `go/test/asmhdr.dir/main.go`: verified
+- `go/test/chan/sieve2.go`: verified
+- `go/test/fixedbugs/bug443.go`: verified
+- `go/test/fixedbugs/issue31252.go`: verified
+- `go/test/fixedbugs/issue78410.go`: verified
+- `grafana/apps/provisioning/pkg/generated/applyconfiguration/provisioning/v0alpha1/jobspec.go`: verified
+- `grafana/packages/grafana-data/src/types/live.ts`: verified
+- `grafana/packages/grafana-data/src/utils/anyToNumber.ts`: verified
+- `grafana/packages/grafana-runtime/src/utils/qscheck.ts`: verified
+- `grafana/packages/grafana-ui/src/components/ColorPicker/SpectrumPalette.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/Table/hooks.ts`: verified
+- `grafana/pkg/components/loki/logproto/extensions.go`: verified
+- `grafana/pkg/infra/features/provider.go`: verified
+- `grafana/pkg/registry/apis/iam/noopstorage/storage_backend.go`: verified
+- `grafana/pkg/registry/apps/example/register.go`: verified
+- `grafana/pkg/services/authz/zanzana/store/store.go`: verified
+- `grafana/pkg/services/live/pipeline/auth.go`: verified
+- `grafana/pkg/services/live/pipeline/pipeline_test.go`: verified
+- `grafana/pkg/services/ngalert/notifier/routes/service.go`: verified
+- `grafana/pkg/services/preference/prefapi/k8s_test.go`: verified
+- `grafana/pkg/services/promtypemigration/prom_mig.go`: verified
+- `grafana/pkg/services/publicdashboards/internal/metric/metrics.go`: verified
+- `grafana/pkg/services/quota/quotatest/fake.go`: verified
+- `grafana/pkg/storage/unified/resource/kv/sqlkv.go`: verified
+- `grafana/pkg/tests/apis/collections/stars_test.go`: verified
+- `grafana/public/app/features/alerting/unified/insights/mimir/rules/Pending.tsx`: verified
+- `grafana/public/app/features/correlations/Forms/QueryEditorField.tsx`: verified
+- `grafana/public/app/features/transformers/smoothing/applicability.ts`: verified
+- `grafana/public/app/features/variables/editor/getVariableQueryEditor.tsx`: verified
+- `grafana/public/app/plugins/panel/barchart/distribute.ts`: verified
+- `prysm/beacon-chain/db/slasherkv/metrics.go`: verified
+- `prysm/beacon-chain/state/fieldtrie/field_trie.go`: verified
+- `prysm/beacon-chain/state/state-native/metrics_gloas.go`: verified
+- `prysm/beacon-chain/sync/verify/blob.go`: verified
+- `prysm/testing/endtoend/evaluators/validator.go`: verified
+- `prysm/testing/spectest/mainnet/bellatrix__epoch_processing__rewards_and_penalties_test.go`: verified
+- `prysm/testing/spectest/mainnet/phase0__operations__deposit_test.go`: verified
+- `prysm/testing/spectest/minimal/altair__epoch_processing__eth1_data_reset_test.go`: verified
+- `prysm/testing/spectest/shared/fulu/epoch_processing/participation_flag_updates.go`: verified
+- `prysm/tools/analyzers/ineffassign/ineffassign.go`: verified
+- `prysm/validator/client/beacon-api/beacon_api_helpers.go`: verified
