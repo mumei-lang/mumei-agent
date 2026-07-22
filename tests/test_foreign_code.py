@@ -4059,6 +4059,118 @@ func addrLock(addr *uint64) *spinlock {
     assert not any("can divide" in issue.message for issue in issues)
 
 
+def test_go_beacon_config_count_nonzero_divisor() -> None:
+    """Local variables assigned from ``params.BeaconConfig().*Count`` are nonzero divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package peerdas
+
+import "github.com/OffchainLabs/prysm/v7/config/params"
+
+func ComputeSubnetForDataColumnSidecar(columnIndex uint64) uint64 {
+    dataColumnSidecarSubnetCount := params.BeaconConfig().DataColumnSidecarSubnetCount
+    return columnIndex % dataColumnSidecarSubnetCount
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in issue.message for issue in issues)
+
+
+def test_go_flattened_2d_range_index_guard() -> None:
+    """Flattened ``row*cols + col`` indices inside nested ``range`` loops are guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package kzg
+
+func VerifyCellKZGProofBatchFromBlobData(blobs [][]byte, commitments [][]byte, cellProofs [][]byte, numberOfColumns uint64) error {
+    blobCount := uint64(len(blobs))
+    expectedCellProofs := blobCount * numberOfColumns
+    if uint64(len(cellProofs)) != expectedCellProofs {
+        return errors.New("mismatch")
+    }
+
+    for blobIndex := range blobs {
+        for columnIndex := range numberOfColumns {
+            cellProofIndex := uint64(blobIndex)*numberOfColumns + columnIndex
+            if len(cellProofs[cellProofIndex]) != 0 {
+                return nil
+            }
+        }
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_index() -> None:
+    """``if idx >= len(arr) { return }`` before ``arr[idx]`` is a valid guard."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+var sigtable []struct{ name string }
+
+func signame(sig uint32) string {
+    if sig >= uint32(len(sigtable)) {
+        return ""
+    }
+    return sigtable[sig].name
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_enum_param_index_num_fields_array() -> None:
+    """Enum parameters of type ``Field`` indexing ``[numFields]`` arrays are guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package pkgbits
+
+type Version uint32
+type Field int
+
+const (
+    Flags Field = iota
+    HasInit
+    numFields = iota
+)
+
+var introduced = [numFields]Version{}
+var removed = [numFields]Version{}
+
+func (v Version) Has(f Field) bool {
+    return introduced[f] <= v && (v < removed[f] || removed[f] == 0)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_record_receiver_nonnil() -> None:
+    """`*StackRecord` / `*MemProfileRecord` pointer-receiver methods are non-nil in callers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+type StackRecord struct { Stack0 [32]uintptr }
+
+func (r *StackRecord) Stack() []uintptr {
+    for i, v := range r.Stack0 {
+        if v == 0 {
+            return r.Stack0[0:i]
+        }
+    }
+    return r.Stack0[0:]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("nil" in issue.message for issue in issues)
+
+
+
 def test_go_syscall_timeval_timespec_nonnil_receiver() -> None:
     """``syscall.Timeval``/``Timespec`` pointer receivers are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
