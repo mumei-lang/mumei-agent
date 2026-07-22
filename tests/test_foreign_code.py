@@ -4485,3 +4485,36 @@ func (a Attribute) load() Attribute { return a }
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("attrBase" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_value_transformer_methods_non_nil() -> None:
+    """``value.Transformer`` implementation methods are invoked on non-nil receivers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package testing
+
+type Context struct{}
+
+type Transformer interface {
+    TransformFromStorage(ctx Context, data []byte, dataCtx Context) ([]byte, bool, error)
+    TransformToStorage(ctx Context, data []byte, dataCtx Context) ([]byte, error)
+}
+
+type reproducingTransformer struct {
+    wrapped Transformer
+    store   interface{ Create(ctx Context, key string, obj, out interface{}) error }
+}
+
+func (rt *reproducingTransformer) TransformFromStorage(ctx Context, data []byte, dataCtx Context) ([]byte, bool, error) {
+    if err := rt.store.Create(ctx, "", nil, nil); err != nil {
+        return nil, false, err
+    }
+    return rt.wrapped.TransformFromStorage(ctx, data, dataCtx)
+}
+
+func (rt *reproducingTransformer) TransformToStorage(ctx Context, data []byte, dataCtx Context) ([]byte, error) {
+    return rt.wrapped.TransformToStorage(ctx, data, dataCtx)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("reproducingTransformer" in issue.message and "dereference" in issue.message for issue in issues)
