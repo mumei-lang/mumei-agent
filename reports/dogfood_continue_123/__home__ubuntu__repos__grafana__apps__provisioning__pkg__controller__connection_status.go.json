@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/provisioning/pkg/controller/connection_status.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

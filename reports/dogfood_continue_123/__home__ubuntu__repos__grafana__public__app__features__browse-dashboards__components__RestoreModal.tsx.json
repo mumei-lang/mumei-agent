@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/browse-dashboards/components/RestoreModal.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

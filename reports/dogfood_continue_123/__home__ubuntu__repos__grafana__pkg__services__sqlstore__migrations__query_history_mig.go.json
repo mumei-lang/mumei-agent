@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/sqlstore/migrations/query_history_mig.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/sqlstore/migrations/login_attempt_mig.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

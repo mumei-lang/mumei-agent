@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/runtime/syscall/linux/defs_linux.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

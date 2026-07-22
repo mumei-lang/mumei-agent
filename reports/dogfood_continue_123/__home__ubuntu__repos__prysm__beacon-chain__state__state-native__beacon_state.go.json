@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/beacon-chain/state/state-native/beacon_state.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
