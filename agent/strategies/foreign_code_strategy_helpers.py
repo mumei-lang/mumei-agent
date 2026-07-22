@@ -1348,11 +1348,12 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     """Return the integer divisor parameter for functions named ``Div``/``Mod``/``Rem`` as non-zero.
 
     A function/method named ``Div``, ``Mod``, or ``Rem`` (with an optional bit-size
-    suffix) that performs integer division or modulo implies the divisor must be
-    non-zero; otherwise the caller has passed an invalid value. The divisor is
-    conventionally the last integer parameter.
+    suffix), or a runtime helper such as ``uint64div``/``int64mod``, performs
+    integer division or modulo and therefore implies the divisor must be non-zero;
+    otherwise the caller has passed an invalid value. The divisor is conventionally
+    the last integer parameter.
     """
-    if not re.fullmatch(r"(Div|Mod|Rem)\d*", name):
+    if not re.fullmatch(r"(?:(?:u?int)?\d*(?:div|mod)|(Div|Mod|Rem))\d*", name, re.IGNORECASE):
         return set()
     int_types = {
         "int", "int8", "int16", "int32", "int64",
