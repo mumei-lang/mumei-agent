@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/influxdb3_cache/src/last_cache/table_function.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

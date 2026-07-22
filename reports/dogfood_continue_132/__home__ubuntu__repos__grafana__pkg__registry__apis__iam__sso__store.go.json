@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/iam/sso/store.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

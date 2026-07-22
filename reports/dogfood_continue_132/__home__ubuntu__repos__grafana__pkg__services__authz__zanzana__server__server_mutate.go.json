@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/authz/zanzana/server/server_mutate.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

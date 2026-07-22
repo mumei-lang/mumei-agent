@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/setting/setting_unified_alerting.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

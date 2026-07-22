@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/iox_query_influxql/src/show_retention_policies.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

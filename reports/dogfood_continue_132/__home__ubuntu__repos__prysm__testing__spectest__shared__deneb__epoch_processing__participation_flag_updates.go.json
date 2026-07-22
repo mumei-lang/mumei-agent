@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/deneb/epoch_processing/participation_flag_updates.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
