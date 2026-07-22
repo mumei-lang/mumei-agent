@@ -2787,6 +2787,24 @@ func offsetFrom(from *Value, offset int64) int {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_slices_index_func_guarded() -> None:
+    """slices.IndexFunc result guarded by ``i >= 0`` is a valid index."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package main
+import "slices"
+type Command struct{ Name string }
+func checkCommandList(commands []*Command, name string) *Command {
+    if i := slices.IndexFunc(commands, func(c *Command) bool { return c.Name == name }); i >= 0 {
+        return commands[i]
+    }
+    return nil
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues

@@ -1753,6 +1753,13 @@ def _go_guarded_indices(
         re.DOTALL,
     ):
         guarded.add(match.group("idx"))
+    # ``slices.Index*`` returns -1 or a valid index; ``if i := slices.Index(...); i >= 0``
+    # guards ``commands[i]``.
+    for match in re.finditer(
+        r"\bif\s+(?P<idx>\w+)\s*:=\s*slices\.Index(?:Func)?\s*\([^;]+\)\s*;\s*(?P=idx)\s*>=\s*0",
+        body,
+    ):
+        guarded.add(match.group("idx"))
     # ``const m = <type>(len(container) - 1)`` used as a last-index helper.
     limit_consts: dict[str, str] = {}
     for match in re.finditer(
