@@ -570,11 +570,17 @@ def _source_has_function_declarations(source: str, language: str) -> bool | None
         names = tree_sitter_extract.function_names(source, normalized, _safe_identifier)
         if names is not None:
             if normalized == "go":
-                # Exclude blank-identifier functions ("func _[T any](x T)"), which are
-                # placeholders in Go type-checker testdata and cannot be verified.
+                # Exclude blank-identifier functions ("func _[T any](x T)") and generic
+                # functions, which are placeholders/type-checker testdata and cannot be
+                # verified without concrete type constraints.
                 extracted = tree_sitter_extract._extract(source, normalized, _safe_identifier)
                 if extracted is not None:
-                    names = {fn.name for fn in extracted if fn.raw_name != "_"}
+                    names = {
+                        fn.name
+                        for fn in extracted
+                        if fn.raw_name != "_"
+                        and not re.search(r"\]\s*\(", source[fn.start_char : fn.body_start_char])
+                    }
                 else:
                     names = set()
                 names = [name for name in names if not _is_go_test_name(name)]

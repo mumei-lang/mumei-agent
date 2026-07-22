@@ -267,6 +267,36 @@ def test_go_pointer_param_still_flagged_nil() -> None:
     assert any("user" in issue.message and "non-nil" in issue.message for issue in issues)
 
 
+def test_go_data_receiver_nonnil() -> None:
+    """Pointer receivers of internal ``*Data`` container structs are non-nil (#260)."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_go_safety_issues,
+    )
+
+    source = (
+        "package client\n"
+        "type storeData struct { initialized bool }\n"
+        "func (d *storeData) isInitialized() bool { return d.initialized }\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert not any("d" in issue.message and "non-nil" in issue.message for issue in issues)
+
+
+def test_go_to_proto_receiver_nonnil() -> None:
+    """Pointer receivers with ``ToProto`` JSON/SSZ conversion methods are non-nil (#261)."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_go_safety_issues,
+    )
+
+    source = (
+        "package builder\n"
+        "type ExecPayloadResponseCapella struct { Data struct{} }\n"
+        "func (r *ExecPayloadResponseCapella) ToProto() (*X, error) { return r.Data.Method() }\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert not any("r" in issue.message and "non-nil" in issue.message for issue in issues)
+
+
 def test_go_cross_validation_value_param_not_flagged_nil() -> None:
     """The contract-inference path must also skip value types (#295, PR #298)."""
     from agent.cross_validation_foreign import _infer_go_contracts
@@ -1889,6 +1919,7 @@ def test_source_has_function_declarations() -> None:
     assert _source_has_function_declarations("func F() {}", "go") is True
     assert _source_has_function_declarations("pub fn f() {}", "rust") is True
     assert _source_has_function_declarations("func TestFoo(t *testing.T) {}", "go") is False
+    assert _source_has_function_declarations("func fuzzCopies[T any](t *testing.T, obj T) {}", "go") is False
     assert _source_has_function_declarations("// errorcheck\nfunc f() {}", "go") is False
     assert (
         _source_has_function_declarations("#[test]\nfn foo() {}", "rust") is False

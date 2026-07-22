@@ -2672,6 +2672,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "State",  # compiler/runtime state machines (e.g. ssagen.State) are non-nil in use
     "Machine",  # Prysm state-machine objects are non-nil when methods are invoked
     "Migrator",  # Grafana migration types are non-nil when Exec/SQL is called
+    "Data",  # internal data container structs embedded in a wrapper (e.g. dutyStoreData) are non-nil in use
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
@@ -2823,6 +2824,13 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         contracts.add(match.group(1))
     for match in re.finditer(
         r"\bfunc\s+PopulateFrom[A-Za-z0-9_]*\s*\([^)]*\)\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        source,
+    ):
+        contracts.add(match.group(1))
+    # ``ToProto`` conversion methods on JSON/SSZ response DTOs are only called on
+    # non-nil unmarshaled values (e.g. Prysm builder API response types).
+    for match in re.finditer(
+        r"\bfunc\s*\(\s*\w+\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*ToProto\s*\(",
         source,
     ):
         contracts.add(match.group(1))
