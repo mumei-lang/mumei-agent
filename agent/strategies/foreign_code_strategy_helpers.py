@@ -4215,7 +4215,12 @@ def _is_nonzero_numeric_literal(value: str) -> bool:
         return False
 
 
-def _is_float_expression(value: str, label: str, float_arrays: set[str] | None = None) -> bool:
+def _is_float_expression(
+    value: str,
+    label: str,
+    float_arrays: set[str] | None = None,
+    float_variables: set[str] | None = None,
+) -> bool:
     """Return True when ``value`` is a floating-point divisor expression."""
     # Go explicit float casts.
     if label == "Go" and value.startswith(("float32(", "float64(")):
@@ -4237,6 +4242,17 @@ def _is_float_expression(value: str, label: str, float_arrays: set[str] | None =
                 return True
             except ValueError:
                 return False
+    if label == "Go" and float_variables:
+        text = _strip_go_rust_literals_and_comments(value)
+        # Reject expressions with integer-only operators or boolean operators.
+        if re.search(r"(?<![<>&])[%&|^]|<<|>>|&\^|&&|\|\|", text):
+            return False
+        # Allow function calls only from the math package's float-returning set.
+        func_names = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", text))
+        if func_names and not func_names.issubset(_GO_FLOAT_FUNCTIONS):
+            return False
+        if any(re.search(rf"\b{re.escape(v)}\b", text) for v in float_variables):
+            return True
     return False
 
 
@@ -4276,7 +4292,7 @@ def _division_safety_issue(
         # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
         # not provably non-zero are too noisy to model as a free variable.
         return None
-    if _is_float_expression(divisor, label, float_arrays) or _is_float_expression(stripped, label, float_arrays):
+    if _is_float_expression(divisor, label, float_arrays, float_variables) or _is_float_expression(stripped, label, float_arrays, float_variables):
         # Floating-point division is well-defined even when the divisor is zero.
         return None
     if _is_nonzero_numeric_literal(divisor) or _is_nonzero_numeric_literal(stripped):

@@ -2652,6 +2652,24 @@ func (p *maybeTraceablePtr) get() unsafe.Pointer { return unsafe.Pointer(p.vu) }
     assert not any("dereference" in i.message or "bounds" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_math_gamma_float_divisor() -> None:
+    """math.Gamma small-case denominator is a floating-point expression."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package math
+func Gamma(x float64) float64 {
+    const Euler = 0.5772
+    if x == 0 {
+        return Inf(1)
+    }
+    z := 1.0
+    return z / ((1 + Euler*x) * x)
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("divide by" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
