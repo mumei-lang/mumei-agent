@@ -1,0 +1,59 @@
+# Batch 243 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/archive/tar/stat_actime1.go`: verified
+- `go/src/cmd/compile/internal/noder/irgen.go`: verified
+- `go/src/crypto/x509/root_solaris.go`: verified
+- `go/src/go/types/decl.go`: verified
+- `go/src/internal/trace/traceviewer/pprof.go`: verified
+- `go/src/net/http/internal/http2/pipe_test.go`: verified
+- `go/src/runtime/typelinksrace_test.go`: verified
+- `go/src/syscall/types_netbsd.go`: verified
+- `go/test/alg.go`: verified
+- `go/test/fixedbugs/issue58325.go`: verified
+- `go/test/genmeth.go`: verified
+- `go/test/sigchld.go`: verified
+- `go/test/typeparam/issue51219.dir/main.go`: verified
+- `grafana/apps/advisor/pkg/app/checkscheduler/mtcheckscheduler.go`: verified
+- `grafana/apps/provisioning/pkg/repository/git/mutator_test.go`: verified
+- `grafana/devenv/docker/loadtest/auth_token_slow_test.js`: verified
+- `grafana/packages/grafana-ui/src/components/DateTimePickers/TimeZonePicker/TimeZoneOffset.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/MatchersUI/FieldNameByRegexMatcherEditor.tsx`: verified
+- `grafana/packages/grafana-ui/src/types/react-table-config.d.ts`: verified
+- `grafana/pkg/cmd/grafana-cli/commands/listversions_command.go`: verified
+- `grafana/pkg/plugins/manager/loader/ifaces.go`: verified
+- `grafana/pkg/plugins/pluginassets/modulehash/modulehash.go`: verified
+- `grafana/pkg/services/apiserver/auth/authenticator/authenticator.go`: verified
+- `grafana/pkg/services/ngalert/state/multi_instance_reader.go`: verified
+- `grafana/pkg/services/pluginsintegration/clientmiddleware/httpclient_middleware_test.go`: verified
+- `grafana/pkg/services/ssosettings/api/api.go`: verified
+- `grafana/pkg/storage/unified/search/embed/embedder/vertex/client.go`: verified
+- `grafana/pkg/tests/apis/datasource/testdata_test.go`: verified
+- `grafana/public/app/features/alerting/unified/api/alertmanager.ts`: verified
+- `grafana/public/app/features/alerting/unified/hooks/ruleGroup/useDeleteRuleGroup.ts`: verified
+- `grafana/public/app/features/browse-dashboards/components/CreateNewButton.tsx`: verified
+- `grafana/public/app/features/connections/components/PageCard/PageCard.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/serialization/layoutSerializers/utils.ts`: verified
+- `grafana/public/app/features/dashboard-scene/settings/enterprise-components/DashboardTemplateSettingsTab.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/v2schema/validation.ts`: verified
+- `grafana/public/app/features/dimensions/editors/URLPickerTab.tsx`: verified
+- `grafana/public/app/features/variables/custom/actions.ts`: verified
+- `grafana/public/app/plugins/datasource/azuremonitor/azure_monitor/response_parser.ts`: verified
+- `grafana/public/app/plugins/datasource/influxdb/table_model.ts`: verified
+- `prysm/beacon-chain/db/kv/validated_checkpoint_test.go`: verified
+- `prysm/beacon-chain/state/state-native/types_test.go`: verified
+- `prysm/beacon-chain/sync/checkpoint/log.go`: verified
+- `prysm/consensus-types/blocks/get_payload.go`: verified
+- `prysm/runtime/version/version.go`: verified
+- `prysm/testing/endtoend/evaluators/execution_engine.go`: verified
+- `prysm/testing/spectest/mainnet/deneb__epoch_processing__justification_and_finalization_test.go`: verified
+- `prysm/testing/spectest/minimal/altair__finality__finality_test.go`: verified
+- `prysm/testing/spectest/minimal/deneb__operations__sync_committee_test.go`: verified
+- `prysm/testing/spectest/minimal/gloas__operations__voluntary_exit_test.go`: verified
+- `prysm/validator/client/beacon-api/test-helpers/deneb_beacon_block_test_helpers.go`: verified
