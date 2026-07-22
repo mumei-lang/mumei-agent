@@ -1595,6 +1595,10 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
             continue
         params = _params_from_signature(fn.params_text)
         go_param_types = _go_param_types(fn.params_text)
+        params = [
+            ContractParam(name=p.name, type=_mumei_return_type(go_param_types.get(p.name, p.type)))
+            for p in params
+        ]
         nillable_names = _go_nillable_param_names(fn.params_text)
         raw_return_expr = _raw_return_statement_expression(fn.body, "go")
         return_type = _mumei_return_type(fn.return_type)
@@ -1639,11 +1643,15 @@ def _infer_go_contracts(code: str) -> list[MumeiContractAtom]:
     known_constants = semantic_safety.collect_declared_constants(code, "go")
     for name, params_text, return_type, body in _go_function_declarations(code):
         params = _params_from_signature(params_text)
+        go_param_types = _go_param_types(params_text)
+        params = [
+            ContractParam(name=p.name, type=_mumei_return_type(go_param_types.get(p.name, p.type)))
+            for p in params
+        ]
         # Only params whose declared Go type is nillable may carry a `!= nil`
         # precondition; value types (e.g. `reflect.Value`) can never be nil, so
         # inferring one produces a false `refuted` verdict (#295).
         nillable_names = _go_nillable_param_names(params_text)
-        go_param_types = _go_param_types(params_text)
         raw_return_expr = _raw_return_statement_expression(body, "go")
         return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "go")
         mumei_return_type = _mumei_return_type(return_type)
