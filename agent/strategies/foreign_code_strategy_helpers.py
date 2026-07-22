@@ -771,11 +771,24 @@ def _go_nonzero_constants(source: str) -> set[str]:
         # ``1 << anything`` is non-zero (runtime constants are non-negative).
         if re.fullmatch(r"\d+\s*<<\s*\w+", text):
             return semantic_safety.parse_int_literal(text.split("<<")[0].strip()) not in (0, None)
-        # ``x * y``, ``x / y`` or ``x << y`` where both operands are known non-zero.
-        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*/\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
+        # ``x * y`` or ``x << y`` where both operands are known non-zero.
+        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
             m = re.fullmatch(pattern, text)
             if m and m.group(1) in known and m.group(2) in known:
                 return True
+        # Time unit ratios such as ``time.Millisecond / time.Nanosecond`` are
+        # positive when the numerator unit is at least as large as the denominator.
+        time_unit_order = {
+            "Nanosecond": 1,
+            "Microsecond": 1000,
+            "Millisecond": 1_000_000,
+            "Second": 1_000_000_000,
+            "Minute": 60 * 1_000_000_000,
+            "Hour": 3600 * 1_000_000_000,
+        }
+        m = re.fullmatch(r"time\.(\w+)\s*/\s*time\.(\w+)", text)
+        if m:
+            return time_unit_order.get(m.group(1), 0) >= time_unit_order.get(m.group(2), 0)
         return _is_nonzero_literal(text)
 
     # Single-line const/var declarations.
