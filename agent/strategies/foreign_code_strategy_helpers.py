@@ -853,6 +853,29 @@ def _go_known_nonzero_selectors(source: str) -> set[str]:
     return nonzero
 
 
+def _go_beacon_config_nonzero_locals(body: str, source: str) -> set[str]:
+    """Return local variables assigned from ``params.BeaconConfig().*Count``.
+
+    Prysm/config fields such as ``DataColumnSidecarSubnetCount`` are protocol
+    constants and are never zero, so divisions by them are safe.
+    """
+    aliases = _go_import_aliases(source)
+    params_aliases = {
+        alias for alias, pkg in aliases.items()
+        if pkg == "params" or pkg.endswith("/params")
+    }
+    if not params_aliases:
+        return set()
+    alias_re = "|".join(re.escape(a) for a in params_aliases)
+    locals: set[str] = set()
+    for match in re.finditer(
+        rf"\b(\w+)\s*:?=\s*(?:\w+\s*\(\s*)?({alias_re})\.BeaconConfig\(\)\.(\w+Count)\b",
+        body,
+    ):
+        locals.add(match.group(1))
+    return locals
+
+
 def _go_expression_is_float(expression: str, float_vars: set[str]) -> bool:
     """Heuristic: is ``expression`` a Go floating-point expression?"""
     text = _strip_go_rust_literals_and_comments(expression)
@@ -1321,7 +1344,144 @@ def _go_range_index_guarded_indices(body: str) -> set[str]:
         if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
     return guarded
-    return guarded
+
+
+def _go_flattened_index_safe_pairs(body: str) -> set[tuple[str, str]]:
+    """Return safe ``(container, index)`` pairs for flattened 2D loop indexing.
+
+    A pattern like::
+
+        if uint64(len(cellProofs)) != expectedCellProofs { return }
+        expectedCellProofs := blobCount * numberOfColumns
+        blobCount := uint64(len(blobs))
+        for blobIndex := range blobs {
+            for columnIndex := range numberOfColumns {
+                cellProofIndex := uint64(blobIndex)*numberOfColumns + columnIndex
+                ... cellProofs[cellProofIndex] ...
+            }
+        }
+
+    guarantees ``cellProofIndex < len(cellProofs)`` because the length check
+    ensures ``len(cellProofs) == len(blobs) * numberOfColumns`` and the index
+    is a flattened ``(row, col)`` pair within those bounds.
+    """
+    safe: set[tuple[str, str]] = set()
+    stripped = _strip_go_rust_literals_and_comments(body)
+
+    # Collect short variable definitions for expansion.
+    defs: dict[str, str] = {}
+    for m in re.finditer(r"\b(\w+)\s*:=\s*([^;\n]+)", stripped):
+        defs[m.group(1)] = m.group(2).strip()
+
+    def expand(expr: str, seen: set[str] | None = None) -> str:
+        if seen is None:
+            seen = set()
+        expr = expr.strip()
+        # Strip type casts.
+        while True:
+            m = re.fullmatch(r"(?:uint64|uint32|int64|int32|uint|int)\s*\(\s*(.+)\s*\)", expr)
+            if not m:
+                break
+            expr = m.group(1).strip()
+        if expr in seen:
+            return expr
+        if re.fullmatch(r"\w+", expr) and expr in defs:
+            return expand(defs[expr], seen | {expr})
+        # Expand identifiers inside the expression.
+        result = []
+        for token in re.split(r"(\b\w+\b)", expr):
+            if re.fullmatch(r"\w+", token) and token in defs and token not in seen:
+                result.append(f"({expand(defs[token], seen | {token})})")
+            else:
+                result.append(token)
+        return "".join(result)
+
+    # Find early-return length checks: `if <cast>(len(arr)) != expected { return }`.
+    for m in re.finditer(
+        r"\bif\s+(?:uint64\s*\(\s*)?len\((\w+)\)\s*(?:\s*\))?\s*!=\s*(\w+)",
+        stripped,
+    ):
+        arr, expected = m.group(1), m.group(2)
+        block_start = stripped.find("{", m.end())
+        if block_start == -1:
+            continue
+        depth = 1
+        i = block_start + 1
+        while i < len(stripped) and depth > 0:
+            if stripped[i] == "{":
+                depth += 1
+            elif stripped[i] == "}":
+                depth -= 1
+            i += 1
+        if "return" not in stripped[block_start + 1 : i - 1]:
+            continue
+        expected_expr = expand(expected)
+        # Look for `len(outer_domain) * inner_bound` in the expanded expression.
+        outer_domain: str | None = None
+        inner_bound: str | None = None
+        for fm in re.finditer(
+            r"len\((\w+)\)\s*\)?\s*\*\s*(\w+)|(\w+)\s*\*\s*len\((\w+)\)",
+            expected_expr,
+        ):
+            if fm.group(1):
+                outer_domain, inner_bound = fm.group(1), fm.group(2)
+            else:
+                inner_bound, outer_domain = fm.group(3), fm.group(4)
+            break
+        if not outer_domain or not inner_bound:
+            continue
+
+        # Locate nested loops over the same outer domain and inner bound.
+        outer_re = re.compile(rf"\bfor\s+(\w+)\s*:=\s*range\s+{re.escape(outer_domain)}\b")
+        for om in outer_re.finditer(stripped):
+            outer_var = om.group(1)
+            outer_brace = stripped.find("{", om.end())
+            if outer_brace == -1 or stripped[outer_brace] != "{":
+                continue
+            depth = 1
+            oi = outer_brace + 1
+            while oi < len(stripped) and depth > 0:
+                if stripped[oi] == "{":
+                    depth += 1
+                elif stripped[oi] == "}":
+                    depth -= 1
+                oi += 1
+            outer_body = stripped[outer_brace + 1 : oi - 1]
+            inner_re = re.compile(
+                rf"\bfor\s+(\w+)\s*:=\s*range\s+{re.escape(inner_bound)}\b"
+            )
+            for im in inner_re.finditer(outer_body):
+                inner_var = im.group(1)
+                inner_brace = outer_body.find("{", im.end())
+                if inner_brace < 0 or outer_body[inner_brace] != "{":
+                    continue
+                depth = 1
+                ii = inner_brace + 1
+                while ii < len(outer_body) and depth > 0:
+                    if outer_body[ii] == "{":
+                        depth += 1
+                    elif outer_body[ii] == "}":
+                        depth -= 1
+                    ii += 1
+                inner_body = outer_body[inner_brace + 1 : ii - 1]
+                # Find an index assignment `idx := <outer_expr> * inner_bound + inner_var`
+                # (possibly with uint64 casts on the outer variable).
+                for am in re.finditer(
+                    rf"\b(\w+)\s*:=\s*(?:uint64\s*\(\s*)?({re.escape(outer_var)})\s*(?:\s*\))?\s*\*\s*({re.escape(inner_bound)})\s*\+\s*({re.escape(inner_var)})\b",
+                    inner_body,
+                ):
+                    idx = am.group(1)
+                    if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", inner_body):
+                        safe.add((arr, idx))
+                # Also allow `idx := inner_bound * <outer_expr> + inner_var`.
+                for am in re.finditer(
+                    rf"\b(\w+)\s*:=\s*({re.escape(inner_bound)})\s*\*\s*(?:uint64\s*\(\s*)?({re.escape(outer_var)})\s*(?:\s*\))?\s*\+\s*({re.escape(inner_var)})\b",
+                    inner_body,
+                ):
+                    idx = am.group(1)
+                    if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", inner_body):
+                        safe.add((arr, idx))
+    return safe
 
 
 def _go_reverse_loop_guarded_indices(body: str) -> set[str]:
@@ -2463,6 +2623,7 @@ def _detect_go_safety_issues(
                 _go_parallel_slice_index_safe_pairs(body)
                 | _go_equal_length_slice_index_safe_pairs(body)
                 | _go_make_plus_one_index_safe_pairs(body)
+                | _go_flattened_index_safe_pairs(body)
             )
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
@@ -2509,6 +2670,7 @@ def _detect_go_safety_issues(
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
                 | _go_rounded_factor_nonzero(body)
+                | _go_beacon_config_nonzero_locals(body, original_source or source)
                 | {"_W", "bits.UintSize"}
             )
             float_param_names = _go_float_param_names(fn.params_text)
@@ -2603,7 +2765,8 @@ def _detect_go_safety_issues(
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
         go_map_names = file_map_names | _go_local_map_names(body)
-        guaranteed_nonzero = base_guaranteed_nonzero | _go_rounded_factor_nonzero(body)
+        guaranteed_nonzero = base_guaranteed_nonzero | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
+        parallel_slicing = _go_flattened_index_safe_pairs(body)
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
@@ -2659,6 +2822,7 @@ def _detect_go_safety_issues(
                 known_types=known_types,
                 float_arrays=go_float_arrays,
                 guarded_indices=guarded_indices,
+                parallel_slicing=parallel_slicing,
                 unsigned_locals=unsigned_vars,
             )
             if index == len(expressions) - 1 and guarded:
