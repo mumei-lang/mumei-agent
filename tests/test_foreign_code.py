@@ -2854,6 +2854,40 @@ def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
     assert not any('allFrames' in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_enum_lookup_table_named_index() -> None:
+    """Named enum parameter indexing ``kind2tok`` keyed by enum constants."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syntax
+
+type LitKind int
+
+const (
+	IntLit LitKind = iota
+	FloatLit
+	ImagLit
+	RuneLit
+	StringLit
+)
+
+type token int
+
+var kind2tok = [...]token{
+	IntLit:    1,
+	FloatLit:  2,
+	ImagLit:   3,
+	RuneLit:   4,
+	StringLit: 5,
+}
+
+func makeFromLiteral(lit string, kind LitKind) token {
+	return kind2tok[kind]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("kind2tok" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues

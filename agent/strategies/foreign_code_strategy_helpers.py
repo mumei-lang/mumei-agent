@@ -2542,14 +2542,14 @@ def _go_global_array_keys(source: str) -> dict[str, set[str]]:
                 depth -= 1
             elif ch == "," and depth == 1:
                 entry = body[entry_start:j].strip()
-                key_match = re.match(r"([A-Za-z_]\w*)\s*:", entry)
+                key_match = re.match(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*:", entry)
                 if key_match:
-                    key_set.add(key_match.group(1))
+                    key_set.add(key_match.group(1).rsplit(".", 1)[-1])
                 entry_start = j + 1
         entry = body[entry_start:].strip()
-        key_match = re.match(r"([A-Za-z_]\w*)\s*:", entry)
+        key_match = re.match(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*:", entry)
         if key_match:
-            key_set.add(key_match.group(1))
+            key_set.add(key_match.group(1).rsplit(".", 1)[-1])
         if key_set:
             keys[container] = key_set
     return keys
@@ -4114,6 +4114,22 @@ def _index_safety_issue(
             return None
     if known_array_keys and index in known_array_keys.get(container, set()):
         # Go package-level keyed array literal: the key is valid by construction.
+        return None
+    if (
+        label == "Go"
+        and param_types
+        and known_array_keys
+        and container in known_array_keys
+        and len(container) > len(index)
+        and container.lower().startswith(index.lower())
+        and (
+            container[len(index)] in "2_"
+            or container[len(index)].isupper()
+        )
+        and _go_type_basename(param_types.get(index, "")) not in _GO_BUILTIN_TYPES
+    ):
+        # Named-type parameter indexing a package-level keyed lookup table named
+        # after the parameter (e.g. ``kind2tok[kind]`` for an enum ``LitKind``).
         return None
     if (
         label == "Go"
