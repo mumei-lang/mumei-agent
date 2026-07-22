@@ -1573,6 +1573,35 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     return set()
 
 
+def _go_return_divisor_nonzero_params(body: str, params_text: str) -> set[str]:
+    """Return integer params used as the divisor/modulo in the sole return expression.
+
+    A function such as ``func randIntn(n int) int { return randInt() % n }``
+    panics when ``n`` is zero, so the parameter carries an implicit non-zero
+    precondition.
+    """
+    int_types = {
+        "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        "byte", "rune",
+    }
+    int_params = {
+        param_name
+        for param_name, param_type in _go_param_types(params_text).items()
+        if param_type.strip().lstrip("*").lower() in int_types
+    }
+    if not int_params:
+        return set()
+    expressions = _return_expressions(body, fallback=False, language="go")
+    if len(expressions) != 1:
+        return set()
+    expr = expressions[0]
+    for name in int_params:
+        if re.search(rf"(?:%|/)\s*{re.escape(name)}\b", expr):
+            return {name}
+    return set()
+
+
 def _go_math_big_nat_scan_guarded_indices(
     body: str, package_name: str, rtype: str | None
 ) -> set[str]:
@@ -1597,6 +1626,64 @@ def _go_math_big_nat_scan_guarded_indices(
         if init is not None and init != idx:
             continue
         guarded.add(idx)
+    return guarded
+
+
+def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
+    """``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both slices."""
+    stripped = _strip_go_rust_literals_and_comments(body)
+    guarded: set[str] = set()
+    # Either order of the two ``len`` comparisons is accepted.
+    for match in re.finditer(
+        r"\bfor\s+(\w+)\s*:=\s*0\s*;\s*\1\s*<\s*len\(\s*(\w+)\s*\)\s*&&\s*\1\s*<\s*len\(\s*(\w+)\s*\)\s*;\s*\1\+\+\s*\{",
+        stripped,
+    ):
+        guarded.add(match.group(1))
+    return guarded
+
+
+def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
+    """Binary-search midpoint ``m`` indexing ``arr[m]`` is bounded by ``len(arr)``."""
+    stripped = _strip_go_rust_literals_and_comments(body)
+    guarded: set[str] = set()
+    # Map ``hi`` variable names to the array whose length initializes them.
+    hi_to_arr: dict[str, str] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*len\(\s*(\w+)\s*\)", stripped
+    ):
+        hi_to_arr[match.group(1)] = match.group(2)
+    for match in re.finditer(
+        r"\b(\w+)\s*=\s*len\(\s*(\w+)\s*\)", stripped
+    ):
+        hi_to_arr[match.group(1)] = match.group(2)
+    for match in re.finditer(r"\bfor\s+(\w+)\s*<\s*(\w+)\s*\{", stripped):
+        lo, hi = match.group(1), match.group(2)
+        arr = hi_to_arr.get(hi)
+        if arr is None:
+            continue
+        # Extract the loop body (balanced braces).
+        brace_start = stripped.find("{", match.end() - 1)
+        if brace_start == -1:
+            continue
+        depth = 1
+        i = brace_start + 1
+        while i < len(stripped) and depth > 0:
+            if stripped[i] == "{":
+                depth += 1
+            elif stripped[i] == "}":
+                depth -= 1
+            i += 1
+        block = stripped[brace_start + 1 : i - 1]
+        # Midpoint assignment: ``m := int(uint(lo+hi) >> 1)`` or similar.
+        for mmatch in re.finditer(
+            rf"\b(\w+)\s*:=\s*int\s*\([^)]*\([^)]*{re.escape(lo)}\s*\+\s*{re.escape(hi)}[^)]*\)[^)]*>>\s*1",
+            block,
+        ):
+            m_name = mmatch.group(1)
+            if re.search(
+                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(m_name)}\s*\]", block
+            ):
+                guarded.add(m_name)
     return guarded
 
 
@@ -1709,6 +1796,11 @@ def _go_guarded_indices(
     # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
     # stay within ``a``'s bounds, so ``a[idx]`` is safe.
     guarded |= _go_range_index_guarded_indices(body)
+    # ``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both ``a[i]`` and ``b[i]``.
+    guarded |= _go_dual_len_loop_guarded_indices(body)
+    # Binary-search midpoint ``m`` is bounded by the initial ``len(arr)`` and the loop invariant.
+    if source:
+        guarded |= _go_binary_search_guarded_indices(body, source)
     # Prysm end-to-end tests loop over validator-index slices and index the
     # deterministic ``privKeys`` array returned by ``util.DeterministicDepositsAndKeys``.
     if source:
@@ -3602,6 +3694,7 @@ def _detect_go_safety_issues(
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
+                | _go_return_divisor_nonzero_params(body, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
                 | _go_loop_count_nonzero_params(body, set(param_types.keys()))
                 | _go_local_nonzero_variables(body)

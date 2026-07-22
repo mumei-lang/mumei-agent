@@ -2503,6 +2503,68 @@ export const getJoinByLabelsTransformer: () => any = () => ({
     assert not any("data" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_dual_len_loop_guarded() -> None:
+    """``for i := 0; i < len(x) && i < len(y); i++`` guards both ``x[i]`` and ``y[i]``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package demo
+func nameLess(x, y string) bool {
+    for i := 0; i < len(x) && i < len(y); i++ {
+        if x[i] != y[i] {
+            return x[i] < y[i]
+        }
+    }
+    return len(x) < len(y)
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_binary_search_guarded() -> None:
+    """Binary-search midpoint ``m`` indexing ``All[m]`` is bounded by ``len(All)``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package godebugs
+var All []Info
+type Info struct{ Name string }
+func Lookup(name string) *Info {
+    lo := 0
+    hi := len(All)
+    for lo < hi {
+        m := int(uint(lo+hi) >> 1)
+        mid := All[m].Name
+        if name == mid {
+            return &All[m]
+        }
+        if name < mid {
+            hi = m
+        } else {
+            lo = m + 1
+        }
+    }
+    return nil
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_rand_modulo_param_nonzero() -> None:
+    """A function returning ``randInt() % n`` implicitly requires ``n != 0``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package net
+func runtime_rand() uint64
+func randInt() int { return int(uint(runtime_rand()) >> 1) }
+func randIntn(n int) int {
+    return randInt() % n
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("n=0" in str(i.counterexample) for i in issues)
+
+
 def test_detect_go_safety_issues_skips_map_key_access() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
 
