@@ -2104,6 +2104,23 @@ def test_raw_return_statement_expression_masks_nested_go_function_literals() -> 
     assert _all_return_expressions(body, "go") == ["nil"]
 
 
+def test_raw_return_statement_expression_ignores_func_type_fields() -> None:
+    """String contents next to a ``func`` type field must not be parsed as a return."""
+    from agent.cross_validation_foreign import _raw_return_statement_expression
+
+    body = '''tests := []struct {
+        name      string
+        callback  func(string) error
+    }{
+        {
+            name: "does not return deleted object",
+        },
+    }
+    return true
+'''
+    assert _raw_return_statement_expression(body, "go") == "true"
+
+
 def test_all_return_expressions_stops_at_case_labels() -> None:
     """Go ``switch`` ``case`` / ``default`` labels terminate a return expression."""
     from agent.cross_validation_foreign import _all_return_expressions
