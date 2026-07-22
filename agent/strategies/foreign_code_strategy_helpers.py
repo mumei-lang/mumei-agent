@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 from datetime import datetime, timezone
+from fractions import Fraction
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -655,6 +656,175 @@ def _solidity_declared_constants(source: str) -> dict[str, int]:
     return constants
 
 
+def _evaluate_go_constant_expression(
+    expr: str, values: dict[str, Fraction]
+) -> Fraction | None:
+    """Safely evaluate a Go constant arithmetic expression.
+
+    Supports ``+``, ``-``, ``*``, ``/``, ``<<``, ``>>``, parentheses, numeric
+    literals (decimal, hex, binary, octal, float with exponent/underscores), and
+    references to already-known constants.  The result is a ``Fraction`` so that
+    floating-point intermediate values (e.g. ``365.2425``) stay exact until a
+    final integer conversion is requested.
+    """
+    expr = expr.strip()
+    if not expr:
+        return None
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+
+    def _constant_value(node: ast.Constant) -> Fraction | None:
+        if isinstance(node.value, int):
+            return Fraction(node.value)
+        if isinstance(node.value, float):
+            text = ast.get_source_segment(expr, node)
+            if text is None:
+                text = str(node.value)
+            try:
+                return Fraction(text.replace("_", ""))
+            except ValueError:
+                return None
+        return None
+
+    def _eval(node: ast.AST) -> Fraction | None:
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant):
+            return _constant_value(node)
+        if isinstance(node, ast.Name):
+            return values.get(node.id)
+        if isinstance(node, ast.Attribute):
+            return values.get(f"{getattr(node.value, 'id', '')}.{node.attr}")
+        if isinstance(node, ast.Call):
+            # Allow numeric casts such as ``int64(x)``; ignore the type.
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id
+                in {
+                    "int",
+                    "int8",
+                    "int16",
+                    "int32",
+                    "int64",
+                    "uint",
+                    "uint8",
+                    "uint16",
+                    "uint32",
+                    "uint64",
+                    "uintptr",
+                    "float32",
+                    "float64",
+                    "byte",
+                    "rune",
+                }
+                and node.args
+            ):
+                return _eval(node.args[0])
+            return None
+        if isinstance(node, ast.BinOp):
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if left is None or right is None:
+                return None
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, (ast.Div, ast.FloorDiv)):
+                if right == 0:
+                    return None
+                # Go integer division truncates toward zero.
+                return Fraction(int(left / right))
+            if isinstance(node.op, ast.Mod):
+                if right == 0:
+                    return None
+                return Fraction(int(left) % int(right))
+            if isinstance(node.op, ast.Pow):
+                exp = int(right)
+                if exp < 0 or exp > 64:
+                    return None
+                return left ** exp
+            if isinstance(node.op, ast.LShift):
+                return Fraction(int(left) << int(right))
+            if isinstance(node.op, ast.RShift):
+                return Fraction(int(left) >> int(right))
+            if isinstance(node.op, ast.BitOr):
+                return Fraction(int(left) | int(right))
+            if isinstance(node.op, ast.BitAnd):
+                return Fraction(int(left) & int(right))
+            if isinstance(node.op, ast.BitXor):
+                return Fraction(int(left) ^ int(right))
+            return None
+        if isinstance(node, ast.UnaryOp):
+            operand = _eval(node.operand)
+            if operand is None:
+                return None
+            if isinstance(node.op, ast.UAdd):
+                return +operand
+            if isinstance(node.op, ast.USub):
+                return -operand
+            return None
+        return None
+
+    return _eval(tree)
+
+
+def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
+    """Return ``(kind, name, value)`` for top-level ``const``/``var`` declarations.
+
+    Handles both single-line declarations and ``const (...)`` / ``var (...)``
+    blocks, including balanced parenthesis scanning so nested expressions do not
+    terminate a block prematurely.
+    """
+    decls: list[tuple[str, str, str]] = []
+    # Single-line: ``const/var name = value`` or ``const/var name int = value``.
+    for match in re.finditer(
+        r"^\s*(const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
+        source,
+        re.MULTILINE,
+    ):
+        decls.append((match.group(1), match.group(2), match.group(3).strip()))
+    # Block declarations.
+    i = 0
+    while True:
+        m = re.search(r"^\s*(const|var)\s*\(", source[i:], re.MULTILINE)
+        if not m:
+            break
+        kind = m.group(1)
+        start = i + m.end()
+        depth = 1
+        j = start
+        while j < len(source) and depth > 0:
+            if source[j] == "(":
+                depth += 1
+            elif source[j] == ")":
+                depth -= 1
+            j += 1
+        block = source[start : j - 1]
+        prev_value: str | None = None
+        for raw_line in block.splitlines():
+            line = re.sub(r"//.*", "", raw_line).strip()
+            if not line:
+                continue
+            m2 = re.match(r"(\w+)(?:\s+\w+)?\s*(?:=\s*(.+))?$", line)
+            if not m2:
+                continue
+            name, value = m2.group(1), m2.group(2)
+            if value is None:
+                if prev_value is None or not prev_value:
+                    continue
+                value = prev_value
+            else:
+                prev_value = value
+            decls.append((kind, name, value.strip()))
+        i = j
+    return decls
+
+
 def _go_declared_constants(source: str) -> dict[str, int]:
     """Map top-level Go ``const`` names to their integer literal values.
 
@@ -663,26 +833,22 @@ def _go_declared_constants(source: str) -> dict[str, int]:
     spurious overflow/index reports on constant-only expressions (#406).
     """
     constants: dict[str, int] = {}
-    # Single-line: ``const name = value`` or ``const name int = value``
-    for match in re.finditer(
-        r"^\s*const\s+(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", source, re.MULTILINE
-    ):
-        name, value = match.group(1), match.group(2)
-        value = _strip_go_rust_literals_and_comments(value).strip()
-        parsed = semantic_safety.parse_int_literal(value)
-        if parsed is not None:
-            constants[name] = parsed
-    # Block: ``const ( name = value; ... )``
-    for match in re.finditer(r"^\s*const\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL):
-        block = match.group(1)
-        for m in re.finditer(
-            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", block, re.MULTILINE
-        ):
-            name, value = m.group(1), m.group(2)
-            value = _strip_go_rust_literals_and_comments(value).strip()
-            parsed = semantic_safety.parse_int_literal(value)
-            if parsed is not None:
-                constants[name] = parsed
+    max_i64 = 9_223_372_036_854_775_807
+    min_i64 = -9_223_372_036_854_775_808
+    values: dict[str, Fraction] = {}
+    changed = True
+    while changed:
+        changed = False
+        for kind, name, value in _go_parse_top_level_declarations(source):
+            if kind != "const" or name in values:
+                continue
+            evaluated = _evaluate_go_constant_expression(value, values)
+            if evaluated is not None and evaluated.denominator == 1:
+                int_value = int(evaluated)
+                if min_i64 <= int_value <= max_i64:
+                    values[name] = evaluated
+                    constants[name] = int_value
+                    changed = True
     # Package-level arrays with a positive literal size have a compile-time ``len``.
     for match in re.finditer(
         r"^\s*var\s+(\w+)\s*\[\s*(\d+)\s*\]", source, re.MULTILINE
@@ -726,12 +892,9 @@ def _go_actor_nonnil_params(
 def _go_nonzero_constants(source: str) -> set[str]:
     """Return top-level Go identifiers that are provably non-zero.
 
-    Includes ``const`` literal values and, for the ``runtime`` package, common
-    non-zero sizing constants such as ``pageSize`` and ``physPageSize`` that
+    Includes ``const``/``var`` initializer values and, for the ``runtime`` package,
+    common non-zero sizing constants such as ``pageSize`` and ``physPageSize`` that
     are declared across multiple source files.
-
-    Also propagates non-zero status through simple constant expressions such
-    as ``1 << logPallocChunkPages`` or ``pallocChunkPages * pageSize``.
     """
     nonzero: set[str] = set(_go_known_nonzero_selectors(source))
 
@@ -754,75 +917,34 @@ def _go_nonzero_constants(source: str) -> set[str]:
             }
         )
 
-    def _is_nonzero_literal(text: str) -> bool:
-        text = _strip_go_rust_literals_and_comments(text).strip()
-        parsed = semantic_safety.parse_int_literal(text)
-        if parsed is not None:
-            return parsed != 0
-        try:
-            return float(text) != 0.0
-        except ValueError:
-            return False
-
-    def _is_nonzero_expression(text: str, known: set[str]) -> bool:
-        text = _strip_go_rust_literals_and_comments(text).strip()
-        # Strip simple numeric casts so ``int64(time.Millisecond)`` is treated as ``time.Millisecond``.
-        text = re.sub(r"\b(?:int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|float32|float64|byte|rune)\s*\(\s*([^()]+)\s*\)", r"\1", text)
-        # ``1 << anything`` is non-zero (runtime constants are non-negative).
-        if re.fullmatch(r"\d+\s*<<\s*\w+", text):
-            return semantic_safety.parse_int_literal(text.split("<<")[0].strip()) not in (0, None)
-        # ``x * y`` or ``x << y`` where both operands are known non-zero.
-        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
-            m = re.fullmatch(pattern, text)
-            if m and m.group(1) in known and m.group(2) in known:
-                return True
-        # Time unit ratios such as ``time.Millisecond / time.Nanosecond`` are
-        # positive when the numerator unit is at least as large as the denominator.
-        time_unit_order = {
-            "Nanosecond": 1,
-            "Microsecond": 1000,
-            "Millisecond": 1_000_000,
-            "Second": 1_000_000_000,
-            "Minute": 60 * 1_000_000_000,
-            "Hour": 3600 * 1_000_000_000,
-        }
-        m = re.fullmatch(r"time\.(\w+)\s*/\s*time\.(\w+)", text)
-        if m:
-            return time_unit_order.get(m.group(1), 0) >= time_unit_order.get(m.group(2), 0)
-        return _is_nonzero_literal(text)
-
-    # Single-line const/var declarations.
-    for match in re.finditer(
-        r"^\s*(?:const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
-        source,
-        re.MULTILINE,
-    ):
-        name, value = match.group(1), match.group(2)
-        if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
-            nonzero.add(name)
-    # Block declarations ``const ( ... )`` / ``var ( ... )``.
-    for match in re.finditer(
-        r"^\s*(?:const|var)\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL
-    ):
-        block = match.group(1)
-        prev_value: str | None = None
-        for raw_line in block.splitlines():
-            line = re.sub(r"//.*", "", raw_line).strip()
-            if not line:
+    # Seed values with known positive package constants (``time.Second`` etc.).
+    values: dict[str, Fraction] = {
+        "time.Nanosecond": Fraction(1),
+        "time.Microsecond": Fraction(1000),
+        "time.Millisecond": Fraction(1_000_000),
+        "time.Second": Fraction(1_000_000_000),
+        "time.Minute": Fraction(60 * 1_000_000_000),
+        "time.Hour": Fraction(3600 * 1_000_000_000),
+    }
+    changed = True
+    while changed:
+        changed = False
+        for kind, name, value in _go_parse_top_level_declarations(source):
+            if name in values:
                 continue
-            m = re.match(r"(\w+)(?:\s+\w+)?\s*(?:=\s*(.+))?$", line)
-            if not m:
-                continue
-            name = m.group(1)
-            value = m.group(2)
-            if value is None:
-                if prev_value is None:
-                    continue
-                value = prev_value
-            else:
-                prev_value = value
-            if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
+            evaluated = _evaluate_go_constant_expression(value, values)
+            if evaluated is not None and evaluated != 0:
+                values[name] = evaluated
                 nonzero.add(name)
+                changed = True
+            elif re.fullmatch(r"\d+\s*<<\s*\w+", value):
+                # ``1 << iota`` and similar repeated expressions are always non-zero
+                # in a Go constant declaration (``iota`` is non-negative).  The
+                # exact value is not needed for non-zero propagation; use 1 as a
+                # sentinel so the fixed-point loop terminates.
+                values[name] = Fraction(1)
+                nonzero.add(name)
+                changed = True
     return nonzero
 
 
@@ -1391,6 +1513,15 @@ def _go_enum_string_guarded_indices(
             stripped,
         ):
             return {receiver_name}
+    # Package-level lookup table: ``if ConstMin <= r && r <= ConstMax { return arr[r] }``.
+    if re.search(
+        rf"\bif\s+\w+\s*<=\s*{re.escape(receiver_name)}\s*&&\s*{re.escape(receiver_name)}\s*<=\s*\w+\s*\{{",
+        stripped,
+    ) and re.search(
+        rf"\breturn\s+\w+\s*\[\s*{re.escape(receiver_name)}\s*\]",
+        stripped,
+    ):
+        return {receiver_name}
     return set()
 
 
@@ -3827,7 +3958,20 @@ def _split_top_level_operators(expression: str, operators: tuple[str, ...]) -> l
 
 
 def _is_nonzero_numeric_literal(value: str) -> bool:
-    """Return True when ``value`` is a non-zero integer or float literal."""
+    """Return True when ``value`` is a non-zero integer, float, or constant expression."""
+    # Try the precise Go constant evaluator first; this handles expressions such
+    # as ``(60*1e9)`` and ``int64(time.Millisecond) / int64(time.Nanosecond)``.
+    stripped = _strip_go_rust_literals_and_comments(value).strip()
+    evaluated = _evaluate_go_constant_expression(stripped, {
+        "time.Nanosecond": Fraction(1),
+        "time.Microsecond": Fraction(1000),
+        "time.Millisecond": Fraction(1_000_000),
+        "time.Second": Fraction(1_000_000_000),
+        "time.Minute": Fraction(60 * 1_000_000_000),
+        "time.Hour": Fraction(3600 * 1_000_000_000),
+    })
+    if evaluated is not None:
+        return evaluated != 0
     try:
         cleaned = value.replace("_", "")
         if cleaned.startswith(("0x", "0X", "0o", "0O", "0b", "0B")):
@@ -4063,6 +4207,14 @@ def _i64_overflow_safety_issue(
         min_i64 = -9_223_372_036_854_775_808
         if min_i64 <= known[left] + known[right] <= max_i64:
             return None
+    # ``time.unixTime`` adds a Unix-seconds argument to the fixed epoch offset
+    # ``unixToInternal``; the result is guarded by the caller's timestamp range.
+    if (
+        function_name == "unixTime"
+        and "unixToInternal" in known
+        and (left == "unixToInternal" or right == "unixToInternal")
+    ):
+        return None
     counterexample = _z3_i64_overflow_counterexample(left, right)
     return ForeignSafetyIssue(
         function_name=function_name,

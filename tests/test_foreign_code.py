@@ -237,7 +237,7 @@ const (
     assert constants["withSep"] == 1_000_000
     assert constants["binLit"] == 0b101
     assert constants["octLit"] == 0o777
-    assert "derived" not in constants  # non-literal expression skipped
+    assert constants["derived"] == 32  # constant expression is evaluated
 
 
 def test_go_value_type_param_not_flagged_nil() -> None:
