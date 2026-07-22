@@ -1229,6 +1229,14 @@ def _go_local_nonzero_variables(body: str) -> set[str]:
     """
     stripped = _strip_go_rust_literals_and_comments(body)
     assignments: dict[str, list[str]] = {}
+    # ``var x T`` or ``var x = expr`` declarations.
+    for match in re.finditer(
+        r"\bvar\s+(\w+)(?:\s+\w+)?(?:\s*=\s*([^;\n]+?))?(?:;|\n|$)", stripped
+    ):
+        name, value = match.group(1), match.group(2)
+        assignments.setdefault(name, [])
+        if value is not None:
+            assignments[name].append(value.strip())
     for match in re.finditer(
         r"\b(\w+)\s*:=\s*([^;\n]+?)(?:;|\n|$)", stripped
     ):
@@ -1337,23 +1345,28 @@ def _go_enum_string_guarded_indices(
 
 
 def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
-    """Return the integer divisor parameter for functions named ``Div``/``Mod`` as non-zero.
+    """Return the integer divisor parameter for functions named ``Div``/``Mod``/``Rem`` as non-zero.
 
-    A function/method named ``Div`` or ``Mod`` that performs integer division
-    or modulo implies the divisor must be non-zero; otherwise the caller has
-    passed an invalid value.
+    A function/method named ``Div``, ``Mod``, or ``Rem`` (with an optional bit-size
+    suffix) that performs integer division or modulo implies the divisor must be
+    non-zero; otherwise the caller has passed an invalid value. The divisor is
+    conventionally the last integer parameter.
     """
-    if name not in {"Div", "Mod"}:
+    if not re.fullmatch(r"(Div|Mod|Rem)\d*", name):
         return set()
     int_types = {
         "int", "int8", "int16", "int32", "int64",
         "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
         "byte", "rune",
     }
-    # Pick the first integer parameter as the divisor.
-    for param_name, param_type in _go_param_types(params_text).items():
-        if param_type.strip().lstrip("*").lower() in int_types:
-            return {param_name}
+    # The divisor is the last integer parameter (e.g. ``Rem32(hi, lo, y)``).
+    candidates = [
+        param_name
+        for param_name, param_type in _go_param_types(params_text).items()
+        if param_type.strip().lstrip("*").lower() in int_types
+    ]
+    if candidates:
+        return {candidates[-1]}
     return set()
 
 
@@ -1497,6 +1510,9 @@ def _go_guarded_indices(
     # deterministic ``privKeys`` array returned by ``util.DeterministicDepositsAndKeys``.
     if source:
         guarded |= _go_prysm_validator_index_guarded_indices(body, source)
+    # ``math/bits`` 256-byte lookup tables indexed by ``uint8`` parameters.
+    if source:
+        guarded |= _go_bits_uint8_lookup_guarded_indices(body, param_types, source)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
         r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
@@ -1663,6 +1679,27 @@ def _go_prysm_validator_index_guarded_indices(body: str, source: str) -> set[str
         for key_slice in key_slice_names:
             if re.search(rf"\b{re.escape(key_slice)}\s*\[\s*{re.escape(idx)}\s*\]", body):
                 guarded.add(idx)
+    return guarded
+
+
+def _go_bits_uint8_lookup_guarded_indices(
+    body: str, param_types: dict[str, str] | None, source: str
+) -> set[str]:
+    """Guard ``uint8`` parameters indexing ``math/bits`` 256-byte string tables.
+
+    Tables such as ``ntz8tab``, ``pop8tab``, ``rev8tab`` and ``len8tab`` are
+    256-byte string constants; a ``uint8`` index is always in bounds.
+    """
+    if _go_package_name(source) != "bits":
+        return set()
+    tables = {"ntz8tab", "pop8tab", "rev8tab", "len8tab"}
+    guarded: set[str] = set()
+    for param_name, raw_type in (param_types or {}).items():
+        if raw_type.strip().lstrip("*") not in {"uint8", "byte"}:
+            continue
+        for table in tables:
+            if re.search(rf"\b{re.escape(table)}\s*\[\s*{re.escape(param_name)}\s*\]", body):
+                guarded.add(param_name)
     return guarded
 
 
@@ -3643,19 +3680,19 @@ def _division_safety_issue(
         if stripped == inner:
             break
         stripped = inner
-    if guaranteed_nonzero and divisor in guaranteed_nonzero:
+    if guaranteed_nonzero and (divisor in guaranteed_nonzero or stripped in guaranteed_nonzero):
         return None
-    if float_variables and divisor in float_variables:
+    if float_variables and (divisor in float_variables or stripped in float_variables):
         # Go float division by zero produces +/-Inf or NaN, not a panic.
         return None
-    if "." in divisor and (guaranteed_nonzero is None or divisor not in guaranteed_nonzero):
+    if "." in divisor and (guaranteed_nonzero is None or (divisor not in guaranteed_nonzero and stripped not in guaranteed_nonzero)):
         # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
         # not provably non-zero are too noisy to model as a free variable.
         return None
-    if _is_float_expression(divisor, label, float_arrays):
+    if _is_float_expression(divisor, label, float_arrays) or _is_float_expression(stripped, label, float_arrays):
         # Floating-point division is well-defined even when the divisor is zero.
         return None
-    if _is_nonzero_numeric_literal(divisor):
+    if _is_nonzero_numeric_literal(divisor) or _is_nonzero_numeric_literal(stripped):
         # Non-zero numeric literals can never produce a divide-by-zero.
         return None
     # Solidity constant exponentiation such as ``2**32`` or ``(2**32)`` is a
@@ -3942,7 +3979,7 @@ def _issues_for_expression(
             issues.append(_null_safety_issue(function_name, value, label))
     if label not in {"TypeScript", "JavaScript"}:
         for match in re.finditer(
-            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*)",
+            r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>/|%)\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^)]*\))?(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]]*\])*)",
             expression,
         ):
             # Solidity >=0.8 reverts on division/modulo by zero by default.
