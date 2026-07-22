@@ -2118,15 +2118,20 @@ def _go_enum_param_guarded_indices(
     constrained to ``0..numFields-1``. Code that indexes a package-level array
     declared ``[numFields]T`` with a ``Field`` parameter is safe by convention,
     because the enum constants are exactly the valid indices.
+
+    Also supports arrays sized by ``len(<Type>Strings)`` where the typed enum
+    has a parallel string table (e.g. ``waitReason`` and ``waitReasonStrings``).
     """
     guarded: set[str] = set()
     array_sizes: dict[str, str] = {}
     for match in re.finditer(
-        r"\bvar\s+(\w+)\s*(?:=\s*\[(\w+)\]|\[\s*(\w+)\s*\])",
+        r"\bvar\s+(\w+)\s*(?:=\s*\[(\w+)\]|\[\s*(\w+)\s*\]|=\s*\[\s*len\(\s*([A-Za-z_]\w*)\s*\)\s*\])",
         source,
     ):
         arr = match.group(1)
         size = match.group(2) or match.group(3)
+        if match.group(4):
+            size = f"len({match.group(4)})"
         if size:
             array_sizes[arr] = size
     if not array_sizes:
@@ -2136,7 +2141,14 @@ def _go_enum_param_guarded_indices(
         if not basename or basename in _GO_BUILTIN_TYPES:
             continue
         size_name: str | None = None
-        for candidate in (f"num{basename}", f"num{basename}s"):
+        candidates = (
+            f"num{basename}",
+            f"num{basename}s",
+            f"len({basename}Strings)",
+            f"len({basename}Names)",
+            f"len({basename}Values)",
+        )
+        for candidate in candidates:
             if candidate in array_sizes.values():
                 size_name = candidate
                 break
@@ -2806,6 +2818,10 @@ _GO_NONNIL_EXACT_TYPES = {
     "StructField",  # runtime/abi field metadata is non-nil when methods are invoked
     "FuncType",  # runtime/abi function type descriptors are non-nil when methods are invoked
     "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
+    "Segment",  # debug/macho/elf load segments are non-nil when methods are invoked
+    "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
+    "maybeTraceablePtr",  # runtime pointer wrapper methods are invoked on valid pointers
+    "maybeTraceableChan",
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
     "StackRecord",  # runtime/pprof profiling records are live container objects
     "MemProfileRecord",
