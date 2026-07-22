@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/provisioning/pkg/repository/pull_request_repo_mock.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

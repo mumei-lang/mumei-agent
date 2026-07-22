@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/accesscontrol/ssoutils/utils.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/auth/authtest/testing.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
