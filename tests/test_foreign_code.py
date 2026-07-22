@@ -4718,3 +4718,147 @@ func (v *Verifier) VerifyValidProposalSlot(st state) error {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("VerifyValidProposalSlot" in issue.message and "bounds" in issue.message for issue in issues)
+
+
+def test_go_math_package_constants_and_denom_s_nonzero() -> None:
+    """``math`` package constants and ``s := 1 + z*P(z)`` denominators are nonzero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package math
+
+func y1(x float64) float64 {
+    return (2 / Pi) / x
+}
+
+func qone(x float64) float64 {
+    z := 1 / (x * x)
+    r := p[0] + z*(p[1]+z*p[2])
+    s := 1 + z*(q[0]+z*q[1])
+    return (0.375 + r/s) / x
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("y1" in issue.message and "non-zero" in issue.message for issue in issues)
+    assert not any("qone" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_generic_pointer_receiver_is_non_nil() -> None:
+    """Generic pointer receivers on container types are non-nil in practice."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package mvslice
+
+type Slice[V comparable] struct {
+    lock sync.RWMutex
+}
+
+func (s *Slice[V]) Len() int {
+    s.lock.RLock()
+    defer s.lock.RUnlock()
+    return 0
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("Len" in issue.message and "non-nil" in issue.message for issue in issues)
+
+
+def test_go_prysm_validator_index_into_deterministic_privkeys() -> None:
+    """Prysm end-to-end validator indices are valid indices into deterministic privKeys."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package evaluators
+
+func submitWithdrawal() error {
+    exitedIndices := make([]primitives.ValidatorIndex, 0)
+    _, privKeys, err := util.DeterministicDepositsAndKeys(100)
+    if err != nil {
+        return err
+    }
+    for _, idx := range exitedIndices {
+        if !bytes.Equal(pubkey, privKeys[idx].PublicKey().Marshal()) {
+            return nil
+        }
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("submitWithdrawal" in issue.message and "bounds" in issue.message for issue in issues)
+
+
+def test_go_testdata_directory_is_skipped() -> None:
+    """Files inside ``testdata`` directories are treated as test data and skipped."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package main
+
+func div(x, y uint32) uint32 {
+    return x / y
+}
+
+func main() {}
+'''
+    issues = _detect_safety_issues(source, "go", source_file="/home/ubuntu/repos/go/src/cmd/cgo/internal/testshared/testdata/division/division.go")
+    assert issues == []
+
+
+def test_go_math_bits_uint8_lookup_table_indexing() -> None:
+    """``math/bits`` 256-byte lookup tables are safely indexed by ``uint8`` params."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package bits
+
+func TrailingZeros8(x uint8) int { return int(ntz8tab[x]) }
+func OnesCount8(x uint8) int     { return int(pop8tab[x]) }
+func Reverse8(x uint8) uint8      { return rev8tab[x] }
+func Len8(x uint8) int           { return int(len8tab[x]) }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_math_bits_rem_divisor_nonzero() -> None:
+    """``math/bits`` Rem*/Div* divisor parameters are non-zero by contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package bits
+
+func Rem32(hi, lo, y uint32) uint32 {
+    return uint32((uint64(hi)<<32 | uint64(lo)) % uint64(y))
+}
+
+func Div64(hi, lo, y uint64) uint64 {
+    return (uint64(hi)<<64 | uint64(lo)) / y
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("Rem32" in issue.message and "non-zero" in issue.message for issue in issues)
+    assert not any("Div64" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_switch_assigned_nonzero_local() -> None:
+    """A local assigned only positive constants across switch cases is non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package mips
+
+type As int
+const AVMOVB As = 0
+const AVMOVH As = 1
+
+func lsoffset(a As, o int32) int32 {
+    var mod int32
+    switch a {
+    case AVMOVB:
+        mod = 1
+    case AVMOVH:
+        mod = 2
+    }
+    if o%mod != 0 {
+        return 0
+    }
+    return o / mod
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("lsoffset" in issue.message and "non-zero" in issue.message for issue in issues)

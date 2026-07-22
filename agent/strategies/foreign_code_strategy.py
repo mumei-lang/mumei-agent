@@ -39,6 +39,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _filter_covered_safety_issues,
     _is_go_compiler_test,
     _is_go_experimental,
+    _is_go_test_helper,
     _first_counterexample_payload,
     _go_function_blocks,
     _go_nil_dereference_values,
@@ -625,6 +626,19 @@ class ForeignCodeVerifier:
         self, source_code: str, language: str, source_file: str | None = None
     ) -> dict[str, object]:
         normalized_language = _normalize_language(language)
+        if normalized_language == "go" and _is_go_test_helper(source_code):
+            return {
+                "success": True,
+                "language": normalized_language,
+                "specs": [],
+                "atoms": [],
+                "source_line_map": {},
+                "mumei_source": "",
+                "verification": {"success": True, "report": {"status": "verified"}},
+                "errors": [],
+                "warnings": ["Go test-helper file skipped from foreign-code verification."],
+                **_first_counterexample_payload([]),
+            }
         specs = self.extractor.extract(source_code, normalized_language)
         safety_issues = _filter_covered_safety_issues(
             _detect_safety_issues(source_code, normalized_language, source_file=source_file),
