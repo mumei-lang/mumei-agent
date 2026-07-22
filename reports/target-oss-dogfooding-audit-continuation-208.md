@@ -1,0 +1,59 @@
+# Batch 209 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/types2/check.go`: verified
+- `go/src/cmd/go/internal/list/context.go`: verified
+- `go/src/crypto/internal/cryptotest/wycheproof/schema.go`: verified
+- `go/src/debug/dwarf/tag_string.go`: verified
+- `go/src/encoding/json/v2_bench_test.go`: verified
+- `go/src/internal/bytealg/equal_native.go`: verified
+- `go/src/internal/runtime/wasitest/tcpecho_test.go`: verified
+- `go/src/runtime/defs_linux_loong64.go`: verified
+- `go/src/syscall/fs_wasip1.go`: verified
+- `go/test/fixedbugs/bug376.go`: verified
+- `go/test/fixedbugs/bug506.go`: verified
+- `go/test/fixedbugs/issue6703q.go`: verified
+- `go/test/fixedbugs/issue6703t.go`: verified
+- `go/test/named1.go`: verified
+- `grafana/apps/advisor/pkg/app/checks/authchecks/check.go`: verified
+- `grafana/apps/alerting/notifications/pkg/apis/alertingnotifications/v0alpha1/receiver_createreceiverintegrationtest_response_object_types_gen.go`: verified
+- `grafana/packages/grafana-ui/src/components/AutoSaveField/EllipsisAnimated.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/UsersIndicator/types.ts`: verified
+- `grafana/pkg/operators/provisioning/connection_operator.go`: verified
+- `grafana/pkg/registry/apis/collections/legacy/queries_test.go`: verified
+- `grafana/pkg/registry/apis/provisioning/jobs/export/worker_test.go`: verified
+- `grafana/pkg/services/annotations/annotationsimpl/xorm_store.go`: verified
+- `grafana/pkg/services/ngalert/api/tooling/definitions/alertmanager.go`: verified
+- `grafana/pkg/services/ngalert/remote/alertmanager_test.go`: verified
+- `grafana/pkg/services/provisioning/dashboards/config_reader.go`: verified
+- `grafana/pkg/storage/unified/resource/quotas.go`: verified
+- `grafana/pkg/tests/apis/folder/folders_test.go`: verified
+- `grafana/public/app/core/components/RolePicker/styles.ts`: verified
+- `grafana/public/app/features/alerting/unified/home/IRMCard.tsx`: verified
+- `grafana/public/app/features/canvas/elements/droneSide.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/edit-pane/dashboard/DashboardFiltersList.tsx`: verified
+- `grafana/public/app/features/dashboard/dashgrid/DashboardLibrary/constants.ts`: verified
+- `grafana/public/app/features/dashboard/utils/tracking.ts`: verified
+- `grafana/public/app/features/datasources/components/EditDataSource.tsx`: verified
+- `grafana/public/app/features/explore/TraceView/components/utils/TreeNode.ts`: verified
+- `grafana/public/app/features/explore/extensions/ToolbarExtensionPoint.tsx`: verified
+- `grafana/public/app/features/provisioning/hooks/useRepositoryList.ts`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/components/VariableQueryEditor/VariableQueryField.tsx`: verified
+- `prysm/async/log.go`: verified
+- `prysm/beacon-chain/core/fulu/upgrade_test.go`: verified
+- `prysm/beacon-chain/db/kv/backfill_test.go`: verified
+- `prysm/beacon-chain/p2p/gossip_topic_mappings.go`: verified
+- `prysm/beacon-chain/p2p/peers/scorers/gossip_scorer_test.go`: verified
+- `prysm/beacon-chain/rpc/eth/shared/request.go`: verified
+- `prysm/consensus-types/blocks/kzg.go`: verified
+- `prysm/testing/endtoend/evaluators/beaconapi/requests.go`: verified
+- `prysm/testing/spectest/shared/gloas/epoch_processing/pending_consolidations.go`: verified
+- `prysm/testing/spectest/shared/phase0/finality/runner.go`: verified
+- `prysm/tools/analyzers/properpermissions/analyzer_test.go`: verified
+- `prysm/validator/client/beacon-api/propose_exit.go`: verified
