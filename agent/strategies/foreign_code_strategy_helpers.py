@@ -851,7 +851,9 @@ def _go_declared_constants(source: str) -> dict[str, int]:
                     changed = True
     # Package-level arrays with a positive literal size have a compile-time ``len``.
     for match in re.finditer(
-        r"^\s*var\s+(\w+)\s*\[\s*(\d+)\s*\]", source, re.MULTILINE
+        r"^\s*var\s+(\w+)\s*(?:=\s*)?\[\s*(\d+)\s*\]",
+        source,
+        re.MULTILINE,
     ):
         name, size = match.group(1), match.group(2)
         if int(size) > 0:
@@ -2894,6 +2896,15 @@ _UNSIGNED_INTEGER_TYPES = {
     "usize", "u8", "u16", "u32", "u64",
     "byte",
 }
+# Maximum representable value for fixed-width unsigned Go integer types.  Used
+# to prove that a ``byte``/``uint8`` index into a ``[256]T`` array is always safe.
+_UNSIGNED_INTEGER_MAX = {
+    "byte": 255,
+    "uint8": 255,
+    "u8": 255,
+    "uint16": 65_535,
+    "u16": 65_535,
+}
 
 # Framework/container types whose methods are always invoked on non-nil values.
 # These are caller-contract false positives rather than verifiable preconditions.
@@ -4236,6 +4247,16 @@ def _index_safety_issue(
     if param_types:
         raw_type = param_types.get(index, "").strip().lstrip("*")
         index_is_unsigned = raw_type.lower() in _UNSIGNED_INTEGER_TYPES
+    if (
+        label == "Go"
+        and param_types
+        and known_constants
+        and (raw_type.lower() in _UNSIGNED_INTEGER_MAX)
+        and known_constants.get(f"len({container})", 0) > _UNSIGNED_INTEGER_MAX[raw_type.lower()]
+    ):
+        # Fixed-width unsigned Go index into a package-level array that is larger
+        # than the type's maximum value (e.g. ``byte`` into ``[256]encoding``).
+        return None
     counterexample = _z3_index_counterexample(
         index, f"len_{container}", known_index=known_index, is_unsigned=index_is_unsigned
     )
