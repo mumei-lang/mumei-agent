@@ -1460,6 +1460,10 @@ def _go_guarded_indices(
     # ``op := v.Op`` followed by ``opcodeTable[op]`` is safe: ``Op`` is an enum whose
     # values are valid indices into the static ``opcodeTable``.
     guarded |= _go_op_enum_guarded_indices(body)
+    # ``builtinId`` values are valid indices for the package-level ``predeclaredFuncs``
+    # array in ``go/types`` / ``cmd/compile/internal/types2``.
+    if param_types and source:
+        guarded |= _go_predeclared_funcs_guarded_indices(body, param_types, source)
     # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
     # stay within ``a``'s bounds, so ``a[idx]`` is safe.
     guarded |= _go_range_index_guarded_indices(body)
@@ -1528,6 +1532,30 @@ def _go_op_enum_guarded_indices(body: str) -> set[str]:
         idx = match.group(1)
         if re.search(rf"\b(?:opcodeTable|op2str\w*)\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
+    return guarded
+
+
+def _go_predeclared_funcs_guarded_indices(
+    body: str, param_types: dict[str, str] | None, source: str
+) -> set[str]:
+    """Return indices that are ``builtinId`` values indexing ``predeclaredFuncs``."""
+    guarded: set[str] = set()
+    if "predeclaredFuncs" not in source:
+        return guarded
+    # Parameters of type ``builtinId`` are valid indices for the package-level
+    # ``predeclaredFuncs`` array, which has one entry per builtin constant.
+    if param_types:
+        for name, raw_type in param_types.items():
+            if _go_type_basename(raw_type) in {"builtinId"}:
+                if re.search(
+                    rf"\bpredeclaredFuncs\s*\[\s*{re.escape(name)}\s*\]", body
+                ):
+                    guarded.add(name)
+    # Locals assigned from an ``.id`` field (``id := x.id``) that index the array.
+    for match in re.finditer(r"\b(\w+)\s*:=\s*\w+\.id\b", body):
+        local = match.group(1)
+        if re.search(rf"\bpredeclaredFuncs\s*\[\s*{re.escape(local)}\s*\]", body):
+            guarded.add(local)
     return guarded
 
 
