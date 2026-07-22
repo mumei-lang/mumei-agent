@@ -3870,3 +3870,37 @@ func (f *File) Symbols() int { return f.r }
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
 
+
+def test_rust_unsigned_overflow_suppressed() -> None:
+    """Rust unsigned (usize/u64) additions are not flagged as i64 overflow false positives."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''use std::sync::atomic::AtomicUsize;
+
+struct Monitor { value: AtomicUsize, max: AtomicUsize }
+
+impl Monitor {
+    fn grow(&self, amount: usize) {
+        let old = self.value.fetch_add(amount, std::sync::atomic::Ordering::Relaxed);
+        self.max.fetch_max(old + amount, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("overflow" in issue.message for issue in issues)
+
+
+def test_go_test_file_skipped() -> None:
+    """Go files ending in ``_test.go`` are skipped from no-LLM safety auditing."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package sql
+
+type basicStmt struct { Stmt interface{} }
+
+func (s *basicStmt) Exec(args []int) (int, error) {
+    return s.Stmt.(int), nil
+}
+'''
+    issues = _detect_safety_issues(source, "go", source_file="/tmp/foo_test.go")
+    assert issues == []

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-o11y-ds-frontend/src/index.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

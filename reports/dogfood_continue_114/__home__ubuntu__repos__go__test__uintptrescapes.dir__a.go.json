@@ -1,0 +1,10 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/test/uintptrescapes.dir/a.go",
+  "language": "go",
+  "status": "refuted",
+  "errors": [
+    "Go function `recurse` can index `s[i]` without a bounds contract (Z3 counterexample: i=-1, len_s=0)",
+    "Z3 Counter-example: i=-1, len_s=0"
+  ]
+}
