@@ -1,0 +1,59 @@
+# Batch 152 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/internal/objabi/reloctype.go`: verified
+- `go/src/cmd/vet/testdata/rangeloop/rangeloop.go`: verified
+- `go/src/crypto/internal/rand/rand.go`: verified
+- `go/src/fmt/fmt_test.go`: verified
+- `go/src/image/png/writer.go`: verified
+- `go/src/internal/types/testdata/fixedbugs/issue50259.go`: verified
+- `go/src/os/sticky_bsd.go`: verified
+- `go/src/syscall/zsysnum_linux_ppc64le.go`: verified
+- `go/test/fixedbugs/issue13263.go`: verified
+- `go/test/fixedbugs/issue47201.dir/b.go`: verified
+- `go/test/typeparam/issue47878.go`: verified
+- `grafana/e2e-playwright/dashboard-new-layouts/page-objects/sidebar/AddOptions.ts`: verified
+- `grafana/packages/grafana-data/src/utils/object.ts`: verified
+- `grafana/packages/grafana-ui/src/components/ConfirmButton/ConfirmButton.story.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/DateTimePickers/DateTimePicker/DateTimePicker.test.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/Layout/Box/Box.story.tsx`: verified
+- `grafana/pkg/plugins/manager/loader/angular/angularinspector/angularinspector_test.go`: verified
+- `grafana/pkg/registry/apis/provisioning/jobs/history_reader_mock.go`: verified
+- `grafana/pkg/services/annotations/annotationstest/fake_cleanup.go`: verified
+- `grafana/pkg/services/dashboardimport/service/service.go`: verified
+- `grafana/pkg/services/provisioning/datasources/config_reader_test.go`: verified
+- `grafana/pkg/services/supportbundles/supportbundlesimpl/service.go`: verified
+- `grafana/pkg/storage/unified/migrations/testcases/snapshots.go`: verified
+- `grafana/pkg/tests/apis/iam/team/helpers_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/log_sync_query.go`: verified
+- `grafana/pkg/tsdb/influxdb/flux/query_models.go`: verified
+- `grafana/pkg/util/proxyutil/reverse_proxy_test.go`: verified
+- `grafana/public/app/api/clients/folder/v1beta1/hooks.test.ts`: verified
+- `grafana/public/app/features/alerting/unified/mocks/server/handlers/mimirRuler.ts`: verified
+- `grafana/public/app/features/commandPalette/scopes/scopeActions.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/panel-edit/PanelEditNext/QueryEditor/Sidebar/DraggableList/useDropIndicator.test.ts`: verified
+- `grafana/public/app/features/dashboard-scene/serialization/DashboardSceneSerializer.test.ts`: verified
+- `grafana/public/app/features/dashboard/components/PanelEditor/state/reducers.ts`: verified
+- `grafana/public/app/features/explore/TraceView/components/constants/tag-keys.tsx`: verified
+- `grafana/public/app/features/explore/correlationEditLogic.ts`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/mocks/CloudWatchDataSource.ts`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/mocks/metric-math-test-data/thirdArgAfterSearchQuery.ts`: verified
+- `grafana/public/app/plugins/datasource/loki/backendResultTransformer.test.ts`: verified
+- `grafana/public/app/plugins/panel/text/textPanelMigrationHandler.test.ts`: verified
+- `grafana/scripts/webpack/webpack.common.ts`: verified
+- `prysm/beacon-chain/execution/block_reader.go`: verified
+- `prysm/beacon-chain/state/fieldtrie/field_trie_test.go`: verified
+- `prysm/beacon-chain/sync/slot_aware_cache.go`: verified
+- `prysm/beacon-chain/sync/slot_aware_cache_test.go`: verified
+- `prysm/beacon-chain/sync/subscriber_bls_to_execution_change.go`: verified
+- `prysm/beacon-chain/sync/validate_execution_payload_envelope_test.go`: verified
+- `prysm/testing/spectest/minimal/electra__fork_transition__transition_test.go`: verified
+- `prysm/testing/spectest/shared/common/operations/withdrawals.go`: verified
+- `prysm/testing/spectest/shared/fulu/networking/custody_groups.go`: verified
+- `prysm/testing/util/data_column.go`: verified
