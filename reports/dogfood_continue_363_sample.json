@@ -1,0 +1,252 @@
+[
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/compare/compare_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/crypto/internal/fips140test/edwards25519_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/encoding/json/example_marshaling_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/hash/crc32/crc32_generic.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/image/jpeg/dct_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/cpu/cpu_mips64x.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/fastlog2_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/hash_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/simd/archsimd/_gen/simdgen/arm64/operands.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/text/template/exec.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/bug005.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue20335.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue23179.dir/b.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue42587.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue59572.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue73491.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/for.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/intrinsic.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/dashboard/pkg/apis/dashboard/v0alpha1/validation.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/plugins/pkg/app/meta_storage.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/e2e-playwright/test-plugins/frontend-sandbox-datasource-test/module.js"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-runtime/src/utils/openfeature.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-schema/src/raw/composable/dashboardlist/panelcfg/x/types.gen.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/plugins/pluginassets/localprovider_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/folders/sub_access_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/iam/user/validate.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/provisioning/controller/repository_quota_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/accesscontrol/acimpl/basic_role_db_seed.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/authz/zanzana/server/server.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/ngalert/state/persist.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/provisioning/provisioning_mock.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/storage/secret/encryption/data_key_store.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tsdb/cloudwatch/mocks/logs.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/util/contextutil.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/core/components/OptionsUI/select.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/core/utils/arrayMove.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/triage/Triage.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/canvas/elements/rectangle.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard-scene/scene/VariableControls.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard/dashgrid/DashboardLibrary/utils/autoMapDatasources.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/explore/Graph/ExploreGraph.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/home/Recommendations/Recommendations.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/logs/components/panel/analytics.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/provisioning/Wizard/components/WizardStepContent.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/provisioning/hooks/useCreateOrUpdateConnection.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/transformers/editors/LabelsToFieldsTransformerEditor.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/variables/getAllVariableValuesForUrl.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/variables/inspect/NetworkGraph.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/grafana-testdata-datasource/jest-setup.js"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/panel/geomap/editor/layerEditor.tsx"
+  }
+]

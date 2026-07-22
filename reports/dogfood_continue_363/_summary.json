@@ -1,0 +1,354 @@
+[
+  {
+    "repo": "go",
+    "file": "src/cmd/compile/internal/compare/compare_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/crypto/internal/fips140test/edwards25519_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/encoding/json/example_marshaling_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/hash/crc32/crc32_generic.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/image/jpeg/dct_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/cpu/cpu_mips64x.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/fastlog2_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/hash_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/simd/archsimd/_gen/simdgen/arm64/operands.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/text/template/exec.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug005.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue20335.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue23179.dir/b.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue42587.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue59572.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue73491.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/for.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/intrinsic.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "apps/dashboard/pkg/apis/dashboard/v0alpha1/validation.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "apps/plugins/pkg/app/meta_storage.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "e2e-playwright/test-plugins/frontend-sandbox-datasource-test/module.js",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "grafana",
+    "file": "packages/grafana-runtime/src/utils/openfeature.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "packages/grafana-schema/src/raw/composable/dashboardlist/panelcfg/x/types.gen.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/plugins/pluginassets/localprovider_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/folders/sub_access_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/iam/user/validate.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/provisioning/controller/repository_quota_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/accesscontrol/acimpl/basic_role_db_seed.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/authz/zanzana/server/server.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/ngalert/state/persist.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/provisioning/provisioning_mock.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/storage/secret/encryption/data_key_store.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/tsdb/cloudwatch/mocks/logs.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/util/contextutil.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/core/components/OptionsUI/select.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/core/utils/arrayMove.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/alerting/unified/triage/Triage.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/canvas/elements/rectangle.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/dashboard-scene/scene/VariableControls.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/dashboard/dashgrid/DashboardLibrary/utils/autoMapDatasources.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/explore/Graph/ExploreGraph.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/home/Recommendations/Recommendations.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/logs/components/panel/analytics.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/provisioning/Wizard/components/WizardStepContent.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/provisioning/hooks/useCreateOrUpdateConnection.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/transformers/editors/LabelsToFieldsTransformerEditor.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/variables/getAllVariableValuesForUrl.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/variables/inspect/NetworkGraph.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/plugins/datasource/grafana-testdata-datasource/jest-setup.js",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/plugins/panel/geomap/editor/layerEditor.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  }
+]
