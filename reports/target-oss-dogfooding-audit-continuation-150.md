@@ -1,0 +1,59 @@
+# Batch 151 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 49/50 `verified`
+- Refuted: 0
+- Errors: 1
+
+## Files
+
+- `go/src/internal/goos/zgoos_wasip1.go`: verified
+- `go/src/internal/types/testdata/fixedbugs/issue48819.go`: verified
+- `go/src/log/slog/example_logvaluer_group_test.go`: verified
+- `go/src/net/netip/inlining_test.go`: verified
+- `go/src/reflect/set_test.go`: verified
+- `go/src/runtime/bitcursor_test.go`: verified
+- `go/src/runtime/testdata/testprognet/signalexec.go`: verified
+- `go/src/syscall/security_windows.go`: verified
+- `go/test/fixedbugs/bug436.go`: verified
+- `go/test/fixedbugs/issue15898.go`: verified
+- `go/test/fixedbugs/issue19515.go`: verified
+- `go/test/fixedbugs/issue9083.go`: verified
+- `grafana/apps/dashboard/pkg/migration/schemaversion/v26.go`: verified
+- `grafana/packages/grafana-ui/src/components/Menu/hooks.ts`: verified
+- `grafana/packages/grafana-ui/src/components/UsersIndicator/UsersIndicator.tsx`: verified
+- `grafana/pkg/expr/nodes_test.go`: verified
+- `grafana/pkg/infra/log/slogadapter/adapter.go`: verified
+- `grafana/pkg/plugins/errors.go`: verified
+- `grafana/pkg/registry/apps/annotation/tags_handler_test.go`: verified
+- `grafana/pkg/services/cloudmigration/accesscontrol.go`: verified
+- `grafana/pkg/services/live/pipeline/data_output_local_subscribers.go`: verified
+- `grafana/public/app/core/components/OptionsUI/actions.tsx`: verified
+- `grafana/public/app/core/components/Upgrade/ProBadge.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/import-to-gma/steps/StepImportMethod.tsx`: verified
+- `grafana/public/app/features/alerting/unified/rule-list/hooks/useDataSourceLoadingStates.ts`: verified
+- `grafana/public/app/features/commandPalette/scopes/scopesUtils.ts`: verified
+- `grafana/public/app/features/dashboard-scene/mutation-api/commands/annotationCommands.test.ts`: verified
+- `grafana/public/app/features/dashboard-scene/panel-edit/PanelDataPane/PanelDataTransformationsTab.tsx`: verified
+- `grafana/public/app/features/dashboard/api/utils.test.ts`: verified
+- `grafana/public/app/features/plugins/admin/components/GetStartedWithPlugin/GetStartedWithApp.test.tsx`: verified
+- `grafana/public/app/plugins/datasource/graphite/graphite_query.ts`: verified
+- `grafana/public/app/plugins/datasource/loki/querybuilder/operationUtils.test.ts`: verified
+- `influxdb/influxdb3/src/commands/serve/cli_params/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/catalog/versions/v2/tests.rs`: timeout
+- `influxdb/influxdb3_catalog/src/catalog/versions/v2/update/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/format/record_id/tests.rs`: verified
+- `influxdb/influxdb3_telemetry/src/store/tests.rs`: verified
+- `influxdb/influxdb3_telemetry/src/tests.rs`: verified
+- `influxdb/influxdb3_write/src/write_buffer/queryable_buffer/tests.rs`: verified
+- `prysm/beacon-chain/db/kv/validated_checkpoint.go`: verified
+- `prysm/beacon-chain/db/restore_test.go`: verified
+- `prysm/proto/prysm/v1alpha1/partial_data_columns.pb.go`: verified
+- `prysm/testing/endtoend/params/params_test.go`: verified
+- `prysm/testing/middleware/engine-api-proxy/proxy_test.go`: verified
+- `prysm/testing/spectest/mainnet/deneb__sanity__slots_test.go`: verified
+- `prysm/testing/spectest/minimal/altair__operations__sync_committee_test.go`: verified
+- `prysm/validator/client/aggregate_test.go`: verified
+- `prysm/validator/client/beacon-api/beacon_block_proto_helpers.go`: verified
+- `prysm/validator/client/metrics_test.go`: verified
+- `prysm/validator/client/request_auth.go`: verified
