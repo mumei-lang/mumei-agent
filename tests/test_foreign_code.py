@@ -4618,3 +4618,29 @@ func blobBatchLimit(slot uint64) uint64 {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("blobBatchLimit" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_enum_string_method_guarded_local_array() -> None:
+    """An enum ``String`` method with a range guard and local string array is safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package instrumentationutils
+
+type RequestStatus int
+
+const (
+    RequestStatusOK RequestStatus = iota
+    RequestStatusCancelled
+    RequestStatusError
+)
+
+func (status RequestStatus) String() string {
+    names := [...]string{"ok", "cancelled", "error"}
+    if status < RequestStatusOK || status > RequestStatusError {
+        return ""
+    }
+    return names[status]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("String" in issue.message and "bounds" in issue.message for issue in issues)
