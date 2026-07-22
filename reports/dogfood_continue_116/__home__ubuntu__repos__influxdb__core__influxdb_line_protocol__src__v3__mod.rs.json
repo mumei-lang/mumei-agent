@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/influxdb_line_protocol/src/v3/mod.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

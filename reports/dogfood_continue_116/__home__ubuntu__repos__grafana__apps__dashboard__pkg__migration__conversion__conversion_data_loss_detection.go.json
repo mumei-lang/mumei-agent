@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/dashboard/pkg/migration/conversion/conversion_data_loss_detection.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

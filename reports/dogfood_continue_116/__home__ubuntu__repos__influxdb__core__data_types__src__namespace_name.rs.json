@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/data_types/src/namespace_name.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

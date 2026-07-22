@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/collections/pkg/apis/collections/v1alpha1/constants.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

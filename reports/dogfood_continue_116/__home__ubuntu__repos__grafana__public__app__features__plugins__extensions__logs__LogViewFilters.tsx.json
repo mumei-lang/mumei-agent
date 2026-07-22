@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/plugins/extensions/logs/LogViewFilters.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/tsdb/cloudwatch/models/http_error.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
