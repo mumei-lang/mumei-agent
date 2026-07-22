@@ -2802,6 +2802,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "ReadLoop",  # internal read-loop helpers such as http2 clientConnReadLoop
     "State",  # compiler/runtime state machines (e.g. ssagen.State) are non-nil in use
     "Machine",  # Prysm state-machine objects are non-nil when methods are invoked
+    "Msg",  # TLS/communication message structs (e.g. clientHelloMsg) are non-nil when used
     "Migrator",  # Grafana migration types are non-nil when Exec/SQL is called
     "Data",  # internal data container structs embedded in a wrapper (e.g. dutyStoreData) are non-nil in use
     "Block",  # compiler/graph blocks and protobuf block containers are non-nil when methods are invoked
@@ -3395,6 +3396,19 @@ def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set
             if name in {"ptr", "addr"} and (
                 raw_type.strip().startswith("*") or "unsafe.Pointer" in raw_type
             ):
+                result.add(_safe_identifier(name))
+    # cryptobyte.String/Builder methods are always invoked on valid, non-nil
+    # values by TLS and x509 parsers.
+    aliases = _go_import_aliases(source)
+    cryptobyte_aliases = {
+        alias
+        for alias, pkg in aliases.items()
+        if pkg.endswith("/cryptobyte") or pkg == "golang.org/x/crypto/cryptobyte"
+    }
+    if cryptobyte_aliases:
+        for name, raw_type in param_types.items():
+            stripped = re.sub(r"\[.*?\]", "", raw_type.strip().lstrip("*[]"))
+            if any(stripped.startswith(f"{a}.") for a in cryptobyte_aliases):
                 result.add(_safe_identifier(name))
     return result
 

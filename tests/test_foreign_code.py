@@ -2670,6 +2670,22 @@ func Gamma(x float64) float64 {
     assert not any("divide by" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_tls_msg_and_cryptobyte_nonnil() -> None:
+    """crypto/tls message and cryptobyte.String receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package tls
+import "golang.org/x/crypto/cryptobyte"
+type clientHelloMsg struct{ vers uint16 }
+func (m *clientHelloMsg) marshal() ([]byte, error) { return nil, nil }
+func readUint8LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
+    return s.ReadUint8LengthPrefixed((*cryptobyte.String)(out))
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
