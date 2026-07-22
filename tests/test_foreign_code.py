@@ -3904,3 +3904,19 @@ func (s *basicStmt) Exec(args []int) (int, error) {
 '''
     issues = _detect_safety_issues(source, "go", source_file="/tmp/foo_test.go")
     assert issues == []
+
+
+def test_go_compiler_test_dir_skipped() -> None:
+    """Files under the Go compiler test directory (go/test/) are skipped from no-LLM auditing."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package a
+
+func recurse(i int, s []byte) byte {
+    return s[i]
+}
+'''
+    issues = _detect_safety_issues(
+        source, "go", source_file="/home/ubuntu/repos/go/test/uintptrescapes.dir/a.go"
+    )
+    assert issues == []

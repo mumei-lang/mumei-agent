@@ -511,6 +511,10 @@ def _detect_safety_issues(
             _is_go_compiler_test(source)
             or _is_go_experimental(source)
             or (source_file is not None and source_file.endswith("_test.go"))
+            or (
+                source_file is not None
+                and re.search(r"(?:^|[/\\])go[/\\]test[/\\]", source_file) is not None
+            )
         ):
             return []
         known_constants = _go_declared_constants(source)
