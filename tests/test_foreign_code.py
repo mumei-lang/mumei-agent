@@ -868,6 +868,28 @@ def test_rust_contract_inference_skips_trailing_punctuation_in_tail_expression()
     assert atoms[0].ensures == "true"
 
 
+def test_rust_contract_inference_bool_ensures_checks_param_type() -> None:
+    """Boolean Rust functions must not emit ``result == <non-bool-param>`` for macro args."""
+    from agent.cross_validation_foreign import _infer_rust_contracts
+
+    source = '''
+fn is_literal_null_or_number(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Literal(
+            ScalarValue::Null | ScalarValue::Int64(_) | ScalarValue::Float64(_),
+            _
+        )
+    )
+}
+'''
+    atoms = _infer_rust_contracts(source)
+    assert len(atoms) == 1
+    assert atoms[0].return_type == "bool"
+    # ``expr`` is ``&Expr`` (mapped to ``i64``), so it must not be used as a bool RHS.
+    assert atoms[0].ensures == "true"
+
+
 def test_rust_contract_inference_preserves_unsigned_int_return_type() -> None:
     """Rust ``usize``/``u64`` return types must map to Mumei ``u64``."""
     from agent.cross_validation_foreign import _infer_rust_contracts

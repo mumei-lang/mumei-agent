@@ -1059,7 +1059,9 @@ def _infer_rust_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | No
         if "test" in fn.attributes or "bench" in fn.attributes:
             continue
         return_type = _mumei_return_type(fn.return_type)
-        param_names = {p.name for p in _params_from_signature(fn.params_text)}
+        params = _params_from_signature(fn.params_text)
+        param_names = {p.name for p in params}
+        param_types = {p.name: p.type for p in params}
         if not fn.body.strip():
             # Trait methods and external function declarations have no body.
             requires = "true"
@@ -1071,7 +1073,7 @@ def _infer_rust_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | No
             safety_expr = _last_expression(_strip_go_rust_literals_and_comments(fn.body))
             requires = _rust_safety_requires_for_expression(safety_expr, known_constants)
             local_names = _local_variable_names(fn.body, "rust")
-            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
+            ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types)
         atoms.append(
             MumeiContractAtom(
                 name=fn.name,
@@ -1113,6 +1115,7 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
             body = _balanced_brace_body(code, body_start)
             params = _params_from_signature(params_text)
             param_names = {p.name for p in params}
+            param_types = {p.name: p.type for p in params}
             return_expr = _normalize_foreign_expression(
                 _last_expression(body), known_constants, "rust"
             )
@@ -1123,7 +1126,7 @@ def _infer_rust_contracts(code: str) -> list[MumeiContractAtom]:
                 safety_expr, known_constants
             )
             local_names = _local_variable_names(body, "rust")
-            ensures = _ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants, local_names)
+            ensures = _ensures_for_return_expression(return_expr, mumei_return_type, param_names, known_constants, local_names, param_types=param_types)
         atoms.append(
             MumeiContractAtom(
                 name=_safe_identifier(match.group("name")),
@@ -2572,6 +2575,11 @@ def _ensures_for_return_expression(
         if stripped in {"true", "false"}:
             return f"result == {stripped}"
         if param_names and stripped in param_names:
+            # Only emit ``result == x`` when ``x`` is a boolean parameter;
+            # otherwise the equality is a type error (e.g. ``&Expr`` is
+            # mapped to ``i64`` but used as a bool RHS).
+            if param_types and param_types.get(stripped) != "bool":
+                return "true"
             return f"result == {stripped}"
         return "true"
     return f"result == {stripped}"
