@@ -4444,3 +4444,125 @@ func (pq *PriorityQueue) Len() int {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("PriorityQueue" in issue.message and "dereference" in issue.message for issue in issues)
+
+
+def test_typescript_nested_function_param_length_access() -> None:
+    """Nested function-type parameters do not cause spurious non-null findings on locals."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+export function useScopesRow(onApply: () => void) {
+  const { selectedScopes } = useScopeServicesState();
+  const isDirty =
+    selectedScopes.map((s) => s.id).sort().join('') !==
+    appliedScopes.map((s) => s.id).sort().join('');
+  return {
+    scopesRow: isDirty || selectedScopes.length ? selectedScopes.map((s) => s.id) : null,
+  };
+}
+'''
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("selectedScopes" in issue.message and "non-null" in issue.message for issue in issues)
+
+
+def test_go_const_iota_repeated_value_nonzero() -> None:
+    """Go constants that repeat a ``1 << iota`` expression are non-zero divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package obj
+
+const (
+    AttrFoo Attribute = 1 << iota
+    AttrBar
+    AttrBaz
+    attrBase
+)
+
+type Attribute uint32
+
+func (a *Attribute) Value() uint32 { return uint32(a.load() / attrBase) }
+func (a Attribute) load() Attribute { return a }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("attrBase" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_value_transformer_methods_non_nil() -> None:
+    """``value.Transformer`` implementation methods are invoked on non-nil receivers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package testing
+
+type Context struct{}
+
+type Transformer interface {
+    TransformFromStorage(ctx Context, data []byte, dataCtx Context) ([]byte, bool, error)
+    TransformToStorage(ctx Context, data []byte, dataCtx Context) ([]byte, error)
+}
+
+type reproducingTransformer struct {
+    wrapped Transformer
+    store   interface{ Create(ctx Context, key string, obj, out interface{}) error }
+}
+
+func (rt *reproducingTransformer) TransformFromStorage(ctx Context, data []byte, dataCtx Context) ([]byte, bool, error) {
+    if err := rt.store.Create(ctx, "", nil, nil); err != nil {
+        return nil, false, err
+    }
+    return rt.wrapped.TransformFromStorage(ctx, data, dataCtx)
+}
+
+func (rt *reproducingTransformer) TransformToStorage(ctx Context, data []byte, dataCtx Context) ([]byte, error) {
+    return rt.wrapped.TransformToStorage(ctx, data, dataCtx)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("reproducingTransformer" in issue.message and "dereference" in issue.message for issue in issues)
+
+
+def test_go_sql_container_receivers_non_nil() -> None:
+    """database/sql DB/Tx/Rows/Stmt pointers are non-nil when their methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package sql
+
+type DB struct{}
+type Tx struct{}
+type Rows struct{}
+
+func (db *DB) Ping() error { return db.ping() }
+func (db *DB) Query(query string) (*Rows, error) { return nil, nil }
+func (tx *Tx) Exec(query string) error { return tx.exec(query) }
+func (rs *Rows) Err() error { return rs.err }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any(msg in issue.message and "dereference" in issue.message for msg in ("DB", "Tx", "Rows") for issue in issues)
+
+
+def test_typescript_memo_component_extracted() -> None:
+    """React components exported as ``memo(...)`` are extracted and audited."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+import { memo } from 'react';
+
+export const Component = memo(({ items }: { items: string[] }) => {
+  return items.map((s) => s.length);
+});
+'''
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("Component" in issue.message and "non-null" in issue.message for issue in issues)
+
+
+def test_go_uint8_index_fits_array() -> None:
+    """A ``uint8`` parameter indexing a ``[256]T`` package-level array is in bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package flate
+
+var lengthCodes = [256]uint8{0}
+
+func lengthCode(len uint8) uint8 { return lengthCodes[len] }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("lengthCode" in issue.message and "bounds" in issue.message for issue in issues)

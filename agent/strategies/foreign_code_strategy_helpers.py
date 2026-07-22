@@ -674,8 +674,11 @@ def _go_declared_constants(source: str) -> dict[str, int]:
             if parsed is not None:
                 constants[name] = parsed
     # Package-level arrays with a positive literal size have a compile-time ``len``.
+    # Handles both ``var x [N]T`` and ``var x = [N]T{...}`` forms.
     for match in re.finditer(
-        r"^\s*var\s+(\w+)\s*\[\s*(\d+)\s*\]", source, re.MULTILINE
+        r"^\s*var\s+(\w+)\s*(?:=\s*)?\[\s*(\d+)\s*\]",
+        source,
+        re.MULTILINE,
     ):
         name, size = match.group(1), match.group(2)
         if int(size) > 0:
@@ -1345,6 +1348,62 @@ def _go_guarded_indices(
     # Enum-type parameters indexing package-level ``[num<Type>]`` arrays.
     if param_types and source:
         guarded |= _go_enum_param_guarded_indices(body, param_types, source)
+    # Unsigned variables whose type maximum fits a package-level array's size.
+    if unsigned_vars and param_types and source:
+        guarded |= _go_unsigned_array_index_guarded_indices(
+            body, unsigned_vars, param_types, source
+        )
+    return guarded
+
+
+def _go_unsigned_array_index_guarded_indices(
+    body: str, unsigned_vars: set[str], param_types: dict[str, str], source: str
+) -> set[str]:
+    """Return unsigned index variables that can never exceed the array length.
+
+    A ``uint8``/``byte`` parameter (values ``0..255``) indexing a ``[256]T``
+    package-level array is always in bounds, as is a ``uint16`` indexing a
+    ``[65536]T`` array.  This suppresses false positives for lookup tables such
+    as ``lengthCodes[len]`` in ``compress/flate``.
+    """
+    guarded: set[str] = set()
+    unsigned_max: dict[str, int] = {
+        "uint8": 255,
+        "byte": 255,
+        "uint16": 65535,
+    }
+    unsigned_types: dict[str, str] = {}
+    for name, typ in param_types.items():
+        base = typ.lstrip("*").strip()
+        if base in unsigned_max:
+            unsigned_types[name] = base
+    stripped = _strip_go_rust_literals_and_comments(body)
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*(uint8|byte|uint16)\s*\(", stripped
+    ):
+        unsigned_types[match.group(1)] = match.group(2)
+    for match in re.finditer(
+        r"\bvar\s+(\w+)\s+(uint8|byte|uint16)\b", stripped
+    ):
+        unsigned_types[match.group(1)] = match.group(2)
+    for match in re.finditer(
+        r"\bfor\s+(\w+)\s*:=\s*(uint8|byte|uint16)\s*\(", stripped
+    ):
+        unsigned_types[match.group(1)] = match.group(2)
+    array_sizes: dict[str, int] = {}
+    for match in re.finditer(
+        r"\bvar\s+(\w+)\s*(?:=\s*)?\[\s*(\d+)\s*\]",
+        source,
+    ):
+        size = int(match.group(2))
+        if size > 0:
+            array_sizes[match.group(1)] = size
+    for match in re.finditer(r"\b(\w+)\s*\[\s*(\w+)\s*\]", body):
+        arr, idx = match.group(1), match.group(2)
+        if idx not in unsigned_vars or idx not in unsigned_types:
+            continue
+        if array_sizes.get(arr, 0) >= unsigned_max[unsigned_types[idx]] + 1:
+            guarded.add(idx)
     return guarded
 
 
