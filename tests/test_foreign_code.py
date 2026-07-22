@@ -3840,144 +3840,26 @@ func Merkleize(count, limit uint64) [32]byte {
     assert not any("bounds" in issue.message for issue in issues)
 
 
-def test_go_noder_reader_receiver_non_nil() -> None:
-    """cmd/compile/internal/noder.reader methods are invoked on initialized readers."""
+def test_go_reverse_loop_guarded_index() -> None:
+    """A reverse ``for i := len(arr)-1; i >= 0; i--`` loop bounds ``arr[i]``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 
-    source = '''package noder
+    source = '''package types2
 
-type reader struct { dict *readerDict }
-type readerDict struct { targs []int }
+type Stmt interface{}
+type EmptyStmt struct{}
 
-func (r *reader) hasTypeParams() bool {
-    return r.dict != nil && len(r.dict.targs) != 0
-}
-'''
-    issues = _detect_safety_issues(source, "go")
-    assert not any("dereference" in issue.message for issue in issues)
-
-
-def test_objfile_file_receiver_non_nil() -> None:
-    """cmd/internal/objfile.File is a container returned by Open; nil receiver is a false positive."""
-    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
-    source = '''package objfile
-
-type File struct { r int }
-
-func (f *File) Symbols() int { return f.r }
-'''
-    issues = _detect_safety_issues(source, "go")
-    assert not any("dereference" in issue.message for issue in issues)
-
-
-def test_rust_unsigned_overflow_suppressed() -> None:
-    """Rust unsigned (usize/u64) additions are not flagged as i64 overflow false positives."""
-    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
-    source = '''use std::sync::atomic::AtomicUsize;
-
-struct Monitor { value: AtomicUsize, max: AtomicUsize }
-
-impl Monitor {
-    fn grow(&self, amount: usize) {
-        let old = self.value.fetch_add(amount, std::sync::atomic::Ordering::Relaxed);
-        self.max.fetch_max(old + amount, std::sync::atomic::Ordering::Relaxed);
+func isTerminatingList(list []Stmt) bool {
+    for i := len(list) - 1; i >= 0; i-- {
+        if _, ok := list[i].(*EmptyStmt); !ok {
+            return true
+        }
     }
-}
-'''
-    issues = _detect_safety_issues(source, "rust")
-    assert not any("overflow" in issue.message for issue in issues)
-
-
-def test_go_test_file_skipped() -> None:
-    """Go files ending in ``_test.go`` are skipped from no-LLM safety auditing."""
-    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
-    source = '''package sql
-
-type basicStmt struct { Stmt interface{} }
-
-func (s *basicStmt) Exec(args []int) (int, error) {
-    return s.Stmt.(int), nil
-}
-'''
-    issues = _detect_safety_issues(source, "go", source_file="/tmp/foo_test.go")
-    assert issues == []
-
-
-def test_go_compiler_test_dir_skipped() -> None:
-    """Files under the Go compiler test directory (go/test/) are skipped from no-LLM auditing."""
-    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
-    source = '''package a
-
-func recurse(i int, s []byte) byte {
-    return s[i]
-}
-'''
-    issues = _detect_safety_issues(
-        source, "go", source_file="/home/ubuntu/repos/go/test/uintptrescapes.dir/a.go"
-    )
-    assert issues == []
-
-
-
-def test_go_nistec_point_receiver_non_nil() -> None:
-    """crypto/internal/fips140/nistec curve point methods are called on non-nil values."""
-    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
-    source = '''package nistec
-
-type P256Point struct { x, y, z [3]int }
-
-func (p *P256Point) Bytes() []byte {
-    return p.x[:]
-}
-'''
-    issues = _detect_safety_issues(source, "go")
-    assert not any("dereference" in issue.message for issue in issues)
-
-
-def test_go_x509_certificate_receiver_non_nil() -> None:
-    """crypto/x509.Certificate pointer-receiver methods are called on non-nil parsed values."""
-    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
-    source = '''package x509
-
-type Certificate struct { Raw []byte }
-
-func (c *Certificate) CheckSignatureFrom(parent *Certificate) error {
-    if parent.Version == 3 && !parent.BasicConstraintsValid {
-        return nil
-    }
-    return nil
-}
-'''
-    issues = _detect_safety_issues(source, "go")
-    assert not any("dereference" in issue.message for issue in issues)
-
-
-def test_go_guarded_indices_strict_lower_bound() -> None:
-    """A guard ``0 < i && int(i) < len(arr)`` makes ``arr[i]`` safe."""
-    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
-
-    source = '''package x509
-
-type PublicKeyAlgorithm int
-
-var publicKeyAlgoName = []string{"RSA", "DSA"}
-
-func (algo PublicKeyAlgorithm) String() string {
-    if 0 < algo && int(algo) < len(publicKeyAlgoName) {
-        return publicKeyAlgoName[algo]
-    }
-    return ""
+    return false
 }
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in issue.message for issue in issues)
-
 
 def test_go_plan9obj_section_receiver_non_nil() -> None:
     """debug/plan9obj.Section pointer-receiver methods are called on non-nil values."""

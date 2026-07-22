@@ -1238,7 +1238,43 @@ def _go_guarded_indices(body: str) -> set[str]:
         # The constant ``m`` is the last valid index of ``container``.
         if re.search(rf"{re.escape(container)}\s*\[\s*{re.escape(const_name)}\s*\]", body):
             guarded.add(const_name)
+    # Reverse loops: ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }``
+    guarded |= _go_reverse_loop_guarded_indices(body)
     return guarded
+
+
+def _go_reverse_loop_guarded_indices(body: str) -> set[str]:
+    """Return index variables guarded by a reverse ``for`` loop bounded by ``len``.
+
+    A loop ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }`` keeps ``i`` within
+    the array bounds, so any ``arr[i]`` inside the loop body is safe.
+    """
+    guarded: set[str] = set()
+    pattern = re.compile(
+        r"\bfor\s+(?P<idx>\w+)\s*:=\s*len\(\s*(?P<arr>\w+)\s*\)\s*-\s*1\s*;\s*(?:(?P=idx)\s*>=\s*0|0\s*<=\s*(?P=idx))\s*;\s*(?P=idx)\s*(?:--|-=\s*1)\s*\{",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(body):
+        idx = match.group("idx")
+        arr = match.group("arr")
+        # The regex already consumed the opening brace, so ``match.end() - 1``
+        # points to the body-starting ``{``.
+        brace = match.end() - 1
+        if brace < 0 or body[brace] != "{":
+            continue
+        depth = 1
+        i = brace + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        loop_body = body[brace + 1 : i - 1]
+        if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", loop_body):
+            guarded.add(idx)
+    return guarded
+
 
 
 def _go_runtime_level_guarded_indices(body: str, package_name: str, param_names: set[str]) -> set[str]:
