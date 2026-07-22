@@ -2132,6 +2132,14 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``net.Dialer`` is a public configuration value; its pointer-receiver
         # methods (``MultipathTCP``/``SetMultipathTCP``) are called on live values.
         contracts.add("Dialer")
+    # Constructors ``New`` / ``NewFoo`` returning ``*T`` indicate ``T`` is a
+    # container/utility type that callers use through non-nil pointer values.
+    for match in re.finditer(
+        r"\bfunc\s+New(?:[A-Z]\w*)?\s*\([^)]*\)\s*\*?\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        source,
+        re.DOTALL,
+    ):
+        contracts.add(match.group(1))
     contracts |= _go_xorm_core_types(source)
     return contracts
 
@@ -2763,6 +2771,7 @@ def _detect_go_safety_issues(
                         and rtype_base in sort_interface_receivers
                     )
                     or rtype_base in component_runner_receivers
+                    or (fn.name == "IsNil" and rtype.startswith("*"))
                 )
             )
             first_param = _go_first_param_name(fn.params_text)

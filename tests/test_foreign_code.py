@@ -4344,3 +4344,103 @@ var op2str2 = [...]string{
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in issue.message for issue in issues)
+
+
+
+def test_typescript_generic_call_ensures_true() -> None:
+    """Generic function call return expressions fall back to ``ensures: true``."""
+    from agent.cross_validation_foreign import _infer_typescript_contracts
+
+    source = '''export const createAsyncThunk = <Returned, ThunkArg = void, ThunkApiConfig extends {} = {}>(
+  typePrefix: string,
+  payloadCreator: any,
+  options?: any
+): any => createAsyncThunkUntyped<Returned, ThunkArg, ThunkApiConfig>(typePrefix, payloadCreator, options);
+'''
+    atoms = _infer_typescript_contracts(source)
+    assert atoms is not None
+    atom = next(a for a in atoms if a.name == "createAsyncThunk")
+    assert atom.ensures == "true"
+
+
+def test_go_blank_identifier_functions_not_counted() -> None:
+    """Go type-checker testdata with only blank-identifier functions is not a source file."""
+    from agent.strategies.foreign_code_strategy import _source_has_function_declarations
+
+    source = '''package builtins
+
+func _[T any](x T) {
+    clear(x)
+}
+'''
+    assert _source_has_function_declarations(source, "go") is False
+
+
+def test_go_isnil_pointer_receiver_not_nil_deref() -> None:
+    """Pointer-receiver ``IsNil`` methods guard nil themselves and need no non-nil contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package blocks
+
+type BeaconBlock struct { body *BeaconBlockBody }
+type BeaconBlockBody struct{}
+
+func (b *BeaconBlockBody) IsNil() bool {
+    return b == nil
+}
+
+func (b *BeaconBlock) IsNil() bool {
+    return b == nil || b.body.IsNil()
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("IsNil" in issue.message and "dereference" in issue.message for issue in issues)
+
+
+def test_rust_trait_object_plus_not_arithmetic() -> None:
+    """Trait object / existential bounds ``dyn Trait + Send`` are not ``+`` addition."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''#[async_trait::async_trait]
+impl ObjectDeleter for MockObjectDeleter {
+    async fn delete_database(
+        &self,
+        db_id: DbId,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        self.db_sender
+            .send(db_id)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync + 'static>)
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("overflow" in issue.message and "Error + Send" in issue.message for issue in issues)
+
+
+def test_go_constructor_return_pointer_receiver_non_nil() -> None:
+    """Types returned by ``New()`` constructors are used through non-nil pointers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package queue
+
+import "sync"
+
+func New() *PriorityQueue {
+    return &PriorityQueue{dataMap: make(map[string]*Item)}
+}
+
+type PriorityQueue struct {
+    dataMap map[string]*Item
+    lock sync.RWMutex
+}
+
+type Item struct{ Key string }
+
+func (pq *PriorityQueue) Len() int {
+    pq.lock.RLock()
+    defer pq.lock.RUnlock()
+    return len(pq.dataMap)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("PriorityQueue" in issue.message and "dereference" in issue.message for issue in issues)
