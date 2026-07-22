@@ -3822,6 +3822,41 @@ func EventName(typ uint8, s []T) string {
     assert not any("bounds" in issue.message for issue in issues)
 
 
+def test_go_make_plus_one_index_is_safe() -> None:
+    """A slice allocated with ``make([]T, n+1)`` can be indexed at ``n``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssz
+
+func Depth(v uint64) uint8 { return 0 }
+
+func Merkleize(count, limit uint64) [32]byte {
+    limitDepth := Depth(limit)
+    tmp := make([][32]byte, limitDepth+1)
+    return tmp[limitDepth]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_noder_reader_receiver_non_nil() -> None:
+    """cmd/compile/internal/noder.reader methods are invoked on initialized readers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package noder
+
+type reader struct { dict *readerDict }
+type readerDict struct { targs []int }
+
+func (r *reader) hasTypeParams() bool {
+    return r.dict != nil && len(r.dict.targs) != 0
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
 def test_objfile_file_receiver_non_nil() -> None:
     """cmd/internal/objfile.File is a container returned by Open; nil receiver is a false positive."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -3834,3 +3869,4 @@ func (f *File) Symbols() int { return f.r }
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
