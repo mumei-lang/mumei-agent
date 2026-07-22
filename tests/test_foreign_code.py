@@ -2698,6 +2698,39 @@ func traceClockNow() uint64 { return uint64(cputicks() / traceTimeDiv) }
     assert not any("divide by" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_reverse_loop_len_minus_k() -> None:
+    """Reverse for loops starting at len(arr) - k are bounded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package cover
+import "strings"
+func PackageName() string {
+    elems := strings.Split("foo/bar", "/")
+    for i := len(elems) - 2; i >= 0; i-- {
+        if elems[i] != "" { return elems[i] }
+    }
+    return ""
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_debug_elf_file_nonnil() -> None:
+    """debug/elf File and Prog receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package elf
+type File struct { Class uint8 }
+func (f *File) getSymbols() uint8 { return f.Class }
+type Prog struct { sr *Section }
+type Section struct{}
+func (p *Prog) Open() *Section { return p.sr }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues

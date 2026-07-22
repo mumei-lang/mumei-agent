@@ -2355,12 +2355,13 @@ def _go_flattened_index_safe_pairs(body: str) -> set[tuple[str, str]]:
 def _go_reverse_loop_guarded_indices(body: str) -> set[str]:
     """Return index variables guarded by a reverse ``for`` loop bounded by ``len``.
 
-    A loop ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }`` keeps ``i`` within
-    the array bounds, so any ``arr[i]`` inside the loop body is safe.
+    A loop ``for i := len(arr) - k; i >= 0; i-- { arr[i] }`` with ``k >= 1``
+    keeps ``i`` within the array bounds (or does not execute when ``len(arr) < k``),
+    so any ``arr[i]`` inside the loop body is safe.
     """
     guarded: set[str] = set()
     pattern = re.compile(
-        r"\bfor\s+(?P<idx>\w+)\s*:=\s*len\(\s*(?P<arr>\w+)\s*\)\s*-\s*1\s*;\s*(?:(?P=idx)\s*>=\s*0|0\s*<=\s*(?P=idx))\s*;\s*(?P=idx)\s*(?:--|-=\s*1)\s*\{",
+        r"\bfor\s+(?P<idx>\w+)\s*:=\s*len\(\s*(?P<arr>\w+)\s*\)\s*-\s*(?:[1-9]\d*)\s*;\s*(?:(?P=idx)\s*>=\s*0|0\s*<=\s*(?P=idx))\s*;\s*(?P=idx)\s*(?:--|-=\s*1)\s*\{",
         re.DOTALL,
     )
     for match in pattern.finditer(body):
@@ -2823,6 +2824,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
     "Segment",  # debug/macho/elf load segments are non-nil when methods are invoked
     "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
+    "Prog",  # debug/elf program header objects are non-nil when methods are invoked
     "maybeTraceablePtr",  # runtime pointer wrapper methods are invoked on valid pointers
     "maybeTraceableChan",
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
@@ -3411,6 +3413,12 @@ def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set
         for name, raw_type in param_types.items():
             stripped = re.sub(r"\[.*?\]", "", raw_type.strip().lstrip("*[]"))
             if any(stripped.startswith(f"{a}.") for a in cryptobyte_aliases):
+                result.add(_safe_identifier(name))
+    # debug/{elf,macho,pe,plan9obj} container objects are live when methods are
+    # invoked on them.
+    if _go_package_name(source) in {"elf", "macho", "pe", "plan9obj"}:
+        for name, raw_type in param_types.items():
+            if _go_type_basename(raw_type) in {"File", "Prog", "Symbol"}:
                 result.add(_safe_identifier(name))
     return result
 
