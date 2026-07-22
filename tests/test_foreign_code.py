@@ -3922,6 +3922,7 @@ func recurse(i int, s []byte) byte {
     assert issues == []
 
 
+
 def test_go_nistec_point_receiver_non_nil() -> None:
     """crypto/internal/fips140/nistec curve point methods are called on non-nil values."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -3976,3 +3977,17 @@ func (algo PublicKeyAlgorithm) String() string {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_plan9obj_section_receiver_non_nil() -> None:
+    """debug/plan9obj.Section pointer-receiver methods are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package plan9obj
+
+type Section struct { sr *int; Size int }
+
+func (s *Section) Open() int { return *s.sr }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)

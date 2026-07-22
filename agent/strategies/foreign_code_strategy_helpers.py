@@ -1683,6 +1683,10 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
     if pkg == "x509" and re.search(r"\btype\s+RevocationList\s+struct\b", source):
         # ``crypto/x509.RevocationList`` is created by [CreateRevocationList].
         contracts.add("RevocationList")
+    if pkg == "plan9obj" and re.search(r"\btype\s+Section\s+struct\b", source):
+        # ``debug/plan9obj.Section`` is produced by ``File.SectionByName`` and
+        # similar accessors; its pointer-receiver methods are not valid on nil.
+        contracts.add("Section")
     return contracts
 
 
