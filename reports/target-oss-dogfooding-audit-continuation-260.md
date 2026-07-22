@@ -1,0 +1,59 @@
+# Batch 261 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ppc64/ggen.go`: verified
+- `go/src/compress/flate/huffman_code.go`: verified
+- `go/src/crypto/internal/fips140/drbg/cast.go`: verified
+- `go/src/image/ycbcr.go`: verified
+- `go/src/runtime/norace_test.go`: verified
+- `go/src/runtime/traceregion.go`: verified
+- `go/test/const2.go`: verified
+- `go/test/dwarf/dwarf.dir/z18.go`: verified
+- `go/test/fixedbugs/bug297.go`: verified
+- `go/test/fixedbugs/bug433.go`: verified
+- `go/test/fixedbugs/issue21709.go`: verified
+- `go/test/fixedbugs/issue23489.go`: verified
+- `go/test/fixedbugs/issue74626.go`: verified
+- `go/test/fixedbugs/issue8039.go`: verified
+- `grafana/apps/dashboard/pkg/migration/conversion/v2_to_v2beta1.go`: verified
+- `grafana/apps/provisioning/pkg/safepath/dir_test.go`: verified
+- `grafana/apps/secret/pkg/apis/secret/v1beta1/securevalue_object_gen.go`: verified
+- `grafana/packages/grafana-test-utils/src/fixtures/starred.ts`: verified
+- `grafana/packages/grafana-ui/src/components/Typeahead/Typeahead.tsx`: verified
+- `grafana/pkg/components/loki/lokihttp/config.go`: verified
+- `grafana/pkg/infra/metrics/service_test.go`: verified
+- `grafana/pkg/infra/remotecache/memcached_storage.go`: verified
+- `grafana/pkg/services/live/pushws/push_pipeline.go`: verified
+- `grafana/pkg/services/ngalert/api/tooling/definitions/provisioning_templates.go`: verified
+- `grafana/pkg/services/ngalert/api/validation/api_ruler_validation.go`: verified
+- `grafana/pkg/services/sqlstore/migrations/ualert/alert_rule_folder_fullpath_mig.go`: verified
+- `grafana/pkg/storage/unified/search/embed/embedder/azure/client_test.go`: verified
+- `grafana/pkg/tsdb/influxdb/flux/executor.go`: verified
+- `grafana/pkg/tsdb/influxdb/fsql/arrow_test.go`: verified
+- `grafana/pkg/util/xorm/session_raw.go`: verified
+- `grafana/public/app/features/alerting/unified/components/alert-groups/AlertGroup.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/receivers/form/fields/TemplateContentAndPreview.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-editor/AlertRuleNameInput.tsx`: verified
+- `grafana/public/app/features/alerting/unified/hooks/useHasInhibitedInstances.ts`: verified
+- `grafana/public/app/features/dashboard-scene/settings/version-history/RevertDashboardModal.tsx`: verified
+- `grafana/public/app/features/gops/configuration-tracker/components/ConfigCard.tsx`: verified
+- `grafana/public/app/features/provisioning/Config/defaults.ts`: verified
+- `grafana/public/app/features/provisioning/Migrate/ResourcesToMigrate.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/module.tsx`: verified
+- `grafana/scripts/generate-alerting-rtk-apis.ts`: verified
+- `prysm/api/client/builder/types.go`: verified
+- `prysm/beacon-chain/cache/sync_committee_test.go`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_attestations.go`: verified
+- `prysm/beacon-chain/slasher/types/types.go`: verified
+- `prysm/cmd/beacon-chain/usage_test.go`: verified
+- `prysm/config/fieldparams/common_test.go`: verified
+- `prysm/proto/eth/v1/beacon_chain.pb.go`: verified
+- `prysm/proto/prysm/v1alpha1/gloas_test.go`: verified
+- `prysm/testing/spectest/mainnet/electra__ssz_static__ssz_static_test.go`: verified
+- `prysm/testing/spectest/shared/deneb/operations/proposer_slashing.go`: verified
