@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/iam/pkg/apis/iam/v0alpha1/globalrolebinding_codec_gen.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

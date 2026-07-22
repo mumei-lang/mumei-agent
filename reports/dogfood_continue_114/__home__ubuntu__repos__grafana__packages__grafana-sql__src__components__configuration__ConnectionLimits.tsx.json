@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-sql/src/components/configuration/ConnectionLimits.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}
