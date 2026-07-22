@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/provisioning/Wizard/components/GithubAppStepInstruction.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

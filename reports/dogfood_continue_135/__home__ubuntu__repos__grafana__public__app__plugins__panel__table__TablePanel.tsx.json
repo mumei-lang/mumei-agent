@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/plugins/panel/table/TablePanel.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

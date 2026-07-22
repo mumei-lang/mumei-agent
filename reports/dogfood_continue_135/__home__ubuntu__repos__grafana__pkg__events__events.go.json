@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/events/events.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

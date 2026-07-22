@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/tsdb/grafana-testdata-datasource/sims/types.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

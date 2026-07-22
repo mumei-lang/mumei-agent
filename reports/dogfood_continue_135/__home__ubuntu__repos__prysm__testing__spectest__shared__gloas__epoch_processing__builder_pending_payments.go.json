@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/gloas/epoch_processing/builder_pending_payments.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

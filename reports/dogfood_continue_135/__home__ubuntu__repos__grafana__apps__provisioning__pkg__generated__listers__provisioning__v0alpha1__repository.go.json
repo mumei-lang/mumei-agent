@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/provisioning/pkg/generated/listers/provisioning/v0alpha1/repository.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
