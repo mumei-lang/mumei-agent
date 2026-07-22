@@ -2588,6 +2588,14 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         re.DOTALL,
     ):
         contracts.add(match.group(1))
+    # Grafana ``migrator.Migrator.AddMigration`` is always called with a
+    # freshly-allocated migration struct (``&MigrationType{}``); those receivers
+    # are non-nil when ``Exec``/``SQL`` is later invoked.
+    for match in re.finditer(
+        r"\bAddMigration\s*\([^,]+,\s*&\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{\}",
+        source,
+    ):
+        contracts.add(match.group(1))
     contracts |= _go_xorm_core_types(source)
     return contracts
 
