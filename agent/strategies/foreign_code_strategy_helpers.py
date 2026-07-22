@@ -2140,6 +2140,10 @@ _GO_NONNIL_EXACT_TYPES = {
     "MemProfileRecord",
     "Timespec",  # syscall/unix time-value structs are always initialized pointers
     "Timeval",
+    "DB",  # database/sql.DB handles are opened once and used through non-nil pointers
+    "Tx",  # database/sql.Tx is returned by Begin and used non-nil until Commit/Rollback
+    "Rows",  # database/sql.Rows is returned by Query and used non-nil until Close
+    "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -2345,6 +2349,13 @@ def _go_is_known_interface_method(
     if name == "HashTreeRoot" and "[32]byte" in ret and "error" in ret:
         return True
     if name == "HashTreeRootWith" and "*fssz.Hasher" in params_text and re.search(r"\berror\b", ret):
+        return True
+    # ``k8s.io/apiserver/pkg/storage/value.Transformer`` implementation methods
+    # (``TransformFromStorage`` / ``TransformToStorage``) are invoked on non-nil
+    # concrete transformers by the storage layer.
+    if name == "TransformFromStorage" and "value.Context" in params_text and "[]byte" in ret and "error" in ret:
+        return True
+    if name == "TransformToStorage" and "value.Context" in params_text and "[]byte" in ret and "error" in ret:
         return True
     # ``encoding/json.Marshaler`` / ``encoding/json.Unmarshaler`` methods are
     # always invoked on non-nil concrete values by the encoder/decoder.
@@ -4546,7 +4557,8 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     )
     for match in (*function_pattern.finditer(source), *arrow_pattern.finditer(source)):
         name = _safe_identifier(match.group("name"))
-        result[name] = _ts_nullable_param_set(match.group("params") or "")
+        params_text = match.group("params") or ""
+        result[name] = _ts_nullable_param_set(params_text)
     return result
 
 
