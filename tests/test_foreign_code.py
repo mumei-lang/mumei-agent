@@ -4057,3 +4057,48 @@ func addrLock(addr *uint64) *spinlock {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("can divide" in issue.message for issue in issues)
+
+
+def test_go_beacon_config_count_nonzero_divisor() -> None:
+    """Local variables assigned from ``params.BeaconConfig().*Count`` are nonzero divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package peerdas
+
+import "github.com/OffchainLabs/prysm/v7/config/params"
+
+func ComputeSubnetForDataColumnSidecar(columnIndex uint64) uint64 {
+    dataColumnSidecarSubnetCount := params.BeaconConfig().DataColumnSidecarSubnetCount
+    return columnIndex % dataColumnSidecarSubnetCount
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in issue.message for issue in issues)
+
+
+def test_go_flattened_2d_range_index_guard() -> None:
+    """Flattened ``row*cols + col`` indices inside nested ``range`` loops are guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package kzg
+
+func VerifyCellKZGProofBatchFromBlobData(blobs [][]byte, commitments [][]byte, cellProofs [][]byte, numberOfColumns uint64) error {
+    blobCount := uint64(len(blobs))
+    expectedCellProofs := blobCount * numberOfColumns
+    if uint64(len(cellProofs)) != expectedCellProofs {
+        return errors.New("mismatch")
+    }
+
+    for blobIndex := range blobs {
+        for columnIndex := range numberOfColumns {
+            cellProofIndex := uint64(blobIndex)*numberOfColumns + columnIndex
+            if len(cellProofs[cellProofIndex]) != 0 {
+                return nil
+            }
+        }
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
