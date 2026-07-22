@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/runtime/atomic/types.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

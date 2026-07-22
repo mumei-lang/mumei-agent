@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/provisioning/jobs/migrate/mock_namespace_cleaner.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

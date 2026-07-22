@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/sqlstore/migrations/accesscontrol/dashboard_permissions.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
