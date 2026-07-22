@@ -733,7 +733,7 @@ def _go_nonzero_constants(source: str) -> set[str]:
     Also propagates non-zero status through simple constant expressions such
     as ``1 << logPallocChunkPages`` or ``pallocChunkPages * pageSize``.
     """
-    nonzero: set[str] = set()
+    nonzero: set[str] = set(_go_known_nonzero_selectors(source))
 
     pkg_match = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
     if pkg_match and pkg_match.group(1) == "runtime":
@@ -766,11 +766,13 @@ def _go_nonzero_constants(source: str) -> set[str]:
 
     def _is_nonzero_expression(text: str, known: set[str]) -> bool:
         text = _strip_go_rust_literals_and_comments(text).strip()
+        # Strip simple numeric casts so ``int64(time.Millisecond)`` is treated as ``time.Millisecond``.
+        text = re.sub(r"\b(?:int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|uintptr|float32|float64|byte|rune)\s*\(\s*([^()]+)\s*\)", r"\1", text)
         # ``1 << anything`` is non-zero (runtime constants are non-negative).
         if re.fullmatch(r"\d+\s*<<\s*\w+", text):
             return semantic_safety.parse_int_literal(text.split("<<")[0].strip()) not in (0, None)
-        # ``x * y`` or ``x << y`` where both operands are known non-zero.
-        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
+        # ``x * y``, ``x / y`` or ``x << y`` where both operands are known non-zero.
+        for pattern in (r"(\S+)\s*\*\s*(\S+)", r"(\S+)\s*/\s*(\S+)", r"(\S+)\s*<<\s*(\S+)"):
             m = re.fullmatch(pattern, text)
             if m and m.group(1) in known and m.group(2) in known:
                 return True
@@ -778,7 +780,7 @@ def _go_nonzero_constants(source: str) -> set[str]:
 
     # Single-line const/var declarations.
     for match in re.finditer(
-        r"^\s*(?:const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)",
+        r"^\s*(?:const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
         source,
         re.MULTILINE,
     ):
@@ -3354,7 +3356,7 @@ def _detect_go_safety_issues(
             orig_start = orig_source.find(header) if original_source else -1
             suppress_bounds = _go_doc_comment_suppresses_bounds(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             guaranteed_nonzero = (
-                _go_nonzero_constants(source)
+                _go_nonzero_constants(original_source or source)
                 | _go_known_nonzero_selectors(original_source or source)
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
@@ -3450,7 +3452,7 @@ def _detect_go_safety_issues(
     file_map_names = _go_map_names(source)
     map_type_names = _go_map_type_names(source)
     base_guaranteed_nonzero = (
-        _go_nonzero_constants(source)
+        _go_nonzero_constants(original_source or source)
         | _go_known_nonzero_selectors(original_source or source)
         | {"_W", "bits.UintSize"}
     )
