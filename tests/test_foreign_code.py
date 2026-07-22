@@ -3873,3 +3873,23 @@ func (s *Section) Open() int { return *s.sr }
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_go_net_dialer_non_nil_receiver() -> None:
+    """net.Dialer pointer-receiver methods are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package net
+
+type Dialer struct{ mptcpStatus int }
+
+type mptcpStatus int
+
+func (s *mptcpStatus) get() bool { return false }
+
+func (d *Dialer) MultipathTCP() bool {
+    return d.mptcpStatus.get()
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)

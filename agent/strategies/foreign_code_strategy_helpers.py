@@ -1723,6 +1723,10 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``debug/plan9obj.Section`` is produced by ``File.SectionByName`` and
         # similar accessors; its pointer-receiver methods are not valid on nil.
         contracts.add("Section")
+    if pkg == "net" and re.search(r"\btype\s+Dialer\s+struct\b", source):
+        # ``net.Dialer`` is a public configuration value; its pointer-receiver
+        # methods (``MultipathTCP``/``SetMultipathTCP``) are called on live values.
+        contracts.add("Dialer")
     return contracts
 
 
