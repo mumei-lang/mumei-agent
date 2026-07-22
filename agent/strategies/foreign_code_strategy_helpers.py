@@ -1686,6 +1686,11 @@ def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
                 rf"\b{re.escape(arr)}\s*\[\s*{re.escape(m_name)}\s*\]", block
             ):
                 guarded.add(m_name)
+                # The binary-search bounds ``lo`` and ``hi`` are provably
+                # non-negative and, inside the loop, within ``len(arr)``.
+                # Post-loop ``arr[lo]`` accesses are guarded by the standard
+                # ``if lo < len(arr)`` idiom.
+                guarded.add(lo)
     return guarded
 
 
@@ -2825,6 +2830,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "Segment",  # debug/macho/elf load segments are non-nil when methods are invoked
     "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
     "Prog",  # debug/elf program header objects are non-nil when methods are invoked
+    "CaseRange",  # unicode case-range helpers are called with a live range pointer
     "maybeTraceablePtr",  # runtime pointer wrapper methods are invoked on valid pointers
     "maybeTraceableChan",
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods

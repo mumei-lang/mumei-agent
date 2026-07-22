@@ -2731,6 +2731,48 @@ func (p *Prog) Open() *Section { return p.sr }
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_binary_search_lo_guarded() -> None:
+    """Binary-search ``lo`` is non-negative and a subsequent ``lo < len(arr)`` guard is enough."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package unicode
+type foldPair struct{ From, To uint16 }
+var caseOrbit []foldPair
+func SimpleFold(r rune) rune {
+    lo := 0
+    hi := len(caseOrbit)
+    for lo < hi {
+        m := int(uint(lo+hi) >> 1)
+        if rune(caseOrbit[m].From) < r {
+            lo = m + 1
+        } else {
+            hi = m
+        }
+    }
+    if lo < len(caseOrbit) && rune(caseOrbit[lo].From) == r {
+        return rune(caseOrbit[lo].To)
+    }
+    return r
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_unicode_case_range_nonnil() -> None:
+    """unicode CaseRange helper functions receive a live, non-nil pointer."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package unicode
+type CaseRange struct{ Lo, Hi uint32; Delta [3]int32 }
+func convertCase(c int, r rune, cr *CaseRange) rune {
+    return r + cr.Delta[c]
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
