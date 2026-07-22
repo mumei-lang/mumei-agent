@@ -4344,3 +4344,23 @@ var op2str2 = [...]string{
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_rust_trait_object_plus_not_arithmetic() -> None:
+    """Trait object / existential bounds ``dyn Trait + Send`` are not ``+`` addition."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''#[async_trait::async_trait]
+impl ObjectDeleter for MockObjectDeleter {
+    async fn delete_database(
+        &self,
+        db_id: DbId,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+        self.db_sender
+            .send(db_id)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync + 'static>)
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("overflow" in issue.message and "Error + Send" in issue.message for issue in issues)
