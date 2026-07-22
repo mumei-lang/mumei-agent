@@ -4463,3 +4463,25 @@ export function useScopesRow(onApply: () => void) {
 '''
     issues = _detect_safety_issues(source, "typescript")
     assert not any("selectedScopes" in issue.message and "non-null" in issue.message for issue in issues)
+
+
+def test_go_const_iota_repeated_value_nonzero() -> None:
+    """Go constants that repeat a ``1 << iota`` expression are non-zero divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package obj
+
+const (
+    AttrFoo Attribute = 1 << iota
+    AttrBar
+    AttrBaz
+    attrBase
+)
+
+type Attribute uint32
+
+func (a *Attribute) Value() uint32 { return uint32(a.load() / attrBase) }
+func (a Attribute) load() Attribute { return a }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("attrBase" in issue.message and "non-zero" in issue.message for issue in issues)

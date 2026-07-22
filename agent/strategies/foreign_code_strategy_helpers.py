@@ -780,10 +780,22 @@ def _go_nonzero_constants(source: str) -> set[str]:
         r"^\s*(?:const|var)\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL
     ):
         block = match.group(1)
-        for m in re.finditer(
-            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", block, re.MULTILINE
-        ):
-            name, value = m.group(1), m.group(2)
+        prev_value: str | None = None
+        for raw_line in block.splitlines():
+            line = re.sub(r"//.*", "", raw_line).strip()
+            if not line:
+                continue
+            m = re.match(r"(\w+)(?:\s+\w+)?\s*(?:=\s*(.+))?$", line)
+            if not m:
+                continue
+            name = m.group(1)
+            value = m.group(2)
+            if value is None:
+                if prev_value is None:
+                    continue
+                value = prev_value
+            else:
+                prev_value = value
             if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
                 nonzero.add(name)
     return nonzero
