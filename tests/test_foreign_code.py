@@ -2854,6 +2854,29 @@ def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
     assert not any('allFrames' in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_reverse_loop_sliced_alias() -> None:
+    """Reverse loop over a local ``size`` indexing a same-length slice alias."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package bigmod
+
+type Nat struct{ limbs []uint }
+
+func (x *Nat) BitLenVarTime() int {
+    size := len(x.limbs)
+    xLimbs := x.limbs[:size]
+    for i := size - 1; i >= 0; i-- {
+        if xLimbs[i] != 0 {
+            return i
+        }
+    }
+    return 0
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("xLimbs" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_enum_lookup_table_named_index() -> None:
     """Named enum parameter indexing ``kind2tok`` keyed by enum constants."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

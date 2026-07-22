@@ -2253,6 +2253,66 @@ def _go_unsigned_array_index_guarded_indices(
     return guarded
 
 
+def _go_reverse_loop_alias_safe_pairs(body: str) -> set[tuple[str, str]]:
+    """Return safe ``(container, index)`` pairs for reverse loops over a local size.
+
+    A pattern like::
+
+        size := len(x.limbs)
+        xLimbs := x.limbs[:size]
+        for i := size - 1; i >= 0; i-- {
+            xLimbs[i]
+        }
+
+    keeps ``i`` within ``0 <= i < len(xLimbs)`` because ``xLimbs`` was sliced
+    to exactly ``size`` and the loop starts at ``size-1``.
+    """
+    safe: set[tuple[str, str]] = set()
+    # ``size := len(x.limbs)`` maps a local variable to the base expression.
+    len_vars: dict[str, str] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*len\s*\(\s*([A-Za-z_][\w\.]*)\s*\)",
+        body,
+    ):
+        len_vars[match.group(1)] = match.group(2)
+    # ``xLimbs := x.limbs[:size]`` maps an alias to (base, length-variable).
+    aliases: dict[str, tuple[str, str]] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*([A-Za-z_][\w\.]*)\s*\[\s*:\s*(\w+)\s*\]",
+        body,
+    ):
+        aliases[match.group(1)] = (match.group(2), match.group(3))
+    if not len_vars or not aliases:
+        return safe
+    reverse_re = re.compile(
+        r"\bfor\s+(\w+)\s*:=\s*(\w+)\s*-\s*([1-9]\d*)\s*;\s*(?:\1\s*>=\s*0|0\s*<=\s*\1)\s*;\s*\1\s*(?:--|-=\s*1)\s*\{",
+        re.DOTALL,
+    )
+    for match in reverse_re.finditer(body):
+        idx, bound, _ = match.groups()
+        if bound not in len_vars:
+            continue
+        brace = match.end() - 1
+        if brace < 0 or body[brace] != "{":
+            continue
+        depth = 1
+        i = brace + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        loop_body = body[brace + 1 : i - 1]
+        for alias, (base, length_var) in aliases.items():
+            if length_var == bound and re.search(
+                rf"\b{re.escape(alias)}\s*\[\s*{re.escape(idx)}\s*\]",
+                loop_body,
+            ):
+                safe.add((alias, idx))
+    return safe
+
+
 def _go_flattened_index_safe_pairs(body: str) -> set[tuple[str, str]]:
     """Return safe ``(container, index)`` pairs for flattened 2D loop indexing.
 
@@ -3783,6 +3843,7 @@ def _detect_go_safety_issues(
                 | _go_equal_length_slice_index_safe_pairs(body)
                 | _go_make_plus_one_index_safe_pairs(body)
                 | _go_flattened_index_safe_pairs(body)
+                | _go_reverse_loop_alias_safe_pairs(body)
             )
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
@@ -3948,7 +4009,10 @@ def _detect_go_safety_issues(
             | _go_beacon_config_nonzero_locals(body, original_source or source)
             | _go_math_denom_nonzero_locals(body, original_source or source)
         )
-        parallel_slicing = _go_flattened_index_safe_pairs(body)
+        parallel_slicing = (
+            _go_flattened_index_safe_pairs(body)
+            | _go_reverse_loop_alias_safe_pairs(body)
+        )
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
