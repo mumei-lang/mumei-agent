@@ -2814,6 +2814,30 @@ def _go_local_map_names(body: str) -> set[str]:
     return {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
 
 
+def _go_map_type_names(source: str) -> set[str]:
+    """Return names of declared types that are Go ``map`` types."""
+    return {
+        match.group(1)
+        for match in re.finditer(r"\btype\s+(\w+)\s+map\[", source)
+    }
+
+
+def _go_map_receiver_names(params_text: str, map_type_names: set[str]) -> set[str]:
+    """Return receiver/parameter names whose declared type is a map type."""
+    names: set[str] = set()
+    if not params_text:
+        return names
+    # Method receiver: ``(p MapType)`` or ``(p *MapType)``.
+    receiver_match = re.search(r"\(\s*(\w+)\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", params_text)
+    if receiver_match and receiver_match.group(2) in map_type_names:
+        names.add(receiver_match.group(1))
+    # Parameter declarations: ``func foo(m MapType)``.
+    for match in re.finditer(r"\b(\w+)\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\b", params_text):
+        if match.group(2) in map_type_names:
+            names.add(match.group(1))
+    return names
+
+
 def _go_float_array_names(source: str) -> set[str]:
     """Return package-level ``float64`` array names.
 
@@ -3239,6 +3263,7 @@ def _detect_go_safety_issues(
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         component_runner_receivers = _go_component_runner_receiver_types(source)
         file_map_names = _go_map_names(source)
+        map_type_names = _go_map_type_names(source)
         global_array_keys = _go_global_array_keys(source)
         known_types = _go_type_names(source)
         go_float_arrays = _go_float_array_names(original_source or source)
@@ -3253,7 +3278,7 @@ def _detect_go_safety_issues(
                 # soundly analyzed without concrete type constraints.
                 continue
             body = fn.body
-            go_map_names = file_map_names | _go_local_map_names(body)
+            go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(fn.params_text, map_type_names)
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
             nonnil_param_names = _go_nonnil_param_names(param_types, source) | _go_actor_nonnil_params(
@@ -3409,6 +3434,7 @@ def _detect_go_safety_issues(
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     file_map_names = _go_map_names(source)
+    map_type_names = _go_map_type_names(source)
     base_guaranteed_nonzero = (
         _go_nonzero_constants(source)
         | _go_known_nonzero_selectors(original_source or source)
@@ -3421,7 +3447,7 @@ def _detect_go_safety_issues(
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
-        go_map_names = file_map_names | _go_local_map_names(body)
+        go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(params_text, map_type_names)
         guaranteed_nonzero = (
             base_guaranteed_nonzero
             | _go_local_nonzero_variables(body)
