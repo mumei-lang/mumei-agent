@@ -150,7 +150,7 @@ def _extract_go_with_tree_sitter(source: str) -> list[ForeignCodeSpec] | None:
     inferred_atoms = {atom.name: atom for atom in _infer_go_contracts(source)}
     pattern = re.compile(
         r"(?P<comment>(?:\s*//[^\n]*\n)*)\s*"
-        r"func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+        r"func\s+(?:\([^)]*\)\s*)?(?P<name>[^\W\d][^\W]*)"
         r"(?:\[[^\]]*\])?\s*"
         r"\((?P<params>[^)]*)\)\s*"
         r"(?P<ret>(?:\([^)]*\)|[^{]+))?\s*\{",

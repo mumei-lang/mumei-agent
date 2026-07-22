@@ -2060,6 +2060,30 @@ def test_normalize_bitwise_and_and_inline_constants() -> None:
     assert _normalize_bitwise_and("(a & b) & c") == "bit_and(bit_and(a, b), c)"
 
 
+def test_extract_go_unicode_identifier() -> None:
+    """Go identifiers containing non-ASCII letters are extracted and audited."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+
+    source = """package þfoo
+
+var þbarV int = 101
+
+func þbar(x int) int {
+    defer func() { þbarV += 3 }()
+    return þblix(x)
+}
+
+func þblix(x int) int {
+    defer func() { þbarV += 9 }()
+    return þbarV + x
+}
+"""
+
+    specs = ForeignCodeExtractor().extract_go(source)
+    names = {s.function_name for s in specs}
+    assert names == {"þbar", "þblix"}
+
+
 def test_extract_go_caller_contracts_from_doc() -> None:
     """Go doc comments such as ``r must not be empty`` are turned into ``requires r != nil``."""
     from agent.strategies.foreign_code_strategy import _extract_go_caller_contracts
@@ -2422,6 +2446,26 @@ impl AsMetricStr for X {
 '''
     issues = _detect_safety_issues(source, "rust")
     assert not any("restore" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_top_nil_guarded_receiver() -> None:
+    """Receivers checked with ``if s == nil { return }`` at the top are non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package models
+type NotificationSettings struct{ a, b int }
+func (s *NotificationSettings) Validate() error {
+    if s == nil {
+        return nil
+    }
+    if s.a != 0 && s.b != 0 {
+        return nil
+    }
+    return nil
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("s" in i.message and "non-nil" in i.message for i in issues)
 
 
 def test_detect_go_safety_issues_word_bits_nonzero() -> None:

@@ -3297,6 +3297,33 @@ def _go_nil_guarded_return_values(body: str) -> set[str]:
     return guarded
 
 
+def _go_top_nil_guarded_params(body: str) -> set[str]:
+    """Return params guarded by an ``if x == nil { return }`` at the body start."""
+    stripped = _strip_go_rust_literals_and_comments(body)
+    match = re.match(
+        r"\s*if\s*\(?\s*([^;{}]*?)\s*\)?\s*\{[^}]*\breturn\b",
+        stripped,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return set()
+    condition = match.group(1).strip()
+    if condition.startswith("(") and condition.endswith(")"):
+        depth = 0
+        valid = True
+        for i, ch in enumerate(condition):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if depth == 0 and i < len(condition) - 1:
+                valid = False
+                break
+        if valid:
+            condition = condition[1:-1].strip()
+    return {_safe_identifier(name) for name in _nil_guarded_values_from_condition(condition)}
+
+
 def _nil_guarded_values_from_condition(condition: str) -> set[str]:
     """Return identifiers ``x`` for which ``x == nil`` guards the fall-through path.
 
@@ -3507,11 +3534,15 @@ def _detect_go_safety_issues(
             go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(fn.params_text, map_type_names)
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
-            nonnil_param_names = _go_nonnil_param_names(param_types, source) | _go_actor_nonnil_params(
-                param_types,
-                function_name=fn.raw_name or fn.name,
-                params_text=fn.params_text,
-                return_type=fn.return_type,
+            nonnil_param_names = (
+                _go_nonnil_param_names(param_types, source)
+                | _go_actor_nonnil_params(
+                    param_types,
+                    function_name=fn.raw_name or fn.name,
+                    params_text=fn.params_text,
+                    return_type=fn.return_type,
+                )
+                | _go_top_nil_guarded_params(body)
             )
             local_names = _local_variable_names(body, "go")
             parallel_slicing = (
@@ -3688,11 +3719,15 @@ def _detect_go_safety_issues(
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
-        nonnil_param_names = _go_nonnil_param_names(param_types, source) | _go_actor_nonnil_params(
-            param_types,
-            function_name=name,
-            params_text=params_text,
-            return_type=_return_type,
+        nonnil_param_names = (
+            _go_nonnil_param_names(param_types, source)
+            | _go_actor_nonnil_params(
+                param_types,
+                function_name=name,
+                params_text=params_text,
+                return_type=_return_type,
+            )
+            | _go_top_nil_guarded_params(body)
         )
         known_strings = string_variables | {
             name for name, raw_type in param_types.items()
