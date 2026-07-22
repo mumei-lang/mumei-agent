@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/syscall/unix/getrandom_solaris.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

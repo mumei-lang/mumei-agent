@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/ngalert/store/compat.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

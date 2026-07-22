@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/azuremonitor/components/TracesQueryEditor/setQueryValue.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/collections/pkg/apis/collections/v1alpha1/stars_client_gen.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/syscall/unix/kernel_version_ge.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

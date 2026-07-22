@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/gops/configuration-tracker/components/ConfigureIRM.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

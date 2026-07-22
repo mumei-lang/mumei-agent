@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/logsdrilldown/pkg/apis/logsdrilldown_manifest.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

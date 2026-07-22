@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/components/rule-editor/query-and-alert-condition/utils.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}
