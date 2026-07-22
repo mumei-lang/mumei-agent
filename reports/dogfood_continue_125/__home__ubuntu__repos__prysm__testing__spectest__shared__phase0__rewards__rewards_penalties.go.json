@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/phase0/rewards/rewards_penalties.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

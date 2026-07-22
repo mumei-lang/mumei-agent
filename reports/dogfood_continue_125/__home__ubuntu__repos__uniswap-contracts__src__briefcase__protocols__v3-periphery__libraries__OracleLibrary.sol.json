@@ -1,0 +1,7 @@
+{
+  "repo": "uniswap-contracts",
+  "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/v3-periphery/libraries/OracleLibrary.sol",
+  "language": "solidity",
+  "status": "verified",
+  "errors": []
+}

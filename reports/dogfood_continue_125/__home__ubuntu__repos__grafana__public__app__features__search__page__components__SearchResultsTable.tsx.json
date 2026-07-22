@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/search/page/components/SearchResultsTable.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

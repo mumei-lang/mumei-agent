@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/folders/cascade_delete_storage.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
