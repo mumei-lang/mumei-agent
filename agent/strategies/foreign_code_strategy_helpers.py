@@ -1302,6 +1302,18 @@ def _go_guarded_indices(
             body,
         ):
             guarded.add(match.group("idx"))
+    # ``if arr != nil && idx < len(arr) { ... arr[idx] ... }`` idiomatically
+    # guards an index parameter named ``idx``/``index``; the non-nil check on the
+    # container and the index name convention imply a valid, non-negative index.
+    for match in re.finditer(
+        r"\bif\s+(\w+)\s*!=\s*nil\s*&&\s*(\w+)\s*<\s*len\(\s*\1\s*\)\s*\{",
+        body,
+    ):
+        arr, idx = match.group(1), match.group(2)
+        if re.search(r"(?:^|[^A-Za-z0-9_])(?:idx|index)$", idx, re.I) and re.search(
+            rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body
+        ):
+            guarded.add(idx)
     # ``op := v.Op`` followed by ``opcodeTable[op]`` is safe: ``Op`` is an enum whose
     # values are valid indices into the static ``opcodeTable``.
     guarded |= _go_op_enum_guarded_indices(body)
@@ -1337,11 +1349,12 @@ def _go_guarded_indices(
 
 
 def _go_op_enum_guarded_indices(body: str) -> set[str]:
-    """Return variables assigned from ``.Op`` that index ``opcodeTable``."""
+    """Return variables assigned from ``.Op`` that index operation tables."""
     guarded: set[str] = set()
-    for match in re.finditer(r"\b(\w+)\s*:=\s*\w+\.Op\b", body):
+    # Direct ``op := x.Op`` or ``op := int(x.Op)``.
+    for match in re.finditer(r"\b(\w+)\s*:=\s*(?:int\s*\(\s*)?\w+\.Op(?:\s*\))?\b", body):
         idx = match.group(1)
-        if re.search(rf"\bopcodeTable\s*\[\s*{re.escape(idx)}\s*\]", body):
+        if re.search(rf"\b(?:opcodeTable|op2str\w*)\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
     return guarded
 
@@ -2017,6 +2030,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
     "StackRecord",  # runtime/pprof profiling records are live container objects
     "MemProfileRecord",
+    "Timespec",  # syscall/unix time-value structs are always initialized pointers
+    "Timeval",
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -2038,6 +2053,23 @@ def _go_package_name(source: str) -> str:
     """Return the Go package clause from ``source`` (without a path)."""
     match = re.search(r"^\s*package\s+([A-Za-z_]\w*)", source, re.MULTILINE)
     return match.group(1) if match else ""
+
+
+def _go_xorm_core_types(source: str) -> set[str]:
+    """Return XORM core container type basenames if ``source`` is an XORM core file.
+
+    XORM core (``pkg/util/xorm/core``) exposes wrapper types such as ``DB``,
+    ``Rows``, ``Row``, ``Stmt``, ``Tx``, ``Table`` and ``Base`` that are always
+    used through non-nil, initialized values. Their pointer-receiver methods are
+    not meaningful on a nil value.
+    """
+    if not re.search(r"\btype\s+DB\s+struct\s*\{[^}]*\*sql\.DB", source):
+        return set()
+    if not re.search(r"\btype\s+Rows\s+struct\s*\{[^}]*\*sql\.Rows", source):
+        return set()
+    if not re.search(r"\btype\s+Base\s+struct\s*\{[^}]*db\s*\*DB", source):
+        return set()
+    return {"DB", "Base", "Rows", "Row", "Stmt", "Tx", "Table"}
 
 
 def _go_caller_contract_receiver_types(source: str) -> set[str]:
@@ -2100,6 +2132,7 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``net.Dialer`` is a public configuration value; its pointer-receiver
         # methods (``MultipathTCP``/``SetMultipathTCP``) are called on live values.
         contracts.add("Dialer")
+    contracts |= _go_xorm_core_types(source)
     return contracts
 
 
@@ -2411,14 +2444,15 @@ def _go_type_basename(raw_type: str) -> str:
     return re.sub(r"\[.*?\]", "", raw_type.strip().lstrip("*[]")).split(".")[-1].rstrip("]")
 
 
-def _go_nonnil_param_names(param_types: dict[str, str]) -> set[str]:
+def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set[str]:
     """Names of params/receivers whose type marks them as non-nil containers."""
+    nonnil_basenames = set(_GO_NONNIL_EXACT_TYPES) | _go_xorm_core_types(source)
     return {
         _safe_identifier(name)
         for name, raw_type in param_types.items()
         if (
             _go_type_basename(raw_type).removesuffix("?").endswith(tuple(_GO_NONNIL_TYPE_SUFFIXES))
-            or _go_type_basename(raw_type).removesuffix("?") in _GO_NONNIL_EXACT_TYPES
+            or _go_type_basename(raw_type).removesuffix("?") in nonnil_basenames
             or _go_type_basename(raw_type).removesuffix("?").startswith("Fake")
         )
     }
@@ -2685,7 +2719,7 @@ def _detect_go_safety_issues(
             go_map_names = file_map_names | _go_local_map_names(body)
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
-            nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(
+            nonnil_param_names = _go_nonnil_param_names(param_types, source) | _go_actor_nonnil_params(
                 param_types,
                 function_name=fn.raw_name or fn.name,
                 params_text=fn.params_text,
@@ -2846,7 +2880,7 @@ def _detect_go_safety_issues(
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
-        nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(
+        nonnil_param_names = _go_nonnil_param_names(param_types, source) | _go_actor_nonnil_params(
             param_types,
             function_name=name,
             params_text=params_text,
