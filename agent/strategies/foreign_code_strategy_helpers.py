@@ -2763,6 +2763,7 @@ def _detect_go_safety_issues(
                         and rtype_base in sort_interface_receivers
                     )
                     or rtype_base in component_runner_receivers
+                    or (fn.name == "IsNil" and rtype.startswith("*"))
                 )
             )
             first_param = _go_first_param_name(fn.params_text)

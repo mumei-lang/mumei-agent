@@ -2438,6 +2438,37 @@ def _local_variable_names(body: str, language: str) -> set[str]:
     return names
 
 
+def _contains_generic_function_call(expression: str) -> bool:
+    """True when ``expression`` contains a generic function call like ``f<T>(x)``.
+
+    Such calls (common in TypeScript generic wrappers and Rust generic
+    instantiations) cannot be lowered into a Mumei equality because the angle
+    brackets are parsed as comparison operators.
+    """
+    no_strings = re.sub(r"'[^']*'|\"[^\"]*\"", "", expression)
+    i = 1
+    while i < len(no_strings):
+        if no_strings[i] == "<" and (no_strings[i - 1].isalnum() or no_strings[i - 1] == "_"):
+            depth = 1
+            j = i + 1
+            while j < len(no_strings) and depth > 0:
+                if no_strings[j] == "<":
+                    depth += 1
+                elif no_strings[j] == ">":
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                k = j
+                while k < len(no_strings) and no_strings[k].isspace():
+                    k += 1
+                if k < len(no_strings) and no_strings[k] == "(":
+                    type_args = no_strings[i + 1 : j - 1]
+                    if not any(op in type_args for op in ("&&", "||", "==", "!=", "<=", ">=")):
+                        return True
+        i += 1
+    return False
+
+
 def _is_expression_lowerable(
     expression: str,
     param_names: set[str] | None = None,
@@ -2481,6 +2512,8 @@ def _is_expression_lowerable(
         # no runtime ``?:`` ternary.
         if not re.search(r"\bis\s+[A-Za-z_]", no_strings):
             return False
+    if _contains_generic_function_call(expression):
+        return False
     if "=>" in no_strings or "function" in no_strings.lower():
         return False
     # Object literals and method/field access on index/aggregate results cannot
