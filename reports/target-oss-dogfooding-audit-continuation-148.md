@@ -1,0 +1,59 @@
+# Batch 149 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/cgo/internal/testerrors/testdata/issue33061.go`: verified
+- `go/src/cmd/cgo/internal/testso/testdata/so/cgoso_unix.go`: verified
+- `go/src/cmd/compile/internal/test/testdata/sqrtConst_test.go`: verified
+- `go/src/cmd/internal/buildid/buildid_test.go`: verified
+- `go/src/internal/types/testdata/fixedbugs/issue68903.go`: verified
+- `go/src/runtime/mem_aix.go`: verified
+- `go/src/time/tick.go`: verified
+- `go/test/chan/select7.go`: verified
+- `go/test/fixedbugs/issue16133.dir/a2.go`: verified
+- `go/test/ken/range.go`: verified
+- `grafana/apps/provisioning/pkg/apis/provisioning/v0alpha1/classic.go`: verified
+- `grafana/apps/provisioning/pkg/repository/github/repository_test.go`: verified
+- `grafana/packages/grafana-flamegraph/src/types/emotion-core-stub.d.ts`: verified
+- `grafana/packages/grafana-ui/src/components/DateTimePickers/TimeRangePicker/TimeRangeContent.tsx`: verified
+- `grafana/pkg/services/sqlstore/migrations/accesscontrol/test/managed_permission_migrator_test.go`: verified
+- `grafana/pkg/storage/unified/sql/list_iterator.go`: verified
+- `grafana/pkg/tests/alertmanager/loki.go`: verified
+- `grafana/public/app/features/alerting/unified/api/convertToGMAApi.ts`: verified
+- `grafana/public/app/features/alerting/unified/components/TimeRangeLabel.test.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-viewer/Details.test.tsx`: verified
+- `grafana/public/app/features/alerting/unified/hooks/abilities/otherAbilities.test.tsx`: verified
+- `grafana/public/app/features/alerting/unified/rule-list/hooks/grafanaFilter.test.ts`: verified
+- `grafana/public/app/features/dashboard-scene/analytics/dashboard-templates/main.ts`: verified
+- `grafana/public/app/features/datasources/components/BuildDashboardButton.tsx`: verified
+- `grafana/public/app/features/explore/extensions/DrilldownExtensionPoint.tsx`: verified
+- `grafana/public/app/features/query/state/DashboardQueryRunner/PublicAnnotationsDataSource.test.ts`: verified
+- `grafana/public/app/plugins/datasource/loki/LiveStreams.test.ts`: verified
+- `grafana/public/app/plugins/datasource/loki/querybuilder/components/LokiQueryBuilder.test.tsx`: verified
+- `grafana/public/app/plugins/panel/canvas/editor/element/APIEditor.tsx`: verified
+- `grafana/public/app/plugins/panel/nodeGraph/NodeGraphPanel.tsx`: verified
+- `influxdb/influxdb3_catalog/src/format/record/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/format/records/trigger/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/log/versions/v2/conversion/tests.rs`: verified
+- `influxdb/influxdb3_clap_blocks/src/object_store/tests.rs`: verified
+- `influxdb/influxdb3_clap_blocks/src/tokio/tests.rs`: verified
+- `influxdb/influxdb3_commands/src/helpers/tests.rs`: verified
+- `influxdb/influxdb3_commands/src/test.rs`: verified
+- `influxdb/influxdb3_sys_events/src/tests.rs`: verified
+- `influxdb/influxdb3_wal/src/snapshot_tracker/tests.rs`: verified
+- `influxdb/object_store_utils/src/object_store_health/tests.rs`: verified
+- `prysm/beacon-chain/blockchain/tracked_proposer_test.go`: verified
+- `prysm/beacon-chain/rpc/prysm/validator/handlers_test.go`: verified
+- `prysm/beacon-chain/verification/blob_test.go`: verified
+- `prysm/cmd/beacon-chain/db/log.go`: verified
+- `prysm/container/queue/priority_queue.go`: verified
+- `prysm/network/auth_test.go`: verified
+- `prysm/runtime/version/fork.go`: verified
+- `prysm/testing/spectest/mainnet/electra__epoch_processing__historical_summaries_update_test.go`: verified
+- `prysm/testing/spectest/mainnet/fulu__epoch_processing__inactivity_updates_test.go`: verified
+- `prysm/validator/client/beacon-api/beacon_committee_selections.go`: verified
