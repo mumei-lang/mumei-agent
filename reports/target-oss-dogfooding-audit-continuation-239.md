@@ -1,0 +1,59 @@
+# Batch 240 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/crypto/internal/fips140test/fips_test.go`: verified
+- `go/src/image/internal/imageutil/gen.go`: verified
+- `go/src/internal/nettrace/nettrace.go`: verified
+- `go/src/internal/strconv/atoc_test.go`: verified
+- `go/src/internal/trace/summary_test.go`: verified
+- `go/src/runtime/defs_freebsd_amd64.go`: verified
+- `go/src/runtime/preempt_arm64.go`: verified
+- `go/src/syscall/exec_linux.go`: verified
+- `go/src/syscall/rlimit_darwin.go`: verified
+- `go/src/syscall/zerrors_dragonfly_amd64.go`: verified
+- `go/src/testing/allocs.go`: verified
+- `go/test/codegen/divmod.go`: verified
+- `go/test/fixedbugs/issue5793.go`: verified
+- `go/test/fixedbugs/issue8060.dir/b.go`: verified
+- `grafana/apps/provisioning/pkg/generated/applyconfiguration/provisioning/v0alpha1/githubenterpriserepositoryconfig.go`: verified
+- `grafana/e2e-playwright/utils/prometheus-helpers.ts`: verified
+- `grafana/packages/grafana-ui/src/components/FileUpload/FileUpload.tsx`: verified
+- `grafana/pkg/cmd/grafana-cli/logger/loggerV2.go`: verified
+- `grafana/pkg/login/social/connectors/github_oauth_test.go`: verified
+- `grafana/pkg/registry/apis/datasource/sub_query.go`: verified
+- `grafana/pkg/registry/apis/provisioning/openapi_version_test.go`: verified
+- `grafana/pkg/services/loginattempt/loginattemptimpl/store.go`: verified
+- `grafana/pkg/services/ngalert/metrics/notification_historian.go`: verified
+- `grafana/pkg/services/updatemanager/updatemanager.go`: verified
+- `grafana/pkg/tests/apis/provisioning/git/health_test.go`: verified
+- `grafana/pkg/tests/apis/types.go`: verified
+- `grafana/public/app/core/components/AppChrome/MegaMenu/styles.ts`: verified
+- `grafana/public/app/core/components/OwnerReferences/hooks.ts`: verified
+- `grafana/public/app/core/components/SplashScreenModal/SplashScreenModal.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/export/GrafanaRuleGroupExporter.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-viewer/FederatedRuleWarning.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/inspect/InspectStatsTab.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/mutation-api/commands/movePanel.ts`: verified
+- `grafana/public/app/features/dashboard-scene/scene/dashboard-controls-menu/DashboardControlsMenu.tsx`: verified
+- `grafana/public/app/features/provisioning/components/BulkActions/utils.ts`: verified
+- `grafana/public/app/features/provisioning/components/Dashboards/FormLoadingErrorAlert.tsx`: verified
+- `grafana/public/app/features/variables/interval/adapter.ts`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/mocks/cloudwatch-logs-sql-test-data/whitespaceQuery.ts`: verified
+- `grafana/public/app/plugins/datasource/influxdb/components/editor/constants.ts`: verified
+- `grafana/public/app/plugins/datasource/mysql/module.ts`: verified
+- `prysm/beacon-chain/db/kv/checkpoint.go`: verified
+- `prysm/beacon-chain/state/state-native/setters_payload_header_test.go`: verified
+- `prysm/beacon-chain/sync/initial-sync/initial_sync_test.go`: verified
+- `prysm/cmd/flags/enum.go`: verified
+- `prysm/crypto/bls/blst/signature.go`: verified
+- `prysm/encoding/ssz/query/bitlist.go`: verified
+- `prysm/genesis/initialize_test.go`: verified
+- `prysm/testing/spectest/shared/fulu/epoch_processing/historical_summaries_update.go`: verified
+- `prysm/validator/db/kv/proposer_settings.go`: verified
+- `prysm/validator/db/restore_test.go`: verified
