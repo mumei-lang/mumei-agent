@@ -4336,11 +4336,14 @@ def _issues_for_expression(
         # null/undefined dereference is a JS/TS concept. Solidity value types
         # (`bytes`/`string`/structs) and Rust references are never null, so
         # emitting a "non-null contract" for them is a false positive (#295).
+        typeof_guarded = _ts_typeof_guarded_values(expression)
         for match in re.finditer(
             r"\b(?P<value>[A-Za-z_][A-Za-z0-9_]*)!?\.(?:length|len|is_empty)\b",
             expression,
         ):
             value = match.group("value")
+            if value in typeof_guarded:
+                continue
             if dereference_values is not None and value not in dereference_values:
                 continue
             issues.append(_null_safety_issue(function_name, value, label))
@@ -4426,7 +4429,10 @@ def _issues_from_findings(
         for value in _go_nil_dereference_values(expression, dereference_values):
             issues.append(_go_nil_safety_issue(function_name, value, label))
     elif label == "TypeScript":
+        typeof_guarded = _ts_typeof_guarded_values(expression)
         for value in findings.length_access_values:
+            if value in typeof_guarded:
+                continue
             if dereference_values is not None and value not in dereference_values:
                 continue
             issues.append(_null_safety_issue(function_name, value, label))
@@ -5231,6 +5237,24 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
         params_text = match.group("params") or ""
         result[name] = _ts_nullable_param_set(params_text)
     return result
+
+
+def _ts_typeof_guarded_values(expression: str) -> set[str]:
+    """Return identifiers narrowed to non-null by ``typeof x === 'string' && ...``.
+
+    TypeScript's ``typeof`` type guard makes subsequent ``.length`` / member
+    access safe in the same ``&&`` chain.  A guard of the form
+    ``typeof x === 'string' && x.length`` means ``x`` is a string on the right.
+    """
+    guarded: set[str] = set()
+    # Match ``typeof x === 'string'`` followed (possibly through a closing paren)
+    # by ``&&``.  Also accept ``number`` for numeric member accesses.
+    for match in re.finditer(
+        r"typeof\s+([A-Za-z_$][\w$]*)\s*===\s*['\"](?:string|number)['\"]\s*\)?\s*&&",
+        expression,
+    ):
+        guarded.add(match.group(1))
+    return guarded
 
 
 def _return_expressions(body: str, fallback: bool = True, language: str = "") -> list[str]:
