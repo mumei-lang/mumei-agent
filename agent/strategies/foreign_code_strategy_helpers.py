@@ -2044,6 +2044,10 @@ _GO_NONNIL_EXACT_TYPES = {
     "MemProfileRecord",
     "Timespec",  # syscall/unix time-value structs are always initialized pointers
     "Timeval",
+    "DB",  # database/sql.DB handles are opened once and used through non-nil pointers
+    "Tx",  # database/sql.Tx is returned by Begin and used non-nil until Commit/Rollback
+    "Rows",  # database/sql.Rows is returned by Query and used non-nil until Close
+    "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

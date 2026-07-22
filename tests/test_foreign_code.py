@@ -4518,3 +4518,22 @@ func (rt *reproducingTransformer) TransformToStorage(ctx Context, data []byte, d
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("reproducingTransformer" in issue.message and "dereference" in issue.message for issue in issues)
+
+
+def test_go_sql_container_receivers_non_nil() -> None:
+    """database/sql DB/Tx/Rows/Stmt pointers are non-nil when their methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package sql
+
+type DB struct{}
+type Tx struct{}
+type Rows struct{}
+
+func (db *DB) Ping() error { return db.ping() }
+func (db *DB) Query(query string) (*Rows, error) { return nil, nil }
+func (tx *Tx) Exec(query string) error { return tx.exec(query) }
+func (rs *Rows) Err() error { return rs.err }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any(msg in issue.message and "dereference" in issue.message for msg in ("DB", "Tx", "Rows") for issue in issues)
