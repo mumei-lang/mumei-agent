@@ -1,0 +1,59 @@
+# Batch 258 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ssagen/nowb.go`: verified
+- `go/src/cmd/internal/obj/arm64/asm_test.go`: verified
+- `go/src/internal/poll/sockopt_unix.go`: verified
+- `go/src/runtime/signal_darwin_arm64.go`: verified
+- `go/test/escape_indir.go`: verified
+- `go/test/fixedbugs/bug133.dir/bug1.go`: verified
+- `go/test/fixedbugs/issue23780.go`: verified
+- `go/test/fixedbugs/issue26411.go`: verified
+- `go/test/fixedbugs/issue4167.go`: verified
+- `go/test/fixedbugs/issue7405.go`: verified
+- `go/test/typeparam/issue50121b.dir/main.go`: verified
+- `go/test/typeparam/typeswitch7.go`: verified
+- `go/test/uintptrkeepalive.go`: verified
+- `grafana/apps/advisor/pkg/apis/advisor/v0alpha1/checktype_status_gen.go`: verified
+- `grafana/packages/grafana-data/src/transformations/matchers/valueMatchers/equalMatchers.ts`: verified
+- `grafana/packages/grafana-o11y-ds-frontend/rollup.config.ts`: verified
+- `grafana/packages/grafana-test-utils/src/worker/index.ts`: verified
+- `grafana/packages/grafana-ui/src/components/Combobox/MultiCombobox.tsx`: verified
+- `grafana/pkg/registry/apps/alerting/notifications/templategroup/authorize.go`: verified
+- `grafana/pkg/services/accesscontrol/acimpl/zanzana_resolver_test.go`: verified
+- `grafana/pkg/services/accesscontrol/database/seeder.go`: verified
+- `grafana/pkg/services/apiserver/appinstaller/server_test.go`: verified
+- `grafana/pkg/services/authz/proto/v1/extention_grpc.pb.go`: verified
+- `grafana/pkg/services/ngalert/notifier/legacy_storage/persist_mock.go`: verified
+- `grafana/pkg/services/ngalert/prom/convert.go`: verified
+- `grafana/pkg/services/sqlstore/migrations/preferences_mig.go`: verified
+- `grafana/pkg/services/team/teamapi/team_members_adapter.go`: verified
+- `grafana/pkg/storage/unified/sql/queries_test.go`: verified
+- `grafana/pkg/tsdb/graphite/resource_handler.go`: verified
+- `grafana/pkg/tsdb/influxdb/flux/macros_test.go`: verified
+- `grafana/pkg/tsdb/mysql/standalone/main.go`: verified
+- `grafana/public/app/core/components/CardButton.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/scene/layout-notebook/NotebookCellRenderer.tsx`: verified
+- `grafana/public/app/features/explore/Logs/LiveLogs.tsx`: verified
+- `grafana/public/app/features/plugins/admin/hooks/usePluginEntitlement.ts`: verified
+- `grafana/public/app/features/provisioning/Repository/SyncRepository.tsx`: verified
+- `grafana/public/app/features/provisioning/hooks/usePullRequestParam.ts`: verified
+- `grafana/public/app/features/variables/constant/adapter.ts`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/types.ts`: verified
+- `prysm/beacon-chain/blockchain/head_test.go`: verified
+- `prysm/beacon-chain/core/transition/gloas_operations_test.go`: verified
+- `prysm/beacon-chain/core/transition/log.go`: verified
+- `prysm/beacon-chain/das/needs.go`: verified
+- `prysm/beacon-chain/db/kv/testing_helpers.go`: verified
+- `prysm/encoding/ssz/query/container.go`: verified
+- `prysm/proto/prysm/v1alpha1/altair.ssz.go`: verified
+- `prysm/proto/prysm/v1alpha1/debug.pb.go`: verified
+- `prysm/testing/spectest/mainnet/fulu__epoch_processing__slashings_test.go`: verified
+- `prysm/testing/spectest/shared/gloas/rewards/rewards_penalties.go`: verified
+- `prysm/validator/keymanager/local/keymanager_test.go`: verified
