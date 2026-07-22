@@ -1,0 +1,59 @@
+# Batch 235 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ssa/addressingmodes.go`: verified
+- `go/src/cmd/go/internal/modindex/scan.go`: verified
+- `go/src/crypto/internal/fips140/sha3/sha3_s390x.go`: verified
+- `go/src/go/doc/comment/old_test.go`: verified
+- `go/src/go/types/return.go`: verified
+- `go/src/go/types/sizes.go`: verified
+- `go/src/internal/poll/fd_writev_unix.go`: verified
+- `go/src/net/http/transport_default_wasm.go`: verified
+- `go/src/strconv/number_test.go`: verified
+- `go/src/time/embed.go`: verified
+- `go/test/codegen/issue58166.go`: verified
+- `go/test/fixedbugs/issue21120.dir/a.go`: verified
+- `go/test/fixedbugs/issue48784.go`: verified
+- `go/test/fixedbugs/issue52193.go`: verified
+- `go/test/typeparam/mincheck.go`: verified
+- `grafana/apps/alerting/rules/plugin/src/generated/recordingrule/v0alpha1/recordingrule_object_gen.ts`: verified
+- `grafana/apps/provisioning/pkg/generated/applyconfiguration/provisioning/v0alpha1/githubenterpriseconnectionconfig.go`: verified
+- `grafana/packages/grafana-flamegraph/src/ColorSchemeButton.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/CustomScrollbar/CustomScrollbar.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/InfoBox/FeatureInfoBox.tsx`: verified
+- `grafana/pkg/api/apierrors/dashboard_test.go`: verified
+- `grafana/pkg/cmd/grafana-cli/commands/ls_command_test.go`: verified
+- `grafana/pkg/registry/apis/iam/authorizer_test.go`: verified
+- `grafana/pkg/registry/apis/iam/resourcepermission/templates.go`: verified
+- `grafana/pkg/registry/apis/provisioning/webhooks/webhook.go`: verified
+- `grafana/pkg/services/accesscontrol/resourcepermissions/error.go`: verified
+- `grafana/pkg/services/authz/zanzana/server/reconciler/reconciler_test.go`: verified
+- `grafana/pkg/services/frontend/context_middleware_test.go`: verified
+- `grafana/pkg/services/ngalert/api/api_prometheus_test_fixtures.go`: verified
+- `grafana/pkg/services/ngalert/metrics/state.go`: verified
+- `grafana/pkg/services/promtypemigration/amazon_prom_mig_test.go`: verified
+- `grafana/pkg/tests/apis/provisioning/jobs/job_validation_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/utils/metrics.go`: verified
+- `grafana/pkg/tsdb/influxdb/fsql/macro_test.go`: verified
+- `grafana/public/app/features/query/components/QueryErrorAlert.tsx`: verified
+- `grafana/public/app/plugins/datasource/azuremonitor/components/LogsQueryBuilder/TableSection.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/components/QueryEditor/LogsQueryEditor/CloudWatchLink.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/query-runner/CloudWatchLogsQueryRunner.ts`: verified
+- `grafana/public/app/plugins/panel/gauge/EffectsEditor.tsx`: verified
+- `grafana/public/app/plugins/panel/heatmap/utils.ts`: verified
+- `prysm/beacon-chain/core/gloas/builder_deposit_request_test.go`: verified
+- `prysm/beacon-chain/core/gloas/withdrawals_test.go`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/debug/block_test.go`: verified
+- `prysm/beacon-chain/state/state-native/getters_deposit_requests_test.go`: verified
+- `prysm/cmd/validator/wallet/recover.go`: verified
+- `prysm/testing/bls/utils/utils.go`: verified
+- `prysm/testing/spectest/mainnet/altair__sanity__slots_test.go`: verified
+- `prysm/testing/spectest/mainnet/capella__epoch_processing__inactivity_updates_test.go`: verified
+- `prysm/testing/spectest/minimal/capella__sanity__blocks_test.go`: verified
+- `prysm/testing/spectest/shared/fulu/epoch_processing/rewards_and_penalties.go`: verified

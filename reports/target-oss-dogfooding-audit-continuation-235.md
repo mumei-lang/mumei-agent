@@ -1,0 +1,59 @@
+# Batch 236 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/cgo/internal/test/issue9400_linux.go`: verified
+- `go/src/cmd/internal/pkgpath/pkgpath.go`: verified
+- `go/src/crypto/x509/cert_pool_test.go`: verified
+- `go/src/internal/runtime/syscall/linux/syscall_linux.go`: verified
+- `go/src/net/error_test.go`: verified
+- `go/src/net/http/csrf_test.go`: verified
+- `go/src/runtime/defs_plan9_arm.go`: verified
+- `go/src/syscall/mksyscall_windows.go`: verified
+- `go/src/syscall/zsyscall_openbsd_riscv64.go`: verified
+- `go/test/abi/leaf.go`: verified
+- `go/test/fixedbugs/issue13273.go`: verified
+- `go/test/fixedbugs/issue16733.go`: verified
+- `go/test/fixedbugs/issue3925.go`: verified
+- `go/test/fixedbugs/issue5704.go`: verified
+- `go/test/fixedbugs/issue9321.go`: verified
+- `go/test/helloworld.go`: verified
+- `go/test/syntax/initvar.go`: verified
+- `grafana/apps/alerting/rules/pkg/apis/alerting/v0alpha1/client_gen.go`: verified
+- `grafana/apps/logsdrilldown/pkg/apis/logsdrilldown/v1alpha1/logsdrilldown_client_gen.go`: verified
+- `grafana/apps/provisioning/pkg/generated/applyconfiguration/provisioning/v0alpha1/webhookstatus.go`: verified
+- `grafana/packages/grafana-test-utils/src/handlers/apis/iam.grafana.app/v0alpha1/handlers.ts`: verified
+- `grafana/pkg/services/ngalert/accesscontrol/fakes/silences.go`: verified
+- `grafana/pkg/services/ngalert/notifier/autogen_alertmanager_test.go`: verified
+- `grafana/pkg/services/publicdashboards/internal/service/service_test.go`: verified
+- `grafana/pkg/services/queryhistory/queryhistory_patch_test.go`: verified
+- `grafana/pkg/storage/unified/resource/usagestats/ingester_test.go`: verified
+- `grafana/pkg/storage/unified/search/embed/embedder/normalize.go`: verified
+- `grafana/pkg/tests/apis/provisioning/jobs/deleteresourcesjob_auth_test.go`: verified
+- `grafana/pkg/tests/apis/provisioning/jobs/pullrequestjob_auth_test.go`: verified
+- `grafana/pkg/tsdb/azuremonitor/macros/macros_test.go`: verified
+- `grafana/public/app/features/alerting/unified/components/rules/state-history/useRuleHistoryRecords.tsx`: verified
+- `grafana/public/app/features/alerting/unified/reducers/alertmanager/muteTimings.ts`: verified
+- `grafana/public/app/features/alerting/unified/rule-list/PaginatedGrafanaLoader.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/scene/PanelLinks.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/solo/FanoutPanel.tsx`: verified
+- `grafana/public/app/features/dashboard/dashgrid/DashboardLibrary/DashboardCard.tsx`: verified
+- `grafana/public/app/features/serviceaccounts/components/ServiceAccountTokensTable.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/components/AnnotationQueryEditor/AnnotationQueryEditor.tsx`: verified
+- `grafana/public/app/plugins/datasource/graphite/parser.ts`: verified
+- `grafana/public/app/plugins/panel/geomap/components/MarkersLegend.tsx`: verified
+- `prysm/beacon-chain/builder/log.go`: verified
+- `prysm/beacon-chain/core/helpers/attestation_test.go`: verified
+- `prysm/beacon-chain/state/stateutil/pending_deposits_root.go`: verified
+- `prysm/cmd/validator/accounts/backup_test.go`: verified
+- `prysm/testing/spectest/minimal/altair__light_client__update_ranking_test.go`: verified
+- `prysm/testing/spectest/minimal/altair__sanity__slots_test.go`: verified
+- `prysm/testing/spectest/minimal/electra__finality__finality_test.go`: verified
+- `prysm/testing/spectest/shared/deneb/epoch_processing/rewards_and_penalties.go`: verified
+- `prysm/testing/spectest/shared/fulu/operations/consolidations.go`: verified
+- `prysm/validator/client/beacon-api/submit_signed_aggregate_proof_test.go`: verified
