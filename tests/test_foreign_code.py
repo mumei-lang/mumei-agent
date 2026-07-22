@@ -2854,6 +2854,61 @@ def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
     assert not any('allFrames' in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_config_receiver_non_nil() -> None:
+    """Pointer receivers of ``*Config`` types are treated as non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package printer
+
+type Config struct{ Tabwidth int }
+
+func (cfg *Config) Fprint(output string) string {
+    return cfg.fprint()
+}
+
+func (cfg *Config) fprint() string {
+    return "ok"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Fprint" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_punycode_adapt() -> None:
+    """RFC 3492 Punycode ``adapt`` arithmetic is trusted."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package cookiejar
+
+const (
+	base        int32 = 36
+	damp        int32 = 700
+	initialBias int32 = 72
+	initialN    int32 = 128
+	skew        int32 = 38
+	tmax        int32 = 26
+	tmin        int32 = 1
+)
+
+func adapt(delta, numPoints int32, firstTime bool) int32 {
+	if firstTime {
+		delta /= damp
+	} else {
+		delta /= 2
+	}
+	delta += delta / numPoints
+	k := int32(0)
+	for delta > ((base-tmin)*tmax)/2 {
+		delta /= base - tmin
+		k += base
+	}
+	return k + (base-tmin+1)*delta/(delta+skew)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("adapt" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_impl_receiver_non_nil() -> None:
     """Pointer receivers named ``*Impl`` are treated as non-nil containers."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

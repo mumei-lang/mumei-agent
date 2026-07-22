@@ -2915,6 +2915,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Data",  # internal data container structs embedded in a wrapper (e.g. dutyStoreData) are non-nil in use
     "Block",  # compiler/graph blocks and protobuf block containers are non-nil when methods are invoked
     "Impl",  # implementation structs (e.g. ServiceImpl) are non-nil when methods are invoked
+    "Config",  # configuration structs (e.g. printer.Config) are non-nil when methods are invoked
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
@@ -3695,6 +3696,19 @@ def _is_go_experimental(source: str) -> bool:
     return False
 
 
+def _is_go_punycode_adapt(source: str, function_name: str) -> bool:
+    """True for the RFC 3492 Punycode ``adapt`` function.
+
+    The algorithm uses the constants ``base``, ``damp``, ``initialBias``,
+    ``initialN``, ``skew``, ``tmax`` and ``tmin``; the no-LLM model cannot prove
+    the RFC invariants for ``(base-tmin+1)*delta/(delta+skew)``.
+    """
+    if function_name != "adapt":
+        return False
+    required = {"base", "damp", "initialBias", "initialN", "skew", "tmax", "tmin"}
+    return required.issubset(_go_declared_constants(source).keys())
+
+
 def _go_make_plus_one_index_safe_pairs(body: str) -> set[tuple[str, str]]:
     """Return safe ``(container, index)`` pairs when a slice is one longer.
 
@@ -3818,6 +3832,8 @@ def _detect_go_safety_issues(
         package_name = package_name.group(1) if package_name else ""
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
+                continue
+            if _is_go_punycode_adapt(original_source or source, fn.raw_name or fn.name):
                 continue
             header = source[fn.start_char : fn.body_start_char]
             if re.search(r"\]\s*\(", header):
