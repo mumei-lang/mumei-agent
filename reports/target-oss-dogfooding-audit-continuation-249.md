@@ -1,0 +1,59 @@
+# Batch 250 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/cgo/internal/testsanitizers/lsan_test.go`: verified
+- `go/src/cmd/compile/internal/ssa/deadstore_test.go`: verified
+- `go/src/compress/flate/dict_decoder.go`: verified
+- `go/src/encoding/json/stream.go`: verified
+- `go/src/internal/cpu/cpu_arm64.go`: verified
+- `go/src/net/http/cookie_test.go`: verified
+- `go/src/testing/fstest/testfs_test.go`: verified
+- `go/test/const1.go`: verified
+- `go/test/fixedbugs/bug263.go`: verified
+- `go/test/fixedbugs/bug455.go`: verified
+- `go/test/fixedbugs/issue12347.go`: verified
+- `go/test/fixedbugs/issue31252.dir/a.go`: verified
+- `go/test/opt_branchlikely.go`: verified
+- `go/test/typeparam/issue48462.dir/a.go`: verified
+- `grafana/packages/grafana-runtime/src/services/LocationService.tsx`: verified
+- `grafana/packages/grafana-runtime/src/utils/DataSourceWithBackend.ts`: verified
+- `grafana/packages/grafana-ui/src/components/Select/DropdownIndicator.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/Slider/types.ts`: verified
+- `grafana/pkg/expr/query.go`: verified
+- `grafana/pkg/registry/apis/datasource/migrator/migrator_test.go`: verified
+- `grafana/pkg/registry/apis/folders/folder_storage_test.go`: verified
+- `grafana/pkg/registry/apis/provisioning/jobs/progress_fn_mock.go`: verified
+- `grafana/pkg/registry/apis/provisioning/resources/filepath_test.go`: verified
+- `grafana/pkg/registry/apis/provisioning/resources/resources_remove_test.go`: verified
+- `grafana/pkg/services/ngalert/api/tooling/definitions/alertmanager_test.go`: verified
+- `grafana/pkg/tests/apis/provisioning/foldermetadata/fixfoldermetadata_git_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/services/accounts.go`: verified
+- `grafana/public/app/features/alerting/state/alertDef.ts`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-editor/notificaton-preview/useAlertmanagerNotificationRoutingPreview.ts`: verified
+- `grafana/public/app/features/auth-config/ErrorContainer.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/settings/version-history/VersionHistoryTable.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/sharing/ShareDrawer/ShareDrawerConfirmAction.tsx`: verified
+- `grafana/public/app/features/explore/MetaInfoText.tsx`: verified
+- `grafana/public/app/features/panel/options/builder/CanvasControlsSwitchEditor.tsx`: verified
+- `grafana/public/app/features/provisioning/Migrate/Migrate.tsx`: verified
+- `grafana/public/app/features/provisioning/utils/routes.tsx`: verified
+- `grafana/public/app/features/transformers/editors/FormatStringTransformerEditor.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/mocks/cloudwatch-logs-sql-test-data/partialQueryWithSubquery.ts`: verified
+- `grafana/public/app/plugins/datasource/graphite/state/actions.ts`: verified
+- `grafana/public/app/plugins/datasource/influxdb/components/editor/query/influxql/visual/PartListSection.tsx`: verified
+- `prysm/beacon-chain/cache/active_balance.go`: verified
+- `prysm/beacon-chain/db/filesystem/iteration.go`: verified
+- `prysm/beacon-chain/db/slasherkv/migrate_test.go`: verified
+- `prysm/beacon-chain/rpc/eth/debug/handlers.go`: verified
+- `prysm/beacon-chain/verification/execution_payload_bid_test.go`: verified
+- `prysm/cmd/beacon-chain/genesis/options.go`: verified
+- `prysm/config/params/testnet_custom_network_config.go`: verified
+- `prysm/testing/spectest/mainnet/altair__epoch_processing__slashings_test.go`: verified
+- `prysm/testing/spectest/minimal/phase0__sanity__slots_test.go`: verified
+- `prysm/validator/db/filesystem/import.go`: verified
