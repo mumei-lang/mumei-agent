@@ -4618,3 +4618,26 @@ func batches(rowCount, maxRows int) int {
     issues = _detect_safety_issues(source, "go")
     assert not any("batches" in issue.message and "non-zero" in issue.message for issue in issues)
     assert not any("batches" in issue.message and "overflow" in issue.message for issue in issues)
+
+
+def test_go_math_big_nat_scan_loop_index_guarded() -> None:
+    """``math/big`` ``nat`` methods scan with ``for x[i] == 0 { i++ }``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package big
+
+type nat []Word
+
+func (x nat) trailingZeroBits() uint {
+    if len(x) == 0 {
+        return 0
+    }
+    var i uint
+    for x[i] == 0 {
+        i++
+    }
+    return i*_W + uint(bits.TrailingZeros(uint(x[i])))
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("trailingZeroBits" in issue.message and "bounds" in issue.message for issue in issues)

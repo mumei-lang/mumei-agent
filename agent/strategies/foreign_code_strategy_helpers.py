@@ -1289,11 +1289,40 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     return set()
 
 
+def _go_math_big_nat_scan_guarded_indices(
+    body: str, package_name: str, rtype: str | None
+) -> set[str]:
+    """Return loop indices scanning a ``math/big`` ``nat`` that are bounded by value.
+
+    ``math/big`` methods such as ``trailingZeroBits`` and ``isPow2`` iterate with
+    ``for x[i] == 0 { i++ }`` over a normalized ``nat`` value. A zero ``nat`` has
+    length 0, so any non-empty ``nat`` has at least one non-zero word and the loop
+    terminates before ``i`` reaches ``len(x)``.
+    """
+    if package_name != "big" or rtype not in {"nat", "*nat"}:
+        return set()
+    stripped = _strip_go_rust_literals_and_comments(body)
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\bfor\s+(?:(\w+)\s*:=\s*0\s*;\s*)?(\w+)\s*\[\s*(\w+)\s*\]\s*==\s*0\s*\{\s*(\w+)\s*\+\+\s*\}",
+        stripped,
+    ):
+        init, container, idx, post = match.groups()
+        if idx != post:
+            continue
+        if init is not None and init != idx:
+            continue
+        guarded.add(idx)
+    return guarded
+
+
 def _go_guarded_indices(
     body: str,
     unsigned_vars: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     source: str | None = None,
+    package_name: str = "",
+    rtype: str | None = None,
 ) -> set[str]:
     """Return index variables that are provably within bounds.
 
@@ -1421,6 +1450,9 @@ def _go_guarded_indices(
     # indexing a package-level ``[N]T`` array is in bounds (e.g. ``uint8`` and ``[256]T``).
     if param_types and source:
         guarded |= _go_unsigned_array_index_guarded_indices(body, param_types, source)
+    # ``math/big`` ``nat`` methods scan with ``for x[i] == 0 { i++ }`` over a
+    # normalized value, so the loop index stays in bounds.
+    guarded |= _go_math_big_nat_scan_guarded_indices(body, package_name, rtype)
     return guarded
 
 
@@ -2214,6 +2246,12 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
     contracts: set[str] = set()
     if pkg == "flag" and re.search(r"\btype\s+FlagSet\s+struct\b", source):
         contracts.add("FlagSet")
+    if pkg == "big" and re.search(r"\btype\s+stack\s+struct\b", source):
+        # ``math/big`` ``stack``/``stackInner`` are internal temporaries always
+        # obtained and used through non-nil values; their pointer-receiver helpers
+        # are not meaningful on a nil value.
+        contracts.add("stack")
+        contracts.add("stackInner")
     if pkg == "web" and re.search(r"\btype\s+Context\s+struct\b", source):
         # Web framework request contexts (e.g. Grafana ``pkg/web``) are always
         # created from an active HTTP request; nil receiver counterexamples on
@@ -2885,7 +2923,12 @@ def _detect_go_safety_issues(
                 source, body, param_types, rtype, receiver_name
             )
             guarded_indices = _go_guarded_indices(
-                body, unsigned_vars, param_types=param_types, source=source
+                body,
+                unsigned_vars,
+                param_types=param_types,
+                source=source,
+                package_name=package_name,
+                rtype=rtype,
             ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             )
@@ -3006,6 +3049,8 @@ def _detect_go_safety_issues(
         type("Fn", (), {"params_text": params_text, "name": name})()
         for name, params_text, _, _ in go_decls
     ])
+    package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
+    package_name = package_name.group(1) if package_name else ""
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     file_map_names = _go_map_names(source)
@@ -3046,7 +3091,14 @@ def _detect_go_safety_issues(
         unsigned_vars = _go_unsigned_variables(
             source, body, param_types, rtype, receiver_name
         )
-        guarded_indices = _go_guarded_indices(body, unsigned_vars, param_types=param_types, source=source)
+        guarded_indices = _go_guarded_indices(
+            body,
+            unsigned_vars,
+            param_types=param_types,
+            source=source,
+            package_name=package_name,
+            rtype=rtype,
+        )
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
