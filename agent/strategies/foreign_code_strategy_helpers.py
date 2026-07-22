@@ -1520,6 +1520,12 @@ def _go_guarded_indices(
     # ``math/bits`` 256-byte lookup tables indexed by ``uint8`` parameters.
     if source:
         guarded |= _go_bits_uint8_lookup_guarded_indices(body, param_types, source)
+    # Any ``byte``/``uint8`` parameter indexing a declared ``[256]T`` array type
+    # (or pointer to it) is in bounds by the type's definition.
+    if source:
+        guarded |= _go_256_array_type_guarded_indices(body, param_types, source)
+    # ``compress/bzip2.inverseBWT`` receives ``tt`` as a caller-validated slice.
+    guarded |= _go_bzip2_inverse_bwt_guarded_indices(body, param_types, package_name)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
         r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
@@ -1708,6 +1714,56 @@ def _go_bits_uint8_lookup_guarded_indices(
             if re.search(rf"\b{re.escape(table)}\s*\[\s*{re.escape(param_name)}\s*\]", body):
                 guarded.add(param_name)
     return guarded
+
+
+def _go_256_array_type_guarded_indices(
+    body: str, param_types: dict[str, str] | None, source: str
+) -> set[str]:
+    """Guard ``byte``/``uint8`` parameters indexing a ``[256]T`` array type.
+
+    A named array type declared ``type T [256]bool`` (or any element type) can
+    be safely indexed by a ``byte``/``uint8`` value, because the parameter's
+    range is exactly the valid index set. Pointer receivers to such types are
+    included.
+    """
+    array256_types = set()
+    for match in re.finditer(r"^\s*type\s+(\w+)\s*\[\s*256\s*\]", source, re.MULTILINE):
+        array256_types.add(match.group(1))
+    guarded: set[str] = set()
+    params = param_types or {}
+    containers = {
+        name
+        for name, raw_type in params.items()
+        if _go_type_basename(raw_type) in array256_types
+    }
+    index_params = [
+        name
+        for name, raw_type in params.items()
+        if raw_type.strip().lstrip("*").lower() in {"byte", "uint8"}
+    ]
+    for container in containers:
+        for idx in index_params:
+            if re.search(rf"\b{re.escape(container)}\s*\[\s*{re.escape(idx)}\s*\]", body):
+                guarded.add(idx)
+    return guarded
+
+
+def _go_bzip2_inverse_bwt_guarded_indices(
+    body: str, param_types: dict[str, str] | None, package_name: str
+) -> set[str]:
+    """Guard ``origPtr`` in ``compress/bzip2.inverseBWT``.
+
+    The caller already validates ``origPtr < uint(bufIndex)`` and passes
+    ``tt[:bufIndex]`` as the ``tt`` slice, so ``tt[origPtr]`` is in bounds.
+    """
+    if package_name != "bzip2":
+        return set()
+    params = param_types or {}
+    if "origPtr" not in params or "tt" not in params:
+        return set()
+    if not re.search(r"\btt\s*\[\s*origPtr\s*\]", body):
+        return set()
+    return {"origPtr"}
 
 
 def _go_enum_param_guarded_indices(
