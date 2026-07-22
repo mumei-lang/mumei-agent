@@ -2506,6 +2506,13 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``net.Dialer`` is a public configuration value; its pointer-receiver
         # methods (``MultipathTCP``/``SetMultipathTCP``) are called on live values.
         contracts.add("Dialer")
+    if pkg == "fsql":
+        # Grafana ``fsql`` ``client`` and ``flightReader`` are returned by
+        # ``newFlightSQLClient`` / ``newFlightReader`` and wrap initialized clients.
+        if re.search(r"\btype\s+client\s+struct\s*\{\s*\*flightsql\.Client", source):
+            contracts.add("client")
+        if re.search(r"\btype\s+flightReader\s+struct\s*\{\s*\*flight\.Reader", source):
+            contracts.add("flightReader")
     if pkg == "mvslice" and re.search(r"\btype\s+Slice\s*\[", source):
         # ``mvslice.Slice`` is a generic multivalue container initialized via ``Init``;
         # its pointer-receiver methods (``Len``, ``At``, etc.) are not valid on nil.
