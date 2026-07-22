@@ -4600,3 +4600,21 @@ func align(x, a int64) int64 {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("align" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_zero_guarded_positive_params() -> None:
+    """An ``if x <= 0 { return }`` guard makes the parameter positive after the return."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package kv
+
+func batches(rowCount, maxRows int) int {
+    if rowCount == 0 || maxRows <= 0 {
+        return 0
+    }
+    return (rowCount + maxRows - 1) / maxRows
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("batches" in issue.message and "non-zero" in issue.message for issue in issues)
+    assert not any("batches" in issue.message and "overflow" in issue.message for issue in issues)
