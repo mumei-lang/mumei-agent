@@ -2773,6 +2773,20 @@ func convertCase(c int, r rune, cr *CaseRange) rune {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_ssa_value_nonnil() -> None:
+    """cmd/compile/internal/ssa *Value helpers receive a live node."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package ssa
+type Value struct{ Type int }
+func offsetFrom(from *Value, offset int64) int {
+    return from.Type
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues

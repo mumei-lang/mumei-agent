@@ -2831,6 +2831,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
     "Prog",  # debug/elf program header objects are non-nil when methods are invoked
     "CaseRange",  # unicode case-range helpers are called with a live range pointer
+    "registerCursor",  # cmd/compile/ssa register cursors are live when used
     "maybeTraceablePtr",  # runtime pointer wrapper methods are invoked on valid pointers
     "maybeTraceableChan",
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
@@ -3425,6 +3426,14 @@ def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set
     if _go_package_name(source) in {"elf", "macho", "pe", "plan9obj"}:
         for name, raw_type in param_types.items():
             if _go_type_basename(raw_type) in {"File", "Prog", "Symbol"}:
+                result.add(_safe_identifier(name))
+    # cmd/compile/internal/ssa values and blocks are graph nodes that are
+    # always live when passed to helpers or used as receivers.
+    if _go_package_name(source) == "ssa":
+        for name, raw_type in param_types.items():
+            if _go_type_basename(raw_type) in {
+                "Value", "Block", "Func", "expandState", "registerCursor",
+            }:
                 result.add(_safe_identifier(name))
     return result
 
