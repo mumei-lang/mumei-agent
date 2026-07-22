@@ -2041,7 +2041,7 @@ def _last_expression(body: str) -> str:
             next_line = masked_lines[next_idx].strip()
             if re.match(r"^[.\(\)\->::]", next_line):
                 continue
-        candidate = line.removeprefix("return ").strip().rstrip(";")
+        candidate = _strip_comments(line).removeprefix("return ").strip().rstrip(";,").strip()
         if not candidate or re.fullmatch(r"[\)\}\];,]+", candidate):
             continue
         # A trailing comma or semicolon usually means the expression continues
@@ -2552,6 +2552,16 @@ def _ensures_for_return_expression(
     """Build a Mumei ``ensures`` clause, falling back to ``true`` for unverifiable types."""
     if not return_expr or return_type == "string":
         return "true"
+    stripped = return_expr.strip().rstrip(",")
+    # Boolean literals are only meaningful as the RHS of a boolean equality.
+    # For non-bool return types (e.g. an inferred ``i64`` for ``SortExpr``) a
+    # ``result == true`` clause lowers to a type error.  Likewise a string
+    # literal as the apparent tail expression in a non-string function (e.g. a
+    # nom parser combinator) is not the real return value.
+    if return_type != "bool" and stripped in {"true", "false"}:
+        return "true"
+    if return_type != "string" and re.fullmatch(r'"[^"]*"', stripped):
+        return "true"
     if not _is_expression_lowerable(return_expr, param_names, known_constants, local_names, param_types=param_types):
         return "true"
     # Mumei's vacuity-check lowerer only supports boolean equality with a bare
@@ -2559,13 +2569,12 @@ def _ensures_for_return_expression(
     # ``result == true``).  Compound boolean expressions such as
     # ``year % 400 == 0 or ...`` fail with "Expected bool for ==".
     if return_type == "bool":
-        stripped = return_expr.strip()
         if stripped in {"true", "false"}:
             return f"result == {stripped}"
         if param_names and stripped in param_names:
             return f"result == {stripped}"
         return "true"
-    return f"result == {return_expr}"
+    return f"result == {stripped}"
 
 
 def _is_regex_context(prefix: str) -> bool:
