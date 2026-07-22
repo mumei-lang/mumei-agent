@@ -3893,3 +3893,59 @@ func (d *Dialer) MultipathTCP() bool {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
+def test_go_op_enum_index_guarded() -> None:
+    """A variable assigned from ``v.Op`` and used as ``opcodeTable[op]`` is safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+type Op int32
+type regInfo struct{}
+
+var opcodeTable []regInfo
+
+func regspec(v *Value) regInfo {
+    op := v.Op
+    return opcodeTable[op]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_range_index_alias_guarded() -> None:
+    """A variable assigned from a ``range`` index and used as ``arr[idx]`` is safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+func concatstrings(buf *int, a []string) string {
+    idx := 0
+    for i, x := range a {
+        _ = x
+        idx = i
+    }
+    return a[idx]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_rounded_factor_nonzero() -> None:
+    """A ``math.Round(score*K)/K`` factor constant is treated as non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package scorers
+
+import "math"
+
+const ScoreRoundingFactor = 10000
+
+func scoreNoLock(score float64) float64 {
+    return math.Round(score*ScoreRoundingFactor) / ScoreRoundingFactor
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can divide" in issue.message for issue in issues)
