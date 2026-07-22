@@ -1364,6 +1364,27 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
     return guarded
 
 
+def _go_loop_count_nonzero_params(body: str, param_names: set[str]) -> set[str]:
+    """Return parameters used as the upper bound of a positive ``for`` loop.
+
+    A parameter ``n`` in ``for i := 0; i < n; i++`` is a repetition count; if
+    it is also used as a divisor later, the intended contract is ``n > 0``.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    return {
+        param
+        for param in param_names
+        if re.search(
+            rf"\bfor\s+\w+\s*:=\s*0\s*;\s*\w+\s*<\s*{re.escape(param)}\s*;\s*\w+\+\+",
+            stripped,
+        )
+        and re.search(
+            rf"(?:/|%)\s*(?:[A-Za-z_]\w*\s*\(\s*)?{re.escape(param)}\b",
+            stripped,
+        )
+    }
+
+
 def _go_local_nonzero_variables(body: str) -> set[str]:
     """Return local Go variables that are always assigned a nonzero literal.
 
@@ -3543,6 +3564,7 @@ def _detect_go_safety_issues(
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
+                | _go_loop_count_nonzero_params(body, set(param_types.keys()))
                 | _go_local_nonzero_variables(body)
                 | _go_align_nonzero_params(body)
                 | _go_rounded_factor_nonzero(body)
