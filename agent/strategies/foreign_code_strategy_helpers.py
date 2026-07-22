@@ -1171,7 +1171,7 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     return set()
 
 
-def _go_guarded_indices(body: str) -> set[str]:
+def _go_guarded_indices(body: str, unsigned_vars: set[str] | None = None) -> set[str]:
     """Return index variables that are provably within bounds.
 
     Matches explicit guards such as:
@@ -1187,6 +1187,9 @@ def _go_guarded_indices(body: str) -> set[str]:
     Finally, an upper-bound guard ``if int(idx) < len(arr)`` followed by ``&&`` or
     a block is treated as guarded. This idiom is used when ``idx`` is an unsigned
     type whose cast to ``int`` is non-negative.
+
+    For an unsigned variable ``x``, a simple ``if x < len(arr)`` is sufficient
+    to guard ``arr[x]`` because ``x`` can never be negative.
     """
     guarded: set[str] = set()
     pattern = re.compile(
@@ -1240,6 +1243,14 @@ def _go_guarded_indices(body: str) -> set[str]:
             guarded.add(const_name)
     # Reverse loops: ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }``
     guarded |= _go_reverse_loop_guarded_indices(body)
+    # For unsigned variables, ``if x < len(arr)`` is a complete bounds guard.
+    if unsigned_vars:
+        names = "|".join(re.escape(name) for name in unsigned_vars)
+        for match in re.finditer(
+            rf"\bif\s+(?P<idx>{names})\s*<\s*(?:\w+\(\s*)?len\(\s*(?P<arr>\w+)\s*\)(?:\s*\))?",
+            body,
+        ):
+            guarded.add(match.group("idx"))
     return guarded
 
 
@@ -1276,7 +1287,48 @@ def _go_reverse_loop_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_unsigned_variables(
+    source: str,
+    body: str,
+    param_types: dict[str, str],
+    rtype: str | None,
+    receiver_name: str | None,
+) -> set[str]:
+    """Return Go variable names that are provably unsigned integer values."""
+    # Build a map of user-defined type aliases whose underlying type is unsigned.
+    underlying_unsigned: set[str] = set(_UNSIGNED_INTEGER_TYPES)
+    for match in re.finditer(
+        r"^\s*type\s+(\w+)\s+(uint(?:8|16|32|64|ptr)?|byte)\b",
+        source,
+        re.MULTILINE,
+    ):
+        underlying_unsigned.add(match.group(1))
 
+    unsigned: set[str] = set()
+    for name, typ in param_types.items():
+        if typ.lstrip("*").strip() in underlying_unsigned:
+            unsigned.add(name)
+    if rtype and receiver_name:
+        if rtype.lstrip("*").strip() in underlying_unsigned:
+            unsigned.add(receiver_name)
+
+    stripped = _strip_go_rust_literals_and_comments(body)
+    # Short declarations with an unsigned conversion, e.g. ``i := uint(0)``.
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
+    ):
+        unsigned.add(match.group(1))
+    # ``var x uint = ...``
+    for match in re.finditer(
+        r"\bvar\s+(\w+)\s+(?:byte|uint(?:8|16|32|64|ptr)?)\b", stripped
+    ):
+        unsigned.add(match.group(1))
+    # ``for i := uint(0); ...``
+    for match in re.finditer(
+        r"\bfor\s+(\w+)\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
+    ):
+        unsigned.add(match.group(1))
+    return unsigned
 def _go_runtime_level_guarded_indices(body: str, package_name: str, param_names: set[str]) -> set[str]:
     """Treat ``level`` as a guarded index for runtime summary helpers.
 
@@ -1650,6 +1702,9 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Transport",  # net/http transports and similar client/server transports
     "Stream",  # HTTP/2 clientStream and similar stream handles
     "ReadLoop",  # internal read-loop helpers such as http2 clientConnReadLoop
+    "State",  # compiler/runtime state machines (e.g. ssagen.State) are non-nil in use
+    "Machine",  # Prysm state-machine objects are non-nil when methods are invoked
+    "Migrator",  # Grafana migration types are non-nil when Exec/SQL is called
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
@@ -1723,6 +1778,19 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``debug/plan9obj.Section`` is produced by ``File.SectionByName`` and
         # similar accessors; its pointer-receiver methods are not valid on nil.
         contracts.add("Section")
+    if pkg == "atomic":
+        # ``sync/atomic`` and ``internal/runtime/atomic`` wrapper types are always
+        # used as pointers to live variables, so their pointer-receiver methods
+        # (Load/Store/Add/etc.) are non-nil in practice.
+        for match in re.finditer(
+            r"\btype\s+(Int(?:8|16|32|64)?|Uint(?:8|16|32|64|ptr)|Pointer|UnsafePointer|Bool|Float32|Float64)\s+struct\b",
+            source,
+        ):
+            contracts.add(match.group(1))
+    if pkg == "ssagen" and re.search(r"\btype\s+state\s+struct\b", source):
+        # ``cmd/compile/internal/ssagen.state`` is the per-function SSA builder;
+        # its pointer-receiver logging helpers are only called on an initialized state.
+        contracts.add("state")
     return contracts
 
 
@@ -1886,6 +1954,11 @@ def _go_map_names(source: str) -> set[str]:
     return names
 
 
+def _go_local_map_names(body: str) -> set[str]:
+    """Return short variable map declarations local to a function body."""
+    return {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
+
+
 def _go_float_array_names(source: str) -> set[str]:
     """Return package-level ``float64`` array names.
 
@@ -2025,8 +2098,8 @@ def _go_method_receiver_type(params_text: str) -> str | None:
 
 
 def _go_type_basename(raw_type: str) -> str:
-    """Return the unqualified type name without leading stars or brackets."""
-    return raw_type.strip().lstrip("*").split(".")[-1].rstrip("]")
+    """Return the unqualified type name without leading stars, brackets, or generics."""
+    return re.sub(r"\[.*?\]", "", raw_type.strip().lstrip("*[]")).split(".")[-1].rstrip("]")
 
 
 def _go_nonnil_param_names(param_types: dict[str, str]) -> set[str]:
@@ -2285,7 +2358,7 @@ def _detect_go_safety_issues(
         interface_method_names = _go_interface_method_names(source)
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         component_runner_receivers = _go_component_runner_receiver_types(source)
-        go_map_names = _go_map_names(source)
+        file_map_names = _go_map_names(source)
         global_array_keys = _go_global_array_keys(source)
         known_types = _go_type_names(source)
         go_float_arrays = _go_float_array_names(original_source or source)
@@ -2300,6 +2373,7 @@ def _detect_go_safety_issues(
                 # soundly analyzed without concrete type constraints.
                 continue
             body = fn.body
+            go_map_names = file_map_names | _go_local_map_names(body)
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
             nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(
@@ -2316,29 +2390,33 @@ def _detect_go_safety_issues(
             )
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
-            guarded_indices = _go_guarded_indices(body) | _go_runtime_level_guarded_indices(
-                body, package_name, set(param_types.keys())
-            )
             rtype = _go_method_receiver_type(fn.params_text)
             receiver_name = _go_method_receiver_name(fn.params_text)
+            unsigned_vars = _go_unsigned_variables(
+                source, body, param_types, rtype, receiver_name
+            )
+            guarded_indices = _go_guarded_indices(body, unsigned_vars) | _go_runtime_level_guarded_indices(
+                body, package_name, set(param_types.keys())
+            )
             suppress_nil = (
                 fn.name in {"String", "Get"}
                 and rtype is not None
                 and rtype in flag_value_types
             )
             is_method = source[fn.start_char : fn.body_start_char].lstrip().startswith("func (")
+            rtype_base = _go_type_basename(rtype) if rtype else None
             suppress_receiver_nil = (
                 rtype is not None
                 and (
-                    rtype.lstrip("*") in caller_contract_types
+                    rtype_base in caller_contract_types
                     or _go_is_known_interface_method(fn.name, fn.params_text, fn.return_type)
                     or _go_is_hash_internal_helper(fn.name, fn.params_text, fn.return_type)
                     or fn.name in interface_method_names
                     or (
                         fn.name in {"Len", "Less", "Swap"}
-                        and rtype.lstrip("*") in sort_interface_receivers
+                        and rtype_base in sort_interface_receivers
                     )
-                    or rtype.lstrip("*") in component_runner_receivers
+                    or rtype_base in component_runner_receivers
                 )
             )
             first_param = _go_first_param_name(fn.params_text)
@@ -2381,6 +2459,7 @@ def _detect_go_safety_issues(
                     known_types=known_types,
                     float_arrays=go_float_arrays,
                     guarded_indices=guarded_indices,
+                    unsigned_locals=unsigned_vars,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -2433,7 +2512,7 @@ def _detect_go_safety_issues(
     ])
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
-    go_map_names = _go_map_names(source)
+    file_map_names = _go_map_names(source)
     guaranteed_nonzero = (
         _go_nonzero_constants(source)
         | _go_known_nonzero_selectors(original_source or source)
@@ -2446,6 +2525,7 @@ def _detect_go_safety_issues(
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
+        go_map_names = file_map_names | _go_local_map_names(body)
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
@@ -2465,6 +2545,11 @@ def _detect_go_safety_issues(
         guarded = _go_nil_guarded_return_values(body)
         rtype = _go_method_receiver_type(params_text)
         receiver_name = _go_method_receiver_name(params_text)
+        unsigned_vars = _go_unsigned_variables(
+            source, body, param_types, rtype, receiver_name
+        )
+        guarded_indices = _go_guarded_indices(body, unsigned_vars)
+        rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
             and rtype is not None
@@ -2473,7 +2558,7 @@ def _detect_go_safety_issues(
         suppress_receiver_nil = (
             rtype is not None
             and (
-                rtype.lstrip("*") in caller_contract_types
+                rtype_base in caller_contract_types
                 or _go_is_known_interface_method(name, params_text, _return_type)
                 or _go_is_hash_internal_helper(name, params_text, _return_type)
                 or name in interface_method_names
@@ -2495,6 +2580,8 @@ def _detect_go_safety_issues(
                 known_array_keys=global_array_keys,
                 known_types=known_types,
                 float_arrays=go_float_arrays,
+                guarded_indices=guarded_indices,
+                unsigned_locals=unsigned_vars,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -2945,10 +3032,9 @@ def _i64_overflow_safety_issue(
     if _is_size_like_identifier(left) and _is_size_like_identifier(right):
         # Memory-accounting sums of size/length values are not overflow bugs.
         return None
-    if label == "Rust" and unsigned_locals and left in unsigned_locals and right in unsigned_locals:
-        # Rust unsigned integer overflow wraps in release and panics in debug;
-        # it is not a memory-safety issue, and the i64 model otherwise invents
-        # impossible negative counterexamples.
+    if label in {"Go", "Rust"} and unsigned_locals and left in unsigned_locals and right in unsigned_locals:
+        # Unsigned integer overflow wraps in Go and Rust; it is not a memory-safety
+        # issue, and the i64 model otherwise invents impossible negative counterexamples.
         return None
     if local_names and (left in local_names or right in local_names):
         # Arithmetic over local loop variables cannot be expressed as a

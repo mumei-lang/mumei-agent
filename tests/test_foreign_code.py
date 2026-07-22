@@ -3861,6 +3861,94 @@ func isTerminatingList(list []Stmt) bool {
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in issue.message for issue in issues)
 
+
+
+def test_go_unsigned_variable_guarded_index() -> None:
+    """Unsigned variables with ``x < len(arr)`` are fully bounds-guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+type relation uint
+
+var relationStrings = []string{"lt", "eq", "gt"}
+
+func (r relation) String() string {
+    if r < relation(len(relationStrings)) {
+        return relationStrings[r]
+    }
+    return "unknown"
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_unsigned_addition_no_overflow() -> None:
+    """Unsigned parameter addition wraps and should not trigger i64 overflow."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+func unsignedAddOverflows(a, b uint) bool {
+    return a+b < a
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("overflow" in issue.message for issue in issues)
+
+
+def test_go_local_map_key_access_not_bounds() -> None:
+    """Short variable map declarations are not array index accesses."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package fsm
+
+type stateID uint8
+
+func (s stateID) String() string {
+    states := map[stateID]string{0: "new"}
+    return states[s]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_atomic_pointer_receiver_non_nil() -> None:
+    """Atomic wrapper pointer-receiver methods are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package atomic
+
+type Uint32 struct { v uint32 }
+
+func Loadint32(addr *uint32) uint32 { return 0 }
+
+func (u *Uint32) Load() uint32 {
+    return Loadint32(&u.v)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_go_machine_migrator_non_nil_receiver() -> None:
+    """Prysm state machines and Grafana migrators are non-nil in callers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package initialsync
+
+type stateMachine struct{ start int }
+
+func (m *stateMachine) String() string {
+    return "ok"
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
 def test_go_plan9obj_section_receiver_non_nil() -> None:
     """debug/plan9obj.Section pointer-receiver methods are called on non-nil values."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
