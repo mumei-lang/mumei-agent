@@ -1,0 +1,252 @@
+[
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/ssa/rewriteARM.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/internal/obj/arm/asm5.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/crypto/x509/pem_decrypt_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/go/parser/resolver_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/runtime/maps/fuzz_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/net/interface_bsdvar.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/os/env_unix_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/bug010.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/bug407.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue15611.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue42686.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue49003.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue51437.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/typeparam/issue48337a.dir/a.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/alerting/notifications/pkg/apis/alertingnotifications/v0alpha1/config_ext.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/logsdrilldown/pkg/apis/logsdrilldown/v1alpha1/getdefaultfields_response_types_gen.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/provisioning/pkg/repository/mutator_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/quotas/pkg/apis/quotas/v0alpha1/getusage_response_body_types_gen.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/components/SecretInput/index.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/utils/useCombinedRefs.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/api/datasources_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/plugins/backendplugin/grpcplugin/client.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/plugins/manager/client/client.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/dashboard/snapshot/snapshot_legacy_store.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/auth/authimpl/model.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/pluginsintegration/clientmiddleware/metrics_middleware.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/storage/unified/search/disk_cleanup.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tests/api/alerting/api_convert_prometheus_notification_settings_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tests/api/alerting/api_namespace_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tsdb/grafana-postgresql-datasource/proxy_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/admin/UserPermissions.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/auth-config/utils/data.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard-scene/panel-edit/PanelEditNext/QueryEditor/Header/HeaderActions.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard/dashgrid/DashboardLibrary/TemplateFilters.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/plugins/loader/systemjsHooks.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/variables/query/actions.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/cloudwatch/language/cloudwatch-sql/completion/CompletionItemProvider.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/types/config.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/test/helpers/getQueryOptions.ts"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/core/peerdas/das_core_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/core/transition/trailing_slot_state_cache_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/light-client/cache_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/monitor/doc.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/rpc/eth/beacon/handlers_state.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/consensus-types/payload-attribute/getters_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/proto/prysm/v1alpha1/sync_committee_minimal.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/bellatrix/operations/attester_slashing.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/fulu/epoch_processing/helpers.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/fulu/ssz_static/ssz_static.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/third_party/go-bip39/wordlists/spanish.go"
+  }
+]
