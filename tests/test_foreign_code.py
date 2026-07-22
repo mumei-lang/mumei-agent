@@ -267,6 +267,36 @@ def test_go_pointer_param_still_flagged_nil() -> None:
     assert any("user" in issue.message and "non-nil" in issue.message for issue in issues)
 
 
+def test_go_data_receiver_nonnil() -> None:
+    """Pointer receivers of internal ``*Data`` container structs are non-nil (#260)."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_go_safety_issues,
+    )
+
+    source = (
+        "package client\n"
+        "type storeData struct { initialized bool }\n"
+        "func (d *storeData) isInitialized() bool { return d.initialized }\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert not any("d" in issue.message and "non-nil" in issue.message for issue in issues)
+
+
+def test_go_to_proto_receiver_nonnil() -> None:
+    """Pointer receivers with ``ToProto`` JSON/SSZ conversion methods are non-nil (#261)."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_go_safety_issues,
+    )
+
+    source = (
+        "package builder\n"
+        "type ExecPayloadResponseCapella struct { Data struct{} }\n"
+        "func (r *ExecPayloadResponseCapella) ToProto() (*X, error) { return r.Data.Method() }\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert not any("r" in issue.message and "non-nil" in issue.message for issue in issues)
+
+
 def test_go_cross_validation_value_param_not_flagged_nil() -> None:
     """The contract-inference path must also skip value types (#295, PR #298)."""
     from agent.cross_validation_foreign import _infer_go_contracts
@@ -1889,6 +1919,7 @@ def test_source_has_function_declarations() -> None:
     assert _source_has_function_declarations("func F() {}", "go") is True
     assert _source_has_function_declarations("pub fn f() {}", "rust") is True
     assert _source_has_function_declarations("func TestFoo(t *testing.T) {}", "go") is False
+    assert _source_has_function_declarations("func fuzzCopies[T any](t *testing.T, obj T) {}", "go") is False
     assert _source_has_function_declarations("// errorcheck\nfunc f() {}", "go") is False
     assert (
         _source_has_function_declarations("#[test]\nfn foo() {}", "rust") is False
@@ -2029,6 +2060,30 @@ def test_normalize_bitwise_and_and_inline_constants() -> None:
     assert _normalize_bitwise_and("(a & b) & c") == "bit_and(bit_and(a, b), c)"
 
 
+def test_extract_go_unicode_identifier() -> None:
+    """Go identifiers containing non-ASCII letters are extracted and audited."""
+    from agent.strategies.foreign_code_strategy import ForeignCodeExtractor
+
+    source = """package þfoo
+
+var þbarV int = 101
+
+func þbar(x int) int {
+    defer func() { þbarV += 3 }()
+    return þblix(x)
+}
+
+func þblix(x int) int {
+    defer func() { þbarV += 9 }()
+    return þbarV + x
+}
+"""
+
+    specs = ForeignCodeExtractor().extract_go(source)
+    names = {s.function_name for s in specs}
+    assert names == {"þbar", "þblix"}
+
+
 def test_extract_go_caller_contracts_from_doc() -> None:
     """Go doc comments such as ``r must not be empty`` are turned into ``requires r != nil``."""
     from agent.strategies.foreign_code_strategy import _extract_go_caller_contracts
@@ -2071,6 +2126,23 @@ def test_raw_return_statement_expression_masks_nested_go_function_literals() -> 
     body = 'sort.Slice(deps, func(i, j int) bool { return deps[i].order() < deps[j].order() })\nreturn nil'
     assert _raw_return_statement_expression(body, "go") == "nil"
     assert _all_return_expressions(body, "go") == ["nil"]
+
+
+def test_raw_return_statement_expression_ignores_func_type_fields() -> None:
+    """String contents next to a ``func`` type field must not be parsed as a return."""
+    from agent.cross_validation_foreign import _raw_return_statement_expression
+
+    body = '''tests := []struct {
+        name      string
+        callback  func(string) error
+    }{
+        {
+            name: "does not return deleted object",
+        },
+    }
+    return true
+'''
+    assert _raw_return_statement_expression(body, "go") == "true"
 
 
 def test_all_return_expressions_stops_at_case_labels() -> None:
@@ -2374,6 +2446,26 @@ impl AsMetricStr for X {
 '''
     issues = _detect_safety_issues(source, "rust")
     assert not any("restore" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_top_nil_guarded_receiver() -> None:
+    """Receivers checked with ``if s == nil { return }`` at the top are non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package models
+type NotificationSettings struct{ a, b int }
+func (s *NotificationSettings) Validate() error {
+    if s == nil {
+        return nil
+    }
+    if s.a != 0 && s.b != 0 {
+        return nil
+    }
+    return nil
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("s" in i.message and "non-nil" in i.message for i in issues)
 
 
 def test_detect_go_safety_issues_word_bits_nonzero() -> None:

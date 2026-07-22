@@ -3306,10 +3306,12 @@ def _mask_go_function_literals(body: str) -> str:
         bracket = 0
         i = start
         n = len(stripped)
+        signature_opened = False
         while i < n:
             ch = stripped[i]
             if ch == "(":
                 paren += 1
+                signature_opened = True
             elif ch == ")":
                 paren -= 1
             elif ch == "[":
@@ -3347,6 +3349,11 @@ def _mask_go_function_literals(body: str) -> str:
                         depth -= 1
                     j += 1
                 return i, j
+            elif signature_opened and paren == 0 and bracket == 0 and ch in {",", ";", "}"}:
+                # Function type fields (e.g. ``Foo func() error``) or type
+                # declarations have no body; the next non-trivial token is a
+                # separator or closing brace, not an opening function body.
+                return None
             i += 1
         return None
 
@@ -3363,10 +3370,9 @@ def _mask_go_function_literals(body: str) -> str:
         rng = _body_range(start)
         if rng is not None:
             for k in range(rng[0], rng[1]):
-                if not stripped[k].isspace() or stripped[k] == "\n":
-                    mask[k] = True
+                mask[k] = True
 
-    return "".join(" " if mask[i] and body[i] not in "\n" else body[i] for i in range(len(body)))
+    return "".join(" " if mask[i] and body[i] != "\n" else body[i] for i in range(len(body)))
 
 
 def _mask_typescript_function_literals(body: str) -> str:
