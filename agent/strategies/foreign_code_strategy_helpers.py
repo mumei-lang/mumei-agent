@@ -507,7 +507,11 @@ def _detect_safety_issues(
             nullable_params=nullable_params,
         )
     if normalized == "go":
-        if _is_go_compiler_test(source) or _is_go_experimental(source):
+        if (
+            _is_go_compiler_test(source)
+            or _is_go_experimental(source)
+            or (source_file is not None and source_file.endswith("_test.go"))
+        ):
             return []
         known_constants = _go_declared_constants(source)
         stripped_source = _strip_go_rust_literals_and_comments(source)
@@ -935,6 +939,79 @@ def _rust_float_variables(body: str) -> set[str]:
                 float_vars.add(name)
                 changed = True
     return float_vars
+
+
+_RUST_UNSIGNED_TYPES = {"usize", "u64", "u32", "u16", "u8"}
+
+
+def _rust_unsigned_variables(source: str, body: str, function_name: str) -> set[str]:
+    """Return Rust variable names that are known to have an unsigned integer type."""
+    stripped = _strip_go_rust_literals_and_comments(source)
+    unsigned: set[str] = set()
+    # Parameters declared with an unsigned type in the function signature.
+    sig_pattern = re.compile(
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        + re.escape(function_name)
+        + r"\s*(?:<[^>]+>)?\s*\((?P<params>[^)]*)\)"
+    )
+    sig_match = sig_pattern.search(stripped)
+    if sig_match:
+        for param_match in re.finditer(
+            r"(?P<name>[A-Za-z_]\w*)\s*:\s*(?P<type>[^,=]+)",
+            sig_match.group("params"),
+        ):
+            raw_type = param_match.group("type").strip().removeprefix("&mut ").removeprefix("&")
+            if re.sub(r"\s+", "", raw_type).lower() in _RUST_UNSIGNED_TYPES:
+                unsigned.add(param_match.group("name"))
+
+    body_stripped = _strip_go_rust_literals_and_comments(body)
+    changed = True
+    while changed:
+        changed = False
+        for match in re.finditer(
+            r"let\s+(?:mut\s+)?(?P<name>\w+)\s*(?::\s*(?P<typ>[^;=]+))?\s*=\s*(?P<rhs>[^;]+);",
+            body_stripped,
+            re.DOTALL,
+        ):
+            name = match.group("name")
+            if name in unsigned:
+                continue
+            typ = (match.group("typ") or "").strip()
+            if typ:
+                raw_type = typ.removeprefix("&mut ").removeprefix("&")
+                if re.sub(r"\s+", "", raw_type).lower() in _RUST_UNSIGNED_TYPES:
+                    unsigned.add(name)
+                    changed = True
+                    continue
+            rhs = match.group("rhs").strip()
+            # Assigned from an atomic fetch operation (returns the previous unsigned value).
+            if re.search(r"\.\s*fetch_[a-z]+\s*\(", rhs):
+                unsigned.add(name)
+                changed = True
+                continue
+            # Assigned from another known-unsigned identifier.
+            if re.fullmatch(r"[A-Za-z_]\w*", rhs) and rhs in unsigned:
+                unsigned.add(name)
+                changed = True
+        # Closure parameters used in an addition with a known-unsigned operand.
+        for match in re.finditer(
+            r"\|\s*(?P<param>\w+)\s*\|\s*(?P<body>[^;\n]+)",
+            body_stripped,
+        ):
+            param = match.group("param")
+            if param in unsigned:
+                continue
+            closure_body = match.group("body")
+            for um in re.finditer(
+                r"\b(?P<left>\w+)\s*\+\s*(?P<right>\w+)\b",
+                closure_body,
+            ):
+                left, right = um.group("left"), um.group("right")
+                if (left == param and right in unsigned) or (right == param and left in unsigned):
+                    unsigned.add(param)
+                    changed = True
+                    break
+    return unsigned
 
 
 def _rust_guarded_indices(body: str) -> set[str]:
@@ -1465,6 +1542,7 @@ def _detect_block_safety_issues(
         per_function_nonzero = (guaranteed_nonzero or set()).copy()
         per_function_guarded_indices: set[str] = set()
         per_function_float_vars: set[str] = set()
+        per_function_unsigned_vars: set[str] = set()
         if label == "Solidity":
             per_function_nonzero |= _solidity_require_nonzero_params(body)
             per_function_nonzero |= _solidity_early_return_nonzero_params(body)
@@ -1475,6 +1553,7 @@ def _detect_block_safety_issues(
             per_function_float_vars = _rust_float_variables(body)
             per_function_guarded_indices = _rust_guarded_indices(body)
             per_function_nonzero |= _rust_doc_comment_nonzero_params(source, name)
+            per_function_unsigned_vars = _rust_unsigned_variables(source, body, name)
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
@@ -1489,6 +1568,7 @@ def _detect_block_safety_issues(
                 guaranteed_nonzero=per_function_nonzero,
                 guarded_indices=per_function_guarded_indices,
                 float_variables=per_function_float_vars,
+                unsigned_locals=per_function_unsigned_vars,
                 solidity_default_checks=solidity_checked_arithmetic,
             )
             if solidity_checked_arithmetic and not function_has_unchecked:
@@ -2775,6 +2855,7 @@ def _i64_overflow_safety_issue(
     expression: str = "",
     local_names: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
+    unsigned_locals: set[str] | None = None,
 ) -> ForeignSafetyIssue | None:
     if _is_pointer_arithmetic_expression(expression, left, right):
         return None
@@ -2782,6 +2863,11 @@ def _i64_overflow_safety_issue(
         return None
     if _is_size_like_identifier(left) and _is_size_like_identifier(right):
         # Memory-accounting sums of size/length values are not overflow bugs.
+        return None
+    if label == "Rust" and unsigned_locals and left in unsigned_locals and right in unsigned_locals:
+        # Rust unsigned integer overflow wraps in release and panics in debug;
+        # it is not a memory-safety issue, and the i64 model otherwise invents
+        # impossible negative counterexamples.
         return None
     if local_names and (left in local_names or right in local_names):
         # Arithmetic over local loop variables cannot be expressed as a
@@ -2851,6 +2937,7 @@ def _issues_for_expression(
     parallel_slicing: set[tuple[str, str]] | None = None,
     guarded_indices: set[str] | None = None,
     float_variables: set[str] | None = None,
+    unsigned_locals: set[str] | None = None,
     known_strings: set[str] | None = None,
     known_array_keys: dict[str, set[str]] | None = None,
     known_types: set[str] | None = None,
@@ -2882,6 +2969,7 @@ def _issues_for_expression(
             parallel_slicing=parallel_slicing,
             guarded_indices=guarded_indices,
             float_variables=float_variables,
+            unsigned_locals=unsigned_locals,
             known_strings=known_strings,
             known_array_keys=known_array_keys,
             known_types=known_types,
@@ -2951,7 +3039,14 @@ def _issues_for_expression(
             if known_strings and (left in known_strings or right in known_strings):
                 continue
             issue = _i64_overflow_safety_issue(
-                function_name, left, right, label, expression, local_names=local_names, known_constants=known_constants
+                function_name,
+                left,
+                right,
+                label,
+                expression,
+                local_names=local_names,
+                known_constants=known_constants,
+                unsigned_locals=unsigned_locals,
             )
             if issue is not None:
                 issues.append(issue)
@@ -2972,6 +3067,7 @@ def _issues_from_findings(
     guaranteed_nonzero: set[str] | None = None,
     local_names: set[str] | None = None,
     float_variables: set[str] | None = None,
+    unsigned_locals: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
@@ -3022,7 +3118,14 @@ def _issues_from_findings(
             if known_strings and (left in known_strings or right in known_strings):
                 continue
             issue = _i64_overflow_safety_issue(
-                function_name, left, right, label, expression, local_names=local_names, known_constants=known_constants
+                function_name,
+                left,
+                right,
+                label,
+                expression,
+                local_names=local_names,
+                known_constants=known_constants,
+                unsigned_locals=unsigned_locals,
             )
             if issue is not None:
                 issues.append(issue)
