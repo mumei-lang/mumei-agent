@@ -848,9 +848,9 @@ def _go_expression_is_float(expression: str, float_vars: set[str]) -> bool:
     return False
 
 
-def _go_float_variables(body: str) -> set[str]:
+def _go_float_variables(body: str, param_float_vars: set[str] | None = None) -> set[str]:
     """Return local variable names that are initialized with floating-point values."""
-    float_vars: set[str] = set()
+    float_vars = set(param_float_vars or set())
     changed = True
     while changed:
         changed = False
@@ -2179,7 +2179,8 @@ def _detect_go_safety_issues(
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
                 | {"_W", "bits.UintSize"}
             )
-            float_variables = _go_float_variables(body) | _go_float_param_names(fn.params_text)
+            float_param_names = _go_float_param_names(fn.params_text)
+            float_variables = _go_float_variables(body, float_param_names) | float_param_names
             string_variables = _go_string_variables(original_source or source)
             known_strings = string_variables | {
                 name for name, raw_type in param_types.items()
@@ -2268,7 +2269,8 @@ def _detect_go_safety_issues(
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
-        float_variables = _go_float_variables(body) | _go_float_param_names(params_text)
+        float_param_names = _go_float_param_names(params_text)
+        float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
         param_types = _go_param_types(params_text)
         nonnil_param_names = _go_nonnil_param_names(param_types) | _go_actor_nonnil_params(

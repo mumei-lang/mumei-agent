@@ -3786,3 +3786,20 @@ func divRoundUp(x, y int) int {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("divide" in issue.message for issue in issues)
+
+
+def test_go_float_variables_propagates_from_float_params() -> None:
+    """Local float variables derived from float64 parameters are recognized."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package math
+
+func erf(x float64) float64 {
+    s := x - 1
+    P := 1.0 + s*2.0
+    Q := 1 + s*(2.0)
+    return P / Q
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in issue.message for issue in issues)
