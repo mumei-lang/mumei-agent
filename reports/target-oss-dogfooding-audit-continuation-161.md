@@ -1,0 +1,59 @@
+# Batch 162 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/cgo/internal/testshared/testdata/issue58966/main.go`: verified
+- `go/src/crypto/tls/fips140_test.go`: verified
+- `go/src/internal/cpu/cpu_x86_darwin.go`: verified
+- `go/src/internal/testenv/testenv_notunix.go`: verified
+- `go/src/internal/types/testdata/check/decls3.go`: verified
+- `go/src/internal/types/testdata/check/go1_13.go`: verified
+- `go/src/log/internal/internal.go`: verified
+- `go/src/math/modf.go`: verified
+- `go/src/runtime/os_darwin_arm64.go`: verified
+- `go/src/runtime/signal_linux_test.go`: verified
+- `go/test/codegen/reflect_type.go`: verified
+- `go/test/fixedbugs/bug070.go`: verified
+- `go/test/fixedbugs/issue39459.go`: verified
+- `grafana/apps/live/pkg/app/app.go`: verified
+- `grafana/packages/grafana-alerting/src/grafana/matchers/utils.ts`: verified
+- `grafana/packages/grafana-api-clients/src/clients/rtkq/preferences/user/baseAPI.ts`: verified
+- `grafana/packages/grafana-data/src/utils/unaryOperators.ts`: verified
+- `grafana/packages/grafana-ui/src/components/Collapse/Collapse.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/DateTimePickers/TimeRangePicker/CalendarBody.tsx`: verified
+- `grafana/packages/grafana-ui/src/types/emotion-core-stub.d.ts`: verified
+- `grafana/pkg/cmd/grafana-cli/commands/remove_command.go`: verified
+- `grafana/pkg/expr/ml/outlier_test.go`: verified
+- `grafana/pkg/registry/apis/secret/contracts/mutator.go`: verified
+- `grafana/pkg/storage/legacysql/dualwrite/metrics.go`: verified
+- `grafana/pkg/storage/unified/migrations/testcases/querycacheconfigs.go`: verified
+- `grafana/pkg/storage/unified/search/builders/teambinding.go`: verified
+- `grafana/pkg/tests/apis/alerting/rules/common/testing.go`: verified
+- `grafana/pkg/tests/apis/provisioning/git/missing_metadata_incremental_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/log_actions.go`: verified
+- `grafana/public/app/core/components/Branding/CloudBadge.tsx`: verified
+- `grafana/public/app/core/components/RolePicker/RolePicker.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/DynamicTableWithGuidelines.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/alert-groups/AlertGroupHeader.tsx`: verified
+- `grafana/public/app/features/alerting/unified/mocks/server/all-handlers.ts`: verified
+- `grafana/public/app/features/correlations/__mocks__/handlers.ts`: verified
+- `grafana/public/app/features/dashboard-scene/scene/types/DashboardLayoutGrid.ts`: verified
+- `grafana/public/app/features/geo/editor/locationModeEditor.tsx`: verified
+- `grafana/public/app/features/library-panels/LibraryPanelsPage.tsx`: verified
+- `grafana/public/app/features/transformers/rowsToFields/rowsToFields.ts`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/mocks/cloudwatch-logs-sql-test-data/multiLineFullQuery.ts`: verified
+- `prysm/beacon-chain/cache/private_access_test.go`: verified
+- `prysm/beacon-chain/rpc/eth/beacon/handlers_validator.go`: verified
+- `prysm/beacon-chain/rpc/eth/validator/handlers_block_gloas_test.go`: verified
+- `prysm/encoding/bytesutil/hex_test.go`: verified
+- `prysm/testing/spectest/mainnet/bellatrix__epoch_processing__randao_mixes_reset_test.go`: verified
+- `prysm/testing/spectest/minimal/capella__operations__voluntary_exit_test.go`: verified
+- `prysm/testing/spectest/shared/altair/epoch_processing/slashings.go`: verified
+- `prysm/testing/spectest/shared/altair/sanity/block_processing.go`: verified
+- `prysm/testing/util/deneb.go`: verified
+- `prysm/testing/util/deneb_test.go`: verified
