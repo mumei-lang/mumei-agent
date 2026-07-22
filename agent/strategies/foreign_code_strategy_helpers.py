@@ -826,26 +826,36 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
     return decls
 
 
-def _go_package_source(source: str, source_file: str | None) -> str:
+def _go_package_source(
+    source: str, source_file: str | None, max_chars: int = 500_000
+) -> str:
     """Return ``source`` combined with sibling non-test ``.go`` files.
 
     Go package-level ``const``/``var`` declarations are visible across files, so
     a single-file audit needs the package context to know array sizes such as
-    ``[256]encoding`` declared in a sibling file.
+    ``[256]encoding`` declared in a sibling file.  A size cap keeps huge packages
+    such as ``cmd/compile/internal/ssa`` from slowing every audit.
     """
     if not source_file:
         return source
     path = Path(source_file)
     if not path.exists():
         return source
-    parts = []
-    for sibling in path.parent.glob("*.go"):
-        if sibling.name.endswith("_test.go"):
+    # Large generated files (e.g. ``cmd/compile/internal/ssa/opGen.go``) are
+    # dominated by data tables; only the first chunk is needed for constants.
+    parts = [source[:max_chars]]
+    total = len(parts[0])
+    for sibling in sorted(path.parent.glob("*.go")):
+        if sibling.name.endswith("_test.go") or sibling == path:
             continue
         try:
-            parts.append(sibling.read_text(encoding="utf-8"))
+            text = sibling.read_text(encoding="utf-8")[:max_chars]
         except Exception:
             continue
+        total += len(text)
+        if total > max_chars:
+            break
+        parts.append(text)
     return "\n".join(parts)
 
 
@@ -2602,6 +2612,7 @@ def _go_global_array_keys(source: str) -> dict[str, set[str]]:
     checks on those exact keys are false positives.
     """
     keys: dict[str, set[str]] = {}
+    open_brace = re.compile(r"\s*\{")
     for start_match in re.finditer(
         r"^\s*var\s+(\w+)\s*=\s*\[\.\.\.\][^\{]*\{",
         source,
@@ -2609,6 +2620,10 @@ def _go_global_array_keys(source: str) -> dict[str, set[str]]:
     ):
         container = start_match.group(1)
         i = start_match.end()
+        # Skip positional struct arrays such as ``opcodeTable = [...]opInfo{ ... }``;
+        # they are indexed by enum values, not keyed by constants.
+        if open_brace.match(source, i):
+            continue
         depth = 1
         while i < len(source) and depth > 0:
             if source[i] == "{":
@@ -4249,6 +4264,17 @@ def _index_safety_issue(
     ):
         # Named-type parameter indexing a package-level keyed lookup table named
         # after the parameter (e.g. ``kind2tok[kind]`` for an enum ``LitKind``).
+        return None
+    if (
+        label == "Go"
+        and param_types
+        and container
+        and index
+        and container.lower().endswith("table")
+        and _go_type_basename(param_types.get(index, "")) not in _GO_BUILTIN_TYPES
+    ):
+        # Enum-typed receiver/parameter indexing a package-level lookup table
+        # (e.g. ``opcodeTable[o]`` for an ``Op`` method).
         return None
     if (
         label == "Go"

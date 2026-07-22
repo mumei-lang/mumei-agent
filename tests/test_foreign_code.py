@@ -2909,6 +2909,36 @@ func adapt(delta, numPoints int32, firstTime bool) int32 {
     assert not any("adapt" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_enum_table_indexed_by_receiver() -> None:
+    """Enum-typed receiver indexing a package-level ``...Table`` is in bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+type Op int32
+
+const (
+	OpInvalid Op = iota
+	OpAdd
+	OpSub
+)
+
+type opInfo struct{ name string }
+
+var opcodeTable = [...]opInfo{
+	{name: "OpInvalid"},
+	{name: "Add"},
+	{name: "Sub"},
+}
+
+func (o Op) String() string {
+	return opcodeTable[o].name
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("opcodeTable" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_byte_index_into_256_array() -> None:
     """A ``byte`` index into a package-level ``[256]T`` is always in bounds."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
