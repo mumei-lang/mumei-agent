@@ -2854,6 +2854,20 @@ def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
     assert not any('allFrames' in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_runtime_pages_per_arena_nonzero() -> None:
+    """Runtime ``pagesPerArena`` is treated as a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+func spanOf(p uintptr) *mspan {
+	return mheap_.arenas[0].spans[(p/pageSize)%pagesPerArena]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("pagesPerArena" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_config_receiver_non_nil() -> None:
     """Pointer receivers of ``*Config`` types are treated as non-nil."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
