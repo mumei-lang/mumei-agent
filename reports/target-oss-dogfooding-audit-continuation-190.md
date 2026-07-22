@@ -1,0 +1,59 @@
+# Batch 191 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/crypto/elliptic/p256_test.go`: verified
+- `go/src/go/ast/walk_test.go`: verified
+- `go/src/internal/cpu/cpu_arm.go`: verified
+- `go/src/internal/runtime/maps/memhash_aes_asm.go`: verified
+- `go/src/math/big/sqrt_test.go`: verified
+- `go/src/runtime/set_vma_name_stub.go`: verified
+- `go/src/simd/archsimd/_gen/unify/html.go`: verified
+- `go/src/syscall/zsysnum_linux_386.go`: verified
+- `go/test/fixedbugs/bug313.dir/a.go`: verified
+- `go/test/fixedbugs/bug471.go`: verified
+- `go/test/fixedbugs/issue10975.go`: verified
+- `go/test/fixedbugs/issue31419.go`: verified
+- `go/test/fixedbugs/issue4252.go`: verified
+- `go/test/ken/convert.go`: verified
+- `go/test/typeparam/issue48094.dir/a.go`: verified
+- `go/test/typeparam/mapimp.dir/main.go`: verified
+- `grafana/apps/dashboard/pkg/apis/dashboard/v0alpha1/zz_generated.openapi.go`: verified
+- `grafana/packages/grafana-data/src/types/legacyEvents.ts`: verified
+- `grafana/packages/grafana-o11y-ds-frontend/src/SpanBar/SpanBarSettings.tsx`: verified
+- `grafana/packages/grafana-runtime/src/services/pluginMeta/mappers/v0alpha1AppMapper.ts`: verified
+- `grafana/packages/grafana-ui/src/components/DateTimePickers/TimeRangePicker/TimePickerCalendar.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/Tabs/TabContent.tsx`: verified
+- `grafana/pkg/registry/apis/iam/authorizer/external_group_mapping.go`: verified
+- `grafana/pkg/registry/apis/secret/encryption/manager/manager.go`: verified
+- `grafana/pkg/registry/backgroundsvcs/adapter/dependencies.go`: verified
+- `grafana/pkg/services/authn/authnimpl/registration.go`: verified
+- `grafana/pkg/services/contexthandler/ctxkey/key.go`: verified
+- `grafana/pkg/services/encryption/service/service_test.go`: verified
+- `grafana/pkg/services/frontend/index_test.go`: verified
+- `grafana/pkg/services/live/features/watch_test.go`: verified
+- `grafana/pkg/services/ngalert/state/persister_sync_rule.go`: verified
+- `grafana/pkg/services/plugindashboards/service/dashboard_updater_test.go`: verified
+- `grafana/pkg/services/shorturls/shorturlimpl/shorturl.go`: verified
+- `grafana/pkg/storage/unified/sql/test/benchmark_test.go`: verified
+- `grafana/public/app/features/explore/utils/supplementaryQueries.ts`: verified
+- `grafana/public/app/features/gops/configuration-tracker/slo/hooks.ts`: verified
+- `grafana/public/app/features/users/state/actions.ts`: verified
+- `grafana/public/app/plugins/datasource/influxdb/components/editor/query/influxql/utils/tagUtils.ts`: verified
+- `prysm/beacon-chain/blockchain/process_block.go`: verified
+- `prysm/beacon-chain/core/blocks/exit.go`: verified
+- `prysm/beacon-chain/core/requests/consolidations_test.go`: verified
+- `prysm/beacon-chain/das/mock.go`: verified
+- `prysm/beacon-chain/state/state-native/getters_deposits.go`: verified
+- `prysm/beacon-chain/sync/data_column_assignment.go`: verified
+- `prysm/config/params/testnet_sepolia_config_test.go`: verified
+- `prysm/consensus-types/blocks/roblob.go`: verified
+- `prysm/encoding/ssz/helpers_test.go`: verified
+- `prysm/proto/ssz_query/testing/test_containers.ssz.go`: verified
+- `prysm/testing/spectest/shared/fulu/epoch_processing/slashings_reset.go`: verified
+- `prysm/testing/spectest/shared/fulu/operations/attester_slashing.go`: verified
