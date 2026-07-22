@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/query_functions/src/selectors/internal.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

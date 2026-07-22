@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/provisioning/pkg/repository/local/extra.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

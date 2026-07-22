@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/beacon-chain/core/time/slot_epoch.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

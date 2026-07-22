@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/compress/flate/huffman_bit_writer.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

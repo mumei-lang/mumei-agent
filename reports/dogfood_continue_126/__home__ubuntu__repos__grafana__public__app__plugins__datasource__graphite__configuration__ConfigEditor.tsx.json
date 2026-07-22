@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/graphite/configuration/ConfigEditor.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}
