@@ -2854,6 +2854,26 @@ def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
     assert not any('allFrames' in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_impl_receiver_non_nil() -> None:
+    """Pointer receivers named ``*Impl`` are treated as non-nil containers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package query
+
+type ServiceImpl struct{}
+
+func (s *ServiceImpl) GetSQLSchemas() string {
+    return s.parseMetricRequest()
+}
+
+func (s *ServiceImpl) parseMetricRequest() string {
+    return "ok"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("GetSQLSchemas" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_reverse_loop_sliced_alias() -> None:
     """Reverse loop over a local ``size`` indexing a same-length slice alias."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

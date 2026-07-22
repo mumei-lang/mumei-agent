@@ -2914,6 +2914,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Migrator",  # Grafana migration types are non-nil when Exec/SQL is called
     "Data",  # internal data container structs embedded in a wrapper (e.g. dutyStoreData) are non-nil in use
     "Block",  # compiler/graph blocks and protobuf block containers are non-nil when methods are invoked
+    "Impl",  # implementation structs (e.g. ServiceImpl) are non-nil when methods are invoked
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
