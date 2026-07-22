@@ -1797,6 +1797,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "Int",  # math/big.Int and similar big-integer wrappers
     "Request",  # net/http.Request and similar request DTOs are non-nil in callers
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
+    "Timespec",  # syscall/unix time-value structs are always initialized pointers
+    "Timeval",
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
