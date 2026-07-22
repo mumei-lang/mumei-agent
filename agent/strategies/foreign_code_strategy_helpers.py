@@ -1208,6 +1208,62 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
     return guarded
 
 
+def _go_local_nonzero_variables(body: str) -> set[str]:
+    """Return local Go variables that are always assigned a nonzero literal.
+
+    For example, in ``sum := 32; if prefix == 2 { sum = 16 }``, ``sum`` is
+    nonzero in every assignment and is therefore safe as a divisor/modulus.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    assignments: dict[str, list[str]] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*([^;\n]+?)(?:;|\n|$)", stripped
+    ):
+        name, value = match.group(1), match.group(2).strip()
+        assignments.setdefault(name, []).append(value)
+    for match in re.finditer(
+        r"\b(\w+)\s*=\s*([^;\n]+?)(?:;|\n|$)", stripped
+    ):
+        name, value = match.group(1), match.group(2).strip()
+        if name in assignments:
+            assignments[name].append(value)
+
+    def _is_nonzero_literal_or_expr(value: str) -> bool:
+        text = _strip_go_rust_literals_and_comments(value).strip()
+        parsed = semantic_safety.parse_int_literal(text)
+        if parsed is not None:
+            return parsed != 0
+        try:
+            return float(text) != 0.0
+        except ValueError:
+            return False
+
+    return {
+        name
+        for name, values in assignments.items()
+        if values and all(_is_nonzero_literal_or_expr(v) for v in values)
+    }
+
+
+def _go_align_nonzero_params(body: str) -> set[str]:
+    """Return alignment parameters that are provably non-zero.
+
+    The standard round-up idiom ``y := x + a - 1; return y - y % a`` (or the
+    equivalent bitwise form) computes an aligned offset. The alignment ``a``
+    is positive by contract, so the division/modulo is safe.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    # ``y := x + a - 1`` followed by ``return y - y % a``.
+    for m in re.finditer(r"\b(\w+)\s*:=\s*(\w+)\s*\+\s*(\w+)\s*-\s*1\b", stripped):
+        var, base, align = m.group(1), m.group(2), m.group(3)
+        if re.search(rf"\breturn\s+{re.escape(var)}\s*-\s*{re.escape(var)}\s*%\s*{re.escape(align)}\b", stripped):
+            return {align}
+    # Bitwise equivalent: ``return (x + a - 1) &^ (a - 1)``.
+    for m in re.finditer(r"\breturn\s*\(\s*(\w+)\s*\+\s*(\w+)\s*-\s*1\s*\)\s*&\^\s*\(\s*\2\s*-\s*1\s*\)", stripped):
+        return {m.group(2)}
+    return set()
+
+
 def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     """Return the integer divisor parameter for functions named ``Div``/``Mod`` as non-zero.
 
@@ -1357,6 +1413,10 @@ def _go_guarded_indices(
     # Enum-type parameters indexing package-level ``[num<Type>]`` arrays.
     if param_types and source:
         guarded |= _go_enum_param_guarded_indices(body, param_types, source)
+    # An unsigned parameter whose type's maximum value is at least ``N-1``
+    # indexing a package-level ``[N]T`` array is in bounds (e.g. ``uint8`` and ``[256]T``).
+    if param_types and source:
+        guarded |= _go_unsigned_array_index_guarded_indices(body, param_types, source)
     return guarded
 
 
@@ -1439,6 +1499,56 @@ def _go_enum_param_guarded_indices(
                 rf"\b{re.escape(arr)}\s*\[\s*{re.escape(param)}\s*\]", body
             ):
                 guarded.add(param)
+    return guarded
+
+
+def _go_unsigned_array_index_guarded_indices(
+    body: str, param_types: dict[str, str], source: str
+) -> set[str]:
+    """Return unsigned index parameters that provably fit a package-level ``[N]T``.
+
+    A ``uint8`` parameter can represent 0..255, so ``arr[x]`` is safe when
+    ``len(arr) == 256`` and ``x`` is the ``uint8`` parameter.  Similarly for
+    other unsigned types whose maximum value is at least ``N-1``.
+    """
+    guarded: set[str] = set()
+    unsigned_max = {
+        "byte": 255,
+        "rune": 0x10FFFF,
+        "uint8": 255,
+        "uint16": 65535,
+        "uint32": 2**32 - 1,
+        "uint64": 2**64 - 1,
+        "uint": 2**64 - 1,
+    }
+    array_sizes: dict[str, int] = {}
+    for match in re.finditer(
+        r"^\s*var\s+(\w+)\s*(?:=\s*)?\[\s*(\d+)\s*\]\w+",
+        source,
+        re.MULTILINE,
+    ):
+        name, size = match.group(1), int(match.group(2))
+        array_sizes[name] = size
+    for match in re.finditer(
+        r"^\s*var\s+(\w+)\s*=\s*\[\s*(\d+)\s*\]\w+\s*\{",
+        source,
+        re.MULTILINE,
+    ):
+        name, size = match.group(1), int(match.group(2))
+        array_sizes[name] = size
+    if not array_sizes:
+        return guarded
+    for match in re.finditer(
+        r"\b([A-Za-z_]\w*)\s*\[\s*([A-Za-z_]\w*)\s*\]",
+        body,
+    ):
+        arr, idx = match.group(1), match.group(2)
+        if arr not in array_sizes:
+            continue
+        idx_type = param_types.get(idx, "").strip().lstrip("*").lower()
+        max_val = unsigned_max.get(idx_type)
+        if max_val is not None and array_sizes[arr] <= max_val + 1:
+            guarded.add(idx)
     return guarded
 
 
@@ -2810,6 +2920,8 @@ def _detect_go_safety_issues(
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
+                | _go_local_nonzero_variables(body)
+                | _go_align_nonzero_params(body)
                 | _go_rounded_factor_nonzero(body)
                 | _go_beacon_config_nonzero_locals(body, original_source or source)
                 | {"_W", "bits.UintSize"}
@@ -2906,7 +3018,7 @@ def _detect_go_safety_issues(
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
         go_map_names = file_map_names | _go_local_map_names(body)
-        guaranteed_nonzero = base_guaranteed_nonzero | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
+        guaranteed_nonzero = base_guaranteed_nonzero | _go_local_nonzero_variables(body) | _go_align_nonzero_params(body) | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
         parallel_slicing = _go_flattened_index_safe_pairs(body)
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
