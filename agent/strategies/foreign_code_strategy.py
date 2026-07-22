@@ -572,6 +572,11 @@ def _source_has_function_declarations(source: str, language: str) -> bool | None
                 names = [name for name in names if not _is_go_test_name(name)]
             if normalized == "rust":
                 names = [name for name in names if not _is_rust_test_function(source, name)]
+            if normalized == "rust" and names:
+                # Trait method signatures without bodies (e.g. ``fn id(&self);``) are
+                # declarations, not implementations, so there is nothing to verify.
+                if not re.search(r"\bfn\s+[A-Za-z_]\w*[^{;]*\{", source, re.DOTALL):
+                    return False
             return bool(names)
 
     if normalized == "python":
