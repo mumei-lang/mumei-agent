@@ -2145,7 +2145,12 @@ def _extract_return_expression(stripped: str, source: str, start: int) -> str:
         elif ch in "])}" and depth > 0:
             depth -= 1
         elif ch == "?" and depth == 0:
-            ternary_depth += 1
+            # ``??`` (nullish coalescing) and ``?.`` (optional chaining) are not
+            # ternary operators, so skip both characters.
+            if i + 1 < len(stripped) and stripped[i + 1] in "?.":
+                i += 1
+            else:
+                ternary_depth += 1
         elif ch == ":" and depth == 0 and ternary_depth > 0:
             ternary_depth -= 1
         elif (

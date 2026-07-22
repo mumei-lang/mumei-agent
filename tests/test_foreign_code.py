@@ -2825,6 +2825,35 @@ func (bm Bitmap) Has(i Sym) bool {
     assert not any("bounds" in i.message for i in issues)
 
 
+def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
+    """``return a ?? b;`` must not swallow the rest of the function body."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export function calculateFieldDisplayName(
+  field: Field,
+  frame?: DataFrame,
+  allFrames?: DataFrame[],
+  commonLabels?: Labels
+): string {
+  if (field.type === FieldType.time && !field.labels) {
+    return displayName ?? TIME_SERIES_TIME_FIELD_NAME;
+  }
+
+  let parts: string[] = [];
+
+  if (allFrames && allFrames.length > 1) {
+    for (let i = 1; i < allFrames.length; i++) {
+      const f = allFrames[i];
+    }
+  }
+
+  return displayName;
+}
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any('allFrames' in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
