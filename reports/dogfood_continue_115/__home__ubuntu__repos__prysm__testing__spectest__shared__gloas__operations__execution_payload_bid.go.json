@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/gloas/operations/execution_payload_bid.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

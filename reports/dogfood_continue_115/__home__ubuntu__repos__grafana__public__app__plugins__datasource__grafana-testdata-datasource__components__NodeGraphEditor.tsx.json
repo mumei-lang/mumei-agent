@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/grafana-testdata-datasource/components/NodeGraphEditor.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

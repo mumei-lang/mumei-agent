@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard-scene/serialization/custom-variables/SnapshotVariable.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/dashboard/pkg/apis/dashboard/cuevalidator/validator.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

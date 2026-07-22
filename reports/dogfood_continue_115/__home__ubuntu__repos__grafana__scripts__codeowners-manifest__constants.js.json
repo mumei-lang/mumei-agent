@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/scripts/codeowners-manifest/constants.js",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

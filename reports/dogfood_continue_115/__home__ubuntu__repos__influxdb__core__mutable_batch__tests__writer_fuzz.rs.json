@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/mutable_batch/tests/writer_fuzz.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

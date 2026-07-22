@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/generated/clientset/versioned/scheme/doc.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
