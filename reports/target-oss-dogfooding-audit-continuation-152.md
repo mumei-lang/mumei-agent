@@ -1,0 +1,59 @@
+# Batch 153 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/test/value_test.go`: verified
+- `go/src/cmd/compile/internal/types2/format.go`: verified
+- `go/src/cmd/internal/obj/link.go`: verified
+- `go/src/cmd/link/internal/ld/testdata/issue39256/x.go`: verified
+- `go/src/cmd/vet/vet_test.go`: verified
+- `go/src/fmt/scan_test.go`: verified
+- `go/src/math/big/internal/asmgen/riscv64.go`: verified
+- `go/test/fixedbugs/issue20227.go`: verified
+- `go/test/fixedbugs/issue25966.go`: verified
+- `go/test/fixedbugs/issue27829.go`: verified
+- `go/test/method5.go`: verified
+- `go/test/typeparam/issue46461b.dir/a.go`: verified
+- `grafana/apps/playlist/pkg/apis/playlist/v1/playlist_client_gen.go`: verified
+- `grafana/devenv/docker/loadtest/auth_key_test.js`: verified
+- `grafana/e2e-playwright/various-suite/prometheus-variable-editor.spec.ts`: verified
+- `grafana/pkg/apiserver/endpoints/filters/accept_test.go`: verified
+- `grafana/pkg/apiserver/registry/generic/strategy.go`: verified
+- `grafana/pkg/expr/sql/db.go`: verified
+- `grafana/pkg/registry/apis/datasource/querier.go`: verified
+- `grafana/pkg/services/authz/rbac/cache_test.go`: verified
+- `grafana/pkg/services/encryption/provider/provider.go`: verified
+- `grafana/pkg/services/ngalert/api/generated_base_api_history.go`: verified
+- `grafana/pkg/services/ngalert/writer/fake.go`: verified
+- `grafana/pkg/storage/unified/search/embed/embedder/azure/embed_dense.go`: verified
+- `grafana/pkg/storage/unified/search/lock_objstore_test.go`: verified
+- `grafana/public/app/features/actions/ActionVariablesEditor.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/panel-edit/PanelEditNext/QueryEditor/QueryEditorContext.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/utils/getDatasourceFromQueryRunner.ts`: verified
+- `grafana/public/app/features/explore/ExploreTimeControls.tsx`: verified
+- `grafana/public/app/features/explore/Logs/LogsVolumePanel.test.tsx`: verified
+- `grafana/public/app/features/geo/editor/locationEditor.ts`: verified
+- `grafana/public/app/features/library-panels/components/LibraryPanelsView/LibraryPanelsView.tsx`: verified
+- `grafana/public/app/features/migrate-to-cloud/onprem/SnapshotCTAs.tsx`: verified
+- `grafana/public/app/features/profile/UserSessions.tsx`: verified
+- `grafana/public/app/features/provisioning/Config/BranchOptionsSection.test.tsx`: verified
+- `grafana/public/app/features/provisioning/utils/repositoryStatus.ts`: verified
+- `grafana/public/app/features/transformers/extractFields/fieldExtractors.ts`: verified
+- `grafana/public/app/features/variables/constants.ts`: verified
+- `grafana/public/app/plugins/datasource/azuremonitor/azure_log_analytics/utils.ts`: verified
+- `prysm/beacon-chain/blockchain/error.go`: verified
+- `prysm/beacon-chain/core/transition/state-bellatrix.go`: verified
+- `prysm/beacon-chain/operations/attestations/service.go`: verified
+- `prysm/beacon-chain/rpc/eth/events/server.go`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/beacon/beacon_test.go`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_preferences.go`: verified
+- `prysm/proto/prysm/v1alpha1/gloas_builder_api.pb.go`: verified
+- `prysm/runtime/version/metrics.go`: verified
+- `prysm/testing/spectest/mainnet/electra__operations__bls_to_execution_change_test.go`: verified
+- `prysm/testing/spectest/minimal/fulu__operations__proposer_slashing_test.go`: verified
+- `prysm/validator/db/kv/graffiti.go`: verified
