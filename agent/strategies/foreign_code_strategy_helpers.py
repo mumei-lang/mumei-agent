@@ -528,9 +528,10 @@ def _detect_safety_issues(
             )
         ):
             return []
-        known_constants = _go_declared_constants(source)
+        package_source = _go_package_source(source, source_file)
+        known_constants = _go_declared_constants(package_source)
         stripped_source = _strip_go_rust_literals_and_comments(source)
-        return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source)
+        return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source, source_file=source_file)
     if normalized == "python":
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
@@ -823,6 +824,29 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
             decls.append((kind, name, value.strip()))
         i = j
     return decls
+
+
+def _go_package_source(source: str, source_file: str | None) -> str:
+    """Return ``source`` combined with sibling non-test ``.go`` files.
+
+    Go package-level ``const``/``var`` declarations are visible across files, so
+    a single-file audit needs the package context to know array sizes such as
+    ``[256]encoding`` declared in a sibling file.
+    """
+    if not source_file:
+        return source
+    path = Path(source_file)
+    if not path.exists():
+        return source
+    parts = []
+    for sibling in path.parent.glob("*.go"):
+        if sibling.name.endswith("_test.go"):
+            continue
+        try:
+            parts.append(sibling.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    return "\n".join(parts)
 
 
 def _go_declared_constants(source: str) -> dict[str, int]:
@@ -3821,10 +3845,12 @@ def _detect_go_safety_issues(
     *,
     known_constants: dict[str, int] | None = None,
     original_source: str | None = None,
+    source_file: str | None = None,
 ) -> list[ForeignSafetyIssue]:
     if _is_go_compiler_test(source):
         return []
     issues: list[ForeignSafetyIssue] = []
+    package_source = _go_package_source(original_source or source, source_file)
     functions = tree_sitter_extract.extract_contract_functions(
         source, "go", _safe_identifier
     )
@@ -3837,8 +3863,8 @@ def _detect_go_safety_issues(
         component_runner_receivers = _go_component_runner_receiver_types(source)
         file_map_names = _go_map_names(source)
         map_type_names = _go_map_type_names(source)
-        global_array_keys = _go_global_array_keys(source)
-        known_types = _go_type_names(source)
+        global_array_keys = _go_global_array_keys(package_source)
+        known_types = _go_type_names(package_source)
         go_float_arrays = _go_float_array_names(original_source or source)
         package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
         package_name = package_name.group(1) if package_name else ""
@@ -4023,8 +4049,8 @@ def _detect_go_safety_issues(
         | {"_W", "bits.UintSize"}
     )
     string_variables = _go_string_variables(original_source or source)
-    global_array_keys = _go_global_array_keys(source)
-    known_types = _go_type_names(source)
+    global_array_keys = _go_global_array_keys(package_source)
+    known_types = _go_type_names(package_source)
     go_float_arrays = _go_float_array_names(original_source or source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
