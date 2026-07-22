@@ -1581,6 +1581,10 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
             contracts.add("Info")
         if re.search(r"\btype\s+ArgumentError\s+struct\b", source):
             contracts.add("ArgumentError")
+    if pkg == "noder" and re.search(r"\btype\s+reader\s+struct\b", source):
+        # ``cmd/compile/internal/noder.reader`` is created by ``newReader`` and
+        # ``asReader``; its methods are only invoked on initialized readers.
+        contracts.add("reader")
     return contracts
 
 
@@ -2029,6 +2033,25 @@ def _is_go_experimental(source: str) -> bool:
     return False
 
 
+def _go_make_plus_one_index_safe_pairs(body: str) -> set[tuple[str, str]]:
+    """Return safe ``(container, index)`` pairs when a slice is one longer.
+
+    A declaration like ``tmp := make([]T, n + 1)`` guarantees that ``tmp[n]``
+    is a valid index (when ``n`` is non-negative, which holds for uint types and
+    for depth-calculating helpers such as ``Depth``).
+    """
+    safe: set[tuple[str, str]] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*make\s*\([^,]+,\s*(\w+)\s*\+\s*1\)", body
+    ):
+        safe.add((match.group(1), match.group(2)))
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*make\s*\([^,]+,\s*1\s*\+\s*(\w+)\)", body
+    ):
+        safe.add((match.group(1), match.group(2)))
+    return safe
+
+
 def _go_parallel_slice_index_safe_pairs(body: str) -> set[tuple[str, str]]:
     """Return safe ``(container, index)`` index pairs for parallel local slices.
 
@@ -2148,7 +2171,11 @@ def _detect_go_safety_issues(
                 return_type=fn.return_type,
             )
             local_names = _local_variable_names(body, "go")
-            parallel_slicing = _go_parallel_slice_index_safe_pairs(body) | _go_equal_length_slice_index_safe_pairs(body)
+            parallel_slicing = (
+                _go_parallel_slice_index_safe_pairs(body)
+                | _go_equal_length_slice_index_safe_pairs(body)
+                | _go_make_plus_one_index_safe_pairs(body)
+            )
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
             guarded_indices = _go_guarded_indices(body) | _go_runtime_level_guarded_indices(
