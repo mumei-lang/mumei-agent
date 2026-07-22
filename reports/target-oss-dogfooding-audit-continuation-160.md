@@ -1,0 +1,59 @@
+# Batch 161 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/go/internal/modload/query_test.go`: verified
+- `go/src/compress/flate/token.go`: verified
+- `go/src/container/heap/heap.go`: verified
+- `go/src/internal/trace/testdata/testprog/stacks.go`: verified
+- `go/src/net/unixsock.go`: verified
+- `go/src/runtime/preempt_nonwindows.go`: verified
+- `go/test/fixedbugs/bug154.go`: verified
+- `go/test/fixedbugs/issue32560.go`: verified
+- `go/test/fixedbugs/issue42784.go`: verified
+- `go/test/fixedbugs/issue4326.dir/z.go`: verified
+- `go/test/fixedbugs/issue4463.go`: verified
+- `go/test/fixedbugs/issue8028.go`: verified
+- `grafana/apps/dashboard/pkg/migration/schemaversion/v13_test.go`: verified
+- `grafana/apps/dashboard/pkg/migration/schemaversion/v41.go`: verified
+- `grafana/apps/example/pkg/apis/example/v0alpha1/example_client_gen.go`: verified
+- `grafana/apps/plugins/pkg/app/meta/manager.go`: verified
+- `grafana/packages/grafana-plugin-configs/jest/mocks/react-inlinesvg.tsx`: verified
+- `grafana/packages/grafana-runtime/src/utils/TracedError.ts`: verified
+- `grafana/packages/grafana-sql/src/utils/formatSQL.ts`: verified
+- `grafana/packages/grafana-ui/src/components/DataSourceSettings/CustomHeadersSettings.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/PageLoader/BouncingLogo.tsx`: verified
+- `grafana/packages/grafana-ui/src/themes/GlobalStyles/GlobalStyles.tsx`: verified
+- `grafana/packages/grafana-ui/src/utils/searchFunctions.ts`: verified
+- `grafana/pkg/registry/apis/secret/secure_value_client_test.go`: verified
+- `grafana/pkg/services/authn/authnimpl/service.go`: verified
+- `grafana/pkg/services/dashboardsnapshots/database/database.go`: verified
+- `grafana/pkg/services/live/pipeline/storage.go`: verified
+- `grafana/pkg/storage/secret/encryption/encrypted_value_store_test.go`: verified
+- `grafana/pkg/storage/unified/search/lock_cdk_backend.go`: verified
+- `grafana/pkg/tests/api/alerting/api_convert_prometheus_test.go`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-viewer/tabs/Query/SQLQueryPreview.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/sharing/panel-share/SharePanelInternally.tsx`: verified
+- `grafana/public/app/features/query/state/DashboardQueryRunner/LegacyAnnotationQueryRunner.ts`: verified
+- `grafana/public/app/features/variables/state/variablesReducer.ts`: verified
+- `grafana/public/app/plugins/datasource/influxdb/components/editor/query/influxql/InfluxCheatSheet.tsx`: verified
+- `grafana/public/app/plugins/datasource/loki/jest.config.js`: verified
+- `grafana/public/app/plugins/panel/gettingstarted/steps.ts`: verified
+- `prysm/beacon-chain/blockchain/execution_engine.go`: verified
+- `prysm/beacon-chain/core/transition/state_test.go`: verified
+- `prysm/beacon-chain/p2p/peers/scorers/gossip_scorer.go`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/beacon/attestations.go`: verified
+- `prysm/beacon-chain/state/stateutil/builder_pending_withdrawals_root.go`: verified
+- `prysm/container/multi-value-slice/multi_value_slice_test.go`: verified
+- `prysm/testing/spectest/mainnet/gloas__epoch_processing__process_builder_pending_payments_test.go`: verified
+- `prysm/testing/spectest/minimal/capella__epoch_processing__rewards_and_penalties_test.go`: verified
+- `prysm/testing/spectest/minimal/deneb__merkle_proof__merkle_proof_test.go`: verified
+- `prysm/testing/spectest/minimal/gloas__operations__payload_attestation_test.go`: verified
+- `prysm/testing/spectest/shared/bellatrix/operations/sync_committee.go`: verified
+- `prysm/validator/client/beacon-api/beacon_block_converter_test.go`: verified
+- `prysm/validator/keymanager/remote-web3signer/types/custom_mappers.go`: verified
