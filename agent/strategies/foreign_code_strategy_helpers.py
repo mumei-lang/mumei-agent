@@ -2947,6 +2947,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "Tx",  # database/sql.Tx is returned by Begin and used non-nil until Commit/Rollback
     "Rows",  # database/sql.Rows is returned by Query and used non-nil until Close
     "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
+    "Evaluation",  # alerting evaluation objects are live when their methods are invoked
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

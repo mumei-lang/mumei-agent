@@ -2909,6 +2909,22 @@ func adapt(delta, numPoints int32, firstTime bool) int32 {
     assert not any("adapt" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_evaluation_receiver_non_nil() -> None:
+    """Pointer receivers of ``*Evaluation`` are treated as non-nil containers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package schedule
+
+type Evaluation struct{ rule string }
+
+func (e *Evaluation) Fingerprint() string {
+    return e.rule
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Fingerprint" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_impl_receiver_non_nil() -> None:
     """Pointer receivers named ``*Impl`` are treated as non-nil containers."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
