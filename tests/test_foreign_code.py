@@ -2599,6 +2599,25 @@ func idToType(id int32) int {
     assert not any("idToTypeSlice" in i.message and "bounds" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_hpke_sender_recipient_nonnil() -> None:
+    """crypto/hpke Sender/Recipient receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package hpke
+type context struct{ export func(string, uint16) ([]byte, error) }
+type Sender struct{ *context }
+func (s *Sender) Export(ctx string, l int) ([]byte, error) {
+    return s.export(ctx, uint16(l))
+}
+type Recipient struct{ *context }
+func (r *Recipient) Export(ctx string, l int) ([]byte, error) {
+    return r.export(ctx, uint16(l))
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues

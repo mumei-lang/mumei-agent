@@ -2799,6 +2799,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
 _GO_NONNIL_EXACT_TYPES = {
     "Int",  # math/big.Int and similar big-integer wrappers
     "Request",  # net/http.Request and similar request DTOs are non-nil in callers
+    "Sender",  # crypto/hpke.Sender and similar messaging handles are non-nil in use
+    "Recipient",  # crypto/hpke.Recipient and similar messaging handles are non-nil in use
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
     "StackRecord",  # runtime/pprof profiling records are live container objects
     "MemProfileRecord",
