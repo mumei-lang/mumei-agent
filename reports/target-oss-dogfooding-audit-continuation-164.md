@@ -1,0 +1,59 @@
+# Batch 165 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ssa/rewritedec64.go`: verified
+- `go/src/cmd/vet/testdata/nilfunc/nilfunc.go`: verified
+- `go/src/crypto/aes/aes_test.go`: verified
+- `go/src/go/internal/gccgoimporter/parser.go`: verified
+- `go/src/internal/goexperiment/exp_sizespecializedmalloc_on.go`: verified
+- `go/src/internal/sync/export_test.go`: verified
+- `go/src/syscall/syscall_darwin_arm64.go`: verified
+- `go/src/syscall/zerrors_openbsd_ppc64.go`: verified
+- `go/test/fixedbugs/bug392.go`: verified
+- `go/test/fixedbugs/issue16804.go`: verified
+- `go/test/fixedbugs/issue4614.go`: verified
+- `go/test/index1.go`: verified
+- `go/test/typecheckloop.go`: verified
+- `grafana/apps/dashboard/pkg/migration/schemaversion/v33.go`: verified
+- `grafana/apps/folder/pkg/apis/folder/v1/folder_schema_gen.go`: verified
+- `grafana/apps/secret/pkg/apis/secret/v1beta1/securevalue_schema_gen.go`: verified
+- `grafana/e2e-playwright/utils/scopes.ts`: verified
+- `grafana/packages/grafana-data/src/utils/url.ts`: verified
+- `grafana/packages/grafana-ui/src/graveyard/GraphNG/nullToUndefThreshold.ts`: verified
+- `grafana/pkg/codegen/tmpl.go`: verified
+- `grafana/pkg/infra/features/cache.go`: verified
+- `grafana/pkg/registry/apis/collections/stars_update.go`: verified
+- `grafana/pkg/registry/apis/provisioning/controller/connection_test.go`: verified
+- `grafana/pkg/registry/apis/provisioning/jobs/queue_test.go`: verified
+- `grafana/pkg/registry/apis/provisioning/list.go`: verified
+- `grafana/pkg/registry/apis/provisioning/resources/folder_metadata_test.go`: verified
+- `grafana/pkg/services/accesscontrol/checker.go`: verified
+- `grafana/pkg/services/ssosettings/strategies/ldap_strategy_test.go`: verified
+- `grafana/pkg/storage/legacysql/dualwrite/dualwriter_mode2_test.go`: verified
+- `grafana/pkg/storage/unified/resource/document_test.go`: verified
+- `grafana/pkg/tests/api/alerting/api_notification_channel_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/resource_handler.go`: verified
+- `grafana/public/app/core/components/AppChrome/TopBar/SingleTopBar.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/edit-pane/add-new/AddRow.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/sharing/ExportButton/ExportMenu.tsx`: verified
+- `grafana/public/app/features/dashboard/api/types.ts`: verified
+- `grafana/public/app/features/dashboard/components/SaveDashboard/forms/SaveDashboardForm.tsx`: verified
+- `grafana/public/app/features/explore/RichHistory/RichHistory.tsx`: verified
+- `grafana/public/app/plugins/datasource/azuremonitor/components/MetricsQueryEditor/AggregationField.tsx`: verified
+- `grafana/public/app/plugins/panel/histogram/utils.ts`: verified
+- `prysm/beacon-chain/core/helpers/shuffle.go`: verified
+- `prysm/beacon-chain/rpc/eth/events/http_test.go`: verified
+- `prysm/container/trie/sparse_merkle.go`: verified
+- `prysm/proto/prysm/v1alpha1/slashings/double_votes.go`: verified
+- `prysm/testing/spectest/minimal/bellatrix__operations__sync_committee_test.go`: verified
+- `prysm/testing/spectest/minimal/capella__forkchoice__forkchoice_test.go`: verified
+- `prysm/testing/spectest/minimal/deneb__fork__upgrade_to_deneb_test.go`: verified
+- `prysm/testing/spectest/minimal/gloas__epoch_processing__justification_and_finalization_test.go`: verified
+- `prysm/tools/analyzers/slicedirect/analyzer.go`: verified
+- `prysm/validator/graffiti/log.go`: verified
