@@ -1,0 +1,59 @@
+# Batch 157 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/cgo/internal/testsanitizers/empty_test.go`: verified
+- `go/src/cmd/compile/internal/dwarfgen/scope_test.go`: verified
+- `go/src/cmd/internal/obj/inl.go`: verified
+- `go/src/crypto/ecdsa/notboring.go`: verified
+- `go/src/database/sql/sql.go`: verified
+- `go/src/expvar/expvar_test.go`: verified
+- `go/src/internal/syscall/unix/at_fstatat2.go`: verified
+- `go/src/math/big/arith_s390x_test.go`: verified
+- `go/src/runtime/testdata/testgoroutineleakprofile/goker/kubernetes30872.go`: verified
+- `go/src/runtime/testdata/testprog/stw_trace.go`: verified
+- `go/test/convert5.go`: verified
+- `go/test/fixedbugs/bug012.go`: verified
+- `go/test/fixedbugs/issue25055.dir/a.go`: verified
+- `go/test/fixedbugs/issue79909.go`: verified
+- `go/test/typeparam/issue47925b.go`: verified
+- `grafana/apps/annotation/pkg/apis/annotation/v0alpha1/annotation_codec_gen.go`: verified
+- `grafana/apps/dashboard/pkg/migration/schemaversion/v6.go`: verified
+- `grafana/pkg/services/authn/authnimpl/sync/org_sync.go`: verified
+- `grafana/pkg/services/frontend/context_middleware.go`: verified
+- `grafana/pkg/services/ngalert/notifier/alertmanager_config_test.go`: verified
+- `grafana/pkg/services/secrets/migrator/provisioning.go`: verified
+- `grafana/pkg/services/sqlstore/migrations/anonservice/migrations.go`: verified
+- `grafana/pkg/storage/unified/resource/migrations.go`: verified
+- `grafana/pkg/storage/unified/search/builders/dashboard_stats.go`: verified
+- `grafana/pkg/storage/unified/sql/dbutil/dbutil.go`: verified
+- `grafana/pkg/tsdb/grafana-testdata-datasource/sims/flight_path_test.go`: verified
+- `grafana/public/app/core/components/AppChrome/AppChrome.tsx`: verified
+- `grafana/public/app/core/components/AppChrome/FeatureControl/FeatureControlFlag.tsx`: verified
+- `grafana/public/app/core/utils/auth.ts`: verified
+- `grafana/public/app/features/dashboard-scene/panel-edit/PanelEditNext/QueryEditor/Sidebar/SidebarHeaderActions.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/settings/variables/components/QueryVariableRegexForm.tsx`: verified
+- `grafana/public/app/features/dashboard/dashgrid/DashboardLibrary/api/dashboardLibraryApi.ts`: verified
+- `grafana/public/app/features/datasources/components/DataSourceTypeCard.tsx`: verified
+- `grafana/public/app/features/explore/TraceView/components/common/LabeledList.tsx`: verified
+- `grafana/public/app/features/explore/TraceView/components/types/links.ts`: verified
+- `grafana/public/app/features/logs/components/ControlledLogRows.tsx`: verified
+- `grafana/public/app/features/variables-management/useVariableNameCollisionCheck.ts`: verified
+- `grafana/public/app/features/variables/adhoc/picker/AdHocFilterValue.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/utils/query/getStatsGroups.ts`: verified
+- `grafana/public/app/plugins/datasource/loki/modifyQuery.ts`: verified
+- `prysm/beacon-chain/blockchain/receive_blob.go`: verified
+- `prysm/beacon-chain/core/blocks/header_test.go`: verified
+- `prysm/beacon-chain/execution/block_cache_test.go`: verified
+- `prysm/beacon-chain/rpc/core/duties.go`: verified
+- `prysm/beacon-chain/state/state-native/getters_checkpoint_test.go`: verified
+- `prysm/beacon-chain/sync/backfill/log.go`: verified
+- `prysm/genesis/internal/embedded/lookup_test.go`: verified
+- `prysm/proto/prysm/v1alpha1/attestation/aggregation/sync_contribution/contribution.go`: verified
+- `prysm/proto/prysm/v1alpha1/gloas.go`: verified
+- `prysm/testing/spectest/minimal/capella__operations__sync_committee_test.go`: verified
