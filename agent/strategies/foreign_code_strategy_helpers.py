@@ -673,6 +673,13 @@ def _go_declared_constants(source: str) -> dict[str, int]:
             parsed = semantic_safety.parse_int_literal(value)
             if parsed is not None:
                 constants[name] = parsed
+    # Package-level arrays with a positive literal size have a compile-time ``len``.
+    for match in re.finditer(
+        r"^\s*var\s+(\w+)\s*\[\s*(\d+)\s*\]", source, re.MULTILINE
+    ):
+        name, size = match.group(1), match.group(2)
+        if int(size) > 0:
+            constants[f"len({name})"] = int(size)
     return constants
 
 
@@ -2866,6 +2873,19 @@ def _division_safety_issue(
     # divide-by-zero from modeling it as a free integer (#296).
     if known_constants.get(divisor, 0) != 0:
         return None
+    # ``uintptr(len(locktab))`` and similar casts of compile-time ``len(...)``
+    # evaluate to the array's non-zero length.
+    stripped = _strip_outer_parentheses(divisor)
+    while re.fullmatch(r"\w+\s*\(.*\)", stripped):
+        m = re.match(r"\w+\s*\(\s*(.*)\s*\)\s*$", stripped)
+        if not m:
+            break
+        inner = m.group(1).strip()
+        if known_constants.get(inner, 0) != 0:
+            return None
+        if stripped == inner:
+            break
+        stripped = inner
     if guaranteed_nonzero and divisor in guaranteed_nonzero:
         return None
     if float_variables and divisor in float_variables:

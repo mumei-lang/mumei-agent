@@ -3949,3 +3949,23 @@ func scoreNoLock(score float64) float64 {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("can divide" in issue.message for issue in issues)
+
+def test_go_array_len_nonzero_divisor() -> None:
+    """``len`` of a package-level array with positive size is a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package atomic
+
+type spinlock struct{ v uint32 }
+
+var locktab [57]struct {
+    l   spinlock
+    pad [64]byte
+}
+
+func addrLock(addr *uint64) *spinlock {
+    return &locktab[(uintptr(addr)>>3)%uintptr(len(locktab))].l
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can divide" in issue.message for issue in issues)
