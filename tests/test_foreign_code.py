@@ -4800,3 +4800,65 @@ func main() {}
 '''
     issues = _detect_safety_issues(source, "go", source_file="/home/ubuntu/repos/go/src/cmd/cgo/internal/testshared/testdata/division/division.go")
     assert issues == []
+
+
+def test_go_math_bits_uint8_lookup_table_indexing() -> None:
+    """``math/bits`` 256-byte lookup tables are safely indexed by ``uint8`` params."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package bits
+
+func TrailingZeros8(x uint8) int { return int(ntz8tab[x]) }
+func OnesCount8(x uint8) int     { return int(pop8tab[x]) }
+func Reverse8(x uint8) uint8      { return rev8tab[x] }
+func Len8(x uint8) int           { return int(len8tab[x]) }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_math_bits_rem_divisor_nonzero() -> None:
+    """``math/bits`` Rem*/Div* divisor parameters are non-zero by contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package bits
+
+func Rem32(hi, lo, y uint32) uint32 {
+    return uint32((uint64(hi)<<32 | uint64(lo)) % uint64(y))
+}
+
+func Div64(hi, lo, y uint64) uint64 {
+    return (uint64(hi)<<64 | uint64(lo)) / y
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("Rem32" in issue.message and "non-zero" in issue.message for issue in issues)
+    assert not any("Div64" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_go_switch_assigned_nonzero_local() -> None:
+    """A local assigned only positive constants across switch cases is non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package mips
+
+type As int
+const AVMOVB As = 0
+const AVMOVH As = 1
+
+func lsoffset(a As, o int32) int32 {
+    var mod int32
+    switch a {
+    case AVMOVB:
+        mod = 1
+    case AVMOVH:
+        mod = 2
+    }
+    if o%mod != 0 {
+        return 0
+    }
+    return o / mod
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("lsoffset" in issue.message and "non-zero" in issue.message for issue in issues)
