@@ -1526,6 +1526,9 @@ def _go_guarded_indices(
         guarded |= _go_256_array_type_guarded_indices(body, param_types, source)
     # ``compress/bzip2.inverseBWT`` receives ``tt`` as a caller-validated slice.
     guarded |= _go_bzip2_inverse_bwt_guarded_indices(body, param_types, package_name)
+    # ``crypto.Hash`` values are guarded by ``h > 0 && h < maxHash`` before
+    # indexing ``digestSizes`` or ``hashes``.
+    guarded |= _go_crypto_hash_guarded_indices(body, param_types, source, package_name)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
         r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
@@ -1764,6 +1767,31 @@ def _go_bzip2_inverse_bwt_guarded_indices(
     if not re.search(r"\btt\s*\[\s*origPtr\s*\]", body):
         return set()
     return {"origPtr"}
+
+
+def _go_crypto_hash_guarded_indices(
+    body: str, param_types: dict[str, str] | None, source: str, package_name: str
+) -> set[str]:
+    """Guard ``crypto.Hash`` receiver/index ``h`` after ``h > 0 && h < maxHash``.
+
+    ``crypto.Hash`` is an enum-ish ``uint`` whose valid identifiers run from
+    ``1`` to ``maxHash-1``. ``Size`` and ``Available`` guard with
+    ``if h > 0 && h < maxHash`` before indexing ``digestSizes`` or ``hashes``.
+    """
+    if package_name != "crypto":
+        return set()
+    if not re.search(r"\btype\s+Hash\s+uint\b", source):
+        return set()
+    if not re.search(r"\bconst\s*\([^)]*maxHash", source, re.DOTALL):
+        return set()
+    if not re.search(r"\bh\s*<\s*maxHash\b", body):
+        return set()
+    guarded: set[str] = set()
+    for name, raw_type in (param_types or {}).items():
+        if _go_type_basename(raw_type) == "Hash":
+            if re.search(rf"\b(?:digestSizes|hashes)\s*\[\s*{re.escape(name)}\s*\]", body):
+                guarded.add(name)
+    return guarded
 
 
 def _go_enum_param_guarded_indices(
