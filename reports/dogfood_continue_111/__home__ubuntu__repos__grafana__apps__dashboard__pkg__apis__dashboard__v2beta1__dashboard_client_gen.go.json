@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/dashboard/pkg/apis/dashboard/v2beta1/dashboard_client_gen.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

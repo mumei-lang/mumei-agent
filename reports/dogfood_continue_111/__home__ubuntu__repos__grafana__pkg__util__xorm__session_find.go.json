@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/util/xorm/session_find.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

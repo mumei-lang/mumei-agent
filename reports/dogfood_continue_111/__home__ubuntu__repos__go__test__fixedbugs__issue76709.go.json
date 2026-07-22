@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/test/fixedbugs/issue76709.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

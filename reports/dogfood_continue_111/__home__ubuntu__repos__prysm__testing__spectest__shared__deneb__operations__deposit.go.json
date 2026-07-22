@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/deneb/operations/deposit.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

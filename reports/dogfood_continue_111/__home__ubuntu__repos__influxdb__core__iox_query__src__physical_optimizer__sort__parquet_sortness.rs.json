@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/iox_query/src/physical_optimizer/sort/parquet_sortness.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}
