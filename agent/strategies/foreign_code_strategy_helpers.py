@@ -1103,9 +1103,9 @@ def _go_guarded_indices(body: str) -> set[str]:
     as a valid upper-bound guard, and treats ``m`` itself as a safe last-element index
     into ``container``.
 
-    Finally, an upper-bound guard ``if int(idx) < len(arr)`` (or ``idx < len(arr)``)
-    followed by ``&&`` or a block is treated as guarded. This idiom is used when
-    ``idx`` is an unsigned type whose cast to ``int`` is non-negative.
+    Finally, an upper-bound guard ``if int(idx) < len(arr)`` followed by ``&&`` or
+    a block is treated as guarded. This idiom is used when ``idx`` is an unsigned
+    type whose cast to ``int`` is non-negative.
     """
     guarded: set[str] = set()
     pattern = re.compile(
@@ -1121,12 +1121,12 @@ def _go_guarded_indices(body: str) -> set[str]:
         idx = match.group("lower") or match.group("lower2")
         if idx:
             guarded.add(idx)
-    # ``if int(idx) < len(arr) && ...`` or ``if idx < len(arr) { ... }``
+    # ``if int(idx) < len(arr) && ...`` — safe when ``idx`` is unsigned.
     for match in re.finditer(
-        r"\bif\s+(?:int\(\s*([A-Za-z_]\w*)\s*\)|([A-Za-z_]\w*))\s*<\s*len\(\s*[A-Za-z_]\w*\s*\)(?:\s*&&|\s*\{)",
+        r"\bif\s+int\(\s*([A-Za-z_]\w*)\s*\)\s*<\s*len\(\s*[A-Za-z_]\w*\s*\)(?:\s*&&|\s*\{)",
         body,
     ):
-        idx = match.group(1) or match.group(2)
+        idx = match.group(1)
         if idx:
             guarded.add(idx)
     # ``idx, err := BeaconProposerIndex(...); if err != nil { return ... }``
