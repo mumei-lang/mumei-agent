@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/example/pkg/apis/example/v1alpha1/getsomething_request_params_object_gen.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

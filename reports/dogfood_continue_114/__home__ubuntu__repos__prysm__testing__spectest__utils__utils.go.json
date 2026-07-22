@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/utils/utils.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

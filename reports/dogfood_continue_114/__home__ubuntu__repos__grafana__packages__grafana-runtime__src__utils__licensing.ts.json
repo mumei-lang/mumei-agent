@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-runtime/src/utils/licensing.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}
