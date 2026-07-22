@@ -1484,6 +1484,28 @@ def _go_guarded_indices(
             and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
         ):
             guarded.add(idx)
+    # ``if uint64(len(arr)) <= uint64(idx) { return }`` implies ``idx < len(arr)`` after the return.
+    for match in re.finditer(
+        r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*<=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)(?:\s*\))?\s*\{",
+        body,
+    ):
+        arr, idx = match.group(1), match.group(2)
+        block_start = body.find("{", match.end() - 1)
+        if block_start == -1:
+            continue
+        depth = 1
+        i = block_start + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        if (
+            "return" in body[block_start + 1 : i - 1]
+            and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
+        ):
+            guarded.add(idx)
     # Enum-type parameters indexing package-level ``[num<Type>]`` arrays.
     if param_types and source:
         guarded |= _go_enum_param_guarded_indices(body, param_types, source)

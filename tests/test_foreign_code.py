@@ -4667,3 +4667,36 @@ func (status RequestStatus) String() string {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("String" in issue.message and "bounds" in issue.message for issue in issues)
+
+
+def test_go_uint64_cast_len_guarded_index() -> None:
+    """A ``uint64(len(arr)) <= uint64(idx)`` guard with return makes ``arr[idx]`` safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package verification
+
+import "github.com/OffchainLabs/prysm/v7/config/params"
+
+type state struct{}
+
+func (s *state) ProposerLookahead() ([]uint64, error) { return nil, nil }
+
+type primitives struct{ Slot uint64 }
+
+func (v *Verifier) VerifyValidProposalSlot(st state) error {
+    lookahead, err := st.ProposerLookahead()
+    if err != nil {
+        return err
+    }
+    slotIndex := primitives.Slot(1)*params.BeaconConfig().SlotsPerEpoch + primitives.Slot(2)
+    if uint64(len(lookahead)) <= uint64(slotIndex) {
+        return err
+    }
+    if lookahead[slotIndex] != 0 {
+        return nil
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("VerifyValidProposalSlot" in issue.message and "bounds" in issue.message for issue in issues)
