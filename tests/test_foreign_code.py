@@ -4057,3 +4057,52 @@ func addrLock(addr *uint64) *spinlock {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("can divide" in issue.message for issue in issues)
+
+
+def test_xorm_core_receiver_nonnil_and_idx_guard() -> None:
+    """XORM core pointer receivers and ``arr != nil && idx < len(arr)`` guards."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package core
+
+import "database/sql"
+
+type Column struct{ Name string }
+
+type DB struct {
+    *sql.DB
+    Mapper IMapper
+}
+
+type Rows struct {
+    *sql.Rows
+    db *DB
+}
+
+type Base struct {
+    db *DB
+}
+
+type Table struct {
+    Name       string
+    columnsMap map[string][]*Column
+}
+
+func (db *DB) Query() (*Rows, error) {
+    return db.QueryContext(nil, "")
+}
+
+func (table *Table) columnsByName(name string) []*Column {
+    return table.columnsMap[name]
+}
+
+func (table *Table) GetColumnIdx(name string, idx int) *Column {
+    cols := table.columnsByName(name)
+    if cols != nil && idx < len(cols) {
+        return cols[idx]
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("nil" in issue.message or "bounds" in issue.message for issue in issues)
