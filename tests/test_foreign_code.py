@@ -2854,6 +2854,18 @@ def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
     assert not any('allFrames' in i.message for i in issues)
 
 
+def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
+    """``message && message.length`` is guarded by the truthiness check."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export function isMessageTooLong(message?: string) {
+  return message && message.length > 500;
+}
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any("message" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_runtime_pages_per_arena_nonzero() -> None:
     """Runtime ``pagesPerArena`` is treated as a non-zero divisor."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

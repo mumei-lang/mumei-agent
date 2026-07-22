@@ -5737,17 +5737,24 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
 
 
 def _ts_typeof_guarded_values(expression: str) -> set[str]:
-    """Return identifiers narrowed to non-null by ``typeof x === 'string' && ...``.
+    """Return identifiers narrowed to non-null by type or truthiness guards.
 
     TypeScript's ``typeof`` type guard makes subsequent ``.length`` / member
     access safe in the same ``&&`` chain.  A guard of the form
     ``typeof x === 'string' && x.length`` means ``x`` is a string on the right.
+    The same applies to a truthiness guard ``x && x.length``.
     """
     guarded: set[str] = set()
     # Match ``typeof x === 'string'`` followed (possibly through a closing paren)
     # by ``&&``.  Also accept ``number`` for numeric member accesses.
     for match in re.finditer(
         r"typeof\s+([A-Za-z_$][\w$]*)\s*===\s*['\"](?:string|number)['\"]\s*\)?\s*&&",
+        expression,
+    ):
+        guarded.add(match.group(1))
+    # Truthiness guard ``message && message.length > 500``
+    for match in re.finditer(
+        r"\b([A-Za-z_$][\w$]*)\s*&&\s*\1\.(?:length|len|is_empty)\b",
         expression,
     ):
         guarded.add(match.group(1))
