@@ -260,6 +260,18 @@ def _parse(source: str, language: str):
         tree = parser.parse(source_bytes)
     except Exception:
         return None, None
+    if language == "typescript" and tree.root_node.has_error:
+        try:
+            from tree_sitter import Language, Parser
+            import tree_sitter_typescript as ts_grammar
+
+            tsx_lang = Language(ts_grammar.language_tsx())
+            tsx_parser = Parser(tsx_lang)
+            tsx_tree = tsx_parser.parse(source_bytes)
+            if not tsx_tree.root_node.has_error:
+                return tsx_tree, source_bytes
+        except Exception:
+            pass
     return tree, source_bytes
 
 
