@@ -515,6 +515,10 @@ def _detect_safety_issues(
                 source_file is not None
                 and re.search(r"(?:^|[/\\])go[/\\]test[/\\]", source_file) is not None
             )
+            or (
+                source_file is not None
+                and re.search(r"(?:^|[/\\])testdata[/\\]", source_file) is not None
+            )
         ):
             return []
         known_constants = _go_declared_constants(source)
@@ -1489,6 +1493,10 @@ def _go_guarded_indices(
     # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
     # stay within ``a``'s bounds, so ``a[idx]`` is safe.
     guarded |= _go_range_index_guarded_indices(body)
+    # Prysm end-to-end tests loop over validator-index slices and index the
+    # deterministic ``privKeys`` array returned by ``util.DeterministicDepositsAndKeys``.
+    if source:
+        guarded |= _go_prysm_validator_index_guarded_indices(body, source)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
         r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
@@ -1608,6 +1616,53 @@ def _go_range_index_guarded_indices(body: str) -> set[str]:
                 guarded.add(alias)
         if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
+    return guarded
+
+
+def _go_prysm_validator_index_guarded_indices(body: str, source: str) -> set[str]:
+    """Guard Prysm validator indices used to index deterministic private keys.
+
+    In end-to-end tests, ``privKeys`` is produced by
+    ``util.DeterministicDepositsAndKeys(count)`` and has one entry per validator.
+    Validator indices obtained from the beacon state (``ValidatorIndexByPubkey``)
+    or from a ``[]primitives.ValidatorIndex`` slice are therefore valid indices
+    into ``privKeys``.
+    """
+    guarded: set[str] = set()
+    if "DeterministicDepositsAndKeys" not in body:
+        return guarded
+    # Find local slices of ValidatorIndex (or primitives.ValidatorIndex).
+    validator_index_slices: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*make\s*\(\s*\[\]?\s*(?:primitives\.)?ValidatorIndex",
+        body,
+    ):
+        validator_index_slices.add(match.group(1))
+    for match in re.finditer(
+        r"\bvar\s+(\w+)\s+\[\]?\s*(?:primitives\.)?ValidatorIndex",
+        body,
+    ):
+        validator_index_slices.add(match.group(1))
+    # Find the deterministic private-key slice name.
+    key_slice_names: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*,?\s*(?:\w+)\s*,?\s*:=\s*util\.DeterministicDepositsAndKeys\s*\(",
+        body,
+    ):
+        key_slice_names.add(match.group(1))
+    if not key_slice_names:
+        return guarded
+    # Loop over a validator-index slice and index privKeys with the value.
+    for match in re.finditer(
+        r"\bfor\s+_,\s*(\w+)\s*:=\s*range\s+(\w+)\s*\{",
+        body,
+    ):
+        idx, arr = match.group(1), match.group(2)
+        if arr not in validator_index_slices:
+            continue
+        for key_slice in key_slice_names:
+            if re.search(rf"\b{re.escape(key_slice)}\s*\[\s*{re.escape(idx)}\s*\]", body):
+                guarded.add(idx)
     return guarded
 
 

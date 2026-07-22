@@ -4760,3 +4760,43 @@ func (s *Slice[V]) Len() int {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("Len" in issue.message and "non-nil" in issue.message for issue in issues)
+
+
+def test_go_prysm_validator_index_into_deterministic_privkeys() -> None:
+    """Prysm end-to-end validator indices are valid indices into deterministic privKeys."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package evaluators
+
+func submitWithdrawal() error {
+    exitedIndices := make([]primitives.ValidatorIndex, 0)
+    _, privKeys, err := util.DeterministicDepositsAndKeys(100)
+    if err != nil {
+        return err
+    }
+    for _, idx := range exitedIndices {
+        if !bytes.Equal(pubkey, privKeys[idx].PublicKey().Marshal()) {
+            return nil
+        }
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("submitWithdrawal" in issue.message and "bounds" in issue.message for issue in issues)
+
+
+def test_go_testdata_directory_is_skipped() -> None:
+    """Files inside ``testdata`` directories are treated as test data and skipped."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package main
+
+func div(x, y uint32) uint32 {
+    return x / y
+}
+
+func main() {}
+'''
+    issues = _detect_safety_issues(source, "go", source_file="/home/ubuntu/repos/go/src/cmd/cgo/internal/testshared/testdata/division/division.go")
+    assert issues == []
