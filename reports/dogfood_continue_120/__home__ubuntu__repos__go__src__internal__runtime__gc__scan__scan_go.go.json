@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/runtime/gc/scan/scan_go.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

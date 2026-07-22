@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/rule-list/RuleList.v2.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

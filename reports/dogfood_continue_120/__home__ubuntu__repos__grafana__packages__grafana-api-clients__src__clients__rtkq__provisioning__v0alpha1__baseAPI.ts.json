@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-api-clients/src/clients/rtkq/provisioning/v0alpha1/baseAPI.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

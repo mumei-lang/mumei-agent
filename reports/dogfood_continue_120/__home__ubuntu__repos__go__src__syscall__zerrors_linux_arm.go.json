@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/syscall/zerrors_linux_arm.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

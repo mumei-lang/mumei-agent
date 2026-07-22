@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/syscall/zsyscall_freebsd_riscv64.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

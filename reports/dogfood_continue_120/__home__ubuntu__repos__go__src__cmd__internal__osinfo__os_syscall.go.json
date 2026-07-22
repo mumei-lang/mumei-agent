@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/cmd/internal/osinfo/os_syscall.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-openapi/src/scripts/process-specs.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

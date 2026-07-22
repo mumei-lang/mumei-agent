@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard/components/GenAI/utils.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}
