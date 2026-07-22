@@ -788,7 +788,8 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
         source,
         re.MULTILINE,
     ):
-        decls.append((match.group(1), match.group(2), match.group(3).strip()))
+        value = re.sub(r"\s*//.*", "", match.group(3)).strip()
+        decls.append((match.group(1), match.group(2), value))
     # Block declarations.
     i = 0
     while True:

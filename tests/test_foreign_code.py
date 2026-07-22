@@ -2866,6 +2866,27 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_const_with_trailing_line_comment() -> None:
+    """Single-line Go constants with trailing ``//`` comments are parsed."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package goobj
+
+const stringRefSize = 8 // two uint32s
+const SymSize = stringRefSize + 2 + 1 + 1 + 1 + 4 + 4
+
+func NPkg(r []byte, off int) int {
+	return (len(r) - off) / stringRefSize
+}
+
+func NSym(r []byte, off int) int {
+	return (len(r) - off) / SymSize
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("stringRefSize" in i.message or "SymSize" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_unsigned_index_guard_with_leading_and() -> None:
     """Unsigned ``size < len(table)`` guard works when prefixed by ``&&``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
