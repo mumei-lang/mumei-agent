@@ -780,10 +780,22 @@ def _go_nonzero_constants(source: str) -> set[str]:
         r"^\s*(?:const|var)\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL
     ):
         block = match.group(1)
-        for m in re.finditer(
-            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", block, re.MULTILINE
-        ):
-            name, value = m.group(1), m.group(2)
+        prev_value: str | None = None
+        for raw_line in block.splitlines():
+            line = re.sub(r"//.*", "", raw_line).strip()
+            if not line:
+                continue
+            m = re.match(r"(\w+)(?:\s+\w+)?\s*(?:=\s*(.+))?$", line)
+            if not m:
+                continue
+            name = m.group(1)
+            value = m.group(2)
+            if value is None:
+                if prev_value is None:
+                    continue
+                value = prev_value
+            else:
+                prev_value = value
             if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
                 nonzero.add(name)
     return nonzero
@@ -2032,6 +2044,10 @@ _GO_NONNIL_EXACT_TYPES = {
     "MemProfileRecord",
     "Timespec",  # syscall/unix time-value structs are always initialized pointers
     "Timeval",
+    "DB",  # database/sql.DB handles are opened once and used through non-nil pointers
+    "Tx",  # database/sql.Tx is returned by Begin and used non-nil until Commit/Rollback
+    "Rows",  # database/sql.Rows is returned by Query and used non-nil until Close
+    "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -2237,6 +2253,13 @@ def _go_is_known_interface_method(
     if name == "HashTreeRoot" and "[32]byte" in ret and "error" in ret:
         return True
     if name == "HashTreeRootWith" and "*fssz.Hasher" in params_text and re.search(r"\berror\b", ret):
+        return True
+    # ``k8s.io/apiserver/pkg/storage/value.Transformer`` implementation methods
+    # (``TransformFromStorage`` / ``TransformToStorage``) are invoked on non-nil
+    # concrete transformers by the storage layer.
+    if name == "TransformFromStorage" and "value.Context" in params_text and "[]byte" in ret and "error" in ret:
+        return True
+    if name == "TransformToStorage" and "value.Context" in params_text and "[]byte" in ret and "error" in ret:
         return True
     # ``encoding/json.Marshaler`` / ``encoding/json.Unmarshaler`` methods are
     # always invoked on non-nil concrete values by the encoder/decoder.
@@ -4379,6 +4402,32 @@ def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
     return blocks
 
 
+def _ts_nullable_param_set(params_text: str) -> set[str]:
+    """Return the set of parameter names that may be null/undefined."""
+    nullable: set[str] = set()
+    for raw in _split_params(params_text):
+        if not raw.strip():
+            continue
+        parts = raw.split(":", 1)
+        pname = parts[0].strip().split("=")[0].strip().rstrip("?")
+        if not pname:
+            continue
+        if len(parts) < 2:
+            # No type annotation: conservative.
+            nullable.add(_safe_identifier(pname))
+            continue
+        type_text = parts[1].strip()
+        is_optional = raw.strip().startswith(pname + "?") or type_text.endswith("?")
+        if (
+            is_optional
+            or "null" in type_text.lower()
+            or "undefined" in type_text.lower()
+            or type_text.lower() == "any"
+        ):
+            nullable.add(_safe_identifier(pname))
+    return nullable
+
+
 def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     """Map each TypeScript function name to the set of possibly-null parameter names.
 
@@ -4387,6 +4436,14 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     array/object parameters are excluded so that ``.length`` and indexing do not
     produce false positives for well-typed inputs.
     """
+    extracted = tree_sitter_extract.extract_functions(source, "typescript", _safe_identifier)
+    if extracted is not None:
+        return {
+            fn.name: _ts_nullable_param_set(fn.params_text or "")
+            for fn in extracted
+            if fn.has_body
+        }
+    # Fallback regex when tree-sitter is unavailable.
     result: dict[str, set[str]] = {}
     function_pattern = re.compile(
         r"(?:export\s+)?(?:async\s+)?function\s+"
@@ -4403,30 +4460,8 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     )
     for match in (*function_pattern.finditer(source), *arrow_pattern.finditer(source)):
         name = _safe_identifier(match.group("name"))
-        nullable: set[str] = set()
-        params_text = match.group("params")
-        if params_text:
-            for raw in _split_params(params_text):
-                if not raw.strip():
-                    continue
-                parts = raw.split(":", 1)
-                pname = parts[0].strip().split("=")[0].strip().rstrip("?")
-                if not pname:
-                    continue
-                if len(parts) < 2:
-                    # No type annotation: conservative.
-                    nullable.add(_safe_identifier(pname))
-                    continue
-                type_text = parts[1].strip()
-                is_optional = raw.strip().startswith(pname + "?") or type_text.endswith("?")
-                if (
-                    is_optional
-                    or "null" in type_text.lower()
-                    or "undefined" in type_text.lower()
-                    or type_text.lower() == "any"
-                ):
-                    nullable.add(_safe_identifier(pname))
-        result[name] = nullable
+        params_text = match.group("params") or ""
+        result[name] = _ts_nullable_param_set(params_text)
     return result
 
 

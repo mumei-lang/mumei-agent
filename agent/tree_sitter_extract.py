@@ -153,6 +153,31 @@ _VALUE_FUNCTION_NODE_TYPES = {"arrow_function", "function_expression"}
 _BLOCK_NODE_TYPES = {"block", "statement_block", "function_body"}
 
 
+def _react_wrapped_function(value_node, source_bytes: bytes):
+    """Return the inner arrow/function expression wrapped by ``memo(...)`` or ``forwardRef(...)``.
+
+    React components are often exported as ``const X = memo((props) => ...)``.
+    If the variable value is a call to ``memo`` or ``forwardRef`` and the first
+    argument is an arrow or function expression, treat that argument as the
+    actual function body.
+    """
+    if value_node is None or value_node.type != "call_expression":
+        return None
+    callee = value_node.child_by_field_name("function")
+    if callee is None:
+        return None
+    name = _decode(source_bytes, callee)
+    if name not in {"memo", "forwardRef"}:
+        return None
+    arguments_node = value_node.child_by_field_name("arguments")
+    if arguments_node is None:
+        return None
+    for arg in arguments_node.named_children:
+        if arg.type in _VALUE_FUNCTION_NODE_TYPES:
+            return arg
+    return None
+
+
 def _decode(source_bytes: bytes, node) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
@@ -189,7 +214,7 @@ def _is_top_level_function(node, language: str) -> bool:
     return True
 
 
-def _outer_declaration_node(node, language: str):
+def _outer_declaration_node(node, language: str, source_bytes: bytes | None = None):
     """Return the outer-most statement node that owns a function declaration.
 
     For TypeScript this surfaces ``export_statement`` / ``lexical_declaration``
@@ -203,7 +228,12 @@ def _outer_declaration_node(node, language: str):
         return node
     if node.type == "variable_declarator" and node.parent is not None:
         value = node.child_by_field_name("value")
-        if value is not None and value.type in _VALUE_FUNCTION_NODE_TYPES:
+        func_value = (
+            value
+            if value is not None and value.type in _VALUE_FUNCTION_NODE_TYPES
+            else _react_wrapped_function(value, source_bytes) if source_bytes is not None else None
+        )
+        if func_value is not None:
             lexical = node.parent
             if (
                 lexical is not None
@@ -228,7 +258,7 @@ def _char_offsets(source_bytes: bytes) -> list[int]:
     return offsets
 
 
-def _iter_function_nodes(root, language: str):
+def _iter_function_nodes(root, language: str, source_bytes: bytes | None = None):
     """Yield ``(name_node, body_node, function_node)`` for every function/method in the tree."""
     function_types = _FUNCTION_NODE_TYPES[language]
     stack = [root]
@@ -242,12 +272,14 @@ def _iter_function_nodes(root, language: str):
         elif language == "typescript" and node.type == "variable_declarator":
             value = node.child_by_field_name("value")
             name_node = node.child_by_field_name("name")
-            if (
-                value is not None
-                and value.type in _VALUE_FUNCTION_NODE_TYPES
-                and name_node is not None
-            ):
-                yield name_node, value.child_by_field_name("body"), node
+            if value is not None and name_node is not None:
+                func_value = (
+                    value
+                    if value.type in _VALUE_FUNCTION_NODE_TYPES
+                    else _react_wrapped_function(value, source_bytes) if source_bytes is not None else None
+                )
+                if func_value is not None:
+                    yield name_node, func_value.child_by_field_name("body"), node
         stack.extend(reversed(node.children))
 
 
@@ -287,10 +319,10 @@ def _extract(
     char_offsets = _char_offsets(source_bytes)
     results: list[ExtractedFunction] = []
     for name_node, body_node, fn_node in _iter_function_nodes(
-        tree.root_node, canonical
+        tree.root_node, canonical, source_bytes
     ):
         raw_name = _decode(source_bytes, name_node)
-        declaration_node = _outer_declaration_node(fn_node, canonical)
+        declaration_node = _outer_declaration_node(fn_node, canonical, source_bytes)
         body, body_start_byte, body_end_byte = _inner_body_offsets(
             source_bytes, body_node
         )
@@ -483,6 +515,10 @@ def _typescript_signature(
     value_node = fn_node
     if fn_node.type == "variable_declarator":
         value_node = fn_node.child_by_field_name("value")
+        if value_node is not None and value_node.type == "call_expression":
+            wrapped = _react_wrapped_function(value_node, source_bytes)
+            if wrapped is not None:
+                value_node = wrapped
     if value_node is None or value_node.type not in {
         "function_declaration",
         "method_definition",
@@ -572,12 +608,12 @@ def _extract_full(
     char_offsets = _char_offsets(source_bytes)
     results: list[ExtractedFunction] = []
     for name_node, body_node, fn_node in _iter_function_nodes(
-        tree.root_node, canonical
+        tree.root_node, canonical, source_bytes
     ):
         raw_name = _decode(source_bytes, name_node)
         name = safe_identifier(raw_name)
         line = name_node.start_point[0] + 1
-        declaration_node = _outer_declaration_node(fn_node, canonical)
+        declaration_node = _outer_declaration_node(fn_node, canonical, source_bytes)
         body, body_start_byte, body_end_byte = _inner_body_offsets(
             source_bytes, body_node
         )
