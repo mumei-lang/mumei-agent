@@ -2582,6 +2582,41 @@ func (b *Block) Log() {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_negative_or_len_guard() -> None:
+    """``if id < 0 || int(id) >= len(arr) { return }`` guards ``arr[id]``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package gob
+var idToTypeSlice []int
+func idToType(id int32) int {
+    if id < 0 || int(id) >= len(idToTypeSlice) {
+        return 0
+    }
+    return idToTypeSlice[id]
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("idToTypeSlice" in i.message and "bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
+    """Short map aliases and type-asserted map variables are map accesses."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package gob
+var typeInfoMapInit = make(map[string]int)
+func lookupTypeInfo(rt string) int {
+    if m := typeInfoMapInit; m != nil {
+        return m[rt]
+    }
+    v, _ := cache.Load().(map[string]int)
+    return v[rt]
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_skips_map_key_access() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
 

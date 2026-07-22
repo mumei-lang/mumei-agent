@@ -1861,6 +1861,33 @@ def _go_guarded_indices(
             and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
         ):
             guarded.add(idx)
+    # ``if id < 0 || int(id) >= len(arr) { return }`` implies ``0 <= id < len(arr)`` after.
+    for match in re.finditer(
+        r"\bif\s+(?:"
+        r"(?P<idx1>\w+)\s*<\s*0\s*\|\|\s*(?:int\(\s*(?P=idx1)\s*\)|(?P=idx1))\s*>=\s*len\(\s*(?P<arr1>\w+)\s*\)"
+        r"|"
+        r"(?:int\(\s*(?P<idx2>\w+)\s*\)|(?P=idx2))\s*>=\s*len\(\s*(?P<arr2>\w+)\s*\)\s*\|\|\s*(?P=idx2)\s*<\s*0"
+        r")\s*\{",
+        body,
+    ):
+        idx = match.group("idx1") or match.group("idx2")
+        arr = match.group("arr1") or match.group("arr2")
+        block_start = body.find("{", match.end() - 1)
+        if block_start == -1:
+            continue
+        depth = 1
+        i = block_start + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        if (
+            "return" in body[block_start + 1 : i - 1]
+            and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
+        ):
+            guarded.add(idx)
     # Enum-type parameters indexing package-level ``[num<Type>]`` arrays.
     if param_types and source:
         guarded |= _go_enum_param_guarded_indices(body, param_types, source)
@@ -3128,9 +3155,20 @@ def _go_map_names(source: str) -> set[str]:
     return names
 
 
-def _go_local_map_names(body: str) -> set[str]:
+def _go_local_map_names(body: str, known_maps: set[str] | None = None) -> set[str]:
     """Return short variable map declarations local to a function body."""
-    return {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
+    names = {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
+    # Type assertion to a map type: ``m, _ := v.(map[K]V)``.
+    for match in re.finditer(
+        r"\b(\w+)\s*(?:,\s*\w+)?\s*:=\s*[^;{}]*\.\(\s*map\[", body
+    ):
+        names.add(match.group(1))
+    # Alias of a known map variable: ``m := knownMap``.
+    if known_maps:
+        known = "|".join(re.escape(name) for name in known_maps)
+        for match in re.finditer(rf"\b(\w+)\s*:=\s*(?:{known})\b", body):
+            names.add(match.group(1))
+    return names
 
 
 def _go_map_type_names(source: str) -> set[str]:
@@ -3624,7 +3662,7 @@ def _detect_go_safety_issues(
                 # soundly analyzed without concrete type constraints.
                 continue
             body = fn.body
-            go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(fn.params_text, map_type_names)
+            go_map_names = file_map_names | _go_local_map_names(body, file_map_names) | _go_map_receiver_names(fn.params_text, map_type_names)
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
             nonnil_param_names = (
@@ -3799,7 +3837,7 @@ def _detect_go_safety_issues(
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
-        go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(params_text, map_type_names)
+        go_map_names = file_map_names | _go_local_map_names(body, file_map_names) | _go_map_receiver_names(params_text, map_type_names)
         guaranteed_nonzero = (
             base_guaranteed_nonzero
             | _go_local_nonzero_variables(body)
