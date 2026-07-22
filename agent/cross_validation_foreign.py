@@ -691,6 +691,14 @@ def _addition_pairs_regex(expression: str) -> list[tuple[str, str]]:
     ``SafeCast`` in ``result + SafeCast.toUint(...)``), which are not integer
     variables and must not be bounded as free integers (#281).
     """
+    # Rust trait object / existential bounds like ``dyn Error + Send`` or
+    # ``impl Trait + Send`` use ``+`` for trait composition, not arithmetic.
+    expression = re.sub(
+        r"\b(?:dyn|impl)\b[^;{},()\[\]]*(?:\s*\+\s*[^;{},()\[\]]*)*",
+        " ",
+        expression,
+        flags=re.DOTALL,
+    )
     pairs: list[tuple[str, str]] = []
     for match in re.finditer(
         r"\b(?P<left>[A-Za-z_][A-Za-z0-9_]*)\s*\+\s*(?P<right>[A-Za-z_][A-Za-z0-9_]*)",
