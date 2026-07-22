@@ -3936,3 +3936,43 @@ func (p *P256Point) Bytes() []byte {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_go_x509_certificate_receiver_non_nil() -> None:
+    """crypto/x509.Certificate pointer-receiver methods are called on non-nil parsed values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package x509
+
+type Certificate struct { Raw []byte }
+
+func (c *Certificate) CheckSignatureFrom(parent *Certificate) error {
+    if parent.Version == 3 && !parent.BasicConstraintsValid {
+        return nil
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_go_guarded_indices_strict_lower_bound() -> None:
+    """A guard ``0 < i && int(i) < len(arr)`` makes ``arr[i]`` safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package x509
+
+type PublicKeyAlgorithm int
+
+var publicKeyAlgoName = []string{"RSA", "DSA"}
+
+func (algo PublicKeyAlgorithm) String() string {
+    if 0 < algo && int(algo) < len(publicKeyAlgoName) {
+        return publicKeyAlgoName[algo]
+    }
+    return ""
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)

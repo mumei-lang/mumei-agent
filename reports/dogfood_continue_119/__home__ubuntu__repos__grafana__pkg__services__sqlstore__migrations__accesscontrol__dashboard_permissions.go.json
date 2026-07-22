@@ -1,0 +1,10 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/sqlstore/migrations/accesscontrol/dashboard_permissions.go",
+  "language": "go",
+  "status": "refuted",
+  "errors": [
+    "Go function `Exec` can dereference `d` without a non-nil contract (Z3 counterexample: d_is_nil=true)",
+    "Z3 Counter-example: d_is_nil=True"
+  ]
+}

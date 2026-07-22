@@ -1,0 +1,11 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/ssagen/ssa.go",
+  "language": "go",
+  "status": "refuted",
+  "errors": [
+    "Go function `Log` can dereference `s` without a non-nil contract (Z3 counterexample: s_is_nil=true)",
+    "Go function `Debug_checknil` can dereference `s` without a non-nil contract (Z3 counterexample: s_is_nil=true)",
+    "Z3 Counter-example: s_is_nil=True"
+  ]
+}
