@@ -4087,3 +4087,113 @@ func (tv *Timeval) timestamp() timestamp {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("nil" in issue.message for issue in issues)
+
+
+def test_xorm_core_receiver_nonnil_and_idx_guard() -> None:
+    """XORM core pointer receivers and ``arr != nil && idx < len(arr)`` guards."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package core
+
+import "database/sql"
+
+type Column struct{ Name string }
+
+type DB struct {
+    *sql.DB
+    Mapper IMapper
+}
+
+type Rows struct {
+    *sql.Rows
+    db *DB
+}
+
+type Base struct {
+    db *DB
+}
+
+type Table struct {
+    Name       string
+    columnsMap map[string][]*Column
+}
+
+func (db *DB) Query() (*Rows, error) {
+    return db.QueryContext(nil, "")
+}
+
+func (table *Table) columnsByName(name string) []*Column {
+    return table.columnsMap[name]
+}
+
+func (table *Table) GetColumnIdx(name string, idx int) *Column {
+    cols := table.columnsByName(name)
+    if cols != nil && idx < len(cols) {
+        return cols[idx]
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("nil" in issue.message or "bounds" in issue.message for issue in issues)
+
+
+def test_rust_contract_inference_skips_assert_macro_string_argument() -> None:
+    """A multi-line ``assert!`` macro must not be mistaken for the tail expression."""
+    from agent.cross_validation_foreign import _infer_rust_contracts_tree_sitter
+
+    source = '''pub struct Backoff;
+
+impl Backoff {
+    pub fn new_with_rng(config: &Config) -> Self {
+        assert!(
+            config.base >= 1.0,
+            "Backoff base ({}) must be greater or equal than 1.",
+            config.base,
+        );
+
+        Self {
+            base: config.base,
+        }
+    }
+}
+'''
+    atoms = _infer_rust_contracts_tree_sitter(source)
+    assert atoms is not None
+    atom = next(a for a in atoms if a.name == "new_with_rng")
+    assert atom.ensures == "true"
+
+
+def test_go_op_int_cast_enum_index_guarded() -> None:
+    """``op := int(x.Op)`` indexing an ``op2str`` table is guarded by the enum."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syntax
+
+type Operator uint
+type Operation struct { Op Operator }
+
+func opName(x interface{}) string {
+    if e, _ := x.(*Operation); e != nil {
+        op := int(e.Op)
+        if op < len(op2str1) {
+            return op2str1[op]
+        }
+        if op < len(op2str2) {
+            return op2str2[op]
+        }
+    }
+    return ""
+}
+
+var op2str1 = [...]string{
+    Xor: "bitwise complement",
+}
+
+var op2str2 = [...]string{
+    Add: "addition",
+    Sub: "subtraction",
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
