@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/cloudwatch/mocks/cloudwatch-ppl-test-data/singleLineQueries.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

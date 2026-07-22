@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-flamegraph/src/FlameGraph/FlameGraphCanvas.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

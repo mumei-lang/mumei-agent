@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/beacon-chain/rpc/testutil/mock_exec_chain_info_fetcher.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
