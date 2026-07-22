@@ -866,10 +866,11 @@ def _go_known_nonzero_selectors(source: str) -> set[str]:
 
 
 def _go_beacon_config_nonzero_locals(body: str, source: str) -> set[str]:
-    """Return local variables assigned from ``params.BeaconConfig().*Count``.
+    """Return local variables assigned from ``params.BeaconConfig().*``.
 
-    Prysm/config fields such as ``DataColumnSidecarSubnetCount`` are protocol
-    constants and are never zero, so divisions by them are safe.
+    Prysm/config fields and methods such as ``MaxBlobsPerBlock`` and
+    ``DataColumnSidecarSubnetCount`` are protocol constants and are never zero,
+    so divisions by them are safe.
     """
     aliases = _go_import_aliases(source)
     params_aliases = {
@@ -881,7 +882,7 @@ def _go_beacon_config_nonzero_locals(body: str, source: str) -> set[str]:
     alias_re = "|".join(re.escape(a) for a in params_aliases)
     locals: set[str] = set()
     for match in re.finditer(
-        rf"\b(\w+)\s*:?=\s*(?:\w+\s*\(\s*)?({alias_re})\.BeaconConfig\(\)\.(\w+Count)\b",
+        rf"\b(\w+)\s*:?=\s*(?:\w+\s*\(\s*)?({alias_re})\.BeaconConfig\(\)\.(\w+)(?:\s*\([^)]*\))?\b",
         body,
     ):
         locals.add(match.group(1))
