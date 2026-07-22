@@ -1,0 +1,59 @@
+# Batch 202 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/syntax/walk.go`: verified
+- `go/src/cmd/fix/main.go`: verified
+- `go/src/cmd/go/internal/verylongtest/script_test.go`: verified
+- `go/src/cmd/internal/osinfo/os_windows.go`: verified
+- `go/src/compress/bzip2/bzip2.go`: verified
+- `go/src/crypto/ecdsa/ecdsa_legacy.go`: verified
+- `go/src/encoding/xml/xml_test.go`: verified
+- `go/src/os/removeall_windows.go`: verified
+- `go/src/runtime/pprof/protobuf.go`: verified
+- `go/src/runtime/slice.go`: verified
+- `go/src/strings/strings.go`: verified
+- `go/test/fixedbugs/bug262.go`: verified
+- `go/test/fixedbugs/issue13480.go`: verified
+- `go/test/fixedbugs/issue46653.dir/main.go`: verified
+- `go/test/typeparam/absdiffimp.go`: verified
+- `go/test/typeparam/issue47775.go`: verified
+- `grafana/apps/alerting/rules/pkg/app/util/validator.go`: verified
+- `grafana/packages/grafana-api-clients/src/clients/rtkq/preferences/user/endpoints.gen.ts`: verified
+- `grafana/packages/grafana-ui/src/components/ErrorBoundary/ErrorWithStack.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/uPlot/config/UPlotSeriesBuilder.ts`: verified
+- `grafana/packages/grafana-ui/src/graveyard/GraphNG/hooks.ts`: verified
+- `grafana/pkg/apis/datasource/v0alpha1/datasource_test.go`: verified
+- `grafana/pkg/login/social/connectors/google_oauth_test.go`: verified
+- `grafana/pkg/services/authn/authnimpl/sync/groups_claim_sync_test.go`: verified
+- `grafana/pkg/services/frontend/frontend_service.go`: verified
+- `grafana/pkg/services/grpcserver/interceptors/auth.go`: verified
+- `grafana/pkg/services/libraryelements/database.go`: verified
+- `grafana/pkg/services/serviceaccounts/manager/stats_test.go`: verified
+- `grafana/pkg/services/shorturls/models_test.go`: verified
+- `grafana/pkg/tests/apis/provisioning/repository/pending_delete_test.go`: verified
+- `grafana/pkg/tsdb/cloudwatch/clients/metrics.go`: verified
+- `grafana/public/app/api/clients/scope/v0alpha1/index.ts`: verified
+- `grafana/public/app/core/components/OptionsUI/color.tsx`: verified
+- `grafana/public/app/core/components/OptionsUI/units.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-viewer/tabs/version-history/versions-utils.tsx`: verified
+- `grafana/public/app/features/alerting/unified/rule-list/PaginatedDataSourceLoader.tsx`: verified
+- `grafana/public/app/features/browse-dashboards/fixtures/dashboardsTreeItem.fixture.ts`: verified
+- `grafana/public/app/features/dashboard-scene/scene/dashboard-filters-overview/interactions.ts`: verified
+- `grafana/public/app/features/explore/hooks/useStateSync/parseURL.ts`: verified
+- `grafana/public/app/features/logs/components/LogMessageAnsi.tsx`: verified
+- `prysm/api/client/beacon/doc.go`: verified
+- `prysm/beacon-chain/state/interfaces_gloas.go`: verified
+- `prysm/beacon-chain/state/state-native/custom-types/historical_roots_test.go`: verified
+- `prysm/cmd/beacon-chain/flags/log.go`: verified
+- `prysm/testing/spectest/mainnet/bellatrix__epoch_processing__inactivity_updates_test.go`: verified
+- `prysm/testing/spectest/mainnet/bellatrix__operations__attestation_test.go`: verified
+- `prysm/testing/spectest/mainnet/phase0__epoch_processing__effective_balance_updates_test.go`: verified
+- `prysm/testing/spectest/minimal/gloas__epoch_processing__registry_updates_test.go`: verified
+- `prysm/testing/spectest/minimal/phase0__epoch_processing__slashings_test.go`: verified
+- `prysm/testing/spectest/shared/common/operations/proposer_slashing.go`: verified
