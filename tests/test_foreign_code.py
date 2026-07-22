@@ -3788,6 +3788,23 @@ func divRoundUp(x, y int) int {
     assert not any("divide" in issue.message for issue in issues)
 
 
+def test_go_float_variables_propagates_from_float_params() -> None:
+    """Local float variables derived from float64 parameters are recognized."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package math
+
+func erf(x float64) float64 {
+    s := x - 1
+    P := 1.0 + s*2.0
+    Q := 1 + s*(2.0)
+    return P / Q
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in issue.message for issue in issues)
+
+
 def test_go_guarded_indices_int_cast_upper_bound() -> None:
     """Go upper-bound guard ``int(idx) < len(arr)`` is recognized when the index is unsigned."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -3838,3 +3855,18 @@ func (r *reader) hasTypeParams() bool {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_objfile_file_receiver_non_nil() -> None:
+    """cmd/internal/objfile.File is a container returned by Open; nil receiver is a false positive."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package objfile
+
+type File struct { r int }
+
+func (f *File) Symbols() int { return f.r }
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
