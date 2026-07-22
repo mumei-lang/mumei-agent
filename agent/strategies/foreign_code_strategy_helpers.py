@@ -1284,11 +1284,12 @@ def _go_guarded_indices(body: str, unsigned_vars: set[str] | None = None) -> set
 
 
 def _go_op_enum_guarded_indices(body: str) -> set[str]:
-    """Return variables assigned from ``.Op`` that index ``opcodeTable``."""
+    """Return variables assigned from ``.Op`` that index operation tables."""
     guarded: set[str] = set()
-    for match in re.finditer(r"\b(\w+)\s*:=\s*\w+\.Op\b", body):
+    # Direct ``op := x.Op`` or ``op := int(x.Op)``.
+    for match in re.finditer(r"\b(\w+)\s*:=\s*(?:int\s*\(\s*)?\w+\.Op(?:\s*\))?\b", body):
         idx = match.group(1)
-        if re.search(rf"\bopcodeTable\s*\[\s*{re.escape(idx)}\s*\]", body):
+        if re.search(rf"\b(?:opcodeTable|op2str\w*)\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
     return guarded
 
