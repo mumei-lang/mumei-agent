@@ -2616,6 +2616,15 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         re.DOTALL,
     ):
         contracts.add(match.group(1))
+    # Types with pointer-receiver ``MarshalJSON``/``UnmarshalJSON``/``MarshalYAML``/
+    # ``UnmarshalYAML``/``MarshalText``/``UnmarshalText`` are always used via non-nil
+    # concrete values when the encoder/decoder calls those interface methods.
+    for match in re.finditer(
+        r"\bfunc\s*\(\s*\w+\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*"
+        r"(?:Marshal|Unmarshal)(JSON|YAML|Text|Binary)\s*\(",
+        source,
+    ):
+        contracts.add(match.group(1))
     # Grafana ``migrator.Migrator.AddMigration`` is always called with a
     # freshly-allocated migration struct (``&MigrationType{}``); those receivers
     # are non-nil when ``Exec``/``SQL`` is later invoked.
@@ -2734,6 +2743,11 @@ def _go_is_known_interface_method(
     if name == "MarshalJSON" and "[]byte" in ret and "error" in ret:
         return True
     if name == "UnmarshalJSON" and "[]byte" in params_text and re.search(r"\berror\b", ret):
+        return True
+    # ``gopkg.in/yaml`` / ``goccy/go-yaml`` ``Marshaler`` / ``Unmarshaler`` methods.
+    if name == "MarshalYAML" and "error" in ret:
+        return True
+    if name == "UnmarshalYAML" and "*yaml.Node" in params_text and "error" in ret:
         return True
     # encoding.TextMarshaler / TextUnmarshaler interface methods.
     if name == "MarshalText" and ret.startswith("([]byte") and "error" in ret:
