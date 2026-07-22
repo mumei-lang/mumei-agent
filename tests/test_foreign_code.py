@@ -4602,6 +4602,46 @@ func align(x, a int64) int64 {
     assert not any("align" in issue.message and "non-zero" in issue.message for issue in issues)
 
 
+def test_go_zero_guarded_positive_params() -> None:
+    """An ``if x <= 0 { return }`` guard makes the parameter positive after the return."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package kv
+
+func batches(rowCount, maxRows int) int {
+    if rowCount == 0 || maxRows <= 0 {
+        return 0
+    }
+    return (rowCount + maxRows - 1) / maxRows
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("batches" in issue.message and "non-zero" in issue.message for issue in issues)
+    assert not any("batches" in issue.message and "overflow" in issue.message for issue in issues)
+
+
+def test_go_math_big_nat_scan_loop_index_guarded() -> None:
+    """``math/big`` ``nat`` methods scan with ``for x[i] == 0 { i++ }``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package big
+
+type nat []Word
+
+func (x nat) trailingZeroBits() uint {
+    if len(x) == 0 {
+        return 0
+    }
+    var i uint
+    for x[i] == 0 {
+        i++
+    }
+    return i*_W + uint(bits.TrailingZeros(uint(x[i])))
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("trailingZeroBits" in issue.message and "bounds" in issue.message for issue in issues)
+
 def test_go_beacon_config_nonzero_local_divisor() -> None:
     """Local variables assigned from ``params.BeaconConfig().*`` are protocol constants."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -4618,6 +4658,7 @@ func blobBatchLimit(slot uint64) uint64 {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("blobBatchLimit" in issue.message and "non-zero" in issue.message for issue in issues)
+
 
 
 def test_go_enum_string_method_guarded_local_array() -> None:
@@ -4644,3 +4685,36 @@ func (status RequestStatus) String() string {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("String" in issue.message and "bounds" in issue.message for issue in issues)
+
+
+def test_go_uint64_cast_len_guarded_index() -> None:
+    """A ``uint64(len(arr)) <= uint64(idx)`` guard with return makes ``arr[idx]`` safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package verification
+
+import "github.com/OffchainLabs/prysm/v7/config/params"
+
+type state struct{}
+
+func (s *state) ProposerLookahead() ([]uint64, error) { return nil, nil }
+
+type primitives struct{ Slot uint64 }
+
+func (v *Verifier) VerifyValidProposalSlot(st state) error {
+    lookahead, err := st.ProposerLookahead()
+    if err != nil {
+        return err
+    }
+    slotIndex := primitives.Slot(1)*params.BeaconConfig().SlotsPerEpoch + primitives.Slot(2)
+    if uint64(len(lookahead)) <= uint64(slotIndex) {
+        return err
+    }
+    if lookahead[slotIndex] != 0 {
+        return nil
+    }
+    return nil
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("VerifyValidProposalSlot" in issue.message and "bounds" in issue.message for issue in issues)

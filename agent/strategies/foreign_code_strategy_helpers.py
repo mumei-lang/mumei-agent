@@ -1189,12 +1189,16 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
     """Return parameters guarded by an ``if x == 0 { return }`` early return.
 
     Code after ``if x == 0 { return ... }`` executes only when ``x != 0``,
-    so a subsequent division by ``x`` is safe.
+    so a subsequent division by ``x`` is safe. Also handles ``x <= 0`` guards,
+    which imply ``x > 0`` after the return.
     """
     stripped = _strip_go_rust_literals_and_comments(body)
     guarded: set[str] = set()
     for param in param_names:
-        for match in re.finditer(rf"\bif\s+{re.escape(param)}\s*==\s*0\s*{{", stripped):
+        for match in re.finditer(
+            rf"\bif\s+(?:[^;{{]*\b{re.escape(param)}\s*(?:<=|==)\s*0[^;{{]*)\s*{{",
+            stripped,
+        ):
             i = match.end()
             depth = 1
             block_start = i
@@ -1327,11 +1331,40 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     return set()
 
 
+def _go_math_big_nat_scan_guarded_indices(
+    body: str, package_name: str, rtype: str | None
+) -> set[str]:
+    """Return loop indices scanning a ``math/big`` ``nat`` that are bounded by value.
+
+    ``math/big`` methods such as ``trailingZeroBits`` and ``isPow2`` iterate with
+    ``for x[i] == 0 { i++ }`` over a normalized ``nat`` value. A zero ``nat`` has
+    length 0, so any non-empty ``nat`` has at least one non-zero word and the loop
+    terminates before ``i`` reaches ``len(x)``.
+    """
+    if package_name != "big" or rtype not in {"nat", "*nat"}:
+        return set()
+    stripped = _strip_go_rust_literals_and_comments(body)
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\bfor\s+(?:(\w+)\s*:=\s*0\s*;\s*)?(\w+)\s*\[\s*(\w+)\s*\]\s*==\s*0\s*\{\s*(\w+)\s*\+\+\s*\}",
+        stripped,
+    ):
+        init, container, idx, post = match.groups()
+        if idx != post:
+            continue
+        if init is not None and init != idx:
+            continue
+        guarded.add(idx)
+    return guarded
+
+
 def _go_guarded_indices(
     body: str,
     unsigned_vars: set[str] | None = None,
     param_types: dict[str, str] | None = None,
     source: str | None = None,
+    package_name: str = "",
+    rtype: str | None = None,
 ) -> set[str]:
     """Return index variables that are provably within bounds.
 
@@ -1427,6 +1460,10 @@ def _go_guarded_indices(
     # ``op := v.Op`` followed by ``opcodeTable[op]`` is safe: ``Op`` is an enum whose
     # values are valid indices into the static ``opcodeTable``.
     guarded |= _go_op_enum_guarded_indices(body)
+    # ``builtinId`` values are valid indices for the package-level ``predeclaredFuncs``
+    # array in ``go/types`` / ``cmd/compile/internal/types2``.
+    if param_types and source:
+        guarded |= _go_predeclared_funcs_guarded_indices(body, param_types, source)
     # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
     # stay within ``a``'s bounds, so ``a[idx]`` is safe.
     guarded |= _go_range_index_guarded_indices(body)
@@ -1452,6 +1489,28 @@ def _go_guarded_indices(
             and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
         ):
             guarded.add(idx)
+    # ``if uint64(len(arr)) <= uint64(idx) { return }`` implies ``idx < len(arr)`` after the return.
+    for match in re.finditer(
+        r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*<=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)(?:\s*\))?\s*\{",
+        body,
+    ):
+        arr, idx = match.group(1), match.group(2)
+        block_start = body.find("{", match.end() - 1)
+        if block_start == -1:
+            continue
+        depth = 1
+        i = block_start + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        if (
+            "return" in body[block_start + 1 : i - 1]
+            and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
+        ):
+            guarded.add(idx)
     # Enum-type parameters indexing package-level ``[num<Type>]`` arrays.
     if param_types and source:
         guarded |= _go_enum_param_guarded_indices(body, param_types, source)
@@ -1459,6 +1518,9 @@ def _go_guarded_indices(
     # indexing a package-level ``[N]T`` array is in bounds (e.g. ``uint8`` and ``[256]T``).
     if param_types and source:
         guarded |= _go_unsigned_array_index_guarded_indices(body, param_types, source)
+    # ``math/big`` ``nat`` methods scan with ``for x[i] == 0 { i++ }`` over a
+    # normalized value, so the loop index stays in bounds.
+    guarded |= _go_math_big_nat_scan_guarded_indices(body, package_name, rtype)
     return guarded
 
 
@@ -1470,6 +1532,30 @@ def _go_op_enum_guarded_indices(body: str) -> set[str]:
         idx = match.group(1)
         if re.search(rf"\b(?:opcodeTable|op2str\w*)\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
+    return guarded
+
+
+def _go_predeclared_funcs_guarded_indices(
+    body: str, param_types: dict[str, str] | None, source: str
+) -> set[str]:
+    """Return indices that are ``builtinId`` values indexing ``predeclaredFuncs``."""
+    guarded: set[str] = set()
+    if "predeclaredFuncs" not in source:
+        return guarded
+    # Parameters of type ``builtinId`` are valid indices for the package-level
+    # ``predeclaredFuncs`` array, which has one entry per builtin constant.
+    if param_types:
+        for name, raw_type in param_types.items():
+            if _go_type_basename(raw_type) in {"builtinId"}:
+                if re.search(
+                    rf"\bpredeclaredFuncs\s*\[\s*{re.escape(name)}\s*\]", body
+                ):
+                    guarded.add(name)
+    # Locals assigned from an ``.id`` field (``id := x.id``) that index the array.
+    for match in re.finditer(r"\b(\w+)\s*:=\s*\w+\.id\b", body):
+        local = match.group(1)
+        if re.search(rf"\bpredeclaredFuncs\s*\[\s*{re.escape(local)}\s*\]", body):
+            guarded.add(local)
     return guarded
 
 
@@ -2252,6 +2338,12 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
     contracts: set[str] = set()
     if pkg == "flag" and re.search(r"\btype\s+FlagSet\s+struct\b", source):
         contracts.add("FlagSet")
+    if pkg == "big" and re.search(r"\btype\s+stack\s+struct\b", source):
+        # ``math/big`` ``stack``/``stackInner`` are internal temporaries always
+        # obtained and used through non-nil values; their pointer-receiver helpers
+        # are not meaningful on a nil value.
+        contracts.add("stack")
+        contracts.add("stackInner")
     if pkg == "web" and re.search(r"\btype\s+Context\s+struct\b", source):
         # Web framework request contexts (e.g. Grafana ``pkg/web``) are always
         # created from an active HTTP request; nil receiver counterexamples on
@@ -2923,7 +3015,12 @@ def _detect_go_safety_issues(
                 source, body, param_types, rtype, receiver_name
             )
             guarded_indices = _go_guarded_indices(
-                body, unsigned_vars, param_types=param_types, source=source
+                body,
+                unsigned_vars,
+                param_types=param_types,
+                source=source,
+                package_name=package_name,
+                rtype=rtype,
             ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name)
@@ -3044,6 +3141,8 @@ def _detect_go_safety_issues(
         type("Fn", (), {"params_text": params_text, "name": name})()
         for name, params_text, _, _ in go_decls
     ])
+    package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
+    package_name = package_name.group(1) if package_name else ""
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     file_map_names = _go_map_names(source)
@@ -3084,7 +3183,14 @@ def _detect_go_safety_issues(
         unsigned_vars = _go_unsigned_variables(
             source, body, param_types, rtype, receiver_name
         )
-        guarded_indices = _go_guarded_indices(body, unsigned_vars, param_types=param_types, source=source) | _go_enum_string_guarded_indices(body, name, receiver_name)
+        guarded_indices = _go_guarded_indices(
+            body,
+            unsigned_vars,
+            param_types=param_types,
+            source=source,
+            package_name=package_name,
+            rtype=rtype,
+        ) | _go_enum_string_guarded_indices(body, name, receiver_name)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
@@ -3578,6 +3684,8 @@ def _i64_overflow_safety_issue(
     if _is_pointer_arithmetic_expression(expression, left, right):
         return None
     if label == "Go" and _is_roundup_expression(expression, left, right):
+        return None
+    if label == "Go" and _is_divroundup_expression(expression, right):
         return None
     if _is_size_like_identifier(left) and _is_size_like_identifier(right):
         # Memory-accounting sums of size/length values are not overflow bugs.
