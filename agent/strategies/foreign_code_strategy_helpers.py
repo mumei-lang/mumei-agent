@@ -2485,6 +2485,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
     "StackRecord",  # runtime/pprof profiling records are live container objects
     "MemProfileRecord",
+    "cleanupBlock",  # runtime cleanupBlock allocated by persistentalloc and never nil
+    "cleanupQueue",
     "Timespec",  # syscall/unix time-value structs are always initialized pointers
     "Timeval",
     "DB",  # database/sql.DB handles are opened once and used through non-nil pointers
