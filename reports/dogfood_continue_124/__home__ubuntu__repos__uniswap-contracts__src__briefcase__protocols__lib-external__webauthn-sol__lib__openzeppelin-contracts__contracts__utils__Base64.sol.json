@@ -1,0 +1,7 @@
+{
+  "repo": "uniswap-contracts",
+  "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/lib-external/webauthn-sol/lib/openzeppelin-contracts/contracts/utils/Base64.sol",
+  "language": "solidity",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-schema/src/raw/composable/azuremonitor/dataquery/x/types.gen.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

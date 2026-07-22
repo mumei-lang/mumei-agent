@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/e2e-playwright/test-plugins/grafana-extensionstest-app/webpack.config.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/authn/clients/render.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,12 @@
+{
+  "repo": "uniswap-contracts",
+  "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/lib-external/solmate/src/tokens/ERC20.sol",
+  "language": "solidity",
+  "status": "verified",
+  "errors": [
+    "Solidity function `approve` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless",
+    "Solidity function `transfer` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless",
+    "Solidity function `transferFrom` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless",
+    "Solidity function `permit` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless"
+  ]
+}

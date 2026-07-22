@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/common/forkchoice/builder.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

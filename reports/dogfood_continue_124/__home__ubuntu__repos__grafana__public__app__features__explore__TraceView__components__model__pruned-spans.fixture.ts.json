@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/explore/TraceView/components/model/pruned-spans.fixture.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

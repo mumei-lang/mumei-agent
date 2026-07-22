@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/simd/archsimd/internal/simd_test/generate.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

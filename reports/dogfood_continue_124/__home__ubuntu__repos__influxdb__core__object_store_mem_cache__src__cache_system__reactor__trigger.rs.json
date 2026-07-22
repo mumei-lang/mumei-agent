@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/object_store_mem_cache/src/cache_system/reactor/trigger.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}
