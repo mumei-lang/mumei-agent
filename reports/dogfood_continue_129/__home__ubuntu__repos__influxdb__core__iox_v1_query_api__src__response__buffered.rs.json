@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/core/iox_v1_query_api/src/response/buffered.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

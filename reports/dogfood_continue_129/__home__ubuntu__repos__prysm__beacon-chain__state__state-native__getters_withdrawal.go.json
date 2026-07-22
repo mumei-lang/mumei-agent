@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/beacon-chain/state/state-native/getters_withdrawal.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

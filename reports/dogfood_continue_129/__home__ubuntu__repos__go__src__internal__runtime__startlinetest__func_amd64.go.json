@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/runtime/startlinetest/func_amd64.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

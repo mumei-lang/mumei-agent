@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/cpu/cpu_loong64_hwcap.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

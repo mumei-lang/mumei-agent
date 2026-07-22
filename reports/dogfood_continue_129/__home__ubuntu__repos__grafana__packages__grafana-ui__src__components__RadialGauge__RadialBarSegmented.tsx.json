@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/components/RadialGauge/RadialBarSegmented.tsx",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

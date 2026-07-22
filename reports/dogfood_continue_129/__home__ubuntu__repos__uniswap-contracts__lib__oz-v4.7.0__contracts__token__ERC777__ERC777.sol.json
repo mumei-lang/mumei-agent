@@ -1,0 +1,10 @@
+{
+  "repo": "uniswap-contracts",
+  "file": "/home/ubuntu/repos/uniswap-contracts/lib/oz-v4.7.0/contracts/token/ERC777/ERC777.sol",
+  "language": "solidity",
+  "status": "verified",
+  "errors": [
+    "Solidity function `authorizeOperator` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless",
+    "Solidity function `revokeOperator` is an externally callable state-mutating function with no access-control guard (no `onlyOwner`-style modifier or `require(msg.sender == ...)`); confirm this is intentionally permissionless"
+  ]
+}
