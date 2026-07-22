@@ -1581,6 +1581,10 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
             contracts.add("Info")
         if re.search(r"\btype\s+ArgumentError\s+struct\b", source):
             contracts.add("ArgumentError")
+    if pkg == "objfile" and re.search(r"\btype\s+File\s+struct\b", source):
+        # ``cmd/internal/objfile.File`` is returned by ``Open`` and its public
+        # pointer-receiver methods are only meaningful on the initialized value.
+        contracts.add("File")
     return contracts
 
 
