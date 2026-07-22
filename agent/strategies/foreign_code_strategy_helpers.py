@@ -2610,12 +2610,24 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``mvslice.Slice`` is a generic multivalue container initialized via ``Init``;
         # its pointer-receiver methods (``Len``, ``At``, etc.) are not valid on nil.
         contracts.add("Slice")
-    # Constructors ``New`` / ``NewFoo`` returning ``*T`` indicate ``T`` is a
-    # container/utility type that callers use through non-nil pointer values.
+    # Constructors ``New`` / ``NewFoo`` / ``PopulateFrom*`` returning ``*T``
+    # indicate ``T`` is a container/utility type that callers use through non-nil
+    # pointer values.
     for match in re.finditer(
         r"\bfunc\s+New(?:[A-Z]\w*)?\s*\([^)]*\)\s*\*?\s*([A-Za-z_][A-Za-z0-9_]*)\b",
         source,
         re.DOTALL,
+    ):
+        contracts.add(match.group(1))
+    # ``PopulateFrom*`` constructors return ``*T`` or ``(*T, error)``.
+    for match in re.finditer(
+        r"\bfunc\s+PopulateFrom[A-Za-z0-9_]*\s*\([^)]*\)\s*\(\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
+        source,
+    ):
+        contracts.add(match.group(1))
+    for match in re.finditer(
+        r"\bfunc\s+PopulateFrom[A-Za-z0-9_]*\s*\([^)]*\)\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        source,
     ):
         contracts.add(match.group(1))
     # Types with pointer-receiver ``MarshalJSON``/``UnmarshalJSON``/``MarshalYAML``/
