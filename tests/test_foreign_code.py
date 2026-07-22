@@ -4057,3 +4057,38 @@ func addrLock(addr *uint64) *spinlock {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("can divide" in issue.message for issue in issues)
+
+
+def test_go_op_int_cast_enum_index_guarded() -> None:
+    """``op := int(x.Op)`` indexing an ``op2str`` table is guarded by the enum."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syntax
+
+type Operator uint
+type Operation struct { Op Operator }
+
+func opName(x interface{}) string {
+    if e, _ := x.(*Operation); e != nil {
+        op := int(e.Op)
+        if op < len(op2str1) {
+            return op2str1[op]
+        }
+        if op < len(op2str2) {
+            return op2str2[op]
+        }
+    }
+    return ""
+}
+
+var op2str1 = [...]string{
+    Xor: "bitwise complement",
+}
+
+var op2str2 = [...]string{
+    Add: "addition",
+    Sub: "subtraction",
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
