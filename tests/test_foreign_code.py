@@ -4566,3 +4566,22 @@ func lengthCode(len uint8) uint8 { return lengthCodes[len] }
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("lengthCode" in issue.message and "bounds" in issue.message for issue in issues)
+
+
+def test_go_local_nonzero_variable_divisor() -> None:
+    """A local variable assigned only nonzero literals is a safe divisor/modulus."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package arm64
+
+func addrComponent(a *Addr, acl AClass, index int) uint32 {
+    prefix := a.Offset >> 32 & 0b11
+    sum := 32
+    if prefix == 2 {
+        sum = 16
+    }
+    return uint32((index / 2) % sum)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("addrComponent" in issue.message and "non-zero" in issue.message for issue in issues)
