@@ -1268,6 +1268,47 @@ def _go_align_nonzero_params(body: str) -> set[str]:
     return set()
 
 
+def _go_enum_string_guarded_indices(
+    body: str, function_name: str, receiver_name: str | None
+) -> set[str]:
+    """Return the receiver for an enum ``String`` method with a guarded local array.
+
+    A method such as::
+
+        func (s RequestStatus) String() string {
+            names := [...]string{"ok", "cancelled", "error"}
+            if s < RequestStatusOK || s > RequestStatusError { return "" }
+            return names[s]
+        }
+
+    is guarded by the range check against the enum constants, so the index is safe.
+    """
+    if function_name != "String" or not receiver_name:
+        return set()
+    stripped = _strip_go_rust_literals_and_comments(body)
+    # Local array declared with an inferred or explicit positive size.
+    for m in re.finditer(
+        r"\b(\w+)\s*:=\s*\[(?:\.\.\.|\d+)\][\w\[\]]*\{([^}]*)\}", stripped
+    ):
+        arr, elems = m.group(1), m.group(2)
+        if not elems.strip():
+            continue
+        size = elems.count(",") + 1
+        # Guard of the form ``if s < ConstA || s > ConstB { return ... }``.
+        guard = re.search(
+            rf"\bif\s+{re.escape(receiver_name)}\s*<\s*\w+\s*\|\|\s*{re.escape(receiver_name)}\s*>\s*\w+\s*\{{[^}}]*\breturn\b",
+            stripped,
+        )
+        if not guard:
+            continue
+        if re.search(
+            rf"\breturn\s+{re.escape(arr)}\s*\[\s*{re.escape(receiver_name)}\s*\]",
+            stripped,
+        ):
+            return {receiver_name}
+    return set()
+
+
 def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     """Return the integer divisor parameter for functions named ``Div``/``Mod`` as non-zero.
 
@@ -2931,7 +2972,7 @@ def _detect_go_safety_issues(
                 rtype=rtype,
             ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
-            )
+            ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name)
             suppress_nil = (
                 fn.name in {"String", "Get"}
                 and rtype is not None
@@ -3098,7 +3139,7 @@ def _detect_go_safety_issues(
             source=source,
             package_name=package_name,
             rtype=rtype,
-        )
+        ) | _go_enum_string_guarded_indices(body, name, receiver_name)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
