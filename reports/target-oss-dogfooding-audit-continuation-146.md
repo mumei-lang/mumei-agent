@@ -1,0 +1,59 @@
+# Batch 147 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/cgo/internal/test/issue24161e0/main.go`: verified
+- `go/src/cmd/link/testdata/testHashedSyms/p.go`: verified
+- `go/src/crypto/internal/fips140/aes/interface_test.go`: verified
+- `go/src/go/types/validtype.go`: verified
+- `go/src/internal/trace/testtrace/helpers.go`: verified
+- `go/src/internal/types/testdata/fixedbugs/issue67547.go`: verified
+- `go/test/fixedbugs/bug259.go`: verified
+- `go/test/fixedbugs/bug346.go`: verified
+- `go/test/fixedbugs/issue33866.dir/b.go`: verified
+- `go/test/typeparam/issue48424.go`: verified
+- `grafana/apps/alerting/notifications/pkg/apis/alertingnotifications/v0alpha1/routingtree_codec_gen.go`: verified
+- `grafana/apps/alerting/rules/pkg/apis/alerting/v0alpha1/rulesequence_client_gen.go`: verified
+- `grafana/apps/folder/pkg/apis/folder/v1beta1/register.go`: verified
+- `grafana/apps/iam/pkg/apis/iam/v0alpha1/serviceaccount_schema_gen.go`: verified
+- `grafana/packages/grafana-o11y-ds-frontend/src/combineResponses.test.ts`: verified
+- `grafana/packages/grafana-ui/src/components/DataLinks/FieldLinkList.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/DataLinks/codemirrorUtils.ts`: verified
+- `grafana/pkg/apiserver/auditing/event.go`: verified
+- `grafana/pkg/registry/fieldselectors/selectable_fields_utils.go`: verified
+- `grafana/pkg/services/auth/idtest/mock.go`: verified
+- `grafana/pkg/services/ldap/service/helpers.go`: verified
+- `grafana/pkg/storage/unified/sql/db/dbimpl/regression_incident_2144_test.go`: verified
+- `grafana/public/app/features/alerting/unified/components/InhibitionRulesAlert.test.tsx`: verified
+- `grafana/public/app/features/alerting/unified/rule-list/filter/RulesFilterSidebar.test.tsx`: verified
+- `grafana/public/app/features/commandPalette/types.ts`: verified
+- `grafana/public/app/features/dashboard-scene/panel-edit/PanelEditNext/QueryEditor/hooks/useSelectionState.ts`: verified
+- `grafana/public/app/features/dashboard-scene/scene/DashboardDataLayerControls.test.tsx`: verified
+- `grafana/public/app/features/provisioning/File/FileHistoryPage.tsx`: verified
+- `grafana/public/app/plugins/datasource/azuremonitor/utils/migrateQuery.test.ts`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/mocks/cloudwatch-logs-sql-test-data/multiLineFullQueryWithCaseClause.ts`: verified
+- `influxdb/influxdb3/src/lib_tests.rs`: verified
+- `influxdb/influxdb3_cache/src/distinct_cache/tests.rs`: verified
+- `influxdb/influxdb3_cache/src/last_cache/metrics/tests.rs`: verified
+- `influxdb/influxdb3_cache/src/parquet_cache/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/catalog/versions/v3/ops/role/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/object_store/versions/v2/tests.rs`: verified
+- `influxdb/influxdb3_catalog/src/snapshot/versions/v2/conversion/tests.rs`: verified
+- `influxdb/influxdb3_clap_blocks/src/memory_size/tests.rs`: verified
+- `influxdb/influxdb3_load_generator/src/specification/tests.rs`: verified
+- `influxdb/influxdb3_system_tables/src/python_call/tests.rs`: verified
+- `prysm/beacon-chain/blockchain/forkchoice_update_execution.go`: verified
+- `prysm/beacon-chain/light-client/lightclient_test.go`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_gloas.go`: verified
+- `prysm/beacon-chain/sync/backfill/blobs_test.go`: verified
+- `prysm/proto/migration/v1alpha1_to_v1.go`: verified
+- `prysm/testing/endtoend/types/fork.go`: verified
+- `prysm/testing/spectest/minimal/electra__epoch_processing__randao_mixes_reset_test.go`: verified
+- `prysm/testing/spectest/minimal/phase0__operations__attestation_test.go`: verified
+- `prysm/validator/client/beacon-api/genesis_test.go`: verified
+- `prysm/validator/client/wait_helpers.go`: verified
