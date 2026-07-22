@@ -1,0 +1,59 @@
+# Batch 166 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/test/divconst_test.go`: verified
+- `go/src/encoding/xml/example_text_marshaling_test.go`: verified
+- `go/src/internal/types/testdata/check/lookup2.go`: verified
+- `go/src/io/ioutil/example_test.go`: verified
+- `go/src/net/http/routing_tree.go`: verified
+- `go/src/os/copy_test.go`: verified
+- `go/src/runtime/stubs_amd64.go`: verified
+- `go/test/fixedbugs/bug129.go`: verified
+- `go/test/fixedbugs/bug499.go`: verified
+- `go/test/fixedbugs/issue7742.go`: verified
+- `go/test/fixedbugs/issue887.go`: verified
+- `grafana/apps/provisioning/pkg/repository/staged_test.go`: verified
+- `grafana/pkg/api/apierrors/dashboard.go`: verified
+- `grafana/pkg/cmd/grafana-server/commands/cli.go`: verified
+- `grafana/pkg/infra/serverlock/serverlock_integration_test.go`: verified
+- `grafana/pkg/plugins/pluginassets/testdata/module-hash-valid-deeply-nested/datasource/module.js`: verified
+- `grafana/pkg/registry/apis/folders/parents_test.go`: verified
+- `grafana/pkg/registry/apis/provisioning/historic_job_storage.go`: verified
+- `grafana/pkg/services/apikey/apikeyimpl/apikey.go`: verified
+- `grafana/pkg/services/libraryelements/conversions_test.go`: verified
+- `grafana/pkg/services/live/features/dashboard.go`: verified
+- `grafana/pkg/services/live/pipeline/frame_storage.go`: verified
+- `grafana/pkg/services/ngalert/schedule/sequence_test.go`: verified
+- `grafana/pkg/services/rendering/interface.go`: verified
+- `grafana/pkg/storage/unified/testing/search_backend.go`: verified
+- `grafana/public/app/core/components/RolePickerDrawer/RolePickerBadges.tsx`: verified
+- `grafana/public/app/features/admin/ldap/LdapUserPermissions.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-editor/dag.ts`: verified
+- `grafana/public/app/features/dashboard-scene/conditional-rendering/conditions/ConditionalRenderingVariable.tsx`: verified
+- `grafana/public/app/features/dashboard-scene/edit-pane/codePaneUtils.ts`: verified
+- `grafana/public/app/features/library-panels/components/OpenLibraryPanelModal/OpenLibraryPanelModal.tsx`: verified
+- `grafana/public/app/features/migrate-to-cloud/onprem/ConfigureSnapshot.tsx`: verified
+- `grafana/public/app/features/scopes/selector/ScopesTreeHeadline.tsx`: verified
+- `grafana/public/app/features/serviceaccounts/components/CreateTokenModal.tsx`: verified
+- `grafana/public/app/features/transformers/spatial/SpatialTransformerEditor.tsx`: verified
+- `grafana/public/app/features/variables/query/VariableQueryRunner.ts`: verified
+- `grafana/public/app/features/visualization/data-hover/ExemplarTooltip.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/components/QueryEditor/LogsQueryEditor/LogsQueryEditor.tsx`: verified
+- `prysm/beacon-chain/cache/cache_test.go`: verified
+- `prysm/beacon-chain/cache/committee_fuzz_test.go`: verified
+- `prysm/beacon-chain/cache/depositsnapshot/deposit_inserter.go`: verified
+- `prysm/beacon-chain/state/interfaces.go`: verified
+- `prysm/beacon-chain/verification/verification_test.go`: verified
+- `prysm/cmd/client-stats/flags/flags.go`: verified
+- `prysm/cmd/validator/accounts/delete_test.go`: verified
+- `prysm/crypto/bls/bls.go`: verified
+- `prysm/proto/prysm/v1alpha1/slasher.pb.go`: verified
+- `prysm/testing/spectest/minimal/electra__epoch_processing__pending_consolidations_test.go`: verified
+- `prysm/tools/analyzers/maligned/maligned.go`: verified
+- `prysm/validator/db/filesystem/db_test.go`: verified
