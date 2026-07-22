@@ -4444,3 +4444,22 @@ func (pq *PriorityQueue) Len() int {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("PriorityQueue" in issue.message and "dereference" in issue.message for issue in issues)
+
+
+def test_typescript_nested_function_param_length_access() -> None:
+    """Nested function-type parameters do not cause spurious non-null findings on locals."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+export function useScopesRow(onApply: () => void) {
+  const { selectedScopes } = useScopeServicesState();
+  const isDirty =
+    selectedScopes.map((s) => s.id).sort().join('') !==
+    appliedScopes.map((s) => s.id).sort().join('');
+  return {
+    scopesRow: isDirty || selectedScopes.length ? selectedScopes.map((s) => s.id) : null,
+  };
+}
+'''
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("selectedScopes" in issue.message and "non-null" in issue.message for issue in issues)

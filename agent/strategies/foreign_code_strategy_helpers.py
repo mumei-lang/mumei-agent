@@ -4379,6 +4379,32 @@ def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
     return blocks
 
 
+def _ts_nullable_param_set(params_text: str) -> set[str]:
+    """Return the set of parameter names that may be null/undefined."""
+    nullable: set[str] = set()
+    for raw in _split_params(params_text):
+        if not raw.strip():
+            continue
+        parts = raw.split(":", 1)
+        pname = parts[0].strip().split("=")[0].strip().rstrip("?")
+        if not pname:
+            continue
+        if len(parts) < 2:
+            # No type annotation: conservative.
+            nullable.add(_safe_identifier(pname))
+            continue
+        type_text = parts[1].strip()
+        is_optional = raw.strip().startswith(pname + "?") or type_text.endswith("?")
+        if (
+            is_optional
+            or "null" in type_text.lower()
+            or "undefined" in type_text.lower()
+            or type_text.lower() == "any"
+        ):
+            nullable.add(_safe_identifier(pname))
+    return nullable
+
+
 def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     """Map each TypeScript function name to the set of possibly-null parameter names.
 
@@ -4387,6 +4413,14 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     array/object parameters are excluded so that ``.length`` and indexing do not
     produce false positives for well-typed inputs.
     """
+    extracted = tree_sitter_extract.extract_functions(source, "typescript", _safe_identifier)
+    if extracted is not None:
+        return {
+            fn.name: _ts_nullable_param_set(fn.params_text or "")
+            for fn in extracted
+            if fn.has_body
+        }
+    # Fallback regex when tree-sitter is unavailable.
     result: dict[str, set[str]] = {}
     function_pattern = re.compile(
         r"(?:export\s+)?(?:async\s+)?function\s+"
@@ -4403,30 +4437,8 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     )
     for match in (*function_pattern.finditer(source), *arrow_pattern.finditer(source)):
         name = _safe_identifier(match.group("name"))
-        nullable: set[str] = set()
-        params_text = match.group("params")
-        if params_text:
-            for raw in _split_params(params_text):
-                if not raw.strip():
-                    continue
-                parts = raw.split(":", 1)
-                pname = parts[0].strip().split("=")[0].strip().rstrip("?")
-                if not pname:
-                    continue
-                if len(parts) < 2:
-                    # No type annotation: conservative.
-                    nullable.add(_safe_identifier(pname))
-                    continue
-                type_text = parts[1].strip()
-                is_optional = raw.strip().startswith(pname + "?") or type_text.endswith("?")
-                if (
-                    is_optional
-                    or "null" in type_text.lower()
-                    or "undefined" in type_text.lower()
-                    or type_text.lower() == "any"
-                ):
-                    nullable.add(_safe_identifier(pname))
-        result[name] = nullable
+        params_text = match.group("params") or ""
+        result[name] = _ts_nullable_param_set(params_text)
     return result
 
 
