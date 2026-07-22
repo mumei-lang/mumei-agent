@@ -4602,6 +4602,24 @@ func align(x, a int64) int64 {
     assert not any("align" in issue.message and "non-zero" in issue.message for issue in issues)
 
 
+def test_go_beacon_config_nonzero_local_divisor() -> None:
+    """Local variables assigned from ``params.BeaconConfig().*`` are protocol constants."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package sync
+
+import "github.com/prysmaticlabs/prysm/v5/config/params"
+
+func blobBatchLimit(slot uint64) uint64 {
+    maxBlobsPerBlock := params.BeaconConfig().MaxBlobsPerBlock(slot)
+    maxPossibleBlobs := uint64(1000)
+    return maxPossibleBlobs / maxBlobsPerBlock
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("blobBatchLimit" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
 def test_go_enum_string_method_guarded_local_array() -> None:
     """An enum ``String`` method with a range guard and local string array is safe."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
