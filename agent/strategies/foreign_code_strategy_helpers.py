@@ -783,10 +783,22 @@ def _go_nonzero_constants(source: str) -> set[str]:
         r"^\s*(?:const|var)\s*\((.*?)\)", source, re.MULTILINE | re.DOTALL
     ):
         block = match.group(1)
-        for m in re.finditer(
-            r"^\s*(\w+)\s*(?:\w+\s*)?=\s*([^;)\n]+)", block, re.MULTILINE
-        ):
-            name, value = m.group(1), m.group(2)
+        prev_value: str | None = None
+        for raw_line in block.splitlines():
+            line = re.sub(r"//.*", "", raw_line).strip()
+            if not line:
+                continue
+            m = re.match(r"(\w+)(?:\s+\w+)?\s*(?:=\s*(.+))?$", line)
+            if not m:
+                continue
+            name = m.group(1)
+            value = m.group(2)
+            if value is None:
+                if prev_value is None:
+                    continue
+                value = prev_value
+            else:
+                prev_value = value
             if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
                 nonzero.add(name)
     return nonzero
@@ -1197,6 +1209,43 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
             if depth == 0 and re.search(r"\breturn\b", stripped[block_start : i - 1]):
                 guarded.add(param)
     return guarded
+
+
+def _go_local_nonzero_variables(body: str) -> set[str]:
+    """Return local Go variables that are always assigned a nonzero literal.
+
+    For example, in ``sum := 32; if prefix == 2 { sum = 16 }``, ``sum`` is
+    nonzero in every assignment and is therefore safe as a divisor/modulus.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    assignments: dict[str, list[str]] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*([^;\n]+?)(?:;|\n|$)", stripped
+    ):
+        name, value = match.group(1), match.group(2).strip()
+        assignments.setdefault(name, []).append(value)
+    for match in re.finditer(
+        r"\b(\w+)\s*=\s*([^;\n]+?)(?:;|\n|$)", stripped
+    ):
+        name, value = match.group(1), match.group(2).strip()
+        if name in assignments:
+            assignments[name].append(value)
+
+    def _is_nonzero_literal_or_expr(value: str) -> bool:
+        text = _strip_go_rust_literals_and_comments(value).strip()
+        parsed = semantic_safety.parse_int_literal(text)
+        if parsed is not None:
+            return parsed != 0
+        try:
+            return float(text) != 0.0
+        except ValueError:
+            return False
+
+    return {
+        name
+        for name, values in assignments.items()
+        if values and all(_is_nonzero_literal_or_expr(v) for v in values)
+    }
 
 
 def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
@@ -2846,6 +2895,7 @@ def _detect_go_safety_issues(
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
+                | _go_local_nonzero_variables(body)
                 | _go_rounded_factor_nonzero(body)
                 | _go_beacon_config_nonzero_locals(body, original_source or source)
                 | {"_W", "bits.UintSize"}
@@ -2942,7 +2992,7 @@ def _detect_go_safety_issues(
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
         go_map_names = file_map_names | _go_local_map_names(body)
-        guaranteed_nonzero = base_guaranteed_nonzero | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
+        guaranteed_nonzero = base_guaranteed_nonzero | _go_local_nonzero_variables(body) | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
         parallel_slicing = _go_flattened_index_safe_pairs(body)
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
@@ -4438,6 +4488,32 @@ def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
     return blocks
 
 
+def _ts_nullable_param_set(params_text: str) -> set[str]:
+    """Return the set of parameter names that may be null/undefined."""
+    nullable: set[str] = set()
+    for raw in _split_params(params_text):
+        if not raw.strip():
+            continue
+        parts = raw.split(":", 1)
+        pname = parts[0].strip().split("=")[0].strip().rstrip("?")
+        if not pname:
+            continue
+        if len(parts) < 2:
+            # No type annotation: conservative.
+            nullable.add(_safe_identifier(pname))
+            continue
+        type_text = parts[1].strip()
+        is_optional = raw.strip().startswith(pname + "?") or type_text.endswith("?")
+        if (
+            is_optional
+            or "null" in type_text.lower()
+            or "undefined" in type_text.lower()
+            or type_text.lower() == "any"
+        ):
+            nullable.add(_safe_identifier(pname))
+    return nullable
+
+
 def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     """Map each TypeScript function name to the set of possibly-null parameter names.
 
@@ -4446,6 +4522,14 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     array/object parameters are excluded so that ``.length`` and indexing do not
     produce false positives for well-typed inputs.
     """
+    extracted = tree_sitter_extract.extract_functions(source, "typescript", _safe_identifier)
+    if extracted is not None:
+        return {
+            fn.name: _ts_nullable_param_set(fn.params_text or "")
+            for fn in extracted
+            if fn.has_body
+        }
+    # Fallback regex when tree-sitter is unavailable.
     result: dict[str, set[str]] = {}
     function_pattern = re.compile(
         r"(?:export\s+)?(?:async\s+)?function\s+"
@@ -4462,30 +4546,7 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     )
     for match in (*function_pattern.finditer(source), *arrow_pattern.finditer(source)):
         name = _safe_identifier(match.group("name"))
-        nullable: set[str] = set()
-        params_text = match.group("params")
-        if params_text:
-            for raw in _split_params(params_text):
-                if not raw.strip():
-                    continue
-                parts = raw.split(":", 1)
-                pname = parts[0].strip().split("=")[0].strip().rstrip("?")
-                if not pname:
-                    continue
-                if len(parts) < 2:
-                    # No type annotation: conservative.
-                    nullable.add(_safe_identifier(pname))
-                    continue
-                type_text = parts[1].strip()
-                is_optional = raw.strip().startswith(pname + "?") or type_text.endswith("?")
-                if (
-                    is_optional
-                    or "null" in type_text.lower()
-                    or "undefined" in type_text.lower()
-                    or type_text.lower() == "any"
-                ):
-                    nullable.add(_safe_identifier(pname))
-        result[name] = nullable
+        result[name] = _ts_nullable_param_set(match.group("params") or "")
     return result
 
 
