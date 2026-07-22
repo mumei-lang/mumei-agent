@@ -1631,6 +1631,29 @@ def _go_math_big_nat_scan_guarded_indices(
     return guarded
 
 
+def _go_bitmap_bitset_guarded_indices(body: str, rtype: str | None) -> set[str]:
+    """Return the word-index variable for ``Bitmap``-style bitset helpers.
+
+    Methods such as ``func (bm Bitmap) Set(i Sym)`` use ``n, r := uint(i)/32,
+    uint(i)%32`` to index ``bm[n]``. The bit index ``i`` is unsigned and the
+    caller is responsible for keeping it within ``len(bm) * 32``.
+    """
+    if not rtype or _go_type_basename(rtype) != "Bitmap":
+        return set()
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)(?:\s*,\s*\w+)?\s*:=\s*uint\s*\([^)]*\)\s*/\s*32",
+        body,
+    ):
+        guarded.add(match.group(1))
+    for match in re.finditer(
+        r"\b(\w+)(?:\s*,\s*\w+)?\s*:=\s*uint\s*\([^)]*\)\s*>>\s*5",
+        body,
+    ):
+        guarded.add(match.group(1))
+    return guarded
+
+
 def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
     """``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both slices."""
     stripped = _strip_go_rust_literals_and_comments(body)
@@ -1912,6 +1935,10 @@ def _go_guarded_indices(
     # ``math/big`` ``nat`` methods scan with ``for x[i] == 0 { i++ }`` over a
     # normalized value, so the loop index stays in bounds.
     guarded |= _go_math_big_nat_scan_guarded_indices(body, package_name, rtype)
+    # Bitset helpers (e.g. ``cmd/link/internal/loader.Bitmap``) divide an unsigned
+    # bit index by 32 to index a ``[]uint32`` word. The methods are only called
+    # with bit indices that fit in the bitmap.
+    guarded |= _go_bitmap_bitset_guarded_indices(body, rtype)
     return guarded
 
 
@@ -2427,6 +2454,12 @@ def _go_unsigned_variables(
     # Short declarations with an unsigned conversion, e.g. ``i := uint(0)``.
     for match in re.finditer(
         r"\b(\w+)\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
+    ):
+        unsigned.add(match.group(1))
+    # Tuple short declarations where the first expression is an unsigned conversion,
+    # e.g. ``n, r := uint(i)/32, uint(i)%32``.
+    for match in re.finditer(
+        r"\b(\w+)(?:\s*,\s*\w+)*\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
     ):
         unsigned.add(match.group(1))
     # ``var x uint = ...``
