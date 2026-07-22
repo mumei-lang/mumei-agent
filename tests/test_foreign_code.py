@@ -3961,3 +3961,99 @@ func (s *Section) Open() int { return *s.sr }
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("dereference" in issue.message for issue in issues)
+
+
+def test_go_net_dialer_non_nil_receiver() -> None:
+    """net.Dialer pointer-receiver methods are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package net
+
+type Dialer struct{ mptcpStatus int }
+
+type mptcpStatus int
+
+func (s *mptcpStatus) get() bool { return false }
+
+func (d *Dialer) MultipathTCP() bool {
+    return d.mptcpStatus.get()
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+def test_go_op_enum_index_guarded() -> None:
+    """A variable assigned from ``v.Op`` and used as ``opcodeTable[op]`` is safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+type Op int32
+type regInfo struct{}
+
+var opcodeTable []regInfo
+
+func regspec(v *Value) regInfo {
+    op := v.Op
+    return opcodeTable[op]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_range_index_alias_guarded() -> None:
+    """A variable assigned from a ``range`` index and used as ``arr[idx]`` is safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+func concatstrings(buf *int, a []string) string {
+    idx := 0
+    for i, x := range a {
+        _ = x
+        idx = i
+    }
+    return a[idx]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_rounded_factor_nonzero() -> None:
+    """A ``math.Round(score*K)/K`` factor constant is treated as non-zero."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package scorers
+
+import "math"
+
+const ScoreRoundingFactor = 10000
+
+func scoreNoLock(score float64) float64 {
+    return math.Round(score*ScoreRoundingFactor) / ScoreRoundingFactor
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can divide" in issue.message for issue in issues)
+
+def test_go_array_len_nonzero_divisor() -> None:
+    """``len`` of a package-level array with positive size is a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package atomic
+
+type spinlock struct{ v uint32 }
+
+var locktab [57]struct {
+    l   spinlock
+    pad [64]byte
+}
+
+func addrLock(addr *uint64) *spinlock {
+    return &locktab[(uintptr(addr)>>3)%uintptr(len(locktab))].l
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("can divide" in issue.message for issue in issues)
