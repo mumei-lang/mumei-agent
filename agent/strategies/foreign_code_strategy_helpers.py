@@ -2959,7 +2959,7 @@ def _go_type_basename(raw_type: str) -> str:
 def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set[str]:
     """Names of params/receivers whose type marks them as non-nil containers."""
     nonnil_basenames = set(_GO_NONNIL_EXACT_TYPES) | _go_xorm_core_types(source)
-    return {
+    result = {
         _safe_identifier(name)
         for name, raw_type in param_types.items()
         if (
@@ -2968,6 +2968,17 @@ def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set
             or _go_type_basename(raw_type).removesuffix("?").startswith("Fake")
         )
     }
+    # ``atomic`` packages (``sync/atomic``, ``internal/runtime/atomic``) implement
+    # low-level primitives whose first pointer/unsafe.Pointer argument is always
+    # a valid, non-nil address; callers must provide one, otherwise the program
+    # has already violated the atomic contract.
+    if _go_package_name(source) == "atomic":
+        for name, raw_type in param_types.items():
+            if name in {"ptr", "addr"} and (
+                raw_type.strip().startswith("*") or "unsafe.Pointer" in raw_type
+            ):
+                result.add(_safe_identifier(name))
+    return result
 
 
 def _go_flag_value_receiver_types(functions: list) -> set[str]:
