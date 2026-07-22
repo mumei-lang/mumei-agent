@@ -2701,6 +2701,42 @@ def _is_roundup_expression(expression: str, left: str, right: str) -> bool:
     return bool(re.search(pattern, left_side))
 
 
+def _is_divroundup_expression(expression: str, divisor: str) -> bool:
+    """Return True for the ``(x + y - 1) / y`` ceiling-division idiom.
+
+    This form is used by helpers such as Go's ``divRoundUp``.  The divisor is
+    the same ``y`` that appears in ``+ y - 1``, so a zero divisor would also
+    make the numerator undefined; a separate ``y != 0`` contract is redundant
+    for this expression.
+    """
+    expr = re.sub(r"\s+", "", expression)
+    div = re.sub(r"\s+", "", divisor)
+    esc = re.escape(div)
+    for match in re.finditer(rf"/{esc}(?!\w)", expr):
+        # The division should be of the form ``(...) / div``.
+        slash = match.start()
+        if slash == 0 or expr[slash - 1] != ")":
+            continue
+        close = slash - 1
+        depth = 1
+        open_pos = close - 1
+        while open_pos >= 0 and depth > 0:
+            if expr[open_pos] == ")":
+                depth += 1
+            elif expr[open_pos] == "(":
+                depth -= 1
+            open_pos -= 1
+        if depth != 0:
+            continue
+        numerator = expr[open_pos + 1 : close]
+        # The numerator must be ``... + div - 1`` (or ``... - 1 + div``).
+        if re.search(rf"\+{esc}\-1", numerator) or re.search(
+            rf"\-1\+{esc}", numerator
+        ):
+            return True
+    return False
+
+
 def _is_size_like_identifier(name: str) -> bool:
     """Return True for identifiers that represent memory sizes or lengths.
 
@@ -2879,6 +2915,8 @@ def _issues_for_expression(
             # Solidity >=0.8 reverts on division/modulo by zero by default.
             if label == "Solidity" and solidity_default_checks:
                 continue
+            if _is_divroundup_expression(expression, match.group("right")):
+                continue
             issue = _division_safety_issue(
                 function_name,
                 match.group("right"),
@@ -2953,6 +2991,8 @@ def _issues_from_findings(
                 continue
             # Solidity >=0.8 reverts on division/modulo by zero by default.
             if label == "Solidity" and solidity_default_checks:
+                continue
+            if _is_divroundup_expression(expression, divisor):
                 continue
             issue = _division_safety_issue(
                 function_name, divisor, label, known_constants, guaranteed_nonzero, float_variables, float_arrays

@@ -2574,7 +2574,7 @@ def _ensures_for_return_expression(
         if param_names and stripped in param_names:
             return f"result == {stripped}"
         return "true"
-    return f"result == {return_expr.strip().rstrip(",")}"
+    return f"result == {stripped}"
 
 
 def _is_regex_context(prefix: str) -> bool:

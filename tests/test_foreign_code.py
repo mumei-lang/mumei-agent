@@ -3772,3 +3772,17 @@ def test_ensures_for_return_expression_string_literal_non_string_return() -> Non
     from agent.cross_validation_foreign import _ensures_for_return_expression
 
     assert _ensures_for_return_expression('"Invalid CREATE statement"', "i64") == "true"
+
+
+def test_divroundup_expression_suppresses_division_by_zero() -> None:
+    """The ``(x + y - 1) / y`` ceiling-division idiom should not require ``y != 0``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package pbkdf2
+
+func divRoundUp(x, y int) int {
+    return int((int64(x) + int64(y) - 1) / int64(y))
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in issue.message for issue in issues)
