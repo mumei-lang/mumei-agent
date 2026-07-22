@@ -4537,3 +4537,18 @@ func (rs *Rows) Err() error { return rs.err }
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any(msg in issue.message and "dereference" in issue.message for msg in ("DB", "Tx", "Rows") for issue in issues)
+
+
+def test_typescript_memo_component_extracted() -> None:
+    """React components exported as ``memo(...)`` are extracted and audited."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''
+import { memo } from 'react';
+
+export const Component = memo(({ items }: { items: string[] }) => {
+  return items.map((s) => s.length);
+});
+'''
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("Component" in issue.message and "non-null" in issue.message for issue in issues)
