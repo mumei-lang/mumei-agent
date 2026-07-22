@@ -2618,6 +2618,24 @@ func (r *Recipient) Export(ctx string, l int) ([]byte, error) {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_abi_type_metadata_nonnil() -> None:
+    """runtime/abi type descriptor receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package abi
+type Type struct{ Kind_ uint8 }
+func (t *Type) Kind() uint8 { return t.Kind_ }
+type FuncType struct{ Type }
+func (t *FuncType) NumIn() int { return 0 }
+type InterfaceType struct{ Type }
+func (t *InterfaceType) NumMethod() int { return 0 }
+type StructField struct{ Name string }
+func (f *StructField) Embedded() bool { return false }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues

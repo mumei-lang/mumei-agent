@@ -2801,6 +2801,11 @@ _GO_NONNIL_EXACT_TYPES = {
     "Request",  # net/http.Request and similar request DTOs are non-nil in callers
     "Sender",  # crypto/hpke.Sender and similar messaging handles are non-nil in use
     "Recipient",  # crypto/hpke.Recipient and similar messaging handles are non-nil in use
+    "UncommonType",  # runtime/abi type metadata containers are non-nil when methods are invoked
+    "Type",  # runtime/abi type descriptors are non-nil when methods are invoked
+    "StructField",  # runtime/abi field metadata is non-nil when methods are invoked
+    "FuncType",  # runtime/abi function type descriptors are non-nil when methods are invoked
+    "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
     "StackRecord",  # runtime/pprof profiling records are live container objects
     "MemProfileRecord",
