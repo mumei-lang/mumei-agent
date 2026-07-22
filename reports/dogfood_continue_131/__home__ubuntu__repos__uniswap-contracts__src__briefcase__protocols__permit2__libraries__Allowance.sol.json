@@ -1,0 +1,7 @@
+{
+  "repo": "uniswap-contracts",
+  "file": "/home/ubuntu/repos/uniswap-contracts/src/briefcase/protocols/permit2/libraries/Allowance.sol",
+  "language": "solidity",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/influxdb3_clap_blocks/src/object_store.rs",
+  "language": "rust",
+  "status": "verified",
+  "errors": []
+}

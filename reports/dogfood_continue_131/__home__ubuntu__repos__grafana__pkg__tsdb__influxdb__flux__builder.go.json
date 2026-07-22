@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/tsdb/influxdb/flux/builder.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

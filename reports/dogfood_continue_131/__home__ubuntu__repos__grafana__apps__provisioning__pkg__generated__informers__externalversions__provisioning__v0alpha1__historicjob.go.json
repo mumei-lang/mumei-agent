@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/provisioning/pkg/generated/informers/externalversions/provisioning/v0alpha1/historicjob.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

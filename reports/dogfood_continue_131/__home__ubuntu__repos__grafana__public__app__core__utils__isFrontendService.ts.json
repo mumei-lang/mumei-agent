@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/core/utils/isFrontendService.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

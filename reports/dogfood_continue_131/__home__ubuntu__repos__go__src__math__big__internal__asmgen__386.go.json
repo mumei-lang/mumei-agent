@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/math/big/internal/asmgen/386.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

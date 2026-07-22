@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/internal/goexperiment/exp_preemptibleloops_on.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/promtypemigration/amazon_prom_mig.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

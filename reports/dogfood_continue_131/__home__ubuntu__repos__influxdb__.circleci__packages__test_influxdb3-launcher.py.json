@@ -1,0 +1,7 @@
+{
+  "repo": "influxdb",
+  "file": "/home/ubuntu/repos/influxdb/.circleci/packages/test_influxdb3-launcher.py",
+  "language": "python",
+  "status": "verified",
+  "errors": []
+}

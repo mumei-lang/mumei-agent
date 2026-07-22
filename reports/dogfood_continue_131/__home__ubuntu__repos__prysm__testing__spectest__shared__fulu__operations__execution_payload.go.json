@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/fulu/operations/execution_payload.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
