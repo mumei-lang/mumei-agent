@@ -4057,3 +4057,33 @@ func addrLock(addr *uint64) *spinlock {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("can divide" in issue.message for issue in issues)
+
+
+def test_go_syscall_timeval_timespec_nonnil_receiver() -> None:
+    """``syscall.Timeval``/``Timespec`` pointer receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syscall
+
+type timestamp uint64
+
+type Timespec struct {
+    Sec  int64
+    Nsec int64
+}
+
+func (ts *Timespec) timestamp() timestamp {
+    return timestamp(ts.Sec*1e9) + timestamp(ts.Nsec)
+}
+
+type Timeval struct {
+    Sec  int64
+    Usec int64
+}
+
+func (tv *Timeval) timestamp() timestamp {
+    return timestamp(tv.Sec*1e9) + timestamp(tv.Usec*1e3)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("nil" in issue.message for issue in issues)
