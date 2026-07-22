@@ -1,0 +1,252 @@
+[
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/ssa/dom_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/types2/chan.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/go/internal/help/helpdoc.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/go/internal/work/build.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/crypto/internal/fips140/drbg/entropy_wasm.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/syscall/unix/arc4random_openbsd.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/log/syslog/doc.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/cputicks.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/defs_linux_arm64.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/timestub2.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/syscall/syscall_illumos.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/bug172.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/bug206.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue14164.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue52862.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/typeparam/issue49295.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/advisor/pkg/app/checks/datasourcecheck/check.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-api-clients/src/clients/rtkq/notifications.alerting/v1beta1/index.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-runtime/src/services/pluginMeta/mappers/shared.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/components/Combobox/ComboboxList.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/components/Sidebar/SidebarResizer.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/components/uPlot/internal.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/utils/clamp.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/infra/filestorage/wrapper.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/login/social/connectors/azuread_oauth.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/secret/contracts/database.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apps/querycaching/migration_registrar.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tests/apis/provisioning/git/quota_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/util/xorm/session_exist.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/Analytics.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/components/rule-editor/useDashboardQuery.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/components/rules/AlertInstanceStateFilter.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/triage/scene/utils.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard/components/PanelEditor/state/OptionSearchEngine.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/datasources/types.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/explore/TraceView/components/scroll-page.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/expressions/components/SqlExpressions/SchemaInspector/utils.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/transformers/rowsToFields/RowsToFieldsTransformerEditor.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/azuremonitor/components/MetricsQueryEditor/MetricNamespaceField.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/cloudwatch/components/QueryEditor/MetricsQueryEditor/SQLBuilderEditor/utils.ts"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/operations/attestations/kv/seen_bits.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/p2p/rpc_topic_mappings_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_payload_envelope_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/state/state-native/setters_withdrawal.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/sync/validate_light_client.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/beacon-chain/sync/validate_signed_proposer_preferences_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/mainnet/phase0__sanity__blocks_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/deneb/finality/finality.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/validator/db/filesystem/proposer_settings_test.go"
+  },
+  {
+    "repo": "prysm",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/prysm/validator/db/kv/log.go"
+  }
+]

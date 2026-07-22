@@ -1,0 +1,59 @@
+# Batch 229 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ssa/dom_test.go`: verified
+- `go/src/cmd/compile/internal/types2/chan.go`: verified
+- `go/src/cmd/go/internal/help/helpdoc.go`: verified
+- `go/src/cmd/go/internal/work/build.go`: verified
+- `go/src/crypto/internal/fips140/drbg/entropy_wasm.go`: verified
+- `go/src/internal/syscall/unix/arc4random_openbsd.go`: verified
+- `go/src/log/syslog/doc.go`: verified
+- `go/src/runtime/cputicks.go`: verified
+- `go/src/runtime/defs_linux_arm64.go`: verified
+- `go/src/runtime/timestub2.go`: verified
+- `go/src/syscall/syscall_illumos.go`: verified
+- `go/test/fixedbugs/bug172.go`: verified
+- `go/test/fixedbugs/bug206.go`: verified
+- `go/test/fixedbugs/issue14164.go`: verified
+- `go/test/fixedbugs/issue52862.go`: verified
+- `go/test/typeparam/issue49295.go`: verified
+- `grafana/apps/advisor/pkg/app/checks/datasourcecheck/check.go`: verified
+- `grafana/packages/grafana-api-clients/src/clients/rtkq/notifications.alerting/v1beta1/index.ts`: verified
+- `grafana/packages/grafana-runtime/src/services/pluginMeta/mappers/shared.ts`: verified
+- `grafana/packages/grafana-ui/src/components/Combobox/ComboboxList.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/Sidebar/SidebarResizer.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/uPlot/internal.ts`: verified
+- `grafana/packages/grafana-ui/src/utils/clamp.ts`: verified
+- `grafana/pkg/infra/filestorage/wrapper.go`: verified
+- `grafana/pkg/login/social/connectors/azuread_oauth.go`: verified
+- `grafana/pkg/registry/apis/secret/contracts/database.go`: verified
+- `grafana/pkg/registry/apps/querycaching/migration_registrar.go`: verified
+- `grafana/pkg/tests/apis/provisioning/git/quota_test.go`: verified
+- `grafana/pkg/util/xorm/session_exist.go`: verified
+- `grafana/public/app/features/alerting/unified/Analytics.ts`: verified
+- `grafana/public/app/features/alerting/unified/components/rule-editor/useDashboardQuery.ts`: verified
+- `grafana/public/app/features/alerting/unified/components/rules/AlertInstanceStateFilter.tsx`: verified
+- `grafana/public/app/features/alerting/unified/triage/scene/utils.ts`: verified
+- `grafana/public/app/features/dashboard/components/PanelEditor/state/OptionSearchEngine.ts`: verified
+- `grafana/public/app/features/datasources/types.ts`: verified
+- `grafana/public/app/features/explore/TraceView/components/scroll-page.tsx`: verified
+- `grafana/public/app/features/expressions/components/SqlExpressions/SchemaInspector/utils.ts`: verified
+- `grafana/public/app/features/transformers/rowsToFields/RowsToFieldsTransformerEditor.tsx`: verified
+- `grafana/public/app/plugins/datasource/azuremonitor/components/MetricsQueryEditor/MetricNamespaceField.tsx`: verified
+- `grafana/public/app/plugins/datasource/cloudwatch/components/QueryEditor/MetricsQueryEditor/SQLBuilderEditor/utils.ts`: verified
+- `prysm/beacon-chain/operations/attestations/kv/seen_bits.go`: verified
+- `prysm/beacon-chain/p2p/rpc_topic_mappings_test.go`: verified
+- `prysm/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_payload_envelope_test.go`: verified
+- `prysm/beacon-chain/state/state-native/setters_withdrawal.go`: verified
+- `prysm/beacon-chain/sync/validate_light_client.go`: verified
+- `prysm/beacon-chain/sync/validate_signed_proposer_preferences_test.go`: verified
+- `prysm/testing/spectest/mainnet/phase0__sanity__blocks_test.go`: verified
+- `prysm/testing/spectest/shared/deneb/finality/finality.go`: verified
+- `prysm/validator/db/filesystem/proposer_settings_test.go`: verified
+- `prysm/validator/db/kv/log.go`: verified
