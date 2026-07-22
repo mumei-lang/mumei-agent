@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/setting/setting_auth_proxy.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

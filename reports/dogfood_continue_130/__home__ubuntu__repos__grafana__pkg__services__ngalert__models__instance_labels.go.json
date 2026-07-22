@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/ngalert/models/instance_labels.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

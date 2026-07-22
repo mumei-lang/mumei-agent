@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/runtime/_mkmalloc/astutil/clone.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

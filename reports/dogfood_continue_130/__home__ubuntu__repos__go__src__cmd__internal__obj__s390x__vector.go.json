@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/cmd/internal/obj/s390x/vector.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/registry/apps/alerting/rules/alertrule/compat.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

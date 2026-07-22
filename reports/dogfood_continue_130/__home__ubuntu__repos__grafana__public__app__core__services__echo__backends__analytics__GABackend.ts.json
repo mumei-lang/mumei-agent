@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/core/services/echo/backends/analytics/GABackend.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}
