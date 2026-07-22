@@ -1,0 +1,59 @@
+# Batch 168 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ssa/rewrite386.go`: verified
+- `go/src/cmd/go/alldocs.go`: verified
+- `go/src/cmd/go/internal/telemetrystats/version_windows.go`: verified
+- `go/src/cmd/go/internal/workcmd/sync.go`: verified
+- `go/src/crypto/x509/parser.go`: verified
+- `go/src/net/ipsock.go`: verified
+- `go/src/net/url/example_test.go`: verified
+- `go/src/runtime/export_aix_test.go`: verified
+- `go/src/runtime/pprof/runtime_test.go`: verified
+- `go/src/runtime/trace_cgo_test.go`: verified
+- `go/src/sync/example_pool_test.go`: verified
+- `go/src/testing/export_test.go`: verified
+- `go/test/fixedbugs/issue17038.go`: verified
+- `go/test/typeparam/issue47896.go`: verified
+- `grafana/apps/alerting/notifications/pkg/apis/alertingnotifications/v1beta1/receiver_ext.go`: verified
+- `grafana/apps/dashboard/pkg/migration/conversion/v2.go`: verified
+- `grafana/apps/playlist/pkg/apis/playlist/v1/playlist_schema_gen.go`: verified
+- `grafana/packages/grafana-data/src/geo/layer.ts`: verified
+- `grafana/packages/grafana-ui/src/components/RadialGauge/RadialBar.tsx`: verified
+- `grafana/packages/grafana-ui/src/components/Text/utils.ts`: verified
+- `grafana/packages/grafana-ui/src/themes/GlobalStyles/queryEditor.ts`: verified
+- `grafana/pkg/api/datasources_k8s.go`: verified
+- `grafana/pkg/api/password.go`: verified
+- `grafana/pkg/components/imguploader/webdavuploader.go`: verified
+- `grafana/pkg/login/social/socialimpl/service.go`: verified
+- `grafana/pkg/plugins/instrumentationutils/request_status.go`: verified
+- `grafana/pkg/services/apiserver/client/client_test.go`: verified
+- `grafana/pkg/services/pluginsintegration/pluginsettings/models.go`: verified
+- `grafana/pkg/storage/unified/sql/notifier_sql_test.go`: verified
+- `grafana/public/app/core/components/AppChrome/TopBar/InviteUserButtonUtils.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/MetaText.tsx`: verified
+- `grafana/public/app/features/alerting/unified/components/notification-policies/formStyles.ts`: verified
+- `grafana/public/app/features/commandPalette/actions/dashboardActions.ts`: verified
+- `grafana/public/app/features/dashboard-scene/utils/getTopPlacementLabel.ts`: verified
+- `grafana/public/app/features/provisioning/Connection/ConnectionForm.tsx`: verified
+- `grafana/public/app/features/provisioning/components/BulkActions/BulkMoveProvisionedResource.tsx`: verified
+- `grafana/public/app/features/transformers/prepareTimeSeries/PrepareTimeSeriesEditor.tsx`: verified
+- `grafana/public/app/plugins/datasource/azuremonitor/types/query.ts`: verified
+- `prysm/api/grpc/parameters.go`: verified
+- `prysm/async/benchmark_test.go`: verified
+- `prysm/beacon-chain/blockchain/log_helpers.go`: verified
+- `prysm/beacon-chain/verification/payload_attestation_test.go`: verified
+- `prysm/config/fieldparams/mainnet_test.go`: verified
+- `prysm/consensus-types/primitives/sszuint64.go`: verified
+- `prysm/encoding/ssz/query/proof_collector_test.go`: verified
+- `prysm/proto/prysm/v1alpha1/p2p_messages.pb.go`: verified
+- `prysm/testing/endtoend/endtoend_test.go`: verified
+- `prysm/testing/spectest/minimal/phase0__epoch_processing__historical_roots_update_test.go`: verified
+- `prysm/testing/spectest/shared/electra/ssz_static/ssz_static.go`: verified
+- `prysm/validator/rpc/handlers_keymanager_test.go`: verified
