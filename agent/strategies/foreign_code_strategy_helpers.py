@@ -1311,6 +1311,35 @@ def _go_math_denom_nonzero_locals(body: str, source: str) -> set[str]:
     return nonzero
 
 
+def _go_enum_string_array_guarded_indices(
+    body: str, function_name: str, receiver_name: str | None, source: str
+) -> set[str]:
+    """Guard the receiver in enum ``String()`` methods that index a package-level string array.
+
+    Methods such as ``func (kind ObjKind) String() string { return objKindStrings[kind] }``
+    are generated for enum-like types and are only invoked with valid enum values.
+    """
+    if function_name != "String" or not receiver_name:
+        return set()
+    stripped = _strip_go_rust_literals_and_comments(body)
+    m = re.search(
+        rf"\breturn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*{re.escape(receiver_name)}\s*\]",
+        stripped,
+    )
+    if not m:
+        return set()
+    array_name = m.group(1)
+    if array_name in _go_global_array_keys(source):
+        return {receiver_name}
+    # Also allow package-level ``[...]string{...}`` literal (possibly non-keyed).
+    if re.search(
+        rf"\bvar\s+{re.escape(array_name)}\s*=\s*\[\.\.\.\]\w+\s*\{{",
+        source,
+    ):
+        return {receiver_name}
+    return set()
+
+
 def _go_enum_string_guarded_indices(
     body: str, function_name: str, receiver_name: str | None
 ) -> set[str]:
@@ -3326,7 +3355,7 @@ def _detect_go_safety_issues(
                 rtype=rtype,
             ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
-            ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name)
+            ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
             suppress_nil = (
                 fn.name in {"String", "Get"}
                 and rtype is not None
@@ -3502,7 +3531,7 @@ def _detect_go_safety_issues(
             source=source,
             package_name=package_name,
             rtype=rtype,
-        ) | _go_enum_string_guarded_indices(body, name, receiver_name)
+        ) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
