@@ -2063,6 +2063,10 @@ def _last_expression(body: str) -> str:
             and isinstance(tree.body.value, (int, float, complex))
         ):
             continue
+        # A bare string literal is usually a macro argument (e.g. Rust ``assert!``
+        # message), not the function's tail expression.
+        if isinstance(tree.body, ast.Constant) and isinstance(tree.body.value, str):
+            continue
         return normalized
     return ""
 

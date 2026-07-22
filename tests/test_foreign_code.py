@@ -4057,3 +4057,29 @@ func addrLock(addr *uint64) *spinlock {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("can divide" in issue.message for issue in issues)
+
+
+def test_rust_contract_inference_skips_assert_macro_string_argument() -> None:
+    """A multi-line ``assert!`` macro must not be mistaken for the tail expression."""
+    from agent.cross_validation_foreign import _infer_rust_contracts_tree_sitter
+
+    source = '''pub struct Backoff;
+
+impl Backoff {
+    pub fn new_with_rng(config: &Config) -> Self {
+        assert!(
+            config.base >= 1.0,
+            "Backoff base ({}) must be greater or equal than 1.",
+            config.base,
+        );
+
+        Self {
+            base: config.base,
+        }
+    }
+}
+'''
+    atoms = _infer_rust_contracts_tree_sitter(source)
+    assert atoms is not None
+    atom = next(a for a in atoms if a.name == "new_with_rng")
+    assert atom.ensures == "true"
