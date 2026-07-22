@@ -23,8 +23,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
 
-from tree_sitter import Language, Parser
-
 # Languages whose function/block extraction is handled by tree-sitter. Python is
 # intentionally excluded: it already uses the standard-library ``ast`` module.
 SUPPORTED_LANGUAGES = frozenset({"rust", "go", "typescript", "solidity"})
@@ -264,6 +262,7 @@ def _parse(source: str, language: str):
         return None, None
     if language == "typescript" and tree.root_node.has_error:
         try:
+            from tree_sitter import Language, Parser
             import tree_sitter_typescript as ts_grammar
 
             tsx_lang = Language(ts_grammar.language_tsx())
