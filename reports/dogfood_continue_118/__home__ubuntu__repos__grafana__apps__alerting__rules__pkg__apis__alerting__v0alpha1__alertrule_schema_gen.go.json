@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/alerting/rules/pkg/apis/alerting/v0alpha1/alertrule_schema_gen.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

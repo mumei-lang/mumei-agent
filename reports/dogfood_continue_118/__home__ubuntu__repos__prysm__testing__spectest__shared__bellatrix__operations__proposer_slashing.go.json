@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/testing/spectest/shared/bellatrix/operations/proposer_slashing.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/advisor/pkg/app/checkscheduler/checkscheduler.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

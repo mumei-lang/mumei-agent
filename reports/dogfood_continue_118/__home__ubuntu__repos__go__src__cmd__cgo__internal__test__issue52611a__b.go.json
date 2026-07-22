@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/src/cmd/cgo/internal/test/issue52611a/b.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

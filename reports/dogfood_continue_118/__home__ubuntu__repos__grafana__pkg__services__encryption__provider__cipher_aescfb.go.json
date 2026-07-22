@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/encryption/provider/cipher_aescfb.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

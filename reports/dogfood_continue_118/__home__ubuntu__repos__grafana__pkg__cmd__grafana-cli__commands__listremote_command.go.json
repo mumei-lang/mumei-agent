@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/cmd/grafana-cli/commands/listremote_command.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

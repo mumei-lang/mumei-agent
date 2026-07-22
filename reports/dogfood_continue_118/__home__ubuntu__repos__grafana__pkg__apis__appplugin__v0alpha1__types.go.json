@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/apis/appplugin/v0alpha1/types.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
