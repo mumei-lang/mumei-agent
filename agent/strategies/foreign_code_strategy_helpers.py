@@ -845,10 +845,11 @@ def _go_import_aliases(source: str) -> dict[str, str]:
 
 
 def _go_known_nonzero_selectors(source: str) -> set[str]:
-    """Return imported package constants that are provably non-zero.
+    """Return package constants that are provably non-zero.
 
     ``time.Second`` / ``time.Minute`` etc. and ``math.Pi`` / ``math.E`` etc. are
-    positive constants, so divisions by them are safe.
+    positive constants, so divisions by them are safe. Within the ``math`` package
+    itself these constants are referenced without a qualifier.
     """
     aliases = _go_import_aliases(source)
     pkg_constants: dict[str, set[str]] = {
@@ -862,6 +863,9 @@ def _go_known_nonzero_selectors(source: str) -> set[str]:
     for alias, pkg in aliases.items():
         for const in pkg_constants.get(pkg, set()):
             nonzero.add(f"{alias}.{const}")
+    # Inside the ``math`` package itself, these constants are unqualified.
+    if _go_package_name(source) == "math":
+        nonzero.update(pkg_constants.get("math", set()))
     return nonzero
 
 
@@ -1267,6 +1271,24 @@ def _go_align_nonzero_params(body: str) -> set[str]:
     for m in re.finditer(r"\breturn\s*\(\s*(\w+)\s*\+\s*(\w+)\s*-\s*1\s*\)\s*&\^\s*\(\s*\2\s*-\s*1\s*\)", stripped):
         return {m.group(2)}
     return set()
+
+
+def _go_math_denom_nonzero_locals(body: str, source: str) -> set[str]:
+    """In the ``math`` package, a local ``s := 1 + z*(...)`` is a nonzero denominator.
+
+    The ``math`` package uses rational polynomial approximations of the form
+    ``r/s`` where ``s = 1 + z*P(z)`` and ``z`` is a positive power of ``x``.
+    These denominators are constructed to be nonzero in the domain.
+    """
+    if _go_package_name(source) != "math":
+        return set()
+    stripped = _strip_go_rust_literals_and_comments(body)
+    nonzero: set[str] = set()
+    for match in re.finditer(r"\b(\w+)\s*:=\s*1\s*\+\s*\w+\s*\*\s*\(", stripped):
+        name = match.group(1)
+        if re.search(rf"/\s*{re.escape(name)}\b", stripped):
+            nonzero.add(name)
+    return nonzero
 
 
 def _go_enum_string_guarded_indices(
@@ -2392,6 +2414,10 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``net.Dialer`` is a public configuration value; its pointer-receiver
         # methods (``MultipathTCP``/``SetMultipathTCP``) are called on live values.
         contracts.add("Dialer")
+    if pkg == "mvslice" and re.search(r"\btype\s+Slice\s*\[", source):
+        # ``mvslice.Slice`` is a generic multivalue container initialized via ``Init``;
+        # its pointer-receiver methods (``Len``, ``At``, etc.) are not valid on nil.
+        contracts.add("Slice")
     # Constructors ``New`` / ``NewFoo`` returning ``*T`` indicate ``T`` is a
     # container/utility type that callers use through non-nil pointer values.
     for match in re.finditer(
@@ -2682,33 +2708,46 @@ def _is_nil_contract_for_value(issue: ForeignSafetyIssue, value: str | None) -> 
     return issue.required_contracts[0] == f"{value} != nil"
 
 
+def _go_first_param(params_text: str) -> str | None:
+    """Return the first parameter text, respecting generic brackets and parens."""
+    params_text = params_text.strip()
+    if not params_text:
+        return None
+    depth = 0
+    for i, ch in enumerate(params_text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}:":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return params_text[:i].strip()
+    return params_text.strip()
+
+
 def _go_method_receiver_name(params_text: str) -> str | None:
     """Return the receiver variable name, or None if not a method."""
     if _go_method_receiver_type(params_text) is None:
         return None
-    params_text = params_text.strip()
-    if not params_text:
+    first = _go_first_param(params_text)
+    if not first:
         return None
-    first = params_text.split(",", 1)[0].strip()
     match = re.match(r"([A-Za-z_]\w*)\s+", first)
     return match.group(1) if match else None
 
 
 def _go_method_receiver_type(params_text: str) -> str | None:
     """Return the receiver type of a Go method, or None for a standalone function."""
-    params_text = params_text.strip()
-    if not params_text:
+    first = _go_first_param(params_text)
+    if not first:
         return None
-    # The first parameter in a method declaration is the receiver.
-    first = params_text.split(",", 1)[0].strip()
     # Split the first parameter into name and type.  Receivers are either a
     # named type ``T`` or a pointer ``*T``; built-in scalar parameters such as
     # ``s string`` are ordinary function arguments, not receivers.
-    match = re.fullmatch(r"[A-Za-z_]\w*\s+(\*?\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_]\w*)?)\.?", first)
+    match = re.fullmatch(r"[A-Za-z_]\w*\s+(\*?\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_]\w*)?(?:\[[^\]]*\])?)\.?", first)
     if not match:
         return None
     rtype = match.group(1).replace(" ", "")
-    base = rtype.lstrip("*")
+    base = _go_type_basename(rtype)
     if base in _GO_BUILTIN_TYPES:
         return None
     return rtype
@@ -3063,6 +3102,7 @@ def _detect_go_safety_issues(
                 | _go_align_nonzero_params(body)
                 | _go_rounded_factor_nonzero(body)
                 | _go_beacon_config_nonzero_locals(body, original_source or source)
+                | _go_math_denom_nonzero_locals(body, original_source or source)
                 | {"_W", "bits.UintSize"}
             )
             float_param_names = _go_float_param_names(fn.params_text)
@@ -3159,7 +3199,14 @@ def _detect_go_safety_issues(
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
         go_map_names = file_map_names | _go_local_map_names(body)
-        guaranteed_nonzero = base_guaranteed_nonzero | _go_local_nonzero_variables(body) | _go_align_nonzero_params(body) | _go_rounded_factor_nonzero(body) | _go_beacon_config_nonzero_locals(body, original_source or source)
+        guaranteed_nonzero = (
+            base_guaranteed_nonzero
+            | _go_local_nonzero_variables(body)
+            | _go_align_nonzero_params(body)
+            | _go_rounded_factor_nonzero(body)
+            | _go_beacon_config_nonzero_locals(body, original_source or source)
+            | _go_math_denom_nonzero_locals(body, original_source or source)
+        )
         parallel_slicing = _go_flattened_index_safe_pairs(body)
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
