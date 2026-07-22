@@ -914,6 +914,8 @@ def _go_nonzero_constants(source: str) -> set[str]:
                 "summaryLevels",
                 "levelBits",
                 "levelLogPages",
+                "traceTimeDiv",
+                "minTimeForTicksPerSecond",
             }
         )
 

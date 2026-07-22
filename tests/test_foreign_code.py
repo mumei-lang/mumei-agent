@@ -2686,6 +2686,18 @@ func readUint8LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
     assert not any("dereference" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_runtime_trace_time_div_nonzero() -> None:
+    """runtime traceTimeDiv is a compile-time non-zero constant."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package runtime
+const traceTimeDiv = 64
+func traceClockNow() uint64 { return uint64(cputicks() / traceTimeDiv) }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("divide by" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
     """Short map aliases and type-asserted map variables are map accesses."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
