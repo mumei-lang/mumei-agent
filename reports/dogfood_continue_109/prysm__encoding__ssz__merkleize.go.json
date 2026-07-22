@@ -1,0 +1,37 @@
+{
+  "success": false,
+  "source_file": "/home/ubuntu/repos/prysm/encoding/ssz/merkleize.go",
+  "language": "go",
+  "spec_extracted": true,
+  "verification_status": "refuted",
+  "spec_health_issues": [],
+  "verification_violations": [
+    "Go function `Merkleize` can index `tmp[limitDepth]` without a bounds contract (Z3 counterexample: limitDepth=-1, len_tmp=0)",
+    "Z3 Counter-example: limitDepth=-1, len_tmp=0"
+  ],
+  "counterexample_values": [
+    {
+      "function_name": "Merkleize",
+      "counterexample": {
+        "limitDepth": -1,
+        "len_tmp": 0
+      }
+    }
+  ],
+  "cross_validation_gaps": [],
+  "migration_hints": [],
+  "healed_files": [],
+  "heal_errors": [],
+  "next_steps": [
+    {
+      "priority": "high",
+      "action": "migrate-suggest で .mm スケルトンを生成",
+      "command": "mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm"
+    }
+  ],
+  "proof_certificate": null,
+  "lean_bridge": null,
+  "report": "Audit found issues: /home/ubuntu/repos/prysm/encoding/ssz/merkleize.go\nlanguage: go\nspec_extracted: True\nverification_status: refuted\nspec_health_issues: []\nverification_violations: ['Go function `Merkleize` can index `tmp[limitDepth]` without a bounds contract (Z3 counterexample: limitDepth=-1, len_tmp=0)', 'Z3 Counter-example: limitDepth=-1, len_tmp=0']\ncounterexample_values: [{'function_name': 'Merkleize', 'counterexample': {'limitDepth': -1, 'len_tmp': 0}}]\ncross_validation_gaps: []\nmigration_hints:\n  []\nhealed_files: []\nheal_errors: []\nnext_steps:\n  - priority: high\n    action: migrate-suggest で .mm スケルトンを生成\n    command: mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm",
+  "errors": [],
+  "skipped_rate_limited": false
+}
