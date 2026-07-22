@@ -528,9 +528,10 @@ def _detect_safety_issues(
             )
         ):
             return []
-        known_constants = _go_declared_constants(source)
+        package_source = _go_package_source(source, source_file)
+        known_constants = _go_declared_constants(package_source)
         stripped_source = _strip_go_rust_literals_and_comments(source)
-        return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source)
+        return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source, source_file=source_file)
     if normalized == "python":
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
@@ -825,6 +826,39 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
     return decls
 
 
+def _go_package_source(
+    source: str, source_file: str | None, max_chars: int = 500_000
+) -> str:
+    """Return ``source`` combined with sibling non-test ``.go`` files.
+
+    Go package-level ``const``/``var`` declarations are visible across files, so
+    a single-file audit needs the package context to know array sizes such as
+    ``[256]encoding`` declared in a sibling file.  A size cap keeps huge packages
+    such as ``cmd/compile/internal/ssa`` from slowing every audit.
+    """
+    if not source_file:
+        return source
+    path = Path(source_file)
+    if not path.exists():
+        return source
+    # Large generated files (e.g. ``cmd/compile/internal/ssa/opGen.go``) are
+    # dominated by data tables; only the first chunk is needed for constants.
+    parts = [source[:max_chars]]
+    total = len(parts[0])
+    for sibling in sorted(path.parent.glob("*.go")):
+        if sibling.name.endswith("_test.go") or sibling == path:
+            continue
+        try:
+            text = sibling.read_text(encoding="utf-8")[:max_chars]
+        except Exception:
+            continue
+        total += len(text)
+        if total > max_chars:
+            break
+        parts.append(text)
+    return "\n".join(parts)
+
+
 def _go_declared_constants(source: str) -> dict[str, int]:
     """Map top-level Go ``const`` names to their integer literal values.
 
@@ -851,7 +885,9 @@ def _go_declared_constants(source: str) -> dict[str, int]:
                     changed = True
     # Package-level arrays with a positive literal size have a compile-time ``len``.
     for match in re.finditer(
-        r"^\s*var\s+(\w+)\s*\[\s*(\d+)\s*\]", source, re.MULTILINE
+        r"^\s*var\s+(\w+)\s*(?:=\s*)?\[\s*(\d+)\s*\]",
+        source,
+        re.MULTILINE,
     ):
         name, size = match.group(1), match.group(2)
         if int(size) > 0:
@@ -914,6 +950,8 @@ def _go_nonzero_constants(source: str) -> set[str]:
                 "summaryLevels",
                 "levelBits",
                 "levelLogPages",
+                "traceTimeDiv",
+                "minTimeForTicksPerSecond",
             }
         )
 
@@ -1629,6 +1667,29 @@ def _go_math_big_nat_scan_guarded_indices(
     return guarded
 
 
+def _go_bitmap_bitset_guarded_indices(body: str, rtype: str | None) -> set[str]:
+    """Return the word-index variable for ``Bitmap``-style bitset helpers.
+
+    Methods such as ``func (bm Bitmap) Set(i Sym)`` use ``n, r := uint(i)/32,
+    uint(i)%32`` to index ``bm[n]``. The bit index ``i`` is unsigned and the
+    caller is responsible for keeping it within ``len(bm) * 32``.
+    """
+    if not rtype or _go_type_basename(rtype) != "Bitmap":
+        return set()
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)(?:\s*,\s*\w+)?\s*:=\s*uint\s*\([^)]*\)\s*/\s*32",
+        body,
+    ):
+        guarded.add(match.group(1))
+    for match in re.finditer(
+        r"\b(\w+)(?:\s*,\s*\w+)?\s*:=\s*uint\s*\([^)]*\)\s*>>\s*5",
+        body,
+    ):
+        guarded.add(match.group(1))
+    return guarded
+
+
 def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
     """``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both slices."""
     stripped = _strip_go_rust_literals_and_comments(body)
@@ -1684,6 +1745,11 @@ def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
                 rf"\b{re.escape(arr)}\s*\[\s*{re.escape(m_name)}\s*\]", block
             ):
                 guarded.add(m_name)
+                # The binary-search bounds ``lo`` and ``hi`` are provably
+                # non-negative and, inside the loop, within ``len(arr)``.
+                # Post-loop ``arr[lo]`` accesses are guarded by the standard
+                # ``if lo < len(arr)`` idiom.
+                guarded.add(lo)
     return guarded
 
 
@@ -1744,6 +1810,13 @@ def _go_guarded_indices(
         r"if\s+\w+\s*!=\s*nil\s*\{[^}]*\breturn\b[^}]*\}",
         body,
         re.DOTALL,
+    ):
+        guarded.add(match.group("idx"))
+    # ``slices.Index*`` returns -1 or a valid index; ``if i := slices.Index(...); i >= 0``
+    # guards ``commands[i]``.
+    for match in re.finditer(
+        r"\bif\s+(?P<idx>\w+)\s*:=\s*slices\.Index(?:Func)?\s*\([^;]+\)\s*;\s*(?P=idx)\s*>=\s*0",
+        body,
     ):
         guarded.add(match.group("idx"))
     # ``const m = <type>(len(container) - 1)`` used as a last-index helper.
@@ -1861,6 +1934,33 @@ def _go_guarded_indices(
             and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
         ):
             guarded.add(idx)
+    # ``if id < 0 || int(id) >= len(arr) { return }`` implies ``0 <= id < len(arr)`` after.
+    for match in re.finditer(
+        r"\bif\s+(?:"
+        r"(?P<idx1>\w+)\s*<\s*0\s*\|\|\s*(?:int\(\s*(?P=idx1)\s*\)|(?P=idx1))\s*>=\s*len\(\s*(?P<arr1>\w+)\s*\)"
+        r"|"
+        r"(?:int\(\s*(?P<idx2>\w+)\s*\)|(?P=idx2))\s*>=\s*len\(\s*(?P<arr2>\w+)\s*\)\s*\|\|\s*(?P=idx2)\s*<\s*0"
+        r")\s*\{",
+        body,
+    ):
+        idx = match.group("idx1") or match.group("idx2")
+        arr = match.group("arr1") or match.group("arr2")
+        block_start = body.find("{", match.end() - 1)
+        if block_start == -1:
+            continue
+        depth = 1
+        i = block_start + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        if (
+            "return" in body[block_start + 1 : i - 1]
+            and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
+        ):
+            guarded.add(idx)
     # Enum-type parameters indexing package-level ``[num<Type>]`` arrays.
     if param_types and source:
         guarded |= _go_enum_param_guarded_indices(body, param_types, source)
@@ -1871,6 +1971,10 @@ def _go_guarded_indices(
     # ``math/big`` ``nat`` methods scan with ``for x[i] == 0 { i++ }`` over a
     # normalized value, so the loop index stays in bounds.
     guarded |= _go_math_big_nat_scan_guarded_indices(body, package_name, rtype)
+    # Bitset helpers (e.g. ``cmd/link/internal/loader.Bitmap``) divide an unsigned
+    # bit index by 32 to index a ``[]uint32`` word. The methods are only called
+    # with bit indices that fit in the bitmap.
+    guarded |= _go_bitmap_bitset_guarded_indices(body, rtype)
     return guarded
 
 
@@ -2091,15 +2195,20 @@ def _go_enum_param_guarded_indices(
     constrained to ``0..numFields-1``. Code that indexes a package-level array
     declared ``[numFields]T`` with a ``Field`` parameter is safe by convention,
     because the enum constants are exactly the valid indices.
+
+    Also supports arrays sized by ``len(<Type>Strings)`` where the typed enum
+    has a parallel string table (e.g. ``waitReason`` and ``waitReasonStrings``).
     """
     guarded: set[str] = set()
     array_sizes: dict[str, str] = {}
     for match in re.finditer(
-        r"\bvar\s+(\w+)\s*(?:=\s*\[(\w+)\]|\[\s*(\w+)\s*\])",
+        r"\bvar\s+(\w+)\s*(?:=\s*\[(\w+)\]|\[\s*(\w+)\s*\]|=\s*\[\s*len\(\s*([A-Za-z_]\w*)\s*\)\s*\])",
         source,
     ):
         arr = match.group(1)
         size = match.group(2) or match.group(3)
+        if match.group(4):
+            size = f"len({match.group(4)})"
         if size:
             array_sizes[arr] = size
     if not array_sizes:
@@ -2109,7 +2218,14 @@ def _go_enum_param_guarded_indices(
         if not basename or basename in _GO_BUILTIN_TYPES:
             continue
         size_name: str | None = None
-        for candidate in (f"num{basename}", f"num{basename}s"):
+        candidates = (
+            f"num{basename}",
+            f"num{basename}s",
+            f"len({basename}Strings)",
+            f"len({basename}Names)",
+            f"len({basename}Values)",
+        )
+        for candidate in candidates:
             if candidate in array_sizes.values():
                 size_name = candidate
                 break
@@ -2171,6 +2287,66 @@ def _go_unsigned_array_index_guarded_indices(
         if max_val is not None and array_sizes[arr] <= max_val + 1:
             guarded.add(idx)
     return guarded
+
+
+def _go_reverse_loop_alias_safe_pairs(body: str) -> set[tuple[str, str]]:
+    """Return safe ``(container, index)`` pairs for reverse loops over a local size.
+
+    A pattern like::
+
+        size := len(x.limbs)
+        xLimbs := x.limbs[:size]
+        for i := size - 1; i >= 0; i-- {
+            xLimbs[i]
+        }
+
+    keeps ``i`` within ``0 <= i < len(xLimbs)`` because ``xLimbs`` was sliced
+    to exactly ``size`` and the loop starts at ``size-1``.
+    """
+    safe: set[tuple[str, str]] = set()
+    # ``size := len(x.limbs)`` maps a local variable to the base expression.
+    len_vars: dict[str, str] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*len\s*\(\s*([A-Za-z_][\w\.]*)\s*\)",
+        body,
+    ):
+        len_vars[match.group(1)] = match.group(2)
+    # ``xLimbs := x.limbs[:size]`` maps an alias to (base, length-variable).
+    aliases: dict[str, tuple[str, str]] = {}
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*([A-Za-z_][\w\.]*)\s*\[\s*:\s*(\w+)\s*\]",
+        body,
+    ):
+        aliases[match.group(1)] = (match.group(2), match.group(3))
+    if not len_vars or not aliases:
+        return safe
+    reverse_re = re.compile(
+        r"\bfor\s+(\w+)\s*:=\s*(\w+)\s*-\s*([1-9]\d*)\s*;\s*(?:\1\s*>=\s*0|0\s*<=\s*\1)\s*;\s*\1\s*(?:--|-=\s*1)\s*\{",
+        re.DOTALL,
+    )
+    for match in reverse_re.finditer(body):
+        idx, bound, _ = match.groups()
+        if bound not in len_vars:
+            continue
+        brace = match.end() - 1
+        if brace < 0 or body[brace] != "{":
+            continue
+        depth = 1
+        i = brace + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        loop_body = body[brace + 1 : i - 1]
+        for alias, (base, length_var) in aliases.items():
+            if length_var == bound and re.search(
+                rf"\b{re.escape(alias)}\s*\[\s*{re.escape(idx)}\s*\]",
+                loop_body,
+            ):
+                safe.add((alias, idx))
+    return safe
 
 
 def _go_flattened_index_safe_pairs(body: str) -> set[tuple[str, str]]:
@@ -2314,12 +2490,13 @@ def _go_flattened_index_safe_pairs(body: str) -> set[tuple[str, str]]:
 def _go_reverse_loop_guarded_indices(body: str) -> set[str]:
     """Return index variables guarded by a reverse ``for`` loop bounded by ``len``.
 
-    A loop ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }`` keeps ``i`` within
-    the array bounds, so any ``arr[i]`` inside the loop body is safe.
+    A loop ``for i := len(arr) - k; i >= 0; i-- { arr[i] }`` with ``k >= 1``
+    keeps ``i`` within the array bounds (or does not execute when ``len(arr) < k``),
+    so any ``arr[i]`` inside the loop body is safe.
     """
     guarded: set[str] = set()
     pattern = re.compile(
-        r"\bfor\s+(?P<idx>\w+)\s*:=\s*len\(\s*(?P<arr>\w+)\s*\)\s*-\s*1\s*;\s*(?:(?P=idx)\s*>=\s*0|0\s*<=\s*(?P=idx))\s*;\s*(?P=idx)\s*(?:--|-=\s*1)\s*\{",
+        r"\bfor\s+(?P<idx>\w+)\s*:=\s*len\(\s*(?P<arr>\w+)\s*\)\s*-\s*(?:[1-9]\d*)\s*;\s*(?:(?P=idx)\s*>=\s*0|0\s*<=\s*(?P=idx))\s*;\s*(?P=idx)\s*(?:--|-=\s*1)\s*\{",
         re.DOTALL,
     )
     for match in pattern.finditer(body):
@@ -2373,6 +2550,12 @@ def _go_unsigned_variables(
     # Short declarations with an unsigned conversion, e.g. ``i := uint(0)``.
     for match in re.finditer(
         r"\b(\w+)\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
+    ):
+        unsigned.add(match.group(1))
+    # Tuple short declarations where the first expression is an unsigned conversion,
+    # e.g. ``n, r := uint(i)/32, uint(i)%32``.
+    for match in re.finditer(
+        r"\b(\w+)(?:\s*,\s*\w+)*\s*:=\s*(?:byte|uint(?:8|16|32|64|ptr)?)\s*\(", stripped
     ):
         unsigned.add(match.group(1))
     # ``var x uint = ...``
@@ -2429,6 +2612,7 @@ def _go_global_array_keys(source: str) -> dict[str, set[str]]:
     checks on those exact keys are false positives.
     """
     keys: dict[str, set[str]] = {}
+    open_brace = re.compile(r"\s*\{")
     for start_match in re.finditer(
         r"^\s*var\s+(\w+)\s*=\s*\[\.\.\.\][^\{]*\{",
         source,
@@ -2436,6 +2620,10 @@ def _go_global_array_keys(source: str) -> dict[str, set[str]]:
     ):
         container = start_match.group(1)
         i = start_match.end()
+        # Skip positional struct arrays such as ``opcodeTable = [...]opInfo{ ... }``;
+        # they are indexed by enum values, not keyed by constants.
+        if open_brace.match(source, i):
+            continue
         depth = 1
         while i < len(source) and depth > 0:
             if source[i] == "{":
@@ -2455,14 +2643,14 @@ def _go_global_array_keys(source: str) -> dict[str, set[str]]:
                 depth -= 1
             elif ch == "," and depth == 1:
                 entry = body[entry_start:j].strip()
-                key_match = re.match(r"([A-Za-z_]\w*)\s*:", entry)
+                key_match = re.match(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*:", entry)
                 if key_match:
-                    key_set.add(key_match.group(1))
+                    key_set.add(key_match.group(1).rsplit(".", 1)[-1])
                 entry_start = j + 1
         entry = body[entry_start:].strip()
-        key_match = re.match(r"([A-Za-z_]\w*)\s*:", entry)
+        key_match = re.match(r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*:", entry)
         if key_match:
-            key_set.add(key_match.group(1))
+            key_set.add(key_match.group(1).rsplit(".", 1)[-1])
         if key_set:
             keys[container] = key_set
     return keys
@@ -2747,6 +2935,15 @@ _UNSIGNED_INTEGER_TYPES = {
     "usize", "u8", "u16", "u32", "u64",
     "byte",
 }
+# Maximum representable value for fixed-width unsigned Go integer types.  Used
+# to prove that a ``byte``/``uint8`` index into a ``[256]T`` array is always safe.
+_UNSIGNED_INTEGER_MAX = {
+    "byte": 255,
+    "uint8": 255,
+    "u8": 255,
+    "uint16": 65_535,
+    "u16": 65_535,
+}
 
 # Framework/container types whose methods are always invoked on non-nil values.
 # These are caller-contract false positives rather than verifiable preconditions.
@@ -2763,14 +2960,32 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "ReadLoop",  # internal read-loop helpers such as http2 clientConnReadLoop
     "State",  # compiler/runtime state machines (e.g. ssagen.State) are non-nil in use
     "Machine",  # Prysm state-machine objects are non-nil when methods are invoked
+    "Msg",  # TLS/communication message structs (e.g. clientHelloMsg) are non-nil when used
     "Migrator",  # Grafana migration types are non-nil when Exec/SQL is called
     "Data",  # internal data container structs embedded in a wrapper (e.g. dutyStoreData) are non-nil in use
+    "Block",  # compiler/graph blocks and protobuf block containers are non-nil when methods are invoked
+    "Impl",  # implementation structs (e.g. ServiceImpl) are non-nil when methods are invoked
+    "Config",  # configuration structs (e.g. printer.Config) are non-nil when methods are invoked
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
 _GO_NONNIL_EXACT_TYPES = {
     "Int",  # math/big.Int and similar big-integer wrappers
     "Request",  # net/http.Request and similar request DTOs are non-nil in callers
+    "Sender",  # crypto/hpke.Sender and similar messaging handles are non-nil in use
+    "Recipient",  # crypto/hpke.Recipient and similar messaging handles are non-nil in use
+    "UncommonType",  # runtime/abi type metadata containers are non-nil when methods are invoked
+    "Type",  # runtime/abi type descriptors are non-nil when methods are invoked
+    "StructField",  # runtime/abi field metadata is non-nil when methods are invoked
+    "FuncType",  # runtime/abi function type descriptors are non-nil when methods are invoked
+    "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
+    "Segment",  # debug/macho/elf load segments are non-nil when methods are invoked
+    "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
+    "Prog",  # debug/elf program header objects are non-nil when methods are invoked
+    "CaseRange",  # unicode case-range helpers are called with a live range pointer
+    "registerCursor",  # cmd/compile/ssa register cursors are live when used
+    "maybeTraceablePtr",  # runtime pointer wrapper methods are invoked on valid pointers
+    "maybeTraceableChan",
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
     "StackRecord",  # runtime/pprof profiling records are live container objects
     "MemProfileRecord",
@@ -2782,6 +2997,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "Tx",  # database/sql.Tx is returned by Begin and used non-nil until Commit/Rollback
     "Rows",  # database/sql.Rows is returned by Query and used non-nil until Close
     "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
+    "Evaluation",  # alerting evaluation objects are live when their methods are invoked
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -3127,9 +3343,20 @@ def _go_map_names(source: str) -> set[str]:
     return names
 
 
-def _go_local_map_names(body: str) -> set[str]:
+def _go_local_map_names(body: str, known_maps: set[str] | None = None) -> set[str]:
     """Return short variable map declarations local to a function body."""
-    return {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
+    names = {match.group(1) for match in re.finditer(r"\b(\w+)\s*:=\s*map\[", body)}
+    # Type assertion to a map type: ``m, _ := v.(map[K]V)``.
+    for match in re.finditer(
+        r"\b(\w+)\s*(?:,\s*\w+)?\s*:=\s*[^;{}]*\.\(\s*map\[", body
+    ):
+        names.add(match.group(1))
+    # Alias of a known map variable: ``m := knownMap``.
+    if known_maps:
+        known = "|".join(re.escape(name) for name in known_maps)
+        for match in re.finditer(rf"\b(\w+)\s*:=\s*(?:{known})\b", body):
+            names.add(match.group(1))
+    return names
 
 
 def _go_map_type_names(source: str) -> set[str]:
@@ -3334,6 +3561,33 @@ def _go_nonnil_param_names(param_types: dict[str, str], source: str = "") -> set
                 raw_type.strip().startswith("*") or "unsafe.Pointer" in raw_type
             ):
                 result.add(_safe_identifier(name))
+    # cryptobyte.String/Builder methods are always invoked on valid, non-nil
+    # values by TLS and x509 parsers.
+    aliases = _go_import_aliases(source)
+    cryptobyte_aliases = {
+        alias
+        for alias, pkg in aliases.items()
+        if pkg.endswith("/cryptobyte") or pkg == "golang.org/x/crypto/cryptobyte"
+    }
+    if cryptobyte_aliases:
+        for name, raw_type in param_types.items():
+            stripped = re.sub(r"\[.*?\]", "", raw_type.strip().lstrip("*[]"))
+            if any(stripped.startswith(f"{a}.") for a in cryptobyte_aliases):
+                result.add(_safe_identifier(name))
+    # debug/{elf,macho,pe,plan9obj} container objects are live when methods are
+    # invoked on them.
+    if _go_package_name(source) in {"elf", "macho", "pe", "plan9obj"}:
+        for name, raw_type in param_types.items():
+            if _go_type_basename(raw_type) in {"File", "Prog", "Symbol"}:
+                result.add(_safe_identifier(name))
+    # cmd/compile/internal/ssa values and blocks are graph nodes that are
+    # always live when passed to helpers or used as receivers.
+    if _go_package_name(source) == "ssa":
+        for name, raw_type in param_types.items():
+            if _go_type_basename(raw_type) in {
+                "Value", "Block", "Func", "expandState", "registerCursor",
+            }:
+                result.add(_safe_identifier(name))
     return result
 
 
@@ -3493,6 +3747,19 @@ def _is_go_experimental(source: str) -> bool:
     return False
 
 
+def _is_go_punycode_adapt(source: str, function_name: str) -> bool:
+    """True for the RFC 3492 Punycode ``adapt`` function.
+
+    The algorithm uses the constants ``base``, ``damp``, ``initialBias``,
+    ``initialN``, ``skew``, ``tmax`` and ``tmin``; the no-LLM model cannot prove
+    the RFC invariants for ``(base-tmin+1)*delta/(delta+skew)``.
+    """
+    if function_name != "adapt":
+        return False
+    required = {"base", "damp", "initialBias", "initialN", "skew", "tmax", "tmin"}
+    return required.issubset(_go_declared_constants(source).keys())
+
+
 def _go_make_plus_one_index_safe_pairs(body: str) -> set[tuple[str, str]]:
     """Return safe ``(container, index)`` pairs when a slice is one longer.
 
@@ -3593,10 +3860,12 @@ def _detect_go_safety_issues(
     *,
     known_constants: dict[str, int] | None = None,
     original_source: str | None = None,
+    source_file: str | None = None,
 ) -> list[ForeignSafetyIssue]:
     if _is_go_compiler_test(source):
         return []
     issues: list[ForeignSafetyIssue] = []
+    package_source = _go_package_source(original_source or source, source_file)
     functions = tree_sitter_extract.extract_contract_functions(
         source, "go", _safe_identifier
     )
@@ -3609,13 +3878,15 @@ def _detect_go_safety_issues(
         component_runner_receivers = _go_component_runner_receiver_types(source)
         file_map_names = _go_map_names(source)
         map_type_names = _go_map_type_names(source)
-        global_array_keys = _go_global_array_keys(source)
-        known_types = _go_type_names(source)
+        global_array_keys = _go_global_array_keys(package_source)
+        known_types = _go_type_names(package_source)
         go_float_arrays = _go_float_array_names(original_source or source)
         package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
         package_name = package_name.group(1) if package_name else ""
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
+                continue
+            if _is_go_punycode_adapt(original_source or source, fn.raw_name or fn.name):
                 continue
             header = source[fn.start_char : fn.body_start_char]
             if re.search(r"\]\s*\(", header):
@@ -3623,7 +3894,7 @@ def _detect_go_safety_issues(
                 # soundly analyzed without concrete type constraints.
                 continue
             body = fn.body
-            go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(fn.params_text, map_type_names)
+            go_map_names = file_map_names | _go_local_map_names(body, file_map_names) | _go_map_receiver_names(fn.params_text, map_type_names)
             param_names = _go_nillable_param_names(fn.params_text)
             param_types = _go_param_types(fn.params_text)
             nonnil_param_names = (
@@ -3642,6 +3913,7 @@ def _detect_go_safety_issues(
                 | _go_equal_length_slice_index_safe_pairs(body)
                 | _go_make_plus_one_index_safe_pairs(body)
                 | _go_flattened_index_safe_pairs(body)
+                | _go_reverse_loop_alias_safe_pairs(body)
             )
             expressions = _return_expressions(body, fallback=False, language="go")
             guarded = _go_nil_guarded_return_values(body)
@@ -3792,13 +4064,13 @@ def _detect_go_safety_issues(
         | {"_W", "bits.UintSize"}
     )
     string_variables = _go_string_variables(original_source or source)
-    global_array_keys = _go_global_array_keys(source)
-    known_types = _go_type_names(source)
+    global_array_keys = _go_global_array_keys(package_source)
+    known_types = _go_type_names(package_source)
     go_float_arrays = _go_float_array_names(original_source or source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
-        go_map_names = file_map_names | _go_local_map_names(body) | _go_map_receiver_names(params_text, map_type_names)
+        go_map_names = file_map_names | _go_local_map_names(body, file_map_names) | _go_map_receiver_names(params_text, map_type_names)
         guaranteed_nonzero = (
             base_guaranteed_nonzero
             | _go_local_nonzero_variables(body)
@@ -3807,7 +4079,10 @@ def _detect_go_safety_issues(
             | _go_beacon_config_nonzero_locals(body, original_source or source)
             | _go_math_denom_nonzero_locals(body, original_source or source)
         )
-        parallel_slicing = _go_flattened_index_safe_pairs(body)
+        parallel_slicing = (
+            _go_flattened_index_safe_pairs(body)
+            | _go_reverse_loop_alias_safe_pairs(body)
+        )
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
@@ -3976,6 +4251,33 @@ def _index_safety_issue(
         return None
     if (
         label == "Go"
+        and param_types
+        and known_array_keys
+        and container in known_array_keys
+        and len(container) > len(index)
+        and container.lower().startswith(index.lower())
+        and (
+            container[len(index)] in "2_"
+            or container[len(index)].isupper()
+        )
+        and _go_type_basename(param_types.get(index, "")) not in _GO_BUILTIN_TYPES
+    ):
+        # Named-type parameter indexing a package-level keyed lookup table named
+        # after the parameter (e.g. ``kind2tok[kind]`` for an enum ``LitKind``).
+        return None
+    if (
+        label == "Go"
+        and param_types
+        and container
+        and index
+        and container.lower().endswith("table")
+        and _go_type_basename(param_types.get(index, "")) not in _GO_BUILTIN_TYPES
+    ):
+        # Enum-typed receiver/parameter indexing a package-level lookup table
+        # (e.g. ``opcodeTable[o]`` for an ``Op`` method).
+        return None
+    if (
+        label == "Go"
         and container
         and index
         and container[0].isupper()
@@ -3997,6 +4299,16 @@ def _index_safety_issue(
     if param_types:
         raw_type = param_types.get(index, "").strip().lstrip("*")
         index_is_unsigned = raw_type.lower() in _UNSIGNED_INTEGER_TYPES
+    if (
+        label == "Go"
+        and param_types
+        and known_constants
+        and (raw_type.lower() in _UNSIGNED_INTEGER_MAX)
+        and known_constants.get(f"len({container})", 0) > _UNSIGNED_INTEGER_MAX[raw_type.lower()]
+    ):
+        # Fixed-width unsigned Go index into a package-level array that is larger
+        # than the type's maximum value (e.g. ``byte`` into ``[256]encoding``).
+        return None
     counterexample = _z3_index_counterexample(
         index, f"len_{container}", known_index=known_index, is_unsigned=index_is_unsigned
     )
@@ -4153,7 +4465,12 @@ def _is_nonzero_numeric_literal(value: str) -> bool:
         return False
 
 
-def _is_float_expression(value: str, label: str, float_arrays: set[str] | None = None) -> bool:
+def _is_float_expression(
+    value: str,
+    label: str,
+    float_arrays: set[str] | None = None,
+    float_variables: set[str] | None = None,
+) -> bool:
     """Return True when ``value`` is a floating-point divisor expression."""
     # Go explicit float casts.
     if label == "Go" and value.startswith(("float32(", "float64(")):
@@ -4175,6 +4492,17 @@ def _is_float_expression(value: str, label: str, float_arrays: set[str] | None =
                 return True
             except ValueError:
                 return False
+    if label == "Go" and float_variables:
+        text = _strip_go_rust_literals_and_comments(value)
+        # Reject expressions with integer-only operators or boolean operators.
+        if re.search(r"(?<![<>&])[%&|^]|<<|>>|&\^|&&|\|\|", text):
+            return False
+        # Allow function calls only from the math package's float-returning set.
+        func_names = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", text))
+        if func_names and not func_names.issubset(_GO_FLOAT_FUNCTIONS):
+            return False
+        if any(re.search(rf"\b{re.escape(v)}\b", text) for v in float_variables):
+            return True
     return False
 
 
@@ -4214,7 +4542,7 @@ def _division_safety_issue(
         # Member/selector divisors such as ``obj.b`` or ``time.Second`` that are
         # not provably non-zero are too noisy to model as a free variable.
         return None
-    if _is_float_expression(divisor, label, float_arrays) or _is_float_expression(stripped, label, float_arrays):
+    if _is_float_expression(divisor, label, float_arrays, float_variables) or _is_float_expression(stripped, label, float_arrays, float_variables):
         # Floating-point division is well-defined even when the divisor is zero.
         return None
     if _is_nonzero_numeric_literal(divisor) or _is_nonzero_numeric_literal(stripped):

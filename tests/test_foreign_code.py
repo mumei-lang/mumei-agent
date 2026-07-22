@@ -2565,6 +2565,513 @@ func randIntn(n int) int {
     assert not any("n=0" in str(i.counterexample) for i in issues)
 
 
+def test_detect_go_safety_issues_block_receiver_nonnil() -> None:
+    """Methods on compiler/graph ``*Block`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package ssa
+type Block struct{ ID int; Kind int }
+func (b *Block) String() string {
+    return fmt.Sprintf("b%d", b.ID)
+}
+func (b *Block) Log() {
+    _ = b.Kind
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_negative_or_len_guard() -> None:
+    """``if id < 0 || int(id) >= len(arr) { return }`` guards ``arr[id]``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package gob
+var idToTypeSlice []int
+func idToType(id int32) int {
+    if id < 0 || int(id) >= len(idToTypeSlice) {
+        return 0
+    }
+    return idToTypeSlice[id]
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("idToTypeSlice" in i.message and "bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_hpke_sender_recipient_nonnil() -> None:
+    """crypto/hpke Sender/Recipient receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package hpke
+type context struct{ export func(string, uint16) ([]byte, error) }
+type Sender struct{ *context }
+func (s *Sender) Export(ctx string, l int) ([]byte, error) {
+    return s.export(ctx, uint16(l))
+}
+type Recipient struct{ *context }
+func (r *Recipient) Export(ctx string, l int) ([]byte, error) {
+    return r.export(ctx, uint16(l))
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_abi_type_metadata_nonnil() -> None:
+    """runtime/abi type descriptor receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package abi
+type Type struct{ Kind_ uint8 }
+func (t *Type) Kind() uint8 { return t.Kind_ }
+type FuncType struct{ Type }
+func (t *FuncType) NumIn() int { return 0 }
+type InterfaceType struct{ Type }
+func (t *InterfaceType) NumMethod() int { return 0 }
+type StructField struct{ Name string }
+func (f *StructField) Embedded() bool { return false }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_waitreason_and_runtime_ptr_nonnil() -> None:
+    """runtime waitReason and maybeTraceablePtr are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package runtime
+type waitReason uint8
+var waitReasonStrings = [...]string{""}
+var isWaitingForSuspendG = [len(waitReasonStrings)]bool{}
+func (w waitReason) isWaitingForSuspendG() bool { return isWaitingForSuspendG[w] }
+type maybeTraceablePtr struct{ vu uintptr }
+func (p *maybeTraceablePtr) get() unsafe.Pointer { return unsafe.Pointer(p.vu) }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message or "bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_math_gamma_float_divisor() -> None:
+    """math.Gamma small-case denominator is a floating-point expression."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package math
+func Gamma(x float64) float64 {
+    const Euler = 0.5772
+    if x == 0 {
+        return Inf(1)
+    }
+    z := 1.0
+    return z / ((1 + Euler*x) * x)
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("divide by" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_tls_msg_and_cryptobyte_nonnil() -> None:
+    """crypto/tls message and cryptobyte.String receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package tls
+import "golang.org/x/crypto/cryptobyte"
+type clientHelloMsg struct{ vers uint16 }
+func (m *clientHelloMsg) marshal() ([]byte, error) { return nil, nil }
+func readUint8LengthPrefixed(s *cryptobyte.String, out *[]byte) bool {
+    return s.ReadUint8LengthPrefixed((*cryptobyte.String)(out))
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_runtime_trace_time_div_nonzero() -> None:
+    """runtime traceTimeDiv is a compile-time non-zero constant."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package runtime
+const traceTimeDiv = 64
+func traceClockNow() uint64 { return uint64(cputicks() / traceTimeDiv) }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("divide by" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_reverse_loop_len_minus_k() -> None:
+    """Reverse for loops starting at len(arr) - k are bounded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package cover
+import "strings"
+func PackageName() string {
+    elems := strings.Split("foo/bar", "/")
+    for i := len(elems) - 2; i >= 0; i-- {
+        if elems[i] != "" { return elems[i] }
+    }
+    return ""
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_debug_elf_file_nonnil() -> None:
+    """debug/elf File and Prog receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package elf
+type File struct { Class uint8 }
+func (f *File) getSymbols() uint8 { return f.Class }
+type Prog struct { sr *Section }
+type Section struct{}
+func (p *Prog) Open() *Section { return p.sr }
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_binary_search_lo_guarded() -> None:
+    """Binary-search ``lo`` is non-negative and a subsequent ``lo < len(arr)`` guard is enough."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package unicode
+type foldPair struct{ From, To uint16 }
+var caseOrbit []foldPair
+func SimpleFold(r rune) rune {
+    lo := 0
+    hi := len(caseOrbit)
+    for lo < hi {
+        m := int(uint(lo+hi) >> 1)
+        if rune(caseOrbit[m].From) < r {
+            lo = m + 1
+        } else {
+            hi = m
+        }
+    }
+    if lo < len(caseOrbit) && rune(caseOrbit[lo].From) == r {
+        return rune(caseOrbit[lo].To)
+    }
+    return r
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_unicode_case_range_nonnil() -> None:
+    """unicode CaseRange helper functions receive a live, non-nil pointer."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package unicode
+type CaseRange struct{ Lo, Hi uint32; Delta [3]int32 }
+func convertCase(c int, r rune, cr *CaseRange) rune {
+    return r + cr.Delta[c]
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_ssa_value_nonnil() -> None:
+    """cmd/compile/internal/ssa *Value helpers receive a live node."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package ssa
+type Value struct{ Type int }
+func offsetFrom(from *Value, offset int64) int {
+    return from.Type
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_slices_index_func_guarded() -> None:
+    """slices.IndexFunc result guarded by ``i >= 0`` is a valid index."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package main
+import "slices"
+type Command struct{ Name string }
+func checkCommandList(commands []*Command, name string) *Command {
+    if i := slices.IndexFunc(commands, func(c *Command) bool { return c.Name == name }); i >= 0 {
+        return commands[i]
+    }
+    return nil
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_bitmap_bitset_word_index() -> None:
+    """Bitmap bitset helpers divide an unsigned bit index by 32."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package loader
+type Sym uint32
+type Bitmap []uint32
+func (bm Bitmap) Set(i Sym) {
+    n, r := uint(i)/32, uint(i)%32
+    bm[n] |= 1 << r
+}
+func (bm Bitmap) Has(i Sym) bool {
+    n, r := uint(i)/32, uint(i)%32
+    return bm[n]&(1<<r) != 0
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
+def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
+    """``return a ?? b;`` must not swallow the rest of the function body."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export function calculateFieldDisplayName(
+  field: Field,
+  frame?: DataFrame,
+  allFrames?: DataFrame[],
+  commonLabels?: Labels
+): string {
+  if (field.type === FieldType.time && !field.labels) {
+    return displayName ?? TIME_SERIES_TIME_FIELD_NAME;
+  }
+
+  let parts: string[] = [];
+
+  if (allFrames && allFrames.length > 1) {
+    for (let i = 1; i < allFrames.length; i++) {
+      const f = allFrames[i];
+    }
+  }
+
+  return displayName;
+}
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any('allFrames' in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_config_receiver_non_nil() -> None:
+    """Pointer receivers of ``*Config`` types are treated as non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package printer
+
+type Config struct{ Tabwidth int }
+
+func (cfg *Config) Fprint(output string) string {
+    return cfg.fprint()
+}
+
+func (cfg *Config) fprint() string {
+    return "ok"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Fprint" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_punycode_adapt() -> None:
+    """RFC 3492 Punycode ``adapt`` arithmetic is trusted."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package cookiejar
+
+const (
+	base        int32 = 36
+	damp        int32 = 700
+	initialBias int32 = 72
+	initialN    int32 = 128
+	skew        int32 = 38
+	tmax        int32 = 26
+	tmin        int32 = 1
+)
+
+func adapt(delta, numPoints int32, firstTime bool) int32 {
+	if firstTime {
+		delta /= damp
+	} else {
+		delta /= 2
+	}
+	delta += delta / numPoints
+	k := int32(0)
+	for delta > ((base-tmin)*tmax)/2 {
+		delta /= base - tmin
+		k += base
+	}
+	return k + (base-tmin+1)*delta/(delta+skew)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("adapt" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_enum_table_indexed_by_receiver() -> None:
+    """Enum-typed receiver indexing a package-level ``...Table`` is in bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+type Op int32
+
+const (
+	OpInvalid Op = iota
+	OpAdd
+	OpSub
+)
+
+type opInfo struct{ name string }
+
+var opcodeTable = [...]opInfo{
+	{name: "OpInvalid"},
+	{name: "Add"},
+	{name: "Sub"},
+}
+
+func (o Op) String() string {
+	return opcodeTable[o].name
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("opcodeTable" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_byte_index_into_256_array() -> None:
+    """A ``byte`` index into a package-level ``[256]T`` is always in bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package url
+
+type encoding uint8
+
+var table = [256]encoding{}
+
+func ishex(c byte) bool {
+	return table[c]&1 != 0
+}
+
+func shouldEscape(c byte, mode encoding) bool {
+	return table[c]&mode == 0
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("ishex" in i.message or "shouldEscape" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_evaluation_receiver_non_nil() -> None:
+    """Pointer receivers of ``*Evaluation`` are treated as non-nil containers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package schedule
+
+type Evaluation struct{ rule string }
+
+func (e *Evaluation) Fingerprint() string {
+    return e.rule
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Fingerprint" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_impl_receiver_non_nil() -> None:
+    """Pointer receivers named ``*Impl`` are treated as non-nil containers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package query
+
+type ServiceImpl struct{}
+
+func (s *ServiceImpl) GetSQLSchemas() string {
+    return s.parseMetricRequest()
+}
+
+func (s *ServiceImpl) parseMetricRequest() string {
+    return "ok"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("GetSQLSchemas" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_reverse_loop_sliced_alias() -> None:
+    """Reverse loop over a local ``size`` indexing a same-length slice alias."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package bigmod
+
+type Nat struct{ limbs []uint }
+
+func (x *Nat) BitLenVarTime() int {
+    size := len(x.limbs)
+    xLimbs := x.limbs[:size]
+    for i := size - 1; i >= 0; i-- {
+        if xLimbs[i] != 0 {
+            return i
+        }
+    }
+    return 0
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("xLimbs" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_enum_lookup_table_named_index() -> None:
+    """Named enum parameter indexing ``kind2tok`` keyed by enum constants."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syntax
+
+type LitKind int
+
+const (
+	IntLit LitKind = iota
+	FloatLit
+	ImagLit
+	RuneLit
+	StringLit
+)
+
+type token int
+
+var kind2tok = [...]token{
+	IntLit:    1,
+	FloatLit:  2,
+	ImagLit:   3,
+	RuneLit:   4,
+	StringLit: 5,
+}
+
+func makeFromLiteral(lit string, kind LitKind) token {
+	return kind2tok[kind]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("kind2tok" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_local_map_alias_and_assertion() -> None:
+    """Short map aliases and type-asserted map variables are map accesses."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = '''package gob
+var typeInfoMapInit = make(map[string]int)
+func lookupTypeInfo(rt string) int {
+    if m := typeInfoMapInit; m != nil {
+        return m[rt]
+    }
+    v, _ := cache.Load().(map[string]int)
+    return v[rt]
+}
+'''
+    issues = _detect_go_safety_issues(source)
+    assert not any("bounds" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_skips_map_key_access() -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
 
