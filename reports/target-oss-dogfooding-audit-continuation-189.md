@@ -1,0 +1,59 @@
+# Batch 190 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 `verified`
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- `go/src/cmd/compile/internal/ir/visit.go`: verified
+- `go/src/cmd/compile/internal/ssa/merge_conditional_branches.go`: verified
+- `go/src/crypto/internal/fips140deps/byteorder/byteorder.go`: verified
+- `go/src/os/exec/exec_posix_test.go`: verified
+- `go/src/runtime/export_windows_test.go`: verified
+- `go/src/time/zoneinfo_unix_test.go`: verified
+- `go/test/fixedbugs/bug367.go`: verified
+- `go/test/fixedbugs/bug502.go`: verified
+- `go/test/fixedbugs/issue14331.dir/b.go`: verified
+- `go/test/fixedbugs/issue24503.go`: verified
+- `go/test/fixedbugs/issue49029.go`: verified
+- `go/test/fixedbugs/issue8438.go`: verified
+- `go/test/interface/pointer.go`: verified
+- `go/test/live2.go`: verified
+- `go/test/typeparam/issue47925d.go`: verified
+- `grafana/packages/grafana-data/src/themes/createTypography.ts`: verified
+- `grafana/packages/grafana-data/src/themes/types.ts`: verified
+- `grafana/packages/grafana-data/src/transformations/transformDataFrame.ts`: verified
+- `grafana/packages/grafana-data/test/helpers/pluginMocks.ts`: verified
+- `grafana/packages/grafana-ui/src/slate-plugins/indentation.ts`: verified
+- `grafana/packages/grafana-ui/src/themes/GlobalStyles/elements.ts`: verified
+- `grafana/pkg/middleware/org_redirect_test.go`: verified
+- `grafana/pkg/modules/tracing/manager_test.go`: verified
+- `grafana/pkg/services/encryption/service/service.go`: verified
+- `grafana/pkg/services/folder/folderimpl/folder.go`: verified
+- `grafana/pkg/services/pluginsintegration/clientmiddleware/cookies_middleware_test.go`: verified
+- `grafana/pkg/services/pluginsintegration/doc.go`: verified
+- `grafana/pkg/services/pluginsintegration/keyretriever/retriever_test.go`: verified
+- `grafana/pkg/services/quota/quotaimpl/store_test.go`: verified
+- `grafana/pkg/services/rendering/http_mode.go`: verified
+- `grafana/pkg/storage/unified/resource/lease/lease.go`: verified
+- `grafana/pkg/storage/unified/resource/search_vector_cache_test.go`: verified
+- `grafana/pkg/tests/apis/alerting/rules/alertrule/alertrule_test.go`: verified
+- `grafana/public/app/core/components/AppChrome/FullscreenWorkspace/useFullscreenWorkspace.ts`: verified
+- `grafana/public/app/core/services/FetchQueueWorker.ts`: verified
+- `grafana/public/app/features/alerting/unified/utils/notifier-versions.ts`: verified
+- `grafana/public/app/features/dashboard-scene/scene/layout-notebook/cells/cellTypeRegistry.ts`: verified
+- `grafana/public/app/features/dashboard/components/GenAI/GenerationHistoryCarousel.tsx`: verified
+- `grafana/public/app/features/plugins/admin/components/VersionInstallButton.tsx`: verified
+- `prysm/api/client/event/fallback_test.go`: verified
+- `prysm/beacon-chain/core/blocks/exports_test.go`: verified
+- `prysm/beacon-chain/core/electra/effective_balance_updates_test.go`: verified
+- `prysm/beacon-chain/node/prometheus.go`: verified
+- `prysm/beacon-chain/state/state-native/proofs_test.go`: verified
+- `prysm/beacon-chain/sync/initial-sync/round_robin_test.go`: verified
+- `prysm/internal/logrusadapter/adapter_withattrs_test.go`: verified
+- `prysm/testing/spectest/mainnet/fulu__merkle_proof__merkle_proof_test.go`: verified
+- `prysm/testing/spectest/mainnet/gloas__fork__upgrade_to_gloas_test.go`: verified
+- `prysm/testing/spectest/minimal/phase0__operations__voluntary_exit_test.go`: verified
+- `prysm/tools/bootnode/bootnode_test.go`: verified
