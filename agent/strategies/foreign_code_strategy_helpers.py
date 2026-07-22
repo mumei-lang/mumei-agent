@@ -673,6 +673,13 @@ def _go_declared_constants(source: str) -> dict[str, int]:
             parsed = semantic_safety.parse_int_literal(value)
             if parsed is not None:
                 constants[name] = parsed
+    # Package-level arrays with a positive literal size have a compile-time ``len``.
+    for match in re.finditer(
+        r"^\s*var\s+(\w+)\s*\[\s*(\d+)\s*\]", source, re.MULTILINE
+    ):
+        name, size = match.group(1), match.group(2)
+        if int(size) > 0:
+            constants[f"len({name})"] = int(size)
     return constants
 
 
@@ -780,6 +787,22 @@ def _go_nonzero_constants(source: str) -> set[str]:
             if _is_nonzero_literal(value) or _is_nonzero_expression(value, nonzero):
                 nonzero.add(name)
     return nonzero
+
+
+def _go_rounded_factor_nonzero(body: str) -> set[str]:
+    """Return constants used as ``math.Round(score*K) / K`` rounding factors.
+
+    Such factors are package-level positive constants (e.g. ``ScoreRoundingFactor``),
+    so division by them is safe.
+    """
+    factors: set[str] = set()
+    for match in re.finditer(
+        r"\b(?:math\.)?Round\([^)]*\*(\w+)\)[^/]*/\s*\1", body, re.DOTALL
+    ):
+        name = match.group(1)
+        if name[0].isupper() or name.endswith("Factor"):
+            factors.add(name)
+    return factors
 
 
 def _go_import_aliases(source: str) -> dict[str, str]:
@@ -1251,6 +1274,53 @@ def _go_guarded_indices(body: str, unsigned_vars: set[str] | None = None) -> set
             body,
         ):
             guarded.add(match.group("idx"))
+    # ``op := v.Op`` followed by ``opcodeTable[op]`` is safe: ``Op`` is an enum whose
+    # values are valid indices into the static ``opcodeTable``.
+    guarded |= _go_op_enum_guarded_indices(body)
+    # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
+    # stay within ``a``'s bounds, so ``a[idx]`` is safe.
+    guarded |= _go_range_index_guarded_indices(body)
+    return guarded
+
+
+def _go_op_enum_guarded_indices(body: str) -> set[str]:
+    """Return variables assigned from ``.Op`` that index ``opcodeTable``."""
+    guarded: set[str] = set()
+    for match in re.finditer(r"\b(\w+)\s*:=\s*\w+\.Op\b", body):
+        idx = match.group(1)
+        if re.search(rf"\bopcodeTable\s*\[\s*{re.escape(idx)}\s*\]", body):
+            guarded.add(idx)
+    return guarded
+
+
+def _go_range_index_guarded_indices(body: str) -> set[str]:
+    """Return variables assigned from a ``range`` loop index and used to index the same array."""
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\bfor\s+(\w+)(?:,\s*\w+)?\s*:=\s*range\s+(\w+)\s*\{", body
+    ):
+        idx, arr = match.group(1), match.group(2)
+        # The regex already consumed the opening brace, so ``match.end() - 1``
+        # points to the body-starting ``{``.
+        brace = match.end() - 1
+        if brace < 0 or body[brace] != "{":
+            continue
+        depth = 1
+        i = brace + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        loop_body = body[brace + 1 : i - 1]
+        for assign in re.finditer(rf"\b(\w+)\s*=\s*{re.escape(idx)}\b", loop_body):
+            alias = assign.group(1)
+            if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(alias)}\s*\]", body):
+                guarded.add(alias)
+        if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body):
+            guarded.add(idx)
+    return guarded
     return guarded
 
 
@@ -1329,6 +1399,8 @@ def _go_unsigned_variables(
     ):
         unsigned.add(match.group(1))
     return unsigned
+
+
 def _go_runtime_level_guarded_indices(body: str, package_name: str, param_names: set[str]) -> set[str]:
     """Treat ``level`` as a guarded index for runtime summary helpers.
 
@@ -1791,6 +1863,10 @@ def _go_caller_contract_receiver_types(source: str) -> set[str]:
         # ``cmd/compile/internal/ssagen.state`` is the per-function SSA builder;
         # its pointer-receiver logging helpers are only called on an initialized state.
         contracts.add("state")
+    if pkg == "net" and re.search(r"\btype\s+Dialer\s+struct\b", source):
+        # ``net.Dialer`` is a public configuration value; its pointer-receiver
+        # methods (``MultipathTCP``/``SetMultipathTCP``) are called on live values.
+        contracts.add("Dialer")
     return contracts
 
 
@@ -2432,6 +2508,7 @@ def _detect_go_safety_issues(
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
+                | _go_rounded_factor_nonzero(body)
                 | {"_W", "bits.UintSize"}
             )
             float_param_names = _go_float_param_names(fn.params_text)
@@ -2513,7 +2590,7 @@ def _detect_go_safety_issues(
     caller_contract_types = _go_caller_contract_receiver_types(source)
     interface_method_names = _go_interface_method_names(source)
     file_map_names = _go_map_names(source)
-    guaranteed_nonzero = (
+    base_guaranteed_nonzero = (
         _go_nonzero_constants(source)
         | _go_known_nonzero_selectors(original_source or source)
         | {"_W", "bits.UintSize"}
@@ -2526,6 +2603,7 @@ def _detect_go_safety_issues(
     # functions, so callback suppression is skipped in that path.
     for name, params_text, _return_type, body in go_decls:
         go_map_names = file_map_names | _go_local_map_names(body)
+        guaranteed_nonzero = base_guaranteed_nonzero | _go_rounded_factor_nonzero(body)
         float_param_names = _go_float_param_names(params_text)
         float_variables = _go_float_variables(body, float_param_names) | float_param_names
         param_names = _go_nillable_param_names(params_text)
@@ -2885,6 +2963,19 @@ def _division_safety_issue(
     # divide-by-zero from modeling it as a free integer (#296).
     if known_constants.get(divisor, 0) != 0:
         return None
+    # ``uintptr(len(locktab))`` and similar casts of compile-time ``len(...)``
+    # evaluate to the array's non-zero length.
+    stripped = _strip_outer_parentheses(divisor)
+    while re.fullmatch(r"\w+\s*\(.*\)", stripped):
+        m = re.match(r"\w+\s*\(\s*(.*)\s*\)\s*$", stripped)
+        if not m:
+            break
+        inner = m.group(1).strip()
+        if known_constants.get(inner, 0) != 0:
+            return None
+        if stripped == inner:
+            break
+        stripped = inner
     if guaranteed_nonzero and divisor in guaranteed_nonzero:
         return None
     if float_variables and divisor in float_variables:
