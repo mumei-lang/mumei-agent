@@ -3722,3 +3722,67 @@ def test_source_has_function_declarations_rust_trait_signatures_no_body() -> Non
 }
 '''
     assert _source_has_function_declarations(source, "rust") is False
+
+
+def test_detect_go_safety_issues_float_array_divisor() -> None:
+    """Go float64 array elements are floats; division by zero is not a panic."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package math
+
+var pow10tab = [...]float64{
+    1e00, 1e01, 1e02,
+}
+
+func Pow10(n int) float64 {
+    return 1.0 / pow10tab[uint(-n)%3]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in issue.message for issue in issues)
+
+
+def test_ensures_for_return_expression_bool_literal_non_bool_return() -> None:
+    """Boolean literals in a non-bool tail expression must not produce ``result == true``."""
+    from agent.cross_validation_foreign import _ensures_for_return_expression
+
+    assert _ensures_for_return_expression("true", "i64") == "true"
+    assert _ensures_for_return_expression("true,", "i64") == "true"
+    assert _ensures_for_return_expression("false", "bool") == "result == false"
+
+
+def test_last_expression_strips_trailing_comma_comments() -> None:
+    """Trailing commas hidden by line comments do not make an argument a tail expression."""
+    from agent.cross_validation_foreign import _last_expression
+
+    body = '''{
+    Sort::new(
+        self.as_expr(),
+        true, // Sort ASCENDING
+        true,
+    )
+}'''
+    last = _last_expression(body)
+    # It should not return a bare boolean literal from inside the call.
+    assert last not in {"true", "true,"}
+
+
+def test_ensures_for_return_expression_string_literal_non_string_return() -> None:
+    """A string literal tail expression in a non-string function is not the real result."""
+    from agent.cross_validation_foreign import _ensures_for_return_expression
+
+    assert _ensures_for_return_expression('"Invalid CREATE statement"', "i64") == "true"
+
+
+def test_divroundup_expression_suppresses_division_by_zero() -> None:
+    """The ``(x + y - 1) / y`` ceiling-division idiom should not require ``y != 0``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package pbkdf2
+
+func divRoundUp(x, y int) int {
+    return int((int64(x) + int64(y) - 1) / int64(y))
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("divide" in issue.message for issue in issues)
