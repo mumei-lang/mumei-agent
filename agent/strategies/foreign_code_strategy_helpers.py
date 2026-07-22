@@ -1607,6 +1607,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Service", "Node", "Handler", "Manager", "Store",
     "Client", "Provider", "Server", "Resolver", "Registry", "Factory",
     "Key",  # cryptographic key types (PublicKey, PrivateKey, etc.)
+    "Point",  # elliptic curve points (e.g. nistec.P256Point) are created by NewPoint
     "Alloc",  # runtime/pageAlloc-style allocators are embedded in a parent object
     "V1",  # Grafana provisioning API config DTOs (e.g. MuteTimeV1) are unmarshaled non-nil
     "Conn",  # connection objects (e.g. net.Conn, ClientConn) are non-nil when used

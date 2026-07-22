@@ -1,0 +1,12 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/beacon-chain/sync/initial-sync/fsm.go",
+  "language": "go",
+  "status": "refuted",
+  "errors": [
+    "Go function `String` can dereference `m` without a non-nil contract (Z3 counterexample: m_is_nil=true)",
+    "Go function `String` can index `states[s]` without a bounds contract (Z3 counterexample: s=-1, len_states=0)",
+    "Go function `String` can index `events[e]` without a bounds contract (Z3 counterexample: e=-1, len_events=0)",
+    "Z3 Counter-example: m_is_nil=True"
+  ]
+}

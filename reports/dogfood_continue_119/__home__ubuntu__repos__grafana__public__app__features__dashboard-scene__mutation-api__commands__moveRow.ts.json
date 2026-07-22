@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard-scene/mutation-api/commands/moveRow.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/setting/settings_rbac.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

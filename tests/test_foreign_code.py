@@ -3922,6 +3922,22 @@ func recurse(i int, s []byte) byte {
     assert issues == []
 
 
+def test_go_nistec_point_receiver_non_nil() -> None:
+    """crypto/internal/fips140/nistec curve point methods are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package nistec
+
+type P256Point struct { x, y, z [3]int }
+
+func (p *P256Point) Bytes() []byte {
+    return p.x[:]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in issue.message for issue in issues)
+
+
 def test_go_x509_certificate_receiver_non_nil() -> None:
     """crypto/x509.Certificate pointer-receiver methods are called on non-nil parsed values."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
