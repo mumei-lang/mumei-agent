@@ -4102,3 +4102,69 @@ func VerifyCellKZGProofBatchFromBlobData(blobs [][]byte, commitments [][]byte, c
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_inverted_len_guard_index() -> None:
+    """``if idx >= len(arr) { return }`` before ``arr[idx]`` is a valid guard."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+var sigtable []struct{ name string }
+
+func signame(sig uint32) string {
+    if sig >= uint32(len(sigtable)) {
+        return ""
+    }
+    return sigtable[sig].name
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_enum_param_index_num_fields_array() -> None:
+    """Enum parameters of type ``Field`` indexing ``[numFields]`` arrays are guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package pkgbits
+
+type Version uint32
+type Field int
+
+const (
+    Flags Field = iota
+    HasInit
+    numFields = iota
+)
+
+var introduced = [numFields]Version{}
+var removed = [numFields]Version{}
+
+func (v Version) Has(f Field) bool {
+    return introduced[f] <= v && (v < removed[f] || removed[f] == 0)
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("bounds" in issue.message for issue in issues)
+
+
+def test_go_record_receiver_nonnil() -> None:
+    """`*StackRecord` / `*MemProfileRecord` pointer-receiver methods are non-nil in callers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+type StackRecord struct { Stack0 [32]uintptr }
+
+func (r *StackRecord) Stack() []uintptr {
+    for i, v := range r.Stack0 {
+        if v == 0 {
+            return r.Stack0[0:i]
+        }
+    }
+    return r.Stack0[0:]
+}
+'''
+    issues = _detect_safety_issues(source, "go")
+    assert not any("nil" in issue.message for issue in issues)

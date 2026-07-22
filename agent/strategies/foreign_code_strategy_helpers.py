@@ -1217,7 +1217,12 @@ def _go_div_nonzero_params(name: str, params_text: str) -> set[str]:
     return set()
 
 
-def _go_guarded_indices(body: str, unsigned_vars: set[str] | None = None) -> set[str]:
+def _go_guarded_indices(
+    body: str,
+    unsigned_vars: set[str] | None = None,
+    param_types: dict[str, str] | None = None,
+    source: str | None = None,
+) -> set[str]:
     """Return index variables that are provably within bounds.
 
     Matches explicit guards such as:
@@ -1303,6 +1308,31 @@ def _go_guarded_indices(body: str, unsigned_vars: set[str] | None = None) -> set
     # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
     # stay within ``a``'s bounds, so ``a[idx]`` is safe.
     guarded |= _go_range_index_guarded_indices(body)
+    # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
+    for match in re.finditer(
+        r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
+        body,
+    ):
+        idx, arr = match.group(1), match.group(2)
+        block_start = body.find("{", match.end() - 1)
+        if block_start == -1:
+            continue
+        depth = 1
+        i = block_start + 1
+        while i < len(body) and depth > 0:
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+            i += 1
+        if (
+            "return" in body[block_start + 1 : i - 1]
+            and re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body)
+        ):
+            guarded.add(idx)
+    # Enum-type parameters indexing package-level ``[num<Type>]`` arrays.
+    if param_types and source:
+        guarded |= _go_enum_param_guarded_indices(body, param_types, source)
     return guarded
 
 
@@ -1343,6 +1373,47 @@ def _go_range_index_guarded_indices(body: str) -> set[str]:
                 guarded.add(alias)
         if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
+    return guarded
+
+
+def _go_enum_param_guarded_indices(
+    body: str, param_types: dict[str, str], source: str
+) -> set[str]:
+    """Guard enum parameters that index package-level ``[num<Type>]`` arrays.
+
+    An enum type such as ``Field`` is backed by ``int`` and its values are
+    constrained to ``0..numFields-1``. Code that indexes a package-level array
+    declared ``[numFields]T`` with a ``Field`` parameter is safe by convention,
+    because the enum constants are exactly the valid indices.
+    """
+    guarded: set[str] = set()
+    array_sizes: dict[str, str] = {}
+    for match in re.finditer(
+        r"\bvar\s+(\w+)\s*(?:=\s*\[(\w+)\]|\[\s*(\w+)\s*\])",
+        source,
+    ):
+        arr = match.group(1)
+        size = match.group(2) or match.group(3)
+        if size:
+            array_sizes[arr] = size
+    if not array_sizes:
+        return guarded
+    for param, raw_type in param_types.items():
+        basename = _go_type_basename(raw_type)
+        if not basename or basename in _GO_BUILTIN_TYPES:
+            continue
+        size_name: str | None = None
+        for candidate in (f"num{basename}", f"num{basename}s"):
+            if candidate in array_sizes.values():
+                size_name = candidate
+                break
+        if not size_name:
+            continue
+        for arr, size in array_sizes.items():
+            if size == size_name and re.search(
+                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(param)}\s*\]", body
+            ):
+                guarded.add(param)
     return guarded
 
 
@@ -1944,6 +2015,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "Int",  # math/big.Int and similar big-integer wrappers
     "Request",  # net/http.Request and similar request DTOs are non-nil in callers
     "ClientRequest",  # http2 ClientRequest used by Transport/ClientConn methods
+    "StackRecord",  # runtime/pprof profiling records are live container objects
+    "MemProfileRecord",
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -2632,7 +2705,9 @@ def _detect_go_safety_issues(
             unsigned_vars = _go_unsigned_variables(
                 source, body, param_types, rtype, receiver_name
             )
-            guarded_indices = _go_guarded_indices(body, unsigned_vars) | _go_runtime_level_guarded_indices(
+            guarded_indices = _go_guarded_indices(
+                body, unsigned_vars, param_types=param_types, source=source
+            ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             )
             suppress_nil = (
@@ -2789,7 +2864,7 @@ def _detect_go_safety_issues(
         unsigned_vars = _go_unsigned_variables(
             source, body, param_types, rtype, receiver_name
         )
-        guarded_indices = _go_guarded_indices(body, unsigned_vars)
+        guarded_indices = _go_guarded_indices(body, unsigned_vars, param_types=param_types, source=source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
