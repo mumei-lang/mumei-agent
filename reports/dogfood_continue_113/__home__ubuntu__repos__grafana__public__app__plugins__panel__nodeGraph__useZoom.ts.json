@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/public/app/plugins/panel/nodeGraph/useZoom.ts",
+  "language": "typescript",
+  "status": "verified",
+  "errors": []
+}

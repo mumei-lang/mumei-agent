@@ -1,0 +1,7 @@
+{
+  "repo": "go",
+  "file": "/home/ubuntu/repos/go/test/interface/returntype.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

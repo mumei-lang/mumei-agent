@@ -1,0 +1,7 @@
+{
+  "repo": "prysm",
+  "file": "/home/ubuntu/repos/prysm/beacon-chain/sync/rpc_beacon_blocks_by_range.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

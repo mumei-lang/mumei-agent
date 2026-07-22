@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/apps/provisioning/pkg/generated/clientset/versioned/typed/provisioning/v0alpha1/fake/fake_provisioning_client.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}

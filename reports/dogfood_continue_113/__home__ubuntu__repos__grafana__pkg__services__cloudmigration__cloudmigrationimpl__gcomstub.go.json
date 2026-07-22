@@ -1,0 +1,7 @@
+{
+  "repo": "grafana",
+  "file": "/home/ubuntu/repos/grafana/pkg/services/cloudmigration/cloudmigrationimpl/gcomstub.go",
+  "language": "go",
+  "status": "verified",
+  "errors": []
+}
