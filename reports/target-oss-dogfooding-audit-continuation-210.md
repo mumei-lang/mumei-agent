@@ -1,0 +1,59 @@
+# Batch 211 no-LLM dogfooding audit (continuation)
+
+- Sample: 50 files
+- Result: 50/50 
+- Refuted: 0
+- Errors: 0
+
+## Files
+
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
+- : verified
