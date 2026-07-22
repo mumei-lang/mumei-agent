@@ -4114,7 +4114,7 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
     )
     arrow_pattern = re.compile(
         r"(?:export\s+)?(?:const|let)\s+"
-        r"(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+        r"(?P<name>[A-Za-z_$][\w$]*)\s*(?::\s*(?P<vartype>[^=]+?))?\s*=\s*"
         r"(?:async\s*)?\((?P<params>[^)]*)\)\s*"
         r"(?::\s*(?P<ret>[^=]+?))?\s*=>\s*(?:\{.*?\}|[^;\n]+)",
         re.DOTALL,

@@ -343,6 +343,19 @@ def test_typescript_safety_ignores_index_bounds() -> None:
     assert not any("index" in issue.message.lower() for issue in issues)
 
 
+def test_typescript_safety_skips_local_array_length() -> None:
+    """Local arrays returned by helpers like ``takeRight`` are not nullable params."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """const Matchers: FC<MatchersProps> = ({ matchers }) => {
+  const rest = takeRight(matchers, matchers.length - 5);
+  return rest.length > 0 && rest.map((m) => m);
+};
+"""
+    issues = _detect_safety_issues(source, "typescript")
+    assert not any("non-null" in issue.message for issue in issues)
+
+
 def test_rust_go_overflow_requires_ignore_method_call_receiver() -> None:
     """`a + SomeStruct.method()` must not bound `SomeStruct` as a free integer (#281)."""
     from agent.cross_validation_foreign import (
