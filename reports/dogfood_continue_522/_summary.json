@@ -1,0 +1,352 @@
+[
+  {
+    "repo": "go",
+    "file": "src/cmd/addr2line/main.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/go/internal/auth/userauth_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/go/internal/doc/doc_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/go/internal/modfetch/zip_sum_test/zip_sum_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/internal/obj/ppc64/list9.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/internal/obj/wasm/a.out.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/crypto/rand/util.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/buildcfg/cfg.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/poll/error_stub_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/syslist/syslist.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/trace/batchcursor_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/net/error_posix.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/secret_noasm.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/signal_dragonfly_amd64.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/tracestatus.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/syscall/zsysnum_freebsd_riscv64.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/unsafe/unsafe.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug011.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug122.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue10219.dir/c.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue16616.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue19705.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue38496.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue39292.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue78016.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/init.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/typeparam/mdempsky/18.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "apps/example/pkg/apis/example/v1alpha1/getsomething_response_body_types_gen.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "apps/provisioning/pkg/repository/stageable_repository_mock.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "packages/grafana-data/src/types/vector.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "packages/grafana-schema/src/raw/composable/bargauge/panelcfg/x/types.gen.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/api/dtos/user_token.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/components/simplejson/simplejson_go11.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/plugins/manager/process/process_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/iam/user/search.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/iam/user/store.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apis/provisioning/webhooks/pullrequest/render_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/registry/apps/annotation/register.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/authz/zanzana/server/openfga_server.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/ngalert/api/tooling/definitions/inhibition_rule.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/pluginsintegration/clientmiddleware/httpclient_middleware.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/services/screenshot/option.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/storage/unified/resource/broadcaster_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/tests/apis/provisioning/jobs/job_warning_result_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "pkg/tsdb/loki/scopes.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/alerting/unified/components/rule-viewer/RuleViewer.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/alerting/unified/rule-editor/formDefaults.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/dashboard-scene/conditional-rendering/group/ConditionalRenderingGroupAdd.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/explore/LimitedDataDisclaimer.tsx",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "grafana",
+    "file": "public/app/features/provisioning/Migrate/stats.ts",
+    "lang": "typescript",
+    "status": "verified",
+    "errors": []
+  }
+]
