@@ -1406,11 +1406,29 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
     so a subsequent division by ``x`` is safe. Also handles ``x <= 0`` guards,
     which imply ``x > 0`` after the return.
     """
+    return _go_zero_guarded_nonzero_names(body, param_names)
+
+
+def _go_zero_guarded_nonzero_locals(body: str) -> set[str]:
+    """Return local variables guarded by an ``if v == 0 { return }`` early return.
+
+    A local such as ``jitterRange := uint64(maxAge / 2); if jitterRange == 0 {
+    return 0 }; return x % jitterRange`` is safe after the guard.
+    """
+    # Collect simple local names from short declarations, var declarations and assignments.
+    names = set(re.findall(r"\b(\w+)\s*:=", _strip_go_rust_literals_and_comments(body)))
+    names.update(re.findall(r"\bvar\s+(\w+)", _strip_go_rust_literals_and_comments(body)))
+    names.update(re.findall(r"\b(\w+)\s*=[^=]", _strip_go_rust_literals_and_comments(body)))
+    return _go_zero_guarded_nonzero_names(body, names)
+
+
+def _go_zero_guarded_nonzero_names(body: str, names: set[str]) -> set[str]:
+    """Return names guarded by an ``if v == 0 { return/continue/break/panic }`` guard."""
     stripped = _strip_go_rust_literals_and_comments(body)
     guarded: set[str] = set()
-    for param in param_names:
+    for name in names:
         for match in re.finditer(
-            rf"\bif\s+(?:[^;{{]*\b{re.escape(param)}\s*(?:<=|==)\s*0[^;{{]*)\s*{{",
+            rf"\bif\s+(?:[^;{{]*\b{re.escape(name)}\s*(?:<=|==)\s*0[^;{{]*)\s*{{",
             stripped,
         ):
             i = match.end()
@@ -1422,8 +1440,8 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
                 elif stripped[i] == "}":
                     depth -= 1
                 i += 1
-            if depth == 0 and re.search(r"\b(?:return|panic)\b", stripped[block_start : i - 1]):
-                guarded.add(param)
+            if depth == 0 and re.search(r"\b(?:return|continue|break|panic|base\.Fatal)\b", stripped[block_start : i - 1]):
+                guarded.add(name)
     return guarded
 
 
@@ -3292,6 +3310,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "transportRequest",  # net/http internal request wrapper is non-nil in use
     "decoder",  # encoding/binary decoder is non-nil when methods are called
     "encoder",  # encoding/binary encoder is non-nil when methods are called
+    "NamespacedResource",  # grafana unified storage resource key is non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -4263,6 +4282,7 @@ def _detect_go_safety_issues(
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_return_divisor_nonzero_params(body, fn.params_text)
                 | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
+                | _go_zero_guarded_nonzero_locals(body)
                 | _go_loop_count_nonzero_params(body, set(param_types.keys()))
                 | _go_local_nonzero_variables(body)
                 | _go_align_nonzero_params(body)
@@ -4371,6 +4391,8 @@ def _detect_go_safety_issues(
         guaranteed_nonzero = (
             base_guaranteed_nonzero
             | _go_local_nonzero_variables(body)
+            | _go_zero_guarded_nonzero_params(body, set(_go_param_types(params_text).keys()))
+            | _go_zero_guarded_nonzero_locals(body)
             | _go_align_nonzero_params(body)
             | _go_rounded_factor_nonzero(body)
             | _go_beacon_config_nonzero_locals(body, original_source or source)

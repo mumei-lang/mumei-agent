@@ -2866,6 +2866,30 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_zero_guarded_nonzero_local() -> None:
+    """Local variables checked with ``if v == 0 { return }`` are safe divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package main
+
+import "time"
+
+func jitterForKey(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	h := uint64(123)
+	jitterRange := uint64(maxAge / 2)
+	if jitterRange == 0 {
+		return 0
+	}
+	return int(h % jitterRange)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "jitterForKey" for i in issues)
+
+
 def test_detect_go_safety_issues_loop_bound_overflow_guard() -> None:
     """Compiler loop-bound helpers compare ``x`` with ``min+y`` / ``max-y``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
