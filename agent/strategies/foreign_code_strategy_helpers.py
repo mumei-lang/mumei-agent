@@ -4945,6 +4945,27 @@ def _is_grow_guarded_addition(function_name: str, left: str, right: str) -> bool
     return False
 
 
+def _is_loop_bound_overflow_guard(
+    function_name: str, left: str, right: str, expression: str
+) -> bool:
+    """Return True for compiler loop-bound overflow check helpers.
+
+    ``subWillUnderflow`` computes ``x < min+y`` and ``addWillOverflow`` computes
+    ``x > max-y`` to detect stepping past an induction-variable bound. The
+    intermediate arithmetic is the guard itself, not a separate overflow bug.
+    """
+    if function_name not in {"subWillUnderflow", "addWillOverflow"}:
+        return False
+    if "y" not in {left, right}:
+        return False
+    expr = re.sub(r"\s+", "", expression)
+    if "min" in {left, right} and re.search(r"x<\(?min\+y\)?", expr):
+        return True
+    if "max" in {left, right} and re.search(r"x>\(?max-y\)?", expr):
+        return True
+    return False
+
+
 def _is_divroundup_expression(expression: str, divisor: str) -> bool:
     """Return True for the ``(x + y - 1) / y`` ceiling-division idiom.
 
@@ -5010,6 +5031,8 @@ def _i64_overflow_safety_issue(
     if label == "Go" and _is_overflow_guard_expression(expression, left, right):
         return None
     if label == "Go" and _is_grow_guarded_addition(function_name, left, right):
+        return None
+    if label == "Go" and _is_loop_bound_overflow_guard(function_name, left, right, expression):
         return None
     if label == "Go" and _is_divroundup_expression(expression, right):
         return None

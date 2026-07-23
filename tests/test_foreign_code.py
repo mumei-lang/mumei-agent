@@ -2866,6 +2866,30 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_loop_bound_overflow_guard() -> None:
+    """Compiler loop-bound helpers compare ``x`` with ``min+y`` / ``max-y``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+func subWillUnderflow(x, y, min int64) bool {
+	if y < 0 {
+		base.Fatalf("expecting positive value")
+	}
+	return x < min+y
+}
+
+func addWillOverflow(x, y, max int64) bool {
+	if y < 0 {
+		base.Fatalf("expecting positive value")
+	}
+	return x > max-y
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"subWillUnderflow", "addWillOverflow"} for i in issues)
+
+
 def test_detect_go_safety_issues_nonzero_global_slice_length() -> None:
     """``i % len(globalSlice)`` is safe when the slice initializer is non-empty."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
