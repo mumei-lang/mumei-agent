@@ -3125,6 +3125,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Block",  # compiler/graph blocks and protobuf block containers are non-nil when methods are invoked
     "Impl",  # implementation structs (e.g. ServiceImpl) are non-nil when methods are invoked
     "Config",  # configuration structs (e.g. printer.Config) are non-nil when methods are invoked
+    "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
+    "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
 }
 
 # Exact type basenames that are always non-nil when used as parameters.

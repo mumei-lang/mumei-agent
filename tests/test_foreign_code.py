@@ -2866,6 +2866,40 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_validator_response_non_nil() -> None:
+    """Grafana ``*...Validator`` receivers and ``*...Response`` DTO params are non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package migrations
+
+import "context"
+
+type BulkResponse struct{ Summary []Summary; Rejected []Rejected }
+type Summary struct{ Group, Resource, Namespace string }
+type Rejected struct{ Key Key; Error string }
+type Key struct{ Namespace, Group, Resource, Name string }
+type CountValidator struct{ resource GroupResource }
+type GroupResource struct{ Group, Resource string }
+
+type Validator interface {
+	Validate(ctx context.Context, sess any, response *BulkResponse, log any) error
+}
+
+func (v *CountValidator) Validate(ctx context.Context, sess any, response *BulkResponse, log any) error {
+	if len(response.Rejected) > 0 {
+		_ = response.Rejected[0].Key.Namespace
+	}
+	if len(response.Summary) == 0 {
+		return nil
+	}
+	_ = v.resource
+	return nil
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Validate" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_fake_net_fd_receiver_non_nil() -> None:
     """Pointer-receiver methods on ``fakeNetFD`` are called on non-nil values."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
