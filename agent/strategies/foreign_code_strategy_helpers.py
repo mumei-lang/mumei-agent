@@ -3172,6 +3172,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "Frame",  # runtime/pprof Frame passed to linkname helpers is non-nil
     "moduledata",  # runtime module metadata is non-nil when methods are called
     "stackmap",  # runtime stackmap is non-nil when stackmapdata operates on it
+    "AuxCall",  # compiler SSA aux call descriptors are non-nil in use
+    "AuxNameOffset",  # compiler SSA aux name descriptors are non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

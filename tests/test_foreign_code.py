@@ -2866,6 +2866,41 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_ssa_aux_receivers_non_nil() -> None:
+    """Compiler SSA aux types ``*AuxCall`` and ``*AuxNameOffset`` are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+import "fmt"
+
+type LSym struct{ Name string }
+type irName struct{ FrameOffset int64; Sym func() *LSym }
+
+type AuxNameOffset struct {
+	Name   *irName
+	Offset int64
+}
+
+func (a *AuxNameOffset) String() string {
+	return fmt.Sprintf("%s+%d", a.Name.Sym().Name, a.Offset)
+}
+
+func (a *AuxNameOffset) FrameOffset() int64 {
+	return a.Name.FrameOffset() + a.Offset
+}
+
+type AuxCall struct{ Fn *LSym }
+
+func (a *AuxCall) String() string { return "" }
+func (a *AuxCall) NArgs() int64   { return 0 }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"String", "FrameOffset", "NArgs"} for i in issues
+    )
+
+
 def test_detect_go_safety_issues_storage_and_rest_receivers_non_nil() -> None:
     """Kubernetes-style ``*...Storage`` and ``*...REST`` receivers are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
