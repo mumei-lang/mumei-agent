@@ -2866,6 +2866,58 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_link_symbol_builder_and_loader_non_nil() -> None:
+    """``cmd/link`` ``*SymbolBuilder`` / ``*Loader`` / ``*sys.Arch`` are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package loader
+
+import "encoding/binary"
+
+type Arch struct{ ByteOrder binary.ByteOrder }
+
+type Loader struct{}
+func (l *Loader) SubSym(i int) int { return 0 }
+func (l *Loader) CreateSymForUpdate(name string) *SymbolBuilder { return nil }
+
+type Sym int
+
+type SymbolBuilder struct {
+	symIdx Sym
+	size   int64
+	data   []byte
+	kind   int
+}
+
+func (sb *SymbolBuilder) Grow(n int64) {}
+func (sb *SymbolBuilder) AddUint16(arch *Arch, v uint16) int64 {
+	return sb.AddUintXX(arch, uint64(v), 2)
+}
+func (sb *SymbolBuilder) AddUintXX(arch *Arch, v uint64, wid int) int64 {
+	off := sb.size
+	sb.setUintXX(arch, off, v, int64(wid))
+	return off
+}
+func (sb *SymbolBuilder) setUintXX(arch *Arch, off int64, v uint64, wid int64) int64 {
+	if sb.size < off+wid {
+		sb.size = off + wid
+		sb.Grow(sb.size)
+	}
+	switch wid {
+	case 2:
+		arch.ByteOrder.PutUint16(sb.data[off:], uint16(v))
+	}
+	return off + wid
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name
+        in {"SubSym", "CreateSymForUpdate", "AddUint16", "AddUintXX", "setUintXX"}
+        for i in issues
+    )
+
+
 def test_detect_go_safety_issues_io_pipe_receivers_non_nil() -> None:
     """``io.PipeReader``, ``io.PipeWriter``, and ``io.onceError`` receivers are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

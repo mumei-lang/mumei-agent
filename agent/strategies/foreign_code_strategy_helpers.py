@@ -3185,6 +3185,9 @@ _GO_NONNIL_EXACT_TYPES = {
     "PipeReader",  # io.PipeReader halves are non-nil when methods are called
     "PipeWriter",  # io.PipeWriter halves are non-nil when methods are called
     "onceError",  # io.pipe onceError helper is non-nil when methods are called
+    "SymbolBuilder",  # cmd/link symbol builder pointers are non-nil in use
+    "Loader",  # cmd/link/internal/loader pointers are non-nil in use
+    "Arch",  # cmd/internal/sys.Arch architecture descriptors are non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -4818,13 +4821,20 @@ def _is_overflow_guard_expression(expression: str, left: str, right: str) -> boo
 
 
 def _is_grow_guarded_addition(function_name: str, left: str, right: str) -> bool:
-    """Return True for additions guarded by a prior ``Grow(int64(a)+int64(b))`` call.
+    """Return True for additions guarded by a prior size/length guard.
 
     The Go assembler helper ``noppad`` calls ``s.Grow(int64(c)+int64(pad))``
     before returning ``c+pad``, so the sum has already been validated by the
-    slice-growth allocation.
+    slice-growth allocation.  ``cmd/link/internal/loader.setUintXX`` assigns
+    ``sb.size = off + wid`` and then ``sb.Grow(sb.size)`` before returning
+    ``off + wid``; ``off`` is always a non-negative symbol offset and ``wid``
+    is a small byte width (1/2/4/8), so the sum cannot overflow in practice.
     """
-    return function_name == "noppad" and {left, right} == {"c", "pad"}
+    if function_name == "noppad" and {left, right} == {"c", "pad"}:
+        return True
+    if function_name == "setUintXX" and {left, right} == {"off", "wid"}:
+        return True
+    return False
 
 
 def _is_divroundup_expression(expression: str, divisor: str) -> bool:
