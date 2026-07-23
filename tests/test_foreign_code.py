@@ -2866,6 +2866,29 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_storage_and_rest_receivers_non_nil() -> None:
+    """Kubernetes-style ``*...Storage`` and ``*...REST`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package queryschema
+
+type resourceInfo struct{}
+func (r *resourceInfo) NewFunc() runtime.Object { return nil }
+
+type queryTypeStorage struct{ resourceInfo *resourceInfo }
+
+func (s *queryTypeStorage) New() runtime.Object { return s.resourceInfo.NewFunc() }
+
+type queryValidationREST struct{}
+
+func (r *queryValidationREST) New() runtime.Object { return nil }
+
+type runtime interface{ Object() }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("New" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_runtime_internal_descriptor_receivers_non_nil() -> None:
     """Runtime internal descriptors (Func, _func, moduledata, stackmap, Frame) are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

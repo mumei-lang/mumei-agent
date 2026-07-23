@@ -3132,6 +3132,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
     "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
     "Root",  # os.Root and similar filesystem roots are non-nil when methods are called
+    "Storage",  # Kubernetes-style storage implementations (e.g. queryTypeStorage) are non-nil in use
+    "REST",  # Kubernetes REST subresource implementations (e.g. queryValidationREST) are non-nil in use
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
