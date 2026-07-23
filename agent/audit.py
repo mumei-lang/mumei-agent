@@ -82,7 +82,9 @@ from agent.strategies.foreign_code_strategy import (
     _source_has_function_declarations,
 )
 from agent.strategies.foreign_code_strategy_helpers import (
+    _hash_guard_trace_payload,
     build_solidity_guard_trace_proof_certificate,
+    extract_solidity_access_control_atoms,
 )
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
 
@@ -295,6 +297,24 @@ class AuditPipeline:
                 if audit_language == "solidity"
                 else None
             )
+            if proof_certificate is not None:
+                # Access-control obligations ride the same certificate as the
+                # reentrancy guard-trace atoms so both escalate to Lean together.
+                access_control_atoms = extract_solidity_access_control_atoms(
+                    source_code,
+                    source_file=source_label,
+                )
+                existing_atoms = proof_certificate.get("atoms")
+                proof_certificate["atoms"] = [
+                    *(existing_atoms if isinstance(existing_atoms, list) else []),
+                    *access_control_atoms,
+                ]
+                # Recompute the integrity fingerprint over the merged atom list;
+                # the builder hashed only the guard-trace subset.
+                proof_certificate["certificate_hash"] = _hash_guard_trace_payload(
+                    source_label,
+                    proof_certificate["atoms"],
+                )
             lean_bridge_result: dict[str, object] | None = None
             if enable_lean_bridge and proof_certificate is not None and self.config.mumei_lean_repo:
                 proof_certificate, lean_bridge_result = (

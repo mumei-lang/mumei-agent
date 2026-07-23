@@ -87,7 +87,9 @@ from agent.cross_validation_foreign import (
     _with_source_lines,
 )
 from agent.strategies.foreign_code_strategy_helpers import (
+    _hash_guard_trace_payload,
     build_solidity_guard_trace_proof_certificate,
+    extract_solidity_access_control_atoms,
 )
 from agent.cross_validation_payload import (
     _atom_from_mapping,
@@ -939,6 +941,24 @@ def _build_solidity_guard_trace_proof_certificate(
         package_name="solidity",
         package_version="0",
         mumei_version="agent",
+    )
+    # Access-control obligations share the certificate: the Lean bridge upgrades
+    # every atom, so guard-trace (reentrancy) and access-control patterns are
+    # escalated together in one pass.
+    access_control_atoms = extract_solidity_access_control_atoms(
+        code,
+        source_file="<inline:solidity>",
+    )
+    existing_atoms = cert.get("atoms")
+    cert["atoms"] = [
+        *(existing_atoms if isinstance(existing_atoms, list) else []),
+        *access_control_atoms,
+    ]
+    # Recompute the integrity fingerprint over the merged atom list; the builder
+    # hashed only the guard-trace subset.
+    cert["certificate_hash"] = _hash_guard_trace_payload(
+        "<inline:solidity>",
+        cert["atoms"],
     )
     if not cert.get("atoms"):
         return None
