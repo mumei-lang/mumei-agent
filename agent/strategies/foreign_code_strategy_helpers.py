@@ -1401,7 +1401,7 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
                 elif stripped[i] == "}":
                     depth -= 1
                 i += 1
-            if depth == 0 and re.search(r"\breturn\b", stripped[block_start : i - 1]):
+            if depth == 0 and re.search(r"\b(?:return|panic)\b", stripped[block_start : i - 1]):
                 guarded.add(param)
     return guarded
 
@@ -1707,6 +1707,22 @@ def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_short_circuit_or_guarded_indices(body: str) -> set[str]:
+    """``len(arr) == idx || arr[idx] ...`` is safe due to short-circuit ``||``.
+
+    The access ``arr[idx]`` is only evaluated when ``len(arr) != idx``; combined
+    with a preceding ``len(arr) < idx`` guard that returns false, ``idx`` is in
+    bounds for that branch.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\blen\(\s*(\w+)\s*\)\s*==\s*(\w+)\s*\|\|\s*\1\s*\[\s*\2\s*\]",
+        body,
+    ):
+        guarded.add(match.group(2))
+    return guarded
+
+
 def _go_median_guarded_indices(body: str) -> set[str]:
     """``mid := len(arr) / 2`` in a median helper is bounded by ``len(arr) > 0``.
 
@@ -1978,6 +1994,8 @@ def _go_guarded_indices(
     guarded |= _go_range_index_guarded_indices(body)
     # ``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both ``a[i]`` and ``b[i]``.
     guarded |= _go_dual_len_loop_guarded_indices(body)
+    # ``len(arr) == idx || arr[idx]`` short-circuit guards the index access.
+    guarded |= _go_short_circuit_or_guarded_indices(body)
     # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
     guarded |= _go_median_guarded_indices(body)
     # ``sort.Search``/``sortSearch`` closures and their results index the searched slice.
@@ -5879,7 +5897,8 @@ def _ts_typeof_guarded_values(expression: str) -> set[str]:
     TypeScript's ``typeof`` type guard makes subsequent ``.length`` / member
     access safe in the same ``&&`` chain.  A guard of the form
     ``typeof x === 'string' && x.length`` means ``x`` is a string on the right.
-    The same applies to a truthiness guard ``x && x.length``.
+    The same applies to a truthiness guard ``x && x.length`` and to
+    ``Array.isArray(x) && x.length``.
     """
     guarded: set[str] = set()
     # Match ``typeof x === 'string'`` followed (possibly through a closing paren)
@@ -5892,6 +5911,12 @@ def _ts_typeof_guarded_values(expression: str) -> set[str]:
     # Truthiness guard ``message && message.length > 500``
     for match in re.finditer(
         r"\b([A-Za-z_$][\w$]*)\s*&&\s*\1\.(?:length|len|is_empty)\b",
+        expression,
+    ):
+        guarded.add(match.group(1))
+    # ``Array.isArray(x) && ...`` narrows ``x`` to an array object.
+    for match in re.finditer(
+        r"Array\.isArray\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\)?\s*&&",
         expression,
     ):
         guarded.add(match.group(1))

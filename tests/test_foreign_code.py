@@ -2866,6 +2866,62 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_short_circuit_or_index_guard() -> None:
+    """``len(arr) == idx || arr[idx]`` is safe due to short-circuit evaluation."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package cgroup
+
+func hasPathPrefix(p, prefix []byte) bool {
+	i := len(prefix)
+	if i == 1 {
+		return true
+	}
+	if len(p) < i || !equal(prefix, p[:i]) {
+		return false
+	}
+	return len(p) == i || p[i] == '/'
+}
+
+func equal(a, b []byte) bool { return false }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("hasPathPrefix" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_panic_nonzero_guard() -> None:
+    """``if n <= 0 { panic(...) }`` guards a subsequent division by ``n``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package rand
+
+type Rand struct{}
+
+func (r *Rand) Int63n(n int64) int64 {
+	if n <= 0 {
+		panic("invalid argument")
+	}
+	return 0 % n
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Int63n" in i.message for i in issues)
+
+
+def test_detect_ts_safety_issues_array_isarray_guard() -> None:
+    """``Array.isArray(x) && x.length`` narrows ``x`` to a non-null array."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export const isArray = (
+  current: string | Array<string> | undefined
+): current is Array<string> => {
+  return Array.isArray(current) && current.length > 0 && current[0] !== '';
+};
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any("current" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_sort_search_index() -> None:
     """``sort.Search``/``sortSearch`` closures and results are bounded by ``len(arr)``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
