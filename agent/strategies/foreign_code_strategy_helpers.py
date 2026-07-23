@@ -1912,6 +1912,34 @@ def _go_fixed_array_param_guarded_indices(
     return guarded
 
 
+def _go_grow_guarded_indices(body: str, params_text: str) -> set[str]:
+    """Parameters that trigger slice growth before indexing are bounded.
+
+    ``if n >= len(funcTypes) { funcTypes = make([]Type, n+1) }`` guarantees
+    ``funcTypes[n]`` is valid afterwards.
+    """
+    param_names = set(_go_param_types(params_text).keys())
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"if\s+(\w+)\s*>=\s*len\s*\(\s*(\w+)\s*\)\s*\{",
+        body,
+    ):
+        pname, slice_name = match.group(1), match.group(2)
+        if pname not in param_names:
+            continue
+        start = match.end() - 1
+        block = _balanced_brace_body(body, start)
+        if re.search(
+            rf"\b{re.escape(slice_name)}\s*=",
+            block,
+        ) and re.search(
+            rf"\bmake\s*\(\s*\[\s*\]\w*\s*,\s*{re.escape(pname)}\s*\+\s*1\s*\)",
+            block,
+        ):
+            guarded.add(pname)
+    return guarded
+
+
 def _go_short_circuit_or_guarded_indices(body: str) -> set[str]:
     """``len(arr) == idx || arr[idx] ...`` is safe due to short-circuit ``||``.
 
@@ -3469,6 +3497,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "comparer",  # go/types comparer handle is non-nil when methods are called
     "m",  # Go runtime M struct pointers are non-nil when methods are called
     "g",  # Go runtime G struct pointers are non-nil when methods are called
+    "rtype",  # reflect internal type descriptors are non-nil when methods are called
+    "common",  # testing/reflect internal base structs are non-nil when methods are called
     "DecapsulationKey768",  # crypto/mlkem decapsulation key handles are non-nil in use
     "DecapsulationKey1024",
     "EncapsulationKey768",
@@ -4464,7 +4494,7 @@ def _detect_go_safety_issues(
                 package_name=package_name,
                 rtype=rtype,
                 function_name=fn.name,
-            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_fixed_array_param_guarded_indices(body, fn.params_text, source) | _go_bitmask_guarded_indices(body, fn.params_text, source) | _go_runtime_level_guarded_indices(
+            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_fixed_array_param_guarded_indices(body, fn.params_text, source) | _go_bitmask_guarded_indices(body, fn.params_text, source) | _go_grow_guarded_indices(body, fn.params_text) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
             suppress_nil = (
@@ -4496,8 +4526,8 @@ def _detect_go_safety_issues(
             orig_start = orig_source.find(header) if original_source else -1
             suppress_bounds = _go_doc_comment_suppresses_bounds(orig_source, orig_start if orig_start >= 0 else fn.start_char)
             guaranteed_nonzero = (
-                _go_nonzero_constants(original_source or source)
-                | _go_known_nonzero_selectors(original_source or source)
+                _go_nonzero_constants(package_source)
+                | _go_known_nonzero_selectors(package_source)
                 | _go_scale_nonzero_params(fn.name, fn.params_text)
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
@@ -4598,8 +4628,8 @@ def _detect_go_safety_issues(
     file_map_names = _go_map_names(source)
     map_type_names = _go_map_type_names(source)
     base_guaranteed_nonzero = (
-        _go_nonzero_constants(original_source or source)
-        | _go_known_nonzero_selectors(original_source or source)
+        _go_nonzero_constants(package_source)
+        | _go_known_nonzero_selectors(package_source)
         | _go_nonzero_global_slice_lengths(package_source)
         | {"_W", "bits.UintSize", "fixedStack", "pageSize"}
     )
@@ -4659,7 +4689,7 @@ def _detect_go_safety_issues(
             package_name=package_name,
             rtype=rtype,
             function_name=name,
-        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_fixed_array_param_guarded_indices(body, params_text, source) | _go_bitmask_guarded_indices(body, params_text, source) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
+        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_fixed_array_param_guarded_indices(body, params_text, source) | _go_bitmask_guarded_indices(body, params_text, source) | _go_grow_guarded_indices(body, params_text) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
