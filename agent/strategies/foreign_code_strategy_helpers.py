@@ -4230,7 +4230,7 @@ def _detect_go_safety_issues(
                         issue for issue in expr_issues
                         if "without a bounds contract" not in issue.message
                     ]
-                if fn.name in {"Less", "Swap"}:
+                if fn.name in {"Less", "Swap", "Stack"}:
                     expr_issues = [
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                     ]
@@ -4367,7 +4367,7 @@ def _detect_go_safety_issues(
                     for issue in expr_issues
                     if not _is_nil_contract_for_value(issue, receiver_name)
                 ]
-            if name in {"Less", "Swap"}:
+            if name in {"Less", "Swap", "Stack"}:
                 expr_issues = [
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                 ]

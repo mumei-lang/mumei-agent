@@ -2866,6 +2866,32 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_sort_and_profile_stack_accessor_index_guarded() -> None:
+    """sort.Interface / profile ``Stack`` accessor indices are guarded by callers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package pprof
+
+type stackProfile [][]uintptr
+
+func (x stackProfile) Len() int              { return len(x) }
+func (x stackProfile) Stack(i int) []uintptr { return x[i] }
+func (x stackProfile) Label(i int) *labelMap { return nil }
+
+type labelMap struct{}
+
+type byCount struct{ keys []string; count map[string]int }
+
+func (x *byCount) Len() int           { return len(x.keys) }
+func (x *byCount) Less(i, j int) bool { return x.count[x.keys[i]] < x.count[x.keys[j]] }
+func (x *byCount) Swap(i, j int)      { x.keys[i], x.keys[j] = x.keys[j], x.keys[i] }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"Stack", "Label", "Less", "Swap"} for i in issues
+    )
+
+
 def test_detect_go_safety_issues_link_symbol_builder_and_loader_non_nil() -> None:
     """``cmd/link`` ``*SymbolBuilder`` / ``*Loader`` / ``*sys.Arch`` are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
