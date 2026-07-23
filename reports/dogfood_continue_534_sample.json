@@ -1,0 +1,252 @@
+[
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/ir/dump_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/internal/script/conds.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/crypto/mlkem/mlkem_wycheproof_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/abi/abi_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/copyright/copyright_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/internal/goexperiment/exp_mapsplitgroup_off.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/os/exec/exec_windows.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/mem_bsd.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/numcpu_freebsd_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/syscall/exec_libc.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/syscall/sockcmsg_unix_other.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/syscall/syscall_linux_arm64.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue16249.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue21879.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue30085.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue42703.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue4359.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue51401.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue7550.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue8017.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue8042.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue9006.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/import2.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/ken/shift.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/stack.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/advisor/pkg/app/checks/plugincheck/check_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/alerting/notifications/pkg/apis/alertingnotifications/v0alpha1/ext.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-data/src/themes/createSpacing.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/expr/converter.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/expr/dataplane.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/provisioning/webhooks/pullrequest/changes.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apps/alerting/notifications/templategroup/legacy_storage.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/accesscontrol/authorizer_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/authz/rbac/cache.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/ngalert/accesscontrol/silences_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/ngalert/api/tooling/definitions/provisioning_contactpoints.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/provisioning/alerting/mute_times_provisioner.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/sqlstore/migrations/ualert/state_firedat_mig.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/storage/unified/resource/kv/last_import_time.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tsdb/azuremonitor/metrics/migrations_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/tsdb/influxdb/influxql/util/util.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/components/backtesting/BacktestDropdownButton.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/connections/mocks/store.navIndex.mock.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/dashboard-scene/scene/layout-auto-grid/AutoGridLayoutManager.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/datasources/components/DataSourceFailureBadge.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/explore/RichHistory/RichHistorySettingsTab.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/explore/TraceView/utils/tags.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/expressions/utils/interpolateSourceQueries.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/azuremonitor/mocks/instanceSettings.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/influxdb/components/editor/query/influxql/utils/getTemplateVariableOptions.ts"
+  }
+]
