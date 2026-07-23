@@ -3165,6 +3165,11 @@ _GO_NONNIL_EXACT_TYPES = {
     "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
     "Evaluation",  # alerting evaluation objects are live when their methods are invoked
     "netFD",  # net package internal file descriptor wrappers are always non-nil in use
+    "Func",  # runtime.Func descriptors are non-nil when methods are called
+    "_func",  # runtime internal function descriptors are non-nil in use
+    "Frame",  # runtime/pprof Frame passed to linkname helpers is non-nil
+    "moduledata",  # runtime module metadata is non-nil when methods are called
+    "stackmap",  # runtime stackmap is non-nil when stackmapdata operates on it
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

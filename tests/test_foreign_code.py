@@ -2866,6 +2866,38 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_runtime_internal_descriptor_receivers_non_nil() -> None:
+    """Runtime internal descriptors (Func, _func, moduledata, stackmap, Frame) are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+import "unsafe"
+
+type Func struct{ opaque struct{} }
+type _func struct{ entry uintptr }
+type moduledata struct{ funcnametab []byte }
+type Frame struct{ funcInfo funcInfo; startLine int }
+type stackmap struct{ n, nbit int32; bytedata [1]byte }
+
+func (f *Func) funcInfo() funcInfo { return f.raw().funcInfo() }
+func (f *Func) raw() *_func       { return (*_func)(unsafe.Pointer(f)) }
+func (f *_func) funcInfo() funcInfo { return funcInfo{f, nil} }
+func (md *moduledata) funcName(nameOff int32) string { return string(md.funcnametab[nameOff]) }
+func runtime_FrameStartLine(f *Frame) int { return f.startLine }
+func runtime_FrameSymbolName(f *Frame) string { return f.Function }
+func stackmapdata(stkmap *stackmap, n int32) bitvector { return bitvector{} }
+
+type bitvector struct{}
+type funcInfo struct{}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"funcInfo", "funcName", "runtime_FrameStartLine", "runtime_FrameSymbolName", "stackmapdata"}
+        for i in issues
+    )
+
+
 def test_detect_go_safety_issues_root_receiver_non_nil() -> None:
     """``*Root`` receivers (e.g. ``os.Root``) are non-nil when methods are called."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
