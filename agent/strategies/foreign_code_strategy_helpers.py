@@ -2299,14 +2299,20 @@ def _go_prysm_validator_index_guarded_indices(body: str, source: str) -> set[str
 def _go_bits_uint8_lookup_guarded_indices(
     body: str, param_types: dict[str, str] | None, source: str
 ) -> set[str]:
-    """Guard ``uint8`` parameters indexing ``math/bits`` 256-byte string tables.
+    """Guard ``uint8`` parameters indexing 256-byte string lookup tables.
 
-    Tables such as ``ntz8tab``, ``pop8tab``, ``rev8tab`` and ``len8tab`` are
-    256-byte string constants; a ``uint8`` index is always in bounds.
+    ``math/bits`` tables such as ``ntz8tab``, ``pop8tab``, ``rev8tab`` and
+    ``len8tab``, and the runtime ``sys`` copy in
+    ``internal/runtime/sys/intrinsics.go``, are 256-byte string constants; a
+    ``uint8`` index is always in bounds.
     """
-    if _go_package_name(source) != "bits":
+    package_name = _go_package_name(source)
+    if package_name == "bits":
+        tables = {"ntz8tab", "pop8tab", "rev8tab", "len8tab"}
+    elif package_name == "sys":
+        tables = {"ntz8tab", "len8tab"}
+    else:
         return set()
-    tables = {"ntz8tab", "pop8tab", "rev8tab", "len8tab"}
     guarded: set[str] = set()
     for param_name, raw_type in (param_types or {}).items():
         if raw_type.strip().lstrip("*") not in {"uint8", "byte"}:

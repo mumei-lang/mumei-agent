@@ -2866,6 +2866,22 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_sys_uint8_string_table_index() -> None:
+    """``internal/runtime/sys`` 256-byte string tables indexed by ``uint8``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package sys
+
+const ntz8tab = "\\x00\\x01..."
+const len8tab = "\\x00\\x01..."
+
+func TrailingZeros8(x uint8) int { return int(ntz8tab[x]) }
+func Len8(x uint8) int { return int(len8tab[x]) }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"TrailingZeros8", "Len8"} for i in issues)
+
+
 def test_detect_go_safety_issues_token_file_and_position_non_nil() -> None:
     """``go/token.File`` and ``*Position`` receivers are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
