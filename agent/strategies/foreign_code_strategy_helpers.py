@@ -3363,6 +3363,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "StructField",  # runtime/abi field metadata is non-nil when methods are invoked
     "FuncType",  # runtime/abi function type descriptors are non-nil when methods are invoked
     "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
+    "mspan",  # runtime memory-span handles are non-nil when methods/helpers are called
     "Segment",  # debug/macho/elf load segments are non-nil when methods are invoked
     "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
     "Prog",  # debug/elf program header objects are non-nil when methods are invoked
@@ -4400,7 +4401,7 @@ def _detect_go_safety_issues(
                 | _go_beacon_config_nonzero_locals(body, original_source or source)
                 | _go_math_denom_nonzero_locals(body, original_source or source)
                 | _go_nonzero_global_slice_lengths(package_source)
-                | {"_W", "bits.UintSize"}
+                | {"_W", "bits.UintSize", "fixedStack", "pageSize"}
             )
             float_param_names = _go_float_param_names(fn.params_text)
             float_variables = _go_float_variables(body, float_param_names) | float_param_names
@@ -4488,7 +4489,7 @@ def _detect_go_safety_issues(
         _go_nonzero_constants(original_source or source)
         | _go_known_nonzero_selectors(original_source or source)
         | _go_nonzero_global_slice_lengths(package_source)
-        | {"_W", "bits.UintSize"}
+        | {"_W", "bits.UintSize", "fixedStack", "pageSize"}
     )
     string_variables = _go_string_variables(original_source or source)
     global_array_keys = _go_global_array_keys(package_source)
