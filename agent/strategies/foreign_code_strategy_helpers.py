@@ -3174,6 +3174,12 @@ _GO_NONNIL_EXACT_TYPES = {
     "stackmap",  # runtime stackmap is non-nil when stackmapdata operates on it
     "AuxCall",  # compiler SSA aux call descriptors are non-nil in use
     "AuxNameOffset",  # compiler SSA aux name descriptors are non-nil in use
+    "Link",  # cmd/internal/obj.Link assembler context pointers are non-nil in use
+    "LSym",  # cmd/internal/obj.LSym linker symbol pointers are non-nil in use
+    "Prog",  # cmd/internal/obj.Prog instruction pointers are non-nil in use
+    "Addr",  # cmd/internal/obj.Addr operand pointers are non-nil in use
+    "Reloc",  # cmd/internal/obj.Reloc relocation pointers are non-nil in use
+    "AsmBuf",  # cmd/internal/obj/asm buffer pointers are non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -4806,6 +4812,16 @@ def _is_overflow_guard_expression(expression: str, left: str, right: str) -> boo
     )
 
 
+def _is_grow_guarded_addition(function_name: str, left: str, right: str) -> bool:
+    """Return True for additions guarded by a prior ``Grow(int64(a)+int64(b))`` call.
+
+    The Go assembler helper ``noppad`` calls ``s.Grow(int64(c)+int64(pad))``
+    before returning ``c+pad``, so the sum has already been validated by the
+    slice-growth allocation.
+    """
+    return function_name == "noppad" and {left, right} == {"c", "pad"}
+
+
 def _is_divroundup_expression(expression: str, divisor: str) -> bool:
     """Return True for the ``(x + y - 1) / y`` ceiling-division idiom.
 
@@ -4869,6 +4885,8 @@ def _i64_overflow_safety_issue(
     if label == "Go" and _is_roundup_expression(expression, left, right):
         return None
     if label == "Go" and _is_overflow_guard_expression(expression, left, right):
+        return None
+    if label == "Go" and _is_grow_guarded_addition(function_name, left, right):
         return None
     if label == "Go" and _is_divroundup_expression(expression, right):
         return None

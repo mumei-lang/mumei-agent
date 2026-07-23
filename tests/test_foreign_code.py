@@ -2866,6 +2866,49 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_obj_assembler_pointers_non_nil() -> None:
+    """``cmd/internal/obj`` pointer parameters (Link, LSym, Prog, Addr, Reloc, AsmBuf) are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package x86
+
+import "strings"
+
+type Link struct{ Headtype int; Arch struct{ Family int }; Flag_shared bool }
+type LSym struct{ Name string }
+type Prog struct{}
+type Addr struct{ Reg, Type int }
+type Reloc struct{}
+type AsmBuf struct{ buf []byte; off int }
+
+func useAbs(ctxt *Link, s *LSym) bool {
+	if ctxt.Headtype == 0 {
+		return strings.HasPrefix(s.Name, "libc_")
+	}
+	return ctxt.Arch.Family == 0 && !ctxt.Flag_shared
+}
+
+func vaddr(ctxt *Link, p *Prog, a *Addr, r *Reloc) int64 {
+	if r != nil {
+		*r = Reloc{}
+	}
+	switch a.Type {
+	case 0:
+		return 0
+	}
+	return 0
+}
+
+func isax(a *Addr) bool { return a.Reg == 0 }
+
+func (ab *AsmBuf) Last() byte { return ab.buf[ab.off-1] }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"useAbs", "vaddr", "isax", "Last"} for i in issues
+    )
+
+
 def test_detect_go_safety_issues_ssa_aux_receivers_non_nil() -> None:
     """Compiler SSA aux types ``*AuxCall`` and ``*AuxNameOffset`` are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
