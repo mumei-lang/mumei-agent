@@ -2907,6 +2907,64 @@ func pickTaskColor(id uint64) string {
     assert not any(i.function_name == "pickTaskColor" for i in issues)
 
 
+def test_detect_go_safety_issues_signed_modulo_len_index_is_guarded() -> None:
+    """Signed non-negative ``idx := expr % len(arr)`` bounds ``arr[idx]`` when
+    ``arr`` is provably non-empty (symmetric to Rust ``% container.len()``)."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+func pickChange(paths []string) string {
+	names := []string{"add", "update", "delete"}
+	k := len(names)
+	idx := k % len(names)
+	return names[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "pickChange" for i in issues)
+
+
+def test_detect_go_safety_issues_modulo_empty_container_not_guarded() -> None:
+    """``idx := expr % len(container)`` stays flagged when the container may be
+    empty (unknown-length slice parameter): ``expr % 0`` panics, so the bounds
+    obligation is preserved."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+func pickChange(changes []string) string {
+	k := len(changes)
+	idx := k % len(changes)
+	return changes[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert any(
+        i.function_name == "pickChange" and "can index" in i.message for i in issues
+    )
+
+
+def test_detect_go_safety_issues_signed_modulo_negative_dividend_not_guarded() -> None:
+    """A signed, possibly-negative dividend keeps the warning: Go ``%`` yields a
+    negative result for a negative dividend, so ``arr[idx]`` may be out of bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+var palette = []string{"red", "green", "blue"}
+
+func colorFor(h int) string {
+	idx := h % len(palette)
+	return palette[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert any(
+        i.function_name == "colorFor" and "can index" in i.message for i in issues
+    )
+
+
 def test_detect_go_safety_issues_2d_slice_loop_col_index() -> None:
     """Range over a 2-D slice with inner non-nil guard implies the index is valid."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

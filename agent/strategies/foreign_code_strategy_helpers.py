@@ -1315,26 +1315,124 @@ def _rust_unsigned_variables(source: str, body: str, function_name: str) -> set[
     return unsigned
 
 
-def _go_modulo_bounded_indices(body: str, unsigned_vars: set[str] | None) -> set[str]:
+def _go_nonempty_container_names(source: str | None, body: str) -> set[str]:
+    """Return Go container names that are provably non-empty (``len > 0``).
+
+    Non-emptiness comes from:
+
+    * package-level slices with a non-empty composite literal initializer
+      (``var adjectives = []string{"a", ...}``);
+    * package-level fixed-size arrays ``var t [N]T`` with ``N > 0``;
+    * local non-empty composite literals ``xs := []T{a, b}`` / ``xs := [N]T{...}``;
+    * local ``xs := make([]T, n[, ...])`` where ``n`` is a positive integer
+      literal.
+
+    This lets ``xs[expr % len(xs)]`` be recognised as bounds-safe only when the
+    modulus ``len(xs)`` is known to be positive; an unknown-length slice
+    parameter is deliberately excluded so the empty-container case keeps its
+    warning (``expr % 0`` panics — the caller's responsibility).
+    """
+    names: set[str] = set()
+    if source:
+        for token in _go_nonzero_global_slice_lengths(source):
+            match = re.fullmatch(r"len\((\w+)\)", token)
+            if match:
+                names.add(match.group(1))
+        for key, value in _go_declared_constants(source).items():
+            match = re.fullmatch(r"len\((\w+)\)", key)
+            if match and value > 0:
+                names.add(match.group(1))
+    # Local non-empty composite literals: ``xs := []T{a, b}`` / ``xs := [N]T{...}``.
+    for match in re.finditer(
+        r"\b(\w+)\s*:?=\s*(?:\[\s*\d*\s*\]|\[\s*\]|\[\s*\.\.\.\s*\])\w[\w.\[\]]*\s*\{",
+        body,
+    ):
+        name = match.group(1)
+        literal_body = _balanced_brace_body(body, match.end() - 1)
+        if re.sub(r"//.*", "", literal_body).strip():
+            names.add(name)
+    # Local ``xs := make([]T, <positive literal>...)``.
+    for match in re.finditer(
+        r"\b(\w+)\s*:?=\s*make\(\s*\[\s*\]\w[\w.\[\]]*\s*,\s*(\d+)",
+        body,
+    ):
+        if int(match.group(2)) > 0:
+            names.add(match.group(1))
+    return names
+
+
+def _go_nonnegative_dividend(rhs: str, nonneg_vars: set[str]) -> bool:
+    """Return whether a modulo dividend expression is provably non-negative.
+
+    A dividend is non-negative when it is a ``len(...)`` call, a non-negative
+    integer literal, or a single identifier known to be non-negative (a loop
+    counter/range index or a ``len(...)``-assigned local).
+    """
+    expr = rhs.strip()
+    if re.fullmatch(r"len\(\s*\w+\s*\)", expr):
+        return True
+    if re.fullmatch(r"\d+", expr):
+        return True
+    if re.fullmatch(r"\w+", expr) and expr in nonneg_vars:
+        return True
+    return False
+
+
+def _go_nonnegative_local_vars(body: str) -> set[str]:
+    """Return Go local variable names that are provably non-negative.
+
+    Covers counter loops ``for i := 0; ...``, range indices ``for i := range xs``
+    / ``for i, _ := range xs``, ``v := len(...)`` and ``v := <non-negative literal>``.
+    """
+    nonneg: set[str] = set()
+    for match in re.finditer(r"\bfor\s+(\w+)\s*:=\s*0\s*;", body):
+        nonneg.add(match.group(1))
+    for match in re.finditer(r"\bfor\s+(\w+)\s*(?:,\s*\w+\s*)?:=\s*range\b", body):
+        nonneg.add(match.group(1))
+    for match in re.finditer(r"\b(\w+)\s*:=\s*len\(\s*\w+\s*\)\s*(?:$|\n|;)", body):
+        nonneg.add(match.group(1))
+    for match in re.finditer(r"\b(\w+)\s*:=\s*(\d+)\s*(?:$|\n|;)", body, re.MULTILINE):
+        nonneg.add(match.group(1))
+    return nonneg
+
+
+def _go_modulo_bounded_indices(
+    body: str,
+    unsigned_vars: set[str] | None,
+    source: str | None = None,
+) -> set[str]:
     """Return Go local variable names bounded by ``% len(container)``.
 
     ``idx := id % uint64(len(colorForTask))`` produces a value in
     ``[0, len(colorForTask))`` when the dividend is unsigned, so
     ``colorForTask[idx]`` is safe.
+
+    In addition to the unsigned-dividend case, a *signed* but provably
+    non-negative dividend (loop counter, range index, ``len(...)`` result or a
+    non-negative literal) is also bounds-safe **when the container is provably
+    non-empty**, since ``0 <= expr % len(c) < len(c)`` requires ``len(c) > 0``.
+    When ``len(container)`` cannot be shown positive the modulo may divide by
+    zero, so the warning is preserved (the empty-container case stays flagged).
     """
     guarded: set[str] = set()
-    if not unsigned_vars:
-        return guarded
+    unsigned_vars = unsigned_vars or set()
+    nonempty = _go_nonempty_container_names(source, body)
+    nonneg_vars = _go_nonnegative_local_vars(body) | unsigned_vars
+    # The dividend is confined to a single statement (no ``{}``/newline/``=``) so
+    # a modulo further down the body is not mis-attributed to an earlier ``:=``.
     for match in re.finditer(
-        r"\b(\w+)\s*:=\s*([^;]+?)\s*%\s*(?:\w+\()?\s*len\(\s*(\w+)\s*\)(?:\s*\))?",
+        r"\b(\w+)\s*:=\s*([^;{}\n=]+?)\s*%\s*(?:\w+\()?\s*len\(\s*(\w+)\s*\)(?:\s*\))?",
         body,
-        re.DOTALL,
     ):
-        idx, rhs, _arr = match.group(1), match.group(2), match.group(3)
-        # The dividend must be unsigned or cast to an unsigned type.
+        idx, rhs, arr = match.group(1), match.group(2), match.group(3)
+        # The dividend is unsigned or cast to an unsigned type.
         if re.search(r"\b(?:uint|uint8|uint16|uint32|uint64|uintptr)\b", rhs) or any(
             re.search(rf"\b{re.escape(name)}\b", rhs) for name in unsigned_vars
         ):
+            guarded.add(idx)
+        # A signed but non-negative dividend is safe only when the container is
+        # provably non-empty (``len(container) > 0``).
+        elif arr in nonempty and _go_nonnegative_dividend(rhs, nonneg_vars):
             guarded.add(idx)
     return guarded
 
@@ -2250,7 +2348,8 @@ def _go_guarded_indices(
         ):
             guarded.add(match.group("idx"))
     # ``idx := unsignedValue % uint64(len(arr))`` bounds ``idx`` to ``[0, len(arr))``.
-    guarded |= _go_modulo_bounded_indices(body, unsigned_vars)
+    # A signed non-negative dividend is also bounded when ``arr`` is non-empty.
+    guarded |= _go_modulo_bounded_indices(body, unsigned_vars, source)
     # ``if arr != nil && idx < len(arr) { ... arr[idx] ... }`` idiomatically
     # guards an index parameter named ``idx``/``index``; the non-nil check on the
     # container and the index name convention imply a valid, non-negative index.
