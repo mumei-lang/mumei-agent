@@ -2866,6 +2866,28 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_next_size_growth_overflow_guarded() -> None:
+    """``cmd/compile/internal/syntax.nextSize`` growth addition is guarded by prior branches."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syntax
+
+func nextSize(size int) int {
+	const min = 4 << 10
+	const max = 1 << 20
+	if size < min {
+		return min
+	}
+	if size <= max {
+		return size << 1
+	}
+	return size + max
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "nextSize" for i in issues)
+
+
 def test_typescript_boolean_parameter_return_type_infer_bool() -> None:
     """Arrow function returning a ``boolean`` parameter should have bool return type."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

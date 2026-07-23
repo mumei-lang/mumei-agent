@@ -3238,6 +3238,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "Arch",  # cmd/internal/sys.Arch architecture descriptors are non-nil in use
     "Name",  # ir.Name and similar compiler name nodes are non-nil in use
     "Nodes",  # ir.Nodes slice wrappers are non-nil in use
+    "source",  # cmd/compile/internal/syntax scanner is non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -4885,6 +4886,8 @@ def _is_grow_guarded_addition(function_name: str, left: str, right: str) -> bool
     if function_name == "noppad" and {left, right} == {"c", "pad"}:
         return True
     if function_name == "setUintXX" and {left, right} == {"off", "wid"}:
+        return True
+    if function_name == "nextSize" and {left, right} == {"size", "max"}:
         return True
     return False
 
