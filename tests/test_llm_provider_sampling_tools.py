@@ -221,3 +221,92 @@ class TestCompleteWithTools:
             provider.complete_with_tools(
                 [{"role": "user", "content": "hi"}], "gpt-4o", [WEATHER_TOOL]
             )
+
+
+class _RecordingFallback:
+    """Minimal LLMProvider stub that records the OpenAI-compatible fallback call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple, str]] = []
+
+    def complete(self, messages, model: str) -> str:
+        self.calls.append((tuple(messages), model))
+        return "openai-fallback"
+
+
+class TestBasicSamplingMonitoringContract:
+    """Lock the soft-deprecation / fallback guarantees tracked as MCP monitoring items."""
+
+    def test_basic_sampling_omits_soft_deprecated_include_context(self) -> None:
+        """2025-11-25 soft-deprecates includeContext; it must not be sent."""
+        recorded = {}
+
+        async def create_message(messages, **kwargs):
+            recorded["kwargs"] = kwargs
+            return mcp_types.CreateMessageResult(
+                role="assistant",
+                content=mcp_types.TextContent(type="text", text="ok"),
+                model="client-model",
+            )
+
+        session = SimpleNamespace(
+            create_message=create_message,
+            _client_params={"capabilities": {"sampling": {}}},
+        )
+        provider = McpSamplingLLMProvider(_ctx(session))
+
+        assert provider.complete([{"role": "user", "content": "hi"}], "gpt-4o") == "ok"
+        assert "includeContext" not in recorded["kwargs"]
+        assert "include_context" not in recorded["kwargs"]
+        # tools are also soft-gated and must not leak into the basic text path.
+        assert "tools" not in recorded["kwargs"]
+
+    def test_basic_sampling_falls_back_to_openai_on_failure(self) -> None:
+        """Sampling failure must delegate to the OpenAI-compatible fallback unchanged."""
+        async def create_message(messages, **kwargs):
+            raise RuntimeError("sampling unsupported")
+
+        session = SimpleNamespace(
+            create_message=create_message,
+            _client_params={"capabilities": {"sampling": {}}},
+        )
+        fallback = _RecordingFallback()
+        provider = McpSamplingLLMProvider(_ctx(session), fallback=fallback)
+
+        messages = [{"role": "user", "content": "hi"}]
+        assert provider.complete(messages, "gpt-4o") == "openai-fallback"
+        assert len(fallback.calls) == 1
+        assert fallback.calls[0][1] == "gpt-4o"
+
+    def test_basic_sampling_without_fallback_reraises(self) -> None:
+        async def create_message(messages, **kwargs):
+            raise RuntimeError("sampling unsupported")
+
+        session = SimpleNamespace(
+            create_message=create_message,
+            _client_params={"capabilities": {"sampling": {}}},
+        )
+        provider = McpSamplingLLMProvider(_ctx(session))
+
+        with pytest.raises(RuntimeError, match="sampling unsupported"):
+            provider.complete([{"role": "user", "content": "hi"}], "gpt-4o")
+
+    def test_basic_sampling_bounds_max_tokens(self) -> None:
+        recorded = {}
+
+        async def create_message(messages, **kwargs):
+            recorded["kwargs"] = kwargs
+            return mcp_types.CreateMessageResult(
+                role="assistant",
+                content=mcp_types.TextContent(type="text", text="ok"),
+                model="client-model",
+            )
+
+        session = SimpleNamespace(
+            create_message=create_message,
+            _client_params={"capabilities": {"sampling": {}}},
+        )
+        provider = McpSamplingLLMProvider(_ctx(session), max_tokens=123)
+
+        provider.complete([{"role": "user", "content": "hi"}], "gpt-4o")
+        assert recorded["kwargs"]["max_tokens"] == 123

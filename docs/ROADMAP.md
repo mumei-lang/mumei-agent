@@ -93,7 +93,7 @@ Future work:
    returns parsed text + `tool_use` blocks (`SamplingToolCompletion`).  The
    default text-only `complete()` path is unchanged.
 3. 🔍 **監視項目** — multimodal image/audio sampling は具体的な forge/heal ユースケースが発生するまで追加しない。現行の text-only path をデフォルトとして維持する。
-4. 🔍 **監視項目** — MCP spec release 追随。特に `includeContext` soft-deprecation と client capability shape の変更を監視し、`LLMProvider` 抽象と OpenAI-compatible fallback の安定性を維持する。
+4. 🔍 **監視項目** — MCP spec release 追随。特に `includeContext` soft-deprecation と client capability shape の変更を監視し、`LLMProvider` 抽象と OpenAI-compatible fallback の安定性を維持する。text-only `complete()` が `includeContext` を送らないこと・sampling 失敗時に OpenAI-compatible fallback へ委譲すること・`maxTokens` が `MCP_SAMPLING_MAX_TOKENS` で bound されることは `tests/test_llm_provider_sampling_tools.py::TestBasicSamplingMonitoringContract` で回帰固定済み（`mcp` SDK 1.27.2 で検証。public `client_params` + `check_client_capability()` を主経路、`_client_params` をフォールバックとする解決順序を維持）。
 5. ✅ **実装済み** — Go の剰余インデックス `idx = expr % len(container)` を sound に bounds safe と判定する。抑制条件は (a) `expr` が unsigned または非負と証明可能（loop counter / range index / `len(...)` / 非負リテラル）、かつ (b) `len(container) > 0`（非空グローバルスライス・固定長配列・非空 composite literal・正リテラル `make`）。空コンテナや符号付きで負になり得る dividend は抑制せず警告を維持する。`grafana/pkg/registry/apis/provisioning/webhooks/pullrequest/changes_test.go` 型の false positive を解消。実装は `agent/strategies/foreign_code_strategy_helpers.py` の `_go_modulo_bounded_indices` / `_go_nonempty_container_names` / `_go_nonnegative_local_vars`、回帰テストは `tests/test_foreign_code.py`（`signed_modulo_len_index_is_guarded` / `modulo_empty_container_not_guarded` / `signed_modulo_negative_dividend_not_guarded`）。
 
 ## 現状
