@@ -1291,6 +1291,30 @@ def _rust_unsigned_variables(source: str, body: str, function_name: str) -> set[
     return unsigned
 
 
+def _go_modulo_bounded_indices(body: str, unsigned_vars: set[str] | None) -> set[str]:
+    """Return Go local variable names bounded by ``% len(container)``.
+
+    ``idx := id % uint64(len(colorForTask))`` produces a value in
+    ``[0, len(colorForTask))`` when the dividend is unsigned, so
+    ``colorForTask[idx]`` is safe.
+    """
+    guarded: set[str] = set()
+    if not unsigned_vars:
+        return guarded
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*([^;]+?)\s*%\s*(?:\w+\()?\s*len\(\s*(\w+)\s*\)(?:\s*\))?",
+        body,
+        re.DOTALL,
+    ):
+        idx, rhs, _arr = match.group(1), match.group(2), match.group(3)
+        # The dividend must be unsigned or cast to an unsigned type.
+        if re.search(r"\b(?:uint|uint8|uint16|uint32|uint64|uintptr)\b", rhs) or any(
+            re.search(rf"\b{re.escape(name)}\b", rhs) for name in unsigned_vars
+        ):
+            guarded.add(idx)
+    return guarded
+
+
 def _rust_guarded_indices(body: str) -> set[str]:
     """Return Rust local variable names that are bounded by ``% .len()``.
 
@@ -2033,6 +2057,8 @@ def _go_guarded_indices(
             body,
         ):
             guarded.add(match.group("idx"))
+    # ``idx := unsignedValue % uint64(len(arr))`` bounds ``idx`` to ``[0, len(arr))``.
+    guarded |= _go_modulo_bounded_indices(body, unsigned_vars)
     # ``if arr != nil && idx < len(arr) { ... arr[idx] ... }`` idiomatically
     # guards an index parameter named ``idx``/``index``; the non-nil check on the
     # container and the index name convention imply a valid, non-negative index.

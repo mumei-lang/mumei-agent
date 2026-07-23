@@ -2890,6 +2890,23 @@ func jitterForKey(maxAge time.Duration) int {
     assert not any(i.function_name == "jitterForKey" for i in issues)
 
 
+def test_detect_go_safety_issues_modulo_len_index_guard() -> None:
+    """``idx := unsignedValue % len(arr)`` bounds ``idx`` for ``arr[idx]``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package trace
+
+var colorForTask = []string{"red", "green", "blue"}
+
+func pickTaskColor(id uint64) string {
+	idx := id % uint64(len(colorForTask))
+	return colorForTask[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "pickTaskColor" for i in issues)
+
+
 def test_detect_go_safety_issues_loop_bound_overflow_guard() -> None:
     """Compiler loop-bound helpers compare ``x`` with ``min+y`` / ``max-y``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
