@@ -827,6 +827,27 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
     return decls
 
 
+def _go_nonzero_global_slice_lengths(source: str) -> set[str]:
+    """Return ``len(name)`` for package-level slices with non-empty initializers.
+
+    ``var adjectives = []string{"azure", ...}`` is non-empty by construction,
+    so ``i % len(adjectives)`` cannot divide by zero.
+    """
+    nonzero: set[str] = set()
+    for kind, name, value in _go_parse_top_level_declarations(source):
+        if kind != "var" or not value.startswith("["):
+            continue
+        pattern = rf"\b{re.escape(name)}(?:\s+\[\]\w+)?\s*=\s*(\[\s*\]\w*)\s*\{{"
+        match = re.search(pattern, source)
+        if not match:
+            continue
+        body = _balanced_brace_body(source, match.end() - 1)
+        # Remove line comments and check there is at least one element.
+        if re.sub(r"//.*", "", body).strip():
+            nonzero.add(f"len({name})")
+    return nonzero
+
+
 def _go_package_source(
     source: str, source_file: str | None, max_chars: int = 500_000
 ) -> str:
@@ -3247,6 +3268,11 @@ _GO_NONNIL_EXACT_TYPES = {
     "source",  # cmd/compile/internal/syntax scanner is non-nil in use
     "File",  # go/token.File handles are non-nil when methods are called
     "Position",  # go/token.Position pointer receivers are non-nil in use
+    "wantConnQueue",  # net/http internal connection queue is non-nil in use
+    "connLRU",  # net/http internal connection cache is non-nil in use
+    "connectMethod",  # net/http internal connection method is non-nil in use
+    "Transport",  # net/http Transport receivers are non-nil when methods are called
+    "transportRequest",  # net/http internal request wrapper is non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -4224,6 +4250,7 @@ def _detect_go_safety_issues(
                 | _go_rounded_factor_nonzero(body)
                 | _go_beacon_config_nonzero_locals(body, original_source or source)
                 | _go_math_denom_nonzero_locals(body, original_source or source)
+                | _go_nonzero_global_slice_lengths(package_source)
                 | {"_W", "bits.UintSize"}
             )
             float_param_names = _go_float_param_names(fn.params_text)
@@ -4311,6 +4338,7 @@ def _detect_go_safety_issues(
     base_guaranteed_nonzero = (
         _go_nonzero_constants(original_source or source)
         | _go_known_nonzero_selectors(original_source or source)
+        | _go_nonzero_global_slice_lengths(package_source)
         | {"_W", "bits.UintSize"}
     )
     string_variables = _go_string_variables(original_source or source)

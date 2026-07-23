@@ -2866,6 +2866,52 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_nonzero_global_slice_length() -> None:
+    """``i % len(globalSlice)`` is safe when the slice initializer is non-empty."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package main
+
+var adjectives = []string{
+	"azure", "bright",
+}
+
+var nouns = []string{
+	"anchor", "beacon",
+}
+
+func randomName(i int) string {
+	return adjectives[i%len(adjectives)] + "-" + nouns[(i/len(adjectives))%len(nouns)]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "randomName" for i in issues)
+
+
+def test_detect_go_safety_issues_net_http_internal_non_nil() -> None:
+    """``net/http`` internal receiver types are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package http
+
+type wantConnQueue struct{ head, tail []*wantConn; headPos int }
+type connLRU struct{ m map[*persistConn]*list.Element }
+type connectMethod struct{ proxyURL *url.URL; targetScheme, targetAddr string }
+type transportRequest struct{ extra Header; mu sync.Mutex; err error }
+type persistConn struct{}
+type list struct{}
+type Element struct{}
+type Header map[string][]string
+
+func (q *wantConnQueue) len() int { return len(q.head) - q.headPos + len(q.tail) }
+func (cl *connLRU) len() int { return len(cl.m) }
+func (cm *connectMethod) scheme() string { return cm.targetScheme }
+func (tr *transportRequest) extraHeaders() Header { return tr.extra }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"len", "scheme", "extraHeaders"} for i in issues)
+
+
 def test_detect_go_safety_issues_sys_uint8_string_table_index() -> None:
     """``internal/runtime/sys`` 256-byte string tables indexed by ``uint8``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
