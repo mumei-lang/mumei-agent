@@ -3239,6 +3239,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "Name",  # ir.Name and similar compiler name nodes are non-nil in use
     "Nodes",  # ir.Nodes slice wrappers are non-nil in use
     "source",  # cmd/compile/internal/syntax scanner is non-nil in use
+    "File",  # go/token.File handles are non-nil when methods are called
+    "Position",  # go/token.Position pointer receivers are non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

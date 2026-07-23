@@ -2866,6 +2866,25 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_token_file_and_position_non_nil() -> None:
+    """``go/token.File`` and ``*Position`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package token
+
+type Position struct{ Line int }
+type File struct{ base int }
+
+func (pos *Position) IsValid() bool { return pos.Line > 0 }
+func (f *File) Base() int { return f.base }
+func (f *File) Position(p Pos) Position { return f.position(p, true) }
+func (f *File) position(p Pos, adjusted bool) (pos Position) { return }
+type Pos int
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"IsValid", "Base", "Position"} for i in issues)
+
+
 def test_detect_go_safety_issues_next_size_growth_overflow_guarded() -> None:
     """``cmd/compile/internal/syntax.nextSize`` growth addition is guarded by prior branches."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
