@@ -17,6 +17,12 @@ from agent.prompts.code_to_spec import (
     CODE_TO_SPEC_SYSTEM_PROMPT,
     build_code_to_spec_prompt,
 )
+from agent.strategies.foreign_code_strategy_helpers import (
+    _is_go_build_ignore,
+    _is_go_compiler_test,
+    _is_go_experimental,
+    _is_go_test_helper,
+)
 
 Language = Literal[
     "rust",
@@ -483,6 +489,25 @@ class CodeToSpecExtractor:
         warnings: list[str] = []
         if detected_language == "unknown":
             warnings.append("language could not be detected; using generic code analysis")
+
+        # Skip Go compiler/test files that are not normal runnable code.
+        if detected_language == "go" and (
+            _is_go_compiler_test(code)
+            or _is_go_experimental(code)
+            or _is_go_test_helper(code)
+            or _is_go_build_ignore(code)
+            or code_path.name.endswith("_test.go")
+            or re.search(r"(?:^|[/\\])go[/\\]test[/\\]", str(code_path)) is not None
+            or re.search(r"(?:^|[/\\])testdata[/\\]", str(code_path)) is not None
+        ):
+            return CodeToSpecResult(
+                success=True,
+                natural_language_spec="",
+                forge_task_spec=_forge_task_spec_from_atoms(code_path, []),
+                detected_language=detected_language,
+                warnings=["Skipped Go compiler/test/source file."],
+                errors=[],
+            )
 
         deterministic = CodeToSpecConverter(self.config).convert_source(
             code,
