@@ -365,8 +365,35 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
     （`.github/workflows/ci.yml` の "Access-control regression gate" ステップで明示実行）。
   - mumei-lean: `tests/test_lean_bridge_e2e.py::test_access_control_fixture_upgrades_unknown_to_lean_verified`
     と `tests/test_ingest_cert.py::test_access_control_fixture_renders_run_access_theorems_and_imports`。
-- **CEI 順序（stage 4b）**: access-control に続く次パターンとして未着手（別コミット・
-  別回帰テストで段階的に対応予定）。
+- **CEI 順序（stage 4b）✅ 実装済み**: access-control に続く独立パターンとして
+  Checks-Effects-Interactions 順序を Z3→Lean へ昇格。mumei-lean の
+  `SmartContract.lean` に `CeiState`（`Effects` / `Interacted`）/ `CeiOp`
+  （`effect` = storage write, `interaction` = external call）/ `ceiStep` /
+  `runCei` 状態機械と `effect_after_interaction_is_none`（interaction 後の
+  effect は `none`）/ `cei_ordered_trace_is_interacted` /
+  `cei_violation_trace_is_none` theorem を追加。effect が interaction に
+  先行する `[effect, interaction]` は `some CeiState.Interacted`、逆順の
+  `[interaction, effect]` は `none` に評価される。mumei-agent 側は
+  `extract_solidity_cei_atoms` / `build_solidity_cei_proof_certificate` が、
+  storage 書き換えと external call の**両方**を含む関数について、ソース順の
+  op トレースを `runCei` に落として CEI atom
+  （`obligation_class == "smart_contract_cei_obligation"`,
+  `logic_fragment_tag == "smart_contract_cei"`）を抽出する。期待結果は
+  同じ状態機械をシミュレートして決定するため、メタデータのみで昇格せず
+  具体トレースに基づく。mumei-lean 側 translator/ingest
+  （`OBLIGATION_CLASS_SMART_CONTRACT_CEI` / `render_cei_theorem` /
+  `normalize_cei_translator_ir` / `cei_expected_to_lean`）が `runCei` トレース
+  theorem を生成し、Lake ビルドで `z3_check_result == "lean_verified"` へ昇格する。
+  CEI 証跡は guard-trace / access-control と同一証明証跡（`proof_certificate`）に
+  相乗りし、`agent/cross_validation.py` / `agent/audit.py` の Lean bridge 1 パスで
+  全パターンをまとめて昇格する（マージ後に `certificate_hash` を再計算し、
+  fingerprint が証跡内容と一致するよう維持）。回帰ゲート:
+  - mumei-agent: `tests/test_foreign_code.py` の CEI 抽出・証跡・
+    Lean bridge 昇格テストと
+    `tests/test_audit.py::test_audit_pipeline_emits_cei_certificate_and_upgrades_via_lean_bridge`
+    を `.github/workflows/ci.yml` の "CEI ordering regression gate" で明示実行。
+  - mumei-lean: `tests/test_lean_bridge_e2e.py::test_cei_fixture_upgrades_unknown_to_lean_verified`
+    と `tests/test_ingest_cert.py::test_cei_fixture_renders_run_cei_theorems_and_imports`。
 
 #### 次タスク候補: 層B パーサの構文解析移行
 

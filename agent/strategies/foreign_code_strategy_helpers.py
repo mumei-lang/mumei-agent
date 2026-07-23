@@ -6102,12 +6102,17 @@ def _solidity_ordered_op_trace(
             if lhs in named_returns:
                 # Assignments to named return parameters are local, not storage writes.
                 continue
+            # Anchor the statement boundary on the assignment target itself, not
+            # on the leading ``;``/``{`` the match consumes: the leading token can
+            # belong to the *previous* statement, which would make this write
+            # inherit that statement's local-declaration prefix and be dropped.
+            lhs_start = match.start("lhs")
             statement_start = max(
-                body.rfind(";", 0, match.start("stateWrite")),
-                body.rfind("{", 0, match.start("stateWrite")),
+                body.rfind(";", 0, lhs_start),
+                body.rfind("{", 0, lhs_start),
             )
-            statement_start = max(statement_start, body.rfind("\n", 0, match.start("stateWrite")))
-            statement_prefix = body[statement_start + 1 : match.start("stateWrite")].strip()
+            statement_start = max(statement_start, body.rfind("\n", 0, lhs_start))
+            statement_prefix = body[statement_start + 1 : lhs_start].strip()
             if _solidity_statement_is_local_declaration(statement_prefix) or statement_prefix.startswith("emit"):
                 continue
             ops.append(_SolidityOpTraceItem("stateWrite", match.start("stateWrite"), lhs))
@@ -6494,6 +6499,187 @@ def _solidity_access_control_theorem_goal(
         "some AccessState.Checked" if expected_outcome == "safe" else "none"
     )
     return f"runAccess AccessState.Unchecked [{op_terms}] = {expected}"
+
+
+def _solidity_cei_ordered_ops(body: str, named_returns: set[str]) -> list[str]:
+    """Map a function body to an ordered CEI op list.
+
+    Storage writes become ``effect`` and external calls become ``interaction``,
+    preserving source order. Non-effect/interaction statements are irrelevant to
+    CEI ordering and are dropped.
+    """
+    trace = _solidity_ordered_op_trace(body, named_returns=named_returns)
+    ops: list[str] = []
+    for item in trace:
+        if item.kind == "stateWrite":
+            ops.append("effect")
+        elif item.kind == "externalCall":
+            ops.append("interaction")
+    return ops
+
+
+def _run_cei(ops: list[str]) -> str | None:
+    """Simulate the Lean ``runCei`` machine to determine the concrete outcome.
+
+    Mirrors ``MumeiLean.SmartContract.runCei``: once an interaction has
+    occurred, a later effect is a CEI violation (``None``). Returns the final
+    state name (``"Effects"``/``"Interacted"``) or ``None`` for a violation.
+    """
+    state = "Effects"
+    for op in ops:
+        if op == "effect":
+            if state == "Interacted":
+                return None
+            state = "Effects"
+        elif op == "interaction":
+            state = "Interacted"
+    return state
+
+
+def extract_solidity_cei_atoms(
+    source: str,
+    *,
+    source_file: str | Path | None = None,
+) -> list[dict[str, object]]:
+    """Extract Checks-Effects-Interactions ordering obligations from Solidity.
+
+    Every function that performs both a storage write and an external call
+    carries a CEI obligation: all effects must precede any interaction. The
+    ordered op trace is lowered to a concrete ``runCei`` trace whose expected
+    outcome is computed by simulating the same state machine, so a CEI-ordered
+    function proves ``some CeiState.*`` and a reordered one proves ``none``.
+    This mirrors :func:`extract_solidity_access_control_atoms`.
+    """
+    file_name = str(source_file or "<solidity-source>")
+    atoms: list[dict[str, object]] = []
+    for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source):
+        function_name = _safe_identifier(match.group("name"))
+        attrs = match.group("attrs") or ""
+        body = _balanced_brace_body(source, match.end() - 1)
+        named_returns = _solidity_named_return_params(attrs)
+        cei_ops = _solidity_cei_ordered_ops(body, named_returns)
+        if "interaction" not in cei_ops or "effect" not in cei_ops:
+            # CEI ordering is only meaningful when the function both mutates
+            # state and performs an external interaction.
+            continue
+        outcome = _run_cei(cei_ops)
+        expected_outcome = "none" if outcome is None else outcome.lower()
+        line = _line_for_offset(source, match.start())
+        atoms.append(
+            _build_solidity_cei_atom(
+                function_name=function_name,
+                source_file=file_name,
+                line=line,
+                cei_ops=cei_ops,
+                expected_outcome=expected_outcome,
+                body=body,
+            )
+        )
+    return atoms
+
+
+def build_solidity_cei_proof_certificate(
+    source: str,
+    *,
+    source_file: str | Path | None = None,
+    package_name: str | None = None,
+    package_version: str = "0",
+    mumei_version: str = "test-fixture",
+    z3_version: str | None = None,
+    timestamp: str | None = None,
+) -> dict[str, object]:
+    file_name = str(source_file or "<solidity-source>")
+    atoms = extract_solidity_cei_atoms(source, source_file=file_name)
+    return {
+        "version": "1.0",
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "mumei_version": mumei_version,
+        "z3_version": z3_version or f"Z3 version {z3.get_version_string()}",
+        "file": file_name,
+        "atoms": atoms,
+        "package_name": package_name or Path(file_name).stem or "solidity",
+        "package_version": package_version,
+        "certificate_hash": _hash_guard_trace_payload(file_name, atoms),
+        "all_verified": False,
+    }
+
+
+def _build_solidity_cei_atom(
+    *,
+    function_name: str,
+    source_file: str,
+    line: int,
+    cei_ops: list[str],
+    expected_outcome: str,
+    body: str,
+) -> dict[str, object]:
+    safe_name = _safe_identifier(f"{function_name}_cei")
+    theorem_goal = _solidity_cei_theorem_goal(cei_ops, expected_outcome)
+    content_hash = _hash_guard_trace_payload(
+        function_name,
+        cei_ops,
+        expected_outcome,
+        source_file,
+        body,
+    )
+    ordered = expected_outcome != "none"
+    body_summary = (
+        "CEI ordering proof for "
+        f"{'effects-before-interactions' if ordered else 'an interaction-before-effect violation'}"
+    )
+    return {
+        "name": safe_name,
+        "z3_check_result": "unknown",
+        "content_hash": content_hash,
+        "status": "unknown",
+        "proof_hash": _hash_guard_trace_payload("proof", content_hash, theorem_goal),
+        "requires": "true",
+        "ensures": "true",
+        "body_expr": "",
+        "body_summary": body_summary,
+        "z3_result_class": "unknown",
+        "escalation_reason": "sc",
+        "logic_fragment_tag": "smart_contract_cei",
+        "logic_fragment_tags": ["smart_contract", "cei"],
+        "translator_version": _SOLIDITY_GUARD_TRACE_TRANSLATOR_VERSION,
+        "binder_mapping": {},
+        "bridge_lemma_hash": _SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH,
+        "translator_ir": {
+            "sort": "contract_obligation",
+            "binders": [],
+            "theorem_goal": theorem_goal,
+            "provenance_span": {
+                "file": source_file,
+                "line": line,
+                "col": 1,
+                "len": 0,
+            },
+            "lowering_rules": ["smart_contract_cei_lowering"],
+            "proof_trace_hints": [
+                "use the concrete CEI ordering trace with SmartContract.runCei",
+            ],
+            "requires_bridge_lemmas": [
+                "MumeiLean.SmartContract.effect_after_interaction_is_none",
+            ],
+            "obligation_class": "smart_contract_cei_obligation",
+            "cei": {
+                "ops": cei_ops,
+                "expected_outcome": expected_outcome,
+            },
+            "cei_ops": cei_ops,
+            "cei_expected_outcome": expected_outcome,
+        },
+        "unknown_obligation_domain": "smart_contract",
+    }
+
+
+def _solidity_cei_theorem_goal(cei_ops: list[str], expected_outcome: str) -> str:
+    op_terms = ", ".join(f"CeiOp.{op}" for op in cei_ops)
+    if expected_outcome == "none":
+        expected = "none"
+    else:
+        expected = f"some CeiState.{expected_outcome.capitalize()}"
+    return f"runCei CeiState.Effects [{op_terms}] = {expected}"
 
 def _solidity_first_storage_write(
     body: str,

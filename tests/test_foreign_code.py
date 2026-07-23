@@ -16,8 +16,10 @@ from agent.strategies.foreign_code_strategy import (
 )
 from agent.strategies.foreign_code_strategy_helpers import (
     build_solidity_access_control_proof_certificate,
+    build_solidity_cei_proof_certificate,
     build_solidity_guard_trace_proof_certificate,
     extract_solidity_access_control_atoms,
+    extract_solidity_cei_atoms,
 )
 from agent.cross_validation import validate_foreign_code
 from agent.config import AgentConfig
@@ -847,6 +849,124 @@ def test_validate_foreign_code_can_upgrade_access_control_certificate_via_lean_b
     assert atoms["setOwner_access_control"]["z3_check_result"] == "lean_verified"
     assert atoms["withdrawAll_access_control"]["status"] == "verified"
     assert atoms["withdraw_guard_trace"]["z3_check_result"] == "lean_verified"
+
+
+def test_extract_solidity_cei_atoms_distinguishes_ordering() -> None:
+    source = """
+pragma solidity ^0.8.0;
+contract Bank {
+    mapping(address => uint256) public balances;
+    address owner;
+    // CEI violation: interaction precedes the effect.
+    function withdrawUnsafe() external {
+        uint256 amt = balances[msg.sender];
+        (bool ok, ) = msg.sender.call{value: amt}("");
+        balances[msg.sender] = 0;
+    }
+    // CEI-safe: effect precedes the interaction.
+    function withdrawSafe() external {
+        uint256 amt = balances[msg.sender];
+        balances[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amt}("");
+    }
+    // No external interaction -> no CEI obligation.
+    function setOwner(address newOwner) external { owner = newOwner; }
+    // No state write -> no CEI obligation.
+    function ping(address to) external { (bool ok, ) = to.call(""); }
+    // view -> no CEI obligation.
+    function read() external view returns (uint256) { return balances[msg.sender]; }
+}
+"""
+    atoms = {
+        atom["name"]: atom
+        for atom in extract_solidity_cei_atoms(source, source_file="Bank.sol")
+    }
+    # Only functions that both write state and perform an interaction qualify.
+    assert set(atoms) == {"withdrawUnsafe_cei", "withdrawSafe_cei"}
+
+    unsafe = atoms["withdrawUnsafe_cei"]["translator_ir"]
+    assert unsafe["cei"]["ops"] == ["interaction", "effect"]
+    assert unsafe["cei_expected_outcome"] == "none"
+    assert unsafe["theorem_goal"] == (
+        "runCei CeiState.Effects [CeiOp.interaction, CeiOp.effect] = none"
+    )
+    assert unsafe["obligation_class"] == "smart_contract_cei_obligation"
+    assert unsafe["lowering_rules"] == ["smart_contract_cei_lowering"]
+    assert unsafe["requires_bridge_lemmas"] == [
+        "MumeiLean.SmartContract.effect_after_interaction_is_none"
+    ]
+
+    safe = atoms["withdrawSafe_cei"]["translator_ir"]
+    assert safe["cei"]["ops"] == ["effect", "interaction"]
+    assert safe["cei_expected_outcome"] == "interacted"
+    assert safe["theorem_goal"] == (
+        "runCei CeiState.Effects [CeiOp.effect, CeiOp.interaction] "
+        "= some CeiState.Interacted"
+    )
+
+
+def test_build_solidity_cei_proof_certificate_from_vulnerable_fixture() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+
+    cert = build_solidity_cei_proof_certificate(
+        source,
+        source_file=FIXTURES / "sample_solidity_vulnerable.sol",
+        package_name="sample_solidity_vulnerable",
+        package_version="0",
+        mumei_version="agent",
+        timestamp="2026-07-06T00:00:00Z",
+    )
+
+    atoms = {atom["name"]: atom for atom in cert["atoms"]}
+    # withdraw: call before write (violation); withdrawAll: write before transfer.
+    assert set(atoms) == {"withdraw_cei", "withdrawAll_cei"}
+    assert atoms["withdraw_cei"]["logic_fragment_tag"] == "smart_contract_cei"
+    assert atoms["withdraw_cei"]["translator_ir"]["cei_expected_outcome"] == "none"
+    assert (
+        atoms["withdrawAll_cei"]["translator_ir"]["cei_expected_outcome"]
+        == "interacted"
+    )
+    assert cert["all_verified"] is False
+
+
+def test_validate_foreign_code_can_upgrade_cei_certificate_via_lean_bridge() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+    config = AgentConfig(api_key="test", mumei_lean_repo="/tmp/mumei-lean")
+
+    def _verified(name: str) -> dict:
+        return {"name": name, "z3_check_result": "lean_verified", "status": "verified"}
+
+    with patch("agent.cross_validation.run_lean_bridge_and_merge_proof_cert") as bridge_mock:
+        def _merge(cert, _repo):
+            merged = {
+                "atoms": [_verified(atom["name"]) for atom in cert["atoms"]],
+            }
+            return merged, {
+                "success": True,
+                "lean_cert": merged,
+                "diagnostics": ["bridge diag"],
+                "stdout": "",
+                "stderr": "",
+            }
+
+        bridge_mock.side_effect = _merge
+        result = validate_foreign_code(
+            source,
+            "solidity",
+            config=config,
+            use_llm=False,
+            run_mumei=False,
+            enable_lean_bridge=True,
+        )
+
+    bridge_mock.assert_called_once()
+    assert result.proof_certificate is not None
+    atoms = {atom["name"]: atom for atom in result.proof_certificate["atoms"]}
+    # CEI atoms escalate alongside the guard-trace and access-control atoms.
+    assert atoms["withdraw_cei"]["z3_check_result"] == "lean_verified"
+    assert atoms["withdrawAll_cei"]["status"] == "verified"
+    assert atoms["withdraw_guard_trace"]["z3_check_result"] == "lean_verified"
+    assert atoms["setOwner_access_control"]["z3_check_result"] == "lean_verified"
 
 
 def test_to_mumei_atom_emits_trusted_contract() -> None:

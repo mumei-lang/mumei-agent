@@ -90,6 +90,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _hash_guard_trace_payload,
     build_solidity_guard_trace_proof_certificate,
     extract_solidity_access_control_atoms,
+    extract_solidity_cei_atoms,
 )
 from agent.cross_validation_payload import (
     _atom_from_mapping,
@@ -949,10 +950,15 @@ def _build_solidity_guard_trace_proof_certificate(
         code,
         source_file="<inline:solidity>",
     )
+    cei_atoms = extract_solidity_cei_atoms(
+        code,
+        source_file="<inline:solidity>",
+    )
     existing_atoms = cert.get("atoms")
     cert["atoms"] = [
         *(existing_atoms if isinstance(existing_atoms, list) else []),
         *access_control_atoms,
+        *cei_atoms,
     ]
     # Recompute the integrity fingerprint over the merged atom list; the builder
     # hashed only the guard-trace subset.

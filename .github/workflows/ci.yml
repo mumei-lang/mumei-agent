@@ -37,6 +37,14 @@ jobs:
       - name: Access-control regression gate (smart-contract patterns)
         run: uv run pytest tests/test_foreign_code.py tests/test_audit.py -k "access_control" -v --tb=short -m "not integration"
 
+      # Regression gate for the Solidity Checks-Effects-Interactions (CEI)
+      # ordering obligation class: every function that both mutates state and
+      # performs an external interaction lowers to a concrete runCei trace
+      # (effect-before-interaction -> some CeiState.Interacted, reordered ->
+      # none) that upgrades through the mumei-lean Lean bridge to `lean_verified`.
+      - name: CEI ordering regression gate (smart-contract patterns)
+        run: uv run pytest tests/test_foreign_code.py tests/test_audit.py -k "cei" -v --tb=short -m "not integration"
+
       # NOTE: Integration tests (marked @pytest.mark.integration) are excluded
       # from CI. Run them locally with: uv run pytest -m integration
       - name: Run tests with coverage

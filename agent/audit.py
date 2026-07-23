@@ -85,6 +85,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _hash_guard_trace_payload,
     build_solidity_guard_trace_proof_certificate,
     extract_solidity_access_control_atoms,
+    extract_solidity_cei_atoms,
 )
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
 
@@ -304,10 +305,15 @@ class AuditPipeline:
                     source_code,
                     source_file=source_label,
                 )
+                cei_atoms = extract_solidity_cei_atoms(
+                    source_code,
+                    source_file=source_label,
+                )
                 existing_atoms = proof_certificate.get("atoms")
                 proof_certificate["atoms"] = [
                     *(existing_atoms if isinstance(existing_atoms, list) else []),
                     *access_control_atoms,
+                    *cei_atoms,
                 ]
                 # Recompute the integrity fingerprint over the merged atom list;
                 # the builder hashed only the guard-trace subset.
