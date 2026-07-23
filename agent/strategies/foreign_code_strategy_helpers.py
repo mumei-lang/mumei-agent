@@ -1378,16 +1378,53 @@ def _go_nonnegative_dividend(rhs: str, nonneg_vars: set[str]) -> bool:
     return False
 
 
-def _go_nonnegative_local_vars(body: str) -> set[str]:
+def _go_map_or_channel_names(body: str, source: str | None = None) -> set[str]:
+    """Return Go variable names that are maps or channels.
+
+    Ranging over a map yields the key and ranging over a channel yields the
+    received value as the first loop variable; neither is a 0-based index, so
+    these targets must be excluded from range-index non-negativity reasoning.
+    """
+    names: set[str] = set()
+    if source:
+        names |= _go_map_names(source)
+    names |= _go_local_map_names(body, names or None)
+    # Channels created locally: ``ch := make(chan T)``.
+    for match in re.finditer(r"\b(\w+)\s*:=\s*make\(\s*chan\b", body):
+        names.add(match.group(1))
+    # Map/channel-typed declarations, parameters and struct fields
+    # (``taskMap map[int]string``, ``ch chan T`` / ``ch <-chan T``). Over-detecting
+    # a map/channel only makes the range-index reasoning more conservative, so
+    # scanning the whole source here stays on the sound side.
+    for text in (body, source or ""):
+        for match in re.finditer(r"\b(\w+)\s+map\[", text):
+            names.add(match.group(1))
+        for match in re.finditer(r"\b(\w+)\s+(?:<-)?chan\b", text):
+            names.add(match.group(1))
+    return names
+
+
+def _go_nonnegative_local_vars(body: str, source: str | None = None) -> set[str]:
     """Return Go local variable names that are provably non-negative.
 
     Covers counter loops ``for i := 0; ...``, range indices ``for i := range xs``
     / ``for i, _ := range xs``, ``v := len(...)`` and ``v := <non-negative literal>``.
+
+    A range index is only 0-based when the ranged-over target is a
+    slice/array/string/int. For a map the first variable is the key and for a
+    channel it is the received value, either of which can be negative for signed
+    element types, so ranges over known map/channel names are excluded.
     """
     nonneg: set[str] = set()
     for match in re.finditer(r"\bfor\s+(\w+)\s*:=\s*0\s*;", body):
         nonneg.add(match.group(1))
-    for match in re.finditer(r"\bfor\s+(\w+)\s*(?:,\s*\w+\s*)?:=\s*range\b", body):
+    map_or_chan = _go_map_or_channel_names(body, source)
+    for match in re.finditer(
+        r"\bfor\s+(\w+)\s*(?:,\s*\w+\s*)?:=\s*range\s+([\w.]+)", body
+    ):
+        target = match.group(2).split(".", 1)[0]
+        if target in map_or_chan:
+            continue
         nonneg.add(match.group(1))
     for match in re.finditer(r"\b(\w+)\s*:=\s*len\(\s*\w+\s*\)\s*(?:$|\n|;)", body):
         nonneg.add(match.group(1))
@@ -1417,7 +1454,7 @@ def _go_modulo_bounded_indices(
     guarded: set[str] = set()
     unsigned_vars = unsigned_vars or set()
     nonempty = _go_nonempty_container_names(source, body)
-    nonneg_vars = _go_nonnegative_local_vars(body) | unsigned_vars
+    nonneg_vars = _go_nonnegative_local_vars(body, source) | unsigned_vars
     # The dividend is confined to a single statement (no ``{}``/newline/``=``) so
     # a modulo further down the body is not mis-attributed to an earlier ``:=``.
     for match in re.finditer(
