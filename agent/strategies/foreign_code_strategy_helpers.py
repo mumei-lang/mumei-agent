@@ -3327,6 +3327,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Impl",  # implementation structs (e.g. ServiceImpl) are non-nil when methods are invoked
     "Config",  # configuration structs (e.g. printer.Config) are non-nil when methods are invoked
     "Cond",  # script/condition interface implementations are non-nil when methods are called
+    "Type",  # descriptor/enum types (e.g. simdType) are non-nil when methods are called
+    "Op",  # code-generator operation descriptors (e.g. wasmOp) are non-nil when methods are called
     "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
     "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
