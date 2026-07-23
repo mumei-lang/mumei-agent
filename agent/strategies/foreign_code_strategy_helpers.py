@@ -927,6 +927,20 @@ def _go_declared_constants(source: str) -> dict[str, int]:
     return constants
 
 
+def _go_fixed_array_sizes(source: str) -> dict[str, int]:
+    """Map Go type names defined as fixed-size arrays to their length."""
+    sizes: dict[str, int] = {}
+    for match in re.finditer(
+        r"^\s*type\s+(\w+)\s+\[\s*(\d+)\s*\]\w+",
+        source,
+        re.MULTILINE,
+    ):
+        name, size = match.group(1), match.group(2)
+        if int(size) > 0:
+            sizes[name] = int(size)
+    return sizes
+
+
 def _go_actor_nonnil_params(
     param_types: dict[str, str],
     function_name: str = "",
@@ -1462,7 +1476,7 @@ def _go_zero_guarded_nonzero_names(body: str, names: set[str]) -> set[str]:
     guarded: set[str] = set()
     for name in names:
         for match in re.finditer(
-            rf"\bif\s+(?:[^;{{]*\b{re.escape(name)}\s*(?:<=|==)\s*0[^;{{]*)\s*{{",
+            rf"\bif\s+(?:[^;{{]*\b{re.escape(name)}\s*(?:(?:<=|==)\s*0|<\s*[12])[^;{{]*)\s*{{",
             stripped,
         ):
             i = match.end()
@@ -1836,6 +1850,34 @@ def _go_accessor_index_guarded_indices(
     # The receiver type must have a ``len`` method that returns ``len(receiver)``.
     len_re = rf"func\s*\(\s*{re.escape(rname)}\s+{re.escape(rtype)}\s*\)\s*len\s*\(\s*\)\s*int\s*\{{[^}}]*?\blen\s*\(\s*{re.escape(rname)}\s*\)"
     if not re.search(len_re, source):
+        return set()
+    param_names = list(_go_param_types(params_text).keys())
+    if rname in param_names:
+        param_names.remove(rname)
+    guarded: set[str] = set()
+    for pname in param_names:
+        if re.search(rf"\b{re.escape(rname)}\s*\[\s*{re.escape(pname)}\s*\]", body):
+            guarded.add(pname)
+    return guarded
+
+
+def _go_fixed_array_param_guarded_indices(
+    body: str, params_text: str, source: str | None
+) -> set[str]:
+    """Parameters used to index a fixed-size array-typed receiver are bounded.
+
+    ``func (l leaks) get(i int) int { return int(l[i]) - 1 }`` directly indexes
+    the fixed array; callers are responsible for passing a valid ``i``.
+    """
+    if not source:
+        return set()
+    rname = _go_method_receiver_name(params_text)
+    rtype = _go_method_receiver_type(params_text)
+    if not rname or not rtype:
+        return set()
+    base = rtype.lstrip("*")
+    sizes = _go_fixed_array_sizes(source)
+    if base not in sizes:
         return set()
     param_names = list(_go_param_types(params_text).keys())
     if rname in param_names:
@@ -3396,6 +3438,10 @@ _GO_NONNIL_EXACT_TYPES = {
     "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
     "Named",  # go/types Named type handles are non-nil when methods are called
     "comparer",  # go/types comparer handle is non-nil when methods are called
+    "DecapsulationKey768",  # crypto/mlkem decapsulation key handles are non-nil in use
+    "DecapsulationKey1024",
+    "EncapsulationKey768",
+    "EncapsulationKey1024",
     "mspan",  # runtime memory-span handles are non-nil when methods/helpers are called
     "Segment",  # debug/macho/elf load segments are non-nil when methods are invoked
     "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
@@ -4387,7 +4433,7 @@ def _detect_go_safety_issues(
                 package_name=package_name,
                 rtype=rtype,
                 function_name=fn.name,
-            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_runtime_level_guarded_indices(
+            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_fixed_array_param_guarded_indices(body, fn.params_text, source) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
             suppress_nil = (
@@ -4462,6 +4508,8 @@ def _detect_go_safety_issues(
                     float_arrays=go_float_arrays,
                     guarded_indices=guarded_indices,
                     unsigned_locals=unsigned_vars,
+                    source=source,
+                    params_text=fn.params_text,
                 )
                 # A final return after ``if x == nil { return }`` is known non-nil.
                 if index == len(expressions) - 1 and guarded:
@@ -4580,7 +4628,7 @@ def _detect_go_safety_issues(
             package_name=package_name,
             rtype=rtype,
             function_name=name,
-        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
+        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_fixed_array_param_guarded_indices(body, params_text, source) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
@@ -4615,6 +4663,8 @@ def _detect_go_safety_issues(
                 guarded_indices=guarded_indices,
                 parallel_slicing=parallel_slicing,
                 unsigned_locals=unsigned_vars,
+                source=source,
+                params_text=params_text,
             )
             if index == len(expressions) - 1 and guarded:
                 expr_issues = [
@@ -5184,6 +5234,31 @@ def _is_unsigned_mask_expression(expression: str, left: str, right: str) -> bool
     return bool(re.search(r"0x[0-9a-fA-F]+", expression) and re.search(r"[&|]", expression))
 
 
+def _is_fixed_array_method_arg(
+    expression: str, left: str, right: str, source: str, params_text: str
+) -> bool:
+    """Return True when ``left + right`` indexes a fixed-size array receiver.
+
+    ``func (l leaks) Result(i int) { return l.get(leakResult0 + i) }`` passes a
+    sum to an accessor that indexes a fixed-size array; the sum is bounded by
+    the array length, so i64 overflow cannot occur without a prior index panic.
+    """
+    if not source or not params_text:
+        return False
+    rname = _go_method_receiver_name(params_text)
+    rtype = _go_method_receiver_type(params_text)
+    if not rname or not rtype:
+        return False
+    base = rtype.lstrip("*")
+    if base not in _go_fixed_array_sizes(source):
+        return False
+    a, b = re.escape(left), re.escape(right)
+    sum_re = rf"(?:{a}\s*\+\s*{b}|{b}\s*\+\s*{a})"
+    return bool(
+        re.search(rf"\b{re.escape(rname)}\s*\.\s*\w+\s*\([^)]*{sum_re}[^)]*\)", expression)
+    )
+
+
 def _is_size_like_identifier(name: str) -> bool:
     """Return True for identifiers that represent memory sizes or lengths.
 
@@ -5205,6 +5280,8 @@ def _i64_overflow_safety_issue(
     local_names: set[str] | None = None,
     known_constants: dict[str, int] | None = None,
     unsigned_locals: set[str] | None = None,
+    source: str = "",
+    params_text: str = "",
 ) -> ForeignSafetyIssue | None:
     if _is_pointer_arithmetic_expression(expression, left, right):
         return None
@@ -5219,6 +5296,8 @@ def _i64_overflow_safety_issue(
     if label == "Go" and _is_divroundup_expression(expression, right):
         return None
     if label == "Go" and _is_unsigned_mask_expression(expression, left, right):
+        return None
+    if label == "Go" and _is_fixed_array_method_arg(expression, left, right, source, params_text):
         return None
     if _is_size_like_identifier(left) and _is_size_like_identifier(right):
         # Memory-accounting sums of size/length values are not overflow bugs.
@@ -5309,6 +5388,8 @@ def _issues_for_expression(
     known_types: set[str] | None = None,
     float_arrays: set[str] | None = None,
     solidity_default_checks: bool = False,
+    source: str = "",
+    params_text: str = "",
 ) -> list[ForeignSafetyIssue]:
     known_constants = known_constants or {}
     guaranteed_nonzero = _guaranteed_nonzero_in_expression(expression) | (guaranteed_nonzero or set())
@@ -5341,6 +5422,8 @@ def _issues_for_expression(
             known_types=known_types,
             float_arrays=float_arrays,
             solidity_default_checks=solidity_default_checks,
+            source=source,
+            params_text=params_text,
         )
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
@@ -5416,6 +5499,8 @@ def _issues_for_expression(
                 local_names=local_names,
                 known_constants=known_constants,
                 unsigned_locals=unsigned_locals,
+                source=source,
+                params_text=params_text,
             )
             if issue is not None:
                 issues.append(issue)
@@ -5446,6 +5531,8 @@ def _issues_from_findings(
     known_types: set[str] | None = None,
     float_arrays: set[str] | None = None,
     solidity_default_checks: bool = False,
+    source: str = "",
+    params_text: str = "",
 ) -> list[ForeignSafetyIssue]:
     """Build safety issues from syntax-tree findings.
 
@@ -5498,6 +5585,8 @@ def _issues_from_findings(
                 local_names=local_names,
                 known_constants=known_constants,
                 unsigned_locals=unsigned_locals,
+                source=source,
+                params_text=params_text,
             )
             if issue is not None:
                 issues.append(issue)
