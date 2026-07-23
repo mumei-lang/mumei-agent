@@ -1463,7 +1463,9 @@ def _go_local_nonzero_variables(body: str) -> set[str]:
         try:
             return float(text) != 0.0
         except ValueError:
-            return False
+            pass
+        # Architecture fields like ``Config.PtrSize`` are always positive.
+        return bool(re.search(r"(?:^|\.)PtrSize$", text))
 
     return {
         name

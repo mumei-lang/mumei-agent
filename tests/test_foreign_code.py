@@ -2866,6 +2866,35 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_config_ptr_size_nonzero_local() -> None:
+    """A local ``ptrSize := ...Config.PtrSize`` is a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+type Config struct{ PtrSize int64 }
+type Func struct{ Config *Config }
+type Block struct{ Func *Func }
+type Value struct{ Block *Block }
+
+func needWBdst(ptr, mem *Value) bool {
+	var off int64
+	for ptr.Op == 0 {
+		off += 1
+		ptr = ptr.Args[0]
+	}
+	ptrSize := ptr.Block.Func.Config.PtrSize
+	if off%ptrSize != 0 {
+		return true
+	}
+	_ = uint64(1) << (off / ptrSize)
+	return false
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("needWBdst" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_atomic_pointer_wrapper_non_nil() -> None:
     """Atomic pointer wrapper methods are called on non-nil receivers."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
