@@ -1731,6 +1731,83 @@ def _go_median_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_sort_search_guarded_indices(body: str) -> set[str]:
+    """Indices used in ``sort.Search``/``sortSearch`` closures are in bounds.
+
+    The closure parameter is always called with ``0 <= i < n``; the returned
+    result is in ``[0, n]`` and typically checked with ``if i < n`` before use.
+    """
+    guarded: set[str] = set()
+    search_re = re.compile(r"(?:sortSearch|sort\.Search)\s*\(")
+    i = 0
+    while True:
+        m = search_re.search(body, i)
+        if not m:
+            break
+        # The regex matched up to and including the opening paren.
+        paren = m.end() - 1
+        # Find the matching close paren for the sort.Search call.
+        depth = 1
+        j = m.end()
+        while j < len(body) and depth > 0:
+            if body[j] == "(":
+                depth += 1
+            elif body[j] == ")":
+                depth -= 1
+            j += 1
+        call = body[m.end() : j - 1]
+        # First argument should be ``len(arr)``.
+        arr_match = re.match(r"\s*len\(\s*(\w+)\s*\)\s*,", call)
+        if not arr_match:
+            i = j
+            continue
+        arr = arr_match.group(1)
+        rest = call[arr_match.end() :]
+        # Match ``func(i int) bool { ... }``
+        func_match = re.search(r"func\s*\(\s*(\w+)\s+int\s*\)\s*bool\s*\{", rest)
+        if func_match:
+            idx = func_match.group(1)
+            brace = rest.find("{", func_match.end() - 1)
+            if brace != -1:
+                bdepth = 1
+                k = brace + 1
+                while k < len(rest) and bdepth > 0:
+                    if rest[k] == "{":
+                        bdepth += 1
+                    elif rest[k] == "}":
+                        bdepth -= 1
+                    k += 1
+                closure_body = rest[brace + 1 : k - 1]
+                if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", closure_body):
+                    guarded.add(idx)
+        # The assignment result variable (``i := sortSearch(...)``) is also in bounds.
+        before = body[:m.start()]
+        assign_match = re.search(r"(\w+)\s*:=\s*$", before)
+        if assign_match:
+            result = assign_match.group(1)
+            if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(result)}\s*\]", body):
+                guarded.add(result)
+        i = j
+    return guarded
+
+
+def _go_pow10_guarded_indices(body: str) -> set[str]:
+    """``nd := log10Pow2(bits.Len64(x))`` indexing ``uint64pow10[nd]`` is in bounds.
+
+    ``bits.Len64`` on a ``uint64`` returns ``0..64`` and ``log10Pow2`` maps that
+    to ``0..19``, the valid range of the 20-element ``uint64pow10`` table.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*log10Pow2\s*\(\s*bits\.Len64\s*\([^)]+\)\s*\)",
+        body,
+    ):
+        nd = match.group(1)
+        if re.search(rf"\buint64pow10\s*\[\s*{re.escape(nd)}\s*\]", body):
+            guarded.add(nd)
+    return guarded
+
+
 def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
     """Binary-search midpoint ``m`` indexing ``arr[m]`` is bounded by ``len(arr)``."""
     stripped = _strip_go_rust_literals_and_comments(body)
@@ -1903,6 +1980,10 @@ def _go_guarded_indices(
     guarded |= _go_dual_len_loop_guarded_indices(body)
     # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
     guarded |= _go_median_guarded_indices(body)
+    # ``sort.Search``/``sortSearch`` closures and their results index the searched slice.
+    guarded |= _go_sort_search_guarded_indices(body)
+    # ``log10Pow2(bits.Len64(x))`` indexing ``uint64pow10`` stays within the table.
+    guarded |= _go_pow10_guarded_indices(body)
     # Binary-search midpoint ``m`` is bounded by the initial ``len(arr)`` and the loop invariant.
     if source:
         guarded |= _go_binary_search_guarded_indices(body, source)

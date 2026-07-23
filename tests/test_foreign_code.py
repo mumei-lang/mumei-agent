@@ -2866,6 +2866,55 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_sort_search_index() -> None:
+    """``sort.Search``/``sortSearch`` closures and results are bounded by ``len(arr)``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package embed
+
+func lookup(files []file, name string) *file {
+	if len(files) == 0 {
+		return nil
+	}
+	i := sortSearch(len(files), func(i int) bool {
+		return files[i].name >= name
+	})
+	if i < len(files) && files[i].name == name {
+		return &files[i]
+	}
+	return nil
+}
+
+func sortSearch(n int, f func(int) bool) int { return 0 }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("lookup" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_uint64pow10_index() -> None:
+    """``nd := log10Pow2(bits.Len64(d))`` indexing ``uint64pow10[nd]`` is in bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package strconv
+
+import "math/bits"
+
+var uint64pow10 = [...]uint64{
+	1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+	1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
+}
+
+func log10Pow2(x int) int { return (x * 78913) >> 18 }
+
+func numDigits(d uint64) int {
+	nd := log10Pow2(bits.Len64(d))
+	return nd + (d >= uint64pow10[nd])
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("numDigits" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_median_mid_index() -> None:
     """``mid := len(values) / 2`` in a median helper with an empty-array return is bounded."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
