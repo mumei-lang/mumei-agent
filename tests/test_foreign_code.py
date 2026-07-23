@@ -2866,6 +2866,31 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_median_mid_index() -> None:
+    """``mid := len(values) / 2`` in a median helper with an empty-array return is bounded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package mathexp
+
+import "sort"
+
+func Median(values []float64) *float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Float64s(values)
+	mid := len(values) / 2
+	if len(values)%2 == 0 {
+		v := (values[mid-1] + values[mid]) / 2
+		return &v
+	}
+	return &values[mid]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Median" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_array_accessor_index_guard() -> None:
     """``if len(a) > index { a[index] }`` is treated as a bounds guard."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

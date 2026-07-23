@@ -1707,6 +1707,30 @@ def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_median_guarded_indices(body: str) -> set[str]:
+    """``mid := len(arr) / 2`` in a median helper is bounded by ``len(arr) > 0``.
+
+    The median idiom first returns on empty arrays, so ``arr[mid]`` is safe.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*len\(\s*(\w+)\s*\)\s*/\s*2\b",
+        body,
+    ):
+        mid, arr = match.group(1), match.group(2)
+        # Require an early return when the array is empty.
+        if re.search(
+            rf"\bif\s+len\(\s*{re.escape(arr)}\s*\)\s*(?:==|<=)\s*0\s*\{{[^}}]*\breturn\b",
+            body,
+        ):
+            if re.search(
+                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(mid)}\s*\]",
+                body,
+            ):
+                guarded.add(mid)
+    return guarded
+
+
 def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
     """Binary-search midpoint ``m`` indexing ``arr[m]`` is bounded by ``len(arr)``."""
     stripped = _strip_go_rust_literals_and_comments(body)
@@ -1877,6 +1901,8 @@ def _go_guarded_indices(
     guarded |= _go_range_index_guarded_indices(body)
     # ``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both ``a[i]`` and ``b[i]``.
     guarded |= _go_dual_len_loop_guarded_indices(body)
+    # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
+    guarded |= _go_median_guarded_indices(body)
     # Binary-search midpoint ``m`` is bounded by the initial ``len(arr)`` and the loop invariant.
     if source:
         guarded |= _go_binary_search_guarded_indices(body, source)
