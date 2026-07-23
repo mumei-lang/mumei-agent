@@ -2907,6 +2907,111 @@ func pickTaskColor(id uint64) string {
     assert not any(i.function_name == "pickTaskColor" for i in issues)
 
 
+def test_detect_go_safety_issues_signed_modulo_len_index_is_guarded() -> None:
+    """Signed non-negative ``idx := expr % len(arr)`` bounds ``arr[idx]`` when
+    ``arr`` is provably non-empty (symmetric to Rust ``% container.len()``)."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+func pickChange(paths []string) string {
+	names := []string{"add", "update", "delete"}
+	k := len(names)
+	idx := k % len(names)
+	return names[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "pickChange" for i in issues)
+
+
+def test_detect_go_safety_issues_modulo_empty_container_not_guarded() -> None:
+    """``idx := expr % len(container)`` stays flagged when the container may be
+    empty (unknown-length slice parameter): ``expr % 0`` panics, so the bounds
+    obligation is preserved."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+func pickChange(changes []string) string {
+	k := len(changes)
+	idx := k % len(changes)
+	return changes[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert any(
+        i.function_name == "pickChange" and "can index" in i.message for i in issues
+    )
+
+
+def test_detect_go_safety_issues_signed_modulo_negative_dividend_not_guarded() -> None:
+    """A signed, possibly-negative dividend keeps the warning: Go ``%`` yields a
+    negative result for a negative dividend, so ``arr[idx]`` may be out of bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+var palette = []string{"red", "green", "blue"}
+
+func colorFor(h int) string {
+	idx := h % len(palette)
+	return palette[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert any(
+        i.function_name == "colorFor" and "can index" in i.message for i in issues
+    )
+
+
+def test_detect_go_safety_issues_range_over_map_key_modulo_not_guarded() -> None:
+    """A range over a map binds the *key* (not a 0-based index) to the first
+    variable. For a signed-int key type the key can be negative, so Go ``%``
+    can yield a negative index — the bounds warning must be preserved."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+var colors = []string{"red", "green", "blue"}
+
+func colorForTask(taskMap map[int]string) string {
+	for id := range taskMap {
+		idx := id % len(colors)
+		return colors[idx]
+	}
+	return ""
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert any(
+        i.function_name == "colorForTask" and "can index" in i.message
+        for i in issues
+    )
+
+
+def test_detect_go_safety_issues_range_over_slice_index_modulo_is_guarded() -> None:
+    """The companion safe case: ranging over a slice binds a genuine 0-based
+    index, so ``slice[i % len(nonEmpty)]`` remains bounds-safe (guards against
+    the map fix over-broadening and re-introducing the false positive)."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package changes
+
+var colors = []string{"red", "green", "blue"}
+
+func colorForItem(items []string) string {
+	for i := range items {
+		idx := i % len(colors)
+		return colors[idx]
+	}
+	return ""
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "colorForItem" for i in issues)
+
+
 def test_detect_go_safety_issues_2d_slice_loop_col_index() -> None:
     """Range over a 2-D slice with inner non-nil guard implies the index is valid."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
