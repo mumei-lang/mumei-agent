@@ -969,6 +969,11 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
             if base_name is not None and index_name is not None:
                 index_accesses.append((base_name, index_name))
         elif node.type == member_type:
+            if any(child.type == "optional_chain" for child in node.children):
+                # TypeScript/JavaScript optional chaining (``a?.b``) is null-safe.
+                for child in node.children:
+                    visit(child)
+                return
             obj = node.child_by_field_name(object_field)
             prop = node.child_by_field_name(property_field)
             obj_name = _identifier_name(source_bytes, obj)

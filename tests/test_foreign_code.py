@@ -2866,6 +2866,55 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_session_db_tx_receivers_non_nil() -> None:
+    """Grafana ``*SessionDB`` / ``*SessionTx`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package session
+
+import "context"
+
+type sqlxtx struct{}
+func (tx *sqlxtx) NamedExecContext(ctx context.Context, query string, arg any) (any, error) { return nil, nil }
+func (tx *sqlxtx) Rebind(query string) string { return query }
+
+type SessionTx struct{ sqlxtx *sqlxtx }
+
+func (gtx *SessionTx) NamedExec(ctx context.Context, query string, arg any) (any, error) {
+	return gtx.sqlxtx.NamedExecContext(ctx, gtx.sqlxtx.Rebind(query), arg)
+}
+
+type SessionDB struct{}
+
+func (gs *SessionDB) DriverName() string { return "" }
+func (gs *SessionDB) Get(ctx context.Context, dest any, query string, args ...any) error { return nil }
+
+func execWithReturningId(ctx context.Context, driverName string, query string, sess any, args ...any) (int64, error) { return 0, nil }
+
+func (gs *SessionDB) ExecWithReturningId(ctx context.Context, query string, args ...any) (int64, error) {
+	return execWithReturningId(ctx, gs.DriverName(), query, gs, args...)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"NamedExec", "ExecWithReturningId"} for i in issues
+    )
+
+
+def test_detect_typescript_optional_chain_length_not_null_deref() -> None:
+    """TypeScript optional chaining ``workflows?.length`` is null-safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export interface RepoWorkflows extends Array<any> {}
+
+export function getIsReadOnlyWorkflows(workflows?: RepoWorkflows): boolean {
+  return workflows?.length === 0;
+}
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any("workflows" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_obj_assembler_pointers_non_nil() -> None:
     """``cmd/internal/obj`` pointer parameters (Link, LSym, Prog, Addr, Reloc, AsmBuf) are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

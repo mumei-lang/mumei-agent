@@ -3180,6 +3180,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "Addr",  # cmd/internal/obj.Addr operand pointers are non-nil in use
     "Reloc",  # cmd/internal/obj.Reloc relocation pointers are non-nil in use
     "AsmBuf",  # cmd/internal/obj/asm buffer pointers are non-nil in use
+    "SessionDB",  # Grafana sqlstore session database wrappers are non-nil in use
+    "SessionTx",  # Grafana sqlstore session transaction wrappers are non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
