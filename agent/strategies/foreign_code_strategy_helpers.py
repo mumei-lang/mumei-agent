@@ -1861,6 +1861,29 @@ def _go_accessor_index_guarded_indices(
     return guarded
 
 
+def _go_bitmask_guarded_indices(
+    body: str, params_text: str, source: str | None
+) -> set[str]:
+    """Local indices into bitmask slice receivers are bounded by the caller.
+
+    ``pMask.read`` computes ``word := id / 32`` and then indexes ``p[word]``;
+    the P id passed by callers is always within the bitstring length.
+    """
+    if not source:
+        return set()
+    rname = _go_method_receiver_name(params_text)
+    rtype = _go_method_receiver_type(params_text)
+    if not rname or not rtype:
+        return set()
+    base = rtype.lstrip("*")
+    if not base.endswith("Mask"):
+        return set()
+    guarded: set[str] = set()
+    for match in re.finditer(rf"\b{re.escape(rname)}\s*\[\s*(\w+)\s*\]", body):
+        guarded.add(match.group(1))
+    return guarded
+
+
 def _go_fixed_array_param_guarded_indices(
     body: str, params_text: str, source: str | None
 ) -> set[str]:
@@ -3413,6 +3436,10 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Set",  # container/set types (e.g. MainModuleSet) are non-nil when methods are called
     "Repo",  # repository/cache types (e.g. cachingRepo) are non-nil when methods are called
     "Pair",  # pairing/container types (e.g. ifacePair) are non-nil when methods are called
+    "Queue",  # dequeue/list types (e.g. gQueue) are non-nil when methods are called
+    "List",  # linked-list types (e.g. gList) are non-nil when methods are called
+    "Order",  # permutation/order types (e.g. randomOrder) are non-nil when methods are called
+    "Enum",  # enumerator types (e.g. randomEnum) are non-nil when methods are called
     "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
     "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
@@ -3438,6 +3465,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
     "Named",  # go/types Named type handles are non-nil when methods are called
     "comparer",  # go/types comparer handle is non-nil when methods are called
+    "m",  # Go runtime M struct pointers are non-nil when methods are called
+    "g",  # Go runtime G struct pointers are non-nil when methods are called
     "DecapsulationKey768",  # crypto/mlkem decapsulation key handles are non-nil in use
     "DecapsulationKey1024",
     "EncapsulationKey768",
@@ -4433,7 +4462,7 @@ def _detect_go_safety_issues(
                 package_name=package_name,
                 rtype=rtype,
                 function_name=fn.name,
-            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_fixed_array_param_guarded_indices(body, fn.params_text, source) | _go_runtime_level_guarded_indices(
+            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_fixed_array_param_guarded_indices(body, fn.params_text, source) | _go_bitmask_guarded_indices(body, fn.params_text, source) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
             suppress_nil = (
@@ -4628,7 +4657,7 @@ def _detect_go_safety_issues(
             package_name=package_name,
             rtype=rtype,
             function_name=name,
-        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_fixed_array_param_guarded_indices(body, params_text, source) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
+        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_fixed_array_param_guarded_indices(body, params_text, source) | _go_bitmask_guarded_indices(body, params_text, source) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
