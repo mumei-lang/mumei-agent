@@ -5137,6 +5137,20 @@ def _is_divroundup_expression(expression: str, divisor: str) -> bool:
     return False
 
 
+def _is_unsigned_mask_expression(expression: str, left: str, right: str) -> bool:
+    """Return True when ``left + right`` is cast to an unsigned type and masked.
+
+    ``uint32(a + b) & mask`` (and similar) intentionally discards high bits,
+    so signed overflow of the intermediate sum is not a memory-safety bug.
+    """
+    a, b = re.escape(left), re.escape(right)
+    sum_re = rf"(?:{a}\s*\+\s*{b}|{b}\s*\+\s*{a})"
+    if not re.search(rf"\b(?:u?int(?:8|16|32|64)|uintptr)\s*\([^)]*{sum_re}[^)]*\)", expression):
+        return False
+    # The cast must be used in a bitwise context with a literal mask.
+    return bool(re.search(r"0x[0-9a-fA-F]+", expression) and re.search(r"[&|]", expression))
+
+
 def _is_size_like_identifier(name: str) -> bool:
     """Return True for identifiers that represent memory sizes or lengths.
 
@@ -5170,6 +5184,8 @@ def _i64_overflow_safety_issue(
     if label == "Go" and _is_loop_bound_overflow_guard(function_name, left, right, expression):
         return None
     if label == "Go" and _is_divroundup_expression(expression, right):
+        return None
+    if label == "Go" and _is_unsigned_mask_expression(expression, left, right):
         return None
     if _is_size_like_identifier(left) and _is_size_like_identifier(right):
         # Memory-accounting sums of size/length values are not overflow bugs.
