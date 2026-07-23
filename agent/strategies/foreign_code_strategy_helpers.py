@@ -3337,6 +3337,9 @@ _GO_NONNIL_EXACT_TYPES = {
     "decoder",  # encoding/binary decoder is non-nil when methods are called
     "encoder",  # encoding/binary encoder is non-nil when methods are called
     "NamespacedResource",  # grafana unified storage resource key is non-nil in use
+    "Regexp",  # regexp.Regexp handles are non-nil when methods/callers use them
+    "T",  # testing.T receivers are non-nil in test methods
+    "common",  # testing.common receivers are non-nil via testing.T/B/M
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
