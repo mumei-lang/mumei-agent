@@ -1,0 +1,370 @@
+[
+  {
+    "repo": "go",
+    "file": "src/cmd/compile/internal/gc/compile.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/compile/internal/ssa/_gen/decOps.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/compile/internal/test/inl_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/compile/internal/types2/typexpr.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/go/internal/verylongtest/go_unix_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/internal/cov/covcmd/cmddefs.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/internal/cov/mreader.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/internal/obj/arm/obj5.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/internal/pgo/pprof.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/link/internal/ld/deadcode.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/cmd/link/internal/ppc64/asm.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/compress/flate/fuzz_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/crypto/internal/fips140test/cast_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "src/database/sql/closemu_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/go/types/self_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "src/image/color/ycbcr.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/image/gif/writer.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/cpu/cpu_darwin.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/runtime/cgroup/cgroup_linux.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/internal/zstd/fuzz_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/math/big/alias_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "src/math/rand/v2/chacha8.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/math/rand/v2/example_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/math/unsafe.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/os/sys_wasip1.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/defs_arm_linux.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/sema_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "src/runtime/tracestack.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/simd/simd_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/syscall/syscall_darwin.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/syscall/zsyscall_openbsd_arm64.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "src/text/template/example_test.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/chan/sieve1.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/directive2.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/escape_struct_param2.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug060.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug200.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/bug456.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue4510.dir/f2.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue48536.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue52590.dir/b.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue52862.dir/b.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "test/fixedbugs/issue6513.dir/main.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": [
+      "No Mumei atoms were generated from the extracted forge task spec."
+    ]
+  },
+  {
+    "repo": "go",
+    "file": "test/func3.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/ken/slicearray.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/recover.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/syntax/composite.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/tighten.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/undef.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  },
+  {
+    "repo": "go",
+    "file": "test/writebarrier.go",
+    "lang": "go",
+    "status": "verified",
+    "errors": []
+  }
+]
