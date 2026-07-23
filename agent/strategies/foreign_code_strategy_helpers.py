@@ -3182,6 +3182,9 @@ _GO_NONNIL_EXACT_TYPES = {
     "AsmBuf",  # cmd/internal/obj/asm buffer pointers are non-nil in use
     "SessionDB",  # Grafana sqlstore session database wrappers are non-nil in use
     "SessionTx",  # Grafana sqlstore session transaction wrappers are non-nil in use
+    "PipeReader",  # io.PipeReader halves are non-nil when methods are called
+    "PipeWriter",  # io.PipeWriter halves are non-nil when methods are called
+    "onceError",  # io.pipe onceError helper is non-nil when methods are called
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

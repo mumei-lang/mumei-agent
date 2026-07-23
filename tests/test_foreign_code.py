@@ -2866,6 +2866,47 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_io_pipe_receivers_non_nil() -> None:
+    """``io.PipeReader``, ``io.PipeWriter``, and ``io.onceError`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package io
+
+import "errors"
+
+type pipe struct{}
+func (p *pipe) read(data []byte) (int, error) { return 0, nil }
+func (p *pipe) write(data []byte) (int, error) { return 0, nil }
+func (p *pipe) closeRead(err error) error { return nil }
+func (p *pipe) closeWrite(err error) error { return nil }
+
+type PipeReader struct{ pipe *pipe }
+type PipeWriter struct{ r PipeReader }
+
+func (r *PipeReader) Read(data []byte) (int, error) { return r.pipe.read(data) }
+func (r *PipeReader) Close() error { return r.CloseWithError(nil) }
+func (r *PipeReader) CloseWithError(err error) error { return r.pipe.closeRead(err) }
+
+func (w *PipeWriter) Write(data []byte) (int, error) { return w.r.pipe.write(data) }
+func (w *PipeWriter) Close() error { return w.CloseWithError(nil) }
+func (w *PipeWriter) CloseWithError(err error) error { return w.r.pipe.closeWrite(err) }
+
+type onceError struct{ err error }
+
+func (a *onceError) Store(err error) {
+	a.err = err
+}
+func (a *onceError) Load() error {
+	return a.err
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"Read", "Close", "CloseWithError", "Write", "Store", "Load"}
+        for i in issues
+    )
+
+
 def test_detect_go_safety_issues_session_db_tx_receivers_non_nil() -> None:
     """Grafana ``*SessionDB`` / ``*SessionTx`` receivers are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
