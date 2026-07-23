@@ -1,0 +1,252 @@
+[
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/misc/go_android_exec/exitcode_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/misc/go_android_exec/main.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/cmd/compile/internal/ssa/rewriteRISCV64.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/crypto/ecdsa/ecdsa_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/encoding/asn1/common.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/net/http/httptest/server_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/os/wait6_freebsd64.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/env_test.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/runtime/pprof/elf.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/src/syscall/ztypes_freebsd_amd64.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/ddd1.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/escape_field.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/bug219.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue10407.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue10977.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue13268.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue22962.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue30956.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/fixedbugs/issue4752.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/import4.dir/import4.go"
+  },
+  {
+    "repo": "go",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/go/test/typeparam/typeswitch6.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/advisor/pkg/app/checks/plugincheck/update_step.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/alerting/rules/pkg/apis/alerting/v0alpha1/rulesequence_schema_gen.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/folder/pkg/apis/folder/v1beta1/folder.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/apps/logsdrilldown/pkg/apis/logsdrilldown/v1beta1/logsdrilldowndefaultlabels_status_gen.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/apps/plugins/plugin/src/generated/meta/v0alpha1/types.status.gen.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-api-clients/src/clients/rtkq/migrate-to-cloud/index.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-api-clients/src/clients/rtkq/quotas/v0alpha1/baseAPI.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-data/src/utils/throwIfAngular.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/components/Link/Link.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/packages/grafana-ui/src/components/Slider/HandleTooltip.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/middleware/dashboard_redirect_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/iam/legacy/team.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/provisioning/informer/repository.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/provisioning/jobs/progress.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apis/secret/contracts/encryption.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/registry/apps/annotation/k8s_adapter_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/apiserver/utils/clientConfig.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/ngalert/models/alert_rule.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/services/quota/quotaimpl/quota_test.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/storage/secret/metadata/keeper_model.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "go",
+    "file": "/home/ubuntu/repos/grafana/pkg/storage/unified/resource/gc_gate.go"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/core/navigation/hooks.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/components/contact-points/ContactPointHeader.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/alerting/unified/components/receivers/usePreviewTemplate.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/explore/TraceView/components/utils/DraggableManager/EUpdateTypes.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/gops/configuration-tracker/irmHooks.ts"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/features/panel/components/VizTypePicker/VisualizationCardGrid.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/jaeger/components/QueryEditor.tsx"
+  },
+  {
+    "repo": "grafana",
+    "lang": "typescript",
+    "file": "/home/ubuntu/repos/grafana/public/app/plugins/datasource/loki/tracking.ts"
+  }
+]
