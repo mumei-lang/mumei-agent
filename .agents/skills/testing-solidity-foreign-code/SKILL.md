@@ -134,6 +134,45 @@ Assert on the emitted JSON (`--output`, it's `asdict(result)` incl. `proof_certi
 Generated theorem lands in mumei-lean `generated/Generated/_<module>_.lean` (gitignored) with the
 provenance block (`-- mumei_z3_result_class:`, `/-- Auto-generated from mumei atom ... -/`).
 
+## Stage 4: additional obligation classes (access-control, CEI) — same bridge pattern
+Two more Solidity obligation classes were escalated to machine-checked Lean proofs, reusing the
+Stage-3 producer→bridge→`lean_verified` pattern. Both ride the **same** proof-cert as guard-trace:
+`cross_validation.py` (`<inline:solidity>`) and `audit.py` (`source_label`) extract the extra atoms
+and **recompute `certificate_hash` over the merged atom list** (the builder only hashed the
+guard-trace subset — a stale hash here was a real Devin Review finding, so assert hash-after-merge).
+
+- **Access-control** (`extract_solidity_access_control_atoms` / `build_solidity_access_control_proof_certificate`):
+  `obligation_class == "smart_contract_access_control_obligation"`. mumei-lean side in
+  `SmartContract.lean` (access-control state machine) + `normalize_*` in `expr_translator.py`.
+- **CEI** (`extract_solidity_cei_atoms` / `build_solidity_cei_proof_certificate`):
+  `obligation_class == "smart_contract_cei_obligation"`. Maps `stateWrite`→`effect`,
+  `externalCall`→`interaction` **in source order**; only functions with BOTH sides get an atom.
+  mumei-lean `SmartContract.lean`: `CeiState{Effects,Interacted}`, `CeiOp{effect,interaction}`,
+  `ceiStep`, `runCei`. Goal for ordered `[effect, interaction]` is
+  `runCei CeiState.Effects [CeiOp.effect, CeiOp.interaction] = some CeiState.Interacted`; a
+  violation `[interaction, effect]` is `= none` (an effect after an interaction yields `none`).
+
+**E2E (same as guard-trace):** `validate-code --no-llm --no-mumei --enable-lean-bridge
+--mumei-lean-repo <path>` on a fixture with both an ordered and a violating function (e.g.
+`sample_solidity_vulnerable.sol`: `withdrawAll` effect→interaction ordered, `withdraw`
+interaction→effect violation). Atoms are named `<fn>_cei`. Both valid AND violation goals upgrade to
+`z3_check_result == "lean_verified"` — the violation goal is a TRUE proposition (`= none`), so it
+also verifies. Note: with `validate-code` the merged `lean_bridge` object may be null at the top
+cert level even though atoms upgraded; assert on the **atoms**, not on `cert.lean_bridge`.
+
+**Adversarial integrity (CEI):** take the violation atom but flip its goal to
+`runCei CeiState.Effects [CeiOp.interaction, CeiOp.effect] = some CeiState.Interacted` (false), run
+mumei-lean `scripts/bridge.py --cert ... --out-dir generated --lean-cert-out ...` directly →
+`lake build` exits 1 with `tactic 'decide' proved that the proposition ... is false`; exported atom
+stays `unknown`, `all_verified == false`. Generated module: `generated/Generated/Std/Contract/Cei.lean`.
+
+**CI gate selector gotcha:** `pytest -k "cei"` substring-matches `re`**`cei`**`ver`, pulling ~43
+unrelated Go receiver tests into the CEI gate. Use `-k "cei and not receiver"` (collects exactly the
+4 CEI tests). Sibling gates `guard_trace` / `access_control` don't collide. Gates live in
+`.github/workflows/ci.yml` and mirror in `tests/test_foreign_code.py` + `tests/test_audit.py`.
+mumei-lean CEI tests: `tests/test_ingest_cert.py`, `tests/test_lean_bridge_e2e.py` (live),
+`tests/test_expr_translator.py`; fixture `tests/fixtures/cei_demo.proof-cert.json`.
+
 ## Detection heuristic (Layer A) is easy to over-broaden
 `_detect_language` content fallback (only used for files with NO recognized extension) must use
 `re.search(r"\bcontract\s+[A-Z]", code)`, NOT `"contract " in code`. Regression test: a Python
