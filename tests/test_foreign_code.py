@@ -2866,6 +2866,34 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_fake_net_fd_receiver_non_nil() -> None:
+    """Pointer-receiver methods on ``fakeNetFD`` are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package net
+
+type fakeNetFD struct{ queue *fakeNetFDQueue }
+
+type fakeNetFDQueue struct{}
+
+func (q *fakeNetFDQueue) closeRead() error { return nil }
+func (q *fakeNetFDQueue) closeWrite() error { return nil }
+
+func (ffd *fakeNetFD) closeRead() error {
+	return ffd.queue.closeRead()
+}
+
+func (ffd *fakeNetFD) closeWrite() error {
+	if ffd.peer == nil {
+		return nil
+	}
+	return ffd.peer.queue.closeWrite()
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("closeRead" in i.message or "closeWrite" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_short_circuit_or_index_guard() -> None:
     """``len(arr) == idx || arr[idx]`` is safe due to short-circuit evaluation."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

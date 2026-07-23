@@ -3113,6 +3113,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Alloc",  # runtime/pageAlloc-style allocators are embedded in a parent object
     "V1",  # Grafana provisioning API config DTOs (e.g. MuteTimeV1) are unmarshaled non-nil
     "Conn",  # connection objects (e.g. net.Conn, ClientConn) are non-nil when used
+    "NetFD",  # net package internal file descriptor wrappers (netFD, fakeNetFD)
     "Transport",  # net/http transports and similar client/server transports
     "Stream",  # HTTP/2 clientStream and similar stream handles
     "ReadLoop",  # internal read-loop helpers such as http2 clientConnReadLoop
