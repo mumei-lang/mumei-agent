@@ -2866,6 +2866,340 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_nonzero_global_slice_length() -> None:
+    """``i % len(globalSlice)`` is safe when the slice initializer is non-empty."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package main
+
+var adjectives = []string{
+	"azure", "bright",
+}
+
+var nouns = []string{
+	"anchor", "beacon",
+}
+
+func randomName(i int) string {
+	return adjectives[i%len(adjectives)] + "-" + nouns[(i/len(adjectives))%len(nouns)]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "randomName" for i in issues)
+
+
+def test_detect_go_safety_issues_net_http_internal_non_nil() -> None:
+    """``net/http`` internal receiver types are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package http
+
+type wantConnQueue struct{ head, tail []*wantConn; headPos int }
+type connLRU struct{ m map[*persistConn]*list.Element }
+type connectMethod struct{ proxyURL *url.URL; targetScheme, targetAddr string }
+type transportRequest struct{ extra Header; mu sync.Mutex; err error }
+type persistConn struct{}
+type list struct{}
+type Element struct{}
+type Header map[string][]string
+
+func (q *wantConnQueue) len() int { return len(q.head) - q.headPos + len(q.tail) }
+func (cl *connLRU) len() int { return len(cl.m) }
+func (cm *connectMethod) scheme() string { return cm.targetScheme }
+func (tr *transportRequest) extraHeaders() Header { return tr.extra }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"len", "scheme", "extraHeaders"} for i in issues)
+
+
+def test_detect_go_safety_issues_sys_uint8_string_table_index() -> None:
+    """``internal/runtime/sys`` 256-byte string tables indexed by ``uint8``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package sys
+
+const ntz8tab = "\\x00\\x01..."
+const len8tab = "\\x00\\x01..."
+
+func TrailingZeros8(x uint8) int { return int(ntz8tab[x]) }
+func Len8(x uint8) int { return int(len8tab[x]) }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"TrailingZeros8", "Len8"} for i in issues)
+
+
+def test_detect_go_safety_issues_token_file_and_position_non_nil() -> None:
+    """``go/token.File`` and ``*Position`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package token
+
+type Position struct{ Line int }
+type File struct{ base int }
+
+func (pos *Position) IsValid() bool { return pos.Line > 0 }
+func (f *File) Base() int { return f.base }
+func (f *File) Position(p Pos) Position { return f.position(p, true) }
+func (f *File) position(p Pos, adjusted bool) (pos Position) { return }
+type Pos int
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"IsValid", "Base", "Position"} for i in issues)
+
+
+def test_detect_go_safety_issues_next_size_growth_overflow_guarded() -> None:
+    """``cmd/compile/internal/syntax.nextSize`` growth addition is guarded by prior branches."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syntax
+
+func nextSize(size int) int {
+	const min = 4 << 10
+	const max = 1 << 20
+	if size < min {
+		return min
+	}
+	if size <= max {
+		return size << 1
+	}
+	return size + max
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "nextSize" for i in issues)
+
+
+def test_typescript_boolean_parameter_return_type_infer_bool() -> None:
+    """Arrow function returning a ``boolean`` parameter should have bool return type."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export interface FieldConfigSettings {}
+export interface FieldOverrideContext {}
+
+export const booleanOverrideProcessor = (
+  value: boolean,
+  _context: FieldOverrideContext,
+  _settings?: FieldConfigSettings
+) => {
+  return value;
+};
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not issues
+
+
+def test_detect_go_safety_issues_mapfast_index_guarded() -> None:
+    """``mapfast`` result indexing ``mapdelete`` / ``mapaccess`` tables is guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package walk
+
+type mapnames [5]string
+
+var mapdelete = mapnames{"a", "b", "c", "d", "e"}
+
+func mapfast(t int) int { return t }
+
+func walkDelete(t int) string {
+	fast := mapfast(t)
+	return mapdelete[fast]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "walkDelete" for i in issues)
+
+
+def test_detect_go_safety_issues_ir_compiler_node_receivers_non_nil() -> None:
+    """Compiler ``ir.*Expr`` / ``*Stmt`` / ``*Name`` / ``*Nodes`` nodes are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package walk
+
+type CallExpr struct{ Args []int }
+type Nodes struct{}
+
+func (n *CallExpr) Type() int { return 0 }
+func (init *Nodes) Append(x int) {}
+
+func walkDelete(init *Nodes, n *CallExpr) int {
+	init.Append(n.Args[0])
+	return n.Type()
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name == "walkDelete" for i in issues
+    )
+
+
+def test_detect_go_safety_issues_sort_and_profile_stack_accessor_index_guarded() -> None:
+    """sort.Interface / profile ``Stack`` accessor indices are guarded by callers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package pprof
+
+type stackProfile [][]uintptr
+
+func (x stackProfile) Len() int              { return len(x) }
+func (x stackProfile) Stack(i int) []uintptr { return x[i] }
+func (x stackProfile) Label(i int) *labelMap { return nil }
+
+type labelMap struct{}
+
+type byCount struct{ keys []string; count map[string]int }
+
+func (x *byCount) Len() int           { return len(x.keys) }
+func (x *byCount) Less(i, j int) bool { return x.count[x.keys[i]] < x.count[x.keys[j]] }
+func (x *byCount) Swap(i, j int)      { x.keys[i], x.keys[j] = x.keys[j], x.keys[i] }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"Stack", "Label", "Less", "Swap"} for i in issues
+    )
+
+
+def test_detect_go_safety_issues_link_symbol_builder_and_loader_non_nil() -> None:
+    """``cmd/link`` ``*SymbolBuilder`` / ``*Loader`` / ``*sys.Arch`` are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package loader
+
+import "encoding/binary"
+
+type Arch struct{ ByteOrder binary.ByteOrder }
+
+type Loader struct{}
+func (l *Loader) SubSym(i int) int { return 0 }
+func (l *Loader) CreateSymForUpdate(name string) *SymbolBuilder { return nil }
+
+type Sym int
+
+type SymbolBuilder struct {
+	symIdx Sym
+	size   int64
+	data   []byte
+	kind   int
+}
+
+func (sb *SymbolBuilder) Grow(n int64) {}
+func (sb *SymbolBuilder) AddUint16(arch *Arch, v uint16) int64 {
+	return sb.AddUintXX(arch, uint64(v), 2)
+}
+func (sb *SymbolBuilder) AddUintXX(arch *Arch, v uint64, wid int) int64 {
+	off := sb.size
+	sb.setUintXX(arch, off, v, int64(wid))
+	return off
+}
+func (sb *SymbolBuilder) setUintXX(arch *Arch, off int64, v uint64, wid int64) int64 {
+	if sb.size < off+wid {
+		sb.size = off + wid
+		sb.Grow(sb.size)
+	}
+	switch wid {
+	case 2:
+		arch.ByteOrder.PutUint16(sb.data[off:], uint16(v))
+	}
+	return off + wid
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name
+        in {"SubSym", "CreateSymForUpdate", "AddUint16", "AddUintXX", "setUintXX"}
+        for i in issues
+    )
+
+
+def test_detect_go_safety_issues_io_pipe_receivers_non_nil() -> None:
+    """``io.PipeReader``, ``io.PipeWriter``, and ``io.onceError`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package io
+
+import "errors"
+
+type pipe struct{}
+func (p *pipe) read(data []byte) (int, error) { return 0, nil }
+func (p *pipe) write(data []byte) (int, error) { return 0, nil }
+func (p *pipe) closeRead(err error) error { return nil }
+func (p *pipe) closeWrite(err error) error { return nil }
+
+type PipeReader struct{ pipe *pipe }
+type PipeWriter struct{ r PipeReader }
+
+func (r *PipeReader) Read(data []byte) (int, error) { return r.pipe.read(data) }
+func (r *PipeReader) Close() error { return r.CloseWithError(nil) }
+func (r *PipeReader) CloseWithError(err error) error { return r.pipe.closeRead(err) }
+
+func (w *PipeWriter) Write(data []byte) (int, error) { return w.r.pipe.write(data) }
+func (w *PipeWriter) Close() error { return w.CloseWithError(nil) }
+func (w *PipeWriter) CloseWithError(err error) error { return w.r.pipe.closeWrite(err) }
+
+type onceError struct{ err error }
+
+func (a *onceError) Store(err error) {
+	a.err = err
+}
+func (a *onceError) Load() error {
+	return a.err
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"Read", "Close", "CloseWithError", "Write", "Store", "Load"}
+        for i in issues
+    )
+
+
+def test_detect_go_safety_issues_session_db_tx_receivers_non_nil() -> None:
+    """Grafana ``*SessionDB`` / ``*SessionTx`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package session
+
+import "context"
+
+type sqlxtx struct{}
+func (tx *sqlxtx) NamedExecContext(ctx context.Context, query string, arg any) (any, error) { return nil, nil }
+func (tx *sqlxtx) Rebind(query string) string { return query }
+
+type SessionTx struct{ sqlxtx *sqlxtx }
+
+func (gtx *SessionTx) NamedExec(ctx context.Context, query string, arg any) (any, error) {
+	return gtx.sqlxtx.NamedExecContext(ctx, gtx.sqlxtx.Rebind(query), arg)
+}
+
+type SessionDB struct{}
+
+func (gs *SessionDB) DriverName() string { return "" }
+func (gs *SessionDB) Get(ctx context.Context, dest any, query string, args ...any) error { return nil }
+
+func execWithReturningId(ctx context.Context, driverName string, query string, sess any, args ...any) (int64, error) { return 0, nil }
+
+func (gs *SessionDB) ExecWithReturningId(ctx context.Context, query string, args ...any) (int64, error) {
+	return execWithReturningId(ctx, gs.DriverName(), query, gs, args...)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"NamedExec", "ExecWithReturningId"} for i in issues
+    )
+
+
+def test_detect_typescript_optional_chain_length_not_null_deref() -> None:
+    """TypeScript optional chaining ``workflows?.length`` is null-safe."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export interface RepoWorkflows extends Array<any> {}
+
+export function getIsReadOnlyWorkflows(workflows?: RepoWorkflows): boolean {
+  return workflows?.length === 0;
+}
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any("workflows" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_obj_assembler_pointers_non_nil() -> None:
     """``cmd/internal/obj`` pointer parameters (Link, LSym, Prog, Addr, Reloc, AsmBuf) are non-nil in use."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

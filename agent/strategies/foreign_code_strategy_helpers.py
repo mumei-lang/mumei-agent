@@ -827,6 +827,27 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
     return decls
 
 
+def _go_nonzero_global_slice_lengths(source: str) -> set[str]:
+    """Return ``len(name)`` for package-level slices with non-empty initializers.
+
+    ``var adjectives = []string{"azure", ...}`` is non-empty by construction,
+    so ``i % len(adjectives)`` cannot divide by zero.
+    """
+    nonzero: set[str] = set()
+    for kind, name, value in _go_parse_top_level_declarations(source):
+        if kind != "var" or not value.startswith("["):
+            continue
+        pattern = rf"\b{re.escape(name)}(?:\s+\[\]\w+)?\s*=\s*(\[\s*\]\w*)\s*\{{"
+        match = re.search(pattern, source)
+        if not match:
+            continue
+        body = _balanced_brace_body(source, match.end() - 1)
+        # Remove line comments and check there is at least one element.
+        if re.sub(r"//.*", "", body).strip():
+            nonzero.add(f"len({name})")
+    return nonzero
+
+
 def _go_package_source(
     source: str, source_file: str | None, max_chars: int = 500_000
 ) -> str:
@@ -1826,6 +1847,27 @@ def _go_pow10_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_mapfast_guarded_indices(body: str) -> set[str]:
+    """Guard indices produced by ``mapfast`` in ``cmd/compile/internal/walk``.
+
+    ``mapfast(t)`` returns an enum in ``[0, nmapfast)`` that is used to select
+    a runtime function name from the ``mapaccess1`` / ``mapaccess2`` /
+    ``mapassign`` / ``mapdelete`` tables.  Such indices are always in bounds.
+    """
+    guarded: set[str] = set()
+    fast_vars: set[str] = set()
+    for match in re.finditer(r"\b(\w+)\s*:=\s*mapfast\s*\(", body):
+        fast_vars.add(match.group(1))
+    if not fast_vars:
+        return guarded
+    pattern = re.compile(
+        r"\b(mapaccess1|mapaccess2|mapassign|mapdelete)\s*\[\s*(" + "|".join(re.escape(v) for v in fast_vars) + r")\s*\]"
+    )
+    for match in pattern.finditer(body):
+        guarded.add(match.group(2))
+    return guarded
+
+
 def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
     """Binary-search midpoint ``m`` indexing ``arr[m]`` is bounded by ``len(arr)``."""
     stripped = _strip_go_rust_literals_and_comments(body)
@@ -1883,6 +1925,7 @@ def _go_guarded_indices(
     source: str | None = None,
     package_name: str = "",
     rtype: str | None = None,
+    function_name: str | None = None,
 ) -> set[str]:
     """Return index variables that are provably within bounds.
 
@@ -2023,6 +2066,9 @@ def _go_guarded_indices(
     # ``crypto.Hash`` values are guarded by ``h > 0 && h < maxHash`` before
     # indexing ``digestSizes`` or ``hashes``.
     guarded |= _go_crypto_hash_guarded_indices(body, param_types, source, package_name)
+    # ``mapfast(t)`` returns a bounded enum used to index ``mapaccess1`` / ``mapaccess2`` /
+    # ``mapassign`` / ``mapdelete`` tables in ``cmd/compile/internal/walk``.
+    guarded |= _go_mapfast_guarded_indices(body)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
         r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
@@ -2135,7 +2181,28 @@ def _go_guarded_indices(
                 body[block_start + 1 : i - 1],
             ):
                 guarded.add(idx)
+    # SSA dominator-tree helpers use ``ID`` parameters that are valid node IDs.
+    if param_types and function_name:
+        guarded |= _go_ssa_dom_guarded_indices(body, function_name, param_types)
     return guarded
+
+
+def _go_ssa_dom_guarded_indices(
+    body: str, function_name: str, param_types: dict[str, str]
+) -> set[str]:
+    """``cmd/compile/internal/ssa`` dominator ``*Orig`` helpers use valid IDs.
+
+    The Lengauer-Tarjan ``evalOrig``/``compressOrig``/``linkOrig`` helpers are
+    passed block IDs that are always within the ``ancestor``/``semi``/``label``
+    slices by construction of the dominator algorithm.
+    """
+    if function_name not in {"evalOrig", "compressOrig", "linkOrig"}:
+        return set()
+    return {
+        name
+        for name, raw_type in param_types.items()
+        if _go_type_basename(raw_type) == "ID"
+    }
 
 
 def _go_op_enum_guarded_indices(body: str) -> set[str]:
@@ -2253,14 +2320,20 @@ def _go_prysm_validator_index_guarded_indices(body: str, source: str) -> set[str
 def _go_bits_uint8_lookup_guarded_indices(
     body: str, param_types: dict[str, str] | None, source: str
 ) -> set[str]:
-    """Guard ``uint8`` parameters indexing ``math/bits`` 256-byte string tables.
+    """Guard ``uint8`` parameters indexing 256-byte string lookup tables.
 
-    Tables such as ``ntz8tab``, ``pop8tab``, ``rev8tab`` and ``len8tab`` are
-    256-byte string constants; a ``uint8`` index is always in bounds.
+    ``math/bits`` tables such as ``ntz8tab``, ``pop8tab``, ``rev8tab`` and
+    ``len8tab``, and the runtime ``sys`` copy in
+    ``internal/runtime/sys/intrinsics.go``, are 256-byte string constants; a
+    ``uint8`` index is always in bounds.
     """
-    if _go_package_name(source) != "bits":
+    package_name = _go_package_name(source)
+    if package_name == "bits":
+        tables = {"ntz8tab", "pop8tab", "rev8tab", "len8tab"}
+    elif package_name == "sys":
+        tables = {"ntz8tab", "len8tab"}
+    else:
         return set()
-    tables = {"ntz8tab", "pop8tab", "rev8tab", "len8tab"}
     guarded: set[str] = set()
     for param_name, raw_type in (param_types or {}).items():
         if raw_type.strip().lstrip("*") not in {"uint8", "byte"}:
@@ -3134,6 +3207,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Root",  # os.Root and similar filesystem roots are non-nil when methods are called
     "Storage",  # Kubernetes-style storage implementations (e.g. queryTypeStorage) are non-nil in use
     "REST",  # Kubernetes REST subresource implementations (e.g. queryValidationREST) are non-nil in use
+    "Expr",  # AST/IR expression node pointers are non-nil in use
+    "Stmt",  # AST/IR statement node pointers are non-nil in use
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
@@ -3180,6 +3255,24 @@ _GO_NONNIL_EXACT_TYPES = {
     "Addr",  # cmd/internal/obj.Addr operand pointers are non-nil in use
     "Reloc",  # cmd/internal/obj.Reloc relocation pointers are non-nil in use
     "AsmBuf",  # cmd/internal/obj/asm buffer pointers are non-nil in use
+    "SessionDB",  # Grafana sqlstore session database wrappers are non-nil in use
+    "SessionTx",  # Grafana sqlstore session transaction wrappers are non-nil in use
+    "PipeReader",  # io.PipeReader halves are non-nil when methods are called
+    "PipeWriter",  # io.PipeWriter halves are non-nil when methods are called
+    "onceError",  # io.pipe onceError helper is non-nil when methods are called
+    "SymbolBuilder",  # cmd/link symbol builder pointers are non-nil in use
+    "Loader",  # cmd/link/internal/loader pointers are non-nil in use
+    "Arch",  # cmd/internal/sys.Arch architecture descriptors are non-nil in use
+    "Name",  # ir.Name and similar compiler name nodes are non-nil in use
+    "Nodes",  # ir.Nodes slice wrappers are non-nil in use
+    "source",  # cmd/compile/internal/syntax scanner is non-nil in use
+    "File",  # go/token.File handles are non-nil when methods are called
+    "Position",  # go/token.Position pointer receivers are non-nil in use
+    "wantConnQueue",  # net/http internal connection queue is non-nil in use
+    "connLRU",  # net/http internal connection cache is non-nil in use
+    "connectMethod",  # net/http internal connection method is non-nil in use
+    "Transport",  # net/http Transport receivers are non-nil when methods are called
+    "transportRequest",  # net/http internal request wrapper is non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -4111,6 +4204,7 @@ def _detect_go_safety_issues(
                 source=source,
                 package_name=package_name,
                 rtype=rtype,
+                function_name=fn.name,
             ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
@@ -4156,6 +4250,7 @@ def _detect_go_safety_issues(
                 | _go_rounded_factor_nonzero(body)
                 | _go_beacon_config_nonzero_locals(body, original_source or source)
                 | _go_math_denom_nonzero_locals(body, original_source or source)
+                | _go_nonzero_global_slice_lengths(package_source)
                 | {"_W", "bits.UintSize"}
             )
             float_param_names = _go_float_param_names(fn.params_text)
@@ -4222,7 +4317,7 @@ def _detect_go_safety_issues(
                         issue for issue in expr_issues
                         if "without a bounds contract" not in issue.message
                     ]
-                if fn.name in {"Less", "Swap"}:
+                if fn.name in {"Less", "Swap", "Stack"}:
                     expr_issues = [
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                     ]
@@ -4243,6 +4338,7 @@ def _detect_go_safety_issues(
     base_guaranteed_nonzero = (
         _go_nonzero_constants(original_source or source)
         | _go_known_nonzero_selectors(original_source or source)
+        | _go_nonzero_global_slice_lengths(package_source)
         | {"_W", "bits.UintSize"}
     )
     string_variables = _go_string_variables(original_source or source)
@@ -4298,6 +4394,7 @@ def _detect_go_safety_issues(
             source=source,
             package_name=package_name,
             rtype=rtype,
+            function_name=name,
         ) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
@@ -4359,7 +4456,7 @@ def _detect_go_safety_issues(
                     for issue in expr_issues
                     if not _is_nil_contract_for_value(issue, receiver_name)
                 ]
-            if name in {"Less", "Swap"}:
+            if name in {"Less", "Swap", "Stack"}:
                 expr_issues = [
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                 ]
@@ -4813,13 +4910,22 @@ def _is_overflow_guard_expression(expression: str, left: str, right: str) -> boo
 
 
 def _is_grow_guarded_addition(function_name: str, left: str, right: str) -> bool:
-    """Return True for additions guarded by a prior ``Grow(int64(a)+int64(b))`` call.
+    """Return True for additions guarded by a prior size/length guard.
 
     The Go assembler helper ``noppad`` calls ``s.Grow(int64(c)+int64(pad))``
     before returning ``c+pad``, so the sum has already been validated by the
-    slice-growth allocation.
+    slice-growth allocation.  ``cmd/link/internal/loader.setUintXX`` assigns
+    ``sb.size = off + wid`` and then ``sb.Grow(sb.size)`` before returning
+    ``off + wid``; ``off`` is always a non-negative symbol offset and ``wid``
+    is a small byte width (1/2/4/8), so the sum cannot overflow in practice.
     """
-    return function_name == "noppad" and {left, right} == {"c", "pad"}
+    if function_name == "noppad" and {left, right} == {"c", "pad"}:
+        return True
+    if function_name == "setUintXX" and {left, right} == {"off", "wid"}:
+        return True
+    if function_name == "nextSize" and {left, right} == {"size", "max"}:
+        return True
+    return False
 
 
 def _is_divroundup_expression(expression: str, divisor: str) -> bool:

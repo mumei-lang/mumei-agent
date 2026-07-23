@@ -1440,23 +1440,25 @@ def _infer_typescript_arrow_functions_with_tree_sitter(
                 is_expression_body = True
             raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
             return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "typescript")
+            params_list = _params_from_signature(params_text)
+            param_types = {p.name: p.type for p in params_list}
+            param_names = {p.name for p in params_list}
             return_type = _typescript_return_type(
-                return_type_text or "number", raw_return_expr
+                return_type_text or "number", raw_return_expr, param_types
             )
             raw_name = _text(name_node)
             start_char = len(
                 source_bytes[: name_node.start_byte].decode("utf-8", "replace")
             )
-            param_names = {p.name for p in _params_from_signature(params_text)}
             local_names = _local_variable_names(body, "typescript")
             atom = MumeiContractAtom(
                 name=_safe_identifier(raw_name),
-                params=_params_from_signature(params_text),
+                params=params_list,
                 return_type=return_type,
                 requires=_safety_requires_for_expression(
                     raw_return_expr, "typescript", known_constants
                 ),
-                ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names),
+                ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types),
             )
             results.append((atom, _safe_identifier(raw_name), start_char))
             continue
@@ -1479,15 +1481,17 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                     fn.body, fn.is_expression_body
                 )
                 return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "typescript")
+                params_list = _params_from_signature(fn.params_text)
+                param_types = {p.name: p.type for p in params_list}
+                param_names = {p.name for p in params_list}
                 return_type = _typescript_return_type(
-                    (fn.return_type or "number").strip(), raw_return_expr
+                    (fn.return_type or "number").strip(), raw_return_expr, param_types
                 )
                 requires = _safety_requires_for_expression(
                     raw_return_expr, "typescript", known_constants
                 )
-                param_names = {p.name for p in _params_from_signature(fn.params_text)}
                 local_names = _local_variable_names(fn.body, "typescript")
-                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names)
+                ensures = _ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types)
             else:
                 requires = "true"
                 ensures = "true"
@@ -1552,20 +1556,22 @@ def _infer_typescript_contracts(code: str) -> list[MumeiContractAtom]:
                 body = _balanced_brace_body(code, body_start - 1)
             raw_return_expr = _typescript_raw_return_expression(body, is_expression_body)
             return_expr = _normalize_foreign_expression(raw_return_expr, known_constants, "typescript")
+            params_list = _params_from_signature(match.group("params"))
+            param_types = {p.name: p.type for p in params_list}
+            param_names = {p.name for p in params_list}
             return_type = _typescript_return_type(
-                match.group("ret") or "number", raw_return_expr
+                match.group("ret") or "number", raw_return_expr, param_types
             )
-            param_names = {p.name for p in _params_from_signature(match.group("params"))}
             local_names = _local_variable_names(body, "typescript")
             atoms.append(
                 MumeiContractAtom(
                     name=_safe_identifier(match.group("name")),
-                    params=_params_from_signature(match.group("params")),
+                    params=params_list,
                     return_type=return_type,
                     requires=_safety_requires_for_expression(
                         raw_return_expr, "typescript", known_constants
                     ),
-                    ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names),
+                    ensures=_ensures_for_return_expression(return_expr, return_type, param_names, known_constants, local_names, param_types=param_types),
                 )
             )
     return atoms
@@ -2360,7 +2366,9 @@ def _typescript_raw_return_expression(body: str, is_expression_body: bool = Fals
     return _extract_return_expression(stripped_search, body, start)
 
 
-def _typescript_return_type(type_text: str, return_expr: str = "") -> str:
+def _typescript_return_type(
+    type_text: str, return_expr: str = "", param_types: dict[str, str] | None = None
+) -> str:
     normalized = type_text.strip()
     if "|" in normalized:
         normalized = normalized.split("|", 1)[0].strip()
@@ -2374,10 +2382,15 @@ def _typescript_return_type(type_text: str, return_expr: str = "") -> str:
     if re.search(r"\bis\s", lowered) or lowered.startswith("asserts "):
         return "bool"
     # No explicit return type; try to infer from the expression.
-    if (not normalized or lowered in {"number", "any"}) and _looks_boolean(
-        return_expr
-    ):
-        return "bool"
+    if not normalized or lowered in {"number", "any"}:
+        if _looks_boolean(return_expr):
+            return "bool"
+        if (
+            param_types
+            and return_expr.strip() in param_types
+            and param_types[return_expr.strip()] == "bool"
+        ):
+            return "bool"
     return "i64"
 
 
