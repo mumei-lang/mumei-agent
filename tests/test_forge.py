@@ -467,6 +467,32 @@ class TestForgeOneModule:
         assert "atom both_positive(a: i64, b: i64)" in text
         assert forge.config.create_client.call_count == 0
 
+    def test_core_ranges_task_uses_deterministic_bodies(self, tmp_path):
+        forge = _make_forge(tmp_path)
+        forge.config.create_client.side_effect = AssertionError("LLM not needed")
+        task_path = (
+            Path(__file__).resolve().parents[1]
+            / "forge_tasks"
+            / "vstd_core_ranges.json"
+        )
+        task = json.loads(task_path.read_text(encoding="utf-8"))
+
+        result = forge.forge_one(task)
+
+        assert result.status == "success"
+        assert result.outside_decidable_fragment is False
+        target = forge.mumei_repo_dir / "std" / "core_ranges.mm"
+        text = target.read_text(encoding="utf-8")
+        assert (
+            "atom ranges_disjoint(a_lo: i64, a_hi: i64, b_lo: i64, b_hi: i64)" in text
+        )
+        assert (
+            "atom ranges_overlap(a_lo: i64, a_hi: i64, b_lo: i64, b_hi: i64)" in text
+        )
+        assert "atom range_width_nonneg(lo: i64, hi: i64)" in text
+        assert "atom point_before_range(lo: i64, hi: i64, p: i64)" in text
+        assert forge.config.create_client.call_count == 0
+
     def test_create_refuses_if_exists(self, tmp_path):
         forge = _make_forge(tmp_path)
         target = forge.mumei_repo_dir / "std" / "existing.mm"

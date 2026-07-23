@@ -1,0 +1,85 @@
+{
+  "task_id": "vstd-core-ranges",
+  "target_file": "std/core_ranges.mm",
+  "mode": "create",
+  "priority": 4,
+  "max_retries": 6,
+  "auto_commit": false,
+  "description": "Core-seeded interval/range predicates anchored on std/core.mm bounds primitives. Each atom is a structural 0/1 witness or bounded-safe difference over closed integer intervals [lo, hi], useful for downstream container range checks and scheduling/overlap logic. All bodies are explicit linear integer constraints with 0/1 witnesses, remaining entirely within the Z3 decidable fragment (no multiplication of two variables, no division, no quantifiers).",
+  "context_files": [
+    "std/core.mm",
+    "std/core_guards.mm",
+    "std/math/min_max.mm"
+  ],
+  "depends_on": [
+    "std/core.mm"
+  ],
+  "implementation_notes": [
+    "Each atom has an explicit body so deterministic forge rendering never needs an LLM credential.",
+    "Use only linear integer constraints and 0/1 witnesses; interval endpoints are closed (inclusive).",
+    "Anchor the contracts on std/core.mm bounds concepts (safe_to_index) and reuse the std/core_guards is_in_bounds convention without importing new trusted atoms."
+  ],
+  "atoms": [
+    {
+      "name": "ranges_disjoint",
+      "description": "Return a 0/1 witness for whether the closed intervals [a_lo, a_hi] and [b_lo, b_hi] do not overlap.",
+      "inputs": [
+        {"name": "a_lo", "type": "i64"},
+        {"name": "a_hi", "type": "i64"},
+        {"name": "b_lo", "type": "i64"},
+        {"name": "b_hi", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a_lo <= a_hi && b_lo <= b_hi",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_in_bounds", "both_positive"],
+      "body": "if a_hi < b_lo { 1 } else { if b_hi < a_lo { 1 } else { 0 } }"
+    },
+    {
+      "name": "ranges_overlap",
+      "description": "Return a 0/1 witness for whether the closed intervals [a_lo, a_hi] and [b_lo, b_hi] share at least one point.",
+      "inputs": [
+        {"name": "a_lo", "type": "i64"},
+        {"name": "a_hi", "type": "i64"},
+        {"name": "b_lo", "type": "i64"},
+        {"name": "b_hi", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "a_lo <= a_hi && b_lo <= b_hi",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_in_bounds", "both_positive"],
+      "body": "if a_hi < b_lo { 0 } else { if b_hi < a_lo { 0 } else { 1 } }"
+    },
+    {
+      "name": "range_width_nonneg",
+      "description": "Return the non-negative width of a non-negative closed interval [lo, hi].",
+      "inputs": [
+        {"name": "lo", "type": "i64"},
+        {"name": "hi", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "lo >= 0 && lo <= hi",
+      "ensures": "result >= 0 && result <= hi",
+      "reference_patterns": ["safe_abs_diff", "range_width"],
+      "body": "hi - lo"
+    },
+    {
+      "name": "point_before_range",
+      "description": "Return a 0/1 witness for whether point p lies strictly below the closed interval [lo, hi].",
+      "inputs": [
+        {"name": "lo", "type": "i64"},
+        {"name": "hi", "type": "i64"},
+        {"name": "p", "type": "i64"}
+      ],
+      "return_type": "i64",
+      "requires": "lo <= hi",
+      "ensures": "result == 0 || result == 1",
+      "reference_patterns": ["is_in_bounds"],
+      "body": "if p < lo { 1 } else { 0 }"
+    }
+  ],
+  "source": "vstd-roadmap-core-seed",
+  "difficulty": "low",
+  "deterministic_bodies": true,
+  "module_title": "std/core_ranges — core-seeded interval range predicates"
+}
