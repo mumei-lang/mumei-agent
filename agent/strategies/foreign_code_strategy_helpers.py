@@ -788,7 +788,8 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
         source,
         re.MULTILINE,
     ):
-        decls.append((match.group(1), match.group(2), match.group(3).strip()))
+        value = re.sub(r"\s*//.*", "", match.group(3)).strip()
+        decls.append((match.group(1), match.group(2), value))
     # Block declarations.
     i = 0
     while True:
@@ -945,6 +946,9 @@ def _go_nonzero_constants(source: str) -> set[str]:
                 "minPhysPageSize",
                 "maxPhysPageSize",
                 "heapArenaBytes",
+                "pagesPerArena",
+                "pagesPerReclaimerChunk",
+                "pagesPerSpanRoot",
                 "pallocChunkBytes",
                 "pallocChunkPages",
                 "summaryLevels",
@@ -1397,7 +1401,7 @@ def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str
                 elif stripped[i] == "}":
                     depth -= 1
                 i += 1
-            if depth == 0 and re.search(r"\breturn\b", stripped[block_start : i - 1]):
+            if depth == 0 and re.search(r"\b(?:return|panic)\b", stripped[block_start : i - 1]):
                 guarded.add(param)
     return guarded
 
@@ -1459,7 +1463,9 @@ def _go_local_nonzero_variables(body: str) -> set[str]:
         try:
             return float(text) != 0.0
         except ValueError:
-            return False
+            pass
+        # Architecture fields like ``Config.PtrSize`` are always positive.
+        return bool(re.search(r"(?:^|\.)PtrSize$", text))
 
     return {
         name
@@ -1703,6 +1709,123 @@ def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_short_circuit_or_guarded_indices(body: str) -> set[str]:
+    """``len(arr) == idx || arr[idx] ...`` is safe due to short-circuit ``||``.
+
+    The access ``arr[idx]`` is only evaluated when ``len(arr) != idx``; combined
+    with a preceding ``len(arr) < idx`` guard that returns false, ``idx`` is in
+    bounds for that branch.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\blen\(\s*(\w+)\s*\)\s*==\s*(\w+)\s*\|\|\s*\1\s*\[\s*\2\s*\]",
+        body,
+    ):
+        guarded.add(match.group(2))
+    return guarded
+
+
+def _go_median_guarded_indices(body: str) -> set[str]:
+    """``mid := len(arr) / 2`` in a median helper is bounded by ``len(arr) > 0``.
+
+    The median idiom first returns on empty arrays, so ``arr[mid]`` is safe.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*len\(\s*(\w+)\s*\)\s*/\s*2\b",
+        body,
+    ):
+        mid, arr = match.group(1), match.group(2)
+        # Require an early return when the array is empty.
+        if re.search(
+            rf"\bif\s+len\(\s*{re.escape(arr)}\s*\)\s*(?:==|<=)\s*0\s*\{{[^}}]*\breturn\b",
+            body,
+        ):
+            if re.search(
+                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(mid)}\s*\]",
+                body,
+            ):
+                guarded.add(mid)
+    return guarded
+
+
+def _go_sort_search_guarded_indices(body: str) -> set[str]:
+    """Indices used in ``sort.Search``/``sortSearch`` closures are in bounds.
+
+    The closure parameter is always called with ``0 <= i < n``; the returned
+    result is in ``[0, n]`` and typically checked with ``if i < n`` before use.
+    """
+    guarded: set[str] = set()
+    search_re = re.compile(r"(?:sortSearch|sort\.Search)\s*\(")
+    i = 0
+    while True:
+        m = search_re.search(body, i)
+        if not m:
+            break
+        # The regex matched up to and including the opening paren.
+        paren = m.end() - 1
+        # Find the matching close paren for the sort.Search call.
+        depth = 1
+        j = m.end()
+        while j < len(body) and depth > 0:
+            if body[j] == "(":
+                depth += 1
+            elif body[j] == ")":
+                depth -= 1
+            j += 1
+        call = body[m.end() : j - 1]
+        # First argument should be ``len(arr)``.
+        arr_match = re.match(r"\s*len\(\s*(\w+)\s*\)\s*,", call)
+        if not arr_match:
+            i = j
+            continue
+        arr = arr_match.group(1)
+        rest = call[arr_match.end() :]
+        # Match ``func(i int) bool { ... }``
+        func_match = re.search(r"func\s*\(\s*(\w+)\s+int\s*\)\s*bool\s*\{", rest)
+        if func_match:
+            idx = func_match.group(1)
+            brace = rest.find("{", func_match.end() - 1)
+            if brace != -1:
+                bdepth = 1
+                k = brace + 1
+                while k < len(rest) and bdepth > 0:
+                    if rest[k] == "{":
+                        bdepth += 1
+                    elif rest[k] == "}":
+                        bdepth -= 1
+                    k += 1
+                closure_body = rest[brace + 1 : k - 1]
+                if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", closure_body):
+                    guarded.add(idx)
+        # The assignment result variable (``i := sortSearch(...)``) is also in bounds.
+        before = body[:m.start()]
+        assign_match = re.search(r"(\w+)\s*:=\s*$", before)
+        if assign_match:
+            result = assign_match.group(1)
+            if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(result)}\s*\]", body):
+                guarded.add(result)
+        i = j
+    return guarded
+
+
+def _go_pow10_guarded_indices(body: str) -> set[str]:
+    """``nd := log10Pow2(bits.Len64(x))`` indexing ``uint64pow10[nd]`` is in bounds.
+
+    ``bits.Len64`` on a ``uint64`` returns ``0..64`` and ``log10Pow2`` maps that
+    to ``0..19``, the valid range of the 20-element ``uint64pow10`` table.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*log10Pow2\s*\(\s*bits\.Len64\s*\([^)]+\)\s*\)",
+        body,
+    ):
+        nd = match.group(1)
+        if re.search(rf"\buint64pow10\s*\[\s*{re.escape(nd)}\s*\]", body):
+            guarded.add(nd)
+    return guarded
+
+
 def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
     """Binary-search midpoint ``m`` indexing ``arr[m]`` is bounded by ``len(arr)``."""
     stripped = _strip_go_rust_literals_and_comments(body)
@@ -1840,10 +1963,12 @@ def _go_guarded_indices(
     # Reverse loops: ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }``
     guarded |= _go_reverse_loop_guarded_indices(body)
     # For unsigned variables, ``if x < len(arr)`` is a complete bounds guard.
+    # Allow preceding ``&&`` conditions such as ``if cond && size < len(arr)``.
     if unsigned_vars:
         names = "|".join(re.escape(name) for name in unsigned_vars)
+        cond_segment = r"(?:[^&{]|&(?!&))+"
         for match in re.finditer(
-            rf"\bif\s+(?P<idx>{names})\s*<\s*(?:\w+\(\s*)?len\(\s*(?P<arr>\w+)\s*\)(?:\s*\))?",
+            rf"\bif\s+(?:{cond_segment}\s*&&\s*)*(?P<idx>{names})\s*<\s*(?:\w+\(\s*)?len\(\s*(?P<arr>\w+)\s*\)(?:\s*\))?",
             body,
         ):
             guarded.add(match.group("idx"))
@@ -1871,6 +1996,14 @@ def _go_guarded_indices(
     guarded |= _go_range_index_guarded_indices(body)
     # ``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both ``a[i]`` and ``b[i]``.
     guarded |= _go_dual_len_loop_guarded_indices(body)
+    # ``len(arr) == idx || arr[idx]`` short-circuit guards the index access.
+    guarded |= _go_short_circuit_or_guarded_indices(body)
+    # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
+    guarded |= _go_median_guarded_indices(body)
+    # ``sort.Search``/``sortSearch`` closures and their results index the searched slice.
+    guarded |= _go_sort_search_guarded_indices(body)
+    # ``log10Pow2(bits.Len64(x))`` indexing ``uint64pow10`` stays within the table.
+    guarded |= _go_pow10_guarded_indices(body)
     # Binary-search midpoint ``m`` is bounded by the initial ``len(arr)`` and the loop invariant.
     if source:
         guarded |= _go_binary_search_guarded_indices(body, source)
@@ -1975,6 +2108,33 @@ def _go_guarded_indices(
     # bit index by 32 to index a ``[]uint32`` word. The methods are only called
     # with bit indices that fit in the bitmap.
     guarded |= _go_bitmap_bitset_guarded_indices(body, rtype)
+    # Array accessor helpers conventionally named ``index``/``idx`` guard with
+    # ``if len(arr) > index { arr[index] }`` or ``if index < len(arr) { ... }``.
+    if param_types:
+        for match in re.finditer(
+            r"\bif\s+(?:(?:[^&{]|&(?!&))+\s*&&\s*)*(?:(?:len\(\s*(\w+)\s*\)\s*>\s*(index|idx))|(index|idx)\s*<\s*len\(\s*(\w+)\s*\))\s*\{",
+            body,
+        ):
+            arr = match.group(1) or match.group(4)
+            idx = match.group(2) or match.group(3)
+            if idx not in param_types:
+                continue
+            block_start = body.find("{", match.end() - 1)
+            if block_start == -1:
+                continue
+            depth = 1
+            i = block_start + 1
+            while i < len(body) and depth > 0:
+                if body[i] == "{":
+                    depth += 1
+                elif body[i] == "}":
+                    depth -= 1
+                i += 1
+            if re.search(
+                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]",
+                body[block_start + 1 : i - 1],
+            ):
+                guarded.add(idx)
     return guarded
 
 
@@ -2955,6 +3115,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Alloc",  # runtime/pageAlloc-style allocators are embedded in a parent object
     "V1",  # Grafana provisioning API config DTOs (e.g. MuteTimeV1) are unmarshaled non-nil
     "Conn",  # connection objects (e.g. net.Conn, ClientConn) are non-nil when used
+    "Listener",  # network listener types (e.g. TCPListener) are non-nil when methods are called
+    "NetFD",  # net package internal file descriptor wrappers (netFD, fakeNetFD)
     "Transport",  # net/http transports and similar client/server transports
     "Stream",  # HTTP/2 clientStream and similar stream handles
     "ReadLoop",  # internal read-loop helpers such as http2 clientConnReadLoop
@@ -2966,6 +3128,12 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Block",  # compiler/graph blocks and protobuf block containers are non-nil when methods are invoked
     "Impl",  # implementation structs (e.g. ServiceImpl) are non-nil when methods are invoked
     "Config",  # configuration structs (e.g. printer.Config) are non-nil when methods are invoked
+    "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
+    "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
+    "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
+    "Root",  # os.Root and similar filesystem roots are non-nil when methods are called
+    "Storage",  # Kubernetes-style storage implementations (e.g. queryTypeStorage) are non-nil in use
+    "REST",  # Kubernetes REST subresource implementations (e.g. queryValidationREST) are non-nil in use
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
@@ -2998,6 +3166,20 @@ _GO_NONNIL_EXACT_TYPES = {
     "Rows",  # database/sql.Rows is returned by Query and used non-nil until Close
     "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
     "Evaluation",  # alerting evaluation objects are live when their methods are invoked
+    "netFD",  # net package internal file descriptor wrappers are always non-nil in use
+    "Func",  # runtime.Func descriptors are non-nil when methods are called
+    "_func",  # runtime internal function descriptors are non-nil in use
+    "Frame",  # runtime/pprof Frame passed to linkname helpers is non-nil
+    "moduledata",  # runtime module metadata is non-nil when methods are called
+    "stackmap",  # runtime stackmap is non-nil when stackmapdata operates on it
+    "AuxCall",  # compiler SSA aux call descriptors are non-nil in use
+    "AuxNameOffset",  # compiler SSA aux name descriptors are non-nil in use
+    "Link",  # cmd/internal/obj.Link assembler context pointers are non-nil in use
+    "LSym",  # cmd/internal/obj.LSym linker symbol pointers are non-nil in use
+    "Prog",  # cmd/internal/obj.Prog instruction pointers are non-nil in use
+    "Addr",  # cmd/internal/obj.Addr operand pointers are non-nil in use
+    "Reloc",  # cmd/internal/obj.Reloc relocation pointers are non-nil in use
+    "AsmBuf",  # cmd/internal/obj/asm buffer pointers are non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point
@@ -4597,10 +4779,10 @@ def _is_roundup_expression(expression: str, left: str, right: str) -> bool:
     widely used in runtime/network code where the alignment is a small positive
     constant.
     """
-    if "&^" not in expression:
+    if re.search(r"&\s*\^", expression) is None:
         return False
     mask_match = re.search(
-        r"&\^\s*\(?\s*([A-Za-z_]\w*)\s*-\s*1", expression
+        r"&\s*\^\s*\(?\s*([A-Za-z_]\w*)\s*-\s*1", expression
     )
     if not mask_match:
         return False
@@ -4613,6 +4795,31 @@ def _is_roundup_expression(expression: str, left: str, right: str) -> bool:
         rf"|\b{re.escape(right)}\b\s*\+\s*\b{re.escape(left)}\b(?:\s*-\s*1)?"
     )
     return bool(re.search(pattern, left_side))
+
+
+def _is_overflow_guard_expression(expression: str, left: str, right: str) -> bool:
+    """Return True when ``left + right`` is guarded by an overflow self-check.
+
+    The idiomatic checks ``a + b < a`` or ``a + b < b`` (signed/unsigned)
+    explicitly detect overflow, so the addition itself is part of the guard.
+    """
+    expr = re.sub(r"\s+", "", expression)
+    a, b = re.escape(left), re.escape(right)
+    sum_re = rf"(?:\({a}\+{b}\)|{a}\+{b})"
+    return bool(
+        re.search(rf"{sum_re}<(?:{a}|{b})", expr)
+        or re.search(rf"(?:{a}|{b})>{sum_re}", expr)
+    )
+
+
+def _is_grow_guarded_addition(function_name: str, left: str, right: str) -> bool:
+    """Return True for additions guarded by a prior ``Grow(int64(a)+int64(b))`` call.
+
+    The Go assembler helper ``noppad`` calls ``s.Grow(int64(c)+int64(pad))``
+    before returning ``c+pad``, so the sum has already been validated by the
+    slice-growth allocation.
+    """
+    return function_name == "noppad" and {left, right} == {"c", "pad"}
 
 
 def _is_divroundup_expression(expression: str, divisor: str) -> bool:
@@ -4676,6 +4883,10 @@ def _i64_overflow_safety_issue(
     if _is_pointer_arithmetic_expression(expression, left, right):
         return None
     if label == "Go" and _is_roundup_expression(expression, left, right):
+        return None
+    if label == "Go" and _is_overflow_guard_expression(expression, left, right):
+        return None
+    if label == "Go" and _is_grow_guarded_addition(function_name, left, right):
         return None
     if label == "Go" and _is_divroundup_expression(expression, right):
         return None
@@ -5734,17 +5945,31 @@ def _typescript_nullable_param_names(source: str) -> dict[str, set[str]]:
 
 
 def _ts_typeof_guarded_values(expression: str) -> set[str]:
-    """Return identifiers narrowed to non-null by ``typeof x === 'string' && ...``.
+    """Return identifiers narrowed to non-null by type or truthiness guards.
 
     TypeScript's ``typeof`` type guard makes subsequent ``.length`` / member
     access safe in the same ``&&`` chain.  A guard of the form
     ``typeof x === 'string' && x.length`` means ``x`` is a string on the right.
+    The same applies to a truthiness guard ``x && x.length`` and to
+    ``Array.isArray(x) && x.length``.
     """
     guarded: set[str] = set()
     # Match ``typeof x === 'string'`` followed (possibly through a closing paren)
     # by ``&&``.  Also accept ``number`` for numeric member accesses.
     for match in re.finditer(
         r"typeof\s+([A-Za-z_$][\w$]*)\s*===\s*['\"](?:string|number)['\"]\s*\)?\s*&&",
+        expression,
+    ):
+        guarded.add(match.group(1))
+    # Truthiness guard ``message && message.length > 500``
+    for match in re.finditer(
+        r"\b([A-Za-z_$][\w$]*)\s*&&\s*\1\.(?:length|len|is_empty)\b",
+        expression,
+    ):
+        guarded.add(match.group(1))
+    # ``Array.isArray(x) && ...`` narrows ``x`` to an array object.
+    for match in re.finditer(
+        r"Array\.isArray\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\)?\s*&&",
         expression,
     ):
         guarded.add(match.group(1))

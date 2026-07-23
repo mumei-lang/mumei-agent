@@ -2854,6 +2854,558 @@ def test_detect_safety_issues_typescript_nullish_coalescing_return() -> None:
     assert not any('allFrames' in i.message for i in issues)
 
 
+def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
+    """``message && message.length`` is guarded by the truthiness check."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export function isMessageTooLong(message?: string) {
+  return message && message.length > 500;
+}
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any("message" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_obj_assembler_pointers_non_nil() -> None:
+    """``cmd/internal/obj`` pointer parameters (Link, LSym, Prog, Addr, Reloc, AsmBuf) are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package x86
+
+import "strings"
+
+type Link struct{ Headtype int; Arch struct{ Family int }; Flag_shared bool }
+type LSym struct{ Name string }
+type Prog struct{}
+type Addr struct{ Reg, Type int }
+type Reloc struct{}
+type AsmBuf struct{ buf []byte; off int }
+
+func useAbs(ctxt *Link, s *LSym) bool {
+	if ctxt.Headtype == 0 {
+		return strings.HasPrefix(s.Name, "libc_")
+	}
+	return ctxt.Arch.Family == 0 && !ctxt.Flag_shared
+}
+
+func vaddr(ctxt *Link, p *Prog, a *Addr, r *Reloc) int64 {
+	if r != nil {
+		*r = Reloc{}
+	}
+	switch a.Type {
+	case 0:
+		return 0
+	}
+	return 0
+}
+
+func isax(a *Addr) bool { return a.Reg == 0 }
+
+func (ab *AsmBuf) Last() byte { return ab.buf[ab.off-1] }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"useAbs", "vaddr", "isax", "Last"} for i in issues
+    )
+
+
+def test_detect_go_safety_issues_ssa_aux_receivers_non_nil() -> None:
+    """Compiler SSA aux types ``*AuxCall`` and ``*AuxNameOffset`` are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+import "fmt"
+
+type LSym struct{ Name string }
+type irName struct{ FrameOffset int64; Sym func() *LSym }
+
+type AuxNameOffset struct {
+	Name   *irName
+	Offset int64
+}
+
+func (a *AuxNameOffset) String() string {
+	return fmt.Sprintf("%s+%d", a.Name.Sym().Name, a.Offset)
+}
+
+func (a *AuxNameOffset) FrameOffset() int64 {
+	return a.Name.FrameOffset() + a.Offset
+}
+
+type AuxCall struct{ Fn *LSym }
+
+func (a *AuxCall) String() string { return "" }
+func (a *AuxCall) NArgs() int64   { return 0 }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"String", "FrameOffset", "NArgs"} for i in issues
+    )
+
+
+def test_detect_go_safety_issues_storage_and_rest_receivers_non_nil() -> None:
+    """Kubernetes-style ``*...Storage`` and ``*...REST`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package queryschema
+
+type resourceInfo struct{}
+func (r *resourceInfo) NewFunc() runtime.Object { return nil }
+
+type queryTypeStorage struct{ resourceInfo *resourceInfo }
+
+func (s *queryTypeStorage) New() runtime.Object { return s.resourceInfo.NewFunc() }
+
+type queryValidationREST struct{}
+
+func (r *queryValidationREST) New() runtime.Object { return nil }
+
+type runtime interface{ Object() }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("New" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_runtime_internal_descriptor_receivers_non_nil() -> None:
+    """Runtime internal descriptors (Func, _func, moduledata, stackmap, Frame) are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+import "unsafe"
+
+type Func struct{ opaque struct{} }
+type _func struct{ entry uintptr }
+type moduledata struct{ funcnametab []byte }
+type Frame struct{ funcInfo funcInfo; startLine int }
+type stackmap struct{ n, nbit int32; bytedata [1]byte }
+
+func (f *Func) funcInfo() funcInfo { return f.raw().funcInfo() }
+func (f *Func) raw() *_func       { return (*_func)(unsafe.Pointer(f)) }
+func (f *_func) funcInfo() funcInfo { return funcInfo{f, nil} }
+func (md *moduledata) funcName(nameOff int32) string { return string(md.funcnametab[nameOff]) }
+func runtime_FrameStartLine(f *Frame) int { return f.startLine }
+func runtime_FrameSymbolName(f *Frame) string { return f.Function }
+func stackmapdata(stkmap *stackmap, n int32) bitvector { return bitvector{} }
+
+type bitvector struct{}
+type funcInfo struct{}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name in {"funcInfo", "funcName", "runtime_FrameStartLine", "runtime_FrameSymbolName", "stackmapdata"}
+        for i in issues
+    )
+
+
+def test_detect_go_safety_issues_root_receiver_non_nil() -> None:
+    """``*Root`` receivers (e.g. ``os.Root``) are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package os
+
+type Root struct{ root *File }
+
+func (r *Root) Open(name string) (*File, error) {
+	return r.OpenFile(name, O_RDONLY, 0)
+}
+
+func (r *Root) OpenFile(name string, flag int, perm FileMode) (*File, error) {
+	rf, err := rootOpenFileNolog(r, name, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return rf, nil
+}
+
+func rootOpenFileNolog(r *Root, name string, flag int, perm FileMode) (*File, error) { return nil, nil }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Open" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_alignment_bitmask_with_space() -> None:
+    """``(x + y - 1) & ^(y - 1)`` is the alignment idiom even with spaces."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syscall
+
+const NLMSG_ALIGNTO = 4
+
+func nlmAlignOf(msglen int) int {
+	return (msglen + NLMSG_ALIGNTO - 1) & ^(NLMSG_ALIGNTO - 1)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("nlmAlignOf" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_net_fd_and_listener_receivers_non_nil() -> None:
+    """``*netFD`` and ``*TCPListener`` receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package net
+
+import "os"
+
+type netFD struct{ data *os.File }
+
+func (fd *netFD) dup() (*os.File, error) {
+	if !fd.ok() || fd.data == nil {
+		return nil, nil
+	}
+	return fd.data, nil
+}
+
+func (fd *netFD) ok() bool { return fd != nil && fd.data != nil }
+
+type TCPListener struct{ fd *netFD }
+
+func (l *TCPListener) dup() (*os.File, error) {
+	if !l.fd.ok() {
+		return nil, nil
+	}
+	return l.fd.data, nil
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("dup" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_overflow_self_guard() -> None:
+    """``offset+length < offset`` is an overflow self-check, not an overflow bug."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package asn1
+
+func invalidLength(offset, length, sliceLength int) bool {
+	return offset+length < offset || offset+length > sliceLength
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("invalidLength" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_config_ptr_size_nonzero_local() -> None:
+    """A local ``ptrSize := ...Config.PtrSize`` is a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+type Config struct{ PtrSize int64 }
+type Func struct{ Config *Config }
+type Block struct{ Func *Func }
+type Value struct{ Block *Block }
+
+func needWBdst(ptr, mem *Value) bool {
+	var off int64
+	for ptr.Op == 0 {
+		off += 1
+		ptr = ptr.Args[0]
+	}
+	ptrSize := ptr.Block.Func.Config.PtrSize
+	if off%ptrSize != 0 {
+		return true
+	}
+	_ = uint64(1) << (off / ptrSize)
+	return false
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("needWBdst" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_atomic_pointer_wrapper_non_nil() -> None:
+    """Atomic pointer wrapper methods are called on non-nil receivers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+import "unsafe"
+
+type atomicMSpanPointer struct{ p unsafe.Pointer }
+
+func (p *atomicMSpanPointer) Load() *mspan {
+	return (*mspan)(p.p)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Load" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_validator_response_non_nil() -> None:
+    """Grafana ``*...Validator`` receivers and ``*...Response`` DTO params are non-nil."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package migrations
+
+import "context"
+
+type BulkResponse struct{ Summary []Summary; Rejected []Rejected }
+type Summary struct{ Group, Resource, Namespace string }
+type Rejected struct{ Key Key; Error string }
+type Key struct{ Namespace, Group, Resource, Name string }
+type CountValidator struct{ resource GroupResource }
+type GroupResource struct{ Group, Resource string }
+
+type Validator interface {
+	Validate(ctx context.Context, sess any, response *BulkResponse, log any) error
+}
+
+func (v *CountValidator) Validate(ctx context.Context, sess any, response *BulkResponse, log any) error {
+	if len(response.Rejected) > 0 {
+		_ = response.Rejected[0].Key.Namespace
+	}
+	if len(response.Summary) == 0 {
+		return nil
+	}
+	_ = v.resource
+	return nil
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Validate" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_fake_net_fd_receiver_non_nil() -> None:
+    """Pointer-receiver methods on ``fakeNetFD`` are called on non-nil values."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package net
+
+type fakeNetFD struct{ queue *fakeNetFDQueue }
+
+type fakeNetFDQueue struct{}
+
+func (q *fakeNetFDQueue) closeRead() error { return nil }
+func (q *fakeNetFDQueue) closeWrite() error { return nil }
+
+func (ffd *fakeNetFD) closeRead() error {
+	return ffd.queue.closeRead()
+}
+
+func (ffd *fakeNetFD) closeWrite() error {
+	if ffd.peer == nil {
+		return nil
+	}
+	return ffd.peer.queue.closeWrite()
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("closeRead" in i.message or "closeWrite" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_short_circuit_or_index_guard() -> None:
+    """``len(arr) == idx || arr[idx]`` is safe due to short-circuit evaluation."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package cgroup
+
+func hasPathPrefix(p, prefix []byte) bool {
+	i := len(prefix)
+	if i == 1 {
+		return true
+	}
+	if len(p) < i || !equal(prefix, p[:i]) {
+		return false
+	}
+	return len(p) == i || p[i] == '/'
+}
+
+func equal(a, b []byte) bool { return false }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("hasPathPrefix" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_panic_nonzero_guard() -> None:
+    """``if n <= 0 { panic(...) }`` guards a subsequent division by ``n``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package rand
+
+type Rand struct{}
+
+func (r *Rand) Int63n(n int64) int64 {
+	if n <= 0 {
+		panic("invalid argument")
+	}
+	return 0 % n
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Int63n" in i.message for i in issues)
+
+
+def test_detect_ts_safety_issues_array_isarray_guard() -> None:
+    """``Array.isArray(x) && x.length`` narrows ``x`` to a non-null array."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export const isArray = (
+  current: string | Array<string> | undefined
+): current is Array<string> => {
+  return Array.isArray(current) && current.length > 0 && current[0] !== '';
+};
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not any("current" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_sort_search_index() -> None:
+    """``sort.Search``/``sortSearch`` closures and results are bounded by ``len(arr)``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package embed
+
+func lookup(files []file, name string) *file {
+	if len(files) == 0 {
+		return nil
+	}
+	i := sortSearch(len(files), func(i int) bool {
+		return files[i].name >= name
+	})
+	if i < len(files) && files[i].name == name {
+		return &files[i]
+	}
+	return nil
+}
+
+func sortSearch(n int, f func(int) bool) int { return 0 }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("lookup" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_uint64pow10_index() -> None:
+    """``nd := log10Pow2(bits.Len64(d))`` indexing ``uint64pow10[nd]`` is in bounds."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package strconv
+
+import "math/bits"
+
+var uint64pow10 = [...]uint64{
+	1, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+	1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
+}
+
+func log10Pow2(x int) int { return (x * 78913) >> 18 }
+
+func numDigits(d uint64) int {
+	nd := log10Pow2(bits.Len64(d))
+	return nd + (d >= uint64pow10[nd])
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("numDigits" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_median_mid_index() -> None:
+    """``mid := len(values) / 2`` in a median helper with an empty-array return is bounded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package mathexp
+
+import "sort"
+
+func Median(values []float64) *float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Float64s(values)
+	mid := len(values) / 2
+	if len(values)%2 == 0 {
+		v := (values[mid-1] + values[mid]) / 2
+		return &v
+	}
+	return &values[mid]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Median" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_array_accessor_index_guard() -> None:
+    """``if len(a) > index { a[index] }`` is treated as a bounds guard."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package simplejson
+
+type Json struct{ data any }
+
+func (j *Json) GetIndex(index int) *Json {
+	a, err := j.Array()
+	if err == nil {
+		if len(a) > index {
+			return &Json{a[index]}
+		}
+	}
+	return &Json{nil}
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("GetIndex" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_const_with_trailing_line_comment() -> None:
+    """Single-line Go constants with trailing ``//`` comments are parsed."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package goobj
+
+const stringRefSize = 8 // two uint32s
+const SymSize = stringRefSize + 2 + 1 + 1 + 1 + 4 + 4
+
+func NPkg(r []byte, off int) int {
+	return (len(r) - off) / stringRefSize
+}
+
+func NSym(r []byte, off int) int {
+	return (len(r) - off) / SymSize
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("stringRefSize" in i.message or "SymSize" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_unsigned_index_guard_with_leading_and() -> None:
+    """Unsigned ``size < len(table)`` guard works when prefixed by ``&&``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+var mallocNoScanTable = [...]func(uintptr, *_type, bool) unsafe.Pointer{}
+var mallocScanTable = [...]func(uintptr, *_type, bool) unsafe.Pointer{}
+
+func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
+	if cond && size < uintptr(len(mallocNoScanTable)) {
+		return mallocNoScanTable[size](size, typ, needzero)
+	}
+	if cond && size < uintptr(len(mallocScanTable)) {
+		return mallocScanTable[size](size, typ, needzero)
+	}
+	return nil
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("mallocNoScanTable" in i.message or "mallocScanTable" in i.message for i in issues)
+
+
+def test_detect_go_safety_issues_runtime_pages_per_arena_nonzero() -> None:
+    """Runtime ``pagesPerArena`` is treated as a non-zero divisor."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+func spanOf(p uintptr) *mspan {
+	return mheap_.arenas[0].spans[(p/pageSize)%pagesPerArena]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("pagesPerArena" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_config_receiver_non_nil() -> None:
     """Pointer receivers of ``*Config`` types are treated as non-nil."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
