@@ -2520,6 +2520,11 @@ def _is_expression_lowerable(
     """
     if param_names is None and local_names is None:
         return True
+    # Mumei's lowerer does not support hex literals or unrewritten bit shifts.
+    if re.search(r"\b0[xX][0-9a-fA-F]+\b", expression):
+        return False
+    if re.search(r"<<|>>", expression):
+        return False
     # JSX / TSX element literals cannot be lowered to a Mumei expression.
     if re.search(r"</|/>", expression):
         return False

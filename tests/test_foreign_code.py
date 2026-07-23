@@ -2866,6 +2866,92 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_zero_guarded_nonzero_local() -> None:
+    """Local variables checked with ``if v == 0 { return }`` are safe divisors."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package main
+
+import "time"
+
+func jitterForKey(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		return 0
+	}
+	h := uint64(123)
+	jitterRange := uint64(maxAge / 2)
+	if jitterRange == 0 {
+		return 0
+	}
+	return int(h % jitterRange)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "jitterForKey" for i in issues)
+
+
+def test_detect_go_safety_issues_modulo_len_index_guard() -> None:
+    """``idx := unsignedValue % len(arr)`` bounds ``idx`` for ``arr[idx]``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package trace
+
+var colorForTask = []string{"red", "green", "blue"}
+
+func pickTaskColor(id uint64) string {
+	idx := id % uint64(len(colorForTask))
+	return colorForTask[idx]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "pickTaskColor" for i in issues)
+
+
+def test_detect_go_safety_issues_2d_slice_loop_col_index() -> None:
+    """Range over a 2-D slice with inner non-nil guard implies the index is valid."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package util
+
+import "fmt"
+
+func Typeof(values [][]any, colIndex int) string {
+	for _, value := range values {
+		if value != nil && value[colIndex] != nil {
+			return fmt.Sprintf("%T", value[colIndex])
+		}
+	}
+	return "null"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "Typeof" for i in issues)
+
+
+def test_detect_go_safety_issues_loop_bound_overflow_guard() -> None:
+    """Compiler loop-bound helpers compare ``x`` with ``min+y`` / ``max-y``."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package ssa
+
+func subWillUnderflow(x, y, min int64) bool {
+	if y < 0 {
+		base.Fatalf("expecting positive value")
+	}
+	return x < min+y
+}
+
+func addWillOverflow(x, y, max int64) bool {
+	if y < 0 {
+		base.Fatalf("expecting positive value")
+	}
+	return x > max-y
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"subWillUnderflow", "addWillOverflow"} for i in issues)
+
+
 def test_detect_go_safety_issues_nonzero_global_slice_length() -> None:
     """``i % len(globalSlice)`` is safe when the slice initializer is non-empty."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
@@ -2886,6 +2972,30 @@ func randomName(i int) string {
 '''
     issues = _detect_safety_issues(source, 'go')
     assert not any(i.function_name == "randomName" for i in issues)
+
+
+def test_detect_go_safety_issues_encoding_binary_decoder_non_nil() -> None:
+    """``encoding/binary`` ``*decoder`` / ``*encoder`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package binary
+
+type decoder struct{ order ByteOrder; buf []byte; offset int }
+type encoder struct{ order ByteOrder; buf []byte; offset int }
+type ByteOrder interface{}
+
+func (d *decoder) int8() int8 { return int8(d.uint8()) }
+func (d *decoder) int16() int16 { return int16(d.uint16()) }
+func (d *decoder) int32() int32 { return int32(d.uint32()) }
+func (d *decoder) int64() int64 { return int64(d.uint64()) }
+
+func (d *decoder) uint8() uint8 { return d.buf[d.offset] }
+func (d *decoder) uint16() uint16 { return d.order.Uint16(d.buf[d.offset:]) }
+func (d *decoder) uint32() uint32 { return d.order.Uint32(d.buf[d.offset:]) }
+func (d *decoder) uint64() uint64 { return d.order.Uint64(d.buf[d.offset:]) }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"int8", "int16", "int32", "int64"} for i in issues)
 
 
 def test_detect_go_safety_issues_net_http_internal_non_nil() -> None:
@@ -2910,6 +3020,31 @@ func (tr *transportRequest) extraHeaders() Header { return tr.extra }
 '''
     issues = _detect_safety_issues(source, 'go')
     assert not any(i.function_name in {"len", "scheme", "extraHeaders"} for i in issues)
+
+
+def test_detect_go_safety_issues_cnames_enum_index_guard() -> None:
+    """``cmd/internal/obj`` arch name tables indexed by class constants are guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package arm64
+
+const ( C_NONE = iota + 1; C_NCLASS )
+
+var cnames7 = []string{
+	"",     // C_NONE starts from 1
+	"NONE",
+	"REG",
+}
+
+func DRconv(a int) string {
+	if a >= C_NONE && a <= C_NCLASS {
+		return cnames7[a]
+	}
+	return "C_??"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "DRconv" for i in issues)
 
 
 def test_detect_go_safety_issues_sys_uint8_string_table_index() -> None:
