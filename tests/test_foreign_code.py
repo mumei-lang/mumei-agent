@@ -2866,6 +2866,24 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_atomic_pointer_wrapper_non_nil() -> None:
+    """Atomic pointer wrapper methods are called on non-nil receivers."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package runtime
+
+import "unsafe"
+
+type atomicMSpanPointer struct{ p unsafe.Pointer }
+
+func (p *atomicMSpanPointer) Load() *mspan {
+	return (*mspan)(p.p)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Load" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_validator_response_non_nil() -> None:
     """Grafana ``*...Validator`` receivers and ``*...Response`` DTO params are non-nil."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

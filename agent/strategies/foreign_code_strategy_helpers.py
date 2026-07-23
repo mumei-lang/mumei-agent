@@ -3127,6 +3127,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Config",  # configuration structs (e.g. printer.Config) are non-nil when methods are invoked
     "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
+    "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
