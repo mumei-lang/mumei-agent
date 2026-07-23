@@ -1848,6 +1848,30 @@ def _go_median_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_last_index_guarded_indices(body: str) -> set[str]:
+    """``i := len(arr) - 1; if i < 0 { return }`` guards ``arr[i]``.
+
+    The last-index idiom returns when the array is empty, so ``i`` is a valid
+    index on the remaining path.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\b(\w+)\s*:=\s*len\(\s*(\w+)\s*\)\s*-\s*1\b",
+        body,
+    ):
+        idx, arr = match.group(1), match.group(2)
+        if re.search(
+            rf"\bif\s+{re.escape(idx)}\s*<\s*0\s*\{{[^}}]*\breturn\b",
+            body,
+        ):
+            if re.search(
+                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]",
+                body,
+            ):
+                guarded.add(idx)
+    return guarded
+
+
 def _go_sort_search_guarded_indices(body: str) -> set[str]:
     """Indices used in ``sort.Search``/``sortSearch`` closures are in bounds.
 
@@ -2125,6 +2149,8 @@ def _go_guarded_indices(
     guarded |= _go_short_circuit_or_guarded_indices(body)
     # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
     guarded |= _go_median_guarded_indices(body)
+    # Last-index idiom ``i := len(arr) - 1; if i < 0 { return }`` guards ``arr[i]``.
+    guarded |= _go_last_index_guarded_indices(body)
     # ``sort.Search``/``sortSearch`` closures and their results index the searched slice.
     guarded |= _go_sort_search_guarded_indices(body)
     # ``log10Pow2(bits.Len64(x))`` indexing ``uint64pow10`` stays within the table.
@@ -3314,6 +3340,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
 # Exact type basenames that are always non-nil when used as parameters.
 _GO_NONNIL_EXACT_TYPES = {
     "Int",  # math/big.Int and similar big-integer wrappers
+    "Float",  # math/big.Float handles are non-nil in callers
+    "Rat",  # math/big.Rat handles are non-nil in callers
     "Request",  # net/http.Request and similar request DTOs are non-nil in callers
     "Sender",  # crypto/hpke.Sender and similar messaging handles are non-nil in use
     "Recipient",  # crypto/hpke.Recipient and similar messaging handles are non-nil in use
