@@ -1818,6 +1818,35 @@ def _go_2d_slice_loop_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_accessor_index_guarded_indices(
+    body: str, params_text: str, source: str | None
+) -> set[str]:
+    """Methods paired with ``len() int { return len(d) }`` receive valid indices.
+
+    ``net/http`` defines ``anyDirs`` with ``len()``, ``name(i int)``, and
+    ``isDir(i int)`` methods; callers only pass indices obtained from ``len()``,
+    so ``d[i]`` inside the accessor is in bounds.
+    """
+    if not source:
+        return set()
+    rname = _go_method_receiver_name(params_text)
+    rtype = _go_method_receiver_type(params_text)
+    if not rname or not rtype:
+        return set()
+    # The receiver type must have a ``len`` method that returns ``len(receiver)``.
+    len_re = rf"func\s*\(\s*{re.escape(rname)}\s+{re.escape(rtype)}\s*\)\s*len\s*\(\s*\)\s*int\s*\{{[^}}]*?\blen\s*\(\s*{re.escape(rname)}\s*\)"
+    if not re.search(len_re, source):
+        return set()
+    param_names = list(_go_param_types(params_text).keys())
+    if rname in param_names:
+        param_names.remove(rname)
+    guarded: set[str] = set()
+    for pname in param_names:
+        if re.search(rf"\b{re.escape(rname)}\s*\[\s*{re.escape(pname)}\s*\]", body):
+            guarded.add(pname)
+    return guarded
+
+
 def _go_short_circuit_or_guarded_indices(body: str) -> set[str]:
     """``len(arr) == idx || arr[idx] ...`` is safe due to short-circuit ``||``.
 
@@ -3341,6 +3370,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Op",  # code-generator operation descriptors (e.g. wasmOp) are non-nil when methods are called
     "Set",  # container/set types (e.g. MainModuleSet) are non-nil when methods are called
     "Repo",  # repository/cache types (e.g. cachingRepo) are non-nil when methods are called
+    "Pair",  # pairing/container types (e.g. ifacePair) are non-nil when methods are called
     "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
     "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
@@ -3364,6 +3394,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "StructField",  # runtime/abi field metadata is non-nil when methods are invoked
     "FuncType",  # runtime/abi function type descriptors are non-nil when methods are invoked
     "InterfaceType",  # runtime/abi interface type descriptors are non-nil when methods are invoked
+    "Named",  # go/types Named type handles are non-nil when methods are called
+    "comparer",  # go/types comparer handle is non-nil when methods are called
     "mspan",  # runtime memory-span handles are non-nil when methods/helpers are called
     "Segment",  # debug/macho/elf load segments are non-nil when methods are invoked
     "Section",  # debug/macho/elf/pe sections are non-nil when methods are invoked
@@ -4355,7 +4387,7 @@ def _detect_go_safety_issues(
                 package_name=package_name,
                 rtype=rtype,
                 function_name=fn.name,
-            ) | _go_runtime_level_guarded_indices(
+            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
             suppress_nil = (
@@ -4548,7 +4580,7 @@ def _detect_go_safety_issues(
             package_name=package_name,
             rtype=rtype,
             function_name=name,
-        ) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
+        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
