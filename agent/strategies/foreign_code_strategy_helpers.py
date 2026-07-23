@@ -3131,6 +3131,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
     "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
+    "Root",  # os.Root and similar filesystem roots are non-nil when methods are called
 }
 
 # Exact type basenames that are always non-nil when used as parameters.

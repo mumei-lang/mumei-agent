@@ -2866,6 +2866,32 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_root_receiver_non_nil() -> None:
+    """``*Root`` receivers (e.g. ``os.Root``) are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package os
+
+type Root struct{ root *File }
+
+func (r *Root) Open(name string) (*File, error) {
+	return r.OpenFile(name, O_RDONLY, 0)
+}
+
+func (r *Root) OpenFile(name string, flag int, perm FileMode) (*File, error) {
+	rf, err := rootOpenFileNolog(r, name, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	return rf, nil
+}
+
+func rootOpenFileNolog(r *Root, name string, flag int, perm FileMode) (*File, error) { return nil, nil }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("Open" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_alignment_bitmask_with_space() -> None:
     """``(x + y - 1) & ^(y - 1)`` is the alignment idiom even with spaces."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
