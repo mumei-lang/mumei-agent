@@ -166,6 +166,7 @@ class TestRealForgeSpecs:
             "vstd_bitwise.json",
             "vstd_math_log2.json",
             "vstd_container_set.json",
+            "vstd_core_ranges.json",
         ],
     )
     def test_new_p9d_specs_load(self, spec_name):
@@ -197,5 +198,34 @@ class TestRealForgeSpecs:
             "vstd-bitwise",
             "vstd-math-log2",
             "vstd-container-set",
+            "vstd-core-ranges",
         }:
             assert required in ids, f"{required} not found in {sorted(ids)}"
+
+
+class TestCoreRangesGap:
+    """The core_ranges gap rule and its deterministic task stay paired."""
+
+    def test_gap_rule_maps_to_forge_task(self):
+        from agent.analyze_std_gaps import task_filename_for_target
+        from agent.gap_rules import _STD_GAP_RULES
+
+        targets = {str(rule["target"]) for rule in _STD_GAP_RULES}
+        assert "std/core_ranges.mm" in targets
+
+        task_name = task_filename_for_target("std/core_ranges.mm")
+        assert task_name == "vstd_core_ranges.json"
+        assert (FORGE_TASKS_DIR / task_name).exists()
+
+    def test_task_is_deterministic_and_decidable(self):
+        task = _load_task(FORGE_TASKS_DIR / "vstd_core_ranges.json")
+        assert task is not None
+        assert task["deterministic_bodies"] is True
+        assert task["mode"] == "create"
+        assert task["target_file"] == "std/core_ranges.mm"
+        for atom in task["atoms"]:
+            body = atom.get("body", "")
+            assert body, f"{atom['name']} has no explicit body"
+            # Linear integer fragment only: no variable*variable / division.
+            assert "*" not in body
+            assert "/" not in body

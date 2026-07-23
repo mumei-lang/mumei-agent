@@ -221,6 +221,21 @@ _STD_GAP_RULES: list[dict[str, Any]] = [
         },
     },
     {
+        "target": "std/core_ranges.mm",
+        "reason": (
+            "Interval/range predicates such as disjoint/overlap witnesses, "
+            "non-negative width, and point-before-range for container bounds "
+            "and scheduling logic. Linear integer contracts fully inside the "
+            "Z3 decidable fragment."
+        ),
+        "depends_on": ["std/core.mm"],
+        "difficulty": "low",
+        "trigger": {
+            "missing": "std/core_ranges.mm",
+            "requires_present": ["std/core.mm"],
+        },
+    },
+    {
         "target": "std/crypto/primitives.mm",
         "reason": (
             "Structural crypto primitive validators for key, nonce, digest, "

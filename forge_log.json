@@ -153,6 +153,25 @@
       "error": null,
       "timestamp": "2026-06-28T16:41:23.426658+00:00",
       "task_spec_path": "/home/ubuntu/repos/mumei-agent/forge_tasks/vstd_core_guards.json"
+    },
+    {
+      "task_id": "vstd-core-ranges",
+      "status": "success",
+      "attempts": 1,
+      "target_file": "std/core_ranges.mm",
+      "atoms_added": [
+        "ranges_disjoint",
+        "ranges_overlap",
+        "range_width_nonneg",
+        "point_before_range"
+      ],
+      "logic_fragment_tags": [],
+      "outside_decidable_fragment": false,
+      "metrics_quarter": "2026-Q3",
+      "commit_sha": null,
+      "error": null,
+      "timestamp": "2026-07-23T13:29:37.579225+00:00",
+      "task_spec_path": "forge_tasks/vstd_core_ranges.json"
     }
   ]
 }

@@ -569,6 +569,7 @@ class TestProliferateDryRun:
             "container/binary_heap.mm",
             "crypto/hash.mm",
             "crypto/primitives.mm",
+            "core_ranges.mm",
             "container/bounded_array.mm",
             "string_utils.mm",
             "crypto/hash.mm",
@@ -976,6 +977,7 @@ class TestOutputJson:
             "container/sorted_map.mm",
             "crypto/hash.mm",
             "crypto/primitives.mm",
+            "core_ranges.mm",
             "string/validator.mm",
             "string_utils.mm",
         ):
