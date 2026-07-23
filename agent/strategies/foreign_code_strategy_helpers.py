@@ -3115,6 +3115,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Alloc",  # runtime/pageAlloc-style allocators are embedded in a parent object
     "V1",  # Grafana provisioning API config DTOs (e.g. MuteTimeV1) are unmarshaled non-nil
     "Conn",  # connection objects (e.g. net.Conn, ClientConn) are non-nil when used
+    "Listener",  # network listener types (e.g. TCPListener) are non-nil when methods are called
     "NetFD",  # net package internal file descriptor wrappers (netFD, fakeNetFD)
     "Transport",  # net/http transports and similar client/server transports
     "Stream",  # HTTP/2 clientStream and similar stream handles
@@ -3162,6 +3163,7 @@ _GO_NONNIL_EXACT_TYPES = {
     "Rows",  # database/sql.Rows is returned by Query and used non-nil until Close
     "Stmt",  # database/sql.Stmt is prepared once and used through non-nil pointers
     "Evaluation",  # alerting evaluation objects are live when their methods are invoked
+    "netFD",  # net package internal file descriptor wrappers are always non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

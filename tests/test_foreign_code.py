@@ -2866,6 +2866,38 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_net_fd_and_listener_receivers_non_nil() -> None:
+    """``*netFD`` and ``*TCPListener`` receivers are non-nil when methods are called."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package net
+
+import "os"
+
+type netFD struct{ data *os.File }
+
+func (fd *netFD) dup() (*os.File, error) {
+	if !fd.ok() || fd.data == nil {
+		return nil, nil
+	}
+	return fd.data, nil
+}
+
+func (fd *netFD) ok() bool { return fd != nil && fd.data != nil }
+
+type TCPListener struct{ fd *netFD }
+
+func (l *TCPListener) dup() (*os.File, error) {
+	if !l.fd.ok() {
+		return nil, nil
+	}
+	return l.fd.data, nil
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("dup" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_overflow_self_guard() -> None:
     """``offset+length < offset`` is an overflow self-check, not an overflow bug."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
