@@ -2907,6 +2907,27 @@ func pickTaskColor(id uint64) string {
     assert not any(i.function_name == "pickTaskColor" for i in issues)
 
 
+def test_detect_go_safety_issues_2d_slice_loop_col_index() -> None:
+    """Range over a 2-D slice with inner non-nil guard implies the index is valid."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package util
+
+import "fmt"
+
+func Typeof(values [][]any, colIndex int) string {
+	for _, value := range values {
+		if value != nil && value[colIndex] != nil {
+			return fmt.Sprintf("%T", value[colIndex])
+		}
+	}
+	return "null"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "Typeof" for i in issues)
+
+
 def test_detect_go_safety_issues_loop_bound_overflow_guard() -> None:
     """Compiler loop-bound helpers compare ``x`` with ``min+y`` / ``max-y``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

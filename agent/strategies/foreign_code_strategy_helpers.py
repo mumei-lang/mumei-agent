@@ -1772,6 +1772,42 @@ def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_2d_slice_loop_guarded_indices(body: str) -> set[str]:
+    """Range over a 2-D slice with an inner non-nil guard implies the index is valid.
+
+    ``for _, value := range values { if value != nil && value[colIndex] != nil { ... } }``
+    is an InfluxQL/row-processing idiom where the caller is responsible for the
+    column index being in bounds.
+    """
+    stripped = _strip_go_rust_literals_and_comments(body)
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\bfor\s+(?:\w+\s*,\s*)?(\w+)\s*:=\s*range\s+(\w+)\s*\{",
+        stripped,
+    ):
+        loop_var = match.group(1)
+        brace = stripped.find("{", match.end() - 1)
+        if brace == -1:
+            continue
+        depth = 1
+        i = brace + 1
+        while i < len(stripped) and depth > 0:
+            if stripped[i] == "{":
+                depth += 1
+            elif stripped[i] == "}":
+                depth -= 1
+            i += 1
+        loop_body = stripped[brace:i]
+        for guard in re.finditer(
+            rf"\bif\s+{re.escape(loop_var)}\s*!=\s*nil\s*&&\s+{re.escape(loop_var)}\s*\[\s*(\w+)\s*\]\s*!=\s*nil",
+            loop_body,
+        ):
+            idx = guard.group(1)
+            if re.search(rf"\b{re.escape(loop_var)}\s*\[\s*{re.escape(idx)}\s*\]", loop_body):
+                guarded.add(idx)
+    return guarded
+
+
 def _go_short_circuit_or_guarded_indices(body: str) -> set[str]:
     """``len(arr) == idx || arr[idx] ...`` is safe due to short-circuit ``||``.
 
@@ -2083,6 +2119,8 @@ def _go_guarded_indices(
     guarded |= _go_range_index_guarded_indices(body)
     # ``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both ``a[i]`` and ``b[i]``.
     guarded |= _go_dual_len_loop_guarded_indices(body)
+    # Range over a 2-D slice with an inner non-nil guard implies the column index is valid.
+    guarded |= _go_2d_slice_loop_guarded_indices(body)
     # ``len(arr) == idx || arr[idx]`` short-circuit guards the index access.
     guarded |= _go_short_circuit_or_guarded_indices(body)
     # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
@@ -3262,6 +3300,7 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Block",  # compiler/graph blocks and protobuf block containers are non-nil when methods are invoked
     "Impl",  # implementation structs (e.g. ServiceImpl) are non-nil when methods are invoked
     "Config",  # configuration structs (e.g. printer.Config) are non-nil when methods are invoked
+    "Cond",  # script/condition interface implementations are non-nil when methods are called
     "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
     "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
