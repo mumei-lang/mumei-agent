@@ -2912,6 +2912,31 @@ func (tr *transportRequest) extraHeaders() Header { return tr.extra }
     assert not any(i.function_name in {"len", "scheme", "extraHeaders"} for i in issues)
 
 
+def test_detect_go_safety_issues_cnames_enum_index_guard() -> None:
+    """``cmd/internal/obj`` arch name tables indexed by class constants are guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package arm64
+
+const ( C_NONE = iota + 1; C_NCLASS )
+
+var cnames7 = []string{
+	"",     // C_NONE starts from 1
+	"NONE",
+	"REG",
+}
+
+func DRconv(a int) string {
+	if a >= C_NONE && a <= C_NCLASS {
+		return cnames7[a]
+	}
+	return "C_??"
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "DRconv" for i in issues)
+
+
 def test_detect_go_safety_issues_sys_uint8_string_table_index() -> None:
     """``internal/runtime/sys`` 256-byte string tables indexed by ``uint8``."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

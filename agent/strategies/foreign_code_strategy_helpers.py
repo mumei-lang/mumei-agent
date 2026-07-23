@@ -2184,6 +2184,7 @@ def _go_guarded_indices(
     # SSA dominator-tree helpers use ``ID`` parameters that are valid node IDs.
     if param_types and function_name:
         guarded |= _go_ssa_dom_guarded_indices(body, function_name, param_types)
+    guarded |= _go_cnames_guarded_indices(body)
     return guarded
 
 
@@ -2213,6 +2214,22 @@ def _go_op_enum_guarded_indices(body: str) -> set[str]:
         idx = match.group(1)
         if re.search(rf"\b(?:opcodeTable|op2str\w*)\s*\[\s*{re.escape(idx)}\s*\]", body):
             guarded.add(idx)
+    return guarded
+
+
+def _go_cnames_guarded_indices(body: str) -> set[str]:
+    """Guard index variables bounded by ``C_NONE`` and ``C_NCLASS``.
+
+    Architecture name tables such as ``cnames7`` are indexed by class constants;
+    the standard idiom ``if a >= C_NONE && a <= C_NCLASS { return cnames7[a] }``
+    keeps the index within the table.
+    """
+    guarded: set[str] = set()
+    for match in re.finditer(
+        r"\bif\s+(\w+)\s*>=\s*C_NONE\s*&&\s*\1\s*<=\s*C_NCLASS\s*\{[^}]*return\s+\w+\[\s*\1\s*\]",
+        body,
+    ):
+        guarded.add(match.group(1))
     return guarded
 
 
