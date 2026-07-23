@@ -1981,6 +1981,33 @@ def _go_guarded_indices(
     # bit index by 32 to index a ``[]uint32`` word. The methods are only called
     # with bit indices that fit in the bitmap.
     guarded |= _go_bitmap_bitset_guarded_indices(body, rtype)
+    # Array accessor helpers conventionally named ``index``/``idx`` guard with
+    # ``if len(arr) > index { arr[index] }`` or ``if index < len(arr) { ... }``.
+    if param_types:
+        for match in re.finditer(
+            r"\bif\s+(?:(?:[^&{]|&(?!&))+\s*&&\s*)*(?:(?:len\(\s*(\w+)\s*\)\s*>\s*(index|idx))|(index|idx)\s*<\s*len\(\s*(\w+)\s*\))\s*\{",
+            body,
+        ):
+            arr = match.group(1) or match.group(4)
+            idx = match.group(2) or match.group(3)
+            if idx not in param_types:
+                continue
+            block_start = body.find("{", match.end() - 1)
+            if block_start == -1:
+                continue
+            depth = 1
+            i = block_start + 1
+            while i < len(body) and depth > 0:
+                if body[i] == "{":
+                    depth += 1
+                elif body[i] == "}":
+                    depth -= 1
+                i += 1
+            if re.search(
+                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]",
+                body[block_start + 1 : i - 1],
+            ):
+                guarded.add(idx)
     return guarded
 
 

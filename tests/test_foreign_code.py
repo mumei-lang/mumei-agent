@@ -2866,6 +2866,28 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_array_accessor_index_guard() -> None:
+    """``if len(a) > index { a[index] }`` is treated as a bounds guard."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package simplejson
+
+type Json struct{ data any }
+
+func (j *Json) GetIndex(index int) *Json {
+	a, err := j.Array()
+	if err == nil {
+		if len(a) > index {
+			return &Json{a[index]}
+		}
+	}
+	return &Json{nil}
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("GetIndex" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_const_with_trailing_line_comment() -> None:
     """Single-line Go constants with trailing ``//`` comments are parsed."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
