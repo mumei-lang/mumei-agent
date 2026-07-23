@@ -3290,6 +3290,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "connectMethod",  # net/http internal connection method is non-nil in use
     "Transport",  # net/http Transport receivers are non-nil when methods are called
     "transportRequest",  # net/http internal request wrapper is non-nil in use
+    "decoder",  # encoding/binary decoder is non-nil when methods are called
+    "encoder",  # encoding/binary encoder is non-nil when methods are called
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

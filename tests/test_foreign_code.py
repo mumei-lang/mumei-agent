@@ -2912,6 +2912,30 @@ func randomName(i int) string {
     assert not any(i.function_name == "randomName" for i in issues)
 
 
+def test_detect_go_safety_issues_encoding_binary_decoder_non_nil() -> None:
+    """``encoding/binary`` ``*decoder`` / ``*encoder`` receivers are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package binary
+
+type decoder struct{ order ByteOrder; buf []byte; offset int }
+type encoder struct{ order ByteOrder; buf []byte; offset int }
+type ByteOrder interface{}
+
+func (d *decoder) int8() int8 { return int8(d.uint8()) }
+func (d *decoder) int16() int16 { return int16(d.uint16()) }
+func (d *decoder) int32() int32 { return int32(d.uint32()) }
+func (d *decoder) int64() int64 { return int64(d.uint64()) }
+
+func (d *decoder) uint8() uint8 { return d.buf[d.offset] }
+func (d *decoder) uint16() uint16 { return d.order.Uint16(d.buf[d.offset:]) }
+func (d *decoder) uint32() uint32 { return d.order.Uint32(d.buf[d.offset:]) }
+func (d *decoder) uint64() uint64 { return d.order.Uint64(d.buf[d.offset:]) }
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name in {"int8", "int16", "int32", "int64"} for i in issues)
+
+
 def test_detect_go_safety_issues_net_http_internal_non_nil() -> None:
     """``net/http`` internal receiver types are non-nil when methods are called."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
