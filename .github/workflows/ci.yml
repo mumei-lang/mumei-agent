@@ -30,6 +30,13 @@ jobs:
       - name: Guard-trace regression gate (A1 stage 3 / L3)
         run: uv run pytest tests/test_foreign_code.py tests/test_audit.py -k "guard_trace" -v --tb=short -m "not integration"
 
+      # Regression gate for the Solidity access-control obligation class: every
+      # externally callable state-mutating function must keep producing an
+      # access-control atom (guarded -> Checked, unguarded -> none) that upgrades
+      # through the mumei-lean Lean bridge to `lean_verified`.
+      - name: Access-control regression gate (smart-contract patterns)
+        run: uv run pytest tests/test_foreign_code.py tests/test_audit.py -k "access_control" -v --tb=short -m "not integration"
+
       # NOTE: Integration tests (marked @pytest.mark.integration) are excluded
       # from CI. Run them locally with: uv run pytest -m integration
       - name: Run tests with coverage

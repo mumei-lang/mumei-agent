@@ -15,7 +15,9 @@ from agent.strategies.foreign_code_strategy import (
     to_mumei_atom,
 )
 from agent.strategies.foreign_code_strategy_helpers import (
+    build_solidity_access_control_proof_certificate,
     build_solidity_guard_trace_proof_certificate,
+    extract_solidity_access_control_atoms,
 )
 from agent.cross_validation import validate_foreign_code
 from agent.config import AgentConfig
@@ -722,6 +724,129 @@ def test_validate_foreign_code_can_upgrade_guard_trace_certificate_via_lean_brid
     assert result.lean_bridge is not None
     assert result.lean_bridge["success"] is True
     assert "bridge diag" in result.warnings
+
+
+def test_extract_solidity_access_control_atoms_distinguishes_guards() -> None:
+    source = """
+pragma solidity ^0.8.0;
+contract Vault {
+    address owner;
+    uint256 public value;
+    function setOwner(address newOwner) public { owner = newOwner; }
+    function withdrawAll() public onlyOwner { value = 0; }
+    function setValue(uint v) external {
+        require(msg.sender == owner, "not owner");
+        value = v;
+    }
+    function readValue() public view returns (uint) { return value; }
+    function pureAdd(uint a, uint b) public pure returns (uint) { return a + b; }
+    function internalTouch() internal { value = 1; }
+}
+"""
+    atoms = {
+        atom["name"]: atom
+        for atom in extract_solidity_access_control_atoms(source, source_file="Vault.sol")
+    }
+    # view/pure/internal functions carry no access-control obligation.
+    assert set(atoms) == {
+        "setOwner_access_control",
+        "withdrawAll_access_control",
+        "setValue_access_control",
+    }
+    # Unguarded external state mutation -> the missing-auth theorem (none).
+    unguarded = atoms["setOwner_access_control"]["translator_ir"]
+    assert unguarded["access_control"]["ops"] == ["stateWrite"]
+    assert unguarded["access_control_expected_outcome"] == "none"
+    assert unguarded["theorem_goal"] == (
+        "runAccess AccessState.Unchecked [AccessOp.stateWrite] = none"
+    )
+    assert unguarded["obligation_class"] == "smart_contract_access_control_obligation"
+    assert unguarded["requires_bridge_lemmas"] == [
+        "MumeiLean.SmartContract.no_state_write_without_auth"
+    ]
+    # Modifier-guarded mutation -> guarded trace reaching Checked.
+    modifier_guarded = atoms["withdrawAll_access_control"]["translator_ir"]
+    assert modifier_guarded["access_control"]["ops"] == ["authCheck", "stateWrite"]
+    assert modifier_guarded["access_control_expected_outcome"] == "safe"
+    assert modifier_guarded["theorem_goal"] == (
+        "runAccess AccessState.Unchecked [AccessOp.authCheck, AccessOp.stateWrite] "
+        "= some AccessState.Checked"
+    )
+    # Body ``require(msg.sender == owner)`` guard is recognized too.
+    body_guarded = atoms["setValue_access_control"]["translator_ir"]
+    assert body_guarded["access_control"]["ops"] == ["authCheck", "stateWrite"]
+    assert body_guarded["access_control_expected_outcome"] == "safe"
+
+
+def test_build_solidity_access_control_proof_certificate_from_vulnerable_fixture() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+
+    cert = build_solidity_access_control_proof_certificate(
+        source,
+        source_file=FIXTURES / "sample_solidity_vulnerable.sol",
+        package_name="sample_solidity_vulnerable",
+        package_version="0",
+        mumei_version="agent",
+        timestamp="2026-07-06T00:00:00Z",
+    )
+
+    atoms = {atom["name"]: atom for atom in cert["atoms"]}
+    # getBalance is view -> no obligation.
+    assert set(atoms) == {
+        "withdraw_access_control",
+        "setOwner_access_control",
+        "withdrawAll_access_control",
+    }
+    assert atoms["setOwner_access_control"]["logic_fragment_tag"] == (
+        "smart_contract_access_control"
+    )
+    assert atoms["setOwner_access_control"]["translator_ir"][
+        "access_control_expected_outcome"
+    ] == "none"
+    # withdrawAll is modifier-guarded (onlyOwner).
+    assert atoms["withdrawAll_access_control"]["translator_ir"][
+        "access_control_expected_outcome"
+    ] == "safe"
+    assert cert["all_verified"] is False
+
+
+def test_validate_foreign_code_can_upgrade_access_control_certificate_via_lean_bridge() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+    config = AgentConfig(api_key="test", mumei_lean_repo="/tmp/mumei-lean")
+
+    def _verified(name: str) -> dict:
+        return {"name": name, "z3_check_result": "lean_verified", "status": "verified"}
+
+    with patch("agent.cross_validation.run_lean_bridge_and_merge_proof_cert") as bridge_mock:
+        def _merge(cert, _repo):
+            merged = {
+                "atoms": [_verified(atom["name"]) for atom in cert["atoms"]],
+            }
+            return merged, {
+                "success": True,
+                "lean_cert": merged,
+                "diagnostics": ["bridge diag"],
+                "stdout": "",
+                "stderr": "",
+            }
+
+        bridge_mock.side_effect = _merge
+        result = validate_foreign_code(
+            source,
+            "solidity",
+            config=config,
+            use_llm=False,
+            run_mumei=False,
+            enable_lean_bridge=True,
+        )
+
+    bridge_mock.assert_called_once()
+    assert result.proof_certificate is not None
+    atoms = {atom["name"]: atom for atom in result.proof_certificate["atoms"]}
+    # Access-control atoms escalated alongside the guard-trace atoms in one pass.
+    assert atoms["setOwner_access_control"]["z3_check_result"] == "lean_verified"
+    assert atoms["withdrawAll_access_control"]["status"] == "verified"
+    assert atoms["withdraw_guard_trace"]["z3_check_result"] == "lean_verified"
 
 
 def test_to_mumei_atom_emits_trusted_contract() -> None:

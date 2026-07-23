@@ -340,6 +340,34 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
     （`z3_check_result == "lean_verified"` を検証）と
     `tests/test_ingest_cert.py::test_guard_trace_fixture_renders_run_guard_theorems_and_imports`。
 
+- **access-control（stage 4a）✅ 実装済み**: reentrancy guard-trace と同じ方式で
+  access-control 欠落を Z3→Lean へ昇格。mumei-lean の `SmartContract.lean` に
+  `AccessState` / `AccessOp` / `runAccess` 状態機械と
+  `no_state_write_without_auth`（auth なしの state write は `none`）系 theorem を追加。
+  mumei-agent 側は `extract_solidity_access_control_atoms` /
+  `build_solidity_access_control_proof_certificate` が、外部呼び出し可能かつ
+  storage を書き換える関数について access-control atom
+  （`obligation_class == "smart_contract_access_control_obligation"`,
+  `logic_fragment_tag == "smart_contract_access_control"`）を抽出する。
+  authorization guard（`onlyOwner` 等の modifier または `require(msg.sender == owner)`
+  のような body ガード）があれば `[authCheck, stateWrite] -> AccessState.Checked`、
+  なければ `[stateWrite] -> none` を obligation として lower する。view/pure 関数と
+  外部呼び出し不可能な関数は obligation を生成しない。mumei-lean の
+  `scripts/expr_translator.py`（`OBLIGATION_CLASS_SMART_CONTRACT_ACCESS_CONTROL` /
+  `render_access_control_theorem` / `normalize_access_control_translator_ir`）が
+  `runAccess` トレース theorem を生成し、Lake ビルドで `z3_check_result == "lean_verified"`
+  へ昇格する。access-control 証跡は guard-trace と同一証明証跡（`proof_certificate`）に
+  相乗りし、`agent/cross_validation.py` / `agent/audit.py` の Lean bridge 1 パスで
+  両パターンをまとめて昇格する。回帰ゲート:
+  - mumei-agent: `tests/test_foreign_code.py` の access-control 抽出・証跡・
+    Lean bridge 昇格テストと
+    `tests/test_audit.py::test_audit_pipeline_emits_access_control_certificate_and_upgrades_via_lean_bridge`
+    （`.github/workflows/ci.yml` の "Access-control regression gate" ステップで明示実行）。
+  - mumei-lean: `tests/test_lean_bridge_e2e.py::test_access_control_fixture_upgrades_unknown_to_lean_verified`
+    と `tests/test_ingest_cert.py::test_access_control_fixture_renders_run_access_theorems_and_imports`。
+- **CEI 順序（stage 4b）**: access-control に続く次パターンとして未着手（別コミット・
+  別回帰テストで段階的に対応予定）。
+
 #### 次タスク候補: 層B パーサの構文解析移行
 
 層B のうち Python は `agent/strategies/foreign_code_strategy.py` の `extract_python` と

@@ -6212,6 +6212,153 @@ def _hash_guard_trace_payload(*parts: object) -> str:
     payload = json.dumps(parts, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+
+def extract_solidity_access_control_atoms(
+    source: str,
+    *,
+    source_file: str | Path | None = None,
+) -> list[dict[str, object]]:
+    """Extract access-control proof obligations from Solidity ``source``.
+
+    Every externally callable, state-mutating function carries an obligation
+    that an authorization check precedes the storage write. A guarded function
+    lowers to the concrete trace ``[authCheck, stateWrite]`` (expected to reach
+    ``AccessState.Checked``); an unguarded one to ``[stateWrite]`` (expected to
+    return ``none``, i.e. the missing-auth theorem confirms it is unsafe). This
+    mirrors :func:`extract_solidity_guard_trace_atoms` for reentrancy.
+    """
+    file_name = str(source_file or "<solidity-source>")
+    atoms: list[dict[str, object]] = []
+    for match in _SOLIDITY_FUNCTION_PATTERN.finditer(source):
+        function_name = _safe_identifier(match.group("name"))
+        attrs = match.group("attrs") or ""
+        body = _balanced_brace_body(source, match.end() - 1)
+        if not _solidity_function_is_externally_callable(attrs):
+            continue
+        if not _solidity_function_has_storage_write(body):
+            continue
+        guarded = _solidity_function_has_access_guard(attrs, body)
+        access_ops = ["authCheck", "stateWrite"] if guarded else ["stateWrite"]
+        expected_outcome = "safe" if guarded else "none"
+        line = _line_for_offset(source, match.start())
+        atoms.append(
+            _build_solidity_access_control_atom(
+                function_name=function_name,
+                source_file=file_name,
+                line=line,
+                access_ops=access_ops,
+                expected_outcome=expected_outcome,
+                guarded=guarded,
+                body=body,
+            )
+        )
+    return atoms
+
+
+def build_solidity_access_control_proof_certificate(
+    source: str,
+    *,
+    source_file: str | Path | None = None,
+    package_name: str | None = None,
+    package_version: str = "0",
+    mumei_version: str = "test-fixture",
+    z3_version: str | None = None,
+    timestamp: str | None = None,
+) -> dict[str, object]:
+    file_name = str(source_file or "<solidity-source>")
+    atoms = extract_solidity_access_control_atoms(source, source_file=file_name)
+    return {
+        "version": "1.0",
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "mumei_version": mumei_version,
+        "z3_version": z3_version or f"Z3 version {z3.get_version_string()}",
+        "file": file_name,
+        "atoms": atoms,
+        "package_name": package_name or Path(file_name).stem or "solidity",
+        "package_version": package_version,
+        "certificate_hash": _hash_guard_trace_payload(file_name, atoms),
+        "all_verified": False,
+    }
+
+
+def _build_solidity_access_control_atom(
+    *,
+    function_name: str,
+    source_file: str,
+    line: int,
+    access_ops: list[str],
+    expected_outcome: str,
+    guarded: bool,
+    body: str,
+) -> dict[str, object]:
+    safe_name = _safe_identifier(f"{function_name}_access_control")
+    theorem_goal = _solidity_access_control_theorem_goal(access_ops, expected_outcome)
+    content_hash = _hash_guard_trace_payload(
+        function_name,
+        access_ops,
+        expected_outcome,
+        source_file,
+        body,
+    )
+    body_summary = (
+        "access-control proof for "
+        f"{'a guarded state mutation' if guarded else 'an unguarded state mutation'}"
+    )
+    return {
+        "name": safe_name,
+        "z3_check_result": "unknown",
+        "content_hash": content_hash,
+        "status": "unknown",
+        "proof_hash": _hash_guard_trace_payload("proof", content_hash, theorem_goal),
+        "requires": "true",
+        "ensures": "true",
+        "body_expr": "",
+        "body_summary": body_summary,
+        "z3_result_class": "unknown",
+        "escalation_reason": "sc",
+        "logic_fragment_tag": "smart_contract_access_control",
+        "logic_fragment_tags": ["smart_contract", "access_control"],
+        "translator_version": _SOLIDITY_GUARD_TRACE_TRANSLATOR_VERSION,
+        "binder_mapping": {},
+        "bridge_lemma_hash": _SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH,
+        "translator_ir": {
+            "sort": "contract_obligation",
+            "binders": [],
+            "theorem_goal": theorem_goal,
+            "provenance_span": {
+                "file": source_file,
+                "line": line,
+                "col": 1,
+                "len": 0,
+            },
+            "lowering_rules": ["smart_contract_access_control_lowering"],
+            "proof_trace_hints": [
+                "use the concrete access-control trace with SmartContract.runAccess",
+            ],
+            "requires_bridge_lemmas": [
+                "MumeiLean.SmartContract.no_state_write_without_auth",
+            ],
+            "obligation_class": "smart_contract_access_control_obligation",
+            "access_control": {
+                "ops": access_ops,
+                "expected_outcome": expected_outcome,
+            },
+            "access_control_ops": access_ops,
+            "access_control_expected_outcome": expected_outcome,
+        },
+        "unknown_obligation_domain": "smart_contract",
+    }
+
+
+def _solidity_access_control_theorem_goal(
+    access_ops: list[str], expected_outcome: str
+) -> str:
+    op_terms = ", ".join(f"AccessOp.{op}" for op in access_ops)
+    expected = (
+        "some AccessState.Checked" if expected_outcome == "safe" else "none"
+    )
+    return f"runAccess AccessState.Unchecked [{op_terms}] = {expected}"
+
 def _solidity_first_storage_write(
     body: str,
     minimum_offset: int = 0,
