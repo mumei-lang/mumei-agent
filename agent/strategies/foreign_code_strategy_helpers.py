@@ -3440,10 +3440,12 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "List",  # linked-list types (e.g. gList) are non-nil when methods are called
     "Order",  # permutation/order types (e.g. randomOrder) are non-nil when methods are called
     "Enum",  # enumerator types (e.g. randomEnum) are non-nil when methods are called
+    "Call",  # in-flight call objects (e.g. dialCall) are non-nil when passed to helpers
     "Validator",  # Grafana validation implementations (e.g. CountValidator) are invoked on non-nil values
     "Response",  # request/response DTOs (e.g. BulkResponse) are non-nil when passed to handlers
     "Pointer",  # atomic pointer wrappers (e.g. atomicMSpanPointer) are non-nil when Load/Store is called
     "Root",  # os.Root and similar filesystem roots are non-nil when methods are called
+    "Pool",  # connection/object pools (e.g. clientConnPool) are non-nil when methods are called
     "Storage",  # Kubernetes-style storage implementations (e.g. queryTypeStorage) are non-nil in use
     "REST",  # Kubernetes REST subresource implementations (e.g. queryValidationREST) are non-nil in use
     "Expr",  # AST/IR expression node pointers are non-nil in use
