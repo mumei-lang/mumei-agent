@@ -1826,6 +1826,27 @@ def _go_pow10_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
+def _go_mapfast_guarded_indices(body: str) -> set[str]:
+    """Guard indices produced by ``mapfast`` in ``cmd/compile/internal/walk``.
+
+    ``mapfast(t)`` returns an enum in ``[0, nmapfast)`` that is used to select
+    a runtime function name from the ``mapaccess1`` / ``mapaccess2`` /
+    ``mapassign`` / ``mapdelete`` tables.  Such indices are always in bounds.
+    """
+    guarded: set[str] = set()
+    fast_vars: set[str] = set()
+    for match in re.finditer(r"\b(\w+)\s*:=\s*mapfast\s*\(", body):
+        fast_vars.add(match.group(1))
+    if not fast_vars:
+        return guarded
+    pattern = re.compile(
+        r"\b(mapaccess1|mapaccess2|mapassign|mapdelete)\s*\[\s*(" + "|".join(re.escape(v) for v in fast_vars) + r")\s*\]"
+    )
+    for match in pattern.finditer(body):
+        guarded.add(match.group(2))
+    return guarded
+
+
 def _go_binary_search_guarded_indices(body: str, source: str) -> set[str]:
     """Binary-search midpoint ``m`` indexing ``arr[m]`` is bounded by ``len(arr)``."""
     stripped = _strip_go_rust_literals_and_comments(body)
@@ -2023,6 +2044,9 @@ def _go_guarded_indices(
     # ``crypto.Hash`` values are guarded by ``h > 0 && h < maxHash`` before
     # indexing ``digestSizes`` or ``hashes``.
     guarded |= _go_crypto_hash_guarded_indices(body, param_types, source, package_name)
+    # ``mapfast(t)`` returns a bounded enum used to index ``mapaccess1`` / ``mapaccess2`` /
+    # ``mapassign`` / ``mapdelete`` tables in ``cmd/compile/internal/walk``.
+    guarded |= _go_mapfast_guarded_indices(body)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
         r"\bif\s+(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?(\w+)\s*(?:\s*\))?\s*>=\s*(?:(?:uint|int)(?:ptr|8|16|32|64)?\s*\(\s*)?len\(\s*(\w+)\s*\)(?:\s*\))?\s*\{",
@@ -3134,6 +3158,8 @@ _GO_NONNIL_TYPE_SUFFIXES = {
     "Root",  # os.Root and similar filesystem roots are non-nil when methods are called
     "Storage",  # Kubernetes-style storage implementations (e.g. queryTypeStorage) are non-nil in use
     "REST",  # Kubernetes REST subresource implementations (e.g. queryValidationREST) are non-nil in use
+    "Expr",  # AST/IR expression node pointers are non-nil in use
+    "Stmt",  # AST/IR statement node pointers are non-nil in use
 }
 
 # Exact type basenames that are always non-nil when used as parameters.
@@ -3188,6 +3214,8 @@ _GO_NONNIL_EXACT_TYPES = {
     "SymbolBuilder",  # cmd/link symbol builder pointers are non-nil in use
     "Loader",  # cmd/link/internal/loader pointers are non-nil in use
     "Arch",  # cmd/internal/sys.Arch architecture descriptors are non-nil in use
+    "Name",  # ir.Name and similar compiler name nodes are non-nil in use
+    "Nodes",  # ir.Nodes slice wrappers are non-nil in use
 }
 
 # Functions in the Go ``math`` package that are known to return a floating-point

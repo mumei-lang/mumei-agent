@@ -2866,6 +2866,50 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_mapfast_index_guarded() -> None:
+    """``mapfast`` result indexing ``mapdelete`` / ``mapaccess`` tables is guarded."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package walk
+
+type mapnames [5]string
+
+var mapdelete = mapnames{"a", "b", "c", "d", "e"}
+
+func mapfast(t int) int { return t }
+
+func walkDelete(t int) string {
+	fast := mapfast(t)
+	return mapdelete[fast]
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(i.function_name == "walkDelete" for i in issues)
+
+
+def test_detect_go_safety_issues_ir_compiler_node_receivers_non_nil() -> None:
+    """Compiler ``ir.*Expr`` / ``*Stmt`` / ``*Name`` / ``*Nodes`` nodes are non-nil in use."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package walk
+
+type CallExpr struct{ Args []int }
+type Nodes struct{}
+
+func (n *CallExpr) Type() int { return 0 }
+func (init *Nodes) Append(x int) {}
+
+func walkDelete(init *Nodes, n *CallExpr) int {
+	init.Append(n.Args[0])
+	return n.Type()
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any(
+        i.function_name == "walkDelete" for i in issues
+    )
+
+
 def test_detect_go_safety_issues_sort_and_profile_stack_accessor_index_guarded() -> None:
     """sort.Interface / profile ``Stack`` accessor indices are guarded by callers."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
