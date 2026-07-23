@@ -4779,6 +4779,21 @@ def _is_roundup_expression(expression: str, left: str, right: str) -> bool:
     return bool(re.search(pattern, left_side))
 
 
+def _is_overflow_guard_expression(expression: str, left: str, right: str) -> bool:
+    """Return True when ``left + right`` is guarded by an overflow self-check.
+
+    The idiomatic checks ``a + b < a`` or ``a + b < b`` (signed/unsigned)
+    explicitly detect overflow, so the addition itself is part of the guard.
+    """
+    expr = re.sub(r"\s+", "", expression)
+    a, b = re.escape(left), re.escape(right)
+    sum_re = rf"(?:\({a}\+{b}\)|{a}\+{b})"
+    return bool(
+        re.search(rf"{sum_re}<(?:{a}|{b})", expr)
+        or re.search(rf"(?:{a}|{b})>{sum_re}", expr)
+    )
+
+
 def _is_divroundup_expression(expression: str, divisor: str) -> bool:
     """Return True for the ``(x + y - 1) / y`` ceiling-division idiom.
 
@@ -4840,6 +4855,8 @@ def _i64_overflow_safety_issue(
     if _is_pointer_arithmetic_expression(expression, left, right):
         return None
     if label == "Go" and _is_roundup_expression(expression, left, right):
+        return None
+    if label == "Go" and _is_overflow_guard_expression(expression, left, right):
         return None
     if label == "Go" and _is_divroundup_expression(expression, right):
         return None

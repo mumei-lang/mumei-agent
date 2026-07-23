@@ -2866,6 +2866,20 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_overflow_self_guard() -> None:
+    """``offset+length < offset`` is an overflow self-check, not an overflow bug."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package asn1
+
+func invalidLength(offset, length, sliceLength int) bool {
+	return offset+length < offset || offset+length > sliceLength
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("invalidLength" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_config_ptr_size_nonzero_local() -> None:
     """A local ``ptrSize := ...Config.PtrSize`` is a non-zero divisor."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
