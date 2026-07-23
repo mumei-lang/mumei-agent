@@ -2866,6 +2866,25 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_typescript_boolean_parameter_return_type_infer_bool() -> None:
+    """Arrow function returning a ``boolean`` parameter should have bool return type."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''export interface FieldConfigSettings {}
+export interface FieldOverrideContext {}
+
+export const booleanOverrideProcessor = (
+  value: boolean,
+  _context: FieldOverrideContext,
+  _settings?: FieldConfigSettings
+) => {
+  return value;
+};
+'''
+    issues = _detect_safety_issues(source, 'typescript')
+    assert not issues
+
+
 def test_detect_go_safety_issues_mapfast_index_guarded() -> None:
     """``mapfast`` result indexing ``mapdelete`` / ``mapaccess`` tables is guarded."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

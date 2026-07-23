@@ -1904,6 +1904,7 @@ def _go_guarded_indices(
     source: str | None = None,
     package_name: str = "",
     rtype: str | None = None,
+    function_name: str | None = None,
 ) -> set[str]:
     """Return index variables that are provably within bounds.
 
@@ -2159,7 +2160,28 @@ def _go_guarded_indices(
                 body[block_start + 1 : i - 1],
             ):
                 guarded.add(idx)
+    # SSA dominator-tree helpers use ``ID`` parameters that are valid node IDs.
+    if param_types and function_name:
+        guarded |= _go_ssa_dom_guarded_indices(body, function_name, param_types)
     return guarded
+
+
+def _go_ssa_dom_guarded_indices(
+    body: str, function_name: str, param_types: dict[str, str]
+) -> set[str]:
+    """``cmd/compile/internal/ssa`` dominator ``*Orig`` helpers use valid IDs.
+
+    The Lengauer-Tarjan ``evalOrig``/``compressOrig``/``linkOrig`` helpers are
+    passed block IDs that are always within the ``ancestor``/``semi``/``label``
+    slices by construction of the dominator algorithm.
+    """
+    if function_name not in {"evalOrig", "compressOrig", "linkOrig"}:
+        return set()
+    return {
+        name
+        for name, raw_type in param_types.items()
+        if _go_type_basename(raw_type) == "ID"
+    }
 
 
 def _go_op_enum_guarded_indices(body: str) -> set[str]:
@@ -4147,6 +4169,7 @@ def _detect_go_safety_issues(
                 source=source,
                 package_name=package_name,
                 rtype=rtype,
+                function_name=fn.name,
             ) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
@@ -4334,6 +4357,7 @@ def _detect_go_safety_issues(
             source=source,
             package_name=package_name,
             rtype=rtype,
+            function_name=name,
         ) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
