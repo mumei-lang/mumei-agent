@@ -87,6 +87,7 @@ from agent.cross_validation_foreign import (
     _with_source_lines,
 )
 from agent.strategies.foreign_code_strategy_helpers import (
+    _hash_guard_trace_payload,
     build_solidity_guard_trace_proof_certificate,
     extract_solidity_access_control_atoms,
 )
@@ -953,6 +954,12 @@ def _build_solidity_guard_trace_proof_certificate(
         *(existing_atoms if isinstance(existing_atoms, list) else []),
         *access_control_atoms,
     ]
+    # Recompute the integrity fingerprint over the merged atom list; the builder
+    # hashed only the guard-trace subset.
+    cert["certificate_hash"] = _hash_guard_trace_payload(
+        "<inline:solidity>",
+        cert["atoms"],
+    )
     if not cert.get("atoms"):
         return None
     return cert
