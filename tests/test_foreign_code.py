@@ -2866,6 +2866,22 @@ def test_detect_ts_safety_issues_truthiness_guarded_length() -> None:
     assert not any("message" in i.message for i in issues)
 
 
+def test_detect_go_safety_issues_alignment_bitmask_with_space() -> None:
+    """``(x + y - 1) & ^(y - 1)`` is the alignment idiom even with spaces."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''package syscall
+
+const NLMSG_ALIGNTO = 4
+
+func nlmAlignOf(msglen int) int {
+	return (msglen + NLMSG_ALIGNTO - 1) & ^(NLMSG_ALIGNTO - 1)
+}
+'''
+    issues = _detect_safety_issues(source, 'go')
+    assert not any("nlmAlignOf" in i.message for i in issues)
+
+
 def test_detect_go_safety_issues_net_fd_and_listener_receivers_non_nil() -> None:
     """``*netFD`` and ``*TCPListener`` receivers are non-nil when methods are called."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

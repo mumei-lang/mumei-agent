@@ -4763,10 +4763,10 @@ def _is_roundup_expression(expression: str, left: str, right: str) -> bool:
     widely used in runtime/network code where the alignment is a small positive
     constant.
     """
-    if "&^" not in expression:
+    if re.search(r"&\s*\^", expression) is None:
         return False
     mask_match = re.search(
-        r"&\^\s*\(?\s*([A-Za-z_]\w*)\s*-\s*1", expression
+        r"&\s*\^\s*\(?\s*([A-Za-z_]\w*)\s*-\s*1", expression
     )
     if not mask_match:
         return False
