@@ -867,11 +867,18 @@ def list_forge_log(log_path: str = "forge_log.json") -> str:
 def get_review_queue(mumei_repo: str) -> str:
     """Return the human review queue emitted by ``mumei verify``.
 
+    ``mumei_repo`` must be an existing directory. This guard prevents
+    ``get_review_queue`` from creating stray directories or files when
+    given a non-existent path.
+
     Sets the active tracker for subsequent ``approve_review`` /
     ``reject_review`` / ``escalate_to_lean`` calls.  Calling again
     with a different *mumei_repo* replaces the active tracker.
     """
     global _active_human_review_tracker
+    repo = Path(mumei_repo)
+    if not repo.is_dir():
+        return _err(f"mumei_repo is not an existing directory: {mumei_repo}")
     try:
         from agent.human_review import HumanReviewTracker
 
