@@ -425,3 +425,35 @@ def test_mcp_approve_review_refuses_unknown_atom(tmp_path: Path) -> None:
     assert "atom not found" in result["error"]
     saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
     assert all(a.get("status", ReviewStatus.PENDING.value) == ReviewStatus.PENDING.value for a in saved["atoms"])
+
+
+def test_mcp_reject_review_refuses_unknown_atom(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    repo.mkdir()
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    mcp_server.get_review_queue(str(repo))
+    result = _payload(
+        mcp_server.reject_review("unknown_atom", "akira", "should fail")
+    )
+
+    assert result["status"] == "error"
+    assert "atom not found" in result["error"]
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert all(a.get("status", ReviewStatus.PENDING.value) == ReviewStatus.PENDING.value for a in saved["atoms"])
+
+
+def test_mcp_escalate_to_lean_refuses_unknown_atom(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    (repo / "specs").mkdir(parents=True)
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    mcp_server.get_review_queue(str(repo))
+    result = _payload(mcp_server.escalate_to_lean("unknown_atom"))
+
+    assert result["status"] == "error"
+    assert "atom not found" in result["error"]
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert all(a.get("status", ReviewStatus.PENDING.value) == ReviewStatus.PENDING.value for a in saved["atoms"])
