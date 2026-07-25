@@ -906,7 +906,10 @@ def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
 
 @mcp.tool()
 def escalate_to_lean(atom_name: str) -> str:
-    """Run ``mumei verify --escalate-lean`` and mark an atom as escalated."""
+    """Run ``mumei verify --escalate-lean`` and mark an atom as escalated.
+
+    Fails if the atom is already ``APPROVED`` or ``REJECTED``.
+    """
     try:
         tracker = _human_review_tracker()
         entry = tracker.escalate_to_lean(atom_name)

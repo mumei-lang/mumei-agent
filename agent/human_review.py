@@ -150,6 +150,11 @@ class HumanReviewTracker:
 
     def escalate_to_lean(self, atom_name: str) -> JsonDict:
         entry = self._find_atom(atom_name)
+        current = entry.get("status")
+        if current in (ReviewStatus.APPROVED.value, ReviewStatus.REJECTED.value):
+            raise ValueError(
+                f"cannot escalate atom {atom_name!r}: current status is {current}"
+            )
         command = self._lean_escalation_command()
         proc = subprocess.run(
             command,
