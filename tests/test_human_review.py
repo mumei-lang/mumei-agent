@@ -88,7 +88,13 @@ def test_mcp_review_tools_load_and_approve_active_queue(tmp_path: Path) -> None:
         mcp_server.approve_review("trusted_transfer", "akira", "approved")
     )
 
+    reject_result = _payload(
+        mcp_server.reject_review("trusted_transfer", "akira", "rejected")
+    )
+
     assert queue_result["status"] == "ok"
     assert queue_result["count"] == 2
     assert approve_result["status"] == "ok"
     assert approve_result["atom"]["status"] == ReviewStatus.APPROVED.value
+    assert reject_result["status"] == "ok"
+    assert reject_result["atom"]["status"] == ReviewStatus.REJECTED.value
