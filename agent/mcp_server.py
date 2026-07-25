@@ -936,16 +936,6 @@ def reject_review(atom_name: str, reviewer: str, notes: str) -> str:
         return _err(f"failed to reject review: {exc}", atom_name=atom_name)
     return _ok({"atom": entry, "path": str(tracker.queue_path)})
 
-def _human_review_tracker():
-    global _active_human_review_tracker
-    if _active_human_review_tracker is not None:
-        return _active_human_review_tracker
-    from agent.human_review import HumanReviewTracker
-
-    _active_human_review_tracker = HumanReviewTracker.default()
-    _active_human_review_tracker.load()
-    return _active_human_review_tracker
-
 
 def _require_active_human_review_tracker():
     """Return the active human review tracker, or raise if unset.
