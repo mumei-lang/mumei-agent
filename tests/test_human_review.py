@@ -198,6 +198,7 @@ def test_mcp_approve_review_refuses_escalated_atom(tmp_path: Path) -> None:
     assert saved["atoms"][0]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
 
 
+
 def test_human_review_tracker_escalate_fails_on_approved_or_rejected(
     tmp_path: Path,
 ) -> None:
