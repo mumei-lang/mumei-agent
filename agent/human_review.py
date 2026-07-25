@@ -116,6 +116,12 @@ class HumanReviewTracker:
         )
 
     def approve_review(self, atom_name: str, reviewer: str, notes: str) -> JsonDict:
+        entry = self._find_atom(atom_name)
+        current = entry.get("status")
+        if current in (ReviewStatus.REJECTED.value, ReviewStatus.ESCALATED_TO_LEAN.value):
+            raise ValueError(
+                f"cannot approve atom {atom_name!r}: current status is {current}"
+            )
         return self._record_decision(atom_name, ReviewStatus.APPROVED, reviewer, notes)
 
     def reject_review(self, atom_name: str, reviewer: str, notes: str) -> JsonDict:
