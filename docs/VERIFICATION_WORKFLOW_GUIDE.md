@@ -574,6 +574,7 @@ uv run mumei-agent mcp-server
 - `get_review_queue(mumei_repo)` — 保留中のレビュー項目を取得します。後続の `approve_review` / `reject_review` / `escalate_to_lean` は、この呼び出しで設定された active tracker を使用します。
 - `approve_review(atom_name, reviewer, notes)` — 指定 atom を承認し、ステータスを `APPROVED` に更新します。ただし、すでに `REJECTED` または `ESCALATED_TO_LEAN` になっている atom は承認できません（再度 `scan_and_fix` / `heal` / `migrate-suggest` などでレビュー対象を更新してください）。
 - `reject_review(atom_name, reviewer, notes)` — 指定 atom を否認し、`REJECTED` に更新します。否認した atom は `heal` や `migrate-suggest` を再実行するか、仕様・実装を修正してから再度監査する必要があります。
+- `escalate_to_lean(atom_name)` — `mumei verify --escalate-lean` を実行し、指定 atom を `ESCALATED_TO_LEAN` に更新します。ただし、すでに `APPROVED` または `REJECTED` になっている atom は escalate できません。
 
 ```json
 {

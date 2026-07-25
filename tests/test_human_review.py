@@ -198,6 +198,46 @@ def test_mcp_approve_review_refuses_escalated_atom(tmp_path: Path) -> None:
     assert saved["atoms"][0]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
 
 
+
+def test_human_review_tracker_escalate_fails_on_approved_or_rejected(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "mumei"
+    (repo / "specs").mkdir(parents=True)
+    _write_queue(repo)
+    tracker = HumanReviewTracker.from_repo(repo)
+
+    tracker.approve_review("trusted_transfer", "akira", "approved")
+    with pytest.raises(ValueError, match="cannot escalate atom 'trusted_transfer'"):
+        tracker.escalate_to_lean("trusted_transfer")
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.APPROVED.value
+
+    _write_queue(repo)
+    tracker = HumanReviewTracker.from_repo(repo)
+    tracker.reject_review("trusted_transfer", "akira", "rejected")
+    with pytest.raises(ValueError, match="cannot escalate atom 'trusted_transfer'"):
+        tracker.escalate_to_lean("trusted_transfer")
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.REJECTED.value
+
+
+def test_mcp_escalate_to_lean_refuses_approved_atom(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    (repo / "specs").mkdir(parents=True)
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    mcp_server.get_review_queue(str(repo))
+    mcp_server.approve_review("trusted_transfer", "akira", "approved")
+    result = _payload(mcp_server.escalate_to_lean("trusted_transfer"))
+
+    assert result["status"] == "error"
+    assert "cannot escalate atom" in result["error"]
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.APPROVED.value
+
+
 def test_mcp_escalate_to_lean_marks_atom_escalated(tmp_path: Path) -> None:
     repo = tmp_path / "mumei"
     (repo / "specs").mkdir(parents=True)
