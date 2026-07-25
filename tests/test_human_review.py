@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from agent import mcp_server
 from agent.human_review import HumanReviewTracker, ReviewStatus
 
@@ -72,6 +74,22 @@ def test_human_review_tracker_rejects_and_persists_review(tmp_path: Path) -> Non
     assert saved["atoms"][0]["notes"] == "contract rejected: boundary condition unclear"
     assert saved["review_history"][0]["atom_name"] == "trusted_transfer"
     assert saved["review_history"][0]["status"] == ReviewStatus.REJECTED.value
+
+
+def test_human_review_tracker_approve_fails_on_rejected_or_escalated(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "mumei"
+    repo.mkdir()
+    _write_queue(repo)
+    tracker = HumanReviewTracker.from_repo(repo)
+
+    tracker.reject_review("trusted_transfer", "akira", "rejected")
+    with pytest.raises(ValueError, match="cannot approve atom 'trusted_transfer'"):
+        tracker.approve_review("trusted_transfer", "akira", "should fail")
+
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.REJECTED.value
 
 
 def test_human_review_tracker_escalates_to_lean(tmp_path: Path) -> None:
