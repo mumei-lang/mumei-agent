@@ -6,7 +6,10 @@ agent's existing flows byte-for-byte identical.
 """
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
+
+import pytest
 
 from agent import telemetry
 from agent.llm_provider import McpSamplingLLMProvider, OpenAILLMProvider
@@ -46,9 +49,22 @@ def test_otlp_protocol_env(monkeypatch):
     assert telemetry._otlp_protocol() == "http/protobuf"
 
 
-def test_exporter_builders_return_none_without_extra():
-    # In the default env the otel exporter packages are not installed, so the
-    # builders must swallow the ImportError and return None (never raise).
+def test_exporter_builders_return_none_without_extra(monkeypatch):
+    # Simulate an environment where the otel exporter packages are not installed
+    # so the builders must swallow the ImportError and return None (never raise).
+    # This keeps the test hermetic regardless of whether the `otel` extra is present.
+    class _MissingModule:
+        def __getattr__(self, name: str) -> None:
+            raise ImportError(f"simulated missing exporter module attribute: {name}")
+
+    for path in (
+        "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+        "opentelemetry.exporter.otlp.proto.grpc.metric_exporter",
+        "opentelemetry.exporter.otlp.proto.http.metric_exporter",
+    ):
+        monkeypatch.setitem(sys.modules, path, _MissingModule())
+
     assert telemetry._build_span_exporter() is None
     assert telemetry._build_metric_exporter() is None
 
