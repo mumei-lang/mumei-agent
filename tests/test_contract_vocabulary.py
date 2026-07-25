@@ -201,3 +201,33 @@ def test_mcp_tool_docstrings_do_not_use_forbidden_aliases() -> None:
                     )
                     break
     assert failures == [], "; ".join(failures)
+
+
+def test_mcp_server_doc_table_descriptions_avoid_forbidden_aliases() -> None:
+    """The docs/MCP_SERVER.md tool table description column must not use forbidden aliases."""
+    mcp_server_doc = REPO_ROOT / "docs" / "MCP_SERVER.md"
+    text = mcp_server_doc.read_text(encoding="utf-8")
+    table_match = re.search(
+        r"Exported tools:\n\n\| Tool \| Description \|\n\|[-—]+\|[-—]+\|\n(.*?)(?:\n\n|\Z)",
+        text,
+        re.DOTALL,
+    )
+    assert table_match, "Could not find MCP tools table in docs/MCP_SERVER.md"
+    table_body = table_match.group(1)
+
+    failures: list[str] = []
+    for line in table_body.splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 3:
+            continue
+        tool_cell = cells[1].strip("`")
+        description = cells[2]
+        for alias in FORBIDDEN_ALIASES:
+            for pattern in _alias_key_patterns(alias):
+                match = pattern.search(description)
+                if match:
+                    failures.append(
+                        f"{tool_cell} description uses forbidden alias `{alias}`"
+                    )
+                    break
+    assert failures == [], "; ".join(failures)
