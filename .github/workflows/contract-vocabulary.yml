@@ -7,6 +7,9 @@ on:
       - 'README.md'
       - 'docs/VERIFICATION_WORKFLOW_GUIDE.md'
       - 'docs/ROADMAP.md'
+      - 'docs/MCP_SERVER.md'
+      - 'docs/AGENT_HARNESS_SPEC.md'
+      - 'agent/mcp_server.py'
       - 'tests/test_contract_vocabulary.py'
       - '.github/workflows/contract-vocabulary.yml'
   workflow_dispatch:
@@ -14,6 +17,7 @@ on:
 jobs:
   contract-vocabulary:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
