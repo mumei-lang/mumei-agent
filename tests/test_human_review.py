@@ -196,3 +196,31 @@ def test_mcp_approve_review_refuses_escalated_atom(tmp_path: Path) -> None:
     assert "cannot approve atom" in result["error"]
     saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
     assert saved["atoms"][0]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
+
+
+def test_mcp_escalate_to_lean_marks_atom_escalated(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    (repo / "specs").mkdir(parents=True)
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    queue_result = _payload(mcp_server.get_review_queue(str(repo)))
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="Lean escalation bundle written\n",
+        stderr="",
+    )
+    with patch("agent.human_review.subprocess.run", return_value=completed) as run:
+        result = _payload(mcp_server.escalate_to_lean("hard_nonlinear"))
+
+    assert queue_result["status"] == "ok"
+    assert result["status"] == "ok"
+    assert result["atom"]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][1]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
+
+    command = run.call_args.args[0]
+    assert "--escalate-lean" in command
+    assert "--emit" in command
+    assert "escalation-bundle" in command
