@@ -13,7 +13,7 @@
 
 Canonical result keys are fixed as follows:
 
-Supported no-`.mm` source languages are Python, Rust, TypeScript, and Go. The language changes only the parser path; `audit`, `validate-code`, and MCP `scan_and_fix` still return `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors` without aliases. In deterministic/no-LLM mode, Rust overflow/bounds, TypeScript null/undefined, and Go bounds/nil/overflow fixtures are handled by the parser and Z3 counterexample path.
+Supported no-`.mm` source languages are Python, Rust, TypeScript, Go, and Solidity. The language changes only the parser path; `audit`, `validate-code`, and MCP `scan_and_fix` still return `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors` without aliases. In deterministic/no-LLM mode, Rust overflow/bounds, TypeScript null/undefined, Go bounds/nil/overflow, and Solidity reentrancy/CEI/access-control fixtures are handled by the parser and Z3 counterexample path.
 
 The cross-project reference demo is `mumei-demo/scenarios/no_mm_audit` (Phase 7 front door). Run `CI_FIXTURE_MODE=1 make demo-no-mm` there to see Python negative balance, Rust `a + b` i64 overflow, TypeScript `name!.length` null/undefined, and Go `values[idx]` bounds / `user.Name` nil / `a + b` overflow produce `verification_violations` with `next_steps` as the only human-review entrypoint. The demo stops at `audit -> migrate-suggest -> heal` before Lean escalation, so it does not expect `lean_verified`.
 
@@ -211,10 +211,10 @@ uv run mumei-agent validate-spec \
 
 ## 2. 既存コードの検証
 
-**目的**: Rust/C/Go/Python/TypeScript 等の既存コードに論理的な問題がないかを抽出・検証する。
+**目的**: Python/Rust/Go/TypeScript/Solidity 等の既存コードに論理的な問題がないかを抽出・検証する。
 
 統合監査には `audit` を使う。`--code-file` は単一ファイルまたはディレクトリを受け付ける。
-ディレクトリの場合は Python/Rust/TypeScript の対応拡張子を再帰スキャンし、問題があるファイルだけ
+ディレクトリの場合は Python/Rust/Go/TypeScript/Solidity の対応拡張子を再帰スキャンし、問題があるファイルだけ
 `files_with_issues` に集約される。
 
 ```bash

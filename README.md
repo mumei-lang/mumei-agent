@@ -46,7 +46,7 @@ Use `uv run mumei-agent --help` for the full command-line help. Configuration, p
 
 ## No-.mm audit
 
-`audit` is the single contract for auditing existing Python, Rust, TypeScript, or Go code before a `.mm` file exists. It reports stable audit fields, migration hints, and healing evidence; the vocabulary and layer details are in [`docs/AUDIT_CONTRACT.md`](docs/AUDIT_CONTRACT.md).
+`audit` is the single contract for auditing existing Python, Rust, TypeScript, Go, or Solidity code before a `.mm` file exists. It reports stable audit fields, migration hints, and healing evidence; the vocabulary and layer details are in [`docs/AUDIT_CONTRACT.md`](docs/AUDIT_CONTRACT.md).
 
 The stable audit keys are `spec_health_issues`, `verification_violations`,
 `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`,
