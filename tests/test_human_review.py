@@ -42,6 +42,28 @@ def _payload(raw: str) -> dict:
     return json.loads(raw)
 
 
+def test_mcp_human_review_actions_require_active_tracker() -> None:
+    mcp_server._active_human_review_tracker = None
+
+    approve_result = _payload(
+        mcp_server.approve_review("trusted_transfer", "akira", "should fail")
+    )
+    assert approve_result["status"] == "error"
+    assert "no active human review queue" in approve_result["error"]
+
+    mcp_server._active_human_review_tracker = None
+    reject_result = _payload(
+        mcp_server.reject_review("trusted_transfer", "akira", "should fail")
+    )
+    assert reject_result["status"] == "error"
+    assert "no active human review queue" in reject_result["error"]
+
+    mcp_server._active_human_review_tracker = None
+    escalate_result = _payload(mcp_server.escalate_to_lean("trusted_transfer"))
+    assert escalate_result["status"] == "error"
+    assert "no active human review queue" in escalate_result["error"]
+
+
 def test_human_review_tracker_approves_and_persists_review(tmp_path: Path) -> None:
     repo = tmp_path / "mumei"
     repo.mkdir()

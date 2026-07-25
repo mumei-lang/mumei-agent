@@ -47,16 +47,6 @@ class HumanReviewTracker:
         repo = Path(mumei_repo).expanduser().resolve()
         return cls(repo / "human_review_queue.json", repo)
 
-    @classmethod
-    def default(cls) -> "HumanReviewTracker":
-        queue = os.environ.get("MUMEI_HUMAN_REVIEW_QUEUE")
-        if queue:
-            return cls(Path(queue).expanduser().resolve())
-        repo = os.environ.get("MUMEI_REPO")
-        if repo:
-            return cls.from_repo(repo)
-        return cls(Path("human_review_queue.json").resolve())
-
     def load(self) -> JsonDict:
         if not self.queue_path.exists():
             self.data = {

@@ -572,9 +572,9 @@ uv run mumei-agent mcp-server
 `audit` や `scan_and_fix` の `next_steps` に人間レビューが必要と示された場合、MCP サーバー経由でキューを確認・承認・否認できます。これらは `agent/human_review.py` の `HumanReviewQueue` と連動し、レビュー結果は `human_review_queue.json` に永続化されます。
 
 - `get_review_queue(mumei_repo)` — 保留中のレビュー項目を取得します。後続の `approve_review` / `reject_review` / `escalate_to_lean` は、この呼び出しで設定された active tracker を使用します。
-- `approve_review(atom_name, reviewer, notes)` — 指定 atom を承認し、ステータスを `APPROVED` に更新します。ただし、すでに `REJECTED` または `ESCALATED_TO_LEAN` になっている atom は承認できません（再度 `scan_and_fix` / `heal` / `migrate-suggest` などでレビュー対象を更新してください）。
-- `reject_review(atom_name, reviewer, notes)` — 指定 atom を否認し、`REJECTED` に更新します。ただし、すでに `ESCALATED_TO_LEAN` になっている atom は否認できません。否認した atom は `heal` や `migrate-suggest` を再実行するか、仕様・実装を修正してから再度監査する必要があります。
-- `escalate_to_lean(atom_name)` — `mumei verify --escalate-lean` を実行し、指定 atom を `ESCALATED_TO_LEAN` に更新します。ただし、すでに `APPROVED` または `REJECTED` になっている atom は escalate できません。
+- `approve_review(atom_name, reviewer, notes)` — 事前に `get_review_queue` を呼び出して active tracker を設定する必要があります。指定 atom を承認し、ステータスを `APPROVED` に更新します。ただし、すでに `REJECTED` または `ESCALATED_TO_LEAN` になっている atom は承認できません（再度 `scan_and_fix` / `heal` / `migrate-suggest` などでレビュー対象を更新してください）。
+- `reject_review(atom_name, reviewer, notes)` — 事前に `get_review_queue` を呼び出して active tracker を設定する必要があります。指定 atom を否認し、`REJECTED` に更新します。ただし、すでに `ESCALATED_TO_LEAN` になっている atom は否認できません。否認した atom は `heal` や `migrate-suggest` を再実行するか、仕様・実装を修正してから再度監査する必要があります。
+- `escalate_to_lean(atom_name)` — 事前に `get_review_queue` を呼び出して active tracker を設定する必要があります。`mumei verify --escalate-lean` を実行し、指定 atom を `ESCALATED_TO_LEAN` に更新します。ただし、すでに `APPROVED` または `REJECTED` になっている atom は escalate できません。
 
 ```json
 {
