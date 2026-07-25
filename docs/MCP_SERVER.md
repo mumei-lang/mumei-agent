@@ -56,7 +56,7 @@ Exported tools:
 
 | Tool | Description |
 |---|---|
-| `approve_review(atom_name, reviewer, notes)` | Record human approval for one atom in the active review queue |
+| `approve_review(atom_name, reviewer, notes)` | Record human approval for one atom in the active review queue; fails if the atom is `REJECTED` or `ESCALATED_TO_LEAN` |
 | `async_send_latent_message(message, context='{}', verify=true)` | Asynchronously send a single latent message through one protocol instance |
 | `audit_code(source_code, language, domain_hint='')` | Audit existing code: extract spec, verify contracts, detect cross-validation gaps |
 | `check_cross_spec_consistency(spec_files)` | Run cross-spec verification for a JSON array or comma-separated list of `.mm` files and return cross-validation evidence |
@@ -68,7 +68,7 @@ Exported tools:
 | `extract_spec_from_code(code_file, language='', domain_hint='', generate=false, mumei_repo='')` | Extract natural-language specification from existing code (Layer A) |
 | `forge_task(task_json, mumei_repo, dry_run=true)` | Run a single forge spec (drop-in `MumeiForge.forge_one`) |
 | `get_agent_status()` | Report LLM provider, mumei binary, available subcommands, and registered MCP tools |
-| `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` |
+| `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
 | `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
 | `heal_file(source_code='', error_report='', code_file='')` | Self-heal a `.mm` source via the existing fix-strategy pipeline |

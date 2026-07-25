@@ -868,8 +868,8 @@ def get_review_queue(mumei_repo: str) -> str:
     """Return the human review queue emitted by ``mumei verify``.
 
     Sets the active tracker for subsequent ``approve_review`` /
-    ``escalate_to_lean`` calls.  Calling again with a different
-    *mumei_repo* replaces the active tracker.
+    ``reject_review`` / ``escalate_to_lean`` calls.  Calling again
+    with a different *mumei_repo* replaces the active tracker.
     """
     global _active_human_review_tracker
     try:
@@ -892,7 +892,11 @@ def get_review_queue(mumei_repo: str) -> str:
 
 @mcp.tool()
 def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
-    """Record human approval for one atom in the active review queue."""
+    """Record human approval for one atom in the active review queue.
+
+    Fails if the atom is already ``REJECTED`` or ``ESCALATED_TO_LEAN``;
+    repair and re-audit the atom before approving.
+    """
     try:
         tracker = _human_review_tracker()
         entry = tracker.approve_review(atom_name, reviewer, notes)
