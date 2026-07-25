@@ -64,6 +64,38 @@ def test_mcp_human_review_actions_require_active_tracker() -> None:
     assert "no active human review queue" in escalate_result["error"]
 
 
+def test_mcp_get_review_queue_refuses_missing_repo(tmp_path: Path) -> None:
+    missing_repo = tmp_path / "does_not_exist"
+    result = _payload(mcp_server.get_review_queue(str(missing_repo)))
+    assert result["status"] == "error"
+    assert "not an existing directory" in result["error"]
+    assert mcp_server._active_human_review_tracker is None
+
+
+def test_mcp_get_review_queue_refuses_file_path(tmp_path: Path) -> None:
+    file_path = tmp_path / "not_a_dir"
+    file_path.write_text("not a repo", encoding="utf-8")
+    result = _payload(mcp_server.get_review_queue(str(file_path)))
+    assert result["status"] == "error"
+    assert "not an existing directory" in result["error"]
+    assert mcp_server._active_human_review_tracker is None
+
+
+def test_mcp_get_review_queue_expands_tilde_path(tmp_path: Path, monkeypatch) -> None:
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    repo = home_dir / "mumei"
+    repo.mkdir()
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    result = _payload(mcp_server.get_review_queue("~/mumei"))
+    assert result["status"] == "ok"
+    assert result["count"] == 2
+    assert mcp_server._active_human_review_tracker is not None
+
+
 def test_human_review_tracker_approves_and_persists_review(tmp_path: Path) -> None:
     repo = tmp_path / "mumei"
     repo.mkdir()
