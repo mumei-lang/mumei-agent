@@ -31,7 +31,7 @@ The cross-project reference demo is `mumei-demo/scenarios/no_mm_audit` (Phase 7 
 ```mermaid
 flowchart TD
     input["Existing code only"] --> entry["audit --code-file ...<br/>MCP scan_and_fix"]
-    entry --> classify["Classify findings<br/>spec_health_issues<br/>verification_violations<br/>cross_validation_gaps<br/>next_steps"]
+    entry --> classify["Classify findings<br/>spec_health_issues<br/>verification_violations<br/>verification_status<br/>cross_validation_gaps<br/>next_steps"]
     classify --> clean["No findings"]
     clean --> done["Done: no .mm migration required"]
     classify --> findings["Findings require migration or review"]
