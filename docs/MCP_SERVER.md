@@ -75,7 +75,7 @@ Exported tools:
 | `list_forge_log(log_path='forge_log.json')` | Read `forge_log.json` |
 | `measure_std_health(mumei_repo)` | Delegate to `agent.std_health.measure_health` |
 | `propose_forge_tasks(mumei_repo, max_proposals=3)` | MCP-accessible `uv run mumei-agent propose --auto` |
-| `reject_review(atom_name, reviewer, notes)` | Record human rejection for one atom in the active review queue |
+| `reject_review(atom_name, reviewer, notes)` | Record human rejection for one atom in the active review queue; fails if the atom is `ESCALATED_TO_LEAN` |
 | `run_nlae_pipeline(spec, mumei_lean_repo='', work_dir='', no_build=false)` | Run the P9-G NLAE pipeline: generate `.mm`, verify with `--emit loss-vector`, self-correct, then call the Lean Fidelity Checker |
 | `scan_and_fix(code_file, language, spec='', auto_heal=false, heal_output_dir='', domain_hint='', output_format='json')` | Same contract as `audit --code-file ... --auto-migrate --auto-heal`: audit a file/directory, return `cross_validation_gaps`, emit `migration_hints`, optionally self-heal |
 | `self_correct(code_file, max_iterations=10)` | Run the P9-F Loss Vector self-correction loop for a `.mm` file |

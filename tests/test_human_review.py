@@ -76,6 +76,28 @@ def test_human_review_tracker_rejects_and_persists_review(tmp_path: Path) -> Non
     assert saved["review_history"][0]["status"] == ReviewStatus.REJECTED.value
 
 
+def test_human_review_tracker_reject_fails_on_escalated(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "mumei"
+    (repo / "specs").mkdir(parents=True)
+    _write_queue(repo)
+    tracker = HumanReviewTracker.from_repo(repo)
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="Lean escalation bundle written\n",
+        stderr="",
+    )
+    with patch("agent.human_review.subprocess.run", return_value=completed):
+        tracker.escalate_to_lean("trusted_transfer")
+    with pytest.raises(ValueError, match="cannot reject atom 'trusted_transfer'"):
+        tracker.reject_review("trusted_transfer", "akira", "should fail")
+
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
+
+
 def test_human_review_tracker_approve_fails_on_rejected_or_escalated(
     tmp_path: Path,
 ) -> None:
@@ -194,6 +216,31 @@ def test_mcp_approve_review_refuses_escalated_atom(tmp_path: Path) -> None:
 
     assert result["status"] == "error"
     assert "cannot approve atom" in result["error"]
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
+
+
+def test_mcp_reject_review_refuses_escalated_atom(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    (repo / "specs").mkdir(parents=True)
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    mcp_server.get_review_queue(str(repo))
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="Lean escalation bundle written\n",
+        stderr="",
+    )
+    with patch("agent.human_review.subprocess.run", return_value=completed):
+        mcp_server.escalate_to_lean("trusted_transfer")
+    result = _payload(
+        mcp_server.reject_review("trusted_transfer", "akira", "should fail")
+    )
+
+    assert result["status"] == "error"
+    assert "cannot reject atom" in result["error"]
     saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
     assert saved["atoms"][0]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
 
