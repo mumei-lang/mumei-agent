@@ -876,7 +876,7 @@ def get_review_queue(mumei_repo: str) -> str:
     with a different *mumei_repo* replaces the active tracker.
     """
     global _active_human_review_tracker
-    repo = Path(mumei_repo)
+    repo = Path(mumei_repo).expanduser()
     if not repo.is_dir():
         return _err(f"mumei_repo is not an existing directory: {mumei_repo}")
     try:
