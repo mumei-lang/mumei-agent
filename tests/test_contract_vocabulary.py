@@ -150,3 +150,34 @@ def test_scan_and_fix_docstring_uses_fixed_audit_keys_without_alias_keys() -> No
                 )
                 break
     assert failures == [], failures
+
+
+@_needs_agent
+def test_mcp_server_doc_table_matches_registered_tools() -> None:
+    """docs/MCP_SERVER.md tool table must list exactly the registered MCP tools."""
+    from agent import mcp_server
+
+    mcp_server_doc = REPO_ROOT / "docs" / "MCP_SERVER.md"
+    text = mcp_server_doc.read_text(encoding="utf-8")
+    table_match = re.search(
+        r"Exported tools:\n\n\| Tool \| Description \|\n\|[-—]+\|[-—]+\|\n(.*?)(?:\n\n|\Z)",
+        text,
+        re.DOTALL,
+    )
+    assert table_match, "Could not find MCP tools table in docs/MCP_SERVER.md"
+    table_body = table_match.group(1)
+    doc_tool_names = set(re.findall(r"^\|\s*`(\w+)\s*\(", table_body, re.MULTILINE))
+    registered_names = set(mcp_server.mcp._tool_manager._tools.keys())
+
+    missing_in_docs = registered_names - doc_tool_names
+    missing_in_code = doc_tool_names - registered_names
+    failures: list[str] = []
+    if missing_in_docs:
+        failures.append(
+            f"registered MCP tools missing from docs/MCP_SERVER.md: {sorted(missing_in_docs)}"
+        )
+    if missing_in_code:
+        failures.append(
+            f"docs/MCP_SERVER.md mentions tools not registered: {sorted(missing_in_code)}"
+        )
+    assert failures == [], "; ".join(failures)
