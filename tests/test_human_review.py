@@ -333,3 +333,35 @@ def test_mcp_escalate_to_lean_marks_atom_escalated(tmp_path: Path) -> None:
     assert "--escalate-lean" in command
     assert "--emit" in command
     assert "escalation-bundle" in command
+
+
+def test_mcp_get_review_queue_switches_active_tracker(tmp_path: Path) -> None:
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    _write_queue(repo_a)
+    _write_queue(repo_b)
+    mcp_server._active_human_review_tracker = None
+
+    queue_a = _payload(mcp_server.get_review_queue(str(repo_a)))
+    assert queue_a["status"] == "ok"
+    assert queue_a["count"] == 2
+
+    approve_a = _payload(
+        mcp_server.approve_review("trusted_transfer", "akira", "approved in A")
+    )
+    assert approve_a["status"] == "ok"
+
+    queue_b = _payload(mcp_server.get_review_queue(str(repo_b)))
+    assert queue_b["status"] == "ok"
+
+    approve_b = _payload(
+        mcp_server.approve_review("trusted_transfer", "akira", "approved in B")
+    )
+    assert approve_b["status"] == "ok"
+
+    saved_a = json.loads((repo_a / "human_review_queue.json").read_text(encoding="utf-8"))
+    saved_b = json.loads((repo_b / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved_a["atoms"][0]["status"] == ReviewStatus.APPROVED.value
+    assert saved_b["atoms"][0]["status"] == ReviewStatus.APPROVED.value
