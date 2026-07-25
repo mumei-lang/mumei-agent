@@ -408,3 +408,20 @@ def test_mcp_get_review_queue_switches_active_tracker(tmp_path: Path) -> None:
     saved_b = json.loads((repo_b / "human_review_queue.json").read_text(encoding="utf-8"))
     assert saved_a["atoms"][0]["status"] == ReviewStatus.APPROVED.value
     assert saved_b["atoms"][0]["status"] == ReviewStatus.APPROVED.value
+
+
+def test_mcp_approve_review_refuses_unknown_atom(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    repo.mkdir()
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    mcp_server.get_review_queue(str(repo))
+    result = _payload(
+        mcp_server.approve_review("unknown_atom", "akira", "should fail")
+    )
+
+    assert result["status"] == "error"
+    assert "atom not found" in result["error"]
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert all(a.get("status", ReviewStatus.PENDING.value) == ReviewStatus.PENDING.value for a in saved["atoms"])
