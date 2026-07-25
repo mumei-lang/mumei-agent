@@ -181,3 +181,23 @@ def test_mcp_server_doc_table_matches_registered_tools() -> None:
             f"docs/MCP_SERVER.md mentions tools not registered: {sorted(missing_in_code)}"
         )
     assert failures == [], "; ".join(failures)
+
+
+@_needs_agent
+def test_mcp_tool_docstrings_do_not_use_forbidden_aliases() -> None:
+    """All @mcp.tool() docstrings must avoid forbidden contract vocabulary aliases."""
+    from agent import mcp_server
+
+    failures: list[str] = []
+    for tool_name, tool in mcp_server.mcp._tool_manager._tools.items():
+        docstring = tool.fn.__doc__ or ""
+        for alias in FORBIDDEN_ALIASES:
+            for pattern in _alias_key_patterns(alias):
+                match = pattern.search(docstring)
+                if match:
+                    line = docstring[: match.start()].count("\n") + 1
+                    failures.append(
+                        f"{tool_name} docstring line {line} uses forbidden alias `{alias}`"
+                    )
+                    break
+    assert failures == [], "; ".join(failures)
