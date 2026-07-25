@@ -92,8 +92,16 @@ def test_human_review_tracker_approve_fails_on_rejected_or_escalated(
     assert saved["atoms"][0]["status"] == ReviewStatus.REJECTED.value
 
     _write_queue(repo)
+    (repo / "specs").mkdir(parents=True)
     tracker = HumanReviewTracker.from_repo(repo)
-    tracker.escalate_to_lean("trusted_transfer")
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="Lean escalation bundle written\n",
+        stderr="",
+    )
+    with patch("agent.human_review.subprocess.run", return_value=completed):
+        tracker.escalate_to_lean("trusted_transfer")
     with pytest.raises(ValueError, match="cannot approve atom 'trusted_transfer'"):
         tracker.approve_review("trusted_transfer", "akira", "should fail")
 
