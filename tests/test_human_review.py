@@ -171,3 +171,28 @@ def test_mcp_approve_review_refuses_rejected_atom(tmp_path: Path) -> None:
     assert "cannot approve atom" in result["error"]
     saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
     assert saved["atoms"][0]["status"] == ReviewStatus.REJECTED.value
+
+
+def test_mcp_approve_review_refuses_escalated_atom(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    (repo / "specs").mkdir(parents=True)
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    mcp_server.get_review_queue(str(repo))
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout="Lean escalation bundle written\n",
+        stderr="",
+    )
+    with patch("agent.human_review.subprocess.run", return_value=completed):
+        mcp_server.escalate_to_lean("trusted_transfer")
+    result = _payload(
+        mcp_server.approve_review("trusted_transfer", "akira", "should fail")
+    )
+
+    assert result["status"] == "error"
+    assert "cannot approve atom" in result["error"]
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.ESCALATED_TO_LEAN.value
