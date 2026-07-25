@@ -867,9 +867,11 @@ def list_forge_log(log_path: str = "forge_log.json") -> str:
 def get_review_queue(mumei_repo: str) -> str:
     """Return the human review queue emitted by ``mumei verify``.
 
-    ``mumei_repo`` must be an existing directory. This guard prevents
-    ``get_review_queue`` from creating stray directories or files when
-    given a non-existent path.
+    ``mumei_repo`` must be an existing directory and contain a
+    ``human_review_queue.json`` file produced by ``mumei verify``.
+    This guard prevents ``get_review_queue`` from creating stray
+    directories or files when given a non-existent path and from
+    operating on a repository that has not generated a review queue.
 
     Sets the active tracker for subsequent ``approve_review`` /
     ``reject_review`` / ``escalate_to_lean`` calls.  Calling again
@@ -883,6 +885,12 @@ def get_review_queue(mumei_repo: str) -> str:
         from agent.human_review import HumanReviewTracker
 
         tracker = HumanReviewTracker.from_repo(mumei_repo)
+        if not tracker.queue_path.exists():
+            return _err(
+                f"human review queue not found at {tracker.queue_path}; "
+                f"run `mumei verify` first",
+                mumei_repo=mumei_repo,
+            )
         queue = tracker.load()
     except Exception as exc:
         return _err(f"failed to load human review queue: {exc}", mumei_repo=mumei_repo)

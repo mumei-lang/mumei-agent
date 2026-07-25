@@ -81,6 +81,17 @@ def test_mcp_get_review_queue_refuses_file_path(tmp_path: Path) -> None:
     assert mcp_server._active_human_review_tracker is None
 
 
+def test_mcp_get_review_queue_refuses_missing_queue_file(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    repo.mkdir()
+    mcp_server._active_human_review_tracker = None
+
+    result = _payload(mcp_server.get_review_queue(str(repo)))
+    assert result["status"] == "error"
+    assert "human review queue not found" in result["error"]
+    assert mcp_server._active_human_review_tracker is None
+
+
 def test_mcp_get_review_queue_expands_tilde_path(tmp_path: Path, monkeypatch) -> None:
     home_dir = tmp_path / "home"
     home_dir.mkdir()
