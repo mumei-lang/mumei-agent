@@ -271,8 +271,8 @@ feedback として返す。
 
 ### P14-B: 他言語コードの論理的健全性検証 ✅ Implemented
 
-既存 Python/Rust/TypeScript/Go コードを `.mm` なしで監査し、問題箇所だけ migration hints
-へ送る。V1-B の新規スコープとして、Python 以外の no-`.mm` 入口を Rust / TypeScript / Go まで拡張し、固定語彙と `audit -> migrate-suggest -> heal` の順序は変更しない。
+既存 Python/Rust/TypeScript/Go/Solidity コードを `.mm` なしで監査し、問題箇所だけ migration hints
+へ送る。V1-B の新規スコープとして、Python 以外の no-`.mm` 入口を Rust / TypeScript / Go / Solidity まで拡張し、固定語彙と `audit -> migrate-suggest -> heal` の順序は変更しない。
 
 **実装タスク**:
 
