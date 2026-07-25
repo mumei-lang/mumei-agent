@@ -136,3 +136,21 @@ def test_mcp_review_tools_load_and_approve_active_queue(tmp_path: Path) -> None:
     assert approve_result["atom"]["status"] == ReviewStatus.APPROVED.value
     assert reject_result["status"] == "ok"
     assert reject_result["atom"]["status"] == ReviewStatus.REJECTED.value
+
+
+def test_mcp_approve_review_refuses_rejected_atom(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    repo.mkdir()
+    _write_queue(repo)
+    mcp_server._active_human_review_tracker = None
+
+    mcp_server.get_review_queue(str(repo))
+    mcp_server.reject_review("trusted_transfer", "akira", "rejected")
+    result = _payload(
+        mcp_server.approve_review("trusted_transfer", "akira", "should fail")
+    )
+
+    assert result["status"] == "error"
+    assert "cannot approve atom" in result["error"]
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.REJECTED.value
