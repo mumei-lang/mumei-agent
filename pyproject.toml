@@ -52,6 +52,7 @@ test = [
     # MCP suite (tests/test_mcp_*) imports the SDK at module import
     # time, so the test extra pulls it in transitively.
     "mcp[cli]>=1.0",
+    "pyyaml>=6.0",
 ]
 
 [tool.setuptools.packages.find]
