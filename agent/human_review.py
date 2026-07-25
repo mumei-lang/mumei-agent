@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -73,10 +76,23 @@ class HumanReviewTracker:
         if not self.data:
             self.load()
         self.queue_path.parent.mkdir(parents=True, exist_ok=True)
-        self.queue_path.write_text(
-            json.dumps(self.data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        content = json.dumps(self.data, indent=2, ensure_ascii=False) + "\n"
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.queue_path.parent,
+            prefix=f".{self.queue_path.name}.tmp",
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            target_mode = 0o644
+            if self.queue_path.exists():
+                target_mode = stat.S_IMODE(self.queue_path.stat().st_mode)
+            os.chmod(tmp_path, target_mode)
+            os.replace(tmp_path, self.queue_path)
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                Path(tmp_path).unlink()
+            raise
 
     def atoms(self) -> list[JsonDict]:
         if not self.data:

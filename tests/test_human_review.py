@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -457,3 +458,20 @@ def test_mcp_escalate_to_lean_refuses_unknown_atom(tmp_path: Path) -> None:
     assert "atom not found" in result["error"]
     saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
     assert all(a.get("status", ReviewStatus.PENDING.value) == ReviewStatus.PENDING.value for a in saved["atoms"])
+
+
+def test_tracker_save_is_atomic_and_leaves_no_temp_files(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    repo.mkdir()
+    path = _write_queue(repo)
+    path.chmod(0o640)
+    original_mode = stat.S_IMODE(path.stat().st_mode)
+    tracker = HumanReviewTracker.from_repo(repo)
+    tracker.load()
+    tracker.approve_review("trusted_transfer", "akira", "approved")
+
+    assert path.exists()
+    assert not any(p.name.startswith(".human_review_queue.json.tmp") for p in repo.iterdir())
+    assert stat.S_IMODE(path.stat().st_mode) == original_mode
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["status"] == ReviewStatus.APPROVED.value
