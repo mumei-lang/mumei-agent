@@ -54,6 +54,26 @@ def test_human_review_tracker_approves_and_persists_review(tmp_path: Path) -> No
     assert saved["review_history"][0]["atom_name"] == "trusted_transfer"
 
 
+def test_human_review_tracker_rejects_and_persists_review(tmp_path: Path) -> None:
+    repo = tmp_path / "mumei"
+    repo.mkdir()
+    _write_queue(repo)
+    tracker = HumanReviewTracker.from_repo(repo)
+
+    entry = tracker.reject_review(
+        "trusted_transfer",
+        "akira",
+        "contract rejected: boundary condition unclear",
+    )
+
+    assert entry["status"] == ReviewStatus.REJECTED.value
+    saved = json.loads((repo / "human_review_queue.json").read_text(encoding="utf-8"))
+    assert saved["atoms"][0]["reviewer"] == "akira"
+    assert saved["atoms"][0]["notes"] == "contract rejected: boundary condition unclear"
+    assert saved["review_history"][0]["atom_name"] == "trusted_transfer"
+    assert saved["review_history"][0]["status"] == ReviewStatus.REJECTED.value
+
+
 def test_human_review_tracker_escalates_to_lean(tmp_path: Path) -> None:
     repo = tmp_path / "mumei"
     (repo / "specs").mkdir(parents=True)
