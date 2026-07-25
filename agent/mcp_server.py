@@ -894,11 +894,12 @@ def get_review_queue(mumei_repo: str) -> str:
 def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
     """Record human approval for one atom in the active review queue.
 
-    Fails if the atom is already ``REJECTED`` or ``ESCALATED_TO_LEAN``;
-    repair and re-audit the atom before approving.
+    Requires ``get_review_queue`` to have been called first to set the active
+    review tracker. Fails if the atom is already ``REJECTED`` or
+    ``ESCALATED_TO_LEAN``; repair and re-audit the atom before approving.
     """
     try:
-        tracker = _human_review_tracker()
+        tracker = _require_active_human_review_tracker()
         entry = tracker.approve_review(atom_name, reviewer, notes)
     except Exception as exc:
         return _err(f"failed to approve review: {exc}", atom_name=atom_name)
@@ -908,10 +909,11 @@ def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
 def escalate_to_lean(atom_name: str) -> str:
     """Run ``mumei verify --escalate-lean`` and mark an atom as escalated.
 
-    Fails if the atom is already ``APPROVED`` or ``REJECTED``.
+    Requires ``get_review_queue`` to have been called first to set the active
+    review tracker. Fails if the atom is already ``APPROVED`` or ``REJECTED``.
     """
     try:
-        tracker = _human_review_tracker()
+        tracker = _require_active_human_review_tracker()
         entry = tracker.escalate_to_lean(atom_name)
     except Exception as exc:
         return _err(f"failed to escalate atom to Lean: {exc}", atom_name=atom_name)
@@ -922,12 +924,13 @@ def escalate_to_lean(atom_name: str) -> str:
 def reject_review(atom_name: str, reviewer: str, notes: str) -> str:
     """Record human rejection for one atom in the active review queue.
 
-    Fails if the atom is `ESCALATED_TO_LEAN`; once an atom is escalated to
-    Lean, the result must come back from the Lean bridge before human review
-    can finalize it.
+    Requires ``get_review_queue`` to have been called first to set the active
+    review tracker. Fails if the atom is `ESCALATED_TO_LEAN`; once an atom is
+    escalated to Lean, the result must come back from the Lean bridge before
+    human review can finalize it.
     """
     try:
-        tracker = _human_review_tracker()
+        tracker = _require_active_human_review_tracker()
         entry = tracker.reject_review(atom_name, reviewer, notes)
     except Exception as exc:
         return _err(f"failed to reject review: {exc}", atom_name=atom_name)
@@ -941,6 +944,17 @@ def _human_review_tracker():
 
     _active_human_review_tracker = HumanReviewTracker.default()
     _active_human_review_tracker.load()
+    return _active_human_review_tracker
+
+
+def _require_active_human_review_tracker():
+    """Return the active human review tracker, or raise if unset.
+
+    ``approve_review``, ``reject_review``, and ``escalate_to_lean`` must only
+    operate on the queue loaded by ``get_review_queue``.
+    """
+    if _active_human_review_tracker is None:
+        raise RuntimeError("no active human review queue; call get_review_queue first")
     return _active_human_review_tracker
 
 @mcp.tool()
