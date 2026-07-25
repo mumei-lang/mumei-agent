@@ -567,6 +567,24 @@ uv run mumei-agent mcp-server
 - `audit.healed_files[]` / `audit.heal_errors[]`: `auto_heal=true` の結果。
 - `spec_alignment`: `spec` を渡した単一ファイル監査時の `validate-spec-to-code` 結果。
 
+#### human-review MCP tools
+
+`audit` や `scan_and_fix` の `next_steps` に人間レビューが必要と示された場合、MCP サーバー経由でキューを確認・承認・否認できます。これらは `agent/human_review.py` の `HumanReviewQueue` と連動し、レビュー結果は `human_review_queue.json` に永続化されます。
+
+- `get_review_queue(mumei_repo)` — 保留中のレビュー項目を取得します。
+- `approve_review(atom_name, reviewer, notes)` — 指定 atom を承認し、`REJECTED`/`ESCALATED_TO_LEAN` 以外のステータスを `APPROVED` に更新します。
+- `reject_review(atom_name, reviewer, notes)` — 指定 atom を否認し、`REJECTED` に更新します。否認した atom は `heal` や `migrate-suggest` を再実行するか、仕様・実装を修正してから再度監査する必要があります。
+
+```json
+{
+  "atom_name": "trusted_transfer",
+  "reviewer": "akira",
+  "notes": "FFI boundary conditions reviewed, approved"
+}
+```
+
+これらは `audit` の `next_steps` に含まれる `human review` アクションに対応する MCP 操作です。`approve_review` または `reject_review` 後、必要に応じて `scan_and_fix` / `heal` を再実行してください。
+
 ### 5-4. 診断出力の読み方
 
 `mumei verify` の出力はバイリンガル（EN/JP）:
