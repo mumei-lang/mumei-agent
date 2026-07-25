@@ -90,6 +90,7 @@ permissions:
 jobs:
   forge:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
       # Scheduled runs have no workflow_dispatch inputs, so default to the
       # fully self-contained ollama-local profile with the CPU-friendly
