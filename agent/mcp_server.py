@@ -920,7 +920,12 @@ def escalate_to_lean(atom_name: str) -> str:
 
 @mcp.tool()
 def reject_review(atom_name: str, reviewer: str, notes: str) -> str:
-    """Record human rejection for one atom in the active review queue."""
+    """Record human rejection for one atom in the active review queue.
+
+    Fails if the atom is `ESCALATED_TO_LEAN`; once an atom is escalated to
+    Lean, the result must come back from the Lean bridge before human review
+    can finalize it.
+    """
     try:
         tracker = _human_review_tracker()
         entry = tracker.reject_review(atom_name, reviewer, notes)
