@@ -178,6 +178,13 @@ def load_benchmark_feedback(
         return None
     try:
         return BenchmarkFeedback.load(path)
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        json.JSONDecodeError,
+    ):
         logger.warning("Ignoring unusable benchmark feedback at %s", path, exc_info=True)
         return None

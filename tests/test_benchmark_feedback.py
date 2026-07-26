@@ -11,6 +11,7 @@ from agent.benchmark_feedback import (
     BenchmarkFeedback,
     load_benchmark_feedback,
 )
+from agent.proliferate_cache import _spec_cache_key
 
 
 def _payload() -> dict:
@@ -76,6 +77,11 @@ def test_load_benchmark_feedback_degrades_to_none(tmp_path: Path):
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
     assert load_benchmark_feedback(broken) is None
+    # Valid JSON that is not an object must degrade too, not raise.
+    for text in ("[]", '"nope"', "7", "null"):
+        non_object = tmp_path / "non-object.json"
+        non_object.write_text(text, encoding="utf-8")
+        assert load_benchmark_feedback(non_object) is None
 
 
 def test_bias_for_matches_longest_domain_prefix(tmp_path: Path):
@@ -138,3 +144,16 @@ def test_apply_to_specs_biases_priority_and_reorders(tmp_path: Path):
     assert ordered[0]["priority"] == 2 - 13
     assert ordered[1]["priority"] == 1
     assert ordered[0]["benchmark_feedback"]["domain"] == "std/math"
+
+
+def test_bias_does_not_invalidate_the_forge_result_cache(tmp_path: Path):
+    """Ordering-only metadata must not change the spec cache key."""
+    feedback = BenchmarkFeedback.load(_write(tmp_path, _payload()))
+    spec = {"target_file": "std/math/patterns.mm", "priority": 2, "atoms": ["a"]}
+    before = _spec_cache_key(spec, tmp_path)
+
+    [biased] = feedback.apply_to_specs([spec])
+
+    assert biased["priority"] != 2
+    assert "benchmark_feedback" in biased
+    assert _spec_cache_key(biased, tmp_path) == before
