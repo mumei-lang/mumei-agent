@@ -1,6 +1,7 @@
 """Tests for per-file timeout supervision of dogfood corpus audits."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
@@ -44,12 +45,43 @@ def test_inline_assembly_is_detected(tmp_path: Path) -> None:
     assert source_risk_markers(path) == ["inline_assembly"]
 
 
-def test_complex_generics_are_detected(tmp_path: Path) -> None:
+def test_nested_generics_are_detected(tmp_path: Path) -> None:
     path = tmp_path / "generic.rs"
     path.write_text(
         "pub fn f<T>(v: Vec<Option<T>>) -> usize { v.len() }\n", encoding="utf-8"
     )
     assert source_risk_markers(path) == ["complex_generics"]
+
+
+def test_repeated_declaration_site_generics_are_detected(tmp_path: Path) -> None:
+    path = tmp_path / "impls.rs"
+    path.write_text(
+        "impl<T> Pointer for *const T {\n    fn as_usize(self) -> usize { 0 }\n}\n"
+        "impl<T> Pointer for *mut T {\n    fn as_usize(self) -> usize { 0 }\n}\n",
+        encoding="utf-8",
+    )
+    assert source_risk_markers(path) == ["complex_generics"]
+
+
+def test_go_square_bracket_generics_are_detected(tmp_path: Path) -> None:
+    """Go writes type parameters as `[T Ordered]`, not `<T>`."""
+    path = tmp_path / "cmp.go"
+    path.write_text(
+        "func Less[T Ordered](x, y T) bool { return x < y }\n"
+        "func Compare[T Ordered](x, y T) int { return 0 }\n",
+        encoding="utf-8",
+    )
+    assert source_risk_markers(path) == ["complex_generics"]
+
+
+def test_array_indexing_is_not_mistaken_for_go_generics(tmp_path: Path) -> None:
+    path = tmp_path / "index.go"
+    path.write_text(
+        "func first(xs []int) int { return xs[0] }\n"
+        "func second(xs []int) int { return xs[1] }\n",
+        encoding="utf-8",
+    )
+    assert source_risk_markers(path) == []
 
 
 def test_plain_source_has_no_markers(tmp_path: Path) -> None:
@@ -62,14 +94,20 @@ def test_missing_file_has_no_markers(tmp_path: Path) -> None:
     assert source_risk_markers(tmp_path / "nope.rs") == []
 
 
-def test_pinned_corpus_covers_every_risk_shape() -> None:
-    """The corpus must keep exercising all three timeout-risk shapes."""
+def test_pinned_corpus_risk_shapes_match_the_manifest() -> None:
+    """Every declared `risk_shape` must be one the detector actually reports."""
     corpus = Path(__file__).parent / "corpora" / "oss"
-    detected: set[str] = set()
-    for path in corpus.rglob("*"):
-        if path.is_file() and path.suffix.lower() in {".py", ".rs", ".go", ".sol", ".ts"}:
-            detected.update(source_risk_markers(path))
-    assert {"inline_assembly", "complex_generics"} <= detected
+    manifest = json.loads((corpus / "MANIFEST.json").read_text(encoding="utf-8"))
+    declared = {
+        entry["path"]: entry["risk_shape"]
+        for entry in manifest["entries"]
+        if "risk_shape" in entry
+    }
+    assert declared, "the corpus should pin at least one risk shape"
+    for relative_path, shape in declared.items():
+        markers = source_risk_markers(corpus / relative_path)
+        assert shape in markers, f"{relative_path} declares {shape} but reports {markers}"
+    assert {"inline_assembly", "complex_generics"} <= set(declared.values())
 
 
 def test_timeout_stays_inside_the_existing_verdict_vocabulary(tmp_path: Path) -> None:

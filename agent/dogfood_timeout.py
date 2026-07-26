@@ -34,7 +34,16 @@ _INLINE_ASSEMBLY = re.compile(
     r"|\basm!\s*\(|\bllvm_asm!\s*\(|\bglobal_asm!\s*\("  # rust
     r"|\b__asm__\b|\basm\s+volatile\b"  # c/c++
 )
-_GENERIC_PARAMS = re.compile(r"[A-Za-z_][\w.]*<[^<>]*<")
+_NESTED_GENERIC_PARAMS = re.compile(r"[A-Za-z_][\w.]*<[^<>]*<")
+#: Declaration-site type parameters: angle brackets (rust / typescript / solidity)
+#: and Go's square-bracket type parameter lists, which always name a constraint.
+_DECLARED_TYPE_PARAMS = re.compile(
+    r"\b(?:fn|impl|struct|trait|enum|class|interface|type)\s*<[^<>()]+>"
+    r"|\b(?:func|type)\s+\w+\[\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s+[^\]]+\]"
+)
+#: Two or more generic declarations, or one nested instantiation, is enough to
+#: make extraction walk a non-trivial type graph.
+DECLARED_TYPE_PARAM_SITES = 2
 _WHERE_CLAUSE = re.compile(r"^\s*where\b")
 
 
@@ -73,9 +82,11 @@ def source_risk_markers(path: Path) -> list[str]:
         markers.append("large_function")
     if _INLINE_ASSEMBLY.search(text):
         markers.append("inline_assembly")
-    if _GENERIC_PARAMS.search(text) or sum(
-        1 for line in lines if _WHERE_CLAUSE.search(line)
-    ) >= 3:
+    if (
+        _NESTED_GENERIC_PARAMS.search(text)
+        or len(_DECLARED_TYPE_PARAMS.findall(text)) >= DECLARED_TYPE_PARAM_SITES
+        or sum(1 for line in lines if _WHERE_CLAUSE.search(line)) >= 3
+    ):
         markers.append("complex_generics")
     return markers
 
