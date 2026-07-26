@@ -1,0 +1,95 @@
+{
+  "description": "Pinned real-OSS dogfood corpus for deterministic foreign-code extraction (use_llm=False). Every entry is an unmodified upstream file fetched at the pinned commit; provenance and license are recorded here instead of editing the vendored sources.",
+  "entries": [
+    {
+      "path": "python/requests_hooks.py",
+      "language": "python",
+      "upstream": "https://github.com/psf/requests",
+      "ref": "v2.32.3",
+      "commit": "0e322af87745eff34caffe4df68456ebc20d9068",
+      "source_path": "src/requests/hooks.py",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "python/packaging_utils.py",
+      "language": "python",
+      "upstream": "https://github.com/pypa/packaging",
+      "ref": "24.1",
+      "commit": "85442b8032cb7bae72866dfd7782234a98dd2fb7",
+      "source_path": "src/packaging/utils.py",
+      "license": "Apache-2.0 OR BSD-2-Clause"
+    },
+    {
+      "path": "rust/memchr_cow.rs",
+      "language": "rust",
+      "upstream": "https://github.com/BurntSushi/memchr",
+      "ref": "2.7.4",
+      "commit": "8ad339524d857a2dd9e7231b497ed92aa0f5c334",
+      "source_path": "src/cow.rs",
+      "license": "Unlicense OR MIT"
+    },
+    {
+      "path": "rust/ripgrep_complete_fish.rs",
+      "language": "rust",
+      "upstream": "https://github.com/BurntSushi/ripgrep",
+      "ref": "14.1.0",
+      "commit": "e50df40a1967708b9781486b1c017e48040bceb0",
+      "source_path": "crates/core/flags/complete/fish.rs",
+      "license": "Unlicense OR MIT"
+    },
+    {
+      "path": "typescript/vscode_numbers.ts",
+      "language": "typescript",
+      "upstream": "https://github.com/microsoft/vscode",
+      "ref": "1.91.1",
+      "commit": "f1e16e1e6214d7c44d078b1f0607b2388f29d729",
+      "source_path": "src/vs/base/common/numbers.ts",
+      "license": "MIT"
+    },
+    {
+      "path": "typescript/vscode_uuid.ts",
+      "language": "typescript",
+      "upstream": "https://github.com/microsoft/vscode",
+      "ref": "1.91.1",
+      "commit": "f1e16e1e6214d7c44d078b1f0607b2388f29d729",
+      "source_path": "src/vs/base/common/uuid.ts",
+      "license": "MIT"
+    },
+    {
+      "path": "go/go_math_dim.go",
+      "language": "go",
+      "upstream": "https://github.com/golang/go",
+      "ref": "go1.22.5",
+      "commit": "8e1fdea8316d840fd07e9d6e026048e53290948b",
+      "source_path": "src/math/dim.go",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "path": "go/go_strings_compare.go",
+      "language": "go",
+      "upstream": "https://github.com/golang/go",
+      "ref": "go1.22.5",
+      "commit": "8e1fdea8316d840fd07e9d6e026048e53290948b",
+      "source_path": "src/strings/compare.go",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "path": "solidity/openzeppelin_signed_math.sol",
+      "language": "solidity",
+      "upstream": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+      "ref": "v5.0.2",
+      "commit": "dbb6104ce834628e473d2173bbc9d47f81a9eec3",
+      "source_path": "contracts/utils/math/SignedMath.sol",
+      "license": "MIT"
+    },
+    {
+      "path": "solidity/openzeppelin_address.sol",
+      "language": "solidity",
+      "upstream": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+      "ref": "v5.0.2",
+      "commit": "dbb6104ce834628e473d2173bbc9d47f81a9eec3",
+      "source_path": "contracts/utils/Address.sol",
+      "license": "MIT"
+    }
+  ]
+}

@@ -1,0 +1,222 @@
+name: External Code Dogfood Triage
+
+# Scheduled dogfooding of external code through the audit pipeline, with the
+# results bucketed by the *existing* verdicts (refuted / unverifiable /
+# verified) — no new classifications or aliases.
+#
+# Workflow:
+#   1. Check out mumei-agent (this repo) and mumei (cross-repo) so
+#      `mumei verify` is available to the audit pipeline.
+#   2. Provision the LLM backend. Default is `ollama-local`, which runs an
+#      Ollama server on the runner and needs zero secrets — the audit path
+#      still works without an LLM (deterministic extraction), so this job has
+#      no external dependency in either case.
+#   3. Run `scripts/dogfood_triage_gate.py` over the pinned real-OSS corpus
+#      (`tests/corpora/oss/`) plus any extra directories passed via
+#      `workflow_dispatch`.
+#   4. Publish the verdict buckets to the job summary and upload the JSON /
+#      Markdown reports as artifacts.
+#
+# Only `refuted` files are surfaced for human review, through the existing
+# `next_steps` entrypoint. `unverifiable` files are folded into cause
+# subcategories (`skipped_rate_limited` / `timeout` / `no_function_declarations`
+# / `encoding_gap` / `other`) so they stay out of human attention, and
+# `verified` is kept as an aggregate count.
+#
+# Optional repository secrets (only consumed when llm_profile = remote):
+#   - LLM_API_KEY / LLM_BASE_URL / LLM_MODEL (OPENAI_API_KEY as legacy alias).
+# The scheduled `ollama-local` path requires no secrets.
+
+on:
+  schedule:
+    # Every Wednesday 02:00 UTC (Wednesday 11:00 JST) — offset from the
+    # Monday proliferate run so the two jobs never contend for runners.
+    - cron: '0 2 * * 3'
+  workflow_dispatch:
+    inputs:
+      corpus_paths:
+        description: 'Space-separated directories to audit (default: pinned OSS corpus)'
+        default: 'tests/corpora/oss'
+        type: string
+      llm_profile:
+        description: 'LLM backend profile'
+        default: 'ollama-local'
+        type: choice
+        options:
+          - ollama-local
+          - remote
+      llm_model:
+        description: 'Model tag for the selected profile'
+        default: 'qwen3.5:4b'
+        type: string
+      fail_on_refuted:
+        description: 'Fail the job when any file is refuted'
+        default: false
+        type: boolean
+
+jobs:
+  dogfood-triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      LLM_PROFILE: ${{ github.event.inputs.llm_profile || 'ollama-local' }}
+      LLM_MODEL_SELECTED: ${{ github.event.inputs.llm_model || 'qwen3.5:4b' }}
+      CORPUS_PATHS: ${{ github.event.inputs.corpus_paths || 'tests/corpora/oss' }}
+      FAIL_ON_REFUTED: ${{ github.event.inputs.fail_on_refuted || 'false' }}
+    steps:
+      - name: Check out mumei-agent
+        uses: actions/checkout@v4
+        with:
+          path: mumei-agent
+
+      - name: Check out mumei
+        uses: actions/checkout@v4
+        with:
+          repository: mumei-lang/mumei
+          ref: develop
+          path: mumei
+          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install mumei system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libz3-dev z3 libzstd-dev
+          CODENAME="$(lsb_release -cs)"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] \
+            http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libpolly-17-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            mumei/target
+          key: cargo-mumei-${{ hashFiles('mumei/Cargo.lock') }}
+          restore-keys: |
+            cargo-mumei-
+
+      - name: Build mumei compiler
+        working-directory: mumei
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+        run: |
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      - name: Install agent dependencies
+        working-directory: mumei-agent
+        run: uv sync --extra test --frozen
+
+      - name: Cache ollama models
+        if: env.LLM_PROFILE == 'ollama-local'
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-${{ env.LLM_MODEL_SELECTED }}
+          restore-keys: |
+            ollama-
+
+      - name: Install and start Ollama
+        if: env.LLM_PROFILE == 'ollama-local'
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          OLLAMA_READY=false
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
+              echo "ollama ready after ${i}s"
+              OLLAMA_READY=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$OLLAMA_READY" != "true" ]; then
+            echo "::error::ollama failed to start within 30 seconds"
+            cat /tmp/ollama.log || true
+            exit 1
+          fi
+
+      - name: Pull ollama model
+        if: env.LLM_PROFILE == 'ollama-local'
+        run: |
+          ollama pull "${LLM_MODEL_SELECTED}"
+          ollama list
+
+      - name: Resolve LLM environment
+        id: llm_env
+        env:
+          _LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          _OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          _LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          _LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: |
+          if [ "${LLM_PROFILE}" = "ollama-local" ]; then
+            echo "api_key=ollama" >> "$GITHUB_OUTPUT"
+            echo "base_url=http://localhost:11434/v1" >> "$GITHUB_OUTPUT"
+            echo "model=${LLM_MODEL_SELECTED}" >> "$GITHUB_OUTPUT"
+          else
+            REMOTE_KEY="${_LLM_API_KEY:-${_OPENAI_API_KEY}}"
+            if [ -z "${REMOTE_KEY}" ]; then
+              echo "::error::llm_profile=remote but neither LLM_API_KEY nor OPENAI_API_KEY is set"
+              exit 1
+            fi
+            echo "::add-mask::${REMOTE_KEY}"
+            REMOTE_MODEL="${_LLM_MODEL:-${LLM_MODEL_SELECTED}}"
+            {
+              echo "api_key<<__EOF__"
+              echo "${REMOTE_KEY}"
+              echo "__EOF__"
+              echo "base_url=${_LLM_BASE_URL}"
+              echo "model=${REMOTE_MODEL}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run dogfood triage
+        working-directory: mumei-agent
+        env:
+          MUMEI_BIN: mumei
+          MUMEI_STD_PATH: ${{ github.workspace }}/mumei/std
+          LLM_API_KEY: ${{ steps.llm_env.outputs.api_key }}
+          LLM_BASE_URL: ${{ steps.llm_env.outputs.base_url }}
+          LLM_MODEL: ${{ steps.llm_env.outputs.model }}
+        run: |
+          mkdir -p /tmp/dogfood
+          FAIL_FLAG=""
+          if [ "${FAIL_ON_REFUTED}" = "true" ]; then
+            FAIL_FLAG="--fail-on-refuted"
+          fi
+          # CORPUS_PATHS is intentionally word-split into multiple directory
+          # arguments; the input is a space-separated list.
+          # shellcheck disable=SC2086
+          set -o pipefail
+          uv run python scripts/dogfood_triage_gate.py ${CORPUS_PATHS} \
+            --json-output /tmp/dogfood/triage.json \
+            --markdown-output /tmp/dogfood/triage.md \
+            $FAIL_FLAG \
+            2>&1 | tee /tmp/dogfood/triage.log
+
+      - name: Upload dogfood triage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogfood-triage
+          path: |
+            /tmp/dogfood/triage.json
+            /tmp/dogfood/triage.md
+            /tmp/dogfood/triage.log
