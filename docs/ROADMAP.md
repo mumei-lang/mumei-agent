@@ -1526,6 +1526,13 @@ license を記録してバージョンを固定した。`tests/test_foreign_code
 - 🔍 **監視項目** — 実 OSS 固定コーパスの分量とパース時間（大きな関数・ループ・inline assembly・複雑な generics は
   per-file timeout を超えやすい）。小さいファイル起点でサンプリングし、コーパス総体が CI 予算内に収まるよう調整する。
 
+**漸進拡大（実装済み）**: 監視項目の 3 形状を覆う小さいファイルを 3 件追加して 13 件に拡大した:
+`rust/memchr_ext.rs`（54 行、generics）/ `go/go_cmp_ordered.go`（71 行、generics）/
+`solidity/openzeppelin_short_strings.sol`（123 行、inline assembly）。`MANIFEST.json` の `risk_shape` に
+追加理由を記録し、`tests/test_dogfood_timeout.py::test_pinned_corpus_covers_every_risk_shape` が
+コーパスが risk 形状を覆い続けていることを固定する。合計行数は CI 予算ガード（ファイル 200 行 /
+合計 2000 行）内に収まる。
+
 ### 項目2: dogfood 集計層の CI 恒久運用化 ✅ Implemented
 
 **実装**: `scripts/dogfood_triage_gate.py` がディレクトリ監査を実行し、既存の
@@ -1536,6 +1543,17 @@ summary へ追記）を出力する。`refuted` のみ `next_steps` と `verific
 スケジュール実行を行う（proliferate.yml と同型の checkout / mumei build / ollama provisioning）。
 8 固定キー契約（`AUDIT_SCHEMA_KEYS`）は `audit_contract` としてそのまま反射し、新規分類や alias は追加していない。
 回帰テストは `tests/test_dogfood_triage_gate.py`。
+
+**堅牢化（実装済み）**:
+
+- `--per-file-timeout` でファイル単位の子プロセス監視（`agent/dogfood_timeout.py`）を行い、予算超過ファイルのみを
+  強制終了する。打ち切ったファイルは既存語彙のまま `unverifiable` の `timeout` サブカテゴリに入る（新規 verdict はなし）。
+  同時に構造的 risk marker（`large_function` / `inline_assembly` / `complex_generics`）と秒数を job summary に出す。
+- `--history-file` で verdict バケットの時系列（`agent/dogfood_trend.py`）を蓄積し、`refuted` 急増と
+  `unverifiable` サブカテゴリの偏りを `::warning::` で検知する。ワークフロー側は `actions/cache` で履歴を保持し、
+  `verdict_history.json` をアーティファクトに含める。
+- 回帰テストは `tests/test_dogfood_timeout.py` / `tests/test_dogfood_trend.py`、手順は
+  [`docs/CI_WORKFLOWS.md`](./CI_WORKFLOWS.md)。
 
 当初の計画メモ（履歴として保存）:
 

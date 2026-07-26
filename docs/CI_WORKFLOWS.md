@@ -81,9 +81,31 @@ python scripts/ci_verify.py src/*.mm --proof-cert
 | `llm_profile` | `ollama-local` | LLM バックエンド（`ollama-local` / `remote`） |
 | `llm_model` | `qwen3.5:4b` | モデルタグ |
 | `fail_on_refuted` | `false` | `refuted` が 1 件でもあればジョブを失敗させる |
+| `per_file_timeout` | `300` | 1 ファイルの監査上限秒数。超過したファイルは `unverifiable` / `timeout` として打ち切る |
 
 結果は job summary に verdict バケット表として出力され、`dogfood-triage` アーティファクトとして
-`triage.json` / `triage.md` / `triage.log` がアップロードされる。
+`triage.json` / `triage.md` / `triage.log` / `verdict_history.json` がアップロードされる。
+
+### per-file timeout 監視
+
+`--per-file-timeout` を指定すると、ディレクトリ監査はファイル単位の子プロセス（`agent/dogfood_timeout.py`）で
+実行され、予算を超えたファイルのみを強制終了して残りのコーパスを守る。打ち切ったファイルは
+既存語彙のまま `unverifiable` の `timeout` サブカテゴリに入り、新規分類は作らない。job summary には
+遅いファイルの秒数と構造的 risk marker（`large_function` / `inline_assembly` / `complex_generics`）が
+出力されるので、コーパス拡大時にどの形が高いのかを再実行なしで判定できる。
+
+### verdict バケットの時系列
+
+`--history-file` で指定した JSON に各 run の verdict 件数が追記され（ワークフローでは `actions/cache` で
+保持）、job summary に時系列表とアラートが出力される。検知は 2 種で、いずれも `::warning::` 注釈と
+なりジョブの成否には影響しない:
+
+- **`refuted` 急増** — 直前複数 run の平均に対して `--refuted-spike-min-delta`（既定 2 件）以上かつ
+  50% 以上増えたとき。
+- **`unverifiable` サブカテゴリの偏り** — 1 つの原因が `--unverifiable-skew-share`（既定 60%）以上を
+  占め、かつベースライン比で 20 ポイント以上増えたとき。
+
+履歴ファイルは助言情報なので、欠損・壊れていてもゲートは失敗せず、その run の時系列が短くなるだけである。
 
 ### ローカル実行
 
@@ -92,6 +114,9 @@ MUMEI_BIN=/path/to/mumei uv run python scripts/dogfood_triage_gate.py \
   tests/corpora/oss \
   --json-output /tmp/dogfood/triage.json \
   --markdown-output /tmp/dogfood/triage.md \
+  --per-file-timeout 300 \
+  --slow-file-threshold 30 \
+  --history-file /tmp/dogfood/verdict_history.json \
   --fail-on-refuted
 ```
 
@@ -109,4 +134,5 @@ MUMEI_BIN=/path/to/mumei uv run python scripts/dogfood_triage_gate.py \
 
 コーパス自体の妥当性（`requires` / `ensures` が既存 oracle を満たすこと）は
 `tests/test_foreign_code_oss_corpus.py`、集計 / ゲート層の挙動は
-`tests/test_dogfood_triage_gate.py` が push ごとに回帰テストする。
+`tests/test_dogfood_triage_gate.py`、per-file timeout 監視は `tests/test_dogfood_timeout.py`、
+時系列と急増 / 偏り検知は `tests/test_dogfood_trend.py` が push ごとに回帰テストする。
