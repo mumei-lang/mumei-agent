@@ -1480,9 +1480,12 @@ Phase 1 の残り — ✅ **完了**: 直接 `client.chat.completions.create` �
 
 ---
 
-## 外部コード dogfooding 堅牢性拡張（Planned / 未着手）
+## 外部コード dogfooding 堅牢性拡張 ✅ Implemented
 
-> **ステータス: Planned（未着手）** — 本節は実装ではなく「今後対応予定」の記録である。
+> **ステータス: ✅ Implemented** — 項目1（実 OSS コーパス）・項目2（集計 / ゲート層の CI 恒久運用化）とも
+> 実装済み。実装位置は `tests/corpora/oss/`（`MANIFEST.json` で upstream commit をピン留め）と
+> `tests/test_foreign_code_oss_corpus.py`、`scripts/dogfood_triage_gate.py`、
+> `.github/workflows/dogfood-triage.yml`。運用手順は `docs/CI_WORKFLOWS.md` 参照。
 > 過去のドッグフーディングでは go-ethereum 等の外部 OSS コードを
 > `agent/cross_validation.py` の `validate_foreign_code`（python/rust/typescript/go/solidity 対応）へ通し、
 > 決定的抽出（`agent/cross_validation_foreign.py` の `_infer_go_contracts` →
@@ -1498,7 +1501,17 @@ Phase 1 の残り — ✅ **完了**: 直接 `client.chat.completions.create` �
 **推奨導入順**: 項目1（実 OSS コーパス拡大）→ 項目2（集計層の CI 恒久運用化）。
 両者とも既存の決定的抽出（`use_llm=False`）・既存 verdict・既存 oracle を信頼し、外部依存ゼロ（`ollama-local`）を維持する。
 
-### 項目1: コーパスの実 OSS サンプリング拡大（Planned / 未着手）
+### 項目1: コーパスの実 OSS サンプリング拡大 ✅ Implemented
+
+**実装**: `tests/corpora/oss/` に python / rust / typescript / go / solidity の実 OSS ファイル 10 件
+（requests / packaging / memchr / ripgrep / vscode / golang 標準ライブラリ / OpenZeppelin）を
+**未修正のまま** 取り込み、`MANIFEST.json` に upstream リポジトリ・タグ・40 桁 commit sha・元パス・
+license を記録してバージョンを固定した。`tests/test_foreign_code_oss_corpus.py` が決定的抽出
+（`use_llm=False`, `run_mumei=False`）経由で全 44 atom の `requires` / `ensures` を既存 oracle 3 種で
+面検証し、ファイルごと 200 行 / コーパス合計 2000 行の CI 予算ガードと manifest/ディスク一致・
+言語網羅・atom 非空も回帰テストする（実行時間 < 1s）。
+
+当初の計画メモ（履歴として保存）:
 
 - 現状の property / コーパステストは **合成シグネチャ中心** である前提を明記する。合成コーパスは決定的抽出の
   構造的脆さ（多値 return、ネスト式、幻覚関数）を面で叩くには有効だが、実 OSS の多様な構文分布は覆いきれない。
@@ -1513,7 +1526,18 @@ Phase 1 の残り — ✅ **完了**: 直接 `client.chat.completions.create` �
 - 🔍 **監視項目** — 実 OSS 固定コーパスの分量とパース時間（大きな関数・ループ・inline assembly・複雑な generics は
   per-file timeout を超えやすい）。小さいファイル起点でサンプリングし、コーパス総体が CI 予算内に収まるよう調整する。
 
-### 項目2: dogfood 集計層の CI 恒久運用化（Planned / 未着手）
+### 項目2: dogfood 集計層の CI 恒久運用化 ✅ Implemented
+
+**実装**: `scripts/dogfood_triage_gate.py` がディレクトリ監査を実行し、既存の
+`agent/dogfood_triage.py::triage_directory_result` で verdict バケットに分け、JSON / Markdown（job
+summary へ追記）を出力する。`refuted` のみ `next_steps` と `verification_violations` を展開し、
+`unverifiable` は原因サブカテゴリの件数に畳み込む。`--fail-on-refuted` でゲート化可能。
+`.github/workflows/dogfood-triage.yml` が cron（毎週水 02:00 UTC）＋ `ollama-local` で外部依存ゼロの
+スケジュール実行を行う（proliferate.yml と同型の checkout / mumei build / ollama provisioning）。
+8 固定キー契約（`AUDIT_SCHEMA_KEYS`）は `audit_contract` としてそのまま反射し、新規分類や alias は追加していない。
+回帰テストは `tests/test_dogfood_triage_gate.py`。
+
+当初の計画メモ（履歴として保存）:
 
 - verdict 分類（`refuted` / `unverifiable` / `verified`）は **既に実装済み** である前提を明記する
   （`agent/cross_validation_models.py` の `ForeignCodeVerdict`、`agent/cross_validation.py` の
