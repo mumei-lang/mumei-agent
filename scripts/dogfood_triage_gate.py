@@ -8,7 +8,14 @@ Runs a directory audit per input path, buckets each file with
 - a JSON report per directory plus a combined roll-up (``--json-output``),
 - a Markdown job summary (``--markdown-output``, appended to
   ``$GITHUB_STEP_SUMMARY`` when that variable is set),
+- a verdict-bucket time series plus `refuted` spike / `unverifiable` skew
+  alerts when ``--history-file`` points at a persisted history,
 - exit code 1 when ``--fail-on-refuted`` is passed and any file is ``refuted``.
+
+With ``--per-file-timeout`` each file is audited in a supervised child process,
+so one expensive file (large function, inline assembly, deeply nested generics)
+is abandoned as ``unverifiable`` / ``timeout`` instead of consuming the whole
+CI budget.
 
 Only ``refuted`` files are surfaced for human review, through the existing
 ``next_steps`` entrypoint. ``unverifiable`` files are folded into their cause
@@ -23,13 +30,38 @@ import os
 from pathlib import Path
 import sys
 
-from agent.audit import AUDIT_SCHEMA_KEYS, AuditPipeline
+from agent.audit import (
+    AUDIT_EXTENSION_MAP,
+    AUDIT_SCHEMA_KEYS,
+    AuditPipeline,
+    _aggregate_directory_fixed_keys,
+    _build_directory_report,
+    _collect_code_files,
+    _generate_directory_next_steps,
+    _normalize_language,
+)
 from agent.audit_models import AuditDirectoryResult
 from agent.config import AgentConfig
+from agent.dogfood_timeout import (
+    FileAuditTiming,
+    audit_file_with_timeout,
+    format_timing_markdown,
+)
 from agent.dogfood_triage import (
     DogfoodTriageReport,
     format_triage_markdown,
     triage_directory_result,
+)
+from agent.dogfood_trend import (
+    DEFAULT_HISTORY_LIMIT,
+    DEFAULT_SKEW_SHARE,
+    DEFAULT_SPIKE_MIN_DELTA,
+    detect_refuted_spike,
+    detect_unverifiable_skew,
+    format_trend_markdown,
+    load_history,
+    save_history,
+    snapshot_from_totals,
 )
 
 
@@ -70,6 +102,52 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit non-zero when any audited file is refuted.",
     )
+    parser.add_argument(
+        "--per-file-timeout",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds a single file may take before it is abandoned as "
+            "unverifiable/timeout; 0 disables supervision."
+        ),
+    )
+    parser.add_argument(
+        "--slow-file-threshold",
+        type=float,
+        default=0.0,
+        help="Report files slower than this many seconds in the job summary.",
+    )
+    parser.add_argument(
+        "--history-file",
+        default=None,
+        help=(
+            "JSON file holding the verdict-bucket time series; this run is "
+            "appended and spike/skew alerts are computed against it."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        default=os.environ.get("GITHUB_RUN_ID", ""),
+        help="Label for this run in the time series (defaults to $GITHUB_RUN_ID).",
+    )
+    parser.add_argument(
+        "--history-limit",
+        type=int,
+        default=DEFAULT_HISTORY_LIMIT,
+        help="Snapshots to keep in the history file.",
+    )
+    parser.add_argument(
+        "--refuted-spike-min-delta",
+        type=int,
+        default=DEFAULT_SPIKE_MIN_DELTA,
+        help="Minimum refuted-count increase over the baseline to alert on.",
+    )
+    parser.add_argument(
+        "--unverifiable-skew-share",
+        type=float,
+        default=DEFAULT_SKEW_SHARE,
+        help="Share of unverifiable files one cause may hold before alerting.",
+    )
     return parser
 
 
@@ -80,6 +158,59 @@ def _fixed_keys(result: AuditDirectoryResult) -> dict[str, object]:
         value = getattr(result, key, None)
         payload[key] = value.value if hasattr(value, "value") else value
     return payload
+
+
+def _audit_directory_supervised(
+    path: Path, args: argparse.Namespace
+) -> tuple[AuditDirectoryResult, list[FileAuditTiming]]:
+    """Audit a directory file-by-file under a per-file timeout.
+
+    File discovery and result aggregation reuse the audit pipeline's own
+    helpers, so the only behavioural difference from ``audit_directory`` is the
+    supervision of each file.
+    """
+    normalized_language = _normalize_language(args.language)
+    code_files = _collect_code_files(
+        path,
+        AUDIT_EXTENSION_MAP,
+        normalized_language or None,
+        include_tests=args.include_tests,
+    )
+    errors: list[str] = []
+    if not code_files:
+        errors.append(f"no supported source-code files found in directory: {path}")
+
+    file_results = []
+    timings: list[FileAuditTiming] = []
+    for code_path in code_files:
+        language = normalized_language or AUDIT_EXTENSION_MAP.get(
+            code_path.suffix.lower(), ""
+        )
+        file_result, timing = audit_file_with_timeout(
+            code_path, language, args.per_file_timeout
+        )
+        file_results.append(file_result)
+        timings.append(timing)
+
+    files_with_issues = sum(1 for result in file_results if not result.success)
+    result = AuditDirectoryResult(
+        success=not errors and files_with_issues == 0,
+        source_dir=str(path),
+        language=normalized_language or "mixed",
+        file_results=file_results,
+        total_files=len(file_results),
+        files_with_issues=files_with_issues,
+        errors=errors,
+        skipped_rate_limited_files=[
+            result.source_file
+            for result in file_results
+            if result.skipped_rate_limited
+        ],
+    )
+    _aggregate_directory_fixed_keys(result)
+    result.next_steps = _generate_directory_next_steps(result)
+    result.summary = _build_directory_report(result)
+    return result, timings
 
 
 def _audit(pipeline: AuditPipeline, path: Path, args: argparse.Namespace) -> AuditDirectoryResult:
@@ -130,28 +261,58 @@ def main(argv: list[str] | None = None) -> int:
     directories: list[dict[str, object]] = []
     reports: list[DogfoodTriageReport] = []
     markdown_sections: list[str] = []
+    all_timings: list[FileAuditTiming] = []
 
     for raw_path in args.paths:
         path = Path(raw_path).expanduser().resolve()
         if not path.exists():
             print(f"skipping missing path: {path}", file=sys.stderr)
             continue
-        result = _audit(pipeline, path, args)
+        if path.is_dir() and args.per_file_timeout > 0:
+            result, timings = _audit_directory_supervised(path, args)
+        else:
+            result, timings = _audit(pipeline, path, args), []
         report = triage_directory_result(result)
         reports.append(report)
+        all_timings.extend(timings)
         directories.append(
             {
                 "source_dir": result.source_dir,
                 "language": result.language,
                 "triage": report.to_dict(),
                 "audit_contract": _fixed_keys(result),
+                "file_timings": [timing.to_dict() for timing in timings],
             }
         )
         markdown_sections.append(format_triage_markdown(result, report))
+        timing_markdown = format_timing_markdown(timings, args.slow_file_threshold)
+        if timing_markdown:
+            markdown_sections.append(timing_markdown)
 
     totals = _combined_totals(reports)
-    payload = {"directories": directories, "totals": totals}
+    payload: dict[str, object] = {"directories": directories, "totals": totals}
     markdown = "\n".join(["## Dogfood triage", "", *markdown_sections])
+
+    alerts: list[str] = []
+    if args.history_file:
+        history_path = Path(args.history_file).expanduser()
+        history = load_history(history_path)
+        history.append(snapshot_from_totals(totals, args.run_id))
+        save_history(history_path, history, args.history_limit)
+        history = history[-args.history_limit :]
+        alerts = [
+            *detect_refuted_spike(
+                history, min_delta=args.refuted_spike_min_delta
+            ),
+            *detect_unverifiable_skew(
+                history, share_threshold=args.unverifiable_skew_share
+            ),
+        ]
+        payload["trend"] = {
+            "history": [snapshot.to_dict() for snapshot in history],
+            "alerts": alerts,
+        }
+        markdown = "\n".join([markdown, "", format_trend_markdown(history, alerts)])
 
     if args.json_output:
         Path(args.json_output).write_text(
@@ -164,6 +325,16 @@ def main(argv: list[str] | None = None) -> int:
         with open(step_summary, "a", encoding="utf-8") as handle:
             handle.write(markdown + "\n")
     print(markdown)
+
+    for alert in alerts:
+        print(f"::warning::{alert}")
+    timed_out = [timing for timing in all_timings if timing.timed_out]
+    for timing in timed_out:
+        markers = ", ".join(timing.risk_markers) or "none detected"
+        print(
+            f"::warning::{timing.source_file} exceeded the per-file timeout "
+            f"({args.per_file_timeout:g}s); risk markers: {markers}"
+        )
 
     refuted = int(totals["human_review_count"])
     if refuted:

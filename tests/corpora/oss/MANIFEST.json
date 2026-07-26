@@ -90,6 +90,37 @@
       "commit": "dbb6104ce834628e473d2173bbc9d47f81a9eec3",
       "source_path": "contracts/utils/Address.sol",
       "license": "MIT"
+    },
+    {
+      "path": "rust/memchr_ext.rs",
+      "language": "rust",
+      "upstream": "https://github.com/BurntSushi/memchr",
+      "ref": "2.7.4",
+      "commit": "8ad339524d857a2dd9e7231b497ed92aa0f5c334",
+      "source_path": "src/ext.rs",
+      "license": "Unlicense OR MIT",
+      "risk_shape": "complex_generics"
+    },
+    {
+      "path": "go/go_cmp_ordered.go",
+      "language": "go",
+      "upstream": "https://github.com/golang/go",
+      "ref": "go1.22.5",
+      "commit": "8e1fdea8316d840fd07e9d6e026048e53290948b",
+      "source_path": "src/cmp/cmp.go",
+      "license": "BSD-3-Clause",
+      "risk_shape": "complex_generics"
+    },
+    {
+      "path": "solidity/openzeppelin_short_strings.sol",
+      "language": "solidity",
+      "upstream": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+      "ref": "v5.0.2",
+      "commit": "dbb6104ce834628e473d2173bbc9d47f81a9eec3",
+      "source_path": "contracts/utils/ShortStrings.sol",
+      "license": "MIT",
+      "risk_shape": "inline_assembly"
     }
-  ]
+  ],
+  "risk_shape_note": "risk_shape records why an entry was added: the per-file timeout supervision in agent/dogfood_timeout.py detects the same shapes (large_function / inline_assembly / complex_generics) from the source text."
 }

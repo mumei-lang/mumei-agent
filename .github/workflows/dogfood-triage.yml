@@ -13,9 +13,12 @@ name: External Code Dogfood Triage
 #      no external dependency in either case.
 #   3. Run `scripts/dogfood_triage_gate.py` over the pinned real-OSS corpus
 #      (`tests/corpora/oss/`) plus any extra directories passed via
-#      `workflow_dispatch`.
-#   4. Publish the verdict buckets to the job summary and upload the JSON /
-#      Markdown reports as artifacts.
+#      `workflow_dispatch`, with a per-file timeout so one expensive file
+#      (large function, inline assembly, deeply nested generics) cannot eat the
+#      whole CI budget.
+#   4. Publish the verdict buckets, the per-file cost table, and the verdict
+#      time series (restored from the `actions/cache` history) to the job
+#      summary, and upload the JSON / Markdown reports as artifacts.
 #
 # Only `refuted` files are surfaced for human review, through the existing
 # `next_steps` entrypoint. `unverifiable` files are folded into cause
@@ -53,6 +56,10 @@ on:
         description: 'Fail the job when any file is refuted'
         default: false
         type: boolean
+      per_file_timeout:
+        description: 'Seconds a single file may take before it is abandoned as unverifiable/timeout'
+        default: '300'
+        type: string
 
 jobs:
   dogfood-triage:
@@ -65,6 +72,7 @@ jobs:
       LLM_MODEL_SELECTED: ${{ github.event.inputs.llm_model || 'qwen3.5:4b' }}
       CORPUS_PATHS: ${{ github.event.inputs.corpus_paths || 'tests/corpora/oss' }}
       FAIL_ON_REFUTED: ${{ github.event.inputs.fail_on_refuted || 'false' }}
+      PER_FILE_TIMEOUT: ${{ github.event.inputs.per_file_timeout || '300' }}
     steps:
       - name: Check out mumei-agent
         uses: actions/checkout@v4
@@ -187,6 +195,17 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+      # The verdict time series lives in the cache, not in the repo: it is
+      # advisory trend data, and a cache miss only means the first run after
+      # the miss reports no trend.
+      - name: Restore verdict history
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dogfood-history
+          key: dogfood-verdict-history-${{ github.run_id }}
+          restore-keys: |
+            dogfood-verdict-history-
+
       - name: Run dogfood triage
         working-directory: mumei-agent
         env:
@@ -208,8 +227,12 @@ jobs:
           uv run python scripts/dogfood_triage_gate.py ${CORPUS_PATHS} \
             --json-output /tmp/dogfood/triage.json \
             --markdown-output /tmp/dogfood/triage.md \
+            --per-file-timeout "${PER_FILE_TIMEOUT}" \
+            --slow-file-threshold 30 \
+            --history-file /tmp/dogfood-history/verdict_history.json \
             $FAIL_FLAG \
             2>&1 | tee /tmp/dogfood/triage.log
+          cp /tmp/dogfood-history/verdict_history.json /tmp/dogfood/ || true
 
       - name: Upload dogfood triage artifacts
         if: always()
@@ -220,3 +243,4 @@ jobs:
             /tmp/dogfood/triage.json
             /tmp/dogfood/triage.md
             /tmp/dogfood/triage.log
+            /tmp/dogfood/verdict_history.json

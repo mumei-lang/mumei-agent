@@ -172,3 +172,109 @@ def test_gate_passes_when_only_unverifiable(tmp_path, monkeypatch) -> None:
 
 def test_gate_skips_missing_paths(tmp_path) -> None:
     assert dogfood_triage_gate.main([str(tmp_path / "nope")]) == 0
+
+
+def test_gate_emits_verdict_time_series_and_alerts(tmp_path, monkeypatch, capsys) -> None:
+    """The history file turns per-run counts into a reviewable trend."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    result = _directory_result(
+        [
+            _file_result(str(corpus / f"bug{i}.py"), "refuted", violations=["overflow"])
+            for i in range(4)
+        ]
+        + [
+            _file_result(
+                str(corpus / "slow.py"), "unverifiable", errors=["z3 timed out"]
+            )
+        ]
+    )
+    monkeypatch.setattr(dogfood_triage_gate, "AuditPipeline", lambda **_: object())
+    monkeypatch.setattr(dogfood_triage_gate, "_audit", lambda *_a, **_k: result)
+
+    history = tmp_path / "history.json"
+    history.write_text(
+        json.dumps(
+            [
+                {
+                    "timestamp": "2026-07-01T00:00:00+00:00",
+                    "run_id": "1",
+                    "total_files": 5,
+                    "refuted": 0,
+                    "verified": 4,
+                    "unverifiable": 1,
+                    "unverifiable_counts": {"encoding_gap": 1},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    json_output = tmp_path / "triage.json"
+    markdown_output = tmp_path / "triage.md"
+    exit_code = dogfood_triage_gate.main(
+        [
+            str(corpus),
+            "--json-output",
+            str(json_output),
+            "--markdown-output",
+            str(markdown_output),
+            "--history-file",
+            str(history),
+            "--run-id",
+            "2",
+        ]
+    )
+    assert exit_code == 0
+
+    payload = json.loads(json_output.read_text(encoding="utf-8"))
+    trend = payload["trend"]
+    assert [snapshot["run_id"] for snapshot in trend["history"]] == ["1", "2"]
+    assert trend["history"][-1]["refuted"] == 4
+    assert trend["history"][-1]["unverifiable_counts"]["timeout"] == 1
+    assert any("refuted spike" in alert for alert in trend["alerts"])
+    assert any("unverifiable skew" in alert for alert in trend["alerts"])
+
+    markdown = markdown_output.read_text(encoding="utf-8")
+    assert "Dogfood verdict time series" in markdown
+    assert "trend alerts" in markdown
+    stdout = capsys.readouterr().out
+    assert "::warning::refuted spike" in stdout
+
+    # The history file is persisted for the next run.
+    assert len(json.loads(history.read_text(encoding="utf-8"))) == 2
+
+
+def test_gate_supervises_each_file_when_a_timeout_is_set(tmp_path, capsys) -> None:
+    """A file that outlives the budget is abandoned, not the whole corpus."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+    (corpus / "b.py").write_text("def g(x):\n    return x\n", encoding="utf-8")
+
+    json_output = tmp_path / "triage.json"
+    exit_code = dogfood_triage_gate.main(
+        [
+            str(corpus),
+            "--json-output",
+            str(json_output),
+            "--per-file-timeout",
+            "0.001",
+            "--slow-file-threshold",
+            "0",
+        ]
+    )
+    assert exit_code == 0
+
+    payload = json.loads(json_output.read_text(encoding="utf-8"))
+    directory = payload["directories"][0]
+    assert {Path(t["source_file"]).name for t in directory["file_timings"]} == {
+        "a.py",
+        "b.py",
+    }
+    assert all(timing["timed_out"] for timing in directory["file_timings"])
+    # Timeouts stay inside the existing verdict vocabulary.
+    assert payload["totals"]["unverifiable_counts"]["timeout"] == 2
+    assert payload["totals"]["human_review_count"] == 0
+    assert list(directory["audit_contract"]) == AUDIT_SCHEMA_KEYS
+    assert "exceeded the per-file timeout" in capsys.readouterr().out
