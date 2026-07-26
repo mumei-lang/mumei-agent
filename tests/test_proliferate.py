@@ -628,6 +628,91 @@ class TestProliferateDryRun:
         assert results[0].get("dry_run") is True
         assert results[0]["code"] == fake_code
 
+    def test_benchmark_feedback_is_recorded_in_summary(
+        self, tmp_path: Path, mock_mumei_client
+    ) -> None:
+        """P16 feedback provenance lands in the run summary artifact."""
+        from agent.benchmark_feedback import SCHEMA
+
+        std = tmp_path / "std"
+        std.mkdir()
+        summary_path = tmp_path / "summary.json"
+        feedback_path = tmp_path / "forge-feedback.json"
+        feedback_path.write_text(json.dumps({
+            "schema": SCHEMA,
+            "timestamp": "2026-07-26 13:00 UTC",
+            "stdlib_trusted_ratio": 0.1,
+            "weak_categories": ["arithmetic"],
+            "domain_bias": [{
+                "domain": "std/math",
+                "priority_delta": -20,
+                "weakness_score": 0.4,
+                "driving_category": "arithmetic",
+            }],
+        }), encoding="utf-8")
+        fake_code = "atom core_ok(x: i64) ensures: true; body: x;\n"
+
+        with patch("agent.proliferate.generate_code") as gen_mock, patch(
+            "agent.proliferate.AgentConfig"
+        ) as cfg_mock, patch(
+            "agent.proliferate.create_mumei_client"
+        ) as client_mock:
+            gen_mock.return_value = (fake_code, True)
+            cfg_instance = MagicMock()
+            cfg_instance.mumei_bin = "mumei"
+            cfg_instance.model = "gpt-test"
+            cfg_instance.max_retries = 2
+            cfg_instance.create_client.return_value = MagicMock()
+            cfg_mock.return_value = cfg_instance
+            client_mock.return_value = mock_mumei_client(verify_success=True)
+
+            proliferate.proliferate(
+                tmp_path,
+                dry_run=True,
+                max_proposals=1,
+                output_json=summary_path,
+                benchmark_feedback=feedback_path,
+            )
+
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert data["benchmark_feedback"]["schema"] == SCHEMA
+        assert data["benchmark_feedback"]["weak_categories"] == ["arithmetic"]
+
+    def test_missing_benchmark_feedback_is_ignored(
+        self, tmp_path: Path, mock_mumei_client
+    ) -> None:
+        """An unusable feedback document must not abort the loop."""
+        std = tmp_path / "std"
+        std.mkdir()
+        summary_path = tmp_path / "summary.json"
+        fake_code = "atom core_ok(x: i64) ensures: true; body: x;\n"
+
+        with patch("agent.proliferate.generate_code") as gen_mock, patch(
+            "agent.proliferate.AgentConfig"
+        ) as cfg_mock, patch(
+            "agent.proliferate.create_mumei_client"
+        ) as client_mock:
+            gen_mock.return_value = (fake_code, True)
+            cfg_instance = MagicMock()
+            cfg_instance.mumei_bin = "mumei"
+            cfg_instance.model = "gpt-test"
+            cfg_instance.max_retries = 2
+            cfg_instance.create_client.return_value = MagicMock()
+            cfg_mock.return_value = cfg_instance
+            client_mock.return_value = mock_mumei_client(verify_success=True)
+
+            results = proliferate.proliferate(
+                tmp_path,
+                dry_run=True,
+                max_proposals=1,
+                output_json=summary_path,
+                benchmark_feedback=tmp_path / "missing.json",
+            )
+
+        assert results[0]["success"] is True
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert "benchmark_feedback" not in data
+
     def test_dry_run_lean_fallback_verify_exception_is_best_effort(
         self, tmp_path: Path
     ) -> None:
@@ -773,6 +858,19 @@ class TestBuildParser:
             ["--mumei-repo", "/tmp/m", "--output-json", "/tmp/summary.json"]
         )
         assert args.output_json == "/tmp/summary.json"
+
+    def test_benchmark_feedback_flag_passed_to_proliferate(self) -> None:
+        parser = argparse.ArgumentParser()
+        proliferate.build_parser(parser)
+        args = parser.parse_args(
+            ["--mumei-repo", "/tmp/m", "--benchmark-feedback", "/tmp/fb.json"]
+        )
+        assert args.benchmark_feedback == "/tmp/fb.json"
+
+        with patch("agent.proliferate.proliferate", return_value=[]) as run_mock:
+            proliferate.main(args)
+
+        assert run_mock.call_args.kwargs["benchmark_feedback"] == "/tmp/fb.json"
 
     def test_lean_fallback_flag_passed_to_proliferate(self) -> None:
         parser = argparse.ArgumentParser()

@@ -16,20 +16,29 @@ def _safe_relative_file(repo_dir: Path, rel_path: str) -> Path | None:
     return candidate
 
 
+# Spec fields that only affect queue ordering, never generated code.
+_NON_GENERATION_SPEC_FIELDS = ("priority", "benchmark_feedback")
+
+
 def _spec_cache_key(
     spec: dict[str, Any],
     mumei_repo_dir: Path | None = None,
 ) -> str:
-    payload_obj: dict[str, Any] = {"spec": spec}
+    keyed_spec = {
+        key: value
+        for key, value in spec.items()
+        if key not in _NON_GENERATION_SPEC_FIELDS
+    }
+    payload_obj: dict[str, Any] = {"spec": keyed_spec}
     if mumei_repo_dir is not None:
         context_hashes: dict[str, str | None] = {}
         rel_paths: set[str] = set()
         for key in ("target_file",):
-            value = spec.get(key)
+            value = keyed_spec.get(key)
             if isinstance(value, str):
                 rel_paths.add(value)
         for key in ("context_files", "depends_on"):
-            value = spec.get(key)
+            value = keyed_spec.get(key)
             if isinstance(value, list):
                 rel_paths.update(item for item in value if isinstance(item, str))
         for rel_path in sorted(rel_paths):

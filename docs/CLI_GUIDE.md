@@ -172,6 +172,10 @@ uv run mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --dry-ru
 # Run a single spec (path is looked up relative to --tasks-dir)
 uv run mumei-agent forge --mumei-repo ../mumei --task vstd_safe_add.json
 
+# Bias the queue toward the weakest P16 benchmark categories' stdlib domains
+uv run mumei-agent forge --mumei-repo ../mumei --max-tasks 2 \
+  --benchmark-feedback /tmp/forge-feedback.json
+
 # Run the whole queue, capped at 5 tasks per invocation
 uv run mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 5
 ```
@@ -190,3 +194,25 @@ exercise this no-LLM path.
 
 See [`forge_tasks/README.md`](../forge_tasks/README.md) for the full task
 spec schema.
+
+## Benchmark Feedback (P16-C)
+
+The mumei benchmark suite can drive vStd prioritisation:
+
+```bash
+# In the mumei repo: score each benchmark category and emit the feedback doc
+python3 benchmarks/run_benchmarks.py --forge-feedback /tmp/forge-feedback.json
+
+# In mumei-agent: bias gap proposals / forge tasks toward weak domains
+uv run mumei-agent proliferate --mumei-repo ../mumei \
+  --benchmark-feedback /tmp/forge-feedback.json \
+  --output-json /tmp/proliferate/summary.json
+```
+
+The `mumei.benchmark_forge_feedback/v1` document carries a per-category
+`weakness_score` (expected-outcome match rate, counterexample catch rate,
+trusted ratio, plus Z3 / Lean solver-time signals) and the resulting negative
+`priority_delta` per stdlib domain. Feedback only **reorders** work that gap
+analysis already produced — it never adds or drops proposals — and the applied
+bias is recorded under `benchmark_feedback` in the run summary JSON. A missing or
+malformed document is logged and ignored so the loop still runs.

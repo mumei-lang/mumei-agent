@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from agent import telemetry
+from agent.benchmark_feedback import BenchmarkFeedback, load_benchmark_feedback
 from agent.config import AgentConfig
 from agent.gap_rules import (
     _IMPORT_RE,
@@ -579,6 +580,7 @@ def proliferate(
     enable_self_correction: bool | None = None,
     harness_profile: str = "basic",
     parallel_forge_workers: int | None = None,
+    benchmark_feedback: str | Path | BenchmarkFeedback | None = None,
 ) -> list[dict[str, Any]]:
     """Run the autonomous proliferation loop.
 
@@ -601,6 +603,12 @@ def proliferate(
         Consumed by the SI-5 Phase 3-B scheduled workflow so operators
         can review pre/post health and per-proposal outcomes as a CI
         artifact.
+    benchmark_feedback:
+        Optional ``mumei.benchmark_forge_feedback/v1`` document (path or parsed
+        :class:`~agent.benchmark_feedback.BenchmarkFeedback`) produced by
+        ``benchmarks/run_benchmarks.py --forge-feedback``. Weak benchmark
+        categories bias their stdlib domains forward in the proposal queue; the
+        set of proposals is unchanged.
 
     Returns
     -------
@@ -625,6 +633,7 @@ def proliferate(
             enable_self_correction=enable_self_correction,
             harness_profile=harness_profile,
             parallel_forge_workers=parallel_forge_workers,
+            benchmark_feedback=benchmark_feedback,
         )
 
 
@@ -640,11 +649,17 @@ def _proliferate_inner(
     enable_self_correction: bool | None = None,
     harness_profile: str = "basic",
     parallel_forge_workers: int | None = None,
+    benchmark_feedback: str | Path | BenchmarkFeedback | None = None,
 ) -> list[dict[str, Any]]:
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
         timespec="seconds"
     )
     harness_metrics = HarnessMetrics.from_profile(harness_profile)
+    feedback = (
+        benchmark_feedback
+        if isinstance(benchmark_feedback, BenchmarkFeedback)
+        else load_benchmark_feedback(benchmark_feedback)
+    )
     enable_lean_fallback = enable_lean_fallback or harness_metrics.lean_fallback_enabled
     mumei_repo = Path(mumei_repo_dir).resolve()
     std_dir = mumei_repo / "std"
@@ -715,6 +730,14 @@ def _proliferate_inner(
         )
         return results
 
+    if feedback is not None:
+        gaps["proposals"] = feedback.rank_proposals(gaps["proposals"])
+        _log_info(
+            "Benchmark feedback applied (weak categories: "
+            + (", ".join(feedback.weak_categories) or "none")
+            + ")"
+        )
+
     _log_info(
         f"Found {len(gaps['proposals'])} proposal(s): "
         + ", ".join(p["name"] for p in gaps["proposals"])
@@ -757,6 +780,8 @@ def _proliferate_inner(
     openai_client: Any | None = None
 
     specs = [harness_metrics.apply_to_spec(spec) for spec in specs]
+    if feedback is not None:
+        specs = feedback.apply_to_specs(specs)
     with telemetry.start_span("mumei.proliferate.forge"):
         forged_results = _parallel_forge(
             specs,
@@ -1161,6 +1186,7 @@ def _proliferate_inner(
         dry_run=dry_run,
         harness_metrics=harness_metrics,
         lean_fallback_enabled=enable_lean_fallback,
+        benchmark_feedback=feedback,
     )
 
     return results
@@ -1241,6 +1267,7 @@ def _write_output_json(
     health_delta: float | None = None,
     harness_metrics: HarnessMetrics | None = None,
     lean_fallback_enabled: bool = False,
+    benchmark_feedback: BenchmarkFeedback | None = None,
 ) -> None:
     """Write a structured summary of the run to *output_json* (if set).
 
@@ -1288,6 +1315,8 @@ def _write_output_json(
     payload["lean_fallback_metrics"] = lean_metrics
     if harness_metrics is not None:
         payload["harness_metrics"] = harness_metrics.aggregate_metrics()
+    if benchmark_feedback is not None:
+        payload["benchmark_feedback"] = benchmark_feedback.summary()
     # P15 operational alerts / SLO layer: append a thin OTel-derived SLO status
     # as a new optional trailing field. It is ``None`` when OTel is disabled
     # (the default), preserving the existing summary.json contract.
@@ -1381,6 +1410,15 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--benchmark-feedback",
+        default=None,
+        help=(
+            "Path to a mumei.benchmark_forge_feedback/v1 document from "
+            "'benchmarks/run_benchmarks.py --forge-feedback'. Weak benchmark "
+            "categories bias their stdlib domains forward in the queue."
+        ),
+    )
+    parser.add_argument(
         "--parallel-forge-workers",
         type=int,
         default=None,
@@ -1411,6 +1449,9 @@ def main(args: argparse.Namespace) -> None:
     parallel_forge_workers = getattr(args, "parallel_forge_workers", None)
     if parallel_forge_workers is not None:
         run_kwargs["parallel_forge_workers"] = parallel_forge_workers
+    benchmark_feedback = getattr(args, "benchmark_feedback", None)
+    if benchmark_feedback is not None:
+        run_kwargs["benchmark_feedback"] = benchmark_feedback
     results = proliferate(**run_kwargs)
 
     succeeded = sum(1 for r in results if r.get("success"))
