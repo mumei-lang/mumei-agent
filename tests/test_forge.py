@@ -555,6 +555,35 @@ class TestRun:
         results = forge.run(dry_run=True, max_tasks=2)
         assert len(results) == 2
 
+    def test_benchmark_feedback_biases_task_budget(self, tmp_path):
+        """A weak benchmark domain wins a limited ``max_tasks`` budget."""
+        from agent.benchmark_feedback import SCHEMA, BenchmarkFeedback
+
+        tasks_dir = tmp_path / "forge_tasks"
+        tasks_dir.mkdir()
+        for name, target in [("t-json", "std/json.mm"), ("t-math", "std/math/p.mm")]:
+            (tasks_dir / f"{name}.json").write_text(json.dumps({
+                "task_id": name, "target_file": target, "priority": 1,
+                "atoms": [{"name": "a"}],
+            }), encoding="utf-8")
+
+        feedback = BenchmarkFeedback.from_dict({
+            "schema": SCHEMA,
+            "timestamp": "2026-07-26 13:00 UTC",
+            "weak_categories": ["arithmetic"],
+            "domain_bias": [{
+                "domain": "std/math",
+                "priority_delta": -20,
+                "weakness_score": 0.4,
+                "driving_category": "arithmetic",
+            }],
+        })
+        forge = _make_forge(tmp_path, tasks_dir=tasks_dir)
+        forge.benchmark_feedback = feedback
+        results = forge.run(dry_run=True, max_tasks=1)
+
+        assert [r.task_id for r in results] == ["t-math"]
+
     def test_single_task_path(self, tmp_path):
         spec = tmp_path / "solo.json"
         spec.write_text(json.dumps({

@@ -28,6 +28,7 @@ from openai import OpenAI
 
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient, create_mumei_client
+from agent.benchmark_feedback import BenchmarkFeedback, load_benchmark_feedback
 from agent.forge_discovery import discover_tasks, filter_completed_tasks
 from agent.harness_metrics import HarnessMetrics, harness_profile_names
 from agent.llm_provider import LLMProvider, complete_text
@@ -76,6 +77,7 @@ class MumeiForge:
         openai_client: OpenAI | LLMProvider | None = None,
         llm_provider: LLMProvider | None = None,
         harness_metrics: HarnessMetrics | None = None,
+        benchmark_feedback: BenchmarkFeedback | None = None,
     ) -> None:
         # ``config`` may be ``None`` for dry-run usage, where the forge
         # only discovers/prints tasks and never calls the LLM or
@@ -90,6 +92,7 @@ class MumeiForge:
         self._client: OpenAI | LLMProvider | None = openai_client
         self._llm_provider = llm_provider
         self.harness_metrics = harness_metrics or HarnessMetrics.from_profile("basic")
+        self.benchmark_feedback = benchmark_feedback
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,12 +122,20 @@ class MumeiForge:
             When not ``None``, override each task's ``max_retries``.
         single_task_path:
             When provided, run only this specific spec file.
+
+        When benchmark feedback is configured, task priorities are biased by the
+        weakness of the benchmark categories covering each target's stdlib
+        domain *before* ``max_tasks`` truncation, so a weak domain can win a
+        limited task budget.
         """
         if single_task_path is not None:
             tasks = self._load_single_task(single_task_path)
         else:
             tasks = discover_tasks(self.forge_tasks_dir)
             tasks = filter_completed_tasks(tasks, self.log_path)
+
+        if self.benchmark_feedback is not None:
+            tasks = self.benchmark_feedback.apply_to_specs(tasks)
 
         if max_tasks is not None:
             tasks = tasks[:max_tasks]
@@ -816,6 +827,15 @@ def build_parser(parser) -> None:  # type: ignore[no-untyped-def]
             "enabled only by self_evolution/full."
         ),
     )
+    parser.add_argument(
+        "--benchmark-feedback",
+        default=None,
+        help=(
+            "Path to a mumei.benchmark_forge_feedback/v1 document from "
+            "'benchmarks/run_benchmarks.py --forge-feedback'. Biases task "
+            "priorities toward the weakest benchmark categories' stdlib domains."
+        ),
+    )
 
 
 def argparse_bool_action():
@@ -861,6 +881,9 @@ def main(args) -> None:  # type: ignore[no-untyped-def]
         forge_tasks_dir=tasks_dir,
         log_path=log_path,
         harness_metrics=harness_metrics,
+        benchmark_feedback=load_benchmark_feedback(
+            getattr(args, "benchmark_feedback", None)
+        ),
     )
 
     single_task_path = Path(args.task) if args.task else None
