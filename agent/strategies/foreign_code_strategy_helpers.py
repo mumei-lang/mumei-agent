@@ -6205,7 +6205,7 @@ def _solidity_format_trace_item(item: _SolidityOpTraceItem) -> str:
 
 
 _SOLIDITY_GUARD_TRACE_TRANSLATOR_VERSION = "mumei-lean-translator-ir-v2"
-_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH = "a3e9c1f4b7d2806e5f19347cab82d0963ef1a5bc70d4e8290f136d5ab7c84e11"
+_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH = "fec31244e29b7d6bd4790b0a25bceb7fce6bdf8f0b18d74d1c0ccdec8ecdc49d"
 
 
 def extract_solidity_guard_trace_atoms(
