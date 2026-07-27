@@ -184,8 +184,17 @@ existing `lp-v2` versioned envelope, `blake2b-128` semantic hash,
 `hmac-sha256` authentication tag, optional AES-256-GCM payload encryption, and a
 redacted audit entry (`LATENT_PROTOCOL_KEY` / `LATENT_PROTOCOL_AUDIT_LOG` apply
 unchanged). The `NLAEResult.multi_agent` field reports `rounds`, `converged`,
-`audit_events`, and one record per handoff (`from_role`, `to_role`, `round`,
-`semantic_hash`, `protocol_version`, `transfer_bytes`, `authenticated`).
+`converged_by`, `audit_events`, and one record per handoff (`from_role`,
+`to_role`, `round`, `semantic_hash`, `protocol_version`, `transfer_bytes`,
+`authenticated`). `converged` mirrors `NLAEResult.verified`, which is true when
+*either* backend discharged the obligations, and `converged_by` names which one
+(`"z3"`, `"lean"`, or `null`) so a Lean-only close is distinguishable from a Z3
+close. The `lean_escalation` handoff body includes a digest of the verified
+source, so its semantic hash differs between specs.
+
+The opt-in flag is authoritative: passing `multi_agent=False` keeps the single
+pipeline even when an orchestrator is injected; an injected orchestrator only
+enables the workflow when the flag is left unset (`None`).
 
 Tracing keeps one distributed trace: `mumei.nlae.multi_agent` nests under the
 `mumei.nlae.pipeline` root span, each agent runs in

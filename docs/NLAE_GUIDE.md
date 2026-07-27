@@ -43,6 +43,8 @@ With `ENABLE_NLAE_MULTI_AGENT` enabled, `NLAEPipeline.run_full_pipeline()` divid
 2. Orchestration is deterministic, so repeated runs of the same spec produce the same handoff `semantic_hash` sequence; `NLAEResult.multi_agent` carries the handoff records for audit.
 3. Spans stay in one trace: `mumei.nlae.multi_agent` under the `mumei.nlae.pipeline` root, `mumei.nlae.agent.<role>` per agent, and `mumei.nlae.handoff` per handoff.
 4. Any failure inside the workflow degrades to the single pipeline, and `multi_agent.status` becomes `fallback` with the reason recorded.
+5. `multi_agent.converged` mirrors `NLAEResult.verified` (Z3 *or* Lean); `multi_agent.converged_by` names the backend that closed the run (`z3`, `lean`, or `null`).
+6. An explicit `multi_agent=False` keeps the single pipeline even when an orchestrator is injected.
 
 ```bash
 ENABLE_NLAE_MULTI_AGENT=true NLAE_MULTI_AGENT_MAX_ROUNDS=3 python -m agent mcp-server

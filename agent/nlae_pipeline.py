@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 import logging
 import re
@@ -188,7 +189,13 @@ class NLAEPipeline:
             multi_agent,
             multi_agent_max_rounds,
         )
-        self.multi_agent = resolved_multi_agent or orchestrator is not None
+        # An explicit ``multi_agent=False`` is authoritative: injecting an
+        # orchestrator only opts in when the caller left the flag unset.
+        self.multi_agent = (
+            resolved_multi_agent
+            if multi_agent is not None
+            else resolved_multi_agent or orchestrator is not None
+        )
         self.multi_agent_max_rounds = resolved_rounds
         self.orchestrator = orchestrator
 
@@ -316,6 +323,10 @@ class NLAEPipeline:
                     from_role=escalation_source,
                     to_role=LEAN_ESCALATION_ROLE,
                     message={
+                        # The certificate filename is fixed per work dir, so
+                        # the digest of the verified source is what makes this
+                        # handoff's semantic hash specification-dependent.
+                        "code_digest": _code_digest(code),
                         "proof_cert": cert_path.name,
                         "stage": "certificate",
                         "z3_verified": _all_verified(verify_result),
@@ -335,7 +346,11 @@ class NLAEPipeline:
                 lean_span_name=f"mumei.nlae.agent.{LEAN_ESCALATION_ROLE}",
                 before_lean=announce_certificate,
             )
-            outcome = orchestrator.outcome(rounds=rounds, converged=result.verified)
+            outcome = orchestrator.outcome(
+                rounds=rounds,
+                converged=result.verified,
+                converged_by=_converged_by(verify_result, result.lean_verified),
+            )
             result.multi_agent = outcome.to_dict()
             telemetry.set_span_attributes(
                 workflow_span,
@@ -442,6 +457,19 @@ def _resolve_multi_agent_settings(
                 else DEFAULT_MAX_ROUNDS
             )
     return bool(enabled), max(1, int(max_rounds))
+
+
+def _code_digest(code: str) -> str:
+    return hashlib.blake2b(code.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def _converged_by(verify_result: dict[str, object], lean_verified: bool) -> str | None:
+    """Name the backend that closed the run, or ``None`` when none did."""
+    if _all_verified(verify_result):
+        return "z3"
+    if lean_verified:
+        return "lean"
+    return None
 
 
 def _normalise_correction(
