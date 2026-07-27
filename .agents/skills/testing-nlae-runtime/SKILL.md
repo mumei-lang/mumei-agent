@@ -22,9 +22,10 @@ Use this skill for PRs touching:
 # Setup Checks
 
 1. Confirm the repo has no UI path for this feature; prefer shell/runtime probes over browser recording.
-2. Check CI and PR comments before execution:
+2. Check CI and PR comments before execution. Inside `mumei-agent` always use `uv run pytest`
+   (bare `pytest` on PATH belongs to the system Python and misses the project deps):
    ```bash
-   python -m pytest -q
+   uv run pytest -q   # baseline as of commit 2835e0c7: 1964 passed, 64 skipped
    ```
 3. Check lint according to the repo blueprint:
    ```bash
@@ -63,6 +64,49 @@ The probe should verify these assertions:
    - Run the same spec twice and assert the handoff `semantic_hash` sequences are identical (deterministic orchestration).
    - Make the orchestrator's `handoff` raise, then assert the run still returns a verified `NLAEResult` and `multi_agent["status"] == "fallback"` with the `fallback_reason` recorded.
    - Assert the span names observed through `agent.telemetry.start_span` include `mumei.nlae.pipeline`, `mumei.nlae.multi_agent`, `mumei.nlae.agent.<role>` for each role, and `mumei.nlae.handoff`, and exclude `mumei.nlae.lean_bridge`.
+   - Adversarial controls worth adding (they catch implementations that only *look* correct):
+     - Tamper control for `authenticated`: encode one envelope directly with `LatentProtocol`, assert
+       `verify_authentication_tag(vec) is True`, mutate the stored `encoded_frame` in
+       `protocol._metadata_by_vector[protocol._vector_key(vec)]`, and assert it flips to `False`.
+     - "No behaviour drift" control: extract the pre-change pipeline with
+       `git show <feature-commit>^:agent/nlae_pipeline.py > test-artifacts/old_nlae_pipeline.py`,
+       import it with `importlib.util.spec_from_file_location`, run it with the same fakes, and compare
+       `NLAEResult.to_dict()` plus the generated `.mm` / `.proof-cert.json` bytes. Normalise work-dir
+       absolute paths (they appear inside `lean_result`) and drop `trace_id` / `artifacts` before
+       comparing, otherwise the comparison fails for path reasons only. Add a mutated-input negative
+       control so the comparison cannot pass vacuously.
+     - Spec-sensitivity control: a changed spec must change at least one handoff `semantic_hash`.
+       Note the escalation handoff body is `{proof_cert filename, stage, z3_verified}` + atom names, so
+       that particular hash is expected to stay stable across different specs.
+     - Failure injection twice: raise from `MultiAgentOrchestrator.handoff` *and* monkeypatch
+       `LatentProtocol.encode_message` to raise; both must fall back and the resulting `NLAEResult`
+       (minus `multi_agent`/`trace_id`/paths) must equal the single-pipeline baseline, with the Lean
+       bridge called exactly once.
+     - Audit privacy: seed the loss vector and atom name with unique marker strings, set
+       `LATENT_PROTOCOL_AUDIT_LOG` *and* `LATENT_PROTOCOL_KEY` in the environment only (the
+       orchestrator picks both up itself), then grep the raw JSONL for the markers, the key value and
+       `protocol._auth_key().hex()`. Audit line keys should be exactly
+       `authentication, encrypted, event, payload_hash, protocol_version, semantic_hash, transfer_bytes`.
+     - Real trace assertions instead of span-name recording: set `OTEL_ENABLED=true` and install an SDK
+       `TracerProvider` + `InMemorySpanExporter` (from `opentelemetry.sdk.trace.export.in_memory_span_exporter`)
+       **before** the first `agent.telemetry` call — `telemetry._initialise()` keeps an already-installed
+       provider. Then assert one distinct `trace_id`, one root (`mumei.nlae.pipeline`, `parent is None`),
+       `mumei.nlae.multi_agent` parented on the root, all three `mumei.nlae.agent.<role>` spans and the
+       `mumei.nlae.handoff` spans parented on the workflow span, and no orphan parents. Do this in a
+       separate process from the non-OTel probes, since `OTEL_ENABLED` also switches on
+       `telemetry.span_trace_id`.
+     - MCP surface: patch `agent.mcp_server.NLAEPipeline` with a thin **subclass of the real**
+       `NLAEPipeline` that only injects fakes (signature `(work_dir, lean_no_build=False,
+       multi_agent=None)`), then call `mcp_server.run_nlae_pipeline(...)` directly. Check three
+       combinations: `multi_agent=True`; `multi_agent=False` with `ENABLE_NLAE_MULTI_AGENT=true`
+       (must still opt in via config); `multi_agent=False` with the env var unset (`multi_agent` null).
+     - Round budget: with a self-correction stub that never fixes the code, `rounds` must stop at
+       `NLAE_MULTI_AGENT_MAX_ROUNDS` and the run must still end with one escalation handoff.
+       `converged` mirrors `NLAEResult.verified` (Z3 **or** Lean), so make the Lean fake fail too if you
+       want to prove `converged` can be `False`.
+   - Caveat: passing `orchestrator=` enables the workflow even with `multi_agent=False`
+     (`nlae_pipeline.py`: `self.multi_agent = resolved_multi_agent or orchestrator is not None`).
+     Use `multi_agent=False` **without** an orchestrator when testing the default-off path.
 
 5. Latent debug validates before returning:
    - Call `get_fix()` with `enable_latent_debug=True`, a source containing a `requires` clause, and a report that triggers latent debugging.
