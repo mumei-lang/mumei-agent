@@ -54,6 +54,7 @@ The agent uses an OpenAI-compatible client.
 | `ENABLE_LATENT_DEBUG` | Opt-in experimental latent-space debugging in fix strategy. Leave false for normal runs unless explicitly evaluating NLAE repair behavior. |
 | `ENABLE_DENSE_PROPERTIES` | Opt-in experimental high-density property generation. Leave false for normal runs unless explicitly evaluating dense generated contracts. |
 | `ENABLE_LATENT_PROTOCOL` | Opt-in experimental latent representation MCP protocol. Leave false unless explicitly testing latent inter-agent communication. |
+| `ENABLE_NLAE_MULTI_AGENT` | Opt-in P12-D multi-agent verification workflow (`generator` / `counterexample` / `lean_escalation` over latent protocol handoffs). Falls back to the single P9-G pipeline on failure. |
 
 Local Ollama smoke-test example:
 

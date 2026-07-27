@@ -14,6 +14,9 @@ NLAE-inspired features add three capabilities:
    guidance. Opt-in.
 3. **Latent protocol**: encode inter-agent messages as latent vectors exposed
    through the MCP server. Opt-in.
+4. **Multi-agent verification workflow**: split the P9-G pipeline stages across
+   collaborating verification agents that hand work to each other over latent
+   protocol envelopes. Opt-in.
 
 Enabled capabilities fall back to existing behavior on failure.
 
@@ -24,6 +27,8 @@ Enabled capabilities fall back to existing behavior on failure.
 | `ENABLE_LATENT_DEBUG` | `false` | Opt in to latent-space debugging in fix strategy. |
 | `ENABLE_DENSE_PROPERTIES` | `false` | Opt in to high-density property generation. |
 | `ENABLE_LATENT_PROTOCOL` | `false` | Opt in to latent protocol MCP tool usage. |
+| `ENABLE_NLAE_MULTI_AGENT` | `false` | Opt in to the multi-agent verification workflow in `NLAEPipeline`. |
+| `NLAE_MULTI_AGENT_MAX_ROUNDS` | `2` | Counterexample rounds the workflow may spend before escalating to Lean. |
 
 Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
 
@@ -36,6 +41,8 @@ Truthy values are `true`, `1`, `yes`, and `on` (case-insensitive).
 - `agent/strategies/dense_property_generator.py`: LLM-backed dense contract
   generation.
 - `agent/prompts/dense_property.py`: dense property prompt builder.
+- `agent/nlae_multi_agent.py`: deterministic multi-agent orchestrator that
+  records each role-to-role handoff as a latent protocol envelope.
 - `agent/latent_protocol.py`: hash-based latent inter-agent protocol with
   compression, semantic hashing, versioned envelopes, optional encryption,
   authentication tags, and privacy-preserving audit metadata.
@@ -152,3 +159,49 @@ MCP clients can run the full P9-G integration with `run_nlae_pipeline`:
   "no_build": true
 }
 ```
+
+## P12-D Multi-Agent Verification Workflow
+
+The single P9-G pipeline runs generate → verify → self-correct → Lean fidelity
+as one agent. With `ENABLE_NLAE_MULTI_AGENT=true` (or `multi_agent=true` on the
+`run_nlae_pipeline` MCP call) the same stages are divided between three
+specialised agents that share one spec:
+
+| Role | Stage | Input handoff |
+| --- | --- | --- |
+| `generator` | generate + `mumei verify --emit loss-vector` | spec |
+| `counterexample` | Loss Vector driven self-correction rounds | `generator` → `counterexample` |
+| `lean_escalation` | `mumei-lean` fidelity check on the proof certificate | `counterexample` → `lean_escalation` |
+
+Orchestration is deterministic: the roles, the round order, and the handoff
+bodies are fixed functions of the spec and the verifier output, so two runs of
+the same spec produce the same handoff `semantic_hash` sequence. Verdicts still
+come only from the verifier and the Lean bridge — the workflow adds no verdict
+classification and no alias for `lean_verified`.
+
+Each handoff is encoded with `LatentProtocol.encode_message`, so it carries the
+existing `lp-v2` versioned envelope, `blake2b-128` semantic hash,
+`hmac-sha256` authentication tag, optional AES-256-GCM payload encryption, and a
+redacted audit entry (`LATENT_PROTOCOL_KEY` / `LATENT_PROTOCOL_AUDIT_LOG` apply
+unchanged). The `NLAEResult.multi_agent` field reports `rounds`, `converged`,
+`audit_events`, and one record per handoff (`from_role`, `to_role`, `round`,
+`semantic_hash`, `protocol_version`, `transfer_bytes`, `authenticated`).
+
+Tracing keeps one distributed trace: `mumei.nlae.multi_agent` nests under the
+`mumei.nlae.pipeline` root span, each agent runs in
+`mumei.nlae.agent.<role>`, and every handoff emits `mumei.nlae.handoff` with the
+role, round, semantic hash, and authentication status as span attributes. The
+handoff envelope also carries the current `trace_id`, which the protocol treats
+as a volatile field so the semantic hash stays comparable across traces.
+
+If any part of the workflow raises, the run degrades to the single pipeline and
+`multi_agent` records `status="fallback"` with the `fallback_reason`; the
+resulting `NLAEResult` is otherwise identical to a non-multi-agent run.
+
+```bash
+ENABLE_NLAE_MULTI_AGENT=true NLAE_MULTI_AGENT_MAX_ROUNDS=3 \
+  LATENT_PROTOCOL_AUDIT_LOG=.nlae-work/latent-audit.jsonl \
+  python -m agent mcp-server
+```
+
+Regression gate: `uv run pytest tests/test_nlae_pipeline.py tests/test_latent_protocol.py -q`.

@@ -977,10 +977,40 @@ Anthropic Natural Language Autoencoders (NLAE) の概念を mumei-agent に統�
 - ✅ `mcp_server.py` への `send_latent_message` 追加
 - ✅ MCP feature flag とプロトコルテスト
 
+### P12-D: Multi-Agent Verification Workflow ✅ Implemented (paper Future Work #9)
+
+P9-G の単一 pipeline（generate → verify → self-correct → Lean fidelity）と
+`LatentProtocol` の 1 対 1 メッセージングに留まっていた範囲を、1 つの spec を
+複数の検証エージェントで分担する opt-in ワークフローへ拡張する。
+
+- ✅ `agent/nlae_multi_agent.py` を追加。`generator`（生成 + verify）/
+  `counterexample`（Loss Vector 駆動の self-correction、`NLAE_MULTI_AGENT_MAX_ROUNDS`
+  ラウンドまで）/ `lean_escalation`（`mumei-lean` fidelity check）の 3 role を
+  固定し、`MultiAgentOrchestrator` が決定的にオーケストレーションする。
+- ✅ role 間の受け渡しは既存の `LatentProtocol.encode_message` envelope に載せる。
+  `lp-v2` versioned envelope / `blake2b-128` semantic hash / `hmac-sha256`
+  authentication tag / AES-256-GCM（`LATENT_PROTOCOL_KEY`）/ redacted audit log
+  （`LATENT_PROTOCOL_AUDIT_LOG`）をそのまま再利用し、新規 verdict 分類や別名
+  alias は追加しない。verdict は従来どおり verifier と Lean bridge のみが決める。
+- ✅ `NLAEResult.multi_agent` に `rounds` / `converged` / `audit_events` と
+  handoff 毎の `from_role` / `to_role` / `round` / `semantic_hash` /
+  `protocol_version` / `transfer_bytes` / `authenticated` を記録。同一 spec の
+  再実行で semantic hash 列が一致する（決定性）。
+- ✅ OTel は 1 本の分散トレースを維持: `mumei.nlae.pipeline` root の下に
+  `mumei.nlae.multi_agent`、その下に `mumei.nlae.agent.<role>` と
+  `mumei.nlae.handoff`。handoff envelope は `trace_id` を volatile field として
+  運ぶため semantic hash はトレース間で比較可能なまま。
+- ✅ デフォルト無効（`ENABLE_NLAE_MULTI_AGENT`、MCP は `run_nlae_pipeline`
+  の `multi_agent` 引数）。ワークフロー内の例外は既存の単一 pipeline へ graceful
+  fallback し、`multi_agent.status = "fallback"` と `fallback_reason` を記録する。
+- ✅ 回帰ゲート: `uv run pytest tests/test_nlae_pipeline.py tests/test_latent_protocol.py -q`
+  （収束・決定性・fallback・trace 接続・デフォルト無効を fixture で固定）。
+
 ### Configuration
 
 - すべての機能はデフォルト無効
-- `ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, `ENABLE_LATENT_PROTOCOL`
+- `ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, `ENABLE_LATENT_PROTOCOL`,
+  `ENABLE_NLAE_MULTI_AGENT`（ラウンド予算は `NLAE_MULTI_AGENT_MAX_ROUNDS`, 既定 `2`）
 
 ### References
 
