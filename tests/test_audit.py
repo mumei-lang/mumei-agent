@@ -2101,3 +2101,6 @@ def test_audit_reports_underspecified_intent_without_downgrading_the_verdict(
         gap.startswith("spec ambiguity (") for gap in result.cross_validation_gaps
     )
     assert any("underspecified" in step["action"] for step in result.next_steps)
+    # The stored text report is rendered after the step is recorded, so every
+    # output format carries the same clarification request.
+    assert "underspecified" in result.report

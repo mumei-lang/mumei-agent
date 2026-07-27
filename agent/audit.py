@@ -59,7 +59,6 @@ from agent.audit_reporting import (
     _migration_issue_dicts,
     _pluralize,
     _read_json_dict,
-    _record_underspecified_intent,
     _result_report,
     _result_to_markdown,
     _safe_identifier,
@@ -436,9 +435,7 @@ class AuditPipeline:
             )
             result.healed_files = healed_files
             result.heal_errors = heal_errors
-        audited = _finalize_audit_result(result)
-        _record_underspecified_intent(audited, spec_ambiguities)
-        return audited
+        return _finalize_audit_result(result, spec_ambiguities)
 
     def audit_directory(
         self,

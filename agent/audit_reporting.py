@@ -482,8 +482,14 @@ def _format_result(result: AuditResult | AuditDirectoryResult, output_format: st
 
     return format_result_report(result, "markdown" if output_format == "markdown" else "human")
 
-def _finalize_audit_result(result: AuditResult) -> AuditResult:
+def _finalize_audit_result(
+    result: AuditResult,
+    ambiguities: Sequence[SpecAmbiguity] = (),
+) -> AuditResult:
     result.next_steps = _generate_next_steps(result)
+    # Before the report is rendered, so every output format carries the same
+    # clarification requests.
+    _record_underspecified_intent(result, ambiguities)
     result.report = _build_report(result)
     return result
 
