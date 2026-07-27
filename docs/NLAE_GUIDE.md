@@ -1,6 +1,6 @@
 # NLAE Guide
 
-`mumei-agent` ships lightweight Natural Language Autoencoder-inspired features for denser generation and earlier repair attempts. Latent-space debugging and dense property generation are disabled by default. The latent protocol for inter-agent communication remains disabled by default.
+`mumei-agent` ships lightweight Natural Language Autoencoder-inspired features for denser generation and earlier repair attempts. Latent-space debugging and dense property generation are disabled by default. The latent protocol for inter-agent communication, and the multi-agent verification workflow built on it, remain disabled by default.
 
 ## Latent-space debugging
 
@@ -35,6 +35,21 @@ Enable dense properties for a single run:
 ENABLE_DENSE_PROPERTIES=true python -m agent generate --spec-file spec.json --output out.mm
 ```
 
+## Multi-agent verification workflow
+
+With `ENABLE_NLAE_MULTI_AGENT` enabled, `NLAEPipeline.run_full_pipeline()` divides the P9-G stages between a `generator` agent (generate + verify), a `counterexample` agent (Loss Vector driven self-correction, up to `NLAE_MULTI_AGENT_MAX_ROUNDS` rounds), and a `lean_escalation` agent (`mumei-lean` fidelity check).
+
+1. `MultiAgentOrchestrator` encodes every role-to-role handoff through `LatentProtocol`, so the run inherits the existing versioned envelope, semantic hash, authentication tag, optional encryption, and redacted audit log.
+2. Orchestration is deterministic, so repeated runs of the same spec produce the same handoff `semantic_hash` sequence; `NLAEResult.multi_agent` carries the handoff records for audit.
+3. Spans stay in one trace: `mumei.nlae.multi_agent` under the `mumei.nlae.pipeline` root, `mumei.nlae.agent.<role>` per agent, and `mumei.nlae.handoff` per handoff.
+4. Any failure inside the workflow degrades to the single pipeline, and `multi_agent.status` becomes `fallback` with the reason recorded.
+
+```bash
+ENABLE_NLAE_MULTI_AGENT=true NLAE_MULTI_AGENT_MAX_ROUNDS=3 python -m agent mcp-server
+```
+
+See `docs/NLAE_INTEGRATION.md` for the role/handoff table and the audit payload shape.
+
 ## Performance impact
 
 - Latent debugging is local and deterministic. Its overhead is typically limited to NumPy feature extraction and a small decoder pass.
@@ -50,6 +65,8 @@ ENABLE_DENSE_PROPERTIES=true python -m agent generate --spec-file spec.json --ou
 | `ENABLE_LATENT_DEBUG` | `false` | Run latent-space repair before rule-based and LLM fixes. |
 | `ENABLE_DENSE_PROPERTIES` | `false` | Generate dense `requires` / `ensures` clauses after initial generation. |
 | `ENABLE_LATENT_PROTOCOL` | `false` | Expose latent inter-agent protocol behavior through MCP tools. |
+| `ENABLE_NLAE_MULTI_AGENT` | `false` | Run the NLAE pipeline as a multi-agent verification workflow. |
+| `NLAE_MULTI_AGENT_MAX_ROUNDS` | `2` | Counterexample rounds before the workflow escalates to Lean. |
 
 Truthy values are `true`, `1`, `yes`, and `on` case-insensitively. Any other set value disables the flag.
 
@@ -59,3 +76,4 @@ Truthy values are `true`, `1`, `yes`, and `on` case-insensitively. Any other set
 - Set `ENABLE_LATENT_DEBUG=true` only when a repair run should try the experimental latent-space pass before the legacy repair pipeline.
 - Set `ENABLE_DENSE_PROPERTIES=true` only when a generation run should spend the extra LLM call to densify generated contracts.
 - Keep `ENABLE_LATENT_PROTOCOL=false` unless explicitly testing latent inter-agent communication.
+- Keep `ENABLE_NLAE_MULTI_AGENT=false` unless a run should divide verification across the `generator` / `counterexample` / `lean_escalation` agents; the single pipeline stays the default path.

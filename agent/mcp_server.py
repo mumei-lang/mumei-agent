@@ -637,10 +637,22 @@ def run_nlae_pipeline(
     mumei_lean_repo: str = "",
     work_dir: str = "",
     no_build: bool = False,
+    multi_agent: bool = False,
 ) -> str:
-    """P9-G: run the four-repository NLAE integration pipeline."""
+    """P9-G: run the four-repository NLAE integration pipeline.
+
+    Args:
+        spec: Natural-language specification to forge and verify.
+        mumei_lean_repo: Path to a ``mumei-lang/mumei-lean`` checkout.
+        work_dir: Directory for generated code, certificates, and Lean output.
+        no_build: Skip the Lean ``lake build`` step.
+        multi_agent: Opt in to the P12-D multi-agent verification workflow for
+            this call even when ``ENABLE_NLAE_MULTI_AGENT`` is unset.  The
+            workflow falls back to the single pipeline on failure.
+    """
     with telemetry.start_tool_span(
-        "run_nlae_pipeline", **{"mcp.tool.no_build": no_build}
+        "run_nlae_pipeline",
+        **{"mcp.tool.no_build": no_build, "mcp.tool.multi_agent": multi_agent},
     ):
         lean_repo = Path(
             mumei_lean_repo
@@ -660,6 +672,7 @@ def run_nlae_pipeline(
             result = NLAEPipeline(
                 work_dir=pipeline_work_dir,
                 lean_no_build=no_build,
+                multi_agent=True if multi_agent else None,
             ).run_full_pipeline(spec, lean_repo)
         except Exception as exc:
             return _err(f"run_nlae_pipeline failed: {exc}")
@@ -1032,6 +1045,9 @@ def get_agent_status() -> str:
                         "ENABLE_DENSE_PROPERTIES", ""
                     ),
                     "ENABLE_LATENT_PROTOCOL": os.environ.get("ENABLE_LATENT_PROTOCOL", ""),
+                    "ENABLE_NLAE_MULTI_AGENT": os.environ.get(
+                        "ENABLE_NLAE_MULTI_AGENT", ""
+                    ),
                     "ENABLE_CODE_TO_SPEC": os.environ.get("ENABLE_CODE_TO_SPEC", ""),
                 },
                 "python": sys.version,

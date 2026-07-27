@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
-from agent import mcp_server
+from agent import mcp_server, telemetry
+from agent.latent_protocol import LatentProtocol
+from agent.nlae_multi_agent import (
+    COUNTEREXAMPLE_ROLE,
+    GENERATOR_ROLE,
+    LEAN_ESCALATION_ROLE,
+    AgentHandoff,
+    MultiAgentOrchestrator,
+)
 from agent.nlae_pipeline import NLAEPipeline, NLAEResult
 
 
@@ -156,11 +165,166 @@ def test_lean_fallback_receives_certificate_and_repo(tmp_path: Path) -> None:
     assert fake_lean.lean_cert_out == tmp_path / "nlae_pipeline.lean-cert.json"
 
 
+def test_multi_agent_workflow_converges_with_audited_handoffs(tmp_path: Path) -> None:
+    orchestrator = MultiAgentOrchestrator(
+        protocol=LatentProtocol(audit_log_path=tmp_path / "latent-audit.jsonl"),
+        max_rounds=3,
+    )
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=FakeSelfCorrectionLoop(),
+        lean_bridge=FakeLeanBridge(),
+        work_dir=tmp_path,
+        orchestrator=orchestrator,
+    )
+
+    result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+
+    assert result.verified is True
+    assert "body: balance - amount;" in result.code
+    multi_agent = result.multi_agent
+    assert multi_agent is not None
+    assert multi_agent["status"] == "ok"
+    assert multi_agent["converged"] is True
+    assert multi_agent["rounds"] == 1
+    assert multi_agent["roles"] == [
+        GENERATOR_ROLE,
+        COUNTEREXAMPLE_ROLE,
+        LEAN_ESCALATION_ROLE,
+    ]
+    handoffs = multi_agent["handoffs"]
+    assert [(item["from_role"], item["to_role"]) for item in handoffs] == [
+        (GENERATOR_ROLE, COUNTEREXAMPLE_ROLE),
+        (COUNTEREXAMPLE_ROLE, LEAN_ESCALATION_ROLE),
+    ]
+    assert all(item["authenticated"] for item in handoffs)
+    assert all(item["protocol_version"] == "lp-v2" for item in handoffs)
+    assert len({item["semantic_hash"] for item in handoffs}) == len(handoffs)
+    assert multi_agent["audit_events"] >= 2 * len(handoffs)
+    audit_lines = (tmp_path / "latent-audit.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert audit_lines
+    for line in audit_lines:
+        entry = json.loads(line)
+        assert entry["semantic_hash"]
+        assert "message" not in entry
+        assert "context" not in entry
+
+
+def test_multi_agent_handoffs_are_deterministic(tmp_path: Path) -> None:
+    def run(work_dir: Path) -> list[str]:
+        pipeline = NLAEPipeline(
+            agent=FakeAgent(),
+            mumei_client=FakeMumeiClient(),
+            self_correction_loop=FakeSelfCorrectionLoop(),
+            lean_bridge=FakeLeanBridge(),
+            work_dir=work_dir,
+            orchestrator=MultiAgentOrchestrator(),
+        )
+        result = pipeline.run_full_pipeline("vault withdraw safety", work_dir)
+        assert result.multi_agent is not None
+        return [item["semantic_hash"] for item in result.multi_agent["handoffs"]]
+
+    first = run(tmp_path / "first")
+    second = run(tmp_path / "second")
+
+    assert first == second
+
+
+def test_multi_agent_failure_falls_back_to_single_pipeline(tmp_path: Path) -> None:
+    class BrokenOrchestrator(MultiAgentOrchestrator):
+        def handoff(self, **kwargs: object) -> AgentHandoff:
+            raise RuntimeError("latent transport unavailable")
+
+    fake_lean = FakeLeanBridge()
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=FakeSelfCorrectionLoop(),
+        lean_bridge=fake_lean,
+        work_dir=tmp_path,
+        orchestrator=BrokenOrchestrator(),
+    )
+
+    result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+
+    assert result.verified is True
+    assert result.lean_verified is True
+    assert "body: balance - amount;" in result.code
+    assert result.multi_agent == {
+        "enabled": True,
+        "status": "fallback",
+        "roles": [GENERATOR_ROLE, COUNTEREXAMPLE_ROLE, LEAN_ESCALATION_ROLE],
+        "rounds": 0,
+        "handoffs": [],
+        "audit_events": 0,
+        "converged": False,
+        "fallback_reason": "RuntimeError: latent transport unavailable",
+    }
+
+
+def test_multi_agent_spans_share_one_trace(tmp_path: Path, monkeypatch) -> None:
+    started: list[str] = []
+    real_start_span = telemetry.start_span
+
+    @contextmanager
+    def recording_start_span(name: str, **kwargs: object):
+        started.append(name)
+        with real_start_span(name, **kwargs) as span:
+            yield span
+
+    monkeypatch.setattr(telemetry, "start_span", recording_start_span)
+
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=FakeSelfCorrectionLoop(),
+        lean_bridge=FakeLeanBridge(),
+        work_dir=tmp_path,
+        orchestrator=MultiAgentOrchestrator(),
+    )
+    pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+
+    assert started[0] == "mumei.nlae.pipeline"
+    assert started[1] == "mumei.nlae.multi_agent"
+    for name in (
+        "mumei.nlae.agent.generator",
+        "mumei.nlae.agent.counterexample",
+        "mumei.nlae.agent.lean_escalation",
+        "mumei.nlae.handoff",
+    ):
+        assert name in started
+    assert "mumei.nlae.lean_bridge" not in started
+
+
+def test_multi_agent_is_disabled_by_default(tmp_path: Path) -> None:
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=FakeSelfCorrectionLoop(),
+        lean_bridge=FakeLeanBridge(),
+        work_dir=tmp_path,
+        multi_agent=False,
+    )
+
+    result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+
+    assert result.multi_agent is None
+
+
 def test_run_nlae_pipeline_mcp_tool(monkeypatch, tmp_path: Path) -> None:
     class FakePipeline:
-        def __init__(self, work_dir: Path, lean_no_build: bool) -> None:
+        def __init__(
+            self,
+            work_dir: Path,
+            lean_no_build: bool,
+            multi_agent: bool | None = None,
+        ) -> None:
             assert work_dir == tmp_path / "work"
             assert lean_no_build is True
+            assert multi_agent is None
 
         def run_full_pipeline(self, spec: str, mumei_lean_repo: Path) -> NLAEResult:
             assert spec == "vault withdraw safety"

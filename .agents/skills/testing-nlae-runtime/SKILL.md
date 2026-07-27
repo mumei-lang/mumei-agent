@@ -12,7 +12,8 @@ If live end-to-end LLM generation is required, use `LLM_API_KEY` or `OPENAI_API_
 # When to Use
 
 Use this skill for PRs touching:
-- `agent/config.py` NLAE flags (`ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, `ENABLE_LATENT_PROTOCOL`)
+- `agent/config.py` NLAE flags (`ENABLE_LATENT_DEBUG`, `ENABLE_DENSE_PROPERTIES`, `ENABLE_LATENT_PROTOCOL`, `ENABLE_NLAE_MULTI_AGENT`)
+- `agent/nlae_multi_agent.py` / `agent/nlae_pipeline.py` multi-agent workflow paths
 - `agent/mcp_server.py` latent protocol tools or `heal_file`
 - `agent/strategies/generate_strategy.py` dense property paths
 - `agent/strategies/fix_strategy.py` latent-debug behavior
@@ -55,7 +56,15 @@ The probe should verify these assertions:
    - Mock the second LLM response to return a distinctive contract such as `requires: false;` and `ensures: result == 1;`.
    - Assert returned `verified is True`, output contains both distinctive contract clauses, and mocked LLM call count is exactly `2`.
 
-4. Latent debug validates before returning:
+4. Multi-agent verification workflow stays opt-in and auditable:
+   - Remove `ENABLE_NLAE_MULTI_AGENT` from `os.environ`, instantiate `AgentConfig()`, and assert `enable_nlae_multi_agent is False` and `nlae_multi_agent_max_rounds == 2`.
+   - Run `NLAEPipeline(...).run_full_pipeline()` with mocked agent / mumei client / self-correction / Lean bridge and no orchestrator, and assert `result.multi_agent is None`.
+   - Re-run with `orchestrator=MultiAgentOrchestrator(protocol=LatentProtocol(audit_log_path=...))` and assert `multi_agent["status"] == "ok"`, `converged is True`, the handoff sequence is `generator -> counterexample` then `counterexample -> lean_escalation`, every handoff is `authenticated` with `protocol_version == "lp-v2"`, and the audit JSONL lines contain `semantic_hash` but no `message` / `context` body.
+   - Run the same spec twice and assert the handoff `semantic_hash` sequences are identical (deterministic orchestration).
+   - Make the orchestrator's `handoff` raise, then assert the run still returns a verified `NLAEResult` and `multi_agent["status"] == "fallback"` with the `fallback_reason` recorded.
+   - Assert the span names observed through `agent.telemetry.start_span` include `mumei.nlae.pipeline`, `mumei.nlae.multi_agent`, `mumei.nlae.agent.<role>` for each role, and `mumei.nlae.handoff`, and exclude `mumei.nlae.lean_bridge`.
+
+5. Latent debug validates before returning:
    - Call `get_fix()` with `enable_latent_debug=True`, a source containing a `requires` clause, and a report that triggers latent debugging.
    - Provide a fake `mumei_client.verify()` returning `{"success": False}`.
    - Mock the LLM fallback to return distinctive fallback code.

@@ -67,6 +67,12 @@ class AgentConfig:
     enable_latent_debug: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_DEBUG"))
     enable_dense_properties: bool = field(default_factory=lambda: _env_bool("ENABLE_DENSE_PROPERTIES"))
     enable_latent_protocol: bool = field(default_factory=lambda: _env_bool("ENABLE_LATENT_PROTOCOL"))
+    enable_nlae_multi_agent: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_NLAE_MULTI_AGENT")
+    )
+    nlae_multi_agent_max_rounds: int = field(
+        default_factory=lambda: int(os.getenv("NLAE_MULTI_AGENT_MAX_ROUNDS", "2"))
+    )
     enable_code_to_spec: bool = field(default_factory=lambda: _env_bool("ENABLE_CODE_TO_SPEC", True))
     enable_generation_health_check: bool = field(
         default_factory=lambda: _env_bool("ENABLE_GENERATION_HEALTH_CHECK", True)

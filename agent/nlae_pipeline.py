@@ -3,18 +3,30 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from agent import telemetry
 from agent.config import AgentConfig
 from agent.lean_bridge import run_lean_bridge as run_lean_bridge_impl
 from agent.mumei_client import create_mumei_client
+from agent.nlae_multi_agent import (
+    COUNTEREXAMPLE_ROLE,
+    DEFAULT_MAX_ROUNDS,
+    GENERATOR_ROLE,
+    LEAN_ESCALATION_ROLE,
+    MultiAgentOrchestrator,
+    fallback_outcome,
+)
 from agent.proofcert import Z3CheckResult
 from agent.strategies.fix_strategy import ConfiguredLossVectorFixClient, SelfCorrectionLoop
 from agent.strategies.generate_strategy import generate_code
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +40,7 @@ class NLAEResult:
     lean_result: dict[str, object] | None
     artifacts: dict[str, str]
     trace_id: str | None = None
+    multi_agent: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -152,6 +165,9 @@ class NLAEPipeline:
         lean_bridge: LeanBridgeRunner | None = None,
         work_dir: Path | None = None,
         lean_no_build: bool = False,
+        multi_agent: bool | None = None,
+        multi_agent_max_rounds: int | None = None,
+        orchestrator: MultiAgentOrchestrator | None = None,
     ) -> None:
         self.work_dir = work_dir or Path(tempfile.mkdtemp(prefix="mumei-nlae-"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -168,6 +184,13 @@ class NLAEPipeline:
             )
         )
         self.lean_bridge = lean_bridge or ConfiguredLeanBridgeRunner(no_build=lean_no_build)
+        resolved_multi_agent, resolved_rounds = _resolve_multi_agent_settings(
+            multi_agent,
+            multi_agent_max_rounds,
+        )
+        self.multi_agent = resolved_multi_agent or orchestrator is not None
+        self.multi_agent_max_rounds = resolved_rounds
+        self.orchestrator = orchestrator
 
     def run_full_pipeline(self, spec: str, mumei_lean_repo: Path) -> NLAEResult:
         """Run generate -> verify -> self-correct -> Lean fidelity as one trace.
@@ -178,7 +201,20 @@ class NLAEPipeline:
         connecting the caller's trace to the inner verify / loop / Lean spans.
         """
         with telemetry.start_span("mumei.nlae.pipeline") as _root_span:
-            return self._run_full_pipeline_inner(_root_span, spec, mumei_lean_repo)
+            if not self.multi_agent:
+                return self._run_full_pipeline_inner(_root_span, spec, mumei_lean_repo)
+            try:
+                return self._run_multi_agent_pipeline(_root_span, spec, mumei_lean_repo)
+            except Exception as exc:
+                logger.warning(
+                    "multi-agent NLAE workflow failed, falling back to the single "
+                    "pipeline: %s",
+                    exc,
+                )
+                fallback = fallback_outcome(f"{type(exc).__name__}: {exc}")
+            result = self._run_full_pipeline_inner(_root_span, spec, mumei_lean_repo)
+            result.multi_agent = fallback.to_dict()
+            return result
 
     def _run_full_pipeline_inner(
         self, _root_span: object, spec: str, mumei_lean_repo: Path,
@@ -207,9 +243,129 @@ class NLAEPipeline:
             if loss_vector is not None:
                 pipeline_loss_vector = loss_vector
 
+        return self._finalise(
+            _root_span,
+            code=code,
+            code_path=code_path,
+            verify_result=verify_result,
+            loss_vector=pipeline_loss_vector,
+            correction_result=correction_result,
+            mumei_lean_repo=mumei_lean_repo,
+            lean_span_name="mumei.nlae.lean_bridge",
+        )
+
+    def _run_multi_agent_pipeline(
+        self, _root_span: object, spec: str, mumei_lean_repo: Path,
+    ) -> NLAEResult:
+        """Split the pipeline stages across collaborating verification agents.
+
+        A generator agent, a counterexample agent, and a Lean escalation agent
+        share one spec.  Every handoff is encoded as a latent protocol
+        envelope so the run stays auditable, and each agent span nests under
+        the same ``mumei.nlae.pipeline`` root span as the single-pipeline path,
+        keeping the whole collaboration inside one distributed trace.
+        """
+        orchestrator = self.orchestrator or MultiAgentOrchestrator(
+            max_rounds=self.multi_agent_max_rounds,
+        )
+        with telemetry.start_span("mumei.nlae.multi_agent") as workflow_span:
+            trace_id = telemetry.span_trace_id(workflow_span) or telemetry.span_trace_id(
+                _root_span,
+            )
+            with telemetry.start_span(f"mumei.nlae.agent.{GENERATOR_ROLE}"):
+                code = self.agent.generate_code(spec)
+                code_path = self._write_code(code)
+                verify_result = self._verify_with_loss_vector(code_path)
+
+            loss_vector = _extract_loss_vector(verify_result)
+            pipeline_loss_vector = loss_vector
+            correction_result: dict[str, object] | None = None
+            rounds = 0
+
+            for round_index in range(1, orchestrator.max_rounds + 1):
+                if _all_verified(verify_result) or loss_vector is None:
+                    break
+                rounds = round_index
+                orchestrator.handoff(
+                    round_index=round_index,
+                    from_role=GENERATOR_ROLE,
+                    to_role=COUNTEREXAMPLE_ROLE,
+                    message={"loss_vector": loss_vector, "stage": "verify"},
+                    context={"atoms": _atom_names(code)},
+                    trace_id=trace_id,
+                )
+                with telemetry.start_span(f"mumei.nlae.agent.{COUNTEREXAMPLE_ROLE}"):
+                    correction = self.self_correction_loop.run(code, loss_vector)
+                    correction_result = _normalise_correction(correction)
+                    code = str(correction_result.get("code") or code)
+                    code_path = self._write_code(code)
+                    corrected_verify = correction_result.get("verify_result")
+                    if isinstance(corrected_verify, dict):
+                        verify_result = corrected_verify
+                    else:
+                        verify_result = self._verify_with_loss_vector(code_path)
+                loss_vector = _extract_loss_vector(verify_result)
+                if loss_vector is not None:
+                    pipeline_loss_vector = loss_vector
+
+            escalation_source = COUNTEREXAMPLE_ROLE if rounds else GENERATOR_ROLE
+
+            def announce_certificate(cert_path: Path) -> None:
+                orchestrator.handoff(
+                    round_index=rounds,
+                    from_role=escalation_source,
+                    to_role=LEAN_ESCALATION_ROLE,
+                    message={
+                        "proof_cert": cert_path.name,
+                        "stage": "certificate",
+                        "z3_verified": _all_verified(verify_result),
+                    },
+                    context={"atoms": _atom_names(code)},
+                    trace_id=trace_id,
+                )
+
+            result = self._finalise(
+                _root_span,
+                code=code,
+                code_path=code_path,
+                verify_result=verify_result,
+                loss_vector=pipeline_loss_vector,
+                correction_result=correction_result,
+                mumei_lean_repo=mumei_lean_repo,
+                lean_span_name=f"mumei.nlae.agent.{LEAN_ESCALATION_ROLE}",
+                before_lean=announce_certificate,
+            )
+            outcome = orchestrator.outcome(rounds=rounds, converged=result.verified)
+            result.multi_agent = outcome.to_dict()
+            telemetry.set_span_attributes(
+                workflow_span,
+                {
+                    "mumei.nlae.multi_agent.rounds": outcome.rounds,
+                    "mumei.nlae.multi_agent.handoffs": len(outcome.handoffs),
+                    "mumei.nlae.multi_agent.converged": outcome.converged,
+                },
+            )
+            return result
+
+    def _finalise(
+        self,
+        _root_span: object,
+        *,
+        code: str,
+        code_path: Path,
+        verify_result: dict[str, object],
+        loss_vector: dict[str, object] | None,
+        correction_result: dict[str, object] | None,
+        mumei_lean_repo: Path,
+        lean_span_name: str,
+        before_lean: Callable[[Path], None] | None = None,
+    ) -> NLAEResult:
+        """Write the certificate, run Lean fidelity, and build the result."""
         cert_path = self._write_certificate(code, verify_result)
         lean_cert_out = self.work_dir / "nlae_pipeline.lean-cert.json"
-        with telemetry.start_span("mumei.nlae.lean_bridge"):
+        if before_lean is not None:
+            before_lean(cert_path)
+        with telemetry.start_span(lean_span_name):
             lean_result = self.lean_bridge.run_lean_bridge(
                 cert_path,
                 lean_cert_out,
@@ -222,7 +378,7 @@ class NLAEPipeline:
             {
                 "mumei.nlae.verified": verified,
                 "mumei.nlae.lean_verified": lean_verified,
-                "mumei.nlae.loss_vector.present": pipeline_loss_vector is not None,
+                "mumei.nlae.loss_vector.present": loss_vector is not None,
             },
         )
         return NLAEResult(
@@ -230,7 +386,7 @@ class NLAEPipeline:
             verified=verified,
             lean_verified=lean_verified,
             verify_result=verify_result,
-            loss_vector=pipeline_loss_vector,
+            loss_vector=loss_vector,
             correction_result=correction_result,
             lean_result=lean_result,
             artifacts={
@@ -263,6 +419,29 @@ class NLAEPipeline:
         cert_path = self.work_dir / "nlae_pipeline.proof-cert.json"
         cert_path.write_text(json.dumps(certificate, indent=2), encoding="utf-8")
         return cert_path
+
+
+def _resolve_multi_agent_settings(
+    multi_agent: bool | None,
+    multi_agent_max_rounds: int | None,
+) -> tuple[bool, int]:
+    """Resolve the opt-in flag and round budget from arguments, then config."""
+    enabled = multi_agent
+    max_rounds = multi_agent_max_rounds
+    if enabled is None or max_rounds is None:
+        try:
+            config: AgentConfig | None = AgentConfig()
+        except Exception:
+            config = None
+        if enabled is None:
+            enabled = bool(config is not None and config.enable_nlae_multi_agent)
+        if max_rounds is None:
+            max_rounds = (
+                config.nlae_multi_agent_max_rounds
+                if config is not None
+                else DEFAULT_MAX_ROUNDS
+            )
+    return bool(enabled), max(1, int(max_rounds))
 
 
 def _normalise_correction(
