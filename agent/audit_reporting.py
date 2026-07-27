@@ -5,12 +5,13 @@ from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
 import re
-from typing import Literal
+from typing import Literal, Sequence
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
 from agent.cross_validation_models import ForeignCodeVerdict
 from agent.prompts.report_formatter import format_counterexample
 from agent.report_formatter import format_result_report
+from agent.spec_ambiguity import SpecAmbiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport
 from agent.strategies.spec_health_strategy import SpecHealthReport
 
@@ -507,6 +508,17 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
                 "command": "mumei-agent validate-spec-to-code --spec <spec> --code <file> --format human",
             }
         )
+    if any(
+        gap.startswith("spec ambiguity (missing_requirement)")
+        for gap in result.cross_validation_gaps
+    ):
+        steps.append(
+            {
+                "priority": "high",
+                "action": "欠落要件を追記してから再監査（推測で補完しない）",
+                "command": "mumei-agent validate-spec --input <spec> --format human",
+            }
+        )
     if result.spec_health_issues:
         steps.append(
             {
@@ -532,6 +544,38 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
             }
         )
     return steps
+
+def _record_underspecified_intent(
+    result: AuditResult,
+    ambiguities: Sequence[SpecAmbiguity],
+) -> None:
+    """Raise underspecified intent for human review via ``next_steps``.
+
+    Intent that is stated but not pinned down is not evidence against the
+    audited code, so it must not become a gap or downgrade the verdict; it is a
+    clarification request, reported on the existing human-review key rather than
+    silently completed.
+    """
+    subjects = list(
+        dict.fromkeys(
+            ambiguity.subject
+            for ambiguity in ambiguities
+            if ambiguity.classification == "underspecified_intent"
+        )
+    )
+    if not subjects:
+        return
+    result.next_steps.append(
+        {
+            "priority": "medium",
+            "action": (
+                "underspecified な意図を明文化（推測で補完しない）: "
+                + ", ".join(subjects)
+            ),
+            "command": "mumei-agent validate-spec --input <spec> --format human",
+        }
+    )
+
 
 def _generate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
     aggregated: list[dict] = []

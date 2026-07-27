@@ -704,6 +704,12 @@ def _proliferate_inner(
     with telemetry.start_span("mumei.proliferate.gap_analysis"):
         _log_step(1, 4, f"Analyzing gaps in {std_dir}")
         gaps = analyze_gaps(std_dir)
+    if feedback is not None:
+        # Benchmark-generated proposals are merged before the emptiness check:
+        # a benchmark weakness is forge work even when the gap rules see none.
+        merged = feedback.merge_generated_proposals(gaps["proposals"])
+        generated_count = len(merged) - len(gaps["proposals"])
+        gaps["proposals"] = merged
     telemetry.set_span_attributes(
         _root_span,
         {"mumei.proliferate.proposals_found": len(gaps["proposals"])},
@@ -735,7 +741,7 @@ def _proliferate_inner(
         _log_info(
             "Benchmark feedback applied (weak categories: "
             + (", ".join(feedback.weak_categories) or "none")
-            + ")"
+            + f"; generated proposals: {generated_count})"
         )
 
     _log_info(

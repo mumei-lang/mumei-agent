@@ -59,6 +59,7 @@ from agent.audit_reporting import (
     _migration_issue_dicts,
     _pluralize,
     _read_json_dict,
+    _record_underspecified_intent,
     _result_report,
     _result_to_markdown,
     _safe_identifier,
@@ -76,6 +77,7 @@ from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.llm_provider import LLMProvider
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
+from agent.spec_ambiguity import classify_spec_ambiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport, CrossValidator
 from agent.strategies.foreign_code_strategy import (
     ForeignCodeVerifier,
@@ -360,6 +362,28 @@ class AuditPipeline:
                 )
                 cross_validation_gaps = _cross_validation_gap_strings(cross_report)
 
+        # Ambiguity is reported, never resolved. A requirement the prose never
+        # states is a gap in what was verified, so it lands in
+        # ``cross_validation_gaps`` and blocks a `verified` verdict; intent that
+        # is stated but not pinned down is not evidence against the code, so it
+        # is raised for human review through ``next_steps`` instead of being
+        # completed with a guessed clause.
+        spec_ambiguities = classify_spec_ambiguity(
+            extraction.natural_language_spec,
+            extraction.forge_task_spec,
+            self.config,
+        )
+        missing_requirements = [
+            ambiguity
+            for ambiguity in spec_ambiguities
+            if ambiguity.classification == "missing_requirement"
+        ]
+        cross_validation_gaps.extend(
+            ambiguity.as_gap() for ambiguity in missing_requirements
+        )
+        if missing_requirements and verification_status == "verified":
+            verification_status = "unverifiable"
+
         success = (
             not errors
             and not spec_health_issues
@@ -412,7 +436,9 @@ class AuditPipeline:
             )
             result.healed_files = healed_files
             result.heal_errors = heal_errors
-        return _finalize_audit_result(result)
+        audited = _finalize_audit_result(result)
+        _record_underspecified_intent(audited, spec_ambiguities)
+        return audited
 
     def audit_directory(
         self,

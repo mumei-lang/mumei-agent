@@ -2024,3 +2024,80 @@ def test_forge_atom_to_mumei_keeps_boolean_clauses() -> None:
     source = _forge_atom_to_mumei(atom)
     assert "requires: a >= 0 && b >= 0;" in source
     assert "ensures: result == a + b;" in source
+
+def _ambiguity_pipeline(natural_language: str, spec: dict) -> object:
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec=natural_language,
+        forge_task_spec=spec,
+        detected_language="solidity",
+    )
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.return_value = CrossValidationReport(
+        coverage_ratio=1.0,
+    )
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+    return AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=ForeignCodeVerifier(mumei_client=mumei),
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    )
+
+
+def test_audit_reports_a_missing_requirement_instead_of_completing_it(
+    tmp_path: Path,
+) -> None:
+    """An unmentioned subject with a trivial clause blocks a `verified` verdict."""
+    source = tmp_path / "Ledger.sol"
+    source.write_text(
+        "function add(uint256 a, uint256 b) public pure returns (uint256) {\n"
+        "    return a + b;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    spec = _solidity_forge_spec()
+    spec["atoms"][0]["ensures"] = "true"
+
+    result = _ambiguity_pipeline(
+        "The ledger exposes a subtraction endpoint.", spec
+    ).audit_file(source, "solidity")
+
+    gaps = [
+        gap
+        for gap in result.cross_validation_gaps
+        if gap.startswith("spec ambiguity (missing_requirement)")
+    ]
+    assert [gap.split(" — ")[0] for gap in gaps] == [
+        "spec ambiguity (missing_requirement): add.requires",
+        "spec ambiguity (missing_requirement): add.ensures",
+    ]
+    assert result.verification_status != "verified"
+    # The extracted contract is reported as-is, never completed for the user.
+    assert spec["atoms"][0]["ensures"] == "true"
+    assert any("欠落要件" in step["action"] for step in result.next_steps)
+
+
+def test_audit_reports_underspecified_intent_without_downgrading_the_verdict(
+    tmp_path: Path,
+) -> None:
+    """Stated-but-vague intent is a clarification request, not a code finding."""
+    source = tmp_path / "Ledger.sol"
+    source.write_text(
+        "function add(uint256 a, uint256 b) public pure returns (uint256) {\n"
+        "    return a + b;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    result = _ambiguity_pipeline(
+        "add must apply an appropriate limit to the sum.", _solidity_forge_spec()
+    ).audit_file(source, "solidity")
+
+    assert not any(
+        gap.startswith("spec ambiguity (") for gap in result.cross_validation_gaps
+    )
+    assert any("underspecified" in step["action"] for step in result.next_steps)

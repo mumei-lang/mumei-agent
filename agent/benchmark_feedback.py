@@ -9,9 +9,16 @@ benchmark suite is weakest on pull their stdlib domains forward in the
 proliferation queue.
 
 Priority is "lower runs first", so a weak domain contributes a negative
-``priority_delta``. Feedback never adds or removes work: it only reorders
-proposals that gap analysis already produced, and records its provenance on each
-affected item.
+``priority_delta``. The bias direction never adds or removes work: it only
+reorders proposals that gap analysis already produced, and records its
+provenance on each affected item.
+
+The document additionally carries ``generated_proposals``: vStd atom proposals
+that the benchmark's weak categories generate directly (paper Future Work #11).
+Those are merged into the gap-analysis proposal list before ranking, so a
+weakness the gap rules cannot see still produces forge work. The field is
+optional, so older ``mumei.benchmark_forge_feedback/v1`` documents keep loading
+with bias-only behaviour.
 """
 from __future__ import annotations
 
@@ -35,6 +42,62 @@ class DomainBias:
 
 
 @dataclass(frozen=True)
+class GeneratedProposal:
+    """A vStd proposal generated from a weak benchmark category."""
+
+    name: str
+    reason: str
+    depends_on: tuple[str, ...]
+    difficulty: str
+    atoms: tuple[dict[str, Any], ...]
+    driving_category: str
+    domain: str
+    weakness_score: float
+    signals: tuple[str, ...]
+
+    @classmethod
+    def from_dict(cls, entry: dict[str, Any]) -> "GeneratedProposal":
+        name = str(entry["name"])
+        if not name.strip():
+            raise ValueError("generated proposal is missing a target module")
+        atoms = tuple(dict(a) for a in entry.get("atoms", []) if isinstance(a, dict))
+        if not atoms:
+            raise ValueError(f"generated proposal {name!r} has no atoms")
+        return cls(
+            name=name,
+            reason=str(entry.get("reason", "")),
+            depends_on=tuple(
+                str(d) for d in entry.get("depends_on", []) if isinstance(d, str)
+            ),
+            difficulty=str(entry.get("difficulty", "medium")),
+            atoms=atoms,
+            driving_category=str(entry.get("driving_category", "")),
+            domain=str(entry.get("domain", "")),
+            weakness_score=float(entry.get("weakness_score", 0.0)),
+            signals=tuple(
+                str(s) for s in entry.get("signals", []) if isinstance(s, str)
+            ),
+        )
+
+    def as_proposal(self) -> dict[str, Any]:
+        """Render this entry in the ``analyze_std_gaps`` proposal shape."""
+        return {
+            "name": self.name,
+            "reason": self.reason,
+            "depends_on": list(self.depends_on),
+            "difficulty": self.difficulty,
+            "atoms": [dict(atom) for atom in self.atoms],
+            "source": "benchmark_forge_feedback",
+            "benchmark_generated": {
+                "driving_category": self.driving_category,
+                "domain": self.domain,
+                "weakness_score": self.weakness_score,
+                "signals": list(self.signals),
+            },
+        }
+
+
+@dataclass(frozen=True)
 class BenchmarkFeedback:
     """A parsed ``mumei.benchmark_forge_feedback/v1`` document."""
 
@@ -43,6 +106,7 @@ class BenchmarkFeedback:
     weak_categories: tuple[str, ...]
     domain_bias: tuple[DomainBias, ...]
     categories: tuple[dict[str, Any], ...] = field(default=())
+    generated_proposals: tuple[GeneratedProposal, ...] = field(default=())
     source_path: str | None = None
 
     @classmethod
@@ -61,12 +125,24 @@ class BenchmarkFeedback:
             )
             for entry in payload.get("domain_bias", [])
         )
+        generated: list[GeneratedProposal] = []
+        for entry in payload.get("generated_proposals", []):
+            if not isinstance(entry, dict):
+                continue
+            try:
+                generated.append(GeneratedProposal.from_dict(entry))
+            except (KeyError, TypeError, ValueError):
+                logger.warning(
+                    "Ignoring unusable generated proposal in benchmark feedback",
+                    exc_info=True,
+                )
         return cls(
             timestamp=str(payload.get("timestamp", "")),
             stdlib_trusted_ratio=payload.get("stdlib_trusted_ratio"),
             weak_categories=tuple(payload.get("weak_categories", [])),
             domain_bias=bias,
             categories=tuple(payload.get("categories", [])),
+            generated_proposals=tuple(generated),
             source_path=source_path,
         )
 
@@ -92,6 +168,28 @@ class BenchmarkFeedback:
                 if best is None or len(entry.domain) > len(best.domain):
                     best = entry
         return best
+
+    def merge_generated_proposals(
+        self, proposals: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Append benchmark-generated proposals gap analysis did not produce.
+
+        Existing proposals win: a generated entry whose target module is already
+        proposed is dropped rather than duplicated, so the benchmark can only
+        *add* coverage the gap rules missed.
+        """
+        existing = {
+            str(proposal.get("name", ""))
+            for proposal in proposals
+            if isinstance(proposal, dict)
+        }
+        merged = list(proposals)
+        for generated in self.generated_proposals:
+            if generated.name in existing:
+                continue
+            existing.add(generated.name)
+            merged.append(generated.as_proposal())
+        return merged
 
     def rank_proposals(
         self, proposals: list[dict[str, Any]]
@@ -154,6 +252,17 @@ class BenchmarkFeedback:
             "timestamp": self.timestamp,
             "stdlib_trusted_ratio": self.stdlib_trusted_ratio,
             "weak_categories": list(self.weak_categories),
+            "generated_proposals": [
+                {
+                    "name": entry.name,
+                    "driving_category": entry.driving_category,
+                    "domain": entry.domain,
+                    "weakness_score": entry.weakness_score,
+                    "signals": list(entry.signals),
+                    "atoms": [str(atom.get("name", "")) for atom in entry.atoms],
+                }
+                for entry in self.generated_proposals
+            ],
             "domain_bias": [
                 {
                     "domain": entry.domain,
