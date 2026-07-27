@@ -147,6 +147,7 @@ def build_spec_from_proposal(
     module_name = _module_name_from_path(name)
     reason = proposal.get("reason", "") or ""
     difficulty = proposal.get("difficulty", "medium")
+    source = proposal.get("source")
 
     # Carry through atom stubs when the proposal already hints at concrete
     # atoms; otherwise synthesise a single placeholder so downstream
@@ -188,9 +189,12 @@ def build_spec_from_proposal(
         "atoms": atoms,
         "max_retries": _resolve_max_retries(str(difficulty)),
         "auto_commit": False,
-        "source": "analyze_std_gaps",
+        "source": source if isinstance(source, str) and source else "analyze_std_gaps",
         "difficulty": str(difficulty),
     }
+    benchmark_generated = proposal.get("benchmark_generated")
+    if isinstance(benchmark_generated, dict):
+        spec["benchmark_generated"] = dict(benchmark_generated)
     priority_band = proposal.get("priority_band")
     if isinstance(priority_band, str):
         spec["priority_band"] = priority_band

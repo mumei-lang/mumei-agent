@@ -12,6 +12,7 @@ from agent.benchmark_feedback import (
     load_benchmark_feedback,
 )
 from agent.proliferate_cache import _spec_cache_key
+from agent.propose_helpers import build_spec_from_proposal
 
 
 def _payload() -> dict:
@@ -144,6 +145,95 @@ def test_apply_to_specs_biases_priority_and_reorders(tmp_path: Path):
     assert ordered[0]["priority"] == 2 - 13
     assert ordered[1]["priority"] == 1
     assert ordered[0]["benchmark_feedback"]["domain"] == "std/math"
+
+
+def _generated_entry() -> dict:
+    return {
+        "name": "std/math/benchmark_gaps.mm",
+        "reason": "Benchmark category arithmetic is weak",
+        "depends_on": ["std/prelude.mm"],
+        "difficulty": "medium",
+        "atoms": [
+            {
+                "name": "math_counterexample_guard",
+                "description": "Reject the missed counterexample input",
+                "inputs": [{"name": "value", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "true",
+                "ensures": "result == 0 || result == 1",
+            }
+        ],
+        "source": "benchmark_forge_feedback",
+        "driving_category": "arithmetic",
+        "domain": "std/math",
+        "weakness_score": 0.25,
+        "priority_delta": -13,
+        "signals": ["counterexample_missed"],
+    }
+
+
+def test_generated_proposals_are_optional(tmp_path: Path):
+    """Documents predating proposal generation stay bias-only."""
+    feedback = BenchmarkFeedback.load(_write(tmp_path, _payload()))
+    assert feedback.generated_proposals == ()
+    proposals = [{"name": "std/json.mm", "priority": 1}]
+    assert feedback.merge_generated_proposals(proposals) == proposals
+    assert feedback.summary()["generated_proposals"] == []
+
+
+def test_generated_proposals_add_forge_work_for_weak_categories(tmp_path: Path):
+    payload = _payload()
+    payload["generated_proposals"] = [_generated_entry()]
+    feedback = BenchmarkFeedback.load(_write(tmp_path, payload))
+
+    merged = feedback.merge_generated_proposals([{"name": "std/json.mm", "priority": 1}])
+    assert [p["name"] for p in merged] == [
+        "std/json.mm",
+        "std/math/benchmark_gaps.mm",
+    ]
+    generated = merged[-1]
+    assert generated["source"] == "benchmark_forge_feedback"
+    assert generated["benchmark_generated"]["driving_category"] == "arithmetic"
+    assert [a["name"] for a in generated["atoms"]] == ["math_counterexample_guard"]
+    # The generated proposal is a real forge task, biased like any other.
+    ranked = feedback.rank_proposals(merged)
+    assert ranked[0]["name"] == "std/math/benchmark_gaps.mm"
+    spec = build_spec_from_proposal(ranked[0], priority=1)
+    assert spec["target_file"] == "std/math/benchmark_gaps.mm"
+    assert spec["source"] == "benchmark_forge_feedback"
+    assert spec["atoms"][0]["name"] == "math_counterexample_guard"
+    assert spec["benchmark_generated"]["domain"] == "std/math"
+
+
+def test_generated_proposals_never_duplicate_gap_analysis(tmp_path: Path):
+    payload = _payload()
+    payload["generated_proposals"] = [_generated_entry()]
+    feedback = BenchmarkFeedback.load(_write(tmp_path, payload))
+
+    existing = [{"name": "std/math/benchmark_gaps.mm", "priority": 1}]
+    assert feedback.merge_generated_proposals(existing) == existing
+
+
+def test_unusable_generated_proposals_are_skipped(tmp_path: Path):
+    payload = _payload()
+    valid = _generated_entry()
+    payload["generated_proposals"] = [
+        "not-an-object",
+        {"reason": "missing name"},
+        {"name": "std/math/no_atoms.mm", "atoms": []},
+        valid,
+    ]
+    feedback = BenchmarkFeedback.load(_write(tmp_path, payload))
+    assert [p.name for p in feedback.generated_proposals] == [valid["name"]]
+
+
+def test_generated_provenance_does_not_invalidate_the_forge_result_cache(
+    tmp_path: Path,
+):
+    spec = {"target_file": "std/math/benchmark_gaps.mm", "atoms": ["a"]}
+    before = _spec_cache_key(spec, tmp_path)
+    spec["benchmark_generated"] = {"driving_category": "arithmetic"}
+    assert _spec_cache_key(spec, tmp_path) == before
 
 
 def test_bias_does_not_invalidate_the_forge_result_cache(tmp_path: Path):

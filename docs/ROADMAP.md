@@ -1574,3 +1574,24 @@ summary へ追記）を出力する。`refuted` のみ `next_steps` と `verific
   必要がある（下記「Planned」節参照）。
 - 🔍 **監視項目** — verdict バケットの時系列（`refuted` 件数の急増は決定的抽出のリグレッション兆候、
   `unverifiable` サブカテゴリの偏りは環境要因の兆候）。既存 proliferate の job summary 出力慣習に揃える。
+
+---
+
+## 自然言語仕様抽出の曖昧性レポート（欠落要件 vs underspecified 意図） ✅ Implemented
+
+paper `paper/index.md` Future Work #4 / known-limitations「the natural-language extraction
+pipeline must conservatively distinguish missing requirements from underspecified intent」への対応。
+canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md`。
+
+- `agent/spec_ambiguity.py` が抽出結果を保守的に 2 分類する。
+  - `missing_requirement`: 抽出された contract clause が trivial（未設定 / 空 / `true`）で、かつ
+    自然言語側が当該 atom に一切言及していない場合のみ。何も述べられていない以上、推測で補完しない。
+  - `underspecified_intent`: 対象は述べられているが clause が確定していない場合、および
+    `AmbiguityDetector` の語彙パターン（vague adjective / quantifier / conditional）に該当する prose。
+- レポート経路は既存の 8 固定キー契約（`AUDIT_SCHEMA_KEYS`）の上に載せる。新規 verdict 分類や別名 alias は追加しない。
+  - `missing_requirement` は `cross_validation_gaps` の 1 エントリとして出し、`verification_status` が
+    `verified` になっていた場合は `unverifiable` へ落とす（検証した契約が空だったため）。
+  - `underspecified_intent` はコードに対する所見ではないため verdict を下げず、`next_steps`
+    （既存の human-review 入口）に確認依頼として積む。
+- どちらの場合も抽出済み spec は書き換えない（曖昧なケースを勝手に補完しない）。
+- 回帰ゲート: `uv run pytest tests/test_spec_ambiguity.py tests/test_audit.py tests/test_contract_vocabulary.py -q`

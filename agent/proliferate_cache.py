@@ -17,7 +17,11 @@ def _safe_relative_file(repo_dir: Path, rel_path: str) -> Path | None:
 
 
 # Spec fields that only affect queue ordering, never generated code.
-_NON_GENERATION_SPEC_FIELDS = ("priority", "benchmark_feedback")
+_NON_GENERATION_SPEC_FIELDS = (
+    "priority",
+    "benchmark_feedback",
+    "benchmark_generated",
+)
 
 
 def _spec_cache_key(
