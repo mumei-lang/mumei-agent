@@ -60,7 +60,11 @@ class MultiAgentOutcome:
     rounds: int = 0
     handoffs: list[dict[str, Any]] = field(default_factory=list)
     audit_events: int = 0
+    # ``converged`` mirrors ``NLAEResult.verified``, which is true when either
+    # backend discharged the obligations; ``converged_by`` names which one
+    # ('z3' or 'lean'), reusing the existing verdict vocabulary.
     converged: bool = False
+    converged_by: str | None = None
     fallback_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -152,7 +156,13 @@ class MultiAgentOrchestrator:
     def audit_events(self) -> int:
         return len(self.protocol.audit_log)
 
-    def outcome(self, *, rounds: int, converged: bool) -> MultiAgentOutcome:
+    def outcome(
+        self,
+        *,
+        rounds: int,
+        converged: bool,
+        converged_by: str | None = None,
+    ) -> MultiAgentOutcome:
         return MultiAgentOutcome(
             enabled=True,
             status="ok",
@@ -160,6 +170,7 @@ class MultiAgentOrchestrator:
             handoffs=[handoff.to_dict() for handoff in self.handoffs],
             audit_events=self.audit_events,
             converged=converged,
+            converged_by=converged_by,
         )
 
 

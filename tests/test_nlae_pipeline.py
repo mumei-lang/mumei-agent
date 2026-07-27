@@ -187,6 +187,7 @@ def test_multi_agent_workflow_converges_with_audited_handoffs(tmp_path: Path) ->
     assert multi_agent is not None
     assert multi_agent["status"] == "ok"
     assert multi_agent["converged"] is True
+    assert multi_agent["converged_by"] == "z3"
     assert multi_agent["rounds"] == 1
     assert multi_agent["roles"] == [
         GENERATOR_ROLE,
@@ -261,6 +262,7 @@ def test_multi_agent_failure_falls_back_to_single_pipeline(tmp_path: Path) -> No
         "handoffs": [],
         "audit_events": 0,
         "converged": False,
+        "converged_by": None,
         "fallback_reason": "RuntimeError: latent transport unavailable",
     }
 
@@ -297,6 +299,101 @@ def test_multi_agent_spans_share_one_trace(tmp_path: Path, monkeypatch) -> None:
     ):
         assert name in started
     assert "mumei.nlae.lean_bridge" not in started
+
+
+def test_converged_by_names_lean_when_only_the_bridge_discharges(tmp_path: Path) -> None:
+    class UnverifiedCorrectionLoop(FakeSelfCorrectionLoop):
+        def run(self, code: str, loss_vector: dict) -> dict:
+            correction = super().run(code, loss_vector)
+            correction["verify_result"] = {
+                "success": False,
+                "report": {"status": "verification_failed"},
+                "loss_vector": loss_vector,
+            }
+            return correction
+
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=UnverifiedCorrectionLoop(),
+        lean_bridge=FakeLeanBridge(),
+        work_dir=tmp_path,
+        orchestrator=MultiAgentOrchestrator(),
+    )
+
+    result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+
+    assert result.lean_verified is True
+    assert result.multi_agent is not None
+    assert result.multi_agent["converged"] is True
+    assert result.multi_agent["converged_by"] == "lean"
+
+
+def test_escalation_handoff_hash_depends_on_the_verified_source(tmp_path: Path) -> None:
+    class SpecificAgent(FakeAgent):
+        def __init__(self, bound: str) -> None:
+            self.bound = bound
+
+        def generate_code(self, spec: str) -> str:
+            return super().generate_code(spec).replace("balance >= 0", self.bound)
+
+    def escalation_hash(work_dir: Path, bound: str) -> str:
+        pipeline = NLAEPipeline(
+            agent=SpecificAgent(bound),
+            mumei_client=FakeMumeiClient(),
+            self_correction_loop=FakeSelfCorrectionLoop(),
+            lean_bridge=FakeLeanBridge(),
+            work_dir=work_dir,
+            orchestrator=MultiAgentOrchestrator(),
+        )
+        result = pipeline.run_full_pipeline("vault withdraw safety", work_dir)
+        assert result.multi_agent is not None
+        handoff = result.multi_agent["handoffs"][-1]
+        assert handoff["to_role"] == LEAN_ESCALATION_ROLE
+        return str(handoff["semantic_hash"])
+
+    first = escalation_hash(tmp_path / "first", "balance >= 0")
+    second = escalation_hash(tmp_path / "second", "balance >= 1")
+    repeated = escalation_hash(tmp_path / "repeated", "balance >= 0")
+
+    assert first != second
+    assert first == repeated
+
+
+def test_explicit_multi_agent_false_overrides_an_injected_orchestrator(
+    tmp_path: Path,
+) -> None:
+    orchestrator = MultiAgentOrchestrator()
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=FakeSelfCorrectionLoop(),
+        lean_bridge=FakeLeanBridge(),
+        work_dir=tmp_path,
+        multi_agent=False,
+        orchestrator=orchestrator,
+    )
+
+    result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+
+    assert result.verified is True
+    assert result.multi_agent is None
+    assert orchestrator.handoffs == []
+
+
+def test_injected_orchestrator_opts_in_when_the_flag_is_unset(tmp_path: Path) -> None:
+    pipeline = NLAEPipeline(
+        agent=FakeAgent(),
+        mumei_client=FakeMumeiClient(),
+        self_correction_loop=FakeSelfCorrectionLoop(),
+        lean_bridge=FakeLeanBridge(),
+        work_dir=tmp_path,
+        orchestrator=MultiAgentOrchestrator(),
+    )
+
+    result = pipeline.run_full_pipeline("vault withdraw safety", tmp_path)
+
+    assert result.multi_agent is not None
 
 
 def test_multi_agent_is_disabled_by_default(tmp_path: Path) -> None:

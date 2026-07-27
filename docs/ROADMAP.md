@@ -992,10 +992,17 @@ P9-G の単一 pipeline（generate → verify → self-correct → Lean fidelity
   authentication tag / AES-256-GCM（`LATENT_PROTOCOL_KEY`）/ redacted audit log
   （`LATENT_PROTOCOL_AUDIT_LOG`）をそのまま再利用し、新規 verdict 分類や別名
   alias は追加しない。verdict は従来どおり verifier と Lean bridge のみが決める。
-- ✅ `NLAEResult.multi_agent` に `rounds` / `converged` / `audit_events` と
-  handoff 毎の `from_role` / `to_role` / `round` / `semantic_hash` /
-  `protocol_version` / `transfer_bytes` / `authenticated` を記録。同一 spec の
-  再実行で semantic hash 列が一致する（決定性）。
+- ✅ `NLAEResult.multi_agent` に `rounds` / `converged` / `converged_by` /
+  `audit_events` と handoff 毎の `from_role` / `to_role` / `round` /
+  `semantic_hash` / `protocol_version` / `transfer_bytes` / `authenticated` を
+  記録。同一 spec の再実行で semantic hash 列が一致する（決定性）。`converged` は
+  `NLAEResult.verified`（Z3 か Lean のいずれかで discharge）と同義であり、
+  `converged_by`（`z3` / `lean` / `null`）でどちらが閉じたかを判別できる。
+  `lean_escalation` handoff の body には検証済みソースの digest を含めるため、
+  spec が異なれば semantic hash も異なる。
+- ✅ opt-in フラグが優先: `multi_agent=False` を明示した場合は orchestrator を
+  注入しても単一 pipeline のまま。orchestrator による opt-in はフラグ未指定
+  （`None`）のときだけ有効。
 - ✅ OTel は 1 本の分散トレースを維持: `mumei.nlae.pipeline` root の下に
   `mumei.nlae.multi_agent`、その下に `mumei.nlae.agent.<role>` と
   `mumei.nlae.handoff`。handoff envelope は `trace_id` を volatile field として
