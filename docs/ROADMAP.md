@@ -1632,3 +1632,35 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md`。
     （既存の human-review 入口）に確認依頼として積む。
 - どちらの場合も抽出済み spec は書き換えない（曖昧なケースを勝手に補完しない）。
 - 回帰ゲート: `uv run pytest tests/test_spec_ambiguity.py tests/test_audit.py tests/test_contract_vocabulary.py -q`
+
+---
+
+## AI エージェントネイティブ統合の標準化（agent 側 local checkpoint）— 🔭 Planned (future)
+
+canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
+"Priority 17: AI エージェントネイティブ統合の標準化（MCP / CI / エディタ）"。本節はその agent 側 local checkpoint で、
+将来 Priority として記録するものであり今すぐ着手する実装ではない。
+
+**既存の土台**（置き換えず、標準化・常時化する）:
+
+- `.mcp.json` に登録された `mumei-forge`（mumei コンパイラ側 MCP サーバ）と `mumei-agent` MCP サーバ（`agent/mcp_server.py`）
+- contract-vocabulary の CI ゲート（`.github/workflows/contract-vocabulary.yml` と mumei 側 `scripts/check_contract_vocabulary.py`）
+- P13 harness externalization（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint`）と
+  mumei-lean 連携の `lean_verified`
+
+**タスク**:
+
+1. **MCP ツール群の標準化** — 2 サーバが公開するツール名・引数・戻り値キーを 1 つの表として固定し、
+   docstring と CI ゲートで乖離を検出できるようにする。戻り値は既存の 8 固定キー
+   （`spec_health_issues` / `verification_violations` / `verification_status` / `cross_validation_gaps` /
+   `next_steps` / `migration_hints` / `healed_files` / `heal_errors`）のみを使い、別名 alias は追加しない。
+   `scan_and_fix` は `audit --auto-migrate --auto-heal` と同一契約であるという既存関係を維持する。
+2. **sampling 互換の follow-up との整合** — MCP sampling（`USE_MCP_SAMPLING`、`agent/llm_provider.py`）で
+   LLM 推論をクライアント側に委譲した場合でも、上記ツール表の戻り値キーと `budget_policy_fingerprint` の記録が
+   provider 非依存で同一になることを標準化の条件に含める。
+3. **proof artifact の受け渡し** — 配布物に同梱される proof bundle を agent 側が入力として受け取り、
+   `artifact_paths` にそのパスを載せて報告する経路を固定する。新しい成果物キーは追加しない。
+4. **CI 常時化との整合** — mumei 側で標準ライブラリメトリクスと proof bundle の再生成が常時 CI 化された際、
+   agent 側の dogfood 集計・health 計測がその成果物を参照できるようにする。
+
+**回帰ゲート（着手時）**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py -q`
