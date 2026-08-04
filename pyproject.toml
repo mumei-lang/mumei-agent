@@ -31,8 +31,10 @@ dependencies = [
 # subcommand and the ``USE_MCP_CLIENT=true`` verification path.  The
 # agent's heal / generate / forge / proliferate / publish flows do
 # not require this package.
+# ``mcp`` 2.x removes ``mcp.server.fastmcp``, which ``agent/mcp_server.py``
+# imports, so the SDK is capped to the 1.x line.
 mcp = [
-    "mcp[cli]>=1.0",
+    "mcp[cli]>=1.0,<2",
 ]
 # P15 — OpenTelemetry observability is opt-in.  Install with
 # ``pip install mumei-agent[otel]`` (or ``uv sync --extra otel``) and set
@@ -51,7 +53,7 @@ test = [
     "pytest-cov>=4.0",
     # MCP suite (tests/test_mcp_*) imports the SDK at module import
     # time, so the test extra pulls it in transitively.
-    "mcp[cli]>=1.0",
+    "mcp[cli]>=1.0,<2",
     "pyyaml>=6.0",
 ]
 

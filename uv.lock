@@ -983,8 +983,8 @@ test = [
 requires-dist = [
     { name = "chardet", specifier = ">=5.0" },
     { name = "cryptography", specifier = ">=42.0" },
-    { name = "mcp", extras = ["cli"], marker = "extra == 'mcp'", specifier = ">=1.0" },
-    { name = "mcp", extras = ["cli"], marker = "extra == 'test'", specifier = ">=1.0" },
+    { name = "mcp", extras = ["cli"], marker = "extra == 'mcp'", specifier = ">=1.0,<2" },
+    { name = "mcp", extras = ["cli"], marker = "extra == 'test'", specifier = ">=1.0,<2" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "openai", specifier = ">=1.0" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20" },
