@@ -80,12 +80,12 @@ jobs:
           path: mumei-agent
 
       - name: Check out mumei
-        uses: actions/checkout@v4
-        with:
-          repository: mumei-lang/mumei
-          ref: develop
-          path: mumei
-          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+        # mumei-lang/mumei is public, so a plain anonymous clone is
+        # sufficient. Using actions/checkout with the mumei-agent
+        # GITHUB_TOKEN fails because that token is scoped to this repo.
+        run: |
+          git clone --depth 1 --single-branch --branch develop \
+            https://github.com/mumei-lang/mumei.git mumei
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
