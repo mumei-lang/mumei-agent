@@ -130,18 +130,22 @@ jobs:
           path: mumei-agent
 
       - name: Check out mumei
-        uses: actions/checkout@v4
-        with:
-          repository: mumei-lang/mumei
-          ref: develop
-          path: mumei
-          # Prefer MUMEI_PAT (shared with forge.yml); fall back to the
-          # legacy MUMEI_REPO_TOKEN secret, and finally to GITHUB_TOKEN so
-          # read-only checkouts of the public mumei repo still succeed
-          # when no PAT is configured.  Note: the downstream PR-creation
-          # step still requires a real PAT with write access to
-          # mumei-lang/mumei; GITHUB_TOKEN is scoped to this repo only.
-          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+        # mumei-lang/mumei is public, so a plain anonymous clone is enough
+        # for the fetch. The later `agent publish` step pushes branches from
+        # this clone, so when a PAT is configured we rewrite the origin
+        # remote to include the token. MUMEI_PAT / MUMEI_REPO_TOKEN are
+        # already required for the GitHub API call that opens the PR.
+        env:
+          MUMEI_PAT: ${{ secrets.MUMEI_PAT }}
+          MUMEI_REPO_TOKEN: ${{ secrets.MUMEI_REPO_TOKEN }}
+        run: |
+          git clone --depth 1 --single-branch --branch develop \
+            https://github.com/mumei-lang/mumei.git mumei
+          TOKEN="${MUMEI_PAT:-${MUMEI_REPO_TOKEN}}"
+          if [ -n "$TOKEN" ]; then
+            git -C mumei remote set-url origin \
+              "https://x-access-token:${TOKEN}@github.com/mumei-lang/mumei.git"
+          fi
 
       - name: Check out mumei-lean
         # Best-effort checkout: the Lean fallback is optional and the
@@ -150,16 +154,9 @@ jobs:
         # must not abort the entire proliferation pipeline (gap analysis,
         # forge, blast-radius, PR creation all run independently of Lean).
         continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          repository: mumei-lang/mumei-lean
-          ref: develop
-          path: mumei-lean
-          # Mirror the token fallback chain used for the mumei checkout
-          # above so this keeps working if mumei-lean ever goes private.
-          # GITHUB_TOKEN alone is scoped to mumei-agent and cannot read
-          # sibling private repos in the mumei-lang org.
-          token: ${{ secrets.MUMEI_PAT || secrets.MUMEI_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          git clone --depth 1 --single-branch --branch develop \
+            https://github.com/mumei-lang/mumei-lean.git mumei-lean
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
