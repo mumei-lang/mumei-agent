@@ -5,6 +5,8 @@ import ast
 import re
 from pathlib import Path
 
+from tests.test_contract_vocabulary import FORBIDDEN_ALIASES, _alias_key_patterns
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVER = REPO_ROOT / "agent" / "mcp_server.py"
 CONTRACT = REPO_ROOT / "docs" / "MCP_SERVER.md"
@@ -62,17 +64,22 @@ def _split_row(line: str) -> list[str]:
     return cells[1:-1] if len(cells) >= 2 else []
 
 
-def extract_documented_tools(text: str) -> dict[str, str]:
+def _contract_table_body(text: str) -> str:
+    section = text.split("## Canonical contract table", 1)[1]
     match = re.search(
-        r"Exported tools:\n\n\| Tool \| Arguments \| Documented return keys \|\n"
+        r"\| Tool \| Arguments \| Documented return keys \|\n"
         r"\|\s*[-—]+\s*\|\s*[-—]+\s*\|\s*[-—]+\s*\|\n"
         r"(.*?)(?:\n\n|\Z)",
-        text,
+        section,
         re.DOTALL,
     )
     assert match, "Could not find agent MCP contract table"
+    return match.group(1)
+
+
+def extract_documented_tools(text: str) -> dict[str, str]:
     tools: dict[str, str] = {}
-    for line in match.group(1).splitlines():
+    for line in _contract_table_body(text).splitlines():
         cells = _split_row(line)
         if len(cells) != 3:
             continue
@@ -92,3 +99,14 @@ def test_agent_mcp_tool_contract_matches_ast() -> None:
     documented = {name: signature.replace('"', "'") for name, signature in documented.items()}
     assert set(expected) == set(documented)
     assert expected == documented
+
+
+def test_agent_contract_cells_avoid_forbidden_aliases() -> None:
+    table_body = _contract_table_body(CONTRACT.read_text(encoding="utf-8"))
+    failures: list[str] = []
+    for alias in FORBIDDEN_ALIASES:
+        for pattern in _alias_key_patterns(alias):
+            if pattern.search(table_body):
+                failures.append(f"contract table uses forbidden alias `{alias}`")
+                break
+    assert failures == [], "; ".join(failures)
