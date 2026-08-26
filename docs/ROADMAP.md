@@ -1635,32 +1635,42 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md`。
 
 ---
 
-## AI エージェントネイティブ統合の標準化（agent 側 local checkpoint）— 🔭 Planned (future)
+## AI エージェントネイティブ統合の標準化（agent 側 local checkpoint）— ✅ Implemented
 
 canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
-"Priority 17: AI エージェントネイティブ統合の標準化（MCP / CI / エディタ）"。本節はその agent 側 local checkpoint で、
-将来 Priority として記録するものであり今すぐ着手する実装ではない。
+"Priority 17: AI エージェントネイティブ統合の標準化（MCP / CI / エディタ）"。
+本節はその agent 側 local checkpoint であり、canonical contract に従属する。
 
-**既存の土台**（置き換えず、標準化・常時化する）:
+**実装エビデンス**:
 
-- `.mcp.json` に登録された `mumei-forge`（mumei コンパイラ側 MCP サーバ）と `mumei-agent` MCP サーバ（`agent/mcp_server.py`）
-- contract-vocabulary の CI ゲート（`.github/workflows/contract-vocabulary.yml` と mumei 側 `scripts/check_contract_vocabulary.py`）
-- P13 harness externalization（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint`）と
-  mumei-lean 連携の `lean_verified`
+1. **MCP ツール契約** — `docs/MCP_SERVER.md` の生成済み表は agent
+   `agent/mcp_server.py` の AST からツール名・引数注釈・デフォルト値を導出し、
+   docstring の Returns-style 記述にある戻り値キーだけを記録する。mumei の
+   `docs/MCP_TOOL_CONTRACT.md` が cross-server canonical table であり、agent
+   文書は従属文書である。`tests/test_mcp_tool_contract.py` がコードと表の
+   双方向 drift（追加・欠落・署名差分）を offline で検査し、
+   `.github/workflows/contract-vocabulary.yml` がこれを実行する。
+   `scan_and_fix` は `audit --auto-migrate --auto-heal` と同一契約であり、
+   既存の 8 固定キー（`spec_health_issues` / `verification_violations` /
+   `verification_status` / `cross_validation_gaps` / `next_steps` /
+   `migration_hints` / `healed_files` / `heal_errors`）と別名禁止を維持する。
+2. **MCP sampling** — `USE_MCP_SAMPLING` の capability detection、sampling
+   fallback、tool-enabled sampling、`maxTokens` 上限、および text-only request
+   の回帰は `tests/test_mcp_server.py` と
+   `tests/test_llm_provider_sampling_tools.py` で検査する。ただし、sampling
+   provider と OpenAI-compatible provider の間で戻り値キーおよび
+   `budget_policy_fingerprint` が同一になることを直接検査するテストはまだなく、
+   provider-independent contract としては未実装である。
+3. **Proof artifact** — mumei が配布する per-module certificate と bundle は
+   canonical な `artifact_paths` で参照し、`MUMEI_PROOF_CERTS` /
+   `MUMEI_PROOF_BUNDLE` と `mumei verify-cert --strict` による distribution-only
+   再検証手順を [`docs/VERIFICATION_WORKFLOW_GUIDE.md`](VERIFICATION_WORKFLOW_GUIDE.md)
+   に同期した。agent 側に独立した bundle intake / `artifact_paths` 検査を追加した
+   ものではなく、consumer wiring の追加は未実装として残る。
+4. **CI 常時化** — mumei の `.github/workflows/stdlib-proof-gate.yml` が
+   certificate-derived baseline `scripts/std_proof_baseline.json` と shared
+   `scripts/verify_packaged_certs.py` を使って証明書・bundle・metrics の gate を
+   常時実行する。metrics の `proven` / proof density は source-count heuristic
+   であり、certificate-derived count との density 比較は意図的に行わない。
 
-**タスク**:
-
-1. **MCP ツール群の標準化** — 2 サーバが公開するツール名・引数・戻り値キーを 1 つの表として固定し、
-   docstring と CI ゲートで乖離を検出できるようにする。戻り値は既存の 8 固定キー
-   （`spec_health_issues` / `verification_violations` / `verification_status` / `cross_validation_gaps` /
-   `next_steps` / `migration_hints` / `healed_files` / `heal_errors`）のみを使い、別名 alias は追加しない。
-   `scan_and_fix` は `audit --auto-migrate --auto-heal` と同一契約であるという既存関係を維持する。
-2. **sampling 互換の follow-up との整合** — MCP sampling（`USE_MCP_SAMPLING`、`agent/llm_provider.py`）で
-   LLM 推論をクライアント側に委譲した場合でも、上記ツール表の戻り値キーと `budget_policy_fingerprint` の記録が
-   provider 非依存で同一になることを標準化の条件に含める。
-3. **proof artifact の受け渡し** — 配布物に同梱される proof bundle を agent 側が入力として受け取り、
-   `artifact_paths` にそのパスを載せて報告する経路を固定する。新しい成果物キーは追加しない。
-4. **CI 常時化との整合** — mumei 側で標準ライブラリメトリクスと proof bundle の再生成が常時 CI 化された際、
-   agent 側の dogfood 集計・health 計測がその成果物を参照できるようにする。
-
-**回帰ゲート（着手時）**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py -q`
+**回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py -q`
