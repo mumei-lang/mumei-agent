@@ -160,13 +160,15 @@ def test_mcp_server_doc_table_matches_registered_tools() -> None:
     mcp_server_doc = REPO_ROOT / "docs" / "MCP_SERVER.md"
     text = mcp_server_doc.read_text(encoding="utf-8")
     table_match = re.search(
-        r"Exported tools:\n\n\| Tool \| Description \|\n\|[-—]+\|[-—]+\|\n(.*?)(?:\n\n|\Z)",
+        r"Exported tools:\n\n\| Tool \| Arguments \| Documented return keys \|\n"
+        r"\|\s*[-—]+\s*\|\s*[-—]+\s*\|\s*[-—]+\s*\|\n"
+        r"(.*?)(?:\n\n|\Z)",
         text,
         re.DOTALL,
     )
     assert table_match, "Could not find MCP tools table in docs/MCP_SERVER.md"
     table_body = table_match.group(1)
-    doc_tool_names = set(re.findall(r"^\|\s*`(\w+)\s*\(", table_body, re.MULTILINE))
+    doc_tool_names = set(re.findall(r"^\|\s*`(\w+)`\s*\|", table_body, re.MULTILINE))
     registered_names = set(mcp_server.mcp._tool_manager._tools.keys())
 
     missing_in_docs = registered_names - doc_tool_names
@@ -203,12 +205,14 @@ def test_mcp_tool_docstrings_do_not_use_forbidden_aliases() -> None:
     assert failures == [], "; ".join(failures)
 
 
-def test_mcp_server_doc_table_descriptions_avoid_forbidden_aliases() -> None:
-    """The docs/MCP_SERVER.md tool table description column must not use forbidden aliases."""
+def test_mcp_server_doc_table_avoids_forbidden_aliases() -> None:
+    """The docs/MCP_SERVER.md contract table must not use forbidden aliases."""
     mcp_server_doc = REPO_ROOT / "docs" / "MCP_SERVER.md"
     text = mcp_server_doc.read_text(encoding="utf-8")
     table_match = re.search(
-        r"Exported tools:\n\n\| Tool \| Description \|\n\|[-—]+\|[-—]+\|\n(.*?)(?:\n\n|\Z)",
+        r"Exported tools:\n\n\| Tool \| Arguments \| Documented return keys \|\n"
+        r"\|\s*[-—]+\s*\|\s*[-—]+\s*\|\s*[-—]+\s*\|\n"
+        r"(.*?)(?:\n\n|\Z)",
         text,
         re.DOTALL,
     )
@@ -217,11 +221,11 @@ def test_mcp_server_doc_table_descriptions_avoid_forbidden_aliases() -> None:
 
     failures: list[str] = []
     for line in table_body.splitlines():
-        cells = [c.strip() for c in line.split("|")]
+        cells = [c.strip() for c in line.replace(r"\|", "§").split("|")]
         if len(cells) < 3:
             continue
         tool_cell = cells[1].strip("`")
-        description = cells[2]
+        description = " | ".join(cells[1:])
         for alias in FORBIDDEN_ALIASES:
             for pattern in _alias_key_patterns(alias):
                 match = pattern.search(description)

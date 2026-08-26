@@ -105,6 +105,18 @@ See [`forge_tasks/README.md`](forge_tasks/README.md) for the task schema.
 
 The `report.json` schema is documented in [mumei's REPORT_SCHEMA.md](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md). The reusable CI verification gate and standalone script are in [`docs/CI_WORKFLOWS.md`](docs/CI_WORKFLOWS.md).
 
+### Distributed proof artifacts
+
+mumei release and Homebrew distributions include per-module proof certificates
+under `std/certs/` and the corresponding proof bundle. A consumer can verify a
+distribution without the source checkout that produced it by running
+`mumei verify-cert --strict` against each packaged certificate and its packaged
+source. The locations are exposed through the existing `MUMEI_PROOF_CERTS` and
+`MUMEI_PROOF_BUNDLE` settings; proof artifact paths are reported under the
+existing `artifact_paths` key. Consumers handling Lean provenance should inspect
+`lean_provenance` and use `--allow-lean-verified` only on the acceptance path
+that explicitly permits `lean_verified`.
+
 ## Roadmap
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) and the [cross-project roadmap](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md).

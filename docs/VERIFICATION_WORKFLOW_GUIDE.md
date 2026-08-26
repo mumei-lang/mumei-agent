@@ -2,6 +2,20 @@
 
 > Cross-project contract: `mumei-lang/mumei/docs/CROSS_PROJECT_ROADMAP.md` is the only top-level roadmap. This guide uses the canonical vocabulary `harness_contract`, `intent_fidelity`, `artifact_paths`, `budget_policy_fingerprint`, `lean_verified`, plus agent audit keys `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, `heal_errors`, and `contradiction_type`.
 
+## 配布物の proof artifact 検証
+
+mumei の release / Homebrew 配布物には、標準ライブラリの module ごとの
+proof certificate（`std/certs/`）と、それらをまとめた proof bundle が同梱されます。
+配布物だけを別環境で検査する場合は、同梱された source と certificate に対して
+`mumei verify-cert --strict` を再実行してください。certificate と bundle の場所は
+既存の `MUMEI_PROOF_CERTS` と `MUMEI_PROOF_BUNDLE` で指定できます。
+
+bundle が返す証明成果物のパスは既存の `artifact_paths` key に記録されます。
+この key を使って per-module certificate と bundle を収集・比較し、新しい
+artifact key や alias を作らないでください。`lean_verified` provenance を使う
+consumer は、bundle の `lean_provenance` と certificate の整合性を確認した上で、
+必要な acceptance path に限り `--allow-lean-verified` を明示します。
+
 
 ## 0. No-.mm entry: one audit contract
 
