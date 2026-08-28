@@ -11,6 +11,7 @@ _SUBCOMMANDS = {
     "proliferate",
     "harness-ablation",
     "health",
+    "scale-report",
     "audit",
     "extract-spec",
     "validate-spec",
@@ -136,6 +137,24 @@ def main() -> None:
         ablation_build_parser(parser)
         args = parser.parse_args(argv[1:])
         ablation_main(args)
+    elif command == "scale-report":
+        import argparse
+        from agent.scale_report import (
+            build_parser as scale_build_parser,
+            main as scale_main,
+        )
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent scale-report",
+            description=(
+                "Report large-scale composability and trust-surface measurements "
+                "through the fixed verification_status / verification_violations / "
+                "next_steps keys."
+            ),
+        )
+        scale_build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(scale_main(args))
     elif command == "health":
         import argparse
         from agent.std_health import build_parser as health_build_parser, main as health_main
