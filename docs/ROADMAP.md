@@ -1674,3 +1674,32 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
    であり、certificate-derived count との density 比較は意図的に行わない。
 
 **回帰ゲート**: `uv run pytest tests/test_contract_vocabulary.py tests/test_mcp_server.py tests/test_mcp_tool_contract.py -q`
+
+## 大規模ケースでの合成性報告（agent 側 local checkpoint）— ✅ Implemented
+
+canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
+"Priority 16: 大規模・安全性クリティカル領域での atom-local proof obligation 合成性検証"。
+本節はその agent 側 local checkpoint であり、canonical contract に従属する。
+
+**実装エビデンス**:
+
+1. **`python -m agent scale-report`** — `agent/scale_report.py` が mumei の
+   `scripts/measure_composability.py` / `scripts/scale_trust_surface.py` が出した
+   artifact を読み、大規模ケース（`mumei-demo` の `*_scale` シナリオ、172 atoms、
+   依存深さ 5–7）の結果を既存の 8 固定キー（`spec_health_issues` /
+   `verification_violations` / `verification_status` / `cross_validation_gaps` /
+   `next_steps` / `migration_hints` / `healed_files` / `heal_errors`）で報告する。
+   新しい verdict 分類も別名 alias も追加しない。
+2. **合成の破れ → `verification_violations`** — 隣接 atom の契約を弱めると閉じない
+   箇所（277 本）は 1 件ずつ `verification_violations` に載る。対象 atom、clause 種別
+   （`requires` / `ensures` / `effect_pre` / `effect_post`）、行、破れのパターンを含む。
+3. **compiler 改善入力 → `next_steps`** — パターン別（`call_site_precondition` 86 /
+   `counterexample_replay_mismatch` 86 / `effect_state_obligation` 58 /
+   `neighbor_ensures_strengthening` 47）の集計を、対応する compiler surface とともに
+   既存の `next_steps` に載せる。
+4. **verdict は既存 3 値のみ** — `verify-cert --strict` の失敗と `std/` trusted atom の
+   回帰（0 → 非 0）だけが `refuted` を立て、artifact にケースが無い場合は
+   `unverifiable`、それ以外は `verified`。`budget_policy_fingerprint` は artifact から
+   そのまま引き継ぐ。
+
+**回帰ゲート**: `uv run pytest tests/test_scale_report.py tests/test_contract_vocabulary.py -q`
