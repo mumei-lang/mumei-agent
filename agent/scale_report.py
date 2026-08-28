@@ -168,8 +168,26 @@ def build_report(
 
 
 def render(report: dict[str, Any], output_format: str) -> str:
-    if output_format in {"json", "text"}:
+    if output_format == "json":
         return json.dumps(report, indent=2, ensure_ascii=False)
+    if output_format == "text":
+        return report["report"]
+    if output_format == "markdown":
+        lines = [
+            "## Scale composability report",
+            "",
+            f"- `verification_status`: {report['verification_status']}",
+            "",
+            f"### verification_violations ({len(report['verification_violations'])})",
+        ]
+        lines.extend(f"- {item}" for item in report["verification_violations"])
+        lines.append("")
+        lines.append(f"### cross_validation_gaps ({len(report['cross_validation_gaps'])})")
+        lines.extend(f"- {item}" for item in report["cross_validation_gaps"])
+        lines.append("")
+        lines.append(f"### next_steps ({len(report['next_steps'])})")
+        lines.extend(f"- **[{step['priority']}]** {step['action']}" for step in report["next_steps"])
+        return "\n".join(lines)
     lines = [
         f"verification_status: {report['verification_status']}",
         f"verification_violations ({len(report['verification_violations'])}):",

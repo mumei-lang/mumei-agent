@@ -135,3 +135,13 @@ def test_human_render_lists_fixed_key_sections():
     assert "verification_status:" in text
     assert "verification_violations" in text
     assert "next_steps" in text
+
+
+def test_each_output_format_is_distinct():
+    report = build_report(COMPOSABILITY, TRUST_SURFACE)
+    rendered = {fmt: render(report, fmt) for fmt in ("human", "markdown", "json", "text")}
+    assert len(set(rendered.values())) == 4
+    assert json.loads(rendered["json"])["verification_status"] == report["verification_status"]
+    assert rendered["text"] == report["report"]
+    assert rendered["markdown"].startswith("## ")
+    assert not rendered["human"].startswith("## ")
