@@ -12,6 +12,15 @@ from typing import Any
 from openai import OpenAI
 
 from agent.config import AgentConfig
+from agent.cross_spec_artifacts import (
+    SESSION_VIOLATION_CONTRADICTION_TYPE,
+    artifact_mapping_divergences,
+    session_analysis_skips,
+    session_protocol_atoms,
+    session_protocol_files,
+    session_protocol_missing_constraints,
+    session_protocol_violations,
+)
 from agent.mumei_client import MumeiClient
 
 _logger = logging.getLogger(__name__)
@@ -37,6 +46,7 @@ class RefactoringProposal:
     changes: dict[str, Any]
     rationale: str
     cross_validation_drift: list[dict[str, Any]] | None = None
+    missing_constraints: list[str] | None = None
 
 
 class MetaArchitect:
@@ -67,18 +77,31 @@ class MetaArchitect:
         )
         cross_validation_drift = self._collect_cross_validation_drift(source_files)
         contract_conflicts.extend(_contract_conflicts_from_drift(cross_validation_drift))
+        session_violations = _session_protocol_violations_from_reports(cross_spec_reports)
+        session_skips = _session_analysis_skips_from_reports(cross_spec_reports)
+        mapping_divergences = _artifact_mapping_divergences_from_reports(cross_spec_reports)
         refactoring_proposals = self._generate_refactoring_proposals(
             dependency_graph,
             circular_dependencies,
             contract_conflicts,
             cross_validation_drift,
             retry_history,
+            session_violations,
         )
 
         return {
             "circular_dependencies": circular_dependencies,
             "contract_conflicts": [asdict(conflict) for conflict in contract_conflicts],
             "cross_validation_drift": cross_validation_drift,
+            "session_protocol_violations": session_violations,
+            "session_protocol_missing_constraints": session_protocol_missing_constraints(
+                session_violations,
+            ),
+            "session_protocol_contradiction_type": (
+                SESSION_VIOLATION_CONTRADICTION_TYPE if session_violations else ""
+            ),
+            "session_analysis_skips": session_skips,
+            "artifact_mapping_divergences": mapping_divergences,
             "dependency_graph": dependency_graph,
             "refactoring_proposals": [
                 asdict(proposal) for proposal in refactoring_proposals
@@ -100,7 +123,6 @@ class MetaArchitect:
                         source_file,
                         result.get("stderr") or result.get("stdout"),
                     )
-                    continue
                 cross_spec_path = Path(report_dir) / "cross_spec.json"
                 if not cross_spec_path.exists():
                     continue
@@ -227,8 +249,11 @@ class MetaArchitect:
         contract_conflicts: list[ContractConflict],
         cross_validation_drift: list[dict[str, Any]] | None = None,
         retry_history: dict[str, Any] | None = None,
+        session_violations: list[dict[str, Any]] | None = None,
     ) -> list[RefactoringProposal]:
         proposals: list[RefactoringProposal] = []
+
+        proposals.extend(_session_protocol_proposals(session_violations or []))
 
         for conflict in contract_conflicts:
             violation_text = " ".join(conflict.violations).lower()
@@ -399,6 +424,98 @@ def _contract_conflicts_from_drift(
             )
         )
     return conflicts
+
+
+def _session_protocol_violations_from_reports(
+    reports: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cross_spec in reports:
+        for violation in session_protocol_violations(cross_spec):
+            key = _finding_key(violation)
+            if key in seen:
+                continue
+            seen.add(key)
+            violations.append(violation)
+    return violations
+
+
+def _finding_key(finding: dict[str, Any]) -> str:
+    """Identify a finding by its whole content, so only identical ones collapse."""
+    try:
+        return json.dumps(finding, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(sorted(finding.items(), key=lambda item: item[0]))
+
+
+def _artifact_mapping_divergences_from_reports(
+    reports: list[dict[str, Any]],
+) -> list[str]:
+    divergences: list[str] = []
+    for cross_spec in reports:
+        for divergence in artifact_mapping_divergences(cross_spec):
+            if divergence not in divergences:
+                divergences.append(divergence)
+    return divergences
+
+
+def _session_analysis_skips_from_reports(
+    reports: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    skips: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cross_spec in reports:
+        for skip in session_analysis_skips(cross_spec):
+            key = _finding_key(skip)
+            if key in seen:
+                continue
+            seen.add(key)
+            skips.append(skip)
+    return skips
+
+
+def _session_protocol_proposals(
+    violations: list[dict[str, Any]],
+) -> list[RefactoringProposal]:
+    """Propose protocol repairs for session-type violations.
+
+    The repair is an ordering constraint over `effect_pre` / `effect_post`
+    contracts spread across files, so it is reported for review rather than
+    rewritten in place.
+    """
+    proposals: list[RefactoringProposal] = []
+    for violation in violations:
+        effect = str(violation.get("effect") or "unknown_effect")
+        kind = str(violation.get("kind") or "session_protocol_violation")
+        atoms = session_protocol_atoms(violation)
+        proposals.append(
+            RefactoringProposal(
+                proposal_id=f"enforce_session_protocol_{effect}_{kind}",
+                description=(
+                    f"Enforce the '{effect}' session protocol across "
+                    f"{', '.join(atoms) or 'the participating atoms'}"
+                ),
+                refactoring_type="enforce_session_protocol",
+                target_atoms=atoms,
+                changes={
+                    "effect": effect,
+                    "kind": kind,
+                    "contradiction_type": SESSION_VIOLATION_CONTRADICTION_TYPE,
+                    "protocol_state": str(violation.get("protocol_state") or ""),
+                    "protocol_path": _as_string_list(violation.get("protocol_path")),
+                    "spec_files": session_protocol_files(violation),
+                    "suggested_fix": str(violation.get("suggested_fix") or ""),
+                },
+                rationale=(
+                    "Cross-spec session typing found a protocol ordering constraint "
+                    f"({SESSION_VIOLATION_CONTRADICTION_TYPE}) that the participating "
+                    "specifications do not enforce."
+                ),
+                missing_constraints=session_protocol_missing_constraints([violation]),
+            )
+        )
+    return proposals
 
 
 def _canonical_cycle_key(cycle: list[str]) -> tuple[str, ...]:

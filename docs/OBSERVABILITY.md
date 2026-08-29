@@ -7,6 +7,9 @@ verification-driven agent loop, and — when the `mumei` binary is built with th
 enable instrumentation, how to run the reference OTLP backend stack, the span
 hierarchy and metrics catalogue, and how to verify the end-to-end distributed
 trace from **MCP client → mumei-agent → `mumei verify` subprocess → Rust Z3**.
+Section (f) covers the complementary compiler-side stream: the proof-aware
+runtime monitors emitted by `--emit runtime-monitor` (P23) and how their
+trust-boundary violations reach the same OTLP endpoint.
 
 Everything here is **opt-in**. With `OTEL_ENABLED` unset (the default) or the
 `otel` extra not installed, every span and instrument falls back to a NoOp, so
@@ -479,6 +482,100 @@ second. A surge signals runaway retries or an unexpectedly expensive model.
 **Runbook.** Break down by `gen_ai_request_model`; check for retry storms in
 the self-healing loop and confirm the configured `LLM_MODEL` matches
 expectations.
+
+---
+
+## (f) Proof-aware runtime monitors (P23)
+
+Sections (a)-(e) cover telemetry the *agent* emits. The compiler emits a second,
+complementary stream: `mumei build --emit runtime-monitor` (in
+`mumei-lang/mumei`) generates Rust guards around **trust boundaries only** —
+atoms that are `trusted`, `extern`-backed, or that assume an effect state via
+`effect_pre`. An atom whose proof is self-contained produces no artifact at all,
+so proven code stays zero-cost and the generated monitor pulls in no OTel
+dependency of its own.
+
+```bash
+# in mumei-lang/mumei
+LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu \
+  cargo run -- build path/to/spec.mm --emit runtime-monitor --output out/mon
+# -> out/mon_<atom>.monitor.rs, one per trust-boundary atom (none for proven atoms)
+```
+
+### Violation events
+
+Each guard reports a `mumei_monitor::Violation` instead of panicking — the
+monitor observes, it never aborts the program:
+
+| Field | Meaning |
+|---|---|
+| `atom` | Monitored atom name. |
+| `boundary` | Why the atom is a trust boundary: `trusted_atom`, `extern_ffi`, `effect_pre_override` (joined with `+` when several apply). |
+| `contract` | `requires`, `ensures`, `effect_pre`, or `requires_unchecked` / `ensures_unchecked` when the contract is not expressible as a runtime condition and is left to verification. |
+| `expression` | The contract text that was checked (`"<effect>: <state>"` for `effect_pre`). |
+| `observed` | Effect state the host reported for an `effect_pre` violation, or `"evaluation panicked"` when the contract itself faulted. |
+
+Reporting is a no-op unless `OTEL_ENABLED` is truthy — the same switch the agent
+uses — and the default hook writes one line per violation to stderr, naming the
+configured endpoint:
+
+```
+mumei.monitor.contract_violation atom=read_clock boundary=trusted_atom contract=requires expression=x > 0 observed=-
+```
+
+### Wiring monitors into the P15 reference stack
+
+The monitor reports through a host-installed hook, so the host application owns
+the OTel SDK. Point it at the collector from section (b) — the generated runtime
+defaults `OTEL_EXPORTER_OTLP_ENDPOINT` to `http://localhost:4318`, which is the
+reference collector's OTLP/HTTP port, the same endpoint the `otel`-built `mumei`
+binary exports to.
+
+```rust
+// host application startup, once
+mumei_monitor::set_violation_hook(|v| {
+    // e.g. tracing/opentelemetry: record as a span event on the current span
+    tracing::event!(
+        tracing::Level::WARN,
+        atom = v.atom,
+        boundary = v.boundary,
+        contract = v.contract,
+        expression = v.expression,
+        observed = v.observed.as_deref().unwrap_or("-"),
+        "mumei.monitor.contract_violation",
+    );
+})
+.expect("hook installed once");
+
+// optional: without a probe the runtime effect state is unobservable and
+// `effect_pre` assumptions stay unchecked
+mumei_monitor::set_effect_state_probe(|effect| current_state_of(effect));
+```
+
+```bash
+docker compose -f docker-compose.otel.yml up -d
+export OTEL_ENABLED=true
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+./your-app-linked-against-the-monitors
+```
+
+Because the hook runs inside the host's own tracer, violations land on whatever
+span is current. When the host is invoked underneath an agent flow (section d),
+that is the `mumei.verify.cli` / `mumei.loop.*` trace, so a runtime violation at
+a trust boundary and the proof obligation it corresponds to share a trace ID in
+Jaeger. Filter with `mumei.monitor.contract_violation` and group by `boundary` /
+`contract` to see which trust boundaries actually break at runtime.
+
+### Summarizing violations from the agent
+
+With no hook installed the default stderr lines above are the agent-observable
+surface: they are stable, single-line, and `key=value`-shaped, so an agent that
+runs a monitored binary can aggregate them by `atom` / `boundary` / `contract`
+without parsing Rust. A rising `contract=effect_pre` count is the runtime
+counterpart of a P22 `session_protocol_violations[]` finding — the same protocol
+assumption, observed instead of proven — and both map to `missing_constraints[]`
+on the agent side (see `docs/VERIFICATION_WORKFLOW_GUIDE.md` § 3-2).
 
 ---
 

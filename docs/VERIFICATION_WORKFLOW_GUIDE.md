@@ -393,6 +393,21 @@ mumei verify \
 - `global_invariants[]`: 全体で共有される不変条件
 - `global_invariant_conflicts[]`: 矛盾する不変条件
 - `circular_dependencies[]`: 循環依存
+- `session_protocol_violations[]`: ファイルをまたぐ stateful effect のプロトコル違反（P22 Session Types）
+- `session_analysis_skips[]`: 解析上限を超えて未検査のまま残った effect（fail-open のため明示的に報告される）
+- `agent_artifact_mapping[]`: 各配列が agent 側のどのフィールドに対応するかの宣言
+
+`agent_artifact_mapping[]` の宣言どおり、`session_protocol_violations[]` は
+`missing_constraints[]`（`contradiction_type: spec_vs_code`）として扱われる。
+Meta-Architect は違反ごとに `enforce_session_protocol` 提案を生成し、MCP の
+`check_cross_spec_consistency` は `missing_constraints[]` としてそのまま返す。
+プロトコル順序の修正は `effect_pre` / `effect_post` の再設計になるため、
+自動書き換えはせずレビュー用に報告する。self-healing ループでは
+`meta_architect_review_only` ステップとして thought log に残り、
+`missing_constraints` と `suggested_fix` が失われない。
+`agent_artifact_mapping[]` の宣言が agent 側の対応と食い違った場合は、
+黙って追従せず `artifact_mapping_divergences[]` として報告する
+（Meta-Architect の解析結果と MCP レスポンスの両方に含まれる）。
 
 ### 3-3. MCP 経由（cross-spec）
 

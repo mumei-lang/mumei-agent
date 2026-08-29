@@ -38,6 +38,13 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 
 from agent import telemetry
+from agent.cross_spec_artifacts import (
+    SESSION_VIOLATION_CONTRADICTION_TYPE,
+    artifact_mapping_divergences,
+    session_analysis_skips,
+    session_protocol_missing_constraints,
+    session_protocol_violations,
+)
 from agent.nlae_pipeline import NLAEPipeline
 from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
 
@@ -1383,6 +1390,11 @@ def check_spec_contradiction(
 def check_cross_spec_consistency(spec_files: str) -> str:
     """Run mumei cross-spec verification and return cross_validation_gaps evidence.
 
+    `session_protocol_violations[]` from the report is surfaced as
+    `missing_constraints[]`, following the report's `agent_artifact_mapping[]`.
+    `artifact_mapping_divergences[]` reports when that declaration no longer
+    matches the mapping the agent applies.
+
     Args:
         spec_files: JSON array string or comma-separated list of .mm files.
     """
@@ -1421,6 +1433,8 @@ def check_cross_spec_consistency(spec_files: str) -> str:
             except json.JSONDecodeError as exc:
                 return _err(f"failed to parse cross_spec.json: {exc}")
 
+    violations = session_protocol_violations(cross_spec_report)
+    skips = session_analysis_skips(cross_spec_report)
     return _ok(
         {
             "spec_files": files,
@@ -1428,9 +1442,20 @@ def check_cross_spec_consistency(spec_files: str) -> str:
             and not cross_spec_report.get("summary", {}).get("inconsistent_calls", 0)
             and not cross_spec_report.get("summary", {}).get(
                 "global_invariant_conflict_count", 0
-            ),
+            )
+            and not violations
+            and not skips,
             "verification": result,
             "cross_spec": cross_spec_report,
+            "session_protocol_violations": violations,
+            "missing_constraints": session_protocol_missing_constraints(violations),
+            "contradiction_type": (
+                SESSION_VIOLATION_CONTRADICTION_TYPE if violations else ""
+            ),
+            "session_analysis_skips": skips,
+            "artifact_mapping_divergences": artifact_mapping_divergences(
+                cross_spec_report
+            ),
         }
     )
 

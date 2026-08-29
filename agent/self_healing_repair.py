@@ -81,6 +81,37 @@ def _try_cegis_repair(
     return None
 
 
+def _record_review_only_proposal(
+    thought: ThoughtProcess,
+    proposal: dict,
+) -> None:
+    """Log a proposal that reports constraints instead of rewriting source.
+
+    Session-protocol repairs span several specifications, so they are surfaced
+    for review rather than applied automatically.
+    """
+    missing_constraints = proposal.get("missing_constraints")
+    if not isinstance(missing_constraints, list) or not missing_constraints:
+        return
+    changes = proposal.get("changes")
+    suggested_fix = ""
+    if isinstance(changes, dict):
+        suggested_fix = str(changes.get("suggested_fix") or "")
+    description = str(proposal.get("description", "review-only proposal"))
+    details = "; ".join(str(constraint) for constraint in missing_constraints)
+    if suggested_fix:
+        details = f"{details} | suggested fix: {suggested_fix}"
+    try:
+        thought.add_step(
+            action="meta_architect_review_only",
+            verification_success=False,
+            fix_strategy=str(proposal.get("refactoring_type", "meta_architect")),
+            fix_description=f"{description}. Missing constraints: {details}",
+        )
+    except Exception:
+        pass
+
+
 def _try_meta_architect_refactor(
     *,
     client,
@@ -119,6 +150,7 @@ def _try_meta_architect_refactor(
             continue
         modified_code = apply_refactoring_proposal(proposal, source)
         if modified_code == source:
+            _record_review_only_proposal(thought, proposal)
             continue
         try:
             thought.steps.append(
