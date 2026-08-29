@@ -1434,6 +1434,7 @@ def check_cross_spec_consistency(spec_files: str) -> str:
                 return _err(f"failed to parse cross_spec.json: {exc}")
 
     violations = session_protocol_violations(cross_spec_report)
+    skips = session_analysis_skips(cross_spec_report)
     return _ok(
         {
             "spec_files": files,
@@ -1442,13 +1443,14 @@ def check_cross_spec_consistency(spec_files: str) -> str:
             and not cross_spec_report.get("summary", {}).get(
                 "global_invariant_conflict_count", 0
             )
-            and not violations,
+            and not violations
+            and not skips,
             "verification": result,
             "cross_spec": cross_spec_report,
             "session_protocol_violations": violations,
             "missing_constraints": session_protocol_missing_constraints(violations),
             "contradiction_type": SESSION_VIOLATION_CONTRADICTION_TYPE,
-            "session_analysis_skips": session_analysis_skips(cross_spec_report),
+            "session_analysis_skips": skips,
             "artifact_mapping_divergences": artifact_mapping_divergences(
                 cross_spec_report
             ),
