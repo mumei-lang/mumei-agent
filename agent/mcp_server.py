@@ -1449,7 +1449,9 @@ def check_cross_spec_consistency(spec_files: str) -> str:
             "cross_spec": cross_spec_report,
             "session_protocol_violations": violations,
             "missing_constraints": session_protocol_missing_constraints(violations),
-            "contradiction_type": SESSION_VIOLATION_CONTRADICTION_TYPE,
+            "contradiction_type": (
+                SESSION_VIOLATION_CONTRADICTION_TYPE if violations else ""
+            ),
             "session_analysis_skips": skips,
             "artifact_mapping_divergences": artifact_mapping_divergences(
                 cross_spec_report

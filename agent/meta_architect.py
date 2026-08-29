@@ -97,7 +97,9 @@ class MetaArchitect:
             "session_protocol_missing_constraints": session_protocol_missing_constraints(
                 session_violations,
             ),
-            "session_protocol_contradiction_type": SESSION_VIOLATION_CONTRADICTION_TYPE,
+            "session_protocol_contradiction_type": (
+                SESSION_VIOLATION_CONTRADICTION_TYPE if session_violations else ""
+            ),
             "session_analysis_skips": session_skips,
             "artifact_mapping_divergences": mapping_divergences,
             "dependency_graph": dependency_graph,

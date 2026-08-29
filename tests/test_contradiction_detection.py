@@ -340,4 +340,5 @@ def test_mcp_check_cross_spec_consistency_rejects_skipped_session_analysis(
     assert payload["status"] == "ok"
     assert payload["session_protocol_violations"] == []
     assert payload["consistent"] is False
+    assert payload["contradiction_type"] == ""
     assert payload["session_analysis_skips"][0]["effect"] == "BulkChannel"
