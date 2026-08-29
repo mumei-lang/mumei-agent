@@ -133,6 +133,47 @@ def test_meta_architect_reports_session_analysis_skips(tmp_path) -> None:
     assert analysis["session_analysis_skips"][0]["effect"] == "BulkChannel"
 
 
+def test_meta_architect_flags_artifact_mapping_divergence(tmp_path) -> None:
+    source = tmp_path / "payment_client.mm"
+    source.write_text("atom payment_client_request() body: 0;\n", encoding="utf-8")
+    cross_spec = json.loads(
+        (FIXTURES / "cross_spec_session_violation.json").read_text(encoding="utf-8")
+    )
+    for entry in cross_spec["agent_artifact_mapping"]:
+        if entry["cross_spec_field"] == "session_protocol_violations[]":
+            entry["agent_field"] = "divergences[]"
+    architect = MetaArchitect(
+        SimpleNamespace(),
+        "model",
+        FakeMumeiClient(cross_spec, success=False),
+        SimpleNamespace(),
+    )
+
+    analysis = architect.analyze_architecture([source])
+
+    assert analysis["artifact_mapping_divergences"] == [
+        "session_protocol_violations[] declares agent_field='divergences[]' "
+        "but the agent maps it to 'missing_constraints[]'"
+    ]
+    assert len(analysis["session_protocol_missing_constraints"]) == 1
+
+
+def test_meta_architect_accepts_declared_artifact_mapping(tmp_path) -> None:
+    source = tmp_path / "payment_client.mm"
+    source.write_text("atom payment_client_request() body: 0;\n", encoding="utf-8")
+    cross_spec = json.loads(
+        (FIXTURES / "cross_spec_session_violation.json").read_text(encoding="utf-8")
+    )
+    architect = MetaArchitect(
+        SimpleNamespace(),
+        "model",
+        FakeMumeiClient(cross_spec, success=False),
+        SimpleNamespace(),
+    )
+
+    assert architect.analyze_architecture([source])["artifact_mapping_divergences"] == []
+
+
 def test_apply_refactoring_proposal_targets_requested_atom() -> None:
     source = """atom a(x: i64)
 requires: x >= 0;

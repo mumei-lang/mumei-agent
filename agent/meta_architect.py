@@ -14,6 +14,7 @@ from openai import OpenAI
 from agent.config import AgentConfig
 from agent.cross_spec_artifacts import (
     SESSION_VIOLATION_CONTRADICTION_TYPE,
+    artifact_mapping_divergences,
     session_analysis_skips,
     session_protocol_atoms,
     session_protocol_files,
@@ -78,6 +79,7 @@ class MetaArchitect:
         contract_conflicts.extend(_contract_conflicts_from_drift(cross_validation_drift))
         session_violations = _session_protocol_violations_from_reports(cross_spec_reports)
         session_skips = _session_analysis_skips_from_reports(cross_spec_reports)
+        mapping_divergences = _artifact_mapping_divergences_from_reports(cross_spec_reports)
         refactoring_proposals = self._generate_refactoring_proposals(
             dependency_graph,
             circular_dependencies,
@@ -96,6 +98,7 @@ class MetaArchitect:
                 session_violations,
             ),
             "session_analysis_skips": session_skips,
+            "artifact_mapping_divergences": mapping_divergences,
             "dependency_graph": dependency_graph,
             "refactoring_proposals": [
                 asdict(proposal) for proposal in refactoring_proposals
@@ -439,6 +442,17 @@ def _session_protocol_violations_from_reports(
             seen.add(key)
             violations.append(violation)
     return violations
+
+
+def _artifact_mapping_divergences_from_reports(
+    reports: list[dict[str, Any]],
+) -> list[str]:
+    divergences: list[str] = []
+    for cross_spec in reports:
+        for divergence in artifact_mapping_divergences(cross_spec):
+            if divergence not in divergences:
+                divergences.append(divergence)
+    return divergences
 
 
 def _session_analysis_skips_from_reports(

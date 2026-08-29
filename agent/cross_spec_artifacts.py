@@ -8,11 +8,45 @@ enforce.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SESSION_VIOLATION_FIELD = "session_protocol_violations[]"
 SESSION_VIOLATION_AGENT_FIELD = "missing_constraints[]"
 SESSION_VIOLATION_CONTRADICTION_TYPE = "spec_vs_code"
+
+
+def artifact_mapping_divergences(cross_spec: dict[str, Any]) -> list[str]:
+    """Compare the declared `agent_artifact_mapping[]` with the mapping used here.
+
+    The agent-side target is a field of the self-healing/MCP contract and cannot
+    be re-pointed at runtime, so a compiler-side mapping change is reported
+    instead of silently followed.
+    """
+    mapping = cross_spec.get("agent_artifact_mapping")
+    if not isinstance(mapping, list):
+        return []
+    divergences: list[str] = []
+    for entry in mapping:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("cross_spec_field") != SESSION_VIOLATION_FIELD:
+            continue
+        for key, expected in (
+            ("agent_field", SESSION_VIOLATION_AGENT_FIELD),
+            ("contradiction_type", SESSION_VIOLATION_CONTRADICTION_TYPE),
+        ):
+            declared = entry.get(key)
+            if declared is not None and declared != expected:
+                divergences.append(
+                    f"{SESSION_VIOLATION_FIELD} declares {key}={declared!r} "
+                    f"but the agent maps it to {expected!r}"
+                )
+    for divergence in divergences:
+        logger.warning("cross-spec artifact mapping diverged: %s", divergence)
+    return divergences
 
 
 def session_protocol_violations(cross_spec: dict[str, Any]) -> list[dict[str, Any]]:
