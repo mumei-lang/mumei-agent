@@ -155,6 +155,38 @@ body: x;
     assert "atom b(x: i64)\nrequires: x >= 0;" in updated
 
 
+def test_meta_architect_refactor_keeps_session_proposals_for_review(tmp_path) -> None:
+    from agent.self_healing import _try_meta_architect_refactor
+    from agent.strategies.retry_history import RetryHistory
+    from agent.thought_log import ThoughtProcess
+
+    source_file = tmp_path / "payment_client.mm"
+    source = "atom payment_client_request() body: 0;\n"
+    source_file.write_text(source, encoding="utf-8")
+    cross_spec = json.loads(
+        (FIXTURES / "cross_spec_session_violation.json").read_text(encoding="utf-8")
+    )
+    thought = ThoughtProcess(target_file=str(source_file))
+
+    assert _try_meta_architect_refactor(
+        client=SimpleNamespace(),
+        model="model",
+        mumei=FakeMumeiClient(cross_spec, success=False),
+        config=SimpleNamespace(),
+        source_files=[source_file],
+        source=source,
+        retry_history=RetryHistory(),
+        thought=thought,
+    ) is None
+
+    step = next(
+        item for item in thought.steps if item.action == "meta_architect_review_only"
+    )
+    assert step.fix_strategy == "enforce_session_protocol"
+    assert "PaymentChannel/deadlock_no_progress" in (step.fix_description or "")
+    assert "suggested fix:" in (step.fix_description or "")
+
+
 def test_meta_architect_refactor_failure_falls_back() -> None:
     from agent.self_healing import _try_meta_architect_refactor
 

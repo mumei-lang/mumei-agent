@@ -402,7 +402,9 @@ mumei verify \
 Meta-Architect は違反ごとに `enforce_session_protocol` 提案を生成し、MCP の
 `check_cross_spec_consistency` は `missing_constraints[]` としてそのまま返す。
 プロトコル順序の修正は `effect_pre` / `effect_post` の再設計になるため、
-自動書き換えはせずレビュー用に報告する。
+自動書き換えはせずレビュー用に報告する。self-healing ループでは
+`meta_architect_review_only` ステップとして thought log に残り、
+`missing_constraints` と `suggested_fix` が失われない。
 
 ### 3-3. MCP 経由（cross-spec）
 
