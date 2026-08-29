@@ -145,3 +145,35 @@ def test_each_output_format_is_distinct():
     assert rendered["text"] == report["report"]
     assert rendered["markdown"].startswith("## ")
     assert not rendered["human"].startswith("## ")
+
+
+def test_null_clause_text_and_affected_atoms_do_not_crash():
+    composability = {
+        "cases": [
+            {
+                "case": "null_fields_scale",
+                "source": "null_fields_scale.mm",
+                "atom_count": 1,
+                "max_dependency_depth": 1,
+                "top_level_atoms": ["root"],
+                "whole_system_invariants_closed": 1,
+                "composition_breaks": 1,
+                "atom_local_closure_ratio": 0.5,
+                "breaks": [
+                    {
+                        "atom": "leaf",
+                        "clause_kind": "ensures",
+                        "clause_line": 3,
+                        "clause_text": None,
+                        "affected_atoms": None,
+                        "pattern": "neighbor_ensures_strengthening",
+                    }
+                ],
+            }
+        ],
+        "modular_verification_inputs": {},
+    }
+    report = build_report(composability, None)
+    violation = report["verification_violations"][0]
+    assert "unknown cannot close" in violation
+    assert "() —" in violation
