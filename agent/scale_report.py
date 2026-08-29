@@ -43,11 +43,12 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _break_violation(case: str, record: dict[str, Any]) -> str:
-    affected = ", ".join(record.get("affected_atoms", [])) or "unknown"
+    affected = ", ".join(record.get("affected_atoms") or []) or "unknown"
+    clause_text = (record.get("clause_text") or "").strip()
     return (
         f"{case}:{record.get('atom')}: composition break at "
         f"{record.get('clause_kind')} line {record.get('clause_line')} "
-        f"({record.get('clause_text', '').strip()}) — {affected} cannot close "
+        f"({clause_text}) — {affected} cannot close "
         f"without this neighbouring contract [{record.get('pattern')}]"
     )
 
