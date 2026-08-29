@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent.meta_architect import MetaArchitect
 from agent.strategies.refactor_strategy import apply_refactoring_proposal
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
 
 class FakeMumeiClient:
-    def __init__(self, cross_spec: dict) -> None:
+    def __init__(self, cross_spec: dict, *, success: bool = True) -> None:
         self.cross_spec = cross_spec
+        self.success = success
 
     def verify(self, _source_path: str, report_dir: str | None = None, **_kwargs) -> dict:
         if report_dir is not None:
             with open(f"{report_dir}/cross_spec.json", "w", encoding="utf-8") as f:
                 json.dump(self.cross_spec, f)
-        return {"success": True, "stdout": "", "stderr": "", "report": {}}
+        return {"success": self.success, "stdout": "", "stderr": "", "report": {}}
 
 
 def test_meta_architect_builds_conflict_proposal(tmp_path) -> None:
@@ -61,6 +65,72 @@ body: x;
     assert analysis["contract_conflicts"][0]["callee_atom"] == "callee"
     assert analysis["refactoring_proposals"][0]["refactoring_type"] == "relax_requires"
     assert analysis["refactoring_proposals"][0]["changes"]["atom"] == "callee"
+
+
+def test_meta_architect_consumes_session_protocol_violations(tmp_path) -> None:
+    source = tmp_path / "payment_client.mm"
+    source.write_text("atom payment_client_request() body: 0;\n", encoding="utf-8")
+    cross_spec = json.loads(
+        (FIXTURES / "cross_spec_session_violation.json").read_text(encoding="utf-8")
+    )
+    architect = MetaArchitect(
+        SimpleNamespace(),
+        "model",
+        FakeMumeiClient(cross_spec, success=False),
+        SimpleNamespace(),
+    )
+
+    analysis = architect.analyze_architecture([source])
+
+    violation = analysis["session_protocol_violations"][0]
+    assert violation["effect"] == "PaymentChannel"
+    assert violation["kind"] == "deadlock_no_progress"
+
+    constraints = analysis["session_protocol_missing_constraints"]
+    assert len(constraints) == 1
+    assert constraints[0].startswith("[PaymentChannel/deadlock_no_progress]")
+    assert "Suggested fix:" in constraints[0]
+
+    proposal = next(
+        item
+        for item in analysis["refactoring_proposals"]
+        if item["refactoring_type"] == "enforce_session_protocol"
+    )
+    assert proposal["target_atoms"] == [
+        "payment_client_request",
+        "payment_server_respond",
+    ]
+    assert proposal["changes"]["protocol_path"] == ["Idle", "ServerWait", "ClientWait"]
+    assert proposal["missing_constraints"] == constraints
+
+
+def test_meta_architect_reports_session_analysis_skips(tmp_path) -> None:
+    source = tmp_path / "bulk_client.mm"
+    source.write_text("atom bulk_client_send() body: 0;\n", encoding="utf-8")
+    cross_spec = {
+        "session_protocol_violations": [],
+        "session_analysis_skips": [
+            {
+                "effect": "BulkChannel",
+                "reason": "state_limit_exceeded",
+                "state_count": 33,
+                "limit": 32,
+                "message": "session protocol not checked for 'BulkChannel'",
+            }
+        ],
+    }
+    architect = MetaArchitect(
+        SimpleNamespace(),
+        "model",
+        FakeMumeiClient(cross_spec),
+        SimpleNamespace(),
+    )
+
+    analysis = architect.analyze_architecture([source])
+
+    assert analysis["session_protocol_violations"] == []
+    assert analysis["session_protocol_missing_constraints"] == []
+    assert analysis["session_analysis_skips"][0]["effect"] == "BulkChannel"
 
 
 def test_apply_refactoring_proposal_targets_requested_atom() -> None:

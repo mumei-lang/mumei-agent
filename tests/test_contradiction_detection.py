@@ -264,3 +264,37 @@ def test_mcp_check_cross_spec_consistency_reads_report(tmp_path: Path) -> None:
     assert payload["status"] == "ok"
     assert payload["consistent"] is False
     assert payload["cross_spec"]["summary"]["global_invariant_conflict_count"] == 1
+
+
+def test_mcp_check_cross_spec_consistency_maps_session_violations(tmp_path: Path) -> None:
+    spec = tmp_path / "payment_client.mm"
+    spec.write_text("atom payment_client_request() body: 0;\n", encoding="utf-8")
+    report = json.loads(
+        (Path(__file__).parent / "fixtures" / "cross_spec_session_violation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    fake_config = MagicMock()
+    fake_config.mumei_bin = "mumei"
+    mumei = MagicMock()
+
+    def fake_verify(_source_path: str, report_dir: str, extra_args: list[str]) -> dict:
+        report_path = Path(report_dir) / "cross_spec.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        return {"success": False, "report": {}, "stdout": "", "stderr": ""}
+
+    mumei.verify.side_effect = fake_verify
+
+    with patch("agent.config.AgentConfig", return_value=fake_config), patch(
+        "agent.mumei_client.create_mumei_client", return_value=mumei
+    ):
+        payload = _payload(mcp_server.check_cross_spec_consistency(json.dumps([str(spec)])))
+
+    assert payload["status"] == "ok"
+    assert payload["consistent"] is False
+    assert payload["session_protocol_violations"][0]["effect"] == "PaymentChannel"
+    assert len(payload["missing_constraints"]) == 1
+    assert "deadlock_no_progress" in payload["missing_constraints"][0]
+    assert payload["session_analysis_skips"] == []

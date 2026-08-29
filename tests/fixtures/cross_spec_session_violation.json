@@ -1,0 +1,77 @@
+{
+  "contract_consistency": [],
+  "global_invariant_conflicts": [],
+  "circular_dependencies": [],
+  "session_protocol_violations": [
+    {
+      "effect": "PaymentChannel",
+      "kind": "deadlock_no_progress",
+      "caller_atom": "payment_client_request",
+      "caller_file": "tests/fixtures/session_types/payment_client.mm",
+      "callee_atom": "payment_server_respond",
+      "callee_file": "tests/fixtures/session_types/payment_server.mm",
+      "protocol_state": "ServerWait",
+      "protocol_path": [
+        "Idle",
+        "ServerWait",
+        "ClientWait"
+      ],
+      "message": "Protocol 'PaymentChannel' never terminates: the reachable states Idle -> ServerWait -> ClientWait all hand control to another role (payment_client_request (tests/fixtures/session_types/payment_client.mm), payment_server_respond (tests/fixtures/session_types/payment_server.mm), payment_client_retry (tests/fixtures/session_types/payment_client.mm)), so the participants wait on each other in a cycle.",
+      "suggested_fix": "Give one role an 'effect_post' that reaches a state without outgoing transitions (for effect 'PaymentChannel': Settled), so the protocol can complete."
+    }
+  ],
+  "session_analysis_skips": [],
+  "dependency_graph": [
+    {
+      "atom_name": "payment_client_request",
+      "dependencies": [],
+      "dependents": []
+    },
+    {
+      "atom_name": "payment_client_retry",
+      "dependencies": [],
+      "dependents": []
+    },
+    {
+      "atom_name": "payment_server_respond",
+      "dependencies": [],
+      "dependents": []
+    }
+  ],
+  "agent_artifact_mapping": [
+    {
+      "cross_spec_field": "contract_consistency[]",
+      "agent_field": "missing_constraints[]",
+      "contradiction_type": "spec_vs_code",
+      "description": "Caller/callee contract violations correspond to agent-reported constraints that the implementation path does not enforce."
+    },
+    {
+      "cross_spec_field": "global_invariant_conflicts[]",
+      "agent_field": "divergences[]",
+      "contradiction_type": "spec_internal",
+      "description": "Conflicting global invariants correspond to spec-level divergences before migration or repair."
+    },
+    {
+      "cross_spec_field": "session_protocol_violations[]",
+      "agent_field": "missing_constraints[]",
+      "contradiction_type": "spec_vs_code",
+      "description": "Session protocol violations correspond to communication ordering constraints that the participating specifications do not enforce."
+    },
+    {
+      "cross_spec_field": "circular_dependencies[]",
+      "agent_field": "drift_issues[]",
+      "contradiction_type": "spec_vs_code",
+      "description": "Cycles that change dependency meaning are surfaced as drift issues for human and MCP review."
+    }
+  ],
+  "summary": {
+    "total_atoms": 6,
+    "consistent_calls": 0,
+    "inconsistent_calls": 0,
+    "circular_dependency_count": 0,
+    "global_invariant_count": 3,
+    "global_invariant_conflict_count": 0,
+    "session_protocol_violation_count": 1,
+    "session_analysis_skipped_count": 0
+  }
+}
