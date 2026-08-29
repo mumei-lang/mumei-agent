@@ -158,6 +158,58 @@ def test_meta_architect_flags_artifact_mapping_divergence(tmp_path) -> None:
     assert len(analysis["session_protocol_missing_constraints"]) == 1
 
 
+def test_artifact_mapping_divergences_flag_missing_declarations() -> None:
+    from agent.cross_spec_artifacts import artifact_mapping_divergences
+
+    assert artifact_mapping_divergences({"agent_artifact_mapping": []}) == [
+        "session_protocol_violations[] is no longer declared in agent_artifact_mapping[]"
+    ]
+    assert artifact_mapping_divergences(
+        {
+            "agent_artifact_mapping": [
+                {"cross_spec_field": "session_protocol_violations[]"},
+            ]
+        }
+    ) == [
+        "session_protocol_violations[] no longer declares agent_field; "
+        "the agent maps it to 'missing_constraints[]'",
+        "session_protocol_violations[] no longer declares contradiction_type; "
+        "the agent maps it to 'spec_vs_code'",
+    ]
+    assert artifact_mapping_divergences({}) == []
+
+
+def test_session_findings_keep_distinct_records_across_reports() -> None:
+    from agent.meta_architect import (
+        _session_analysis_skips_from_reports,
+        _session_protocol_violations_from_reports,
+    )
+
+    base = {
+        "effect": "PaymentChannel",
+        "kind": "deadlock_no_progress",
+        "caller_atom": "client",
+        "callee_atom": "server",
+        "protocol_state": "Idle",
+    }
+    first = {**base, "caller_file": "a.mm", "protocol_path": ["Idle", "ClientWait"]}
+    second = {**base, "caller_file": "b.mm", "protocol_path": ["Idle", "ServerWait"]}
+    reports = [
+        {"session_protocol_violations": [first]},
+        {"session_protocol_violations": [second, dict(first)]},
+    ]
+
+    assert _session_protocol_violations_from_reports(reports) == [first, second]
+
+    skips = [
+        {"effect": "BulkChannel", "reason": "state_limit_exceeded", "state_count": 33},
+        {"effect": "BulkChannel", "reason": "state_limit_exceeded", "state_count": 64},
+    ]
+    assert _session_analysis_skips_from_reports(
+        [{"session_analysis_skips": [skips[0]]}, {"session_analysis_skips": skips}]
+    ) == skips
+
+
 def test_meta_architect_accepts_declared_artifact_mapping(tmp_path) -> None:
     source = tmp_path / "payment_client.mm"
     source.write_text("atom payment_client_request() body: 0;\n", encoding="utf-8")

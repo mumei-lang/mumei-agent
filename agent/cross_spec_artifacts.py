@@ -28,22 +28,38 @@ def artifact_mapping_divergences(cross_spec: dict[str, Any]) -> list[str]:
     mapping = cross_spec.get("agent_artifact_mapping")
     if not isinstance(mapping, list):
         return []
+    entries = [
+        entry
+        for entry in mapping
+        if isinstance(entry, dict)
+        and entry.get("cross_spec_field") == SESSION_VIOLATION_FIELD
+    ]
+    if not entries:
+        return _log_divergences(
+            [f"{SESSION_VIOLATION_FIELD} is no longer declared in agent_artifact_mapping[]"]
+        )
     divergences: list[str] = []
-    for entry in mapping:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("cross_spec_field") != SESSION_VIOLATION_FIELD:
-            continue
+    for entry in entries:
         for key, expected in (
             ("agent_field", SESSION_VIOLATION_AGENT_FIELD),
             ("contradiction_type", SESSION_VIOLATION_CONTRADICTION_TYPE),
         ):
+            if key not in entry:
+                divergences.append(
+                    f"{SESSION_VIOLATION_FIELD} no longer declares {key}; "
+                    f"the agent maps it to {expected!r}"
+                )
+                continue
             declared = entry.get(key)
-            if declared is not None and declared != expected:
+            if declared != expected:
                 divergences.append(
                     f"{SESSION_VIOLATION_FIELD} declares {key}={declared!r} "
                     f"but the agent maps it to {expected!r}"
                 )
+    return _log_divergences(divergences)
+
+
+def _log_divergences(divergences: list[str]) -> list[str]:
     for divergence in divergences:
         logger.warning("cross-spec artifact mapping diverged: %s", divergence)
     return divergences

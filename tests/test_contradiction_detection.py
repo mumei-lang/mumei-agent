@@ -297,4 +297,6 @@ def test_mcp_check_cross_spec_consistency_maps_session_violations(tmp_path: Path
     assert payload["session_protocol_violations"][0]["effect"] == "PaymentChannel"
     assert len(payload["missing_constraints"]) == 1
     assert "deadlock_no_progress" in payload["missing_constraints"][0]
+    assert payload["contradiction_type"] == "spec_vs_code"
     assert payload["session_analysis_skips"] == []
+    assert payload["artifact_mapping_divergences"] == []

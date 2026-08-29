@@ -39,6 +39,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from agent import telemetry
 from agent.cross_spec_artifacts import (
+    SESSION_VIOLATION_CONTRADICTION_TYPE,
     artifact_mapping_divergences,
     session_analysis_skips,
     session_protocol_missing_constraints,
@@ -1446,6 +1447,7 @@ def check_cross_spec_consistency(spec_files: str) -> str:
             "cross_spec": cross_spec_report,
             "session_protocol_violations": violations,
             "missing_constraints": session_protocol_missing_constraints(violations),
+            "contradiction_type": SESSION_VIOLATION_CONTRADICTION_TYPE,
             "session_analysis_skips": session_analysis_skips(cross_spec_report),
             "artifact_mapping_divergences": artifact_mapping_divergences(
                 cross_spec_report

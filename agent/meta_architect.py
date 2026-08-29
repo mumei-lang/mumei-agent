@@ -97,6 +97,7 @@ class MetaArchitect:
             "session_protocol_missing_constraints": session_protocol_missing_constraints(
                 session_violations,
             ),
+            "session_protocol_contradiction_type": SESSION_VIOLATION_CONTRADICTION_TYPE,
             "session_analysis_skips": session_skips,
             "artifact_mapping_divergences": mapping_divergences,
             "dependency_graph": dependency_graph,
@@ -427,21 +428,23 @@ def _session_protocol_violations_from_reports(
     reports: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     violations: list[dict[str, Any]] = []
-    seen: set[tuple[str, ...]] = set()
+    seen: set[str] = set()
     for cross_spec in reports:
         for violation in session_protocol_violations(cross_spec):
-            key = (
-                str(violation.get("effect") or ""),
-                str(violation.get("kind") or ""),
-                str(violation.get("caller_atom") or ""),
-                str(violation.get("callee_atom") or ""),
-                str(violation.get("protocol_state") or ""),
-            )
+            key = _finding_key(violation)
             if key in seen:
                 continue
             seen.add(key)
             violations.append(violation)
     return violations
+
+
+def _finding_key(finding: dict[str, Any]) -> str:
+    """Identify a finding by its whole content, so only identical ones collapse."""
+    try:
+        return json.dumps(finding, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(sorted(finding.items(), key=lambda item: item[0]))
 
 
 def _artifact_mapping_divergences_from_reports(
@@ -459,10 +462,10 @@ def _session_analysis_skips_from_reports(
     reports: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     skips: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     for cross_spec in reports:
         for skip in session_analysis_skips(cross_spec):
-            key = (str(skip.get("effect") or ""), str(skip.get("reason") or ""))
+            key = _finding_key(skip)
             if key in seen:
                 continue
             seen.add(key)
@@ -496,6 +499,7 @@ def _session_protocol_proposals(
                 changes={
                     "effect": effect,
                     "kind": kind,
+                    "contradiction_type": SESSION_VIOLATION_CONTRADICTION_TYPE,
                     "protocol_state": str(violation.get("protocol_state") or ""),
                     "protocol_path": _as_string_list(violation.get("protocol_path")),
                     "spec_files": session_protocol_files(violation),
