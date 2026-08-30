@@ -1,6 +1,8 @@
 # Capability 委譲の需要検証（Priority 15 タスク 3 / Stage 2 着手ゲート）
 
-> 調査日: 2026-08-30。対象は `mumei-lang/mumei-agent` の self-healing / generate / forge /
+> 調査日: 2026-08-30。調査対象のスナップショット: `mumei-lang/mumei-agent` `develop` @ `8b629721`、
+> `mumei-lang/mumei` `develop` @ `6f793bd`（以降の件数・「存在しない」の主張はこの 2 コミット時点の実測値）。
+> 対象は `mumei-lang/mumei-agent` の self-healing / generate / forge /
 > audit / MCP ワークフローで、「信頼できないコード（AI 生成 atom・サードパーティ部品）に対して
 > 呼び出しごとに最小権限だけを渡し、返ってきたら失効する」という制御が実際に必要になるかどうかの検証。
 > 上位ロードマップは `mumei-lang/mumei` の
@@ -54,14 +56,15 @@ delegation needs」を満たす利用者要求も記録されていない。
 
 ### UC-2: forge / generate による新規 atom 生成
 
-- `forge_tasks/` の 41 タスクのうち effect を宣言するのは 4 タスクのみで、内容は
+- `forge_tasks/` の 40 タスク仕様（`*.json`）のうち effect を宣言するのは 3 タスク
+  （`vstd_settlement.json` / `vstd_ownership.json` / `vstd_aviation_control.json`）のみで、内容は
   `Settlement` / `Ownership` / `RunwayAllocation` というドメインの temporal effect である。
   ファイル・ネットワーク等のリソース権限を扱う forge タスクは存在しない。
 - 生成物のリソース権限の例は zero-human challenge の
   `examples/challenges/results/validate_json_file/output.mm` で、
   `effects: [SafeFileRead(path)]` + `requires: starts_with(path, "/tmp/") && not_contains(path, "..")`
   の組で閉じている。呼び出し地点ごとに権限を変える構造は現れない。
-- `mumei` 側の `.mm` 資産でも同様で、`std/` + `examples/` + `tests/` の `effects: [...]` 宣言は
+- `mumei` 側の `.mm` 資産でも同様で、`std/` + `examples/` + `tests/` の `effects: [...]` 宣言（156 箇所 / 67 ファイル）は
   1 atom あたり 1〜3 個の effect 名に収まり、同一 effect に対して**別々の制約を必要とする
   複数の受け渡し**が現れる `.mm` は存在しない（この形が Stage 1 の per-receiver 制限に当たる）。
 
