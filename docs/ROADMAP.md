@@ -490,6 +490,49 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
     nullable 扱いのまま（`x!.length` の非 null アサーションを尊重）。関数スコープを跨いだ
     エイリアス解析・データフロー解析は範囲外（LLM 意味推論は導入しない）。
 
+#### 次タスク候補: 外部コード安全性推論の意味モデル化（データフロー / パス感度）
+
+stage 1 / stage 2 / 意味解析強化で「構文的事実の抽出」と「型述語・定数モデル」は整った
+が、外部コード安全性推論は依然として関数本体の **意味モデル** を持たない。
+`agent/strategies/foreign_code_strategy_helpers.py` の `_detect_go_safety_issues` /
+`_issues_from_findings` / `_i64_overflow_safety_issue` などは、抽出した式テキストを
+構文的に走査し、遭遇した偽陽性パターンごとに抑制分岐（`_go_enum_string_guarded_indices` /
+`_go_binary_search_guarded_indices` / `_go_sort_search_guarded_indices` 等の
+`_go_*_guarded_indices` 群、`_solidity_guaranteed_nonzero_params` 等の `guaranteed_nonzero`
+系ヘルパ）を追加する構造になっている。その結果、検証できるバグ種別は bounds / nil /
+division / overflow の 4 カテゴリに留まる一方、実装量は「検証できるバグ種別数」ではなく
+「遭遇した偽陽性パターン数」に比例して膨張している。
+
+- **根本原因**: 上記「残る未対応領域」に記した「関数スコープを跨いだエイリアス解析・
+  データフロー解析は範囲外」が最大の制約である。ガード条件（`if i < len(xs)`）や
+  代入（`n := len(xs); ... xs[n-1]`）が添字・除数にどう到達するかを追跡できないため、
+  個々のコードイディオムを正規表現で認識する抑制分岐で代替せざるを得ない。
+- **方針（stage 3 相当）**: 出発点は `agent/semantic_safety.py` への集約で実証済みの
+  「型述語・定数モデルへの統一 = 実装量減 + 偽陽性減」を、データフロー事実へ拡張する
+  ことである。関数内に閉じた **ローカルなデータフロー / パス感度解析** を導入する:
+  - 定数畳み込み（`const` を参照する派生定数、算術式の初期化子の値解決）。
+  - ガード条件の伝播（`if` / 早期 `return` / ループ条件から各文に到達する事実の収集）。
+  - 代入到達（除数・添字に到達する定義の追跡、`len(xs)` 由来の値の識別）。
+  - エイリアスの局所追跡（同一関数内でのスライス / ポインタ / 参照の別名付け）。
+  これらを単一の「データフロー事実」として `analyze_expression` の構文的事実と
+  `semantic_safety` の型・定数モデルに並ぶ第三の入力に据え、散在する
+  `_go_*_guarded_indices` / `guaranteed_nonzero` 系ヘルパの多くを置き換える。狙いは
+  「抑制コード削減」と「バグ種別拡大」を同一投資で両立することであり、既存の
+  `ForeignSafetyIssue` / `requires` 文字列 / counterexample のインタフェースは不変とする。
+- **健全性原則の維持**: 型・定数・データフロー情報が取得できない場合は保守側に倒す
+  （偽陽性は許容しても偽陰性を出さない）方針を崩さない。`agent/semantic_safety.py`
+  冒頭の方針と同じく、純粋な決定論的解析として LLM を呼ばず、`solc` / `rustc` / `tsc`
+  にも依存せず、no-LLM / `CI_FIXTURE_MODE` 経路で同一結果を返す。
+- **拡張先バグ種別の候補**: 現 4 カテゴリに加え、データフロー層があって初めて健全に
+  扱える種別を候補とする — 未初期化値の使用、リソースの取得 / 解放不整合（open /
+  close、lock / unlock の対応）、状態遷移の前提条件（ガード状態に依存する呼び出し順序）、
+  契約由来の事後条件チェック（`ensures` が参照する戻り値・出力引数の到達定義）。
+  これらは無償ではなく、データフロー事実だけで閉じない義務は従来どおり `unverifiable`
+  または Lean 送りになるトレードオフを伴う。
+- **スコープ外**: 「LLM 意味推論は導入しない」方針はこの stage でも維持する。関数
+  スコープを跨いだ大域的なエイリアス / データフロー解析も本 stage の範囲外とし、
+  関数内ローカル解析で解ける範囲を先に確定する。
+
 ### P14-C: 仕様↔コードのクロス検証 ✅ Implemented
 
 自然言語仕様、既存コード、抽出された `.mm` を双方向に照合し、multi-file cross-spec
@@ -1129,6 +1172,77 @@ python -m agent proliferate \
 - `tests/test_lean_bridge_e2e.py` now verifies the live path `_run_lean_fallback()` → `publish_result.proof_certificate.atoms[].z3_check_result == "lean_verified"` → `summary.json.details[].publish_result.proof_certificate_summary.lean_verified_count`.
 - The reference body-semantics obligation is `std/math/abs.mm::abs_saturating`. With Lake available, `scripts/bridge.py --cert ... --lean-cert-out ...` now emits and builds `Generated.Std.Math.Abs.abs_saturating_correct`, exports `lean_verified`, and carries `known_witness_used = false`.
 - `tests/test_lean_bridge_e2e.py` no longer skips because the generated theorem path is unavailable: it verifies promotion when Lake is present and uses graceful skip only when the `mumei-lean` checkout or Lake toolchain is unavailable. Stale `translator_version` / `bridge_lemma_hash` output remains unpromoted as `stale_translator`.
+
+---
+
+## Task 2-D: unknown atom の AI 主体 Lean 証明生成
+
+Task 2-C の Lean fallback は、`agent/lean_bridge.py` の `run_lean_bridge` /
+`agent/lean_bridge_helpers.py` の `extract_unknown_atoms` と known witness fallback
+（`_verify_known_witnesses` / `_combine_with_witness_fallback`）、および `agent/proliferate.py`
+の `_run_lean_fallback_inner` で構成され、昇格対象は mumei-lean 側の生成モジュール経路と
+既知 witness モジュールに限定される。それ以外の unknown atom は unknown のまま保守的に
+残し `partial_success` として報告する（`docs/LEAN_FALLBACK.md`）。同ドキュメントの
+error code 表では `tactic_failed` / `partial_translation` の Typical action が「手書き
+witness / proof strategy の追加・改善」「translator の拡張」とされており、Z3 で解けない
+義務の最終解決が人手の証明記述に依存している。
+
+### 目標
+
+P8-C で Lean エスカレーション対象と定めた義務 — 非線形算術・記号的除算 / 剰余・
+量化子交替・非有界時相不変量など Z3 が `unknown` を返すもの — について、Lean 送りの
+後段で AI（LLM）が Lean 4 の証明（tactic script / witness lemma）を自動生成・自動修復し、
+人手の証明記述を「最終手段」へ後退させる導線を追加する。CEGIS の `escalate_to_lean`
+（`agent/strategies/cegis_loop_helpers.py`、`tests/test_cegis_loop.py::test_escalate_to_lean_writes_bundle`）
+が書き出す escalation-bundle（現状は `source_file` / `loop_line` / `loop_context` /
+`reason` のみ）を AI 証明生成の入力として活用する。対象 atom の契約と `_extract_counterexample`
+で得た counterexample・試行済み不変量候補は現状 bundle に含まれないため、bundle スキーマの
+拡張（または proof certificate 側からの補完）を前提タスクとし、Z3 側で得た反例・不変量候補を
+Lean 側の証明ヒントとして再利用する。
+
+### パイプライン設計（opt-in、既存互換）
+
+既存の opt-in 方針（`--enable-lean-fallback` / `MUMEI_LEAN_REPO`）を踏襲し、無効時の
+既存挙動を byte-identical に保つ。AI 証明生成はさらに別フラグ（例:
+`--enable-lean-ai-proof`）で有効化し、Task 2-C の known witness 経路には影響を与えない。
+
+1. `extract_unknown_atoms` で proof certificate から unknown atom を抽出する。
+2. AI が atom の `requires` / `ensures` / body と escalation-bundle を入力に Lean theorem と
+   proof（tactic script または witness lemma）を生成する。
+3. `scripts/bridge.py` 相当で生成モジュールを Lake ビルドし機械的に検証する。
+4. 失敗時は Lean のエラー（unsolved goals、型不一致、`import_error` 等）を feedback として
+   AI に返し、上限回数まで反復修復する。多エージェント構成は `agent/nlae_pipeline.py`
+   の generator → counterexample → Lean escalation の handoff 構造（`LeanBridgeRunner` /
+   `ConfiguredLeanBridgeRunner`）を参考にする。
+5. ビルド成功で当該 atom の `z3_check_result` を `"lean_verified"` に昇格し、
+   `merge_lean_cert_into_proof_cert` で元の proof certificate へ non-mutating にマージする。
+   `summary.json.details[].publish_result.proof_certificate_summary.lean_verified_count`
+   への伝搬は Task 2-C と同一経路を使う。
+
+### 健全性ガード（最重要）
+
+- `lean_verified` へ昇格できるのは、AI が生成した証明のうち Lean / Lake で機械的にチェック
+  され成功したものだけとする。AI 出力自体を信頼して昇格することは行わない。
+- ビルド未成功・タクティク未解決のものは従来どおり unknown / `unverifiable` のまま残し、
+  `partial_success` として報告する保守設計を維持する。既存の `stale_translator` /
+  `bridge_lemma_hash` 検査もそのまま適用する。
+- 生成した Lean ソースと検証ログは証跡として保存し、`known_witness_used` と対になる
+  `ai_proof_used` 等の provenance を lean-cert に残して、人手 witness / 生成モジュール /
+  AI 生成のいずれで昇格したかを追跡可能にする。
+
+### 人手フォールバックの位置づけ
+
+- AI 生成・自動修復で解けなかった義務のみを人手レビュー / 手書き witness に回す
+  「最終手段」とし、`agent/human_review.py` の `escalate_to_lean` / MCP `escalate_to_lean`
+  はその残余に対して起動する。
+- `docs/LEAN_FALLBACK.md` の error code 表（特に `tactic_failed` / `partial_translation`
+  の Typical action）を、AI 証明生成を先に試みる前提へ更新する。
+
+### 決定論・fixture
+
+- no-LLM / `CI_FIXTURE_MODE` 経路では AI 証明生成をスキップし、既存挙動（known witness
+  のみ）に退避する。`tests/test_lean_bridge.py` / `tests/test_lean_bridge_e2e.py` の既存
+  結果は不変とし、AI 経路は LLM をモックした fixture で別テストとして回帰を固定する。
 
 ---
 
