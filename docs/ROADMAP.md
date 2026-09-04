@@ -1194,8 +1194,11 @@ P8-C で Lean エスカレーション対象と定めた義務 — 非線形算�
 後段で AI（LLM）が Lean 4 の証明（tactic script / witness lemma）を自動生成・自動修復し、
 人手の証明記述を「最終手段」へ後退させる導線を追加する。CEGIS の `escalate_to_lean`
 （`agent/strategies/cegis_loop_helpers.py`、`tests/test_cegis_loop.py::test_escalate_to_lean_writes_bundle`）
-が書き出す escalation-bundle（対象 atom、loop 情報、counterexample）を AI 証明生成の
-入力として活用し、Z3 側で得た反例・不変量候補を Lean 側の証明ヒントとして再利用する。
+が書き出す escalation-bundle（現状は `source_file` / `loop_line` / `loop_context` /
+`reason` のみ）を AI 証明生成の入力として活用する。対象 atom の契約と `_extract_counterexample`
+で得た counterexample・試行済み不変量候補は現状 bundle に含まれないため、bundle スキーマの
+拡張（または proof certificate 側からの補完）を前提タスクとし、Z3 側で得た反例・不変量候補を
+Lean 側の証明ヒントとして再利用する。
 
 ### パイプライン設計（opt-in、既存互換）
 
