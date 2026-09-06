@@ -48,6 +48,9 @@ _NUMERIC_CASTS = {
 }
 
 _GO_INT_TYPES = _NUMERIC_CASTS - {"float32", "float64"}
+GO_UNSIGNED_TYPES = frozenset(
+    {"uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "byte"}
+)
 
 _LOCK_METHODS = {"Lock", "RLock"}
 _UNLOCK_METHODS = {"Unlock", "RUnlock"}
@@ -355,7 +358,13 @@ class _Env:
         self.aliases = {
             k: v for k, v in self.aliases.items() if not (mentions(k) or mentions(v))
         }
-        self.held = {h for h in self.held if not any(mentions(part) for part in h[1:2])}
+        self.held = {
+            # A redefined error variable no longer tells us whether the handle
+            # is nil, so the ("file", handle, err) entry keeps only the handle.
+            (h[0], h[1], "") if len(h) == 3 and mentions(h[2]) else h
+            for h in self.held
+            if not mentions(h[1])
+        }
         self.slices = {t for t in self.slices if not mentions(t)}
 
     # -- helpers ---------------------------------------------------------
@@ -946,6 +955,26 @@ class _Walker:
         names.discard("_")
         return names
 
+    @staticmethod
+    def _keep_nil_maps(loop_env: _Env, outer: _Env, statements: tuple[tree_sitter_extract.Statement, ...]) -> None:
+        """Re-establish ``("nilmap", m)`` in ``loop_env`` when the loop body only
+        writes ``m[k] = v`` (which never initialises ``m``) and never assigns
+        ``m`` itself."""
+        whole: set[str] = set()
+
+        def collect(group: tuple[tree_sitter_extract.Statement, ...]) -> None:
+            for statement in group:
+                if statement.kind in {"define", "assign", "var", "range", "closure"}:
+                    for target in statement.targets:
+                        normalized = _norm(target).lstrip("*")
+                        if re.fullmatch(_IDENT, normalized):
+                            whole.add(normalized)
+                for nested in (statement.init, statement.body, statement.orelse, statement.post):
+                    collect(nested)
+
+        collect(statements)
+        loop_env.held |= {h for h in outer.held if h[0] == "nilmap" and h[1] not in whole}
+
     # -- statement walk --------------------------------------------------
 
     def walk(
@@ -1112,6 +1141,7 @@ class _Walker:
             loop_env.kill(name)
         loop_env.lt_len |= kept_lt_len
         loop_env.nonneg |= kept_nonneg
+        self._keep_nil_maps(loop_env, outer, statement.body + statement.post)
         body_env = self._apply_condition(loop_env, statement.condition, True) if statement.condition else loop_env
         body_end, terminated = self.walk(statement.body, body_env)
         after = self._loop_exit(outer, body_end, terminated, statement)
@@ -1170,6 +1200,7 @@ class _Walker:
         loop_env = env.copy()
         for name in assigned:
             loop_env.kill(name)
+        self._keep_nil_maps(loop_env, env, statement.body)
         iterable = _norm(statement.values[0]) if statement.values else ""
         if (
             statement.targets
