@@ -13,7 +13,7 @@ from typing import Iterable
 
 import z3
 
-from agent import semantic_safety, tree_sitter_extract
+from agent import dataflow_facts, semantic_safety, tree_sitter_extract
 from agent.cross_validation_foreign import (
     SOLIDITY_UINT256_MAX,
     _addition_pairs_regex,
@@ -858,6 +858,17 @@ def _go_nonzero_global_slice_lengths(source: str) -> set[str]:
     return nonzero
 
 
+def _go_package_slice_names(source: str) -> set[str]:
+    """Package-level ``var`` names whose initializer / type is a slice or array."""
+    names: set[str] = set()
+    for kind, name, value in _go_parse_top_level_declarations(source):
+        if kind == "var" and value.startswith("["):
+            names.add(name)
+    for match in re.finditer(r"^\s*var\s+(\w+)\s+\[", source, re.MULTILINE):
+        names.add(match.group(1))
+    return names
+
+
 def _go_package_source(
     source: str, source_file: str | None, max_chars: int = 500_000
 ) -> str:
@@ -1433,47 +1444,6 @@ def _go_nonnegative_local_vars(body: str, source: str | None = None) -> set[str]
     return nonneg
 
 
-def _go_modulo_bounded_indices(
-    body: str,
-    unsigned_vars: set[str] | None,
-    source: str | None = None,
-) -> set[str]:
-    """Return Go local variable names bounded by ``% len(container)``.
-
-    ``idx := id % uint64(len(colorForTask))`` produces a value in
-    ``[0, len(colorForTask))`` when the dividend is unsigned, so
-    ``colorForTask[idx]`` is safe.
-
-    In addition to the unsigned-dividend case, a *signed* but provably
-    non-negative dividend (loop counter, range index, ``len(...)`` result or a
-    non-negative literal) is also bounds-safe **when the container is provably
-    non-empty**, since ``0 <= expr % len(c) < len(c)`` requires ``len(c) > 0``.
-    When ``len(container)`` cannot be shown positive the modulo may divide by
-    zero, so the warning is preserved (the empty-container case stays flagged).
-    """
-    guarded: set[str] = set()
-    unsigned_vars = unsigned_vars or set()
-    nonempty = _go_nonempty_container_names(source, body)
-    nonneg_vars = _go_nonnegative_local_vars(body, source) | unsigned_vars
-    # The dividend is confined to a single statement (no ``{}``/newline/``=``) so
-    # a modulo further down the body is not mis-attributed to an earlier ``:=``.
-    for match in re.finditer(
-        r"\b(\w+)\s*:=\s*([^;{}\n=]+?)\s*%\s*(?:\w+\()?\s*len\(\s*(\w+)\s*\)(?:\s*\))?",
-        body,
-    ):
-        idx, rhs, arr = match.group(1), match.group(2), match.group(3)
-        # The dividend is unsigned or cast to an unsigned type.
-        if re.search(r"\b(?:uint|uint8|uint16|uint32|uint64|uintptr)\b", rhs) or any(
-            re.search(rf"\b{re.escape(name)}\b", rhs) for name in unsigned_vars
-        ):
-            guarded.add(idx)
-        # A signed but non-negative dividend is safe only when the container is
-        # provably non-empty (``len(container) > 0``).
-        elif arr in nonempty and _go_nonnegative_dividend(rhs, nonneg_vars):
-            guarded.add(idx)
-    return guarded
-
-
 def _rust_guarded_indices(body: str) -> set[str]:
     """Return Rust local variable names that are bounded by ``% .len()``.
 
@@ -1580,52 +1550,6 @@ def _go_time_interval_nonzero_params(name: str, params_text: str) -> set[str]:
         if param_name.lower() in interval_params
         and param_type.strip().lstrip("*").lower() in int_types
     }
-
-
-def _go_zero_guarded_nonzero_params(body: str, param_names: set[str]) -> set[str]:
-    """Return parameters guarded by an ``if x == 0 { return }`` early return.
-
-    Code after ``if x == 0 { return ... }`` executes only when ``x != 0``,
-    so a subsequent division by ``x`` is safe. Also handles ``x <= 0`` guards,
-    which imply ``x > 0`` after the return.
-    """
-    return _go_zero_guarded_nonzero_names(body, param_names)
-
-
-def _go_zero_guarded_nonzero_locals(body: str) -> set[str]:
-    """Return local variables guarded by an ``if v == 0 { return }`` early return.
-
-    A local such as ``jitterRange := uint64(maxAge / 2); if jitterRange == 0 {
-    return 0 }; return x % jitterRange`` is safe after the guard.
-    """
-    # Collect simple local names from short declarations, var declarations and assignments.
-    names = set(re.findall(r"\b(\w+)\s*:=", _strip_go_rust_literals_and_comments(body)))
-    names.update(re.findall(r"\bvar\s+(\w+)", _strip_go_rust_literals_and_comments(body)))
-    names.update(re.findall(r"\b(\w+)\s*=[^=]", _strip_go_rust_literals_and_comments(body)))
-    return _go_zero_guarded_nonzero_names(body, names)
-
-
-def _go_zero_guarded_nonzero_names(body: str, names: set[str]) -> set[str]:
-    """Return names guarded by an ``if v == 0 { return/continue/break/panic }`` guard."""
-    stripped = _strip_go_rust_literals_and_comments(body)
-    guarded: set[str] = set()
-    for name in names:
-        for match in re.finditer(
-            rf"\bif\s+(?:[^;{{]*\b{re.escape(name)}\s*(?:(?:<=|==)\s*0|<\s*[12])[^;{{]*)\s*{{",
-            stripped,
-        ):
-            i = match.end()
-            depth = 1
-            block_start = i
-            while i < len(stripped) and depth > 0:
-                if stripped[i] == "{":
-                    depth += 1
-                elif stripped[i] == "}":
-                    depth -= 1
-                i += 1
-            if depth == 0 and re.search(r"\b(?:return|continue|break|panic|base\.Fatal)\b", stripped[block_start : i - 1]):
-                guarded.add(name)
-    return guarded
 
 
 def _go_loop_count_nonzero_params(body: str, param_names: set[str]) -> set[str]:
@@ -1918,19 +1842,6 @@ def _go_bitmap_bitset_guarded_indices(body: str, rtype: str | None) -> set[str]:
     return guarded
 
 
-def _go_dual_len_loop_guarded_indices(body: str) -> set[str]:
-    """``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both slices."""
-    stripped = _strip_go_rust_literals_and_comments(body)
-    guarded: set[str] = set()
-    # Either order of the two ``len`` comparisons is accepted.
-    for match in re.finditer(
-        r"\bfor\s+(\w+)\s*:=\s*0\s*;\s*\1\s*<\s*len\(\s*(\w+)\s*\)\s*&&\s*\1\s*<\s*len\(\s*(\w+)\s*\)\s*;\s*\1\+\+\s*\{",
-        stripped,
-    ):
-        guarded.add(match.group(1))
-    return guarded
-
-
 def _go_2d_slice_loop_guarded_indices(body: str) -> set[str]:
     """Range over a 2-D slice with an inner non-nil guard implies the index is valid.
 
@@ -2047,34 +1958,6 @@ def _go_fixed_array_param_guarded_indices(
     return guarded
 
 
-def _go_grow_guarded_indices(body: str, params_text: str) -> set[str]:
-    """Parameters that trigger slice growth before indexing are bounded.
-
-    ``if n >= len(funcTypes) { funcTypes = make([]Type, n+1) }`` guarantees
-    ``funcTypes[n]`` is valid afterwards.
-    """
-    param_names = set(_go_param_types(params_text).keys())
-    guarded: set[str] = set()
-    for match in re.finditer(
-        r"if\s+(\w+)\s*>=\s*len\s*\(\s*(\w+)\s*\)\s*\{",
-        body,
-    ):
-        pname, slice_name = match.group(1), match.group(2)
-        if pname not in param_names:
-            continue
-        start = match.end() - 1
-        block = _balanced_brace_body(body, start)
-        if re.search(
-            rf"\b{re.escape(slice_name)}\s*=",
-            block,
-        ) and re.search(
-            rf"\bmake\s*\(\s*\[\s*\]\w*\s*,\s*{re.escape(pname)}\s*\+\s*1\s*\)",
-            block,
-        ):
-            guarded.add(pname)
-    return guarded
-
-
 def _go_short_circuit_or_guarded_indices(body: str) -> set[str]:
     """``len(arr) == idx || arr[idx] ...`` is safe due to short-circuit ``||``.
 
@@ -2112,30 +1995,6 @@ def _go_median_guarded_indices(body: str) -> set[str]:
                 body,
             ):
                 guarded.add(mid)
-    return guarded
-
-
-def _go_last_index_guarded_indices(body: str) -> set[str]:
-    """``i := len(arr) - 1; if i < 0 { return }`` guards ``arr[i]``.
-
-    The last-index idiom returns when the array is empty, so ``i`` is a valid
-    index on the remaining path.
-    """
-    guarded: set[str] = set()
-    for match in re.finditer(
-        r"\b(\w+)\s*:=\s*len\(\s*(\w+)\s*\)\s*-\s*1\b",
-        body,
-    ):
-        idx, arr = match.group(1), match.group(2)
-        if re.search(
-            rf"\bif\s+{re.escape(idx)}\s*<\s*0\s*\{{[^}}]*\breturn\b",
-            body,
-        ):
-            if re.search(
-                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]",
-                body,
-            ):
-                guarded.add(idx)
     return guarded
 
 
@@ -2372,8 +2231,6 @@ def _go_guarded_indices(
         # The constant ``m`` is the last valid index of ``container``.
         if re.search(rf"{re.escape(container)}\s*\[\s*{re.escape(const_name)}\s*\]", body):
             guarded.add(const_name)
-    # Reverse loops: ``for i := len(arr) - 1; i >= 0; i-- { arr[i] }``
-    guarded |= _go_reverse_loop_guarded_indices(body)
     # For unsigned variables, ``if x < len(arr)`` is a complete bounds guard.
     # Allow preceding ``&&`` conditions such as ``if cond && size < len(arr)``.
     if unsigned_vars:
@@ -2384,9 +2241,6 @@ def _go_guarded_indices(
             body,
         ):
             guarded.add(match.group("idx"))
-    # ``idx := unsignedValue % uint64(len(arr))`` bounds ``idx`` to ``[0, len(arr))``.
-    # A signed non-negative dividend is also bounded when ``arr`` is non-empty.
-    guarded |= _go_modulo_bounded_indices(body, unsigned_vars, source)
     # ``if arr != nil && idx < len(arr) { ... arr[idx] ... }`` idiomatically
     # guards an index parameter named ``idx``/``index``; the non-nil check on the
     # container and the index name convention imply a valid, non-negative index.
@@ -2409,16 +2263,12 @@ def _go_guarded_indices(
     # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
     # stay within ``a``'s bounds, so ``a[idx]`` is safe.
     guarded |= _go_range_index_guarded_indices(body)
-    # ``for i := 0; i < len(a) && i < len(b); i++`` guards ``i`` for both ``a[i]`` and ``b[i]``.
-    guarded |= _go_dual_len_loop_guarded_indices(body)
     # Range over a 2-D slice with an inner non-nil guard implies the column index is valid.
     guarded |= _go_2d_slice_loop_guarded_indices(body)
     # ``len(arr) == idx || arr[idx]`` short-circuit guards the index access.
     guarded |= _go_short_circuit_or_guarded_indices(body)
     # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
     guarded |= _go_median_guarded_indices(body)
-    # Last-index idiom ``i := len(arr) - 1; if i < 0 { return }`` guards ``arr[i]``.
-    guarded |= _go_last_index_guarded_indices(body)
     # ``sort.Search``/``sortSearch`` closures and their results index the searched slice.
     guarded |= _go_sort_search_guarded_indices(body)
     # ``log10Pow2(bits.Len64(x))`` indexing ``uint64pow10`` stays within the table.
@@ -3111,40 +2961,6 @@ def _go_flattened_index_safe_pairs(body: str) -> set[tuple[str, str]]:
                     if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", inner_body):
                         safe.add((arr, idx))
     return safe
-
-
-def _go_reverse_loop_guarded_indices(body: str) -> set[str]:
-    """Return index variables guarded by a reverse ``for`` loop bounded by ``len``.
-
-    A loop ``for i := len(arr) - k; i >= 0; i-- { arr[i] }`` with ``k >= 1``
-    keeps ``i`` within the array bounds (or does not execute when ``len(arr) < k``),
-    so any ``arr[i]`` inside the loop body is safe.
-    """
-    guarded: set[str] = set()
-    pattern = re.compile(
-        r"\bfor\s+(?P<idx>\w+)\s*:=\s*len\(\s*(?P<arr>\w+)\s*\)\s*-\s*(?:[1-9]\d*)\s*;\s*(?:(?P=idx)\s*>=\s*0|0\s*<=\s*(?P=idx))\s*;\s*(?P=idx)\s*(?:--|-=\s*1)\s*\{",
-        re.DOTALL,
-    )
-    for match in pattern.finditer(body):
-        idx = match.group("idx")
-        arr = match.group("arr")
-        # The regex already consumed the opening brace, so ``match.end() - 1``
-        # points to the body-starting ``{``.
-        brace = match.end() - 1
-        if brace < 0 or body[brace] != "{":
-            continue
-        depth = 1
-        i = brace + 1
-        while i < len(body) and depth > 0:
-            if body[i] == "{":
-                depth += 1
-            elif body[i] == "}":
-                depth -= 1
-            i += 1
-        loop_body = body[brace + 1 : i - 1]
-        if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", loop_body):
-            guarded.add(idx)
-    return guarded
 
 
 def _go_unsigned_variables(
@@ -4630,7 +4446,7 @@ def _detect_go_safety_issues(
                 package_name=package_name,
                 rtype=rtype,
                 function_name=fn.name,
-            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_fixed_array_param_guarded_indices(body, fn.params_text, source) | _go_bitmask_guarded_indices(body, fn.params_text, source) | _go_grow_guarded_indices(body, fn.params_text) | _go_runtime_level_guarded_indices(
+            ) | _go_accessor_index_guarded_indices(body, fn.params_text, source) | _go_fixed_array_param_guarded_indices(body, fn.params_text, source) | _go_bitmask_guarded_indices(body, fn.params_text, source) | _go_runtime_level_guarded_indices(
                 body, package_name, set(param_types.keys())
             ) | _go_enum_string_guarded_indices(body, fn.name, receiver_name) | _go_enum_string_array_guarded_indices(body, fn.name, receiver_name, original_source or source)
             suppress_nil = (
@@ -4668,8 +4484,6 @@ def _detect_go_safety_issues(
                 | _go_time_interval_nonzero_params(fn.name, fn.params_text)
                 | _go_div_nonzero_params(fn.name, fn.params_text)
                 | _go_return_divisor_nonzero_params(body, fn.params_text)
-                | _go_zero_guarded_nonzero_params(body, set(param_types.keys()))
-                | _go_zero_guarded_nonzero_locals(body)
                 | _go_loop_count_nonzero_params(body, set(param_types.keys()))
                 | _go_local_nonzero_variables(body)
                 | _go_align_nonzero_params(body)
@@ -4686,24 +4500,52 @@ def _detect_go_safety_issues(
                 name for name, raw_type in param_types.items()
                 if raw_type.strip().lstrip("*") == "string"
             }
+            flow = dataflow_facts.analyze_function(
+                body,
+                "go",
+                constants=known_constants or {},
+                param_names=set(param_types),
+                nonneg_names=unsigned_vars,
+                nonzero_names=guaranteed_nonzero,
+                sequence_names={
+                    name for name, raw_type in param_types.items()
+                    if raw_type.strip().lstrip("*").startswith("[") or raw_type.strip() == "string"
+                }
+                | known_strings
+                | _go_package_slice_names(package_source),
+            )
             for index, expression in enumerate(expressions):
+                facts = flow.facts_for_expression(expression) if flow is not None else None
+                expr_constants = dict(known_constants or {})
+                expr_nonzero = guaranteed_nonzero
+                expr_guarded = guarded_indices
+                expr_dereference = param_names - nonnil_param_names
+                if flow is not None:
+                    expr_constants.update(flow.constants)
+                if facts is not None:
+                    expr_constants.update(facts.consts)
+                    expr_nonzero = guaranteed_nonzero | facts.nonzero
+                    expr_guarded = guarded_indices | facts.bounded_indices(
+                        _go_index_accesses(expression)
+                    )
+                    expr_dereference = expr_dereference - facts.nonnil
                 expr_issues = _issues_for_expression(
                     fn.name,
                     expression,
                     "Go",
-                    dereference_values=param_names - nonnil_param_names,
+                    dereference_values=expr_dereference,
                     local_names=local_names,
                     param_types=param_types,
                     mapping_names=go_map_names,
-                    known_constants=known_constants or {},
+                    known_constants=expr_constants,
                     parallel_slicing=parallel_slicing,
-                    guaranteed_nonzero=guaranteed_nonzero,
+                    guaranteed_nonzero=expr_nonzero,
                     float_variables=float_variables,
                     known_strings=known_strings,
                     known_array_keys=global_array_keys,
                     known_types=known_types,
                     float_arrays=go_float_arrays,
-                    guarded_indices=guarded_indices,
+                    guarded_indices=expr_guarded,
                     unsigned_locals=unsigned_vars,
                     source=source,
                     params_text=fn.params_text,
@@ -4750,6 +4592,8 @@ def _detect_go_safety_issues(
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                     ]
                 issues.extend(expr_issues)
+            if flow is not None:
+                issues.extend(_dataflow_safety_issues(fn.name, flow))
         return issues
     # Regex fallback when tree-sitter / the grammar is unavailable.
     go_decls = list(_go_function_declarations(source))
@@ -4780,8 +4624,6 @@ def _detect_go_safety_issues(
         guaranteed_nonzero = (
             base_guaranteed_nonzero
             | _go_local_nonzero_variables(body)
-            | _go_zero_guarded_nonzero_params(body, set(_go_param_types(params_text).keys()))
-            | _go_zero_guarded_nonzero_locals(body)
             | _go_align_nonzero_params(body)
             | _go_rounded_factor_nonzero(body)
             | _go_beacon_config_nonzero_locals(body, original_source or source)
@@ -4825,7 +4667,7 @@ def _detect_go_safety_issues(
             package_name=package_name,
             rtype=rtype,
             function_name=name,
-        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_fixed_array_param_guarded_indices(body, params_text, source) | _go_bitmask_guarded_indices(body, params_text, source) | _go_grow_guarded_indices(body, params_text) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
+        ) | _go_accessor_index_guarded_indices(body, params_text, source) | _go_fixed_array_param_guarded_indices(body, params_text, source) | _go_bitmask_guarded_indices(body, params_text, source) | _go_enum_string_guarded_indices(body, name, receiver_name) | _go_enum_string_array_guarded_indices(body, name, receiver_name, original_source or source)
         rtype_base = _go_type_basename(rtype) if rtype else None
         suppress_nil = (
             name in {"String", "Get"}
@@ -4893,6 +4735,50 @@ def _detect_go_safety_issues(
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                 ]
             issues.extend(expr_issues)
+    return issues
+
+
+def _go_index_accesses(expression: str) -> tuple[tuple[str, str], ...]:
+    findings = tree_sitter_extract.analyze_expression(expression, "go")
+    return findings.index_accesses if findings is not None else ()
+
+
+_DATAFLOW_ISSUE_MESSAGES = {
+    "nil_map_write": "writes to map `{subject}` which is declared but never initialized (nil map assignment panics)",
+    "double_lock": "acquires `{subject}` again while it is already held on this path (deadlock)",
+    "lock_held_at_return": "returns while `{subject}` is still held (missing unlock on this path)",
+    "resource_leak": "returns without closing `{subject}` (resource leak on this path)",
+}
+
+
+def _dataflow_safety_issues(
+    function_name: str, flow: dataflow_facts.FunctionDataflow
+) -> list[ForeignSafetyIssue]:
+    """Translate local dataflow findings (nil-map write, lock/unlock and
+    open/close mismatches) into ``ForeignSafetyIssue`` entries.
+
+    Emitted after the per-return expression issues of the function so the
+    existing bounds → nil → division → overflow ordering is untouched.
+    """
+    issues: list[ForeignSafetyIssue] = []
+    for finding in flow.issues:
+        template = _DATAFLOW_ISSUE_MESSAGES.get(finding.category)
+        if template is None:
+            continue
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"`{function_name}` " + template.format(subject=finding.subject)
+                    + f" at `{finding.statement}`"
+                ),
+                counterexample={
+                    "category": finding.category,
+                    "subject": finding.subject,
+                    "statement": finding.statement,
+                },
+            )
+        )
     return issues
 
 

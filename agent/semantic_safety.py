@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import re
 
-from agent import tree_sitter_extract
+from agent import dataflow_facts, tree_sitter_extract
 
 _LANGUAGE_ALIASES = {
     "py": "python",
@@ -105,16 +105,42 @@ def collect_declared_constants(source: str, language: str) -> dict[str, int]:
     skipped so only values we can reason about are pinned.
     """
     ts_constants = tree_sitter_extract.extract_declared_constants(source, language)
-    if ts_constants is not None:
-        return ts_constants
     constants: dict[str, int] = {}
-    for pattern in _CONST_PATTERNS.get(normalize_language(language), ()):  # noqa: E501
+    if ts_constants is not None:
+        constants = dict(ts_constants)
+    else:
+        for pattern in _CONST_PATTERNS.get(normalize_language(language), ()):  # noqa: E501
+            for match in pattern.finditer(source):
+                value = parse_int_literal(match.group("value"))
+                if value is not None:
+                    # First declaration wins, mirroring source order.
+                    constants.setdefault(match.group("name"), value)
+    return _fold_derived_constants(source, language, constants)
+
+
+def _fold_derived_constants(
+    source: str, language: str, constants: dict[str, int]
+) -> dict[str, int]:
+    """Resolve constants whose initializer is an arithmetic expression.
+
+    ``const B: usize = A * 2;`` / ``uint256 constant B = A * 2;`` are folded
+    from the literal constants already collected (dependency order is handled
+    by :func:`agent.dataflow_facts.fold_constants`). Initializers that do not
+    fold to an ``int64`` stay unknown, keeping the conservative default.
+    """
+    declarations: list[tuple[str, str]] = []
+    for pattern in _CONST_PATTERNS.get(normalize_language(language), ()):
         for match in pattern.finditer(source):
-            value = parse_int_literal(match.group("value"))
-            if value is not None:
-                # First declaration wins, mirroring source order.
-                constants.setdefault(match.group("name"), value)
-    return constants
+            name = match.group("name")
+            value = match.group("value").strip()
+            if name in constants or parse_int_literal(value) is not None:
+                continue
+            if re.search(r"[\"'`]", value) or "=>" in value or "function" in value:
+                continue
+            declarations.append((name, value))
+    if not declarations:
+        return constants
+    return dataflow_facts.fold_constants(declarations, constants)
 
 
 def divisor_provably_nonzero(name: str, known_constants: dict[str, int]) -> bool:
