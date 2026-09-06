@@ -17,14 +17,20 @@ contains `scripts/bridge.py`.
    strategy.
 5. (Opt-in, Task 2-D) With `--enable-lean-ai-proof` / `ENABLE_LEAN_AI_PROOF=1`,
    atoms still `unknown` after steps 3–4 are handed to
-   `agent.lean_ai_proof.run_ai_proof_repair()`: the LLM writes a Lean module
-   containing `theorem <atom>_correct`, the module is written under
-   `generated/Generated/AiProof/` and checked with `lake build`, and the build
-   log is fed back to the LLM for up to `LEAN_AI_PROOF_MAX_ATTEMPTS` (default 3)
-   repair rounds. Only a module that builds with exit code 0, no `error:` lines
-   and no `declaration uses 'sorry'` is promoted; the source is rejected before
-   Lake if it contains `sorry` / `admit` / `axiom` / `unsafe` /
-   `native_decide` / `implemented_by`. The AI stage is skipped entirely when no
+   `agent.lean_ai_proof.run_ai_proof_repair()`. The theorem *statement* is
+   never authored by the LLM: it is lifted verbatim (header plus helper
+   `def`s / `open`s) from the bridge-generated `theorem <atom>_correct` under
+   `generated/Generated/`, and the LLM only supplies the tactic script after
+   `:= by`. mumei-agent assembles `Generated.AiProof.<Atom>` from the trusted
+   statement plus the tactics plus `#print axioms <atom>_correct`, writes it
+   under `generated/Generated/AiProof/`, runs `lake build`, and feeds the log
+   back to the LLM for up to `LEAN_AI_PROOF_MAX_ATTEMPTS` (default 3) repair
+   rounds. Only a module that builds with exit code 0, no `error:` lines, no
+   `declaration uses 'sorry'` and an axiom audit limited to `propext` /
+   `Classical.choice` / `Quot.sound` is promoted; the tactic script is rejected
+   before Lake if it contains `sorry` / `admit` / `axiom` / `unsafe` /
+   `native_decide` / `implemented_by` / `run_cmd` / `run_tac` / `#eval` /
+   `set_option` / meta-programming or any new declaration. The AI stage is skipped entirely when no
    LLM key is configured or `CI_FIXTURE_MODE` is set, so fixture runs keep the
    known-witness-only behaviour.
 6. Only obligations that remain `unknown` after step 5 are the input to the
@@ -43,8 +49,11 @@ contains `scripts/bridge.py`.
 | `import_error` | Lean could not resolve a generated module/mathlib import. | Yes | Refresh `lake exe cache get` and regenerate `generated/`. |
 | `theorem_not_found` | A referenced Lean theorem name is missing. | No | Check witness module imports and theorem naming. |
 | `tactic_failed` | Lean elaborated the theorem but tactics left goals open. | No | First run with `--enable-lean-ai-proof` so the LLM generates/repairs a proof against the Lake feedback; only if `ai_proof_residual` still lists the atom, add a handwritten witness/proof strategy. |
-| `partial_translation` | mumei-lean marked unsupported syntax/manual review. | No | First let the AI proof stage state the theorem directly from `requires` / `ensures` / body (`--enable-lean-ai-proof`); extend the translator or simplify the contract only for the residual atoms. |
-| `unsound_source` | AI-generated Lean source was rejected before Lake (`sorry` / `axiom` / missing theorem, …). | No | Never promoted. Inspect `attempt_N.lean` under `ai_proof_evidence_dir`; the next repair round already receives the rejection reason. |
+| `partial_translation` | mumei-lean marked unsupported syntax/manual review. | No | If the translator still emitted a `theorem <atom>_correct` statement, the AI proof stage (`--enable-lean-ai-proof`) can attempt it; otherwise the atom is reported as `no_trusted_statement` and you must extend the translator or simplify the contract only for the residual atoms. |
+| `unsound_source` | The AI tactic script was rejected before Lake (`sorry` / `admit` / `axiom` / `native_decide` / `run_cmd` / `set_option` / new declarations, …). | No | Never promoted. Inspect `attempt_N.lean` under `ai_proof_evidence_dir`; the next repair round already receives the rejection reason. |
+| `no_trusted_statement` | No bridge-generated `theorem <atom>_correct` exists under `generated/Generated/`, so there is no trusted statement for the AI to prove. | No | Fix the translator (`partial_translation`) or add a handwritten witness; the LLM is never allowed to author the statement itself. |
+| `ambiguous_atom_name` | Two residual unknown atoms share a name; promotion is keyed by name so neither is attempted. | No | Rename one atom or split the modules before re-running. |
+| `unsound_axioms` / `axiom_audit_missing` | `#print axioms` on the AI-proved theorem reported an axiom outside `propext` / `Classical.choice` / `Quot.sound` (e.g. `sorryAx`), or the audit line was missing from the Lake log. | No | Never promoted; inspect `attempt_N.log`. |
 | `generator_error` | The LLM call for AI proof generation failed. | Yes | Check `LLM_API_KEY` / `LLM_BASE_URL`; the atom stays `unknown`. |
 | `timeout` | Bridge or witness build exceeded its timeout. | Yes | Re-run with a warm Lake cache or a higher timeout. |
 | `subprocess_error` | Python could not execute the bridge. | Yes | Inspect the runner environment and bridge script permissions. |
@@ -107,7 +116,9 @@ AI-promoted atoms also record `ai_proof_attempts`, `proof_path` (the accepted
 `attempt_N.lean`) and `build_log_path` (the matching Lake log) under
 `lean_metadata`, and `lean_module` / `lean_theorem_name` point at
 `Generated.AiProof.<Atom>.<atom>_correct`. The evidence directory defaults to
-`<mumei-lean>/.ai_proof_evidence/<Atom>/` and can be moved with
+`<mumei-lean>/.ai_proof_evidence/<run-id>/<Atom>/` (a fresh `<run-id>` per
+repair run, so earlier certificates keep pointing at unchanged files) and can
+be moved with
 `LEAN_AI_PROOF_EVIDENCE_DIR`. The `stale_translator` / `bridge_lemma_hash`
 checks in `merge_lean_cert_into_proof_cert` apply to AI-promoted atoms exactly
 as they do to the other two stages.

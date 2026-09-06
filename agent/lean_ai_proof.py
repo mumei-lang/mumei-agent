@@ -10,12 +10,19 @@ build log back to the LLM for repair up to a bounded number of attempts.
 Soundness contract
 ------------------
 
+* The theorem *statement* is never written by the LLM.  It is taken
+  verbatim from the module ``scripts/bridge.py`` generated for the atom
+  (``<mumei-lean>/generated/Generated/**.lean``), i.e. from the trusted
+  translator.  The LLM supplies only the tactic script after ``:= by``;
+  atoms without a bridge-generated statement are skipped
+  (``no_trusted_statement``) and stay ``unknown``.
 * An atom is promoted to ``lean_verified`` **only** when Lake compiles the
-  AI-written module with exit code 0, no ``error:`` lines and no
-  ``declaration uses 'sorry'`` warning.  The LLM output itself is never
-  trusted.
-* Modules that contain ``sorry`` / ``admit`` / ``axiom`` / ``unsafe`` /
-  ``implemented_by`` / ``extern`` are rejected before they reach Lake.
+  assembled module with exit code 0, no ``error:`` lines, no
+  ``declaration uses 'sorry'`` warning, and ``#print axioms`` reports
+  nothing beyond ``propext`` / ``Classical.choice`` / ``Quot.sound``.
+* Tactic scripts that contain ``sorry`` / ``admit`` / ``native_decide`` /
+  ``axiom`` / ``unsafe`` / meta-programming or IO escapes (``run_cmd``,
+  ``run_tac``, ``#eval``, ``set_option`` ...) are rejected before Lake.
 * Every attempt's Lean source and build log is copied to an evidence
   directory, and promoted atoms carry ``ai_proof_used = True`` in both
   ``lean_metadata`` and ``lean_result_metadata`` so provenance is
@@ -34,6 +41,8 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -56,16 +65,158 @@ AI_PROOF_MODULE_ROOT = "Generated.AiProof"
 DEFAULT_AI_PROOF_MAX_ATTEMPTS = 3
 
 _SORRY_RE = re.compile(r"declaration uses 'sorry'")
-_ERROR_LINE_RE = re.compile(r"(^|\n)[^\n]*\berror\b", re.IGNORECASE)
+_ERROR_LINE_RE = re.compile(r"(^|\n)[^\n]*\berror:")
+_AXIOMS_RE = re.compile(
+    r"'(?P<decl>[^']+)' depends on axioms: \[(?P<axioms>[^\]]*)\]"
+)
+_NO_AXIOMS_RE = re.compile(r"'(?P<decl>[^']+)' does not depend on any axioms")
+ALLOWED_AXIOMS = frozenset({"propext", "Classical.choice", "Quot.sound"})
 _FORBIDDEN_TOKENS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("sorry", re.compile(r"\bsorry\b")),
     ("admit", re.compile(r"\badmit\b")),
-    ("axiom", re.compile(r"^\s*(?:noncomputable\s+)?axiom\b", re.MULTILINE)),
+    ("axiom", re.compile(r"\baxiom\b")),
     ("unsafe", re.compile(r"\bunsafe\b")),
     ("implemented_by", re.compile(r"implemented_by")),
     ("extern", re.compile(r"@\[\s*extern")),
     ("native_decide", re.compile(r"\bnative_decide\b")),
+    ("run_cmd", re.compile(r"\brun_cmd\b")),
+    ("run_tac", re.compile(r"\brun_tac\b")),
+    ("eval", re.compile(r"#eval\b|#exit\b|#print\b")),
+    ("set_option", re.compile(r"\bset_option\b")),
+    ("initialize", re.compile(r"\binitialize\b")),
+    ("elab", re.compile(r"\b(?:macro|macro_rules|elab|elab_rules|syntax|notation)\b")),
+    ("io", re.compile(r"\bIO\.")),
+    ("declaration", re.compile(r"(^|\n)\s*(?:theorem|lemma|def|abbrev|instance|axiom|opaque|namespace|end|section|import|open|variable|attribute|local|scoped|private|protected|noncomputable|partial|structure|inductive|class|example)\b")),
 )
+_DECL_START_RE = re.compile(
+    r"^(?:@\[[^\]]*\]\s*)?(?:private\s+|protected\s+|noncomputable\s+)*"
+    r"(?P<kind>theorem|lemma|example)\b(?:\s+(?P<name>[^\s(:{\[]+))?"
+)
+_PROOF_START_RE = re.compile(r":=\s*by\b")
+
+
+@dataclass
+class TrustedStatement:
+    """Theorem statement lifted from a bridge-generated Lean module."""
+
+    source_path: str
+    namespace: str
+    theorem_name: str
+    header: str
+    preamble: str
+
+
+def _split_top_level_blocks(source: str) -> list[str]:
+    blocks: list[list[str]] = []
+    for line in source.splitlines():
+        if line and not line[0].isspace() and not (
+            blocks and blocks[-1] and _in_block_comment("\n".join(blocks[-1]))
+        ):
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+        else:
+            blocks.append([line])
+    return ["\n".join(block) for block in blocks]
+
+
+def _in_block_comment(text: str) -> bool:
+    return text.count("/-") > text.count("-/")
+
+
+def find_trusted_statement(
+    repo_path: Path,
+    atom_name: str,
+    *,
+    theorem_name: str,
+) -> TrustedStatement | None:
+    """Locate ``theorem <theorem_name>`` in the bridge-generated module tree.
+
+    Searches ``<repo>/generated/Generated/**/*.lean`` (skipping the AI
+    module directory) and returns the statement header, the module's
+    non-theorem declarations (imports / ``open`` / helper ``def``s) and
+    its namespace.  ``None`` when the translator never produced a
+    statement for the atom (``partial_translation`` etc.).
+    """
+    root = repo_path / "generated" / AI_PROOF_MODULE_ROOT.split(".")[0]
+    if not root.is_dir():
+        return None
+    ai_root = ai_proof_module_path(repo_path, AI_PROOF_MODULE_ROOT).with_suffix("")
+    for candidate in sorted(root.rglob("*.lean")):
+        if ai_root in candidate.parents or candidate == ai_root:
+            continue
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not re.search(rf"\btheorem\s+{re.escape(theorem_name)}\b", text):
+            continue
+        statement = _lift_statement(text, theorem_name, str(candidate))
+        if statement is not None:
+            return statement
+    return None
+
+
+def _lift_statement(
+    text: str, theorem_name: str, source_path: str
+) -> TrustedStatement | None:
+    namespace = ""
+    ns_match = re.search(r"^namespace\s+(\S+)", text, re.MULTILINE)
+    if ns_match:
+        namespace = ns_match.group(1)
+    header: str | None = None
+    preamble: list[str] = []
+    for block in _split_top_level_blocks(text):
+        first = block.lstrip("\n").split("\n", 1)[0]
+        decl = _DECL_START_RE.match(first)
+        if decl is None:
+            stripped = block.strip()
+            if stripped.startswith("end ") or stripped == "end":
+                continue
+            if stripped.startswith("/--") and stripped.endswith("-/"):
+                continue
+            preamble.append(block)
+            continue
+        if decl.group("name") != theorem_name:
+            continue
+        proof = _PROOF_START_RE.search(block)
+        cut = proof.start() if proof else block.rfind(":=")
+        if cut < 0:
+            return None
+        header = block[:cut].rstrip()
+    if header is None:
+        return None
+    return TrustedStatement(
+        source_path=source_path,
+        namespace=namespace,
+        theorem_name=theorem_name,
+        header=header,
+        preamble="\n".join(preamble).strip("\n"),
+    )
+
+
+def assemble_ai_module(
+    statement: TrustedStatement, *, module: str, tactics: str, nonce: str
+) -> str:
+    """Trusted preamble + trusted header + AI tactic script + axiom audit."""
+    preamble = statement.preamble
+    if statement.namespace:
+        preamble = re.sub(
+            rf"^namespace\s+{re.escape(statement.namespace)}\s*$",
+            f"namespace {module}",
+            preamble,
+            flags=re.MULTILINE,
+        )
+    if not re.search(r"^namespace\s", preamble, re.MULTILINE):
+        preamble = f"{preamble}\n\nnamespace {module}"
+    body = "\n".join(
+        f"  {line}" if line.strip() else "" for line in tactics.strip("\n").splitlines()
+    )
+    return (
+        f"{preamble}\n\n-- ai-proof attempt {nonce}\n"
+        f"{statement.header} := by\n{body}\n\n"
+        f"#print axioms {statement.theorem_name}\n\nend {module}\n"
+    )
 
 
 class AiProofGenerator(Protocol):
@@ -142,16 +293,63 @@ def extract_lean_source(text: str) -> str:
     return stripped.replace("```", "").strip()
 
 
+def extract_tactic_script(text: str, theorem_name: str) -> str:
+    """Reduce an LLM reply to the tactic script that follows ``:= by``.
+
+    Accepts either a bare tactic block or a full theorem (in which case
+    everything up to and including the theorem's ``:= by`` is dropped).
+    """
+    source = extract_lean_source(text)
+    decl = re.search(rf"\btheorem\s+{re.escape(theorem_name)}\b", source)
+    if decl is not None:
+        proof = _PROOF_START_RE.search(source, decl.end())
+        if proof is not None:
+            source = source[proof.end():]
+        else:
+            return ""
+    stripped = source.strip("\n")
+    if stripped.lstrip().startswith("by") and re.match(r"\s*by\b", stripped):
+        stripped = re.sub(r"^\s*by\b", "", stripped, count=1)
+    lines = stripped.strip("\n").splitlines()
+    if not lines:
+        return ""
+    # ``extract_lean_source`` already stripped the first line's indent, so
+    # measure the common indent on the remaining lines only.
+    rest = lines[1:]
+    indents = [len(l) - len(l.lstrip()) for l in rest if l.strip()]
+    common = min(indents) if indents else 0
+    out = [lines[0].strip()]
+    out.extend(l[common:].rstrip() if l.strip() else "" for l in rest)
+    return "\n".join(out).strip("\n")
+
+
 def reject_unsound_lean_source(source: str, theorem_name: str) -> str | None:
-    """Return a rejection reason when *source* must not be sent to Lake."""
+    """Return a rejection reason when the tactic script must not reach Lake.
+
+    *source* is the AI-supplied tactic script only; the theorem statement
+    is trusted and assembled separately (:func:`assemble_ai_module`).
+    """
     if not source.strip():
         return "empty_source"
     for label, pattern in _FORBIDDEN_TOKENS:
         if pattern.search(source):
             return f"forbidden_token:{label}"
-    if not re.search(rf"\btheorem\s+{re.escape(theorem_name)}\b", source):
-        return f"missing_theorem:{theorem_name}"
     return None
+
+
+def _audit_axioms(log: str, theorem_name: str) -> str | None:
+    """Return an error code unless ``#print axioms`` reports only ALLOWED_AXIOMS."""
+    for match in _NO_AXIOMS_RE.finditer(log):
+        if match.group("decl").endswith(theorem_name):
+            return None
+    for match in _AXIOMS_RE.finditer(log):
+        if not match.group("decl").endswith(theorem_name):
+            continue
+        axioms = {a.strip() for a in match.group("axioms").split(",") if a.strip()}
+        if axioms - ALLOWED_AXIOMS:
+            return "unsound_axioms"
+        return None
+    return "axiom_audit_missing"
 
 
 def build_ai_proof_request(
@@ -161,6 +359,7 @@ def build_ai_proof_request(
     theorem_name: str,
     escalation_bundle: dict[str, Any] | None,
     feedback: list[dict[str, Any]],
+    statement: TrustedStatement | None = None,
 ) -> dict[str, Any]:
     """Assemble the structured request handed to the generator."""
     bundle_hints: dict[str, Any] = {}
@@ -195,30 +394,48 @@ def build_ai_proof_request(
         },
         "escalation_bundle": bundle_hints,
         "feedback": [dict(item) for item in feedback],
+        "statement": (
+            {
+                "header": statement.header,
+                "preamble": statement.preamble,
+                "source_path": statement.source_path,
+            }
+            if statement is not None
+            else None
+        ),
     }
 
 
 def render_ai_proof_prompt(request: dict[str, Any]) -> str:
     atom = request["atom"]
+    statement = request.get("statement") or {}
+    header = statement.get("header") or f"theorem {request['theorem_name']}"
     lines = [
         (
-            "Write a complete, self-contained Lean 4 module (Mathlib available) "
-            "that states and proves the correctness theorem for a Mumei atom."
+            "Write a Lean 4 tactic script (Mathlib and MumeiLean available) that "
+            "closes the goal of the theorem below.  The statement is fixed and "
+            "will be compiled verbatim; return ONLY the tactic lines that follow "
+            "`:= by`."
         ),
         "",
-        (
-            f"The module MUST be named `{request['module']}` "
-            f"(open with `namespace {request['module']}` after the imports) "
-            f"and MUST contain `theorem {request['theorem_name']}`."
-        ),
-        "Start with `import MumeiLean` (add Mathlib imports as needed).",
         (
             "Do NOT use `sorry`, `admit`, `axiom`, `unsafe`, `native_decide`, "
-            "or `implemented_by`; the proof must fully elaborate under `lake build`."
+            "`run_cmd`, `run_tac`, `#eval`, `set_option`, or new declarations; "
+            "the proof must fully elaborate under `lake build`."
         ),
-        "Model Mumei i64 values as `Int` unless the contract needs bounds.",
         "",
-        "Mumei atom contract:",
+        "Module context (imports / helper definitions, trusted, do not repeat):",
+        "```lean",
+        str(statement.get("preamble") or "import MumeiLean"),
+        "```",
+        "",
+        "Theorem to prove (statement is fixed):",
+        "```lean",
+        f"{header} := by",
+        "  -- your tactic script here",
+        "```",
+        "",
+        "Mumei atom contract (for intuition only):",
         json.dumps(atom, indent=2, ensure_ascii=False),
     ]
     hints = request.get("escalation_bundle") or {}
@@ -241,7 +458,7 @@ def render_ai_proof_prompt(request: dict[str, Any]) -> str:
                 lines.append("```")
                 lines.append(str(log_tail))
                 lines.append("```")
-    lines += ["", "Return ONLY the Lean source, in a single ```lean code block."]
+    lines += ["", "Return ONLY the tactic script, in a single ```lean code block."]
     return "\n".join(lines)
 
 
@@ -266,7 +483,8 @@ class LLMAiProofGenerator:
                     "role": "system",
                     "content": (
                         "You are an expert Lean 4 / Mathlib prover. You output "
-                        "only complete Lean modules whose proofs fully elaborate."
+                        "only tactic scripts that fully elaborate for the given "
+                        "fixed theorem statement."
                     ),
                 },
                 {"role": "user", "content": render_ai_proof_prompt(request)},
@@ -302,8 +520,12 @@ def _lake_build_module(
     return proc.returncode, f"{proc.stdout}\n{proc.stderr}"
 
 
-def _build_log_accepts(returncode: int, log: str) -> tuple[bool, str | None]:
+def _build_log_accepts(
+    returncode: int, log: str, *, theorem_name: str | None = None
+) -> tuple[bool, str | None]:
     if returncode != 0:
+        if "lake build timed out" in log:
+            return False, "timeout"
         error_code, _ = _classify_bridge_failure(
             stdout=log, stderr="", returncode=returncode
         )
@@ -312,6 +534,10 @@ def _build_log_accepts(returncode: int, log: str) -> tuple[bool, str | None]:
         return False, "tactic_failed"
     if _ERROR_LINE_RE.search(log):
         return False, "bridge_failed"
+    if theorem_name is not None:
+        audit = _audit_axioms(log, theorem_name)
+        if audit is not None:
+            return False, audit
     return True, None
 
 
@@ -328,6 +554,7 @@ def _ai_proof_atom_record(
     source_path: str,
     log_path: str,
     bridge_contract: dict[str, str],
+    statement_path: str | None = None,
 ) -> dict[str, Any]:
     record = json.loads(json.dumps(atom))
     record["z3_check_result"] = Z3CheckResult.LEAN_VERIFIED.value
@@ -349,6 +576,7 @@ def _ai_proof_atom_record(
             "ai_proof_attempts": attempts,
             "proof_path": source_path,
             "build_log_path": log_path,
+            "statement_source_path": statement_path,
             "diagnostics": diagnostics,
             "proof_strategy": {
                 "strategy": AI_PROOF_STRATEGY,
@@ -413,6 +641,8 @@ def run_ai_proof_repair(
     ]
     if not unknown_atoms:
         return None
+    name_counts = Counter(atom["name"] for atom in unknown_atoms)
+    ambiguous = {name for name, n in name_counts.items() if n > 1}
     repo_path = Path(mumei_lean_repo)
     if shutil.which("lake") is None:
         return _result(
@@ -423,11 +653,12 @@ def run_ai_proof_repair(
             diagnostics=["AI proof generation requires Lake to check generated modules."],
             extra={"fallback_strategy": AI_PROOF_STRATEGY, "ai_proof_used": False},
         )
+    run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}"
     evidence_root = (
         Path(evidence_dir)
         if evidence_dir is not None
         else repo_path / ".ai_proof_evidence"
-    )
+    ) / run_id
     bridge_contract = _mumei_lean_bridge_contract(repo_path)
     started = time.monotonic()
     outcomes: list[AiProofAtomOutcome] = []
@@ -444,6 +675,17 @@ def run_ai_proof_repair(
         feedback: list[dict[str, Any]] = []
         module_path = ai_proof_module_path(repo_path, module)
         atom_evidence = evidence_root / sanitize_lean_module_name(name)
+        if name in ambiguous:
+            # Promotion is keyed by atom name; two unknown atoms sharing a
+            # name cannot be told apart, so neither may be upgraded.
+            outcome.error_code = "ambiguous_atom_name"
+            outcomes.append(outcome)
+            continue
+        statement = find_trusted_statement(repo_path, name, theorem_name=theorem_name)
+        if statement is None:
+            outcome.error_code = "no_trusted_statement"
+            outcomes.append(outcome)
+            continue
         for attempt in range(1, max(1, max_attempts) + 1):
             request = build_ai_proof_request(
                 atom,
@@ -451,6 +693,7 @@ def run_ai_proof_repair(
                 theorem_name=theorem_name,
                 escalation_bundle=escalation_bundle,
                 feedback=feedback,
+                statement=statement,
             )
             try:
                 raw = generator.generate_lean_proof(request)
@@ -468,12 +711,21 @@ def run_ai_proof_repair(
                 )
                 outcome.error_code = "generator_error"
                 break
-            source = extract_lean_source(raw)
+            tactics = extract_tactic_script(raw, theorem_name)
             atom_evidence.mkdir(parents=True, exist_ok=True)
             source_path = atom_evidence / f"attempt_{attempt}.lean"
             log_path = atom_evidence / f"attempt_{attempt}.log"
+            (atom_evidence / f"attempt_{attempt}.reply.txt").write_text(
+                raw, encoding="utf-8"
+            )
+            rejection = reject_unsound_lean_source(tactics, theorem_name)
+            source = assemble_ai_module(
+                statement,
+                module=module,
+                tactics=tactics or "skip",
+                nonce=f"{run_id}/{attempt}",
+            )
             source_path.write_text(source, encoding="utf-8")
-            rejection = reject_unsound_lean_source(source, theorem_name)
             if rejection is not None:
                 log_path.write_text(f"rejected before lake: {rejection}\n", encoding="utf-8")
                 outcome.attempts.append(
@@ -509,7 +761,9 @@ def run_ai_proof_repair(
                     pass
             log_path.write_text(log, encoding="utf-8")
             log_parts.append(f"[{module} attempt {attempt}]\n{log}")
-            accepted, error_code = _build_log_accepts(returncode, log)
+            accepted, error_code = _build_log_accepts(
+                returncode, log, theorem_name=theorem_name
+            )
             outcome.attempts.append(
                 AiProofAttempt(
                     attempt=attempt,
@@ -530,6 +784,7 @@ def run_ai_proof_repair(
                     source_path=str(source_path),
                     log_path=str(log_path),
                     bridge_contract=bridge_contract,
+                    statement_path=statement.source_path,
                 )
                 break
             outcome.error_code = error_code
@@ -547,15 +802,14 @@ def run_ai_proof_repair(
         strategy=AI_PROOF_STRATEGY,
         lean_atom_records=proved_records,
     )
-    all_names = {atom["name"] for atom in unknown_atoms}
-    complete = all_names.issubset(proved_names)
+    complete = all(o.proved for o in outcomes)
     failed = [o for o in outcomes if not o.proved]
     error_code = None
     if not complete:
         error_code = next((o.error_code for o in failed if o.error_code), "tactic_failed")
     diagnostics = [
         (
-            f"AI proof generation proved {len(proved_names)}/{len(all_names)} "
+            f"AI proof generation proved {len(proved_names)}/{len(outcomes)} "
             "residual unknown atom(s) after Lake verification."
         )
     ]
@@ -578,7 +832,7 @@ def run_ai_proof_repair(
             "partial_success": bool(proved_names) and not complete,
             "ai_proof_used": bool(proved_names),
             "ai_proof_proved": len(proved_names),
-            "ai_proof_attempted": len(all_names),
+            "ai_proof_attempted": len(outcomes),
             "ai_proof_outcomes": [o.to_dict() for o in outcomes],
             "ai_proof_residual": sorted(o.name for o in failed),
             "evidence_dir": str(evidence_root),

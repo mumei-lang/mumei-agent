@@ -386,8 +386,17 @@ def _combine_with_ai_proof(
         ai.get("duration_seconds") or 0.0
     )
     ai_cert = ai.get("lean_cert")
+    lean_cert_path = primary.get("lean_cert_path")
     if isinstance(ai_cert, dict):
         lean_cert = merge_lean_cert_into_proof_cert(base_cert, ai_cert)
+        if ai.get("ai_proof_used") and isinstance(lean_cert_path, str):
+            try:
+                Path(lean_cert_path).write_text(
+                    json.dumps(lean_cert, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                diagnostics.append(f"could not persist AI-upgraded lean-cert: {exc}")
     else:
         lean_cert = base_cert
     combined_success, partial_success = _unknowns_verified_in_cert(
@@ -415,7 +424,7 @@ def _combine_with_ai_proof(
     return _result(
         success=combined_success,
         returncode=0 if combined_success else int(primary.get("returncode", -1)),
-        lean_cert_path=None,
+        lean_cert_path=lean_cert_path if isinstance(lean_cert_path, str) else None,
         lean_cert=lean_cert,
         stdout=stdout,
         stderr=stderr,
@@ -479,8 +488,8 @@ def run_lean_bridge(
         ai_proof_generator is None
         or no_build
         or cert_path is None
-        or base.get("success")
         or base.get("error_code") in {"repo_missing", "bridge_missing", "lake_missing"}
+        or not _residual_unknowns(base, cert_path)
     ):
         return base
     return _combine_with_ai_proof(
@@ -493,6 +502,20 @@ def run_lean_bridge(
         max_attempts=ai_proof_max_attempts,
         evidence_dir=ai_proof_evidence_dir,
     )
+
+
+def _residual_unknowns(base: dict[str, Any], cert_path: str | Path) -> bool:
+    """True when the base stages left at least one atom ``unknown``.
+
+    ``bridge.py`` exits 0 for partial translations, so ``base["success"]``
+    alone cannot decide whether the AI stage has anything to do.
+    """
+    cert = base.get("lean_cert")
+    if not isinstance(cert, dict):
+        cert = _load_json_file(cert_path)
+    if not isinstance(cert, dict):
+        return False
+    return bool(extract_unknown_atoms(cert))
 
 
 def _run_lean_bridge_base(
