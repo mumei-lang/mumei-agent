@@ -140,6 +140,11 @@ Residual atoms the AI stage could not discharge keep `z3_check_result:
 per-attempt evidence paths); `human_review.escalate_to_lean` copies it into
 `lean_escalation.prior_stages` so reviewers see what was already tried.
 
+Concurrency: per-run module names and the post-build `source_mismatch` check
+make a concurrent repair against the same checkout *detectable* (never
+promoted), not safe -- `lake build` / `scripts/bridge.py` share that
+checkout's `.lake/` state. Run one repair per mumei-lean checkout at a time.
+
 ### Evidence handling
 
 `attempt_N.lean` / `attempt_N.log` / `attempt_N.reply.txt` contain the raw
