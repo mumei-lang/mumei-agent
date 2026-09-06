@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from agent.config import AgentConfig
 from agent.strategies.cegis_loop import (
@@ -108,3 +108,139 @@ body: {
 };"""
 
     assert normalize_loop_line(source, 1) == 4
+
+
+def test_escalate_to_lean_bundle_v2_adds_contract_and_history(tmp_path):
+    import json
+
+    from agent.strategies.cegis_loop_helpers import (
+        ESCALATION_BUNDLE_SCHEMA_VERSION,
+        InvariantCandidate,
+    )
+
+    source_file = tmp_path / "sample.mm"
+    source_file.write_text("atom sample() body: 0;", encoding="utf-8")
+
+    path = escalate_to_lean(
+        str(source_file),
+        {"line": 12, "context": {"variables": ["i"]}},
+        atom={
+            "name": "sample",
+            "requires": "n >= 0",
+            "ensures": "result >= 0",
+            "body": "let i = 0; while i < n { i = i + 1; }",
+            "z3_check_result": "unknown",
+            "irrelevant": "dropped",
+        },
+        counterexamples=[{"i": 3}, {"i": 5}],
+        invariant_candidates=[
+            InvariantCandidate("i >= 0", "llm", 1, [{"i": 3}]),
+            InvariantCandidate("i <= n", "refine", 2, [{"i": 5}]),
+        ],
+    )
+
+    bundle = json.loads(path.read_text(encoding="utf-8"))
+    # Existing v1 keys are unchanged.
+    assert bundle["source_file"] == str(source_file)
+    assert bundle["loop_line"] == 12
+    assert bundle["loop_context"] == {"variables": ["i"]}
+    assert bundle["reason"] == "cegis_max_iterations_reached"
+    # v2 additions.
+    assert bundle["bundle_schema_version"] == ESCALATION_BUNDLE_SCHEMA_VERSION
+    assert bundle["atom"] == {
+        "name": "sample",
+        "requires": "n >= 0",
+        "ensures": "result >= 0",
+        "body": "let i = 0; while i < n { i = i + 1; }",
+    }
+    assert bundle["counterexamples"] == [{"i": 3}, {"i": 5}]
+    assert bundle["tried_invariants"] == [
+        {"expression": "i >= 0", "source": "llm", "iteration": 1, "counterexamples": [{"i": 3}]},
+        {"expression": "i <= n", "source": "refine", "iteration": 2, "counterexamples": [{"i": 5}]},
+    ]
+
+
+def test_escalate_to_lean_without_extras_keeps_v1_shape_plus_version(tmp_path):
+    import json
+
+    source_file = tmp_path / "sample.mm"
+    source_file.write_text("atom sample() body: 0;", encoding="utf-8")
+    path = escalate_to_lean(str(source_file), {"line": 1, "context": {}})
+    bundle = json.loads(path.read_text(encoding="utf-8"))
+    assert set(bundle) == {
+        "source_file",
+        "loop_line",
+        "loop_context",
+        "reason",
+        "bundle_schema_version",
+    }
+
+
+def test_try_cegis_repair_escalation_bundle_carries_contract_and_history(tmp_path):
+    import json
+
+    from agent.self_healing_repair import _try_cegis_repair
+    from agent.thought_log import ThoughtProcess
+
+    source_file = tmp_path / "count.mm"
+    source = """atom count(n: i64)
+requires: n >= 0;
+ensures: result >= 0;
+body: {
+    let i = 0;
+    while i < n
+    invariant: true
+    {
+        i = i + 1;
+    }
+};"""
+    source_file.write_text(source, encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {"counterexample": {"i": 3}},
+        "stdout": "",
+        "stderr": "",
+    }
+    config = AgentConfig(
+        api_key="",
+        enable_cegis_loop=True,
+        cegis_max_iterations=2,
+        cegis_escalate_to_lean=True,
+    )
+    report = {
+        "failure_type": "invariant_violated",
+        "atom": "count",
+        "atoms": [
+            {
+                "name": "count",
+                "requires": "n >= 0",
+                "ensures": "result >= 0",
+                "body": "let i = 0; while i < n { i = i + 1; }",
+            }
+        ],
+        "loop_info": {"line": 6, "context": {"variables": ["i", "n"]}},
+    }
+
+    with patch.object(
+        CEGISLoop, "generate_initial_invariant", return_value="i >= 0"
+    ), patch.object(CEGISLoop, "refine_invariant", return_value="i >= 0"):
+        outcome = _try_cegis_repair(
+            config=config,
+            mumei=mumei,
+            source_file=str(source_file),
+            source=source,
+            report=report,
+            thought=ThoughtProcess(target_file=str(source_file)),
+        )
+
+    assert outcome is None  # escalated: no repaired source
+    bundle = json.loads(
+        (tmp_path / "count.escalation-bundle.json").read_text(encoding="utf-8")
+    )
+    assert bundle["reason"] == "cegis_max_iterations_reached"
+    assert bundle["atom"]["requires"] == "n >= 0"
+    assert bundle["atom"]["ensures"] == "result >= 0"
+    assert bundle["counterexamples"] == [{"i": 3}, {"i": 3}]
+    assert [c["iteration"] for c in bundle["tried_invariants"]] == [1, 2]
+    assert all(c["expression"] == "i >= 0" for c in bundle["tried_invariants"])

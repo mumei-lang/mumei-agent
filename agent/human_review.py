@@ -161,6 +161,14 @@ class HumanReviewTracker:
         return entry
 
     def escalate_to_lean(self, atom_name: str) -> JsonDict:
+        """Hand a residual obligation to the human / handwritten-witness path.
+
+        This is the *final* fallback in the Lean pipeline: the generated
+        module bridge, the known witness modules and (when enabled) the
+        Task 2-D AI proof generation/repair loop have already been tried
+        on this atom.  ``lean_escalation.prior_stages`` records what the
+        automated stages reported so reviewers do not redo that work.
+        """
         entry = self._find_atom(atom_name)
         current = entry.get("status")
         if current in (ReviewStatus.APPROVED.value, ReviewStatus.REJECTED.value):
@@ -184,6 +192,8 @@ class HumanReviewTracker:
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
+            "stage": "human_final_fallback",
+            "prior_stages": self._prior_lean_stages(entry),
         }
         self._append_history(
             {
@@ -196,6 +206,35 @@ class HumanReviewTracker:
         )
         self.save()
         return entry
+
+    @staticmethod
+    def _prior_lean_stages(entry: JsonDict) -> JsonDict:
+        """Summarise the automated Lean stages already attempted for *entry*."""
+        stages: JsonDict = {
+            "generated_bridge": False,
+            "known_witness_module": False,
+            "ai_generated_proof": False,
+        }
+        strategy = entry.get("lean_fallback_strategy")
+        if isinstance(strategy, str):
+            stages["generated_bridge"] = True
+            if strategy in stages:
+                stages[strategy] = True
+        for key in ("lean_metadata", "lean_result_metadata"):
+            metadata = entry.get(key)
+            if not isinstance(metadata, dict):
+                continue
+            if metadata.get("known_witness_used"):
+                stages["known_witness_module"] = True
+            if metadata.get("ai_proof_used") or metadata.get("ai_proof_attempts"):
+                stages["ai_generated_proof"] = True
+                stages["ai_proof_attempts"] = metadata.get("ai_proof_attempts", 0)
+        ai_outcome = entry.get("ai_proof_outcome")
+        if isinstance(ai_outcome, dict):
+            stages["ai_generated_proof"] = True
+            stages["ai_proof_attempts"] = ai_outcome.get("attempts", 0)
+            stages["ai_proof_error_code"] = ai_outcome.get("error_code")
+        return stages
 
     def _find_atom(self, atom_name: str) -> JsonDict:
         atoms = self.atoms()

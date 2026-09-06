@@ -421,6 +421,9 @@ def _run_lean_fallback(
     results: list[dict[str, Any]],
     *,
     mumei_lean_repo: str | None,
+    ai_proof_generator: Any | None = None,
+    ai_proof_max_attempts: int = 3,
+    ai_proof_evidence_dir: str | None = None,
 ) -> None:
     """Hand any ``unknown`` atoms in *results* to ``mumei-lean``.
 
@@ -436,13 +439,42 @@ def _run_lean_fallback(
         "mumei.proliferate.lean_fallback",
         **{"mumei.proliferate.results": len(results)},
     ):
-        _run_lean_fallback_inner(results, mumei_lean_repo=mumei_lean_repo)
+        _run_lean_fallback_inner(
+            results,
+            mumei_lean_repo=mumei_lean_repo,
+            ai_proof_generator=ai_proof_generator,
+            ai_proof_max_attempts=ai_proof_max_attempts,
+            ai_proof_evidence_dir=ai_proof_evidence_dir,
+        )
+
+
+def _lean_ai_proof_generator(config: AgentConfig) -> Any | None:
+    """Return the Task 2-D generator, or ``None`` when the AI path is off.
+
+    ``None`` keeps :func:`agent.lean_bridge.run_lean_bridge` on its Task
+    2-C path (generated modules + known witnesses only).  This is the
+    case when ``--enable-lean-ai-proof`` is not given, when no LLM key
+    is configured, or under ``CI_FIXTURE_MODE``.
+    """
+    if not config.lean_ai_proof_active():
+        if config.enable_lean_ai_proof:
+            logger.info(
+                "lean AI proof: disabled (no LLM key or CI_FIXTURE_MODE); "
+                "falling back to known witnesses only"
+            )
+        return None
+    from agent.lean_ai_proof import LLMAiProofGenerator
+
+    return LLMAiProofGenerator(config)
 
 
 def _run_lean_fallback_inner(
     results: list[dict[str, Any]],
     *,
     mumei_lean_repo: str | None,
+    ai_proof_generator: Any | None = None,
+    ai_proof_max_attempts: int = 3,
+    ai_proof_evidence_dir: str | None = None,
 ) -> None:
     from agent import lean_bridge
 
@@ -500,11 +532,21 @@ def _run_lean_fallback_inner(
                 encoding="utf-8",
             )
             lean_cert_out = Path(tmpdir) / "output.lean-cert.json"
-            bridge_result = lean_bridge.run_lean_bridge(
-                cert_path=cert_path,
-                lean_cert_out=lean_cert_out,
-                mumei_lean_repo=mumei_lean_repo or "",
-            )
+            if ai_proof_generator is not None:
+                bridge_result = lean_bridge.run_lean_bridge(
+                    cert_path=cert_path,
+                    lean_cert_out=lean_cert_out,
+                    mumei_lean_repo=mumei_lean_repo or "",
+                    ai_proof_generator=ai_proof_generator,
+                    ai_proof_max_attempts=ai_proof_max_attempts,
+                    ai_proof_evidence_dir=ai_proof_evidence_dir,
+                )
+            else:
+                bridge_result = lean_bridge.run_lean_bridge(
+                    cert_path=cert_path,
+                    lean_cert_out=lean_cert_out,
+                    mumei_lean_repo=mumei_lean_repo or "",
+                )
             lean_cert = bridge_result.get("lean_cert")
             if isinstance(lean_cert, dict):
                 upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
@@ -534,6 +576,22 @@ def _run_lean_fallback_inner(
                 "partial_success": proved > 0 and failed > 0,
                 "fallback_strategy": bridge_result.get("fallback_strategy"),
             }
+            if ai_proof_generator is not None:
+                spec_result["lean_fallback"].update(
+                    {
+                        "ai_proof_used": bool(bridge_result.get("ai_proof_used")),
+                        "ai_proof_proved": bridge_result.get("ai_proof_proved", 0),
+                        "ai_proof_attempted": bridge_result.get(
+                            "ai_proof_attempted", 0
+                        ),
+                        "ai_proof_residual": bridge_result.get(
+                            "ai_proof_residual", []
+                        ),
+                        "ai_proof_evidence_dir": bridge_result.get(
+                            "ai_proof_evidence_dir"
+                        ),
+                    }
+                )
             logger.info(
                 "Lean fallback: %d/%d unknown atoms discharged",
                 proved,
@@ -577,6 +635,7 @@ def proliferate(
     mumei_bin: str | None = None,
     output_json: str | Path | None = None,
     enable_lean_fallback: bool = True,
+    enable_lean_ai_proof: bool | None = None,
     enable_self_correction: bool | None = None,
     harness_profile: str = "basic",
     parallel_forge_workers: int | None = None,
@@ -603,6 +662,13 @@ def proliferate(
         Consumed by the SI-5 Phase 3-B scheduled workflow so operators
         can review pre/post health and per-proposal outcomes as a CI
         artifact.
+    enable_lean_ai_proof:
+        Task 2-D opt-in. When True (or ``ENABLE_LEAN_AI_PROOF`` is set),
+        atoms that the Task 2-C bridge and known witnesses leave ``unknown``
+        are handed to an LLM that writes a Lean proof, which is then
+        ``lake build``-checked and repaired up to
+        ``LEAN_AI_PROOF_MAX_ATTEMPTS`` times.  Skipped without an LLM key or
+        under ``CI_FIXTURE_MODE``.  ``None`` defers to the environment.
     benchmark_feedback:
         Optional ``mumei.benchmark_forge_feedback/v1`` document (path or parsed
         :class:`~agent.benchmark_feedback.BenchmarkFeedback`) produced by
@@ -630,6 +696,7 @@ def proliferate(
             mumei_bin=mumei_bin,
             output_json=output_json,
             enable_lean_fallback=enable_lean_fallback,
+            enable_lean_ai_proof=enable_lean_ai_proof,
             enable_self_correction=enable_self_correction,
             harness_profile=harness_profile,
             parallel_forge_workers=parallel_forge_workers,
@@ -646,6 +713,7 @@ def _proliferate_inner(
     mumei_bin: str | None = None,
     output_json: str | Path | None = None,
     enable_lean_fallback: bool = True,
+    enable_lean_ai_proof: bool | None = None,
     enable_self_correction: bool | None = None,
     harness_profile: str = "basic",
     parallel_forge_workers: int | None = None,
@@ -1128,9 +1196,21 @@ def _proliferate_inner(
     # summary writing below still run.
     if enable_lean_fallback:
         try:
-            _run_lean_fallback(
-                results, mumei_lean_repo=config.mumei_lean_repo
-            )
+            if enable_lean_ai_proof is not None:
+                config.enable_lean_ai_proof = enable_lean_ai_proof
+            ai_proof_generator = _lean_ai_proof_generator(config)
+            if ai_proof_generator is not None:
+                _run_lean_fallback(
+                    results,
+                    mumei_lean_repo=config.mumei_lean_repo,
+                    ai_proof_generator=ai_proof_generator,
+                    ai_proof_max_attempts=config.lean_ai_proof_max_attempts,
+                    ai_proof_evidence_dir=config.lean_ai_proof_evidence_dir,
+                )
+            else:
+                _run_lean_fallback(
+                    results, mumei_lean_repo=config.mumei_lean_repo
+                )
         except Exception:
             logger.warning(
                 "Lean fallback failed unexpectedly", exc_info=True
@@ -1399,6 +1479,16 @@ def build_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--enable-lean-ai-proof",
+        action="store_true",
+        help=(
+            "Task 2-D opt-in: after the Lean fallback, let the LLM write and "
+            "auto-repair Lean 4 proofs for atoms that are still unknown; only "
+            "proofs that pass 'lake build' are promoted to lean_verified. "
+            "Skipped when no LLM key is configured or CI_FIXTURE_MODE is set."
+        ),
+    )
+    parser.add_argument(
         "--enable-self-correction",
         action="store_true",
         help=(
@@ -1450,6 +1540,8 @@ def main(args: argparse.Namespace) -> None:
     harness_profile = getattr(args, "harness_profile", "basic")
     if isinstance(harness_profile, str) and harness_profile != "basic":
         run_kwargs["harness_profile"] = harness_profile
+    if getattr(args, "enable_lean_ai_proof", False):
+        run_kwargs["enable_lean_ai_proof"] = True
     if getattr(args, "enable_self_correction", False):
         run_kwargs["enable_self_correction"] = True
     parallel_forge_workers = getattr(args, "parallel_forge_workers", None)

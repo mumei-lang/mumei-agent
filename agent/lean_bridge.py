@@ -35,6 +35,13 @@ from pathlib import Path
 from typing import Any
 
 from agent import telemetry
+from agent.lean_ai_proof import (
+    AI_PROOF_STRATEGY,
+    DEFAULT_AI_PROOF_MAX_ATTEMPTS,
+    AiProofGenerator,
+    load_escalation_bundle,
+    run_ai_proof_repair,
+)
 from agent.lean_bridge_helpers import (
     _KNOWN_LEAN_WITNESSES,
     _NON_RETRYABLE_ERROR_CODES,
@@ -327,7 +334,168 @@ def _combine_with_witness_fallback(
         },
     )
 
+def _combine_with_ai_proof(
+    *,
+    primary: dict[str, Any],
+    cert_path: str | Path,
+    mumei_lean_repo: str | Path,
+    timeout: float | None,
+    generator: AiProofGenerator,
+    escalation_bundle_path: str | Path | None,
+    max_attempts: int,
+    evidence_dir: str | Path | None,
+) -> dict[str, Any]:
+    """Task 2-D stage: AI-generate + Lake-check proofs for residual unknowns.
+
+    Runs after the generated-module bridge and the known-witness modules so
+    it only ever sees atoms those paths left ``unknown``.  Promotion is
+    decided purely by :func:`agent.lean_ai_proof.run_ai_proof_repair`,
+    i.e. by a successful ``lake build`` of the AI-written module.
+    """
+    original_cert = _load_json_file(cert_path)
+    base_cert = primary.get("lean_cert")
+    if not isinstance(base_cert, dict):
+        base_cert = original_cert
+    if not isinstance(base_cert, dict):
+        return primary
+    ai = run_ai_proof_repair(
+        cert=base_cert,
+        mumei_lean_repo=mumei_lean_repo,
+        generator=generator,
+        escalation_bundle=load_escalation_bundle(escalation_bundle_path),
+        max_attempts=max_attempts,
+        timeout=timeout,
+        evidence_dir=evidence_dir,
+    )
+    if ai is None:
+        return primary
+
+    diagnostics = list(primary.get("diagnostics") or [])
+    diagnostics.extend(ai.get("diagnostics") or [])
+    stdout = "\n".join(
+        part
+        for part in (str(primary.get("stdout", "")), str(ai.get("stdout", "")))
+        if part
+    )
+    stderr = "\n".join(
+        part
+        for part in (str(primary.get("stderr", "")), str(ai.get("stderr", "")))
+        if part
+    )
+    duration = float(primary.get("duration_seconds") or 0.0) + float(
+        ai.get("duration_seconds") or 0.0
+    )
+    ai_cert = ai.get("lean_cert")
+    if isinstance(ai_cert, dict):
+        lean_cert = merge_lean_cert_into_proof_cert(base_cert, ai_cert)
+    else:
+        lean_cert = base_cert
+    combined_success, partial_success = _unknowns_verified_in_cert(
+        original_cert, lean_cert
+    )
+    ai_used = bool(ai.get("ai_proof_used"))
+    strategy_attempts = list(primary.get("strategy_attempts") or [])
+    if not strategy_attempts:
+        strategy_attempts.append(
+            {
+                "name": "generated_bridge",
+                "success": bool(primary.get("success")),
+                "error_code": primary.get("primary_error_code", primary.get("error_code")),
+            }
+        )
+    strategy_attempts.append(
+        {
+            "name": AI_PROOF_STRATEGY,
+            "success": bool(ai.get("success")),
+            "error_code": ai.get("error_code"),
+            "proved": ai.get("ai_proof_proved", 0),
+            "attempted": ai.get("ai_proof_attempted", 0),
+        }
+    )
+    return _result(
+        success=combined_success,
+        returncode=0 if combined_success else int(primary.get("returncode", -1)),
+        lean_cert_path=None,
+        lean_cert=lean_cert,
+        stdout=stdout,
+        stderr=stderr,
+        error_code=(
+            None
+            if combined_success
+            else str(ai.get("error_code") or primary.get("error_code"))
+        ),
+        diagnostics=diagnostics,
+        duration_seconds=duration,
+        retryable=False if combined_success else bool(primary.get("retryable")),
+        extra={
+            "primary_error_code": primary.get(
+                "primary_error_code", primary.get("error_code")
+            ),
+            "fallback_strategy": (
+                AI_PROOF_STRATEGY if ai_used else primary.get("fallback_strategy")
+            ),
+            "partial_success": partial_success,
+            "ai_proof_used": ai_used,
+            "ai_proof_proved": ai.get("ai_proof_proved", 0),
+            "ai_proof_attempted": ai.get("ai_proof_attempted", 0),
+            "ai_proof_outcomes": ai.get("ai_proof_outcomes", []),
+            "ai_proof_residual": ai.get("ai_proof_residual", []),
+            "ai_proof_evidence_dir": ai.get("evidence_dir"),
+            "strategy_attempts": strategy_attempts,
+        },
+    )
+
+
 def run_lean_bridge(
+    cert_path: str | Path | None,
+    lean_cert_out: str | Path | None,
+    mumei_lean_repo: str | Path,
+    *,
+    no_build: bool = False,
+    timeout: float | None = 600.0,
+    enable_known_witness_fallback: bool = True,
+    escalation_bundle_path: str | Path | None = None,
+    ai_proof_generator: AiProofGenerator | None = None,
+    ai_proof_max_attempts: int = DEFAULT_AI_PROOF_MAX_ATTEMPTS,
+    ai_proof_evidence_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run the Task 2-C bridge, then (opt-in) the Task 2-D AI proof stage.
+
+    ``ai_proof_generator`` is ``None`` by default, in which case the
+    result is exactly that of :func:`_run_lean_bridge_base`.  When a
+    generator is supplied, ``cert_path`` is given and the base stages
+    left unknown atoms, :func:`_combine_with_ai_proof` is applied.
+    """
+    base = _run_lean_bridge_base(
+        cert_path,
+        lean_cert_out,
+        mumei_lean_repo,
+        no_build=no_build,
+        timeout=timeout,
+        enable_known_witness_fallback=enable_known_witness_fallback,
+        escalation_bundle_path=escalation_bundle_path,
+    )
+    if (
+        ai_proof_generator is None
+        or no_build
+        or cert_path is None
+        or base.get("success")
+        or base.get("error_code") in {"repo_missing", "bridge_missing", "lake_missing"}
+    ):
+        return base
+    return _combine_with_ai_proof(
+        primary=base,
+        cert_path=cert_path,
+        mumei_lean_repo=mumei_lean_repo,
+        timeout=timeout,
+        generator=ai_proof_generator,
+        escalation_bundle_path=escalation_bundle_path,
+        max_attempts=ai_proof_max_attempts,
+        evidence_dir=ai_proof_evidence_dir,
+    )
+
+
+def _run_lean_bridge_base(
     cert_path: str | Path | None,
     lean_cert_out: str | Path | None,
     mumei_lean_repo: str | Path,

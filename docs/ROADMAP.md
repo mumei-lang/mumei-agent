@@ -1223,7 +1223,33 @@ python -m agent proliferate \
 
 ---
 
-## Task 2-D: unknown atom の AI 主体 Lean 証明生成
+## Task 2-D: unknown atom の AI 主体 Lean 証明生成 ✅ Implemented (mumei-agent 側)
+
+### 実装済み
+
+- **B-0 escalation-bundle v2** — `cegis_loop_helpers.escalate_to_lean` は既存 4 キーに
+  追記形で `bundle_schema_version` / `atom`（`requires` / `ensures` / `body` / `body_expr` 等）/
+  `counterexamples` / `tried_invariants` を書き出す。`self_healing_repair._try_cegis_repair`
+  が `CEGISLoop.history` と `_extract_counterexample` の結果を渡す。
+- **B-4 AI 生成 + 修復ループ** — `agent/lean_ai_proof.py::run_ai_proof_repair`。
+  `AiProofGenerator` Protocol（`LLMAiProofGenerator` が既定実装、テストはモック）が
+  `Generated.AiProof.<Atom>` モジュールを生成 → mumei-lean checkout 内で `lake build` →
+  失敗ログを feedback として最大 `LEAN_AI_PROOF_MAX_ATTEMPTS`（既定 3）回修復。
+  `sorry` / `admit` / `axiom` / `unsafe` / `native_decide` / `implemented_by` を含む
+  ソースは Lake 前に `unsound_source` として拒否。`--enable-lean-ai-proof` /
+  `ENABLE_LEAN_AI_PROOF` で opt-in、LLM キー無し / `CI_FIXTURE_MODE` では自動スキップ。
+- **B-5 マージ** — `run_lean_bridge(..., ai_proof_generator=...)` が Task 2-C
+  （生成モジュール → known witness）の残余 unknown にのみ AI 段を適用し、
+  `merge_lean_cert_into_proof_cert` で non-mutating にマージ。`lean_verified_count`
+  伝搬は既存経路。lean-cert の `lean_metadata` / `lean_result_metadata` に
+  `ai_proof_used = true` / `ai_proof_attempts` / `proof_path` / `build_log_path` を記録
+  （`lean_fallback_strategy = "ai_generated_proof"`）。
+- **B-6 人手フォールバック** — `human_review.escalate_to_lean` / MCP `escalate_to_lean`
+  は残余義務向けの最終手段として `lean_escalation.stage = "human_final_fallback"` と
+  `prior_stages` を記録。`docs/LEAN_FALLBACK.md` の `tactic_failed` /
+  `partial_translation` Typical action を AI 先行に更新。
+
+以下は設計時の仕様（実装の根拠として保持）。
 
 **cross-repo 位置づけ**: 本タスクは [mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の **Track B** に対応する。mumei-agent 側の担当は B-0（契約合意: escalation bundle 拡張スキーマ / lean-cert の `ai_proof_used` provenance / build 失敗の構造化形式、docs のみ）、B-4（`--enable-lean-ai-proof` と AI 生成 + 修復ループ）、B-5（`merge_lean_cert_into_proof_cert` によるマージと `lean_verified_count` 伝搬）、B-6（`docs/LEAN_FALLBACK.md` error code 表と `human_review.py` / MCP `escalate_to_lean` の再配置）。B-4 / B-5 は mumei-lean 側の受理面 B-2 と構造化フィードバック B-3 が develop に入ってから着手する（Wave 3）。下記「パイプライン設計」の前提タスク（bundle スキーマ拡張）は B-0 に相当する。
 

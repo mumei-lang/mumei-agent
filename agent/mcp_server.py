@@ -944,6 +944,12 @@ def approve_review(atom_name: str, reviewer: str, notes: str) -> str:
 def escalate_to_lean(atom_name: str) -> str:
     """Run ``mumei verify --escalate-lean`` and mark an atom as escalated.
 
+    This is the final (human / handwritten witness) fallback: use it only for
+    obligations that the generated-module bridge, known witness modules and
+    the opt-in AI Lean proof generation (``--enable-lean-ai-proof``) left
+    ``unknown``.  The recorded ``lean_escalation.prior_stages`` summarises
+    those automated attempts.
+
     Requires ``get_review_queue`` to have been called first to set the active
     review tracker. Fails if the atom is already ``APPROVED`` or ``REJECTED``.
     """

@@ -60,16 +60,99 @@ def _loop_has_invariant(lines: list[str], loop_index: int) -> bool:
     return False
 
 
-def escalate_to_lean(source_file: str, loop_info: dict[str, Any]) -> Path:
-    """Write a Lean escalation bundle for a CEGIS exhaustion."""
+ESCALATION_BUNDLE_SCHEMA_VERSION = "mumei.escalation_bundle/2"
+
+_ATOM_CONTRACT_FIELDS = (
+    "name",
+    "module_key",
+    "requires",
+    "ensures",
+    "body",
+    "body_expr",
+    "params",
+    "return_type",
+    "escalation_reason",
+    "logic_fragment_tags",
+    "unknown_obligation_domain",
+)
+
+
+def atom_contract_from_record(atom: dict[str, Any] | None) -> dict[str, Any]:
+    """Project the contract-relevant fields of a proof-cert atom record."""
+    if not isinstance(atom, dict):
+        return {}
+    return {
+        field: atom[field]
+        for field in _ATOM_CONTRACT_FIELDS
+        if atom.get(field) is not None
+    }
+
+
+def invariant_candidates_to_records(
+    candidates: list[InvariantCandidate] | None,
+) -> list[dict[str, Any]]:
+    """Serialise CEGIS history entries into JSON-friendly bundle records."""
+    records: list[dict[str, Any]] = []
+    for candidate in candidates or []:
+        records.append(
+            {
+                "expression": candidate.expression,
+                "source": candidate.source,
+                "iteration": candidate.iteration,
+                "counterexamples": [
+                    dict(counterexample)
+                    for counterexample in candidate.counterexamples
+                    if isinstance(counterexample, dict)
+                ],
+            }
+        )
+    return records
+
+
+def escalate_to_lean(
+    source_file: str,
+    loop_info: dict[str, Any],
+    *,
+    atom: dict[str, Any] | None = None,
+    counterexamples: list[dict[str, Any]] | None = None,
+    invariant_candidates: list[InvariantCandidate] | None = None,
+    proof_certificate: dict[str, Any] | None = None,
+) -> Path:
+    """Write a Lean escalation bundle for a CEGIS exhaustion.
+
+    The base keys (``source_file`` / ``loop_line`` / ``loop_context`` /
+    ``reason``) are always present.  When the caller has them, the
+    target atom's contract (``requires`` / ``ensures`` / body), the Z3
+    counterexamples collected by :func:`_extract_counterexample`, and
+    the already-tried invariant candidates are appended so a downstream
+    Lean proof generator can use them as proof hints.
+    """
     source_path = Path(source_file)
     bundle_path = source_path.with_suffix(".escalation-bundle.json")
-    escalation_bundle = {
+    escalation_bundle: dict[str, Any] = {
         "source_file": source_file,
         "loop_line": loop_info.get("line", 0),
         "loop_context": loop_info.get("context", {}),
         "reason": "cegis_max_iterations_reached",
+        "bundle_schema_version": ESCALATION_BUNDLE_SCHEMA_VERSION,
     }
+    contract = atom_contract_from_record(atom)
+    if not contract:
+        contract = atom_contract_from_record(loop_info.get("atom"))
+    if contract:
+        escalation_bundle["atom"] = contract
+    collected = [
+        dict(counterexample)
+        for counterexample in (counterexamples or [])
+        if isinstance(counterexample, dict) and counterexample
+    ]
+    if collected:
+        escalation_bundle["counterexamples"] = collected
+    tried = invariant_candidates_to_records(invariant_candidates)
+    if tried:
+        escalation_bundle["tried_invariants"] = tried
+    if isinstance(proof_certificate, dict):
+        escalation_bundle["proof_certificate"] = proof_certificate
     bundle_path.write_text(
         json.dumps(escalation_bundle, indent=2, ensure_ascii=False),
         encoding="utf-8",

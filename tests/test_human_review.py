@@ -218,6 +218,28 @@ def test_human_review_tracker_escalates_to_lean(tmp_path: Path) -> None:
     assert "--escalate-lean" in command
     assert "--emit" in command
     assert str(repo / "specs" / "review.mm") in command
+    assert entry["lean_escalation"]["stage"] == "human_final_fallback"
+    assert entry["lean_escalation"]["prior_stages"] == {
+        "generated_bridge": False,
+        "known_witness_module": False,
+        "ai_generated_proof": False,
+    }
+
+
+def test_human_review_prior_stages_records_ai_attempts() -> None:
+    stages = HumanReviewTracker._prior_lean_stages(
+        {
+            "name": "hard",
+            "lean_fallback_strategy": "ai_generated_proof",
+            "lean_result_metadata": {"ai_proof_attempts": 3},
+            "ai_proof_outcome": {"attempts": 3, "error_code": "tactic_failed"},
+        }
+    )
+    assert stages["generated_bridge"] is True
+    assert stages["ai_generated_proof"] is True
+    assert stages["known_witness_module"] is False
+    assert stages["ai_proof_attempts"] == 3
+    assert stages["ai_proof_error_code"] == "tactic_failed"
 
 
 def test_mcp_review_tools_load_and_approve_active_queue(tmp_path: Path) -> None:

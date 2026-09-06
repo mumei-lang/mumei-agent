@@ -102,6 +102,8 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
     successes_by_reason: dict[str, int] = {}
     partial_translation = 0
     manual_required = 0
+    ai_proof_successes = 0
+    known_witness_successes = 0
 
     if candidates:
         by_reason = {}
@@ -123,6 +125,11 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
                 lean_successes += 1
                 if isinstance(reason, str):
                     successes_by_reason[reason] = successes_by_reason.get(reason, 0) + 1
+                if isinstance(lean_metadata, dict):
+                    if lean_metadata.get("ai_proof_used"):
+                        ai_proof_successes += 1
+                    elif lean_metadata.get("known_witness_used"):
+                        known_witness_successes += 1
             elif status == "partial_translation":
                 partial_translation += 1
             elif candidate.get("manual_lemma_reason") is not None:
@@ -145,6 +152,8 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
         "lean_successes": lean_successes,
         "partial_translation": partial_translation,
         "manual_required": manual_required,
+        "ai_proof_successes": ai_proof_successes,
+        "known_witness_successes": known_witness_successes,
         "success_rate": success_rate,
         "by_reason": by_reason,
         "by_failure_reason": by_reason,
