@@ -10,12 +10,13 @@ build log back to the LLM for repair up to a bounded number of attempts.
 Soundness contract
 ------------------
 
-* The theorem *statement* is never written by the LLM.  It is taken
-  verbatim from the module ``scripts/bridge.py`` generated for the atom
-  (``<mumei-lean>/generated/Generated/**.lean``), i.e. from the trusted
-  translator.  The LLM supplies only the tactic script after ``:= by``;
-  atoms without a bridge-generated statement are skipped
-  (``no_trusted_statement``) and stay ``unknown``.
+* The theorem *statement* is never written by the LLM.  Each run re-runs
+  the trusted translator (``scripts/ingest_cert.py``) on the certificate
+  being repaired into ``<evidence>/_statements/`` and takes the statement
+  verbatim from there -- never from ``<mumei-lean>/generated/``, where a
+  failed bridge may have left a stale module.  The LLM supplies only the
+  tactic script after ``:= by``; atoms for which the translator emits no
+  statement are skipped (``no_trusted_statement``) and stay ``unknown``.
 * An atom is promoted to ``lean_verified`` **only** when Lake compiles the
   assembled module with exit code 0, no ``error:`` lines, no
   ``declaration uses 'sorry'`` warning, and ``#print axioms`` reports
@@ -35,11 +36,13 @@ The module never imports ``mumei-lean``; Lake is invoked as a subprocess.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from collections import Counter
@@ -140,7 +143,9 @@ def bridge_module_key_for(cert: dict[str, Any], atom: dict[str, Any]) -> str | N
     return "atom_module"
 
 
-def bridge_module_path_for(repo_path: Path, module_key: str) -> Path:
+def bridge_module_path_for(
+    repo_path: Path, module_key: str, *, generated_root: Path | None = None
+) -> Path:
     """Mirror of ``ingest_cert._module_to_path``: ``std/core`` → ``Generated/Std/Core.lean``."""
     parts = [p for p in module_key.replace("\\", "/").split("/") if p]
     segments = [AI_PROOF_MODULE_ROOT.split(".")[0]]
@@ -151,7 +156,52 @@ def bridge_module_path_for(repo_path: Path, module_key: str) -> Path:
         if clean[0].isdigit():
             clean = "M" + clean
         segments.append(clean[:1].upper() + clean[1:])
-    return (repo_path / "generated" / Path(*segments)).with_suffix(".lean")
+    base = generated_root if generated_root is not None else repo_path / "generated"
+    return (base / Path(*segments)).with_suffix(".lean")
+
+
+def _run_translator(
+    cmd: list[str], *, cwd: str, timeout: float | None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+    )
+
+
+def regenerate_trusted_modules(
+    repo_path: Path,
+    cert: dict[str, Any],
+    out_dir: Path,
+    *,
+    timeout: float | None = 120.0,
+) -> Path | None:
+    """Run ``scripts/ingest_cert.py`` on *cert* into a fresh *out_dir*.
+
+    The statements the AI stage proves are lifted from this output rather
+    than from ``<repo>/generated``, so they always describe the certificate
+    being repaired and never a stale module left behind by an earlier or
+    failed bridge run.  Returns the output directory, or ``None`` (fail
+    closed) when the translator is missing or errors out.
+    """
+    script = repo_path / "scripts" / "ingest_cert.py"
+    if not script.is_file():
+        return None
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cert_path = out_dir / "input.proof-cert.json"
+        cert_path.write_text(json.dumps(cert), encoding="utf-8")
+        proc = _run_translator(
+            [sys.executable, str(script), str(cert_path), "--out", str(out_dir)],
+            cwd=str(repo_path),
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ingest_cert regeneration failed: %s", exc)
+        return None
+    if proc.returncode != 0:
+        logger.warning("ingest_cert exited %d: %s", proc.returncode, proc.stderr[-500:])
+        return None
+    return out_dir
 
 
 def find_trusted_statement(
@@ -160,6 +210,7 @@ def find_trusted_statement(
     *,
     theorem_name: str,
     module_key: str | None = None,
+    generated_root: Path | None = None,
 ) -> TrustedStatement | None:
     """Locate ``theorem <theorem_name>`` in the bridge-generated module tree.
 
@@ -171,14 +222,18 @@ def find_trusted_statement(
     unique.  Returns the statement header, the module's non-theorem
     declarations (imports / ``open`` / helper ``def``s) and its namespace;
     ``None`` when the translator never produced an unambiguous statement
-    for the atom (``partial_translation`` etc.).
+    for the atom (``partial_translation`` etc.).  *generated_root*
+    replaces ``<repo>/generated`` (see :func:`regenerate_trusted_modules`).
     """
-    root = repo_path / "generated" / AI_PROOF_MODULE_ROOT.split(".")[0]
+    base = generated_root if generated_root is not None else repo_path / "generated"
+    root = base / AI_PROOF_MODULE_ROOT.split(".")[0]
     if not root.is_dir():
         return None
     ai_root = ai_proof_module_path(repo_path, AI_PROOF_MODULE_ROOT).with_suffix("")
     if module_key is not None:
-        candidates = [bridge_module_path_for(repo_path, module_key)]
+        candidates = [
+            bridge_module_path_for(repo_path, module_key, generated_root=base)
+        ]
     else:
         candidates = [
             c
@@ -766,6 +821,15 @@ def run_ai_proof_repair(
     ) / run_id
     bridge_contract = _mumei_lean_bridge_contract(repo_path)
     started = time.monotonic()
+    statements_root = regenerate_trusted_modules(
+        repo_path, cert, evidence_root / "_statements", timeout=timeout
+    )
+    diagnostics: list[str] = []
+    if statements_root is None:
+        diagnostics.append(
+            "scripts/ingest_cert.py could not regenerate statements for this "
+            "certificate; no atom was attempted (no_trusted_statement)."
+        )
     outcomes: list[AiProofAtomOutcome] = []
     proved_records: dict[str, dict[str, Any]] = {}
     log_parts: list[str] = []
@@ -781,18 +845,26 @@ def run_ai_proof_repair(
         )
         feedback: list[dict[str, Any]] = []
         module_path = ai_proof_module_path(repo_path, module)
-        atom_evidence = evidence_root / sanitize_lean_module_name(name)
+        atom_evidence = evidence_root / (
+            f"{sanitize_lean_module_name(name)}_"
+            f"{hashlib.sha256(name.encode('utf-8')).hexdigest()[:8]}"
+        )
         if name in ambiguous:
             # Promotion is keyed by atom name; two unknown atoms sharing a
             # name cannot be told apart, so neither may be upgraded.
             outcome.error_code = "ambiguous_atom_name"
             outcomes.append(outcome)
             continue
-        statement = find_trusted_statement(
-            repo_path,
-            name,
-            theorem_name=theorem_name,
-            module_key=bridge_module_key_for(cert, atom),
+        statement = (
+            find_trusted_statement(
+                repo_path,
+                name,
+                theorem_name=theorem_name,
+                module_key=bridge_module_key_for(cert, atom),
+                generated_root=statements_root,
+            )
+            if statements_root is not None
+            else None
         )
         if statement is None:
             outcome.error_code = "no_trusted_statement"
@@ -938,12 +1010,10 @@ def run_ai_proof_repair(
     error_code = None
     if not complete:
         error_code = next((o.error_code for o in failed if o.error_code), "tactic_failed")
-    diagnostics = [
-        (
-            f"AI proof generation proved {len(proved_names)}/{len(outcomes)} "
-            "residual unknown atom(s) after Lake verification."
-        )
-    ]
+    diagnostics.append(
+        f"AI proof generation proved {len(proved_names)}/{len(outcomes)} "
+        "residual unknown atom(s) after Lake verification."
+    )
     if failed:
         diagnostics.append(
             "Residual atoms for human review: "

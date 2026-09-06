@@ -51,7 +51,7 @@ contains `scripts/bridge.py`.
 | `tactic_failed` | Lean elaborated the theorem but tactics left goals open. | No | First run with `--enable-lean-ai-proof` so the LLM generates/repairs a proof against the Lake feedback; only if `ai_proof_residual` still lists the atom, add a handwritten witness/proof strategy. |
 | `partial_translation` | mumei-lean marked unsupported syntax/manual review. | No | If the translator still emitted a `theorem <atom>_correct` statement, the AI proof stage (`--enable-lean-ai-proof`) can attempt it; otherwise the atom is reported as `no_trusted_statement` and you must extend the translator or simplify the contract only for the residual atoms. |
 | `unsound_source` | The AI tactic script was rejected before Lake (`sorry` / `admit` / `axiom` / `native_decide` / `run_cmd` / `set_option` / new declarations, …). | No | Never promoted. Inspect `attempt_N.lean` under `ai_proof_evidence_dir`; the next repair round already receives the rejection reason. |
-| `no_trusted_statement` | No bridge-generated `theorem <atom>_correct` exists under `generated/Generated/`, so there is no trusted statement for the AI to prove. | No | Fix the translator (`partial_translation`) or add a handwritten witness; the LLM is never allowed to author the statement itself. |
+| `no_trusted_statement` | Re-running `scripts/ingest_cert.py` on the current certificate produced no `theorem <atom>_correct` (or the translator itself is missing / failed), so there is no trusted statement for the AI to prove. | No | Fix the translator (`partial_translation`) or add a handwritten witness; the LLM is never allowed to author the statement itself. |
 | `ambiguous_atom_name` | Two residual unknown atoms share a name; promotion is keyed by name so neither is attempted. | No | Rename one atom or split the modules before re-running. |
 | `unsound_axioms` / `axiom_audit_missing` | `#print axioms` on the AI-proved theorem reported an axiom outside `propext` / `Classical.choice` / `Quot.sound` (e.g. `sorryAx`), or the audit line was missing from the Lake log. | No | Never promoted; inspect `attempt_N.log`. |
 | `generator_error` | Every LLM call within `LEAN_AI_PROOF_MAX_ATTEMPTS` failed (each failure consumes one attempt and is retried). | Yes | Check `LLM_API_KEY` / `LLM_BASE_URL`; the atom stays `unknown`. |
@@ -118,13 +118,19 @@ AI-promoted atoms also record `ai_proof_attempts`, `proof_path` (the accepted
 `lean_metadata`, and `lean_module` / `lean_theorem_name` point at
 `Generated.AiProof.<Atom>_<run>.<atom>_correct` (the `<run>` suffix keeps
 concurrent repairs against one checkout apart; the `#print axioms` audit
-matches that fully-qualified name exactly). The trusted statement is read only
-from the module `scripts/ingest_cert.py` emits for the certificate's own
-module key (`cert.file` → `Generated/<Key>.lean`), never from another
-generated file that happens to contain a same-named theorem. The evidence
-directory defaults to `<mumei-lean>/.ai_proof_evidence/<run-id>/<Atom>/` (a
-fresh `<run-id>` per repair run, so earlier certificates keep pointing at
-unchanged files) and can be moved with `LEAN_AI_PROOF_EVIDENCE_DIR`. The
+matches that fully-qualified name exactly). The trusted statement is *not*
+read from `<mumei-lean>/generated/` (a failed or interrupted bridge can leave
+an older module with a same-named theorem there): each run re-executes
+`scripts/ingest_cert.py` on the certificate being repaired into
+`<run-dir>/_statements/` and lifts `theorem <atom>_correct` from the module
+emitted for the certificate's own module key (`cert.file` →
+`Generated/<Key>.lean`); `lean_metadata.statement_source_path` points at that
+file. If the translator is missing or fails, every atom is reported as
+`no_trusted_statement`. The evidence directory defaults to
+`<mumei-lean>/.ai_proof_evidence/<run-id>/<Atom>_<hash8>/` (a fresh
+`<run-id>` per repair run, so earlier certificates keep pointing at unchanged
+files; `<hash8>` keeps atoms whose names only differ in case apart) and can be
+moved with `LEAN_AI_PROOF_EVIDENCE_DIR`. The
 `stale_translator` / `bridge_lemma_hash` checks in
 `merge_lean_cert_into_proof_cert` apply to AI-promoted atoms exactly as they
 do to the other two stages.

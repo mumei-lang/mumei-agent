@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -75,10 +76,30 @@ end Generated.Ai_e2e
 """
 
 
-def _fake_repo(tmp_path: Path, *, with_statement: bool = True) -> Path:
+# Stand-in for mumei-lean's translator: emits BRIDGE_MODULE for the atoms of
+# the certificate it is handed (so the regenerated statement follows the cert,
+# not whatever is lying around in ``generated/``).
+INGEST_STUB = f'''import json, sys
+from pathlib import Path
+cert = json.loads(Path(sys.argv[1]).read_text())
+out = Path(sys.argv[sys.argv.index("--out") + 1])
+names = [a["name"] for a in cert["atoms"] if a.get("z3_check_result") == "unknown"]
+if "square_nonneg" not in names:
+    sys.exit(0)
+module = out / "Generated" / "Ai_e2e.lean"
+module.parent.mkdir(parents=True, exist_ok=True)
+module.write_text({BRIDGE_MODULE!r})
+'''
+
+
+def _fake_repo(
+    tmp_path: Path, *, with_statement: bool = True, with_ingest: bool = True
+) -> Path:
     repo = tmp_path / "mumei-lean"
     (repo / "scripts").mkdir(parents=True)
     (repo / "scripts" / "bridge.py").write_text("# stub\n")
+    if with_ingest:
+        (repo / "scripts" / "ingest_cert.py").write_text(INGEST_STUB, encoding="utf-8")
     (repo / "scripts" / "export_cert.py").write_text(
         'TRANSLATOR_VERSION = "mumei-lean-translator-ir-v1"\n'
         'BRIDGE_LEMMA_HASH = "hash-for-test"\n',
@@ -133,10 +154,22 @@ def _patch_lake(**kwargs):
     return patch("agent.lean_ai_proof._lake_build_module", **kwargs)
 
 
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
 @pytest.fixture(autouse=True)
 def _lake_on_path() -> None:
-    # ``shutil`` is one shared module object for lean_bridge / lean_ai_proof.
-    with patch("agent.lean_ai_proof.shutil.which", return_value="/usr/bin/lake"):
+    # ``shutil`` / ``subprocess`` are shared module objects for lean_bridge /
+    # lean_ai_proof; tests below patch ``subprocess.run`` to fake bridge.py,
+    # so the translator stub keeps running through the real one.
+    with patch(
+        "agent.lean_ai_proof.shutil.which", return_value="/usr/bin/lake"
+    ), patch(
+        "agent.lean_ai_proof._run_translator",
+        side_effect=lambda cmd, *, cwd, timeout: _REAL_SUBPROCESS_RUN(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+        ),
+    ):
         yield
 
 
@@ -207,7 +240,9 @@ def test_trusted_statement_is_lifted_from_bridge_module(tmp_path: Path) -> None:
 
 
 def test_ai_proof_skips_atoms_without_trusted_statement(tmp_path: Path) -> None:
+    """Translator emitted no statement for the atom (partial_translation)."""
     repo = _fake_repo(tmp_path, with_statement=False)
+    (repo / "scripts" / "ingest_cert.py").write_text("", encoding="utf-8")
     gen = ScriptedGenerator([_good_module()])
     with _patch_lake(side_effect=_lake_ok_for) as lake:
         result = run_ai_proof_repair(cert=_cert(), mumei_lean_repo=repo, generator=gen)
@@ -581,6 +616,104 @@ def test_bridge_module_path_mirrors_ingest_cert(tmp_path: Path) -> None:
     assert lean_ai_proof.bridge_module_key_for({"file": "./ai_e2e.mm"}, {}) == "ai_e2e"
     assert lean_ai_proof.bridge_module_key_for({}, {"module_key": "std/core"}) == "std/core"
     assert lean_ai_proof.bridge_module_key_for({}, {}) == "atom_module"
+
+
+def test_stale_generated_module_never_supplies_the_statement(tmp_path: Path) -> None:
+    """Bridge failed before rewriting generated/Generated/Ai_e2e.lean: the file
+    still holds a same-named theorem with an *older* contract.  The AI stage
+    must prove the statement regenerated from the current certificate instead."""
+    repo = _fake_repo(tmp_path, with_statement=False)
+    stale_dir = repo / "generated" / "Generated"
+    stale_dir.mkdir(parents=True)
+    stale = BRIDGE_MODULE.replace("(True) → (result ≥ 0)", "(True) → (True)")
+    (stale_dir / "Ai_e2e.lean").write_text(stale, encoding="utf-8")
+    gen = ScriptedGenerator([_good_module()])
+    written: list[str] = []
+
+    def lake(repo_path, module, *, timeout):
+        written.append(
+            lean_ai_proof.ai_proof_module_path(repo_path, module).read_text("utf-8")
+        )
+        return _lake_ok(module)
+
+    with _patch_lake(side_effect=lake):
+        result = run_ai_proof_repair(
+            cert=_cert(),
+            mumei_lean_repo=repo,
+            generator=gen,
+            evidence_dir=tmp_path / "e",
+        )
+    assert result is not None and result["success"] is True
+    assert "(True) → (result ≥ 0)" in written[0]
+    assert "(True) → (True)" not in written[0]
+    assert "(True) → (result ≥ 0)" in gen.requests[0]["statement"]["header"]
+    meta = result["lean_cert"]["atoms"][1]["lean_metadata"]
+    assert "_statements" in meta["statement_source_path"]
+    assert Path(meta["statement_source_path"]).is_file()
+
+
+def test_ai_proof_fails_closed_without_translator(tmp_path: Path) -> None:
+    """No scripts/ingest_cert.py → the checkout's generated module (possibly
+    stale) is *not* used as a fallback; every atom stays unknown."""
+    repo = _fake_repo(tmp_path, with_ingest=False)
+    gen = ScriptedGenerator([_good_module()])
+    with _patch_lake(side_effect=_lake_ok_for) as lake:
+        result = run_ai_proof_repair(cert=_cert(), mumei_lean_repo=repo, generator=gen)
+    assert result is not None
+    lake.assert_not_called()
+    assert gen.requests == []
+    assert result["success"] is False
+    assert result["error_code"] == "no_trusted_statement"
+    assert any("ingest_cert.py" in d for d in result["diagnostics"])
+    assert result["lean_cert"]["atoms"][1]["z3_check_result"] == "unknown"
+
+
+def test_ai_proof_fails_closed_when_translator_errors(tmp_path: Path) -> None:
+    repo = _fake_repo(tmp_path)
+    (repo / "scripts" / "ingest_cert.py").write_text("import sys\nsys.exit(3)\n")
+    gen = ScriptedGenerator([_good_module()])
+    with _patch_lake(side_effect=_lake_ok_for) as lake:
+        result = run_ai_proof_repair(cert=_cert(), mumei_lean_repo=repo, generator=gen)
+    assert result is not None
+    lake.assert_not_called()
+    assert result["error_code"] == "no_trusted_statement"
+
+
+def test_evidence_dirs_are_distinct_for_case_variant_atoms(tmp_path: Path) -> None:
+    repo = _fake_repo(tmp_path)
+    two_theorems = BRIDGE_MODULE.replace(
+        "theorem other_correct : True := by\n  sorry\n",
+        "theorem Square_nonneg_correct (x : Int) (result : Int) "
+        "(h_body : result = squareNonnegResult x) :\n"
+        "    (True) → (result ≥ 0) := by\n  sorry\n",
+    )
+    (repo / "scripts" / "ingest_cert.py").write_text(
+        INGEST_STUB.replace(repr(BRIDGE_MODULE), repr(two_theorems)),
+        encoding="utf-8",
+    )
+    cert = _cert()
+    cert["atoms"].append(dict(cert["atoms"][1], name="Square_nonneg"))
+    gen = ScriptedGenerator(
+        [_good_module(), _good_module("Square_nonneg_correct")]
+    )
+
+    def lake(repo_path, module, *, timeout):
+        src = lean_ai_proof.ai_proof_module_path(repo_path, module).read_text("utf-8")
+        theorem = "Square_nonneg_correct" if "theorem Square_" in src else "square_nonneg_correct"
+        return 0, f"info: '{module}.{theorem}' depends on axioms: [propext]\n"
+
+    with _patch_lake(side_effect=lake):
+        result = run_ai_proof_repair(
+            cert=cert, mumei_lean_repo=repo, generator=gen, evidence_dir=tmp_path / "e"
+        )
+    assert result is not None and result["success"] is True
+    paths = {
+        a["lean_metadata"]["proof_path"]
+        for a in result["lean_cert"]["atoms"]
+        if "lean_metadata" in a
+    }
+    assert len(paths) == 2
+    assert all(Path(p).is_file() for p in paths)
 
 
 def test_ai_proof_noop_without_unknowns(tmp_path: Path) -> None:
