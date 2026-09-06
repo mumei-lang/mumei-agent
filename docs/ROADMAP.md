@@ -492,6 +492,8 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
 
 #### 次タスク候補: 外部コード安全性推論の意味モデル化（データフロー / パス感度）
 
+**cross-repo 位置づけ**: 本タスクは [mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の **Track A**（A-1 データフロー事実の器 + 定数畳み込み → A-2 ガード伝播 → A-3 到達定義 / `len` 由来値 → A-4 局所エイリアス → A-5 抑制ヘルパ置換と削減計測 → A-6 新バグ種別）として順序付けられている。Track B（Task 2-D）とは非依存で完全並行。A-6 は A-5 の削減計測が出てから着手する。完了時は Priority 25 の表と本節を同一 diff で更新する。
+
 stage 1 / stage 2 / 意味解析強化で「構文的事実の抽出」と「型述語・定数モデル」は整った
 が、外部コード安全性推論は依然として関数本体の **意味モデル** を持たない。
 `agent/strategies/foreign_code_strategy_helpers.py` の `_detect_go_safety_issues` /
@@ -1176,6 +1178,8 @@ python -m agent proliferate \
 ---
 
 ## Task 2-D: unknown atom の AI 主体 Lean 証明生成
+
+**cross-repo 位置づけ**: 本タスクは [mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の **Track B** に対応する。mumei-agent 側の担当は B-0（契約合意: escalation bundle 拡張スキーマ / lean-cert の `ai_proof_used` provenance / build 失敗の構造化形式、docs のみ）、B-4（`--enable-lean-ai-proof` と AI 生成 + 修復ループ）、B-5（`merge_lean_cert_into_proof_cert` によるマージと `lean_verified_count` 伝搬）、B-6（`docs/LEAN_FALLBACK.md` error code 表と `human_review.py` / MCP `escalate_to_lean` の再配置）。B-4 / B-5 は mumei-lean 側の受理面 B-2 と構造化フィードバック B-3 が develop に入ってから着手する（Wave 3）。下記「パイプライン設計」の前提タスク（bundle スキーマ拡張）は B-0 に相当する。
 
 Task 2-C の Lean fallback は、`agent/lean_bridge.py` の `run_lean_bridge` /
 `agent/lean_bridge_helpers.py` の `extract_unknown_atoms` と known witness fallback
