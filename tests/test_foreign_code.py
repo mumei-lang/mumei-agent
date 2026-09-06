@@ -244,6 +244,59 @@ const (
     assert constants["derived"] == 32  # constant expression is evaluated
 
 
+def test_go_declared_constants_ignore_function_local_declarations() -> None:
+    """A block-local ``const`` must not be treated as a package constant."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_go_safety_issues,
+        _go_declared_constants,
+        _go_nonzero_constants,
+    )
+
+    source = """package demo
+
+const pkgScale = 100
+
+func Ratio(n, d int, flag bool) int {
+    if flag {
+        const d = 1
+        return n / d
+    }
+    return n / d
+}
+"""
+    assert _go_declared_constants(source) == {"pkgScale": 100}
+    assert "d" not in _go_nonzero_constants(source)
+    issues = _detect_go_safety_issues(source)
+    assert any("`d`" in issue.message for issue in issues), issues
+
+    # Scope is decided by brace depth, not indentation: an indented package
+    # declaration still counts, a column-0 declaration inside a function
+    # (or a grouped ``const (...)`` inside one) does not. Braces inside
+    # strings / comments must not disturb the depth.
+    odd_formatting = """package demo
+
+  const indentedPkg = 7
+  const (
+      grouped = 3
+  )
+const s = "{" // } not a block
+/* { */
+
+func Ratio(n, d int) int {
+const d = 1
+const (
+    e = 2
+)
+return n / d
+}
+"""
+    assert _go_declared_constants(odd_formatting) == {
+        "indentedPkg": 7,
+        "grouped": 3,
+    }
+    assert {"d", "e"}.isdisjoint(_go_nonzero_constants(odd_formatting))
+
+
 def test_go_value_type_param_not_flagged_nil() -> None:
     """A Go value-type param (`reflect.Value`) can never be nil (#295)."""
     from agent.strategies.foreign_code_strategy_helpers import (
