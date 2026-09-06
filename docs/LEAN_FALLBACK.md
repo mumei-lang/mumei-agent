@@ -54,7 +54,8 @@ contains `scripts/bridge.py`.
 | `no_trusted_statement` | No bridge-generated `theorem <atom>_correct` exists under `generated/Generated/`, so there is no trusted statement for the AI to prove. | No | Fix the translator (`partial_translation`) or add a handwritten witness; the LLM is never allowed to author the statement itself. |
 | `ambiguous_atom_name` | Two residual unknown atoms share a name; promotion is keyed by name so neither is attempted. | No | Rename one atom or split the modules before re-running. |
 | `unsound_axioms` / `axiom_audit_missing` | `#print axioms` on the AI-proved theorem reported an axiom outside `propext` / `Classical.choice` / `Quot.sound` (e.g. `sorryAx`), or the audit line was missing from the Lake log. | No | Never promoted; inspect `attempt_N.log`. |
-| `generator_error` | The LLM call for AI proof generation failed. | Yes | Check `LLM_API_KEY` / `LLM_BASE_URL`; the atom stays `unknown`. |
+| `generator_error` | Every LLM call within `LEAN_AI_PROOF_MAX_ATTEMPTS` failed (each failure consumes one attempt and is retried). | Yes | Check `LLM_API_KEY` / `LLM_BASE_URL`; the atom stays `unknown`. |
+| `source_mismatch` | The module Lake compiled differs from the source the AI stage wrote (another process touched the checkout mid-build). | Yes | Never promoted; re-run. Modules are named per run (`Generated.AiProof.<Atom>_<run>`) so concurrent runs do not normally collide. |
 | `timeout` | Bridge or witness build exceeded its timeout. | Yes | Re-run with a warm Lake cache or a higher timeout. |
 | `subprocess_error` | Python could not execute the bridge. | Yes | Inspect the runner environment and bridge script permissions. |
 | `bridge_failed` | Non-zero bridge exit not covered above. | Yes | Inspect captured stdout/stderr for the root cause. |
@@ -115,13 +116,35 @@ Every promoted atom carries `lean_fallback_strategy` plus `lean_metadata` /
 AI-promoted atoms also record `ai_proof_attempts`, `proof_path` (the accepted
 `attempt_N.lean`) and `build_log_path` (the matching Lake log) under
 `lean_metadata`, and `lean_module` / `lean_theorem_name` point at
-`Generated.AiProof.<Atom>.<atom>_correct`. The evidence directory defaults to
-`<mumei-lean>/.ai_proof_evidence/<run-id>/<Atom>/` (a fresh `<run-id>` per
-repair run, so earlier certificates keep pointing at unchanged files) and can
-be moved with
-`LEAN_AI_PROOF_EVIDENCE_DIR`. The `stale_translator` / `bridge_lemma_hash`
-checks in `merge_lean_cert_into_proof_cert` apply to AI-promoted atoms exactly
-as they do to the other two stages.
+`Generated.AiProof.<Atom>_<run>.<atom>_correct` (the `<run>` suffix keeps
+concurrent repairs against one checkout apart; the `#print axioms` audit
+matches that fully-qualified name exactly). The trusted statement is read only
+from the module `scripts/ingest_cert.py` emits for the certificate's own
+module key (`cert.file` → `Generated/<Key>.lean`), never from another
+generated file that happens to contain a same-named theorem. The evidence
+directory defaults to `<mumei-lean>/.ai_proof_evidence/<run-id>/<Atom>/` (a
+fresh `<run-id>` per repair run, so earlier certificates keep pointing at
+unchanged files) and can be moved with `LEAN_AI_PROOF_EVIDENCE_DIR`. The
+`stale_translator` / `bridge_lemma_hash` checks in
+`merge_lean_cert_into_proof_cert` apply to AI-promoted atoms exactly as they
+do to the other two stages.
+
+Residual atoms the AI stage could not discharge keep `z3_check_result:
+"unknown"` and gain an `ai_proof_outcome` record (`attempts`, `error_code`,
+per-attempt evidence paths); `human_review.escalate_to_lean` copies it into
+`lean_escalation.prior_stages` so reviewers see what was already tried.
+
+### Evidence handling
+
+`attempt_N.lean` / `attempt_N.log` / `attempt_N.reply.txt` contain the raw
+model reply and the full Lake log. They are the audit trail for a promotion
+and are kept indefinitely by default; treat the evidence directory like build
+artefacts (it lives under the mumei-lean checkout, not in the mumei-agent
+repo) and point `LEAN_AI_PROOF_EVIDENCE_DIR` at a location with the retention
+you need. Compiler feedback fed back into the *next model request* is
+truncated to a 2000-character tail with the checkout path and `$HOME`
+redacted; it never includes the certificate or `.mm` source beyond what Lean
+itself prints.
 
 ## Escalation bundle schema (v2)
 

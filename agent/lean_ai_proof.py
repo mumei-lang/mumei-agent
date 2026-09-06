@@ -124,27 +124,69 @@ def _in_block_comment(text: str) -> bool:
     return text.count("/-") > text.count("-/")
 
 
+def bridge_module_key_for(cert: dict[str, Any], atom: dict[str, Any]) -> str | None:
+    """Module key ``scripts/ingest_cert.py`` derives for this certificate.
+
+    Mirrors ``_module_key_from_certificate``: ``cert["file"]`` minus ``.mm``
+    / leading ``./`` (default ``atom_module``).  ``atom["module_key"]`` is
+    only a fallback when the certificate carries no ``file``.
+    """
+    file = cert.get("file")
+    if isinstance(file, str) and file:
+        return file.removesuffix(".mm").removeprefix("./") or "atom_module"
+    key = atom.get("module_key")
+    if isinstance(key, str) and key:
+        return key
+    return "atom_module"
+
+
+def bridge_module_path_for(repo_path: Path, module_key: str) -> Path:
+    """Mirror of ``ingest_cert._module_to_path``: ``std/core`` → ``Generated/Std/Core.lean``."""
+    parts = [p for p in module_key.replace("\\", "/").split("/") if p]
+    segments = [AI_PROOF_MODULE_ROOT.split(".")[0]]
+    for part in parts:
+        clean = "".join(c if c.isalnum() or c == "_" else "_" for c in part)
+        if not clean:
+            clean = "M"
+        if clean[0].isdigit():
+            clean = "M" + clean
+        segments.append(clean[:1].upper() + clean[1:])
+    return (repo_path / "generated" / Path(*segments)).with_suffix(".lean")
+
+
 def find_trusted_statement(
     repo_path: Path,
     atom_name: str,
     *,
     theorem_name: str,
+    module_key: str | None = None,
 ) -> TrustedStatement | None:
     """Locate ``theorem <theorem_name>`` in the bridge-generated module tree.
 
-    Searches ``<repo>/generated/Generated/**/*.lean`` (skipping the AI
-    module directory) and returns the statement header, the module's
-    non-theorem declarations (imports / ``open`` / helper ``def``s) and
-    its namespace.  ``None`` when the translator never produced a
-    statement for the atom (``partial_translation`` etc.).
+    With *module_key* only the module ``scripts/bridge.py`` emits for that
+    key is consulted, so a same-named theorem in another (possibly stale)
+    generated module can never be picked up.  Without a key the whole
+    ``<repo>/generated/Generated/**/*.lean`` tree (minus the AI module
+    directory) is searched and the statement is accepted only when it is
+    unique.  Returns the statement header, the module's non-theorem
+    declarations (imports / ``open`` / helper ``def``s) and its namespace;
+    ``None`` when the translator never produced an unambiguous statement
+    for the atom (``partial_translation`` etc.).
     """
     root = repo_path / "generated" / AI_PROOF_MODULE_ROOT.split(".")[0]
     if not root.is_dir():
         return None
     ai_root = ai_proof_module_path(repo_path, AI_PROOF_MODULE_ROOT).with_suffix("")
-    for candidate in sorted(root.rglob("*.lean")):
-        if ai_root in candidate.parents or candidate == ai_root:
-            continue
+    if module_key is not None:
+        candidates = [bridge_module_path_for(repo_path, module_key)]
+    else:
+        candidates = [
+            c
+            for c in sorted(root.rglob("*.lean"))
+            if ai_root not in c.parents and c != ai_root
+        ]
+    found: list[TrustedStatement] = []
+    for candidate in candidates:
         try:
             text = candidate.read_text(encoding="utf-8")
         except OSError:
@@ -153,8 +195,10 @@ def find_trusted_statement(
             continue
         statement = _lift_statement(text, theorem_name, str(candidate))
         if statement is not None:
-            return statement
-    return None
+            found.append(statement)
+    if len(found) != 1:
+        return None
+    return found[0]
 
 
 def _lift_statement(
@@ -337,13 +381,26 @@ def reject_unsound_lean_source(source: str, theorem_name: str) -> str | None:
     return None
 
 
-def _audit_axioms(log: str, theorem_name: str) -> str | None:
-    """Return an error code unless ``#print axioms`` reports only ALLOWED_AXIOMS."""
+def _audit_axioms(
+    log: str, theorem_name: str, *, module: str | None = None
+) -> str | None:
+    """Return an error code unless ``#print axioms`` reports only ALLOWED_AXIOMS.
+
+    Lean prints the fully-qualified declaration name; with *module* the
+    match is exact (``<module>.<theorem_name>``), otherwise the qualified
+    name must end in ``.<theorem_name>`` (or be the bare name).
+    """
+
+    def is_target(decl: str) -> bool:
+        if module is not None:
+            return decl == f"{module}.{theorem_name}"
+        return decl == theorem_name or decl.endswith(f".{theorem_name}")
+
     for match in _NO_AXIOMS_RE.finditer(log):
-        if match.group("decl").endswith(theorem_name):
+        if is_target(match.group("decl")):
             return None
     for match in _AXIOMS_RE.finditer(log):
-        if not match.group("decl").endswith(theorem_name):
+        if not is_target(match.group("decl")):
             continue
         axioms = {a.strip() for a in match.group("axioms").split(",") if a.strip()}
         if axioms - ALLOWED_AXIOMS:
@@ -521,7 +578,11 @@ def _lake_build_module(
 
 
 def _build_log_accepts(
-    returncode: int, log: str, *, theorem_name: str | None = None
+    returncode: int,
+    log: str,
+    *,
+    theorem_name: str | None = None,
+    module: str | None = None,
 ) -> tuple[bool, str | None]:
     if returncode != 0:
         if "lake build timed out" in log:
@@ -535,7 +596,7 @@ def _build_log_accepts(
     if _ERROR_LINE_RE.search(log):
         return False, "bridge_failed"
     if theorem_name is not None:
-        audit = _audit_axioms(log, theorem_name)
+        audit = _audit_axioms(log, theorem_name, module=module)
         if audit is not None:
             return False, audit
     return True, None
@@ -543,6 +604,46 @@ def _build_log_accepts(
 
 def _tail(text: str, limit: int = 2000) -> str:
     return text[-limit:] if len(text) > limit else text
+
+
+def _redact_log(log: str, repo_path: Path) -> str:
+    """Strip checkout-local paths before a build log is shown to the model."""
+    redacted = log.replace(str(repo_path.resolve()), "<mumei-lean>")
+    redacted = redacted.replace(str(repo_path), "<mumei-lean>")
+    return redacted.replace(str(Path.home()), "~")
+
+
+def annotate_residual_atoms(
+    cert: dict[str, Any], outcomes: list[dict[str, Any]]
+) -> None:
+    """Attach failed AI outcomes (``ai_proof_outcome``) to still-unknown atoms.
+
+    Mutates *cert* in place; only atoms whose ``z3_check_result`` is still
+    ``unknown`` and whose name is unique in the certificate are annotated,
+    so the human final fallback (``human_review.escalate_to_lean``) can
+    report what the automated stage already tried.
+    """
+    by_name = {
+        o["name"]: o for o in outcomes if not o.get("proved") and isinstance(o.get("name"), str)
+    }
+    if not by_name:
+        return
+    atoms = cert.get("atoms")
+    if not isinstance(atoms, list):
+        return
+    counts = Counter(a.get("name") for a in atoms if isinstance(a, dict))
+    for atom in atoms:
+        if not isinstance(atom, dict):
+            continue
+        name = atom.get("name")
+        outcome = by_name.get(name)
+        if (
+            outcome is None
+            or counts[name] != 1
+            or atom.get("z3_check_result") != Z3CheckResult.UNKNOWN.value
+        ):
+            continue
+        atom["ai_proof_outcome"] = json.loads(json.dumps(outcome))
 
 
 def _ai_proof_atom_record(
@@ -641,6 +742,9 @@ def run_ai_proof_repair(
     ]
     if not unknown_atoms:
         return None
+    if max_attempts < 1:
+        logger.warning("ai proof repair disabled: max_attempts=%d", max_attempts)
+        return None
     name_counts = Counter(atom["name"] for atom in unknown_atoms)
     ambiguous = {name for name, n in name_counts.items() if n > 1}
     repo_path = Path(mumei_lean_repo)
@@ -653,7 +757,8 @@ def run_ai_proof_repair(
             diagnostics=["AI proof generation requires Lake to check generated modules."],
             extra={"fallback_strategy": AI_PROOF_STRATEGY, "ai_proof_used": False},
         )
-    run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+    run_tag = uuid.uuid4().hex[:8]
+    run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{run_tag}"
     evidence_root = (
         Path(evidence_dir)
         if evidence_dir is not None
@@ -667,7 +772,9 @@ def run_ai_proof_repair(
 
     for atom in unknown_atoms:
         name = atom["name"]
-        module = ai_proof_module_for(name)
+        # Per-run module name: concurrent repairs sharing one checkout must
+        # never write / build / delete the same Lean file.
+        module = f"{ai_proof_module_for(name)}_{run_tag}"
         theorem_name = f"{name}_correct"
         outcome = AiProofAtomOutcome(
             name=name, proved=False, module=module, theorem=theorem_name
@@ -681,12 +788,17 @@ def run_ai_proof_repair(
             outcome.error_code = "ambiguous_atom_name"
             outcomes.append(outcome)
             continue
-        statement = find_trusted_statement(repo_path, name, theorem_name=theorem_name)
+        statement = find_trusted_statement(
+            repo_path,
+            name,
+            theorem_name=theorem_name,
+            module_key=bridge_module_key_for(cert, atom),
+        )
         if statement is None:
             outcome.error_code = "no_trusted_statement"
             outcomes.append(outcome)
             continue
-        for attempt in range(1, max(1, max_attempts) + 1):
+        for attempt in range(1, max_attempts + 1):
             request = build_ai_proof_request(
                 atom,
                 module=module,
@@ -710,7 +822,14 @@ def run_ai_proof_repair(
                     )
                 )
                 outcome.error_code = "generator_error"
-                break
+                feedback.append(
+                    {
+                        "attempt": attempt,
+                        "error_code": "generator_error",
+                        "log_tail": "",
+                    }
+                )
+                continue
             tactics = extract_tactic_script(raw, theorem_name)
             atom_evidence.mkdir(parents=True, exist_ok=True)
             source_path = atom_evidence / f"attempt_{attempt}.lean"
@@ -754,6 +873,10 @@ def run_ai_proof_repair(
                 returncode, log = _lake_build_module(
                     repo_path, module, timeout=timeout
                 )
+                try:
+                    compiled = module_path.read_text(encoding="utf-8")
+                except OSError:
+                    compiled = None
             finally:
                 try:
                     module_path.unlink()
@@ -762,8 +885,11 @@ def run_ai_proof_repair(
             log_path.write_text(log, encoding="utf-8")
             log_parts.append(f"[{module} attempt {attempt}]\n{log}")
             accepted, error_code = _build_log_accepts(
-                returncode, log, theorem_name=theorem_name
+                returncode, log, theorem_name=theorem_name, module=module
             )
+            if accepted and compiled != source:
+                # The file Lake compiled is not the evidence we recorded.
+                accepted, error_code = False, "source_mismatch"
             outcome.attempts.append(
                 AiProofAttempt(
                     attempt=attempt,
@@ -789,7 +915,11 @@ def run_ai_proof_repair(
                 break
             outcome.error_code = error_code
             feedback.append(
-                {"attempt": attempt, "error_code": error_code, "log_tail": _tail(log)}
+                {
+                    "attempt": attempt,
+                    "error_code": error_code,
+                    "log_tail": _tail(_redact_log(log, repo_path)),
+                }
             )
             if error_code in {"lake_missing", "timeout"}:
                 break
@@ -804,6 +934,7 @@ def run_ai_proof_repair(
     )
     complete = all(o.proved for o in outcomes)
     failed = [o for o in outcomes if not o.proved]
+    annotate_residual_atoms(lean_cert, [o.to_dict() for o in failed])
     error_code = None
     if not complete:
         error_code = next((o.error_code for o in failed if o.error_code), "tactic_failed")

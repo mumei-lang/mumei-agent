@@ -139,6 +139,8 @@ def collect_escalation_metrics(bundle_path: str) -> dict[str, Any]:
     total_atoms = int(summary.get("total_atoms", 0) or 0)
     if not candidates:
         lean_successes = int(summary.get("lean_successes", 0) or 0)
+        ai_proof_successes = int(summary.get("ai_proof_successes", 0) or 0)
+        known_witness_successes = int(summary.get("known_witness_successes", 0) or 0)
         successes_by_reason = _success_counts_by_reason(
             summary.get("successes_by_failure_reason"),
             by_reason,

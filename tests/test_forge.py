@@ -733,3 +733,21 @@ class TestEscalationMetricsProvenance:
         assert metrics["ai_proof_successes"] == 1
         assert metrics["known_witness_successes"] == 1
         assert metrics["success_rate"] == 1.0
+
+    def test_collect_escalation_metrics_summary_only_provenance(self, tmp_path):
+        bundle_path = tmp_path / "summary.escalation-bundle.json"
+        bundle_path.write_text(json.dumps({
+            "summary": {
+                "total_atoms": 3,
+                "candidate_count": 3,
+                "lean_successes": 3,
+                "ai_proof_successes": 2,
+                "known_witness_successes": 1,
+            },
+        }), encoding="utf-8")
+
+        metrics = collect_escalation_metrics(str(bundle_path))
+
+        assert metrics["lean_successes"] == 3
+        assert metrics["ai_proof_successes"] == 2
+        assert metrics["known_witness_successes"] == 1

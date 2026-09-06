@@ -39,6 +39,7 @@ from agent.lean_ai_proof import (
     AI_PROOF_STRATEGY,
     DEFAULT_AI_PROOF_MAX_ATTEMPTS,
     AiProofGenerator,
+    annotate_residual_atoms,
     load_escalation_bundle,
     run_ai_proof_repair,
 )
@@ -344,6 +345,7 @@ def _combine_with_ai_proof(
     escalation_bundle_path: str | Path | None,
     max_attempts: int,
     evidence_dir: str | Path | None,
+    lean_cert_out: str | Path | None = None,
 ) -> dict[str, Any]:
     """Task 2-D stage: AI-generate + Lake-check proofs for residual unknowns.
 
@@ -387,9 +389,13 @@ def _combine_with_ai_proof(
     )
     ai_cert = ai.get("lean_cert")
     lean_cert_path = primary.get("lean_cert_path")
+    if not isinstance(lean_cert_path, str) and lean_cert_out is not None:
+        lean_cert_path = str(lean_cert_out)
     if isinstance(ai_cert, dict):
         lean_cert = merge_lean_cert_into_proof_cert(base_cert, ai_cert)
-        if ai.get("ai_proof_used") and isinstance(lean_cert_path, str):
+        annotate_residual_atoms(lean_cert, list(ai.get("ai_proof_outcomes") or []))
+        touched = bool(ai.get("ai_proof_used")) or bool(ai.get("ai_proof_attempted"))
+        if touched and isinstance(lean_cert_path, str):
             try:
                 Path(lean_cert_path).write_text(
                     json.dumps(lean_cert, indent=2, ensure_ascii=False) + "\n",
@@ -397,8 +403,12 @@ def _combine_with_ai_proof(
                 )
             except OSError as exc:
                 diagnostics.append(f"could not persist AI-upgraded lean-cert: {exc}")
+                lean_cert_path = primary.get("lean_cert_path")
+        elif not touched:
+            lean_cert_path = primary.get("lean_cert_path")
     else:
         lean_cert = base_cert
+        lean_cert_path = primary.get("lean_cert_path")
     combined_success, partial_success = _unknowns_verified_in_cert(
         original_cert, lean_cert
     )
@@ -423,7 +433,15 @@ def _combine_with_ai_proof(
     )
     return _result(
         success=combined_success,
-        returncode=0 if combined_success else int(primary.get("returncode", -1)),
+        returncode=(
+            0
+            if combined_success
+            else (
+                int(primary.get("returncode", -1) or 0)
+                or int(ai.get("returncode", 1) or 0)
+                or 1
+            )
+        ),
         lean_cert_path=lean_cert_path if isinstance(lean_cert_path, str) else None,
         lean_cert=lean_cert,
         stdout=stdout,
@@ -501,6 +519,7 @@ def run_lean_bridge(
         escalation_bundle_path=escalation_bundle_path,
         max_attempts=ai_proof_max_attempts,
         evidence_dir=ai_proof_evidence_dir,
+        lean_cert_out=lean_cert_out,
     )
 
 

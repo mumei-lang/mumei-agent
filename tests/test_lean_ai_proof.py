@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -93,6 +94,7 @@ def _fake_repo(tmp_path: Path, *, with_statement: bool = True) -> Path:
 
 def _cert() -> dict:
     return {
+        "file": "ai_e2e.mm",
         "all_verified": False,
         "atoms": [
             {"name": "ok", "z3_check_result": "unsat"},
@@ -109,12 +111,17 @@ def _cert() -> dict:
     }
 
 
-def _lake_ok() -> tuple[int, str]:
+def _lake_ok(module: str = "Generated.AiProof.Square_nonneg") -> tuple[int, str]:
     return 0, (
-        "info: 'Generated.AiProof.Square_nonneg.square_nonneg_correct' depends on "
+        f"info: '{module}.square_nonneg_correct' depends on "
         "axioms: [propext, Classical.choice, Quot.sound]\n"
         "Build completed successfully.\n"
     )
+
+
+def _lake_ok_for(repo_path, module, *, timeout):
+    """Lake stand-in whose `#print axioms` line names the module actually built."""
+    return _lake_ok(module)
 
 
 def _lake_unsolved() -> tuple[int, str]:
@@ -202,7 +209,7 @@ def test_trusted_statement_is_lifted_from_bridge_module(tmp_path: Path) -> None:
 def test_ai_proof_skips_atoms_without_trusted_statement(tmp_path: Path) -> None:
     repo = _fake_repo(tmp_path, with_statement=False)
     gen = ScriptedGenerator([_good_module()])
-    with _patch_lake(return_value=_lake_ok()) as lake:
+    with _patch_lake(side_effect=_lake_ok_for) as lake:
         result = run_ai_proof_repair(cert=_cert(), mumei_lean_repo=repo, generator=gen)
     assert result is not None
     assert gen.requests == []
@@ -219,8 +226,7 @@ def test_ai_proof_wrong_statement_cannot_certify_contract(tmp_path: Path) -> Non
     seen: list[str] = []
 
     def fake_lake(repo_path, module, *, timeout):
-        src = (repo_path / "generated" / "Generated" / "AiProof" / "Square_nonneg.lean").read_text()
-        seen.append(src)
+        seen.append(lean_ai_proof.ai_proof_module_path(repo_path, module).read_text())
         return 1, "error: unsolved goals\n⊢ result ≥ 0"
 
     with _patch_lake(side_effect=fake_lake):
@@ -251,6 +257,22 @@ def test_build_log_axiom_audit(log: str, expected: str | None) -> None:
     assert code == expected
 
 
+def test_build_log_axiom_audit_requires_exact_declaration() -> None:
+    log = "'Generated.Other.t_correct' depends on axioms: [propext]"
+    assert lean_ai_proof._build_log_accepts(
+        0, log, theorem_name="t_correct", module="Generated.AiProof.T_abc"
+    ) == (False, "axiom_audit_missing")
+    assert lean_ai_proof._build_log_accepts(
+        0, "'X.not_t_correct' does not depend on any axioms", theorem_name="t_correct"
+    ) == (False, "axiom_audit_missing")
+    assert lean_ai_proof._build_log_accepts(
+        0,
+        "'Generated.AiProof.T_abc.t_correct' depends on axioms: [propext]",
+        theorem_name="t_correct",
+        module="Generated.AiProof.T_abc",
+    ) == (True, None)
+
+
 def test_build_log_timeout_is_classified() -> None:
     accepted, code = lean_ai_proof._build_log_accepts(
         -1, "error: lake build timed out after 5 seconds"
@@ -263,7 +285,7 @@ def test_ai_proof_evidence_is_not_overwritten_across_runs(tmp_path: Path) -> Non
     evidence = tmp_path / "evidence"
     paths = []
     for reply in (_good_module(), "```lean\n  intro _\n  omega\n```"):
-        with _patch_lake(return_value=_lake_ok()):
+        with _patch_lake(side_effect=_lake_ok_for):
             result = run_ai_proof_repair(
                 cert=_cert(),
                 mumei_lean_repo=repo,
@@ -288,7 +310,7 @@ def test_ai_proof_promotes_only_after_lake_success(tmp_path: Path) -> None:
     gen = ScriptedGenerator([_good_module()])
     evidence = tmp_path / "evidence"
 
-    with _patch_lake(return_value=_lake_ok()) as run:
+    with _patch_lake(side_effect=_lake_ok_for) as run:
         result = run_ai_proof_repair(
             cert=_cert(),
             mumei_lean_repo=repo,
@@ -301,7 +323,9 @@ def test_ai_proof_promotes_only_after_lake_success(tmp_path: Path) -> None:
     assert result["ai_proof_used"] is True
     assert result["ai_proof_proved"] == 1
     assert result["fallback_strategy"] == AI_PROOF_STRATEGY
-    assert run.call_args.args[:2] == (repo, "Generated.AiProof.Square_nonneg")
+    assert run.call_args.args[0] == repo
+    module = run.call_args.args[1]
+    assert re.fullmatch(r"Generated\.AiProof\.Square_nonneg_[0-9a-f]{8}", module)
 
     atom = next(a for a in result["lean_cert"]["atoms"] if a["name"] == "square_nonneg")
     assert atom["z3_check_result"] == "lean_verified"
@@ -310,7 +334,7 @@ def test_ai_proof_promotes_only_after_lake_success(tmp_path: Path) -> None:
     assert meta["ai_proof_used"] is True
     assert meta["known_witness_used"] is False
     assert meta["ai_proof_attempts"] == 1
-    assert meta["lean_module"] == "Generated.AiProof.Square_nonneg"
+    assert meta["lean_module"] == module
     assert meta["theorem_name"] == "square_nonneg_correct"
     assert atom["translator_version"] == "mumei-lean-translator-ir-v1"
     assert atom["bridge_lemma_hash"] == "hash-for-test"
@@ -318,7 +342,7 @@ def test_ai_proof_promotes_only_after_lake_success(tmp_path: Path) -> None:
     # evidence: source and build log persisted, module removed from checkout
     assert Path(meta["proof_path"]).read_text(encoding="utf-8").startswith("import MumeiLean")
     assert "Build completed" in Path(meta["build_log_path"]).read_text(encoding="utf-8")
-    assert not (repo / "generated" / "Generated" / "AiProof" / "Square_nonneg.lean").exists()
+    assert not lean_ai_proof.ai_proof_module_path(repo, module).exists()
     # unaffected atoms untouched
     assert next(a for a in result["lean_cert"]["atoms"] if a["name"] == "ok") == {
         "name": "ok",
@@ -330,9 +354,9 @@ def test_ai_proof_repairs_with_lean_feedback(tmp_path: Path) -> None:
     repo = _fake_repo(tmp_path)
     gen = ScriptedGenerator([_good_module(), _good_module()])
 
-    with _patch_lake(
-        side_effect=[_lake_unsolved(), _lake_ok()],
-    ):
+    calls = iter([lambda m: _lake_unsolved(), _lake_ok])
+
+    with _patch_lake(side_effect=lambda repo_path, module, *, timeout: next(calls)(module)):
         result = run_ai_proof_repair(
             cert=_cert(),
             mumei_lean_repo=repo,
@@ -383,7 +407,7 @@ def test_ai_proof_rejects_sorry_before_lake(tmp_path: Path) -> None:
         ["theorem square_nonneg_correct : True := by sorry", _good_module()]
     )
 
-    with _patch_lake(return_value=_lake_ok()) as run:
+    with _patch_lake(side_effect=_lake_ok_for) as run:
         result = run_ai_proof_repair(
             cert=_cert(),
             mumei_lean_repo=repo,
@@ -417,7 +441,7 @@ def test_ai_proof_does_not_trust_exit_zero_with_sorry_warning(tmp_path: Path) ->
 
 def test_ai_proof_generator_error_degrades_gracefully(tmp_path: Path) -> None:
     repo = _fake_repo(tmp_path)
-    gen = ScriptedGenerator([])  # raises on first call
+    gen = ScriptedGenerator([])  # raises on every call
     with _patch_lake() as run:
         result = run_ai_proof_repair(
             cert=_cert(), mumei_lean_repo=repo, generator=gen, evidence_dir=tmp_path / "e"
@@ -426,6 +450,137 @@ def test_ai_proof_generator_error_degrades_gracefully(tmp_path: Path) -> None:
     assert result["success"] is False
     assert result["error_code"] == "generator_error"
     run.assert_not_called()
+
+
+def test_ai_proof_transient_generator_error_is_retried(tmp_path: Path) -> None:
+    repo = _fake_repo(tmp_path)
+
+    class Flaky(ScriptedGenerator):
+        def __init__(self) -> None:
+            super().__init__([_good_module()])
+            self.calls = 0
+
+        def generate_lean_proof(self, request: dict) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("HTTP 429")
+            return super().generate_lean_proof(request)
+
+    gen = Flaky()
+    with _patch_lake(side_effect=_lake_ok_for):
+        result = run_ai_proof_repair(
+            cert=_cert(), mumei_lean_repo=repo, generator=gen, max_attempts=2
+        )
+    assert result is not None
+    assert gen.calls == 2
+    assert result["success"] is True
+    assert gen.requests[0]["feedback"][0]["error_code"] == "generator_error"
+
+
+def test_ai_proof_zero_attempts_does_nothing(tmp_path: Path) -> None:
+    repo = _fake_repo(tmp_path)
+    gen = ScriptedGenerator([_good_module()])
+    with _patch_lake(side_effect=_lake_ok_for) as lake:
+        result = run_ai_proof_repair(
+            cert=_cert(), mumei_lean_repo=repo, generator=gen, max_attempts=0
+        )
+    assert result is None
+    assert gen.requests == []
+    lake.assert_not_called()
+
+
+def test_ai_proof_rejects_when_lake_compiled_different_source(tmp_path: Path) -> None:
+    """A concurrent writer swapping the module mid-build must not be certified."""
+    repo = _fake_repo(tmp_path)
+    gen = ScriptedGenerator([_good_module()])
+
+    def racing_lake(repo_path, module, *, timeout):
+        path = lean_ai_proof.ai_proof_module_path(repo_path, module)
+        path.write_text(path.read_text() + "\n-- overwritten by another run\n")
+        return _lake_ok(module)
+
+    with _patch_lake(side_effect=racing_lake):
+        result = run_ai_proof_repair(
+            cert=_cert(), mumei_lean_repo=repo, generator=gen, max_attempts=1
+        )
+    assert result is not None
+    assert result["success"] is False
+    assert result["error_code"] == "source_mismatch"
+
+
+def test_ai_proof_modules_are_isolated_per_run(tmp_path: Path) -> None:
+    repo = _fake_repo(tmp_path)
+    modules = []
+    for _ in range(2):
+        with _patch_lake(side_effect=_lake_ok_for) as lake:
+            run_ai_proof_repair(
+                cert=_cert(), mumei_lean_repo=repo, generator=ScriptedGenerator([_good_module()])
+            )
+        modules.append(lake.call_args.args[1])
+    assert modules[0] != modules[1]
+
+
+def test_ai_proof_feedback_redacts_local_paths(tmp_path: Path) -> None:
+    repo = _fake_repo(tmp_path)
+    gen = ScriptedGenerator([_good_module(), _good_module()])
+    log = f"error: {repo.resolve()}/generated/Generated/X.lean:3:1: unsolved goals"
+    with _patch_lake(return_value=(1, log)):
+        run_ai_proof_repair(
+            cert=_cert(), mumei_lean_repo=repo, generator=gen, max_attempts=2
+        )
+    tail = gen.requests[1]["feedback"][0]["log_tail"]
+    assert str(repo.resolve()) not in tail
+    assert "<mumei-lean>/generated/Generated/X.lean:3:1" in tail
+
+
+def test_trusted_statement_is_scoped_to_atom_module(tmp_path: Path) -> None:
+    """A same-named theorem in another generated module must never be used."""
+    repo = _fake_repo(tmp_path)
+    stale = BRIDGE_MODULE.replace("Generated.Ai_e2e", "Generated.Stale").replace(
+        "(result ≥ 0)", "(result ≥ 1)"
+    )
+    (repo / "generated" / "Generated" / "Stale.lean").write_text(stale, encoding="utf-8")
+
+    scoped = find_trusted_statement(
+        repo, "square_nonneg", theorem_name="square_nonneg_correct", module_key="ai_e2e"
+    )
+    assert scoped is not None
+    assert scoped.source_path.endswith("Ai_e2e.lean")
+    assert "(result ≥ 0)" in scoped.header
+    # unscoped lookup is ambiguous → refuse rather than guess
+    assert (
+        find_trusted_statement(repo, "square_nonneg", theorem_name="square_nonneg_correct")
+        is None
+    )
+    assert (
+        find_trusted_statement(
+            repo, "square_nonneg", theorem_name="square_nonneg_correct", module_key="other"
+        )
+        is None
+    )
+
+    # end-to-end: the cert's file-derived module key selects the right statement
+    cert = _cert()
+    gen = ScriptedGenerator([_good_module()])
+    seen: list[str] = []
+
+    def fake_lake(repo_path, module, *, timeout):
+        seen.append(lean_ai_proof.ai_proof_module_path(repo_path, module).read_text())
+        return _lake_ok(module)
+
+    with _patch_lake(side_effect=fake_lake):
+        result = run_ai_proof_repair(cert=cert, mumei_lean_repo=repo, generator=gen)
+    assert result is not None and result["success"] is True
+    assert "(result ≥ 0)" in seen[0] and "(result ≥ 1)" not in seen[0]
+
+
+def test_bridge_module_path_mirrors_ingest_cert(tmp_path: Path) -> None:
+    assert lean_ai_proof.bridge_module_path_for(tmp_path, "std/math/abs") == (
+        tmp_path / "generated" / "Generated" / "Std" / "Math" / "Abs.lean"
+    )
+    assert lean_ai_proof.bridge_module_key_for({"file": "./ai_e2e.mm"}, {}) == "ai_e2e"
+    assert lean_ai_proof.bridge_module_key_for({}, {"module_key": "std/core"}) == "std/core"
+    assert lean_ai_proof.bridge_module_key_for({}, {}) == "atom_module"
 
 
 def test_ai_proof_noop_without_unknowns(tmp_path: Path) -> None:
@@ -452,7 +607,7 @@ def test_ai_proof_uses_escalation_bundle_hints(tmp_path: Path) -> None:
         "counterexamples": [{"x": -1}],
         "tried_invariants": [{"expression": "x >= 0", "iteration": 1}],
     }
-    with _patch_lake(return_value=_lake_ok()):
+    with _patch_lake(side_effect=_lake_ok_for):
         run_ai_proof_repair(
             cert=_cert(),
             mumei_lean_repo=repo,
@@ -476,7 +631,7 @@ def test_ai_proof_refuses_duplicate_atom_names(tmp_path: Path) -> None:
         {"name": "square_nonneg", "z3_check_result": "unknown", "ensures": "result > 0"}
     )
     gen = ScriptedGenerator([_good_module(), _good_module()])
-    with _patch_lake(return_value=_lake_ok()) as lake:
+    with _patch_lake(side_effect=_lake_ok_for) as lake:
         result = run_ai_proof_repair(cert=cert, mumei_lean_repo=repo, generator=gen)
     assert result is not None
     lake.assert_not_called()
@@ -511,7 +666,7 @@ def test_run_lean_bridge_runs_ai_when_bridge_exits_zero_with_residual_unknown(
 
     with patch("agent.lean_bridge.subprocess.run", side_effect=fake_bridge), patch(
         "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
-    ), _patch_lake(return_value=_lake_ok()):
+    ), _patch_lake(side_effect=_lake_ok_for):
         result = lean_bridge.run_lean_bridge(
             cert_path=cert_path,
             lean_cert_out=lean_cert_out,
@@ -545,7 +700,7 @@ def test_run_lean_bridge_ai_stage_after_known_witness(tmp_path: Path) -> None:
 
     with patch("agent.lean_bridge.subprocess.run") as bridge_run, patch(
         "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
-    ), _patch_lake(return_value=_lake_ok()):
+    ), _patch_lake(side_effect=_lake_ok_for):
         bridge_run.side_effect = [
             MagicMock(returncode=1, stdout="", stderr="error: unsolved goals"),
             MagicMock(returncode=0, stdout="built", stderr=""),
@@ -595,7 +750,7 @@ def test_run_lean_bridge_ai_partial_success_reported(tmp_path: Path) -> None:
 
     with patch("agent.lean_bridge.subprocess.run") as bridge_run, patch(
         "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
-    ), _patch_lake(return_value=_lake_ok()):
+    ), _patch_lake(side_effect=_lake_ok_for):
         bridge_run.return_value = MagicMock(
             returncode=1, stdout="", stderr="error: unsolved goals"
         )
@@ -609,12 +764,82 @@ def test_run_lean_bridge_ai_partial_success_reported(tmp_path: Path) -> None:
         )
 
     assert result["success"] is False
+    assert result["returncode"] != 0
     assert result["partial_success"] is True
     assert result["ai_proof_used"] is True
     assert result["ai_proof_residual"] == ["hard_one"]
     atoms = {a["name"]: a for a in result["lean_cert"]["atoms"]}
     assert atoms["square_nonneg"]["z3_check_result"] == "lean_verified"
     assert atoms["hard_one"]["z3_check_result"] == "unknown"
+    # failed AI attempt is recorded on the residual atom for the human fallback
+    outcome = atoms["hard_one"]["ai_proof_outcome"]
+    assert outcome["proved"] is False
+    assert outcome["error_code"] == "no_trusted_statement"
+    from agent import human_review as hr
+
+    stages = hr.HumanReviewTracker._prior_lean_stages(atoms["hard_one"])
+    assert stages["ai_generated_proof"] is True
+    assert stages["ai_proof_error_code"] == "no_trusted_statement"
+    on_disk = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    disk_hard = next(a for a in on_disk["atoms"] if a["name"] == "hard_one")
+    assert disk_hard["ai_proof_outcome"]["error_code"] == "no_trusted_statement"
+
+
+def test_run_lean_bridge_ai_failure_after_bridge_exit_zero_is_nonzero(
+    tmp_path: Path,
+) -> None:
+    repo = _fake_repo(tmp_path)
+    cert_path = tmp_path / "in.json"
+    cert_path.write_text(json.dumps(_cert()), encoding="utf-8")
+    lean_cert_out = tmp_path / "out.json"
+    gen = ScriptedGenerator(["```lean\n  sorry\n```"])
+
+    def fake_bridge(*args, **kwargs):
+        lean_cert_out.write_text(json.dumps(_cert()), encoding="utf-8")
+        return MagicMock(returncode=0, stdout="partial translation", stderr="")
+
+    with patch("agent.lean_bridge.subprocess.run", side_effect=fake_bridge), patch(
+        "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
+    ), _patch_lake(return_value=_lake_unsolved()):
+        result = lean_bridge.run_lean_bridge(
+            cert_path=cert_path,
+            lean_cert_out=lean_cert_out,
+            mumei_lean_repo=repo,
+            ai_proof_generator=gen,
+            ai_proof_max_attempts=1,
+        )
+    assert result["success"] is False
+    assert result["returncode"] != 0
+
+
+def test_run_lean_bridge_writes_requested_cert_when_only_ai_succeeds(
+    tmp_path: Path,
+) -> None:
+    """bridge.py failing before writing its cert must not lose the AI upgrade."""
+    repo = _fake_repo(tmp_path)
+    cert_path = tmp_path / "in.json"
+    cert_path.write_text(json.dumps(_cert()), encoding="utf-8")
+    lean_cert_out = tmp_path / "out.json"
+    gen = ScriptedGenerator([_good_module()])
+
+    with patch("agent.lean_bridge.subprocess.run") as bridge_run, patch(
+        "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
+    ), _patch_lake(side_effect=_lake_ok_for):
+        bridge_run.return_value = MagicMock(
+            returncode=1, stdout="", stderr="error: unsolved goals"
+        )
+        result = lean_bridge.run_lean_bridge(
+            cert_path=cert_path,
+            lean_cert_out=lean_cert_out,
+            mumei_lean_repo=repo,
+            ai_proof_generator=gen,
+            ai_proof_evidence_dir=tmp_path / "evidence",
+        )
+    assert result["success"] is True
+    assert result["lean_cert_path"] == str(lean_cert_out)
+    on_disk = json.loads(lean_cert_out.read_text(encoding="utf-8"))
+    atom = next(a for a in on_disk["atoms"] if a["name"] == "square_nonneg")
+    assert atom["z3_check_result"] == "lean_verified"
 
 
 def test_run_lean_bridge_without_generator_is_unchanged(tmp_path: Path) -> None:
@@ -685,7 +910,7 @@ def test_run_lean_fallback_inner_records_ai_provenance(tmp_path: Path) -> None:
 
     with patch("agent.lean_bridge.subprocess.run") as bridge_run, patch(
         "agent.lean_bridge.shutil.which", return_value="/usr/bin/lake"
-    ), _patch_lake(return_value=_lake_ok()):
+    ), _patch_lake(side_effect=_lake_ok_for):
         bridge_run.return_value = MagicMock(
             returncode=1, stdout="", stderr="error: unsolved goals"
         )
