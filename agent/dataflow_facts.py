@@ -26,8 +26,15 @@ their regex fallbacks.
 
 The same walk also derives the resource / initialisation facts behind the
 new bug categories (nil-map assignment, lock held at return / double lock,
-resource opened but never released). Those are reported only when the
-condition holds on *every* path, which keeps them free of path-merge noise.
+resource opened but never released). Unlike the safety facts these are
+*may*-path findings: a single path on which the map is still nil / the lock
+is still held / the handle is still open at the exit is reported, because a
+handle that is definitely held on that path is a bug on that path. Merges
+intersect the held sets, so a resource released on one branch of an ``if`` is
+not reported after the join.
+
+Bodies containing ``goto`` are not analysed (``None``), since a label can
+re-enter any point of the function.
 """
 from __future__ import annotations
 
@@ -53,7 +60,6 @@ GO_UNSIGNED_TYPES = frozenset(
 )
 
 _LOCK_METHODS = {"Lock", "RLock"}
-_UNLOCK_METHODS = {"Unlock", "RUnlock"}
 # Calls whose integer result is documented to be non-negative.
 _NONNEG_CALLS = re.compile(
     r"^(?:len|cap|copy|sort\.Search\w*|sortSearch|bits\.(?:Len|OnesCount|TrailingZeros|LeadingZeros)\w*|"
@@ -735,6 +741,24 @@ def _strip_borrowing_calls(value: str) -> str:
     return result
 
 
+def _join_termination(*kinds: str) -> str:
+    """Termination kind of a join where every branch left the block."""
+    for kind in ("fallthrough", "continue", "break"):
+        if kind in kinds:
+            return kind
+    return kinds[0] if kinds else "return"
+
+
+def _contains_kind(statements: tuple[tree_sitter_extract.Statement, ...], kind: str) -> bool:
+    for statement in statements:
+        if statement.kind == kind:
+            return True
+        for group in (statement.init, statement.body, statement.orelse, statement.post):
+            if _contains_kind(group, kind):
+                return True
+    return False
+
+
 def _absorb(target: _Env, source: _Env) -> None:
     target.nonzero |= source.nonzero
     target.nonneg |= source.nonneg
@@ -863,10 +887,13 @@ class FunctionDataflow:
         key = _norm(expression)
         if key in self.return_facts:
             return self.return_facts[key]
+        if not key:
+            return None
+        # Sub-expression lookup: the key must appear as a whole operand of the
+        # return expression, not as a substring of a longer identifier.
+        pattern = re.compile(rf"(?<![\w.]){re.escape(key)}(?![\w(])")
         candidates = [
-            facts
-            for text, facts in self.return_facts.items()
-            if key and (key in text)
+            facts for text, facts in self.return_facts.items() if pattern.search(text)
         ]
         if not candidates:
             return None
@@ -896,20 +923,16 @@ class _Walker:
         self.unreliable = set(tree.closure_assigned) | set(tree.address_taken)
         self.return_facts: dict[str, list[_Env]] = {}
         self.issues: list[DataflowIssue] = []
-        self.release_anywhere: set[str] = set()
-        self._scan_releases(tree.statements)
-
-    # -- pre-scan --------------------------------------------------------
-
-    def _scan_releases(self, statements: tuple[tree_sitter_extract.Statement, ...]) -> None:
-        for statement in statements:
-            for text in (*statement.values, statement.text if statement.kind in {"expr", "defer", "closure"} else ""):
-                for match in re.finditer(r"(&?[A-Za-z_][\w.]*)\.(Unlock|RUnlock|Close)\s*\(", text):
-                    self.release_anywhere.add(match.group(1).lstrip("&"))
-            for group in (statement.init, statement.body, statement.orelse, statement.post):
-                self._scan_releases(group)
+        # Environments carried by ``break`` to the innermost enclosing switch /
+        # loop (one list per open construct).
+        self.break_targets: list[list[_Env]] = []
 
     # -- helpers ---------------------------------------------------------
+
+    @staticmethod
+    def _length_bounded(name: str, env: _Env) -> bool:
+        """``name`` is at most a sequence length, so small arithmetic cannot overflow."""
+        return name in env.len_values or any(index == name for index, _ in env.lt_len)
 
     def _reliable(self, name: str) -> bool:
         root = name.split(".")[0].lstrip("&*")
@@ -979,27 +1002,38 @@ class _Walker:
 
     def walk(
         self, statements: tuple[tree_sitter_extract.Statement, ...], env: _Env
-    ) -> tuple[_Env, bool]:
-        """Walk ``statements`` from ``env``; return ``(env_after, terminated)``."""
+    ) -> tuple[_Env, str]:
+        """Walk ``statements`` from ``env``; return ``(env_after, terminated)``.
+
+        ``terminated`` is ``""`` when control falls off the end, otherwise the
+        kind of statement that left the block (``"return"``, ``"terminate"``,
+        ``"break"``, ``"continue"``, ``"fallthrough"``).
+        """
         for statement in statements:
             env, terminated = self.statement(statement, env)
             if terminated:
-                return env, True
-        return env, False
+                return env, terminated
+        return env, ""
 
-    def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, bool]:
+    def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
         kind = statement.kind
         if kind == "return":
             self._on_return(statement, env)
-            return env, True
+            return env, kind
         if kind == "terminate":
-            return env, True
+            return env, kind
+        if kind == "break":
+            if self.break_targets:
+                self.break_targets[-1].append(env.copy())
+            return env, kind
+        if kind in {"continue", "fallthrough"}:
+            return env, kind
         if kind == "if":
             return self._if(statement, env)
         if kind == "for":
-            return self._for(statement, env), False
+            return self._for(statement, env), ""
         if kind == "range":
-            return self._range(statement, env), False
+            return self._range(statement, env), ""
         if kind == "switch":
             return self._switch(statement, env)
         if kind == "block":
@@ -1007,32 +1041,37 @@ class _Walker:
             return inner, terminated
         if kind in {"define", "assign"}:
             self._assign(statement, env)
-            return env, False
+            return env, ""
         if kind in {"inc", "dec"}:
             for target in statement.targets:
                 name = _norm(target)
-                keep_nonneg = kind == "inc" and name in env.nonneg
+                keep_nonneg = kind == "inc" and name in env.nonneg and self._length_bounded(name, env)
                 env.kill(name)
                 if keep_nonneg:
                     env.nonneg.add(name)
-            return env, False
+            return env, ""
         if kind == "const":
             declarations = [
                 (name, value) for name, value in zip(statement.targets, statement.values)
             ]
-            folded = fold_constants(declarations, self.constants)
+            # Local constants are lexically scoped: they live in the path
+            # environment only, so a same-named parameter used after the
+            # enclosing block is not mistaken for the constant.
+            base = dict(self.constants)
+            base.update(env.consts)
+            folded = fold_constants(declarations, base)
             for name, _value in declarations:
+                env.kill(name)
                 if name in folded:
-                    self.constants[name] = folded[name]
-                    env.consts[name] = folded[name]
-            return env, False
+                    env.set_const(name, folded[name])
+            return env, ""
         if kind == "var":
             self._var(statement, env)
-            return env, False
+            return env, ""
         if kind == "defer":
             for value in statement.values:
                 self._release(value, env, deferred=True)
-            return env, False
+            return env, ""
         if kind == "closure":
             for value in statement.values:
                 if re.search(r"\.(Unlock|RUnlock|Close)\s*\(", value):
@@ -1042,14 +1081,12 @@ class _Walker:
                         }
             for name in statement.targets:
                 env.kill(name)
-            return env, False
+            return env, ""
         if kind == "expr":
             for value in statement.values:
                 self._expression(value, env)
-            return env, False
-        if kind == "go":
-            return env, False
-        return env, False
+            return env, ""
+        return env, ""
 
     def _on_return(self, statement: tree_sitter_extract.Statement, env: _Env) -> None:
         keys = set()
@@ -1071,11 +1108,9 @@ class _Walker:
             if held[1] in deferred:
                 continue
             if held[0] == "lock":
-                name = held[1]
-                if name in self.release_anywhere:
-                    self.issues.append(
-                        DataflowIssue("lock_held_at_return", name, statement.text, statement.start)
-                    )
+                self.issues.append(
+                    DataflowIssue("lock_held_at_return", held[1], statement.text, statement.start)
+                )
             elif held[0] == "file":
                 name, err_name = held[1], held[2]
                 if err_name and err_name in env.nonnil:
@@ -1088,18 +1123,18 @@ class _Walker:
                     DataflowIssue("resource_leak", name, statement.text, statement.start)
                 )
 
-    def _if(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, bool]:
+    def _if(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
         base = env.copy()
         if statement.init:
             base, _ = self.walk(statement.init, base)
         then_env = self._apply_condition(base, statement.condition, True)
         then_env, then_terminated = self.walk(statement.body, then_env)
         else_env = self._apply_condition(base, statement.condition, False)
-        else_terminated = False
+        else_terminated = ""
         if statement.orelse:
             else_env, else_terminated = self.walk(statement.orelse, else_env)
         if then_terminated and else_terminated:
-            return then_env.merge(else_env), True
+            return then_env.merge(else_env), _join_termination(then_terminated, else_terminated)
         if then_terminated:
             result = else_env
         elif else_terminated:
@@ -1110,7 +1145,7 @@ class _Walker:
             for name in self._assigned_names(statement.init):
                 # ``if v, ok := ...; ok {`` scopes ``v``/``ok`` to the statement.
                 result.kill(name)
-        return result, False
+        return result, ""
 
     def _for(self, statement: tree_sitter_extract.Statement, env: _Env) -> _Env:
         outer = env.copy()
@@ -1143,7 +1178,9 @@ class _Walker:
         loop_env.nonneg |= kept_nonneg
         self._keep_nil_maps(loop_env, outer, statement.body + statement.post)
         body_env = self._apply_condition(loop_env, statement.condition, True) if statement.condition else loop_env
+        self.break_targets.append([])
         body_end, terminated = self.walk(statement.body, body_env)
+        self.break_targets.pop()
         after = self._loop_exit(outer, body_end, terminated, statement)
         for name in self._assigned_names(statement.init):
             after.kill(name)
@@ -1153,7 +1190,7 @@ class _Walker:
         self,
         before: _Env,
         body_end: _Env,
-        terminated: bool,
+        terminated: str,
         statement: tree_sitter_extract.Statement,
     ) -> _Env:
         """State after a loop: zero iterations (``before``) or the end of some
@@ -1182,7 +1219,7 @@ class _Walker:
         """True when a ``break`` / ``continue`` / ``goto`` appears anywhere in
         ``statements`` (nested constructs included, conservatively)."""
         for statement in statements:
-            if statement.kind == "terminate":
+            if statement.kind in {"terminate", "break", "continue", "goto"}:
                 return True
             if statement.kind == "closure":
                 continue
@@ -1214,10 +1251,12 @@ class _Walker:
                 loop_env.add_lt_len(index, iterable)
                 if len(statement.targets) >= 2:
                     loop_env.kill(_norm(statement.targets[1]))
+        self.break_targets.append([])
         body_end, terminated = self.walk(statement.body, loop_env)
+        self.break_targets.pop()
         return self._loop_exit(env, body_end, terminated, statement)
 
-    def _switch(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, bool]:
+    def _switch(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
         base = env.copy()
         if statement.init:
             base, _ = self.walk(statement.init, base)
@@ -1226,6 +1265,9 @@ class _Walker:
         previous_conditions: list[str] = []
         tag = _norm(statement.condition)
         case_values: list[str] = []
+        carried: _Env | None = None
+        exits: list[str] = []
+        self.break_targets.append([])
         for case in statement.body:
             case_env = base.copy()
             if case.kind == "default":
@@ -1252,21 +1294,32 @@ class _Walker:
                     condition = " || ".join(case.values)
                     case_env = self._apply_condition(case_env, condition, True)
                     previous_conditions.append(condition)
+            if carried is not None:
+                # ``fallthrough`` from the previous case enters this body
+                # without this case's selector guard.
+                case_env = case_env.merge(carried)
+                carried = None
             case_env, terminated = self.walk(case.body, case_env)
-            if not terminated:
+            if terminated == "fallthrough":
+                carried = case_env
+            elif not terminated:
                 outgoing.append(case_env)
+            else:
+                exits.append(terminated)
+        if carried is not None:
+            outgoing.append(carried)
+        outgoing.extend(self.break_targets.pop())
         if not has_default:
-            fallthrough = base.copy()
-            outgoing.append(fallthrough)
+            outgoing.append(base.copy())
         if not outgoing:
-            return base, True
+            return base, _join_termination(*exits)
         merged = outgoing[0]
         for other in outgoing[1:]:
             merged = merged.merge(other)
         if statement.init:
             for name in self._assigned_names(statement.init):
                 merged.kill(name)
-        return merged, False
+        return merged, ""
 
     # -- assignments -----------------------------------------------------
 
@@ -1299,10 +1352,16 @@ class _Walker:
         if statement.operator not in {"=", ":="}:
             for target in targets:
                 keep_nonneg = (
-                    statement.operator in {"+=", "*=", "<<=", ">>=", "&=", "|=", "^="}
-                    and target in env.nonneg
+                    target in env.nonneg
                     and len(values) == 1
-                    and self._nonneg_value(values[0], env)
+                    and (
+                        statement.operator in {">>=", "&="}
+                        and self._nonneg_value(values[0], env)
+                        or statement.operator in {"+=", "*=", "<<=", "|=", "^="}
+                        and self._length_bounded(target, env)
+                        and env.value_of(values[0], self.constants) is not None
+                        and env.value_of(values[0], self.constants) >= 0
+                    )
                 )
                 env.kill(target)
                 if keep_nonneg:
@@ -1328,7 +1387,7 @@ class _Walker:
                     root = target.split("[")[0].split(".")[0].lstrip("*")
                     if target.startswith("*"):
                         env.kill(root)
-        if statement.operator == ":=" and len(targets) == 2 and len(values) == 1:
+        if len(targets) >= 2 and len(values) == 1:
             self._open_resource(targets, values[0], env)
         if len(targets) >= 1 and len(values) == 1 and len(targets) != len(values):
             self._escape(values[0], env)
@@ -1342,10 +1401,12 @@ class _Walker:
     def _open_resource(self, targets: list[str], value: str, env: _Env) -> None:
         if not _OPEN_CALLS.match(value.strip()):
             return
-        handle, err = targets[0], targets[1]
-        if handle == "_" or not self._reliable(handle):
-            return
-        env.held.add(("file", handle, err if err != "_" else ""))
+        *handles, err = targets
+        err = err if re.fullmatch(_IDENT, err) and err != "_" else ""
+        for handle in handles:
+            if handle == "_" or not re.fullmatch(_IDENT, handle) or not self._reliable(handle):
+                continue
+            env.held.add(("file", handle, err))
 
     def _escape(self, value: str, env: _Env) -> None:
         """Forget open handles that are passed on / stored (ownership transfer).
@@ -1383,12 +1444,14 @@ class _Walker:
             return
         cast = _CAST.match(text)
         if cast:
-            inner = cast.group(1)
-            inner_value = env.value_of(inner, self.constants)
+            inner_value = env.value_of(cast.group(1), self.constants)
             if inner_value is not None:
                 env.set_const(target, inner_value)
-                return
-            text = inner
+            elif text.split("(", 1)[0] in GO_UNSIGNED_TYPES:
+                env.nonneg.add(target)
+            # A conversion of a non-constant may wrap or change sign, so no other
+            # fact survives it.
+            return
         if re.fullmatch(_IDENT, text) and text != "nil":
             env.copy_facts(text, target)
             env.aliases[target] = env.root(text)
@@ -1507,8 +1570,15 @@ class _Walker:
             left, op, right = arith.groups()
             right_value = env.value_of(right, self.constants)
             left_nonneg = left in env.nonneg or env.consts.get(left, -1) >= 0
-            if op in {"+", "*"} and left_nonneg and (
-                (right_value is not None and right_value >= 0) or right in env.nonneg
+            # ``+`` / ``*`` keep the sign only when the result provably cannot
+            # wrap: the left operand is bounded by a sequence length (or is a
+            # constant) and the right operand is a non-negative constant.
+            if (
+                op in {"+", "*"}
+                and left_nonneg
+                and right_value is not None
+                and right_value >= 0
+                and (left in env.consts or self._length_bounded(left, env))
             ):
                 env.nonneg.add(target)
                 if op == "+" and (
@@ -1546,7 +1616,7 @@ class _Walker:
             if not self._reliable(subject):
                 return
             if method in _LOCK_METHODS:
-                if ("lock", subject) in env.held and method == "Lock" and subject in self.release_anywhere:
+                if ("lock", subject) in env.held and method == "Lock":
                     self.issues.append(
                         DataflowIssue("double_lock", subject, value.strip(), 0)
                     )
@@ -1618,7 +1688,7 @@ def analyze_function(
     ``len(xs)``) seed the entry state. Only Go bodies are analysed for now.
     """
     tree = tree_sitter_extract.extract_statements(body, language)
-    if tree is None:
+    if tree is None or _contains_kind(tree.statements, "goto"):
         return None
     walker = _Walker(tree, constants or {}, param_names or set(), body)
     seed = _Env()

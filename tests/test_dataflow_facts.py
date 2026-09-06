@@ -456,6 +456,179 @@ def test_dataflow_issues_are_appended_after_expression_issues() -> None:
     assert "d" in messages[0] and "deadlock" in messages[-1]
 
 
+# --------------------------------------------------------------------------- #
+# 8. soundness regressions (review findings)
+# --------------------------------------------------------------------------- #
+
+
+def test_switch_break_keeps_zero_divisor_path() -> None:
+    body = (
+        "d := 1\n"
+        "switch mode {\n"
+        "case 0:\n"
+        "    d = 0\n"
+        "    break\n"
+        "default:\n"
+        "    d = 2\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "mode"})
+    assert "d" not in facts.nonzero
+
+
+def test_break_inside_if_in_switch_keeps_path() -> None:
+    body = (
+        "d := 1\n"
+        "switch {\n"
+        "case mode > 0:\n"
+        "    if flag {\n"
+        "        d = 0\n"
+        "        break\n"
+        "    }\n"
+        "    d = 2\n"
+        "}\n"
+        "return n / d\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "mode", "flag"})
+    assert "d" not in facts.nonzero
+
+
+def test_goto_disables_analysis() -> None:
+    body = "if d == 0 {\n    goto done\n}\nreturn n / d\ndone:\nreturn 0\n"
+    assert dataflow_facts.analyze_function(body, "go", param_names={"n", "d"}) is None
+
+
+def test_fallthrough_enters_next_case_without_its_guard() -> None:
+    body = (
+        "switch d {\n"
+        "case 0:\n"
+        "    fallthrough\n"
+        "default:\n"
+        "    return n / d\n"
+        "}\n"
+        "return 0\n"
+    )
+    facts = _facts(body, "n / d", param_names={"n", "d"})
+    assert "d" not in facts.nonzero
+
+    body = (
+        "switch d {\n"
+        "case 0:\n"
+        "    return 0\n"
+        "default:\n"
+        "    return n / d\n"
+        "}\n"
+    )
+    assert "d" in _facts(body, "n / d", param_names={"n", "d"}).nonzero
+
+
+def test_block_local_constant_does_not_leak_to_same_named_parameter() -> None:
+    body = (
+        "if flag {\n"
+        "    const d = 1\n"
+        "    return n / d\n"
+        "}\n"
+        "return n / d\n"
+    )
+    flow = _go(body, param_names={"n", "d", "flag"})
+    assert "d" not in flow.constants
+    facts = flow.facts_for_expression("n / d")
+    assert facts is not None
+    assert "d" not in facts.nonzero and "d" not in facts.consts
+
+    body = "if flag {\n    const d = 1\n    return n / d\n}\nreturn n / dd\n"
+    facts = _facts(body, "n / dd", param_names={"n", "d", "dd", "flag"})
+    assert "d" not in facts.consts
+
+
+def test_signed_conversion_of_unsigned_does_not_bound_index() -> None:
+    body = "i := int(u)\nif i < len(xs) {\n    return xs[i]\n}\nreturn 0\n"
+    facts = _facts(
+        body, "xs[i]", param_names={"u", "xs"}, nonneg_names={"u"}, sequence_names={"xs"}
+    )
+    assert "i" not in facts.nonneg
+    assert facts.bounded_indices([("xs", "i")]) == set()
+
+    body = "u := uint(i)\nreturn n / u\n"
+    facts = _facts(body, "n / u", param_names={"n", "i"})
+    assert "u" in facts.nonneg and "u" not in facts.nonzero
+
+    body = "k := int64(3)\nreturn n / k\n"
+    assert "k" in _facts(body, "n / k", param_names={"n"}).nonzero
+
+
+def test_lock_without_any_unlock_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func (c *Cache) Get(k string) int {\n"
+        "    c.mu.Lock()\n"
+        "    return c.items[k]\n"
+        "}\n"
+    )
+    assert any("still held" in m for m in _messages(source))
+    source = (
+        "package demo\n"
+        "func (c *Cache) Get(k string) int {\n"
+        "    c.mu.Lock()\n"
+        "    c.mu.Lock()\n"
+        "    return c.items[k]\n"
+        "}\n"
+    )
+    assert any("deadlock" in m for m in _messages(source))
+
+
+def test_plain_assignment_and_pipe_handles_are_tracked() -> None:
+    assigned = (
+        "package demo\n"
+        "func Read(path string) ([]byte, error) {\n"
+        "    var f *os.File\n"
+        "    var err error\n"
+        "    f, err = os.Open(path)\n"
+        "    if err != nil {\n"
+        "        return nil, err\n"
+        "    }\n"
+        "    data, err := io.ReadAll(f)\n"
+        "    if err != nil {\n"
+        "        return nil, err\n"
+        "    }\n"
+        "    f.Close()\n"
+        "    return data, nil\n"
+        "}\n"
+    )
+    assert any("resource leak" in m for m in _messages(assigned))
+    pipe = (
+        "package demo\n"
+        "func Reader() (*os.File, error) {\n"
+        "    r, w, err := os.Pipe()\n"
+        "    if err != nil {\n"
+        "        return nil, err\n"
+        "    }\n"
+        "    return r, nil\n"
+        "}\n"
+    )
+    messages = _messages(pipe)
+    assert any("resource leak" in m and "w" in m for m in messages), messages
+    assert not any("resource leak" in m and "'r'" in m for m in messages), messages
+
+
+def test_unbounded_addition_may_overflow_and_loses_sign() -> None:
+    body = "if n < 0 {\n    return 0\n}\nx := n + 1\nif x < len(xs) {\n    return xs[x]\n}\nreturn 0\n"
+    facts = _facts(body, "xs[x]", param_names={"n", "xs"}, sequence_names={"xs"})
+    assert "x" not in facts.nonneg
+    assert facts.bounded_indices([("xs", "x")]) == set()
+
+    body = "for i := 0; i < len(xs); i++ {\n    j := i + 1\n    if j < len(xs) {\n        return xs[j]\n    }\n}\nreturn 0\n"
+    facts = _facts(body, "xs[j]", param_names={"xs"}, sequence_names={"xs"})
+    assert facts.bounded_indices([("xs", "j")]) == {"j"}
+
+
+def test_facts_for_expression_requires_whole_operand_match() -> None:
+    body = "if d == 0 {\n    return 0\n}\nreturn n / dd\n"
+    flow = _go(body, param_names={"n", "d", "dd"})
+    assert flow.facts_for_expression("d") is None
+
+
 def test_no_llm_path_is_deterministic() -> None:
     source = (
         "package demo\n"

@@ -1202,8 +1202,8 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
         for child in node.named_children:
             values = _go_expression_list(source_bytes, child)
         return Statement(kind="return", text=text, start=start, values=values)
-    if kind in {"break_statement", "continue_statement", "goto_statement"}:
-        return Statement(kind="terminate", text=text, start=start)
+    if kind in {"break_statement", "continue_statement", "goto_statement", "fallthrough_statement"}:
+        return Statement(kind=kind[: -len("_statement")], text=text, start=start)
     if kind == "short_var_declaration":
         return Statement(
             kind="define",
