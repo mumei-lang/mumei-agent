@@ -792,9 +792,11 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
     terminate a block prematurely.
     """
     decls: list[tuple[str, str, str]] = []
+    # Only column-0 declarations are package scope; indented ``const`` / ``var``
+    # inside a function body are lexically scoped and may shadow parameters.
     # Single-line: ``const/var name = value`` or ``const/var name int = value``.
     for match in re.finditer(
-        r"^\s*(const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
+        r"^(const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
         source,
         re.MULTILINE,
     ):
@@ -803,7 +805,7 @@ def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
     # Block declarations.
     i = 0
     while True:
-        m = re.search(r"^\s*(const|var)\s*\(", source[i:], re.MULTILINE)
+        m = re.search(r"^(const|var)\s*\(", source[i:], re.MULTILINE)
         if not m:
             break
         kind = m.group(1)
