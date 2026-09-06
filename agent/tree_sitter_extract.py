@@ -1000,3 +1000,374 @@ def analyze_expression(expression: str, language: str) -> ExpressionSafety | Non
         pointer_deref_values=tuple(pointer_deref_values),
         additions=tuple(additions),
     )
+
+
+# ---------------------------------------------------------------------------
+# Statement-level traversal (Layer B stage 3: function-local dataflow input).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Statement:
+    """A statement recovered from a function body syntax tree.
+
+    ``kind`` is one of ``if`` / ``for`` / ``range`` / ``switch`` / ``case`` /
+    ``return`` / ``define`` / ``assign`` / ``inc`` / ``dec`` / ``const`` /
+    ``var`` / ``defer`` / ``go`` / ``expr`` / ``block`` / ``closure`` /
+    ``terminate`` / ``other``. Nested statements are exposed through ``init``
+    (``if``/``for`` initializer), ``body`` (consequence / loop body / case
+    body), ``orelse`` (``else`` branch; an ``else if`` is a single nested
+    ``if``) and ``post`` (``for`` update clause). Character offsets are relative
+    to the body text handed to :func:`extract_statements`.
+    """
+
+    kind: str
+    text: str
+    start: int
+    condition: str = ""
+    operator: str = ""
+    targets: tuple[str, ...] = ()
+    values: tuple[str, ...] = ()
+    init: tuple["Statement", ...] = ()
+    body: tuple["Statement", ...] = ()
+    orelse: tuple["Statement", ...] = ()
+    post: tuple["Statement", ...] = ()
+    has_tag: bool = False
+
+
+_GO_TERMINATING_CALLS = re.compile(
+    r"^(?:panic|os\.Exit|log\.Fatal\w*|log\.Panic\w*|\w+\.Fatal\w*|runtime\.Goexit)\s*\("
+)
+
+
+def _go_expression_list(source_bytes: bytes, node) -> tuple[str, ...]:
+    if node is None:
+        return ()
+    if node.type == "expression_list":
+        return tuple(_decode(source_bytes, child).strip() for child in node.named_children)
+    return (_decode(source_bytes, node).strip(),)
+
+
+def _go_assigned_identifiers(source_bytes: bytes, node) -> set[str]:
+    """Return root identifiers assigned anywhere under ``node`` (for closures)."""
+    assigned: set[str] = set()
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type in {"assignment_statement", "short_var_declaration"}:
+            left = current.child_by_field_name("left")
+            if left is not None:
+                for target in left.named_children:
+                    root = target
+                    while root.type in {"index_expression", "selector_expression", "unary_expression", "parenthesized_expression"}:
+                        root = root.child_by_field_name("operand") or (root.named_children[0] if root.named_children else root)
+                        if root is target:
+                            break
+                    if root.type == "identifier":
+                        assigned.add(_decode(source_bytes, root))
+        elif current.type in {"inc_statement", "dec_statement"}:
+            for child in current.named_children:
+                if child.type == "identifier":
+                    assigned.add(_decode(source_bytes, child))
+        stack.extend(current.children)
+    return assigned
+
+
+def _go_statements(source_bytes: bytes, node, base: int, offsets: list[int]) -> tuple[Statement, ...]:
+    """Convert a Go ``block`` / ``statement_list`` node into :class:`Statement` values."""
+    if node is None:
+        return ()
+    if node.type == "block":
+        lists = [child for child in node.named_children if child.type == "statement_list"]
+        if not lists:
+            return ()
+        node = lists[0]
+    results: list[Statement] = []
+    for child in node.named_children:
+        statement = _go_statement(source_bytes, child, base, offsets)
+        if statement is not None:
+            results.append(statement)
+    return tuple(results)
+
+
+def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> Statement | None:
+    text = _decode(source_bytes, node).strip()
+    start = offsets[node.start_byte] - base
+    kind = node.type
+    children = lambda name: _go_statements(  # noqa: E731
+        source_bytes, node.child_by_field_name(name), base, offsets
+    )
+    if kind == "if_statement":
+        init_node = node.child_by_field_name("initializer")
+        init = ()
+        if init_node is not None:
+            init_stmt = _go_statement(source_bytes, init_node, base, offsets)
+            init = (init_stmt,) if init_stmt is not None else ()
+        condition = node.child_by_field_name("condition")
+        alternative = node.child_by_field_name("alternative")
+        orelse: tuple[Statement, ...] = ()
+        if alternative is not None:
+            if alternative.type == "block":
+                orelse = _go_statements(source_bytes, alternative, base, offsets)
+            else:
+                nested = _go_statement(source_bytes, alternative, base, offsets)
+                orelse = (nested,) if nested is not None else ()
+        return Statement(
+            kind="if",
+            text=text,
+            start=start,
+            condition=_decode(source_bytes, condition).strip() if condition is not None else "",
+            init=init,
+            body=children("consequence"),
+            orelse=orelse,
+        )
+    if kind == "for_statement":
+        clause = None
+        for child in node.named_children:
+            if child.type in {"for_clause", "range_clause"}:
+                clause = child
+                break
+        body = children("body")
+        if clause is None:
+            condition_node = None
+            for child in node.named_children:
+                if child.type not in {"block"}:
+                    condition_node = child
+            condition = _decode(source_bytes, condition_node).strip() if condition_node is not None else ""
+            return Statement(kind="for", text=text, start=start, condition=condition, body=body)
+        if clause.type == "range_clause":
+            left = clause.child_by_field_name("left")
+            right = clause.child_by_field_name("right")
+            operator_node = None
+            for child in clause.children:
+                if child.type in {":=", "="}:
+                    operator_node = child
+            return Statement(
+                kind="range",
+                text=text,
+                start=start,
+                operator=operator_node.type if operator_node is not None else "",
+                targets=_go_expression_list(source_bytes, left),
+                values=(_decode(source_bytes, right).strip(),) if right is not None else (),
+                body=body,
+            )
+        init_node = clause.child_by_field_name("initializer")
+        cond_node = clause.child_by_field_name("condition")
+        update_node = clause.child_by_field_name("update")
+        init_stmt = _go_statement(source_bytes, init_node, base, offsets) if init_node is not None else None
+        update_stmt = _go_statement(source_bytes, update_node, base, offsets) if update_node is not None else None
+        return Statement(
+            kind="for",
+            text=text,
+            start=start,
+            condition=_decode(source_bytes, cond_node).strip() if cond_node is not None else "",
+            init=(init_stmt,) if init_stmt is not None else (),
+            body=body,
+            post=(update_stmt,) if update_stmt is not None else (),
+        )
+    if kind in {"expression_switch_statement", "type_switch_statement", "select_statement"}:
+        init_node = node.child_by_field_name("initializer")
+        init_stmt = _go_statement(source_bytes, init_node, base, offsets) if init_node is not None else None
+        value_node = node.child_by_field_name("value") if kind == "expression_switch_statement" else None
+        cases: list[Statement] = []
+        for child in node.named_children:
+            if child.type in {"expression_case", "default_case", "type_case", "communication_case"}:
+                case_values = ()
+                if child.type == "expression_case":
+                    case_values = _go_expression_list(source_bytes, child.child_by_field_name("value"))
+                case_body: list[Statement] = []
+                for grand in child.named_children:
+                    if grand.type == "statement_list":
+                        case_body.extend(_go_statements(source_bytes, grand, base, offsets))
+                cases.append(
+                    Statement(
+                        kind="case" if child.type != "default_case" else "default",
+                        text=_decode(source_bytes, child).strip(),
+                        start=offsets[child.start_byte] - base,
+                        values=case_values,
+                        body=tuple(case_body),
+                    )
+                )
+        return Statement(
+            kind="switch",
+            text=text,
+            start=start,
+            condition=_decode(source_bytes, value_node).strip() if value_node is not None else "",
+            init=(init_stmt,) if init_stmt is not None else (),
+            body=tuple(cases),
+            has_tag=value_node is not None or kind != "expression_switch_statement",
+        )
+    if kind == "return_statement":
+        values = ()
+        for child in node.named_children:
+            values = _go_expression_list(source_bytes, child)
+        return Statement(kind="return", text=text, start=start, values=values)
+    if kind in {"break_statement", "continue_statement", "goto_statement", "fallthrough_statement"}:
+        return Statement(kind=kind[: -len("_statement")], text=text, start=start)
+    if kind == "short_var_declaration":
+        return Statement(
+            kind="define",
+            text=text,
+            start=start,
+            operator=":=",
+            targets=_go_expression_list(source_bytes, node.child_by_field_name("left")),
+            values=_go_expression_list(source_bytes, node.child_by_field_name("right")),
+        )
+    if kind == "assignment_statement":
+        operator = node.child_by_field_name("operator")
+        return Statement(
+            kind="assign",
+            text=text,
+            start=start,
+            operator=operator.type if operator is not None else "=",
+            targets=_go_expression_list(source_bytes, node.child_by_field_name("left")),
+            values=_go_expression_list(source_bytes, node.child_by_field_name("right")),
+        )
+    if kind in {"inc_statement", "dec_statement"}:
+        targets = tuple(_decode(source_bytes, child).strip() for child in node.named_children[:1])
+        return Statement(kind="inc" if kind == "inc_statement" else "dec", text=text, start=start, targets=targets)
+    if kind in {"const_declaration", "var_declaration"}:
+        names: list[str] = []
+        values: list[str] = []
+        types: list[str] = []
+        for spec in node.named_children:
+            if spec.type not in {"const_spec", "var_spec"}:
+                continue
+            spec_names = [
+                _decode(source_bytes, child)
+                for child in spec.children_by_field_name("name")
+            ]
+            spec_values = _go_expression_list(source_bytes, spec.child_by_field_name("value"))
+            type_node = spec.child_by_field_name("type")
+            type_text = _decode(source_bytes, type_node).strip() if type_node is not None else ""
+            for index, name in enumerate(spec_names):
+                names.append(name)
+                values.append(spec_values[index] if index < len(spec_values) else "")
+                types.append(type_text)
+        return Statement(
+            kind="const" if kind == "const_declaration" else "var",
+            text=text,
+            start=start,
+            operator="|".join(types),
+            targets=tuple(names),
+            values=tuple(values),
+        )
+    if kind in {"defer_statement", "go_statement"}:
+        call = node.named_children[0] if node.named_children else None
+        call_text = _decode(source_bytes, call).strip() if call is not None else ""
+        if call is not None and call.type == "call_expression":
+            fn = call.child_by_field_name("function")
+            if fn is not None and fn.type == "func_literal":
+                assigned = _go_assigned_identifiers(source_bytes, fn)
+                return Statement(
+                    kind="closure",
+                    text=text,
+                    start=start,
+                    operator=kind[:-10],
+                    targets=tuple(sorted(assigned)),
+                    values=(call_text,),
+                )
+        return Statement(
+            kind="defer" if kind == "defer_statement" else "go",
+            text=text,
+            start=start,
+            values=(call_text,),
+        )
+    if kind == "expression_statement":
+        expr = node.named_children[0] if node.named_children else None
+        expr_text = _decode(source_bytes, expr).strip() if expr is not None else text
+        if _GO_TERMINATING_CALLS.match(expr_text):
+            return Statement(kind="terminate", text=text, start=start, values=(expr_text,))
+        return Statement(kind="expr", text=text, start=start, values=(expr_text,))
+    if kind == "block":
+        return Statement(kind="block", text=text, start=start, body=_go_statements(source_bytes, node, base, offsets))
+    if kind == "labeled_statement":
+        inner = None
+        for child in node.named_children:
+            if child.type != "label_name":
+                inner = child
+        if inner is not None:
+            return _go_statement(source_bytes, inner, base, offsets)
+        return None
+    if kind == "func_literal":
+        return Statement(
+            kind="closure",
+            text=text,
+            start=start,
+            targets=tuple(sorted(_go_assigned_identifiers(source_bytes, node))),
+        )
+    if kind in {"comment", "empty_statement"}:
+        return None
+    return Statement(kind="other", text=text, start=start)
+
+
+def _go_collect_closure_assignments(source_bytes: bytes, root) -> set[str]:
+    """Return identifiers assigned inside any ``func_literal`` under ``root``."""
+    assigned: set[str] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "func_literal":
+            assigned |= _go_assigned_identifiers(source_bytes, node)
+            continue
+        stack.extend(node.children)
+    return assigned
+
+
+@dataclass(frozen=True)
+class StatementTree:
+    """Statements of a function body plus body-wide syntactic facts."""
+
+    statements: tuple[Statement, ...]
+    # Identifiers assigned inside nested function literals; facts about them
+    # cannot be trusted across calls of the closure.
+    closure_assigned: frozenset[str]
+    # Identifiers whose address is taken (``&x``); they may be mutated through
+    # pointers so facts about them are unreliable after any call.
+    address_taken: frozenset[str]
+
+
+_GO_BODY_PREFIX = "package p\nfunc _() {\n"
+
+
+def extract_statements(body: str, language: str) -> StatementTree | None:
+    """Return the statement tree of a function ``body`` or ``None`` to fall back.
+
+    Only Go is supported for now; other languages return ``None`` so callers
+    keep their regex heuristics. ``body`` is the text between the outer braces
+    (``ExtractedFunction.body``).
+    """
+    canonical = _normalize_language(language)
+    if canonical != "go":
+        return None
+    parser = _get_parser(canonical)
+    if parser is None:
+        return None
+    wrapped = _GO_BODY_PREFIX + body + "\n}\n"
+    source_bytes = wrapped.encode("utf-8")
+    try:
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return None
+    if tree.root_node.has_error:
+        return None
+    fn_node = None
+    for child in tree.root_node.named_children:
+        if child.type == "function_declaration":
+            fn_node = child
+    if fn_node is None:
+        return None
+    block = fn_node.child_by_field_name("body")
+    if block is None:
+        return None
+    offsets = _char_offsets(source_bytes)
+    base = len(_GO_BODY_PREFIX)
+    statements = _go_statements(source_bytes, block, base, offsets)
+    address_taken = frozenset(
+        re.findall(r"(?<![&\w)\]])&([A-Za-z_]\w*)\b(?!\s*[\{\[])", body)
+    )
+    return StatementTree(
+        statements=statements,
+        closure_assigned=frozenset(_go_collect_closure_assignments(source_bytes, block)),
+        address_taken=address_taken,
+    )

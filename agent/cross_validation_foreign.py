@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import Callable, cast
 
-from agent import semantic_safety, tree_sitter_extract
+from agent import dataflow_facts, semantic_safety, tree_sitter_extract
 from agent.config import AgentConfig
 from agent.cross_validation_models import (
     ContractParam,
@@ -752,9 +752,20 @@ def _go_safety_requires_for_expression(
     expression: str,
     param_names: Iterable[str] = (),
     known_constants: dict[str, int] | None = None,
+    facts: dataflow_facts.PathFacts | None = None,
 ) -> str:
+    """``requires`` conjuncts for one Go return expression.
+
+    ``facts`` are the function-local dataflow facts reaching the expression;
+    only their constant definitions (``n := 8`` / local ``const``) feed the
+    divisor / index constant model. Guard-derived facts intentionally do not
+    drop conjuncts so the emitted ``requires`` strings stay stable.
+    """
+    constants = dict(known_constants or {})
+    if facts is not None:
+        constants.update(facts.consts)
     requirements: list[str] = []
-    base = _safety_requires_for_expression(expression, "go", known_constants)
+    base = _safety_requires_for_expression(expression, "go", constants)
     if base != "true":
         requirements.extend(part.strip() for part in base.split("&&") if part.strip())
     for value in _go_nil_dereference_values(expression, set(param_names)):
@@ -1620,9 +1631,26 @@ def _infer_go_contracts_tree_sitter(code: str) -> list[MumeiContractAtom] | None
             param_names = {p.name for p in params}
             local_names = _local_variable_names(fn.body, "go")
             nillable_param_names = [param.name for param in params if param.name in nillable_names]
+            flow = dataflow_facts.analyze_function(
+                fn.body,
+                "go",
+                constants=known_constants,
+                param_names=set(go_param_types),
+                nonneg_names={
+                    name for name, raw in go_param_types.items()
+                    if raw.strip().lstrip("*") in dataflow_facts.GO_UNSIGNED_TYPES
+                },
+                sequence_names={
+                    name for name, raw in go_param_types.items()
+                    if raw.strip().lstrip("*").startswith("[") or raw.strip() == "string"
+                },
+            )
             requirements: list[str] = []
             for expr in safety_exprs:
-                req = _go_safety_requires_for_expression(expr, nillable_param_names, known_constants)
+                facts = flow.facts_for_expression(expr) if flow is not None else None
+                req = _go_safety_requires_for_expression(
+                    expr, nillable_param_names, known_constants, facts
+                )
                 if req and req != "true":
                     requirements.extend(part.strip() for part in req.split("&&") if part.strip())
             requires = " && ".join(_dedupe_strings(requirements)) if requirements else "true"

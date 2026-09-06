@@ -490,7 +490,53 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
     nullable 扱いのまま（`x!.length` の非 null アサーションを尊重）。関数スコープを跨いだ
     エイリアス解析・データフロー解析は範囲外（LLM 意味推論は導入しない）。
 
-#### 次タスク候補: 外部コード安全性推論の意味モデル化（データフロー / パス感度）
+#### 外部コード安全性推論の意味モデル化（データフロー / パス感度）✅ Implemented (stage 3)
+
+**実装状況（stage 3, Track A-1〜A-6 の関数内ローカル範囲）**:
+
+- `agent/tree_sitter_extract.py` に文レベル走査 `extract_statements` を追加（Go）。`if` /
+  `for` / `range` / `switch` / `return` / `break` / 短変数宣言 / 代入 / `defer` / 関数リテラル
+  を `Statement` 木として返し、クロージャ内で再代入された名前・`&x` でアドレスが取られた
+  名前を `StatementTree.closure_assigned` / `address_taken` として報告する。
+- 新規 `agent/dataflow_facts.py` が第三の入力「データフロー事実」を算出する
+  （`analyze_function(body, "go", constants=, param_names=, nonneg_names=, nonzero_names=,
+  sequence_names=) -> FunctionDataflow`）。各 `return` 式に到達する `PathFacts`
+  （`nonzero` / `nonneg` / `nonnil` / `lt_len` / `len_ge` / `consts`）を返す。
+  - A-1 定数畳み込み: `evaluate_constant_expression` / `fold_constants`（依存順解決、
+    `int64` に収まらない・非整数・未知名参照は未解決のまま保守側）。関数内 `const` ブロックも
+    畳み込む。
+  - A-2 ガード伝播: `if` / 早期 `return` / `switch` の case / ループ条件から真偽両分岐の事実を
+    導出し、合流点では交差（intersection）で保守的にマージする。ループは 0 回実行と
+    n 回実行後の状態を交差し、`break` を含む場合は代入名を全て破棄する。
+  - A-3 到達定義: `x := 100` / `x = other` の再定義で事実を kill、`n := len(xs)` /
+    `len(xs) - 1` / `k % len(xs)`（`xs` 非空が既知の場合のみ）/ `make([]T, n+1)` 由来の値を
+    `lt_len` に反映する。
+  - A-4 局所エイリアス: `ys := xs` のスライス別名で長さ事実を共有し、クロージャ内再代入・
+    アドレス取得された名前は事実対象から外す（`&files[i]` の要素アドレスは対象外）。
+- 消費側: `_detect_go_safety_issues` は `analyze_expression` の構文的事実、`semantic_safety`
+  の型・定数モデルに加えて `flow.facts_for_expression(expr)` を参照し、除数の `nonzero`、添字の
+  `bounded_indices`、レシーバの `nonnil`、局所定数を既存の Z3 モデルに供給する。
+  `cross_validation_foreign._infer_go_contracts_tree_sitter` も同じ事実を（局所定数のみ）
+  `requires` 推論の定数モデルに接続する。`ForeignSafetyIssue` / `requires` 文字列 /
+  counterexample / required_contracts と出力順序（bounds → nil → division → overflow）は不変。
+- A-5 抑制ヘルパ削減: 8 系統のヘルパ（`_go_zero_guarded_nonzero_params` /
+  `_go_zero_guarded_nonzero_locals` / `_go_zero_guarded_nonzero_names` /
+  `_go_dual_len_loop_guarded_indices` / `_go_grow_guarded_indices` /
+  `_go_last_index_guarded_indices` / `_go_reverse_loop_guarded_indices` /
+  `_go_modulo_bounded_indices`）をデータフロー層で置換・削除した。binary search / sort.Search /
+  enum 文字列配列 / median / lookup-table など残る特化ヘルパは、汎用事実で等価に抑止できる
+  ことを回帰テストで示してから順次置換する。
+- A-6 新バグ種別（データフロー層のみで判定、既存 4 カテゴリの後ろに追記）: nil マップへの
+  書き込み（`var m map[K]V` 未初期化のまま `m[k] = v`）、ロック二重取得（`mu.Lock()` 保持中の
+  再 `Lock`）、ロック保持中の `return`（`defer Unlock` なし・当該パスで `Unlock` なし）、
+  `os.Open` 等のハンドル未 `Close` での `return`（`defer Close` / 戻り値として返却 / 未知関数への
+  受け渡しは所有権移転として抑止）。未初期化値・状態遷移前提・契約由来事後条件は本 stage では
+  未着手で、データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
+- テスト: `tests/test_dataflow_facts.py`（定数畳み込み / ガード / 早期 return / ループ条件 /
+  到達定義 / `len` 由来値 / エイリアス / クロージャ・アドレス無効化 / 削除ヘルパの旧偽陽性ケース /
+  新バグ種別の正例・偽陽性例）。既存 `tests/test_foreign_code.py` / `tests/test_cross_validation.py`
+  は無変更で通過。
+- 解析は関数内ローカルに閉じ、LLM・`solc` / `rustc` / `tsc` に依存せず決定論的。
 
 **cross-repo 位置づけ**: 本タスクは [mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の **Track A**（A-1 データフロー事実の器 + 定数畳み込み → A-2 ガード伝播 → A-3 到達定義 / `len` 由来値 → A-4 局所エイリアス → A-5 抑制ヘルパ置換と削減計測 → A-6 新バグ種別）として順序付けられている。Track B（Task 2-D）とは非依存で完全並行。A-6 は A-5 の削減計測が出てから着手する。完了時は Priority 25 の表と本節を同一 diff で更新する。
 
