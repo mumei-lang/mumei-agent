@@ -701,3 +701,53 @@ class TestRun:
         assert len(results) == 1
         assert results[0].status == "success"
         assert results[0].commit_sha == "sha"
+
+
+class TestEscalationMetricsProvenance:
+    def test_collect_escalation_metrics_splits_ai_and_witness_successes(self, tmp_path):
+        bundle_path = tmp_path / "prov.escalation-bundle.json"
+        bundle_path.write_text(json.dumps({
+            "summary": {"total_atoms": 3, "candidate_count": 3},
+            "candidates": [
+                {
+                    "name": "ai",
+                    "escalation_reason": "z3_unknown_complex_fragment",
+                    "lean_metadata": {"status": "lean_verified", "ai_proof_used": True},
+                },
+                {
+                    "name": "witness",
+                    "escalation_reason": "z3_unknown_complex_fragment",
+                    "lean_metadata": {"status": "lean_verified", "known_witness_used": True},
+                },
+                {
+                    "name": "generated",
+                    "escalation_reason": "timeout",
+                    "lean_metadata": {"status": "lean_verified"},
+                },
+            ],
+        }), encoding="utf-8")
+
+        metrics = collect_escalation_metrics(str(bundle_path))
+
+        assert metrics["lean_successes"] == 3
+        assert metrics["ai_proof_successes"] == 1
+        assert metrics["known_witness_successes"] == 1
+        assert metrics["success_rate"] == 1.0
+
+    def test_collect_escalation_metrics_summary_only_provenance(self, tmp_path):
+        bundle_path = tmp_path / "summary.escalation-bundle.json"
+        bundle_path.write_text(json.dumps({
+            "summary": {
+                "total_atoms": 3,
+                "candidate_count": 3,
+                "lean_successes": 3,
+                "ai_proof_successes": 2,
+                "known_witness_successes": 1,
+            },
+        }), encoding="utf-8")
+
+        metrics = collect_escalation_metrics(str(bundle_path))
+
+        assert metrics["lean_successes"] == 3
+        assert metrics["ai_proof_successes"] == 2
+        assert metrics["known_witness_successes"] == 1

@@ -18,6 +18,26 @@ from agent.self_healing_report import _retry_history_to_dict
 from agent.thought_log import ThoughtProcess, VerificationStep, summarize_code_diff
 
 
+def _report_atom_record(report: dict) -> dict | None:
+    """Locate the failing atom's contract record in a ``mumei verify`` report.
+
+    ``report["atom"]`` is either the atom name or a full record; when it is
+    a name, the matching entry of ``report["atoms"]`` is used so the Lean
+    escalation bundle can carry ``requires`` / ``ensures`` / body.
+    """
+    atom = report.get("atom")
+    if isinstance(atom, dict):
+        return atom
+    atoms = report.get("atoms")
+    if isinstance(atom, str) and isinstance(atoms, list):
+        for candidate in atoms:
+            if isinstance(candidate, dict) and candidate.get("name") == atom:
+                return candidate
+    if isinstance(atom, str) and atom:
+        return {"name": atom}
+    return None
+
+
 def _try_cegis_repair(
     *,
     config: AgentConfig,
@@ -62,7 +82,17 @@ def _try_cegis_repair(
         return fixed_code, result
 
     if config.cegis_escalate_to_lean:
-        bundle_path = escalate_to_lean(source_file, loop_info)
+        bundle_path = escalate_to_lean(
+            source_file,
+            loop_info,
+            atom=_report_atom_record(report),
+            counterexamples=[
+                counterexample
+                for candidate in cegis.history
+                for counterexample in candidate.counterexamples
+            ],
+            invariant_candidates=cegis.history,
+        )
         try:
             thought.steps.append(
                 VerificationStep(

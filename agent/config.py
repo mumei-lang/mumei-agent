@@ -126,6 +126,29 @@ class AgentConfig:
         default_factory=lambda: os.getenv("MUMEI_LEAN_REPO") or None
     )
 
+    # Task 2-D — opt-in AI (LLM) Lean proof generation for residual
+    # ``unknown`` atoms.  Off by default; also forced off when no LLM key
+    # is configured or ``CI_FIXTURE_MODE`` is set so fixture runs stay
+    # deterministic (known-witness-only behaviour).
+    enable_lean_ai_proof: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_LEAN_AI_PROOF")
+    )
+    lean_ai_proof_max_attempts: int = field(
+        default_factory=lambda: int(os.getenv("LEAN_AI_PROOF_MAX_ATTEMPTS", "3"))
+    )
+    lean_ai_proof_evidence_dir: str | None = field(
+        default_factory=lambda: os.getenv("LEAN_AI_PROOF_EVIDENCE_DIR") or None
+    )
+    ci_fixture_mode: bool = field(default_factory=lambda: _env_bool("CI_FIXTURE_MODE"))
+
+    def lean_ai_proof_active(self) -> bool:
+        """True only when AI Lean proof generation may actually run."""
+        return bool(
+            self.enable_lean_ai_proof
+            and self.api_key
+            and not self.ci_fixture_mode
+        )
+
     def __post_init__(self):
         # API key validation is deferred to create_client() so that
         # subcommands that never use the LLM (e.g. ``python -m agent

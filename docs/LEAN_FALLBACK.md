@@ -15,7 +15,28 @@ contains `scripts/bridge.py`.
 4. If another generated Lean module fails but a known std witness exists, the
    agent can still build that witness module and report the explicit fallback
    strategy.
-5. `proliferate` records per-spec fallback diagnostics and aggregate metrics in
+5. (Opt-in, Task 2-D) With `--enable-lean-ai-proof` / `ENABLE_LEAN_AI_PROOF=1`,
+   atoms still `unknown` after steps 3–4 are handed to
+   `agent.lean_ai_proof.run_ai_proof_repair()`. The theorem *statement* is
+   never authored by the LLM: it is lifted verbatim (header plus helper
+   `def`s / `open`s) from the bridge-generated `theorem <atom>_correct` under
+   `generated/Generated/`, and the LLM only supplies the tactic script after
+   `:= by`. mumei-agent assembles `Generated.AiProof.<Atom>` from the trusted
+   statement plus the tactics plus `#print axioms <atom>_correct`, writes it
+   under `generated/Generated/AiProof/`, runs `lake build`, and feeds the log
+   back to the LLM for up to `LEAN_AI_PROOF_MAX_ATTEMPTS` (default 3) repair
+   rounds. Only a module that builds with exit code 0, no `error:` lines, no
+   `declaration uses 'sorry'` and an axiom audit limited to `propext` /
+   `Classical.choice` / `Quot.sound` is promoted; the tactic script is rejected
+   before Lake if it contains `sorry` / `admit` / `axiom` / `unsafe` /
+   `native_decide` / `implemented_by` / `run_cmd` / `run_tac` / `#eval` /
+   `set_option` / meta-programming or any new declaration. The AI stage is skipped entirely when no
+   LLM key is configured or `CI_FIXTURE_MODE` is set, so fixture runs keep the
+   known-witness-only behaviour.
+6. Only obligations that remain `unknown` after step 5 are the input to the
+   human path (`agent/human_review.py::escalate_to_lean`, MCP
+   `escalate_to_lean`), which is now the final fallback.
+7. `proliferate` records per-spec fallback diagnostics and aggregate metrics in
    the output summary JSON.
 
 ## Error codes
@@ -27,8 +48,14 @@ contains `scripts/bridge.py`.
 | `lake_missing` | Lake/Lean is not on `PATH`. | Yes | Install elan/Lean or prepend `$HOME/.elan/bin`. |
 | `import_error` | Lean could not resolve a generated module/mathlib import. | Yes | Refresh `lake exe cache get` and regenerate `generated/`. |
 | `theorem_not_found` | A referenced Lean theorem name is missing. | No | Check witness module imports and theorem naming. |
-| `tactic_failed` | Lean elaborated the theorem but tactics left goals open. | No | Add or improve a handwritten witness/proof strategy. |
-| `partial_translation` | mumei-lean marked unsupported syntax/manual review. | No | Extend the translator or simplify the contract. |
+| `tactic_failed` | Lean elaborated the theorem but tactics left goals open. | No | First run with `--enable-lean-ai-proof` so the LLM generates/repairs a proof against the Lake feedback; only if `ai_proof_residual` still lists the atom, add a handwritten witness/proof strategy. |
+| `partial_translation` | mumei-lean marked unsupported syntax/manual review. | No | If the translator still emitted a `theorem <atom>_correct` statement, the AI proof stage (`--enable-lean-ai-proof`) can attempt it; otherwise the atom is reported as `no_trusted_statement` and you must extend the translator or simplify the contract only for the residual atoms. |
+| `unsound_source` | The AI tactic script was rejected before Lake (`sorry` / `admit` / `axiom` / `native_decide` / `run_cmd` / `set_option` / new declarations, …). | No | Never promoted. Inspect `attempt_N.lean` under `ai_proof_evidence_dir`; the next repair round already receives the rejection reason. |
+| `no_trusted_statement` | Re-running `scripts/ingest_cert.py` on the current certificate produced no `theorem <atom>_correct` (or the translator itself is missing / failed), so there is no trusted statement for the AI to prove. | No | Fix the translator (`partial_translation`) or add a handwritten witness; the LLM is never allowed to author the statement itself. |
+| `ambiguous_atom_name` | Two residual unknown atoms share a name; promotion is keyed by name so neither is attempted. | No | Rename one atom or split the modules before re-running. |
+| `unsound_axioms` / `axiom_audit_missing` | `#print axioms` on the AI-proved theorem reported an axiom outside `propext` / `Classical.choice` / `Quot.sound` (e.g. `sorryAx`), or the audit line was missing from the Lake log. | No | Never promoted; inspect `attempt_N.log`. |
+| `generator_error` | Every LLM call within `LEAN_AI_PROOF_MAX_ATTEMPTS` failed (each failure consumes one attempt and is retried). | Yes | Check `LLM_API_KEY` / `LLM_BASE_URL`; the atom stays `unknown`. |
+| `source_mismatch` | The module Lake compiled differs from the source the AI stage wrote (another process touched the checkout mid-build). | Yes | Never promoted; re-run. Modules are named per run (`Generated.AiProof.<Atom>_<run>`) so concurrent runs do not normally collide. |
 | `timeout` | Bridge or witness build exceeded its timeout. | Yes | Re-run with a warm Lake cache or a higher timeout. |
 | `subprocess_error` | Python could not execute the bridge. | Yes | Inspect the runner environment and bridge script permissions. |
 | `bridge_failed` | Non-zero bridge exit not covered above. | Yes | Inspect captured stdout/stderr for the root cause. |
@@ -49,7 +76,12 @@ contains `scripts/bridge.py`.
 
 Per-spec `details[*].lean_fallback` also records `error_code`,
 `primary_error_code`, `retryable`, `fallback_strategy`, `duration_seconds`, and
-`partial_success`.
+`partial_success`. When the AI stage ran it additionally records
+`ai_proof_used`, `ai_proof_proved`, `ai_proof_attempted`, `ai_proof_residual`
+(atom names left for human review) and `ai_proof_evidence_dir`.
+`lean_verified_count` in `publish_result.proof_certificate_summary` is derived
+through the same `merge_lean_cert_into_proof_cert` path regardless of which
+stage discharged the atom.
 
 ## Generated-module and witness paths
 
@@ -69,3 +101,73 @@ complete body semantics; the live generated path above is canonical when
 
 This keeps the fallback conservative: unmapped unknown atoms remain unknown, and
 partial success is reported instead of treated as a full bridge success.
+
+## Provenance: which stage discharged an atom
+
+Every promoted atom carries `lean_fallback_strategy` plus `lean_metadata` /
+`lean_result_metadata` flags so the three automated stages are distinguishable:
+
+| Stage | `lean_fallback_strategy` | `known_witness_used` | `ai_proof_used` |
+| --- | --- | --- | --- |
+| Generated module (`scripts/bridge.py`) | `generated_bridge` / bridge value | `false` | absent / `false` |
+| Known witness module | `known_witness_module` | `true` | `false` |
+| AI-generated proof (Task 2-D) | `ai_generated_proof` | `false` | `true` |
+
+AI-promoted atoms also record `ai_proof_attempts`, `proof_path` (the accepted
+`attempt_N.lean`) and `build_log_path` (the matching Lake log) under
+`lean_metadata`, and `lean_module` / `lean_theorem_name` point at
+`Generated.AiProof.<Atom>_<run>.<atom>_correct` (the `<run>` suffix keeps
+concurrent repairs against one checkout apart; the `#print axioms` audit
+matches that fully-qualified name exactly). The trusted statement is *not*
+read from `<mumei-lean>/generated/` (a failed or interrupted bridge can leave
+an older module with a same-named theorem there): each run re-executes
+`scripts/ingest_cert.py` on the certificate being repaired into
+`<run-dir>/_statements/` and lifts `theorem <atom>_correct` from the module
+emitted for the certificate's own module key (`cert.file` →
+`Generated/<Key>.lean`); `lean_metadata.statement_source_path` points at that
+file. If the translator is missing or fails, every atom is reported as
+`no_trusted_statement`. The evidence directory defaults to
+`<mumei-lean>/.ai_proof_evidence/<run-id>/<Atom>_<hash8>/` (a fresh
+`<run-id>` per repair run, so earlier certificates keep pointing at unchanged
+files; `<hash8>` keeps atoms whose names only differ in case apart) and can be
+moved with `LEAN_AI_PROOF_EVIDENCE_DIR`. The
+`stale_translator` / `bridge_lemma_hash` checks in
+`merge_lean_cert_into_proof_cert` apply to AI-promoted atoms exactly as they
+do to the other two stages.
+
+Residual atoms the AI stage could not discharge keep `z3_check_result:
+"unknown"` and gain an `ai_proof_outcome` record (`attempts`, `error_code`,
+per-attempt evidence paths); `human_review.escalate_to_lean` copies it into
+`lean_escalation.prior_stages` so reviewers see what was already tried.
+
+Concurrency: per-run module names and the post-build `source_mismatch` check
+make a concurrent repair against the same checkout *detectable* (never
+promoted), not safe -- `lake build` / `scripts/bridge.py` share that
+checkout's `.lake/` state. Run one repair per mumei-lean checkout at a time.
+
+### Evidence handling
+
+`attempt_N.lean` / `attempt_N.log` / `attempt_N.reply.txt` contain the raw
+model reply and the full Lake log. They are the audit trail for a promotion
+and are kept indefinitely by default; treat the evidence directory like build
+artefacts (it lives under the mumei-lean checkout, not in the mumei-agent
+repo) and point `LEAN_AI_PROOF_EVIDENCE_DIR` at a location with the retention
+you need. Compiler feedback fed back into the *next model request* is
+truncated to a 2000-character tail with the checkout path and `$HOME`
+redacted; it never includes the certificate or `.mm` source beyond what Lean
+itself prints.
+
+## Escalation bundle schema (v2)
+
+`agent/strategies/cegis_loop_helpers.py::escalate_to_lean` still writes
+`source_file` / `loop_line` / `loop_context` / `reason`, and appends:
+
+- `bundle_schema_version` — `mumei.escalation_bundle/2`
+- `atom` — the target atom's `name` / `requires` / `ensures` / `body` /
+  `body_expr` (and `params`, `return_type`, `module_key` when known)
+- `counterexamples` — every Z3 model collected by `_extract_counterexample`
+- `tried_invariants` — each CEGIS candidate (`expression`, `source`,
+  `iteration`, `counterexamples`)
+
+The AI proof stage forwards these as hints in its prompt; absent keys are
+simply omitted, so older bundles remain valid.
