@@ -640,3 +640,143 @@ def test_no_llm_path_is_deterministic() -> None:
         "}\n"
     )
     assert _detect_go_safety_issues(source) == _detect_go_safety_issues(source)
+
+
+def test_conditional_release_keeps_other_path_reported() -> None:
+    """Held resources are may-facts: releasing on one branch of an ``if`` does
+    not hide the branch that still holds them."""
+    close_one_side = (
+        "package demo\n"
+        "func Read(path string, verbose bool) error {\n"
+        "    f, err := os.Open(path)\n"
+        "    if err != nil {\n"
+        "        return err\n"
+        "    }\n"
+        "    if verbose {\n"
+        "        f.Close()\n"
+        "    }\n"
+        "    return nil\n"
+        "}\n"
+    )
+    assert any("without closing `f`" in m for m in _messages(close_one_side))
+    unlock_one_side = (
+        "package demo\n"
+        "func (c *Cache) Get(k string, fast bool) int {\n"
+        "    c.mu.Lock()\n"
+        "    if fast {\n"
+        "        c.mu.Unlock()\n"
+        "    }\n"
+        "    return c.items[k]\n"
+        "}\n"
+    )
+    assert any("still held" in m for m in _messages(unlock_one_side))
+    init_one_side = (
+        "package demo\n"
+        "func Fill(flag bool) map[string]int {\n"
+        "    var m map[string]int\n"
+        "    if flag {\n"
+        "        m = make(map[string]int)\n"
+        "    }\n"
+        "    m[\"a\"] = 1\n"
+        "    return m\n"
+        "}\n"
+    )
+    assert any("nil map" in m for m in _messages(init_one_side))
+    # ``if m == nil { m = make(...) }`` initialises on every path.
+    guarded_init = (
+        "package demo\n"
+        "func Fill() map[string]int {\n"
+        "    var m map[string]int\n"
+        "    if m == nil {\n"
+        "        m = make(map[string]int)\n"
+        "    }\n"
+        "    m[\"a\"] = 1\n"
+        "    return m\n"
+        "}\n"
+    )
+    assert not any("nil map" in m for m in _messages(guarded_init))
+    both_sides = (
+        "package demo\n"
+        "func Read(path string, verbose bool) error {\n"
+        "    f, err := os.Open(path)\n"
+        "    if err != nil {\n"
+        "        return err\n"
+        "    }\n"
+        "    if verbose {\n"
+        "        f.Close()\n"
+        "    } else {\n"
+        "        f.Close()\n"
+        "    }\n"
+        "    return nil\n"
+        "}\n"
+    )
+    assert not any("without closing" in m for m in _messages(both_sides))
+
+
+def test_block_local_declaration_does_not_shadow_outer_facts_after_block() -> None:
+    body = "{\n    d := 1\n    _ = d\n}\nreturn n / d\n"
+    facts = _facts(body, "n / d", param_names={"n", "d"})
+    assert "d" not in facts.nonzero
+    if_body = "if flag {\n    d := 1\n    _ = d\n}\nreturn n / d\n"
+    facts = _facts(if_body, "n / d", param_names={"n", "d", "flag"})
+    assert "d" not in facts.nonzero
+    # A shadowed name still keeps the *outer* facts once the block ends.
+    outer_known = "if d == 0 {\n    return 0\n}\n{\n    d := 0\n    _ = d\n}\nreturn n / d\n"
+    facts = _facts(outer_known, "n / d", param_names={"n", "d"})
+    assert "d" in facts.nonzero
+    # A block-local handle that is never closed is still a leak.
+    leak = (
+        "package demo\n"
+        "func Read(path string) error {\n"
+        "    {\n"
+        "        f, err := os.Open(path)\n"
+        "        if err != nil {\n"
+        "            return err\n"
+        "        }\n"
+        "        fmt.Fprintln(f, \"x\")\n"
+        "    }\n"
+        "    return nil\n"
+        "}\n"
+    )
+    assert any("without closing `f`" in m for m in _messages(leak))
+
+
+def test_break_carries_held_resources_out_of_loop() -> None:
+    for_break = (
+        "package demo\n"
+        "func (c *Cache) First(keys []string) int {\n"
+        "    for i := 0; i < len(keys); i++ {\n"
+        "        c.mu.Lock()\n"
+        "        if keys[i] != \"\" {\n"
+        "            break\n"
+        "        }\n"
+        "        c.mu.Unlock()\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert any("still held" in m for m in _messages(for_break))
+    range_break = (
+        "package demo\n"
+        "func Open(paths []string) error {\n"
+        "    for _, p := range paths {\n"
+        "        f, err := os.Open(p)\n"
+        "        if err != nil {\n"
+        "            return err\n"
+        "        }\n"
+        "        if p != \"\" {\n"
+        "            break\n"
+        "        }\n"
+        "        f.Close()\n"
+        "    }\n"
+        "    return nil\n"
+        "}\n"
+    )
+    assert any("without closing `f`" in m for m in _messages(range_break))
+
+
+def test_double_lock_reports_statement_offset() -> None:
+    body = "c.mu.Lock()\nc.mu.Lock()\nreturn 0\n"
+    flow = _go(body)
+    doubles = [issue for issue in flow.issues if issue.category == "double_lock"]
+    assert doubles and doubles[0].offset == body.index("c.mu.Lock()", 1)
