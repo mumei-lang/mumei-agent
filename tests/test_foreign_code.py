@@ -269,6 +269,33 @@ func Ratio(n, d int, flag bool) int {
     issues = _detect_go_safety_issues(source)
     assert any("`d`" in issue.message for issue in issues), issues
 
+    # Scope is decided by brace depth, not indentation: an indented package
+    # declaration still counts, a column-0 declaration inside a function
+    # (or a grouped ``const (...)`` inside one) does not. Braces inside
+    # strings / comments must not disturb the depth.
+    odd_formatting = """package demo
+
+  const indentedPkg = 7
+  const (
+      grouped = 3
+  )
+const s = "{" // } not a block
+/* { */
+
+func Ratio(n, d int) int {
+const d = 1
+const (
+    e = 2
+)
+return n / d
+}
+"""
+    assert _go_declared_constants(odd_formatting) == {
+        "indentedPkg": 7,
+        "grouped": 3,
+    }
+    assert {"d", "e"}.isdisjoint(_go_nonzero_constants(odd_formatting))
+
 
 def test_go_value_type_param_not_flagged_nil() -> None:
     """A Go value-type param (`reflect.Value`) can never be nil (#295)."""

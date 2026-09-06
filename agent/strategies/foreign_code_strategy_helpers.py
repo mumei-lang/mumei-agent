@@ -784,32 +784,90 @@ def _evaluate_go_constant_expression(
     return _eval(tree)
 
 
+def _go_brace_depths(source: str) -> list[int]:
+    """Return the ``{`` nesting depth at every offset of ``source``.
+
+    Braces inside line / block comments, interpreted and raw strings and rune
+    literals are ignored, so depth 0 identifies package scope regardless of
+    indentation.
+    """
+    depths = [0] * len(source)
+    depth = 0
+    i = 0
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        depths[i] = depth
+        if ch == "/" and i + 1 < n and source[i + 1] == "/":
+            end = source.find("\n", i)
+            end = n if end == -1 else end
+            for k in range(i, end):
+                depths[k] = depth
+            i = end
+            continue
+        if ch == "/" and i + 1 < n and source[i + 1] == "*":
+            end = source.find("*/", i + 2)
+            end = n if end == -1 else end + 2
+            for k in range(i, end):
+                depths[k] = depth
+            i = end
+            continue
+        if ch in "\"'`":
+            j = i + 1
+            while j < n and source[j] != ch:
+                if ch != "`" and source[j] == "\\":
+                    j += 1
+                elif ch != "`" and source[j] == "\n":
+                    break
+                j += 1
+            end = min(j + 1, n)
+            for k in range(i, end):
+                depths[k] = depth
+            i = end
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        i += 1
+    return depths
+
+
 def _go_parse_top_level_declarations(source: str) -> list[tuple[str, str, str]]:
-    """Return ``(kind, name, value)`` for top-level ``const``/``var`` declarations.
+    """Return ``(kind, name, value)`` for package-scope ``const``/``var`` declarations.
 
     Handles both single-line declarations and ``const (...)`` / ``var (...)``
     blocks, including balanced parenthesis scanning so nested expressions do not
-    terminate a block prematurely.
+    terminate a block prematurely. Declarations nested in any ``{}`` block
+    (function bodies, nested blocks) are lexically scoped and skipped.
     """
     decls: list[tuple[str, str, str]] = []
-    # Only column-0 declarations are package scope; indented ``const`` / ``var``
-    # inside a function body are lexically scoped and may shadow parameters.
+    depths = _go_brace_depths(source)
+
+    def package_scope(offset: int) -> bool:
+        return offset >= len(depths) or depths[offset] == 0
+
     # Single-line: ``const/var name = value`` or ``const/var name int = value``.
     for match in re.finditer(
-        r"^(const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
+        r"^\s*(const|var)\s+(\w+)\s*(?:\w+\s*)?=\s*([^;\n]+)",
         source,
         re.MULTILINE,
     ):
+        if not package_scope(match.start(1)):
+            continue
         value = re.sub(r"\s*//.*", "", match.group(3)).strip()
         decls.append((match.group(1), match.group(2), value))
     # Block declarations.
     i = 0
     while True:
-        m = re.search(r"^(const|var)\s*\(", source[i:], re.MULTILINE)
+        m = re.search(r"^\s*(const|var)\s*\(", source[i:], re.MULTILINE)
         if not m:
             break
         kind = m.group(1)
         start = i + m.end()
+        if not package_scope(i + m.start(1)):
+            i = start
+            continue
         depth = 1
         j = start
         while j < len(source) and depth > 0:
