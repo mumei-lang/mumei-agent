@@ -546,15 +546,19 @@ def _detect_safety_issues(
         return _detect_python_safety_issues(source)
     if normalized == "solidity":
         mapping_names = _solidity_mapping_names(source)
+        solidity_constants = _solidity_declared_constants(
+            source, source_file=source_file
+        )
         issues = _detect_block_safety_issues(
             source,
             _solidity_function_blocks(source),
             "Solidity",
-            known_constants=_solidity_declared_constants(
-                source, source_file=source_file
-            ),
+            known_constants=solidity_constants,
             mapping_names=mapping_names,
             guaranteed_nonzero=_solidity_guaranteed_nonzero_params(source),
+            per_function_lengths=_solidity_fixed_array_lengths(
+                source, solidity_constants
+            ),
         )
         issues.extend(_detect_solidity_contract_issues(source, source_file=source_file))
         return issues
@@ -641,10 +645,32 @@ def _evaluate_solidity_constant_expression(expr: str, constants: dict[str, int])
     return _eval(tree)
 
 
-_SOLIDITY_IMPORT_PATH_RE = re.compile(
-    r"""^\s*import\s+(?:[^"';]*?\s+from\s+)?["'](?P<path>[^"']+)["']\s*;""",
+_SOLIDITY_IMPORT_RE = re.compile(
+    r"""^\s*import\s+(?:(?P<clause>[^"';]*?)\s+from\s+)?["'](?P<path>[^"']+)["']\s*;""",
     re.MULTILINE,
 )
+
+
+def _solidity_import_visible_names(clause: str | None) -> dict[str, str] | None:
+    """Return the {visible_name: original_name} bindings an import clause
+    introduces, or ``None`` when every global in the target file is visible
+    (``import "./x.sol";``). ``import * as ns`` introduces only
+    namespace-qualified names, which the constant evaluator cannot resolve,
+    so it contributes no bindings."""
+    if clause is None:
+        return None
+    clause = clause.strip()
+    if clause.startswith("*"):
+        return {}
+    names: dict[str, str] = {}
+    for part in clause.strip().strip("{}").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        match = re.match(r"([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?$", part)
+        if match:
+            names[match.group(2) or match.group(1)] = match.group(1)
+    return names
 
 
 def _solidity_declared_constants(
@@ -658,70 +684,103 @@ def _solidity_declared_constants(
     composite constants such as ``NEXT_OFFSET = ADDR_SIZE + FEE_SIZE`` are
     treated as concrete non-zero values rather than free Z3 integers (#296).
 
-    When ``source_file`` is given, relative ``import`` paths are followed so
-    constants defined in imported sibling files (e.g. a shared
-    ``*Config.sol``) also seed the model; imported names are seeded first so
-    local aliases like ``TREE_HEIGHT = POSEIDON_TREE_HEIGHT`` resolve.
+    When ``source_file`` is given, relative ``import`` paths are followed
+    transitively so constants defined in imported sibling files (e.g. a
+    shared ``*Config.sol``) also seed the model; local declarations take
+    precedence over imported bindings, and only the names an import clause
+    makes visible are merged. ``immutable`` assignments in constructors are
+    out of scope.
     """
-    constants: dict[str, int] = {}
+    imported: dict[str, int] = {}
     visited = set() if _visited is None else _visited
     if source_file is not None:
         base = Path(source_file).resolve()
-        if base not in visited:
-            visited.add(base)
-            for match in _SOLIDITY_IMPORT_PATH_RE.finditer(source):
-                import_path = match.group("path")
-                if not import_path.startswith(("./", "../")):
-                    continue
-                candidate = (base.parent / import_path).resolve()
-                if candidate in visited or not candidate.is_file():
-                    continue
-                visited.add(candidate)
-                try:
-                    imported = candidate.read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                except OSError:
-                    continue
-                for name, value in _solidity_declared_constants(
-                    imported, candidate, visited
-                ).items():
-                    constants.setdefault(name, value)
+        visited.add(base)
+        for match in _SOLIDITY_IMPORT_RE.finditer(source):
+            import_path = match.group("path")
+            if not import_path.startswith(("./", "../")):
+                continue
+            candidate = (base.parent / import_path).resolve()
+            if candidate in visited or not candidate.is_file():
+                continue
+            try:
+                imported_source = candidate.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                continue
+            sub = _solidity_declared_constants(imported_source, candidate, visited)
+            visible = _solidity_import_visible_names(match.group("clause"))
+            if visible is None:
+                for name, value in sub.items():
+                    imported.setdefault(name, value)
+            else:
+                for visible_name, original in visible.items():
+                    if original in sub:
+                        imported.setdefault(visible_name, sub[original])
     pattern = re.compile(
         r"\b(?:u?int\d*|address|bytes\d*|bool)\s+"
         r"(?:(?:public|private|internal|external)\s+)*"
         r"(?:constant|immutable)\s+"
         r"(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<value>[^;]+);"
     )
+    local: dict[str, int] = {}
     changed = True
     while changed:
         changed = False
         for match in pattern.finditer(source):
             name = match.group("name")
-            if name in constants:
+            if name in local:
                 continue
-            value = _evaluate_solidity_constant_expression(match.group("value"), constants)
+            value = _evaluate_solidity_constant_expression(
+                match.group("value"), {**imported, **local}
+            )
             if value is not None:
-                constants[name] = value
+                local[name] = value
                 changed = True
-    # Fixed-size arrays whose length is a resolvable constant expression get a
-    # compile-time ``len(name)`` fact (mirrors the Go fixed-array handling), so
-    # ``zeroHash[TREE_HEIGHT]`` is provably in bounds when
-    # ``TREE_HEIGHT < ZERO_HASH_COUNT``.
-    for match in re.finditer(
-        r"\b(?:u?int\d*|address|bytes\d*|bool)\s*"
-        r"\[\s*(?P<size>[^\]]+)\s*\]\s*"
-        r"(?:memory|calldata|storage|payable|\s)*\s*"
-        r"(?P<name>[A-Za-z_]\w*)\s*[,)=;]",
-        source,
-    ):
-        name = match.group("name")
-        if f"len({name})" in constants:
-            continue
-        size = _evaluate_solidity_constant_expression(match.group("size"), constants)
-        if size is not None and size > 0:
-            constants[f"len({name})"] = size
-    return constants
+    return {**imported, **local}
+
+
+_SOLIDITY_FIXED_ARRAY_RE = re.compile(
+    r"\b(?:u?int\d*|address|bytes\d*|bool)\s*"
+    r"\[\s*(?P<size>[^\]]+)\s*\]\s*"
+    r"(?:memory|calldata|storage|payable|\s)*\s*"
+    r"(?P<name>[A-Za-z_]\w*)\s*(?=[,)=;]|$)"
+)
+
+_SOLIDITY_FUNCTION_SIGNATURE_RE = re.compile(
+    r"\bfunction\s+(?P<name>[A-Za-z_]\w*)\s*"
+    r"\((?P<params>[^)]*)\)(?P<tail>[^{;]*)\{"
+)
+
+
+def _solidity_fixed_array_lengths(
+    source: str, constants: dict[str, int]
+) -> dict[str, dict[str, int]]:
+    """Per-function compile-time lengths for fixed-size Solidity arrays.
+
+    Returns ``{function_name: {"len(<name>)": size}}`` covering parameters,
+    ``returns (...)`` declarators, and body-level locals. Lengths are scoped
+    per function so a ``uint[10] data`` parameter in one function cannot
+    mask a ``uint[2] data`` parameter of the same name in another.
+    """
+    lengths: dict[str, dict[str, int]] = {}
+
+    def _collect(scope: str, text: str) -> None:
+        for match in _SOLIDITY_FIXED_ARRAY_RE.finditer(text):
+            size = _evaluate_solidity_constant_expression(
+                match.group("size"), constants
+            )
+            if size is not None and size > 0:
+                lengths.setdefault(scope, {})[f"len({match.group('name')})"] = size
+
+    for match in _SOLIDITY_FUNCTION_SIGNATURE_RE.finditer(source):
+        scope = _safe_identifier(match.group("name"))
+        _collect(scope, match.group("params"))
+        _collect(scope, match.group("tail"))
+    for name, body in _solidity_function_blocks(source):
+        _collect(name, body)
+    return lengths
 
 
 def _evaluate_go_constant_expression(
@@ -3425,6 +3484,7 @@ def _detect_block_safety_issues(
     nullable_params: dict[str, set[str]] | None = None,
     mapping_names: set[str] | None = None,
     guaranteed_nonzero: set[str] | None = None,
+    per_function_lengths: dict[str, dict[str, int]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     fallback = label == "TypeScript"
@@ -3457,13 +3517,21 @@ def _detect_block_safety_issues(
         function_has_unchecked = (
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
+        function_constants = known_constants
+        if per_function_lengths:
+            scoped_lengths = per_function_lengths.get(name)
+            if scoped_lengths:
+                function_constants = {
+                    **(known_constants or {}),
+                    **scoped_lengths,
+                }
         for expression in expressions:
             expr_issues = _issues_for_expression(
                 name,
                 expression,
                 label,
                 dereference_values=dereference_values,
-                known_constants=known_constants,
+                known_constants=function_constants,
                 mapping_names=mapping_names,
                 guaranteed_nonzero=per_function_nonzero,
                 guarded_indices=per_function_guarded_indices,

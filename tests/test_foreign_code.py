@@ -265,6 +265,85 @@ def test_solidity_declared_constants_import_cycle_terminates(tmp_path) -> None:
     assert constants["A_VAL"] == 1
 
 
+def test_solidity_declared_constants_transitive_imports(tmp_path) -> None:
+    """A -> B -> C: constants in C must resolve when scanning A."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    (tmp_path / "C.sol").write_text(
+        "uint256 constant HEIGHT = 6;\n", encoding="utf-8"
+    )
+    (tmp_path / "B.sol").write_text(
+        'import "./C.sol";\nuint256 constant B_VAL = HEIGHT + 1;\n',
+        encoding="utf-8",
+    )
+    a = tmp_path / "A.sol"
+    a.write_text(
+        'import "./B.sol";\nuint256 constant A_VAL = B_VAL * HEIGHT;\n',
+        encoding="utf-8",
+    )
+
+    constants = _solidity_declared_constants(
+        a.read_text(encoding="utf-8"), source_file=a
+    )
+    assert constants["HEIGHT"] == 6
+    assert constants["B_VAL"] == 7
+    assert constants["A_VAL"] == 42
+
+
+def test_solidity_declared_constants_selective_import_shadowing(tmp_path) -> None:
+    """Only the names a selective import lists are bound; a local constant may
+    legally reuse an unselected imported-file name and must win."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    (tmp_path / "Config.sol").write_text(
+        "uint256 constant LIMIT = 2;\nuint256 constant OTHER = 9;\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "Main.sol"
+    main.write_text(
+        'import {OTHER} from "./Config.sol";\n'
+        "uint256 constant LIMIT = 10;\n",
+        encoding="utf-8",
+    )
+
+    constants = _solidity_declared_constants(
+        main.read_text(encoding="utf-8"), source_file=main
+    )
+    assert constants["OTHER"] == 9
+    assert constants["LIMIT"] == 10  # local shadows the unselected import
+
+
+def test_solidity_fixed_array_lengths_are_function_scoped(tmp_path) -> None:
+    """A ``uint[10]`` parameter must not mask a same-named ``uint[2]``
+    parameter in another function — the unsafe access stays reported."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_safety_issues,
+    )
+
+    source = """
+uint256 constant LIMIT_IDX = 9;
+contract C {
+    function f(uint256[10] memory data) public pure returns (uint256) {
+        return data[LIMIT_IDX];
+    }
+    function g(uint256[2] memory data) public pure returns (uint256) {
+        return data[LIMIT_IDX];
+    }
+}
+"""
+    f = tmp_path / "C.sol"
+    f.write_text(source, encoding="utf-8")
+
+    issues = _detect_safety_issues(source, "solidity", source_file=str(f))
+    unsafe = [i for i in issues if "can index `data[LIMIT_IDX]`" in i.message]
+    # f is safe (9 < 10) and must not be reported; g is unsafe (9 >= 2).
+    assert [i.function_name for i in unsafe] == ["g"]
+
+
 def test_go_declared_constants_parses_all_literal_bases_and_skips_expressions() -> None:
     """Go const values may be hex, binary, octal, or have ``_`` separators."""
     from agent.strategies.foreign_code_strategy_helpers import _go_declared_constants
