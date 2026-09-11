@@ -344,6 +344,143 @@ contract C {
     assert [i.function_name for i in unsafe] == ["g"]
 
 
+def test_solidity_fixed_array_lengths_overload_scoped(tmp_path) -> None:
+    """Overloaded functions sharing a name must get independent array
+    lengths — the second overload's length must not mask the first."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_safety_issues,
+    )
+
+    source = """
+uint256 constant IDX = 9;
+contract C {
+    function f(uint256[2] memory data) public pure returns (uint256) {
+        return data[IDX];
+    }
+    function f(uint256[10] memory data, bool flag) public pure returns (uint256) {
+        return data[IDX];
+    }
+}
+"""
+    f = tmp_path / "C.sol"
+    f.write_text(source, encoding="utf-8")
+
+    issues = _detect_safety_issues(source, "solidity", source_file=str(f))
+    unsafe = [i for i in issues if "can index `data[IDX]`" in i.message]
+    # First overload is unsafe (9 >= 2); second is safe (9 < 10).
+    assert len(unsafe) == 1
+    assert "uint256[2]" not in unsafe[0].message or unsafe[0].function_name == "f"
+
+
+def test_solidity_imported_contract_members_not_globals(tmp_path) -> None:
+    """Constants inside an imported contract are not unqualified globals —
+    a same-named parameter must not be pinned to the imported value."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_safety_issues,
+        _solidity_declared_constants,
+    )
+
+    (tmp_path / "Config.sol").write_text(
+        "contract Config { uint256 constant divisor = 1; }\n"
+        "uint256 constant FILE_LEVEL = 7;\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "Main.sol"
+    main.write_text(
+        'import "./Config.sol";\n'
+        "contract Main {\n"
+        "    function divide(uint256 x, uint256 divisor) public pure returns (uint256) {\n"
+        "        return x / divisor;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    constants = _solidity_declared_constants(
+        main.read_text(encoding="utf-8"), source_file=main
+    )
+    assert constants.get("FILE_LEVEL") == 7
+    assert "divisor" not in constants  # contract member, not importable
+
+    issues = _detect_safety_issues(
+        main.read_text(encoding="utf-8"), "solidity", source_file=str(main)
+    )
+    assert any("can divide by `divisor`" in i.message for i in issues)
+
+
+def test_solidity_repeated_imports_bind_all_aliases(tmp_path) -> None:
+    """Importing the same file twice under different aliases binds every
+    clause — the second import must reuse the cached result, not be skipped."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    (tmp_path / "Cfg.sol").write_text(
+        "uint256 constant X = 5;\n", encoding="utf-8"
+    )
+    main = tmp_path / "Main.sol"
+    main.write_text(
+        'import {X as FIRST} from "./Cfg.sol";\n'
+        'import {X as SECOND} from "./Cfg.sol";\n',
+        encoding="utf-8",
+    )
+
+    constants = _solidity_declared_constants(
+        main.read_text(encoding="utf-8"), source_file=main
+    )
+    assert constants["FIRST"] == 5
+    assert constants["SECOND"] == 5
+
+
+def test_solidity_import_cannot_escape_root(tmp_path) -> None:
+    """``../`` imports resolving above the entry file's root (nearest .git
+    ancestor, else its directory) are ignored — no arbitrary host reads."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    (tmp_path / "outside.sol").write_text(
+        "uint256 constant LEAK = 42;\n", encoding="utf-8"
+    )
+    sub = tmp_path / "proj"
+    sub.mkdir()
+    main = sub / "Main.sol"
+    main.write_text(
+        'import "../outside.sol";\nuint256 constant LOCAL = 1;\n',
+        encoding="utf-8",
+    )
+
+    constants = _solidity_declared_constants(
+        main.read_text(encoding="utf-8"), source_file=main
+    )
+    assert constants["LOCAL"] == 1
+    assert "LEAK" not in constants
+
+
+def test_solidity_import_within_repo_root_allowed(tmp_path) -> None:
+    """Inside a git repo, ``../`` imports that stay under the repo root do
+    resolve."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "cfg").mkdir()
+    (repo / "cfg" / "C.sol").write_text(
+        "uint256 constant VAL = 3;\n", encoding="utf-8"
+    )
+    sub = repo / "src"
+    sub.mkdir()
+    main = sub / "Main.sol"
+    main.write_text('import "../cfg/C.sol";\n', encoding="utf-8")
+
+    constants = _solidity_declared_constants(
+        main.read_text(encoding="utf-8"), source_file=main
+    )
+    assert constants["VAL"] == 3
+
+
 def test_go_declared_constants_parses_all_literal_bases_and_skips_expressions() -> None:
     """Go const values may be hex, binary, octal, or have ``_`` separators."""
     from agent.strategies.foreign_code_strategy_helpers import _go_declared_constants
