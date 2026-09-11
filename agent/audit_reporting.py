@@ -290,8 +290,7 @@ def _verification_status_from_foreign_result(
         for warning in _string_list(result.get("warnings"))
     )
     has_spec_lowering_failures = any(
-        _is_spec_lowering_or_unsupported_error(issue)
-        for issue in (spec_health_issues or [])
+        issue.startswith("encoding-gap") for issue in (spec_health_issues or [])
     )
     inconclusive_without_counterexample = (
         status == "satisfiable_with_skips"
