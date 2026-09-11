@@ -985,6 +985,76 @@ def test_audit_verification_status_preserves_skips_without_verification_failure(
     assert status == "unverifiable"
 
 
+def test_audit_verification_status_unverifiable_for_spec_not_boolean() -> None:
+    """A spec health issue whose clause could not lower to boolean means the
+    atom's spec was not fully encoded — the verdict must not stay ``verified``
+    (dogfooding: leanVM xmss hash.rs reported verified with an encoding-gap)."""
+    result = {
+        "success": True,
+        "verification": {
+            "success": True,
+            "report": {"status": "verified", "diagnostics": []},
+        },
+    }
+
+    status = _verification_status_from_foreign_result(
+        result,
+        counterexample_values=[],
+        verification_violations=[],
+        spec_health_issues=[
+            "encoding-gap: tweak_hash: spec_not_boolean: requires clause "
+            "'pp is not None' must lower to boolean"
+        ],
+    )
+
+    assert status == "unverifiable"
+
+
+def test_audit_verification_status_verified_with_genuine_contradiction_unchanged() -> None:
+    """A genuine spec contradiction is not a lowering failure and must not be
+    reclassified as inconclusive by the encoding-gap check."""
+    result = {
+        "success": True,
+        "verification": {
+            "success": True,
+            "report": {"status": "verified", "diagnostics": []},
+        },
+    }
+
+    status = _verification_status_from_foreign_result(
+        result,
+        counterexample_values=[],
+        verification_violations=[],
+        spec_health_issues=["contradiction: withdraw: requires x > 0 and x < 0"],
+    )
+
+    assert status == "verified"
+
+
+def test_audit_verification_status_marker_like_atom_name_stays_verified() -> None:
+    """An atom whose *name* equals a lowering marker (e.g. ``spec_not_boolean``)
+    with a genuine contradiction must not be misread as an encoding gap —
+    only the ``encoding-gap:`` classification prefix counts."""
+    result = {
+        "success": True,
+        "verification": {
+            "success": True,
+            "report": {"status": "verified", "diagnostics": []},
+        },
+    }
+
+    status = _verification_status_from_foreign_result(
+        result,
+        counterexample_values=[],
+        verification_violations=[],
+        spec_health_issues=[
+            "contradiction: spec_not_boolean: requires_unsat: x > 0 && x < 0"
+        ],
+    )
+
+    assert status == "verified"
+
+
 def test_audit_pipeline_marks_verification_status_unverifiable_for_skipped_clause(
     tmp_path: Path,
 ) -> None:
