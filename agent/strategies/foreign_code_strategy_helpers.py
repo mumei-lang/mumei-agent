@@ -550,7 +550,9 @@ def _detect_safety_issues(
             source,
             _solidity_function_blocks(source),
             "Solidity",
-            known_constants=_solidity_declared_constants(source),
+            known_constants=_solidity_declared_constants(
+                source, source_file=source_file
+            ),
             mapping_names=mapping_names,
             guaranteed_nonzero=_solidity_guaranteed_nonzero_params(source),
         )
@@ -639,14 +641,52 @@ def _evaluate_solidity_constant_expression(expr: str, constants: dict[str, int])
     return _eval(tree)
 
 
-def _solidity_declared_constants(source: str) -> dict[str, int]:
+_SOLIDITY_IMPORT_PATH_RE = re.compile(
+    r"""^\s*import\s+(?:[^"';]*?\s+from\s+)?["'](?P<path>[^"']+)["']\s*;""",
+    re.MULTILINE,
+)
+
+
+def _solidity_declared_constants(
+    source: str,
+    source_file: str | Path | None = None,
+    _visited: set[Path] | None = None,
+) -> dict[str, int]:
     """Map Solidity ``constant``/``immutable`` names to their integer value.
 
     Resolves arithmetic expressions of already-known constants so that
     composite constants such as ``NEXT_OFFSET = ADDR_SIZE + FEE_SIZE`` are
     treated as concrete non-zero values rather than free Z3 integers (#296).
+
+    When ``source_file`` is given, relative ``import`` paths are followed so
+    constants defined in imported sibling files (e.g. a shared
+    ``*Config.sol``) also seed the model; imported names are seeded first so
+    local aliases like ``TREE_HEIGHT = POSEIDON_TREE_HEIGHT`` resolve.
     """
     constants: dict[str, int] = {}
+    visited = set() if _visited is None else _visited
+    if source_file is not None:
+        base = Path(source_file).resolve()
+        if base not in visited:
+            visited.add(base)
+            for match in _SOLIDITY_IMPORT_PATH_RE.finditer(source):
+                import_path = match.group("path")
+                if not import_path.startswith(("./", "../")):
+                    continue
+                candidate = (base.parent / import_path).resolve()
+                if candidate in visited or not candidate.is_file():
+                    continue
+                visited.add(candidate)
+                try:
+                    imported = candidate.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError:
+                    continue
+                for name, value in _solidity_declared_constants(
+                    imported, candidate, visited
+                ).items():
+                    constants.setdefault(name, value)
     pattern = re.compile(
         r"\b(?:u?int\d*|address|bytes\d*|bool)\s+"
         r"(?:(?:public|private|internal|external)\s+)*"
@@ -664,6 +704,23 @@ def _solidity_declared_constants(source: str) -> dict[str, int]:
             if value is not None:
                 constants[name] = value
                 changed = True
+    # Fixed-size arrays whose length is a resolvable constant expression get a
+    # compile-time ``len(name)`` fact (mirrors the Go fixed-array handling), so
+    # ``zeroHash[TREE_HEIGHT]`` is provably in bounds when
+    # ``TREE_HEIGHT < ZERO_HASH_COUNT``.
+    for match in re.finditer(
+        r"\b(?:u?int\d*|address|bytes\d*|bool)\s*"
+        r"\[\s*(?P<size>[^\]]+)\s*\]\s*"
+        r"(?:memory|calldata|storage|payable|\s)*\s*"
+        r"(?P<name>[A-Za-z_]\w*)\s*[,)=;]",
+        source,
+    ):
+        name = match.group("name")
+        if f"len({name})" in constants:
+            continue
+        size = _evaluate_solidity_constant_expression(match.group("size"), constants)
+        if size is not None and size > 0:
+            constants[f"len({name})"] = size
     return constants
 
 
@@ -4967,7 +5024,13 @@ def _index_safety_issue(
         # than the type's maximum value (e.g. ``byte`` into ``[256]encoding``).
         return None
     counterexample = _z3_index_counterexample(
-        index, f"len_{container}", known_index=known_index, is_unsigned=index_is_unsigned
+        index,
+        f"len_{container}",
+        known_index=known_index,
+        is_unsigned=index_is_unsigned,
+        known_length=(known_constants or {}).get(f"len({container})")
+        if known_constants
+        else None,
     )
     if counterexample is None:
         return None
@@ -5818,6 +5881,7 @@ def _z3_index_counterexample(
     length_name: str,
     known_index: int | None = None,
     is_unsigned: bool = False,
+    known_length: int | None = None,
 ) -> dict[str, int] | None:
     """Counterexample for an unbounded index access, or ``None`` if provably safe.
 
@@ -5839,6 +5903,10 @@ def _z3_index_counterexample(
         solver.add(z3.Or(index < 0, index >= length))
     if known_index is not None:
         solver.add(index == known_index)
+    if known_length is not None:
+        # Fixed-size containers (Solidity ``uint256[N]``, Go ``[N]T``) pin the
+        # length so a constant index inside it is provably safe.
+        solver.add(length == known_length)
     if solver.check() == z3.sat:
         model = solver.model()
         return {

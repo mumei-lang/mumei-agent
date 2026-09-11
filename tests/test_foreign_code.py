@@ -219,6 +219,52 @@ def test_solidity_declared_constants_parses_hex_and_decimal() -> None:
     assert constants["DERIVED"] == 17  # derived constant expressions are resolved
 
 
+def test_solidity_declared_constants_follows_relative_imports(tmp_path) -> None:
+    """Constants declared in an imported sibling file seed the model, so local
+    aliases like ``TREE_HEIGHT = POSEIDON_TREE_HEIGHT`` resolve. Found by
+    dogfooding zERC20's PoseidonAggregationLib.sol, whose bounds check needs
+    constants from PoseidonAggregationConfig.sol."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    config = tmp_path / "PoseidonAggregationConfig.sol"
+    config.write_text(
+        "uint256 constant POSEIDON_TREE_HEIGHT = 6;\n"
+        "uint256 constant POSEIDON_ZERO_HASH_COUNT = POSEIDON_TREE_HEIGHT + 1;\n",
+        encoding="utf-8",
+    )
+    lib = tmp_path / "PoseidonAggregationLib.sol"
+    lib.write_text(
+        'import {POSEIDON_TREE_HEIGHT, POSEIDON_ZERO_HASH_COUNT} from "./PoseidonAggregationConfig.sol";\n'
+        "uint256 private constant TREE_HEIGHT = POSEIDON_TREE_HEIGHT;\n",
+        encoding="utf-8",
+    )
+
+    constants = _solidity_declared_constants(
+        lib.read_text(encoding="utf-8"), source_file=lib
+    )
+    assert constants["POSEIDON_TREE_HEIGHT"] == 6
+    assert constants["POSEIDON_ZERO_HASH_COUNT"] == 7
+    assert constants["TREE_HEIGHT"] == 6
+
+
+def test_solidity_declared_constants_import_cycle_terminates(tmp_path) -> None:
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _solidity_declared_constants,
+    )
+
+    a = tmp_path / "A.sol"
+    b = tmp_path / "B.sol"
+    a.write_text('import "./B.sol";\nuint256 constant A_VAL = 1;\n', encoding="utf-8")
+    b.write_text('import "./A.sol";\nuint256 constant B_VAL = A_VAL + 1;\n', encoding="utf-8")
+
+    constants = _solidity_declared_constants(
+        a.read_text(encoding="utf-8"), source_file=a
+    )
+    assert constants["A_VAL"] == 1
+
+
 def test_go_declared_constants_parses_all_literal_bases_and_skips_expressions() -> None:
     """Go const values may be hex, binary, octal, or have ``_`` separators."""
     from agent.strategies.foreign_code_strategy_helpers import _go_declared_constants
