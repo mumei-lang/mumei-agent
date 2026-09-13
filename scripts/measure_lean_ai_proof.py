@@ -95,6 +95,7 @@ def measure_one(
     rel = source.relative_to(benchmarks_dir)
     z3_cert_path = work_dir / rel.parent / f"{rel.stem}.z3.proof-cert.json"
     out = cert_dir / rel.parent / f"{rel.stem}.proof.json"
+    out.unlink(missing_ok=True)
     started = time.monotonic()
     cert, verify_diag = _z3_proof_cert(config.mumei_bin, source, z3_cert_path, timeout)
     entry: dict[str, object] = {

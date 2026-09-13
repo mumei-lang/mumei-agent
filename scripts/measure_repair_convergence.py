@@ -155,7 +155,9 @@ def main() -> int:
     done = {
         entry["file"]
         for entry in manifest.get("files", [])  # type: ignore[union-attr]
-        if isinstance(entry, dict) and entry.get("certificate")
+        if isinstance(entry, dict)
+        and isinstance(entry.get("certificate"), str)
+        and Path(entry["certificate"]).is_file()
     }
     for source in files:
         rel = str(source.relative_to(args.benchmarks_dir)).replace(os.sep, "/")

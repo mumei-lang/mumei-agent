@@ -194,6 +194,52 @@ def test_repair_certificate_records_max_retries_exhausted(monkeypatch, tmp_path)
     assert captured[-1]["repair_attempts"] == 1
 
 
+def test_repair_attempts_exclude_unwritten_fixes(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "broken.mm"
+    source.write_text("atom broken() -> i64 body: { 0 }\n", encoding="utf-8")
+
+    class AlwaysFailing:
+        def verify(self, _source_file: str) -> dict:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "",
+                "report": {"failure_type": "postcondition_violated", "counterexample": {"x": 1}},
+            }
+
+    captured = _capture_repair_certificate(monkeypatch)
+    monkeypatch.setattr(self_healing, "create_mumei_client", lambda _bin: AlwaysFailing())
+    monkeypatch.setattr(self_healing, "get_fix", lambda *a, **k: "")
+
+    code = _heal_with_cert(
+        monkeypatch, source, tmp_path / "c.json", ["--max-retries", "3"]
+    )
+    assert code == 1
+    assert captured[-1]["converged"] is False
+    assert captured[-1]["repair_attempts"] == 0
+
+
+def test_certificate_failure_exits_nonzero_after_successful_heal(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "ok.mm"
+    source.write_text("atom ok() -> i64 body: { 0 }\n", encoding="utf-8")
+
+    class Passing:
+        def verify(self, _source_file: str) -> dict:
+            return {"success": True, "stdout": "", "stderr": "", "report": {}}
+
+    def failing_write(*_a, **_k):
+        raise RuntimeError("mumei did not write a proof certificate")
+
+    monkeypatch.setattr(self_healing, "write_repair_certificate", failing_write)
+    monkeypatch.setattr(self_healing.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        self_healing.AgentConfig, "create_client", lambda self: SimpleNamespace()
+    )
+    monkeypatch.setattr(self_healing, "create_mumei_client", lambda _bin: Passing())
+
+    assert _heal_with_cert(monkeypatch, source, tmp_path / "c.json") == 1
+
+
 def test_repair_certificate_records_exception_stop_reason(monkeypatch, tmp_path) -> None:
     source = tmp_path / "broken.mm"
     source.write_text("atom broken() -> i64 body: { 0 }\n", encoding="utf-8")

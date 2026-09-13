@@ -360,6 +360,7 @@ def main() -> None:
 
     success = False
     stop_reason: str | None = None
+    applied_fixes = 0
     outer_history = RetryHistory()
     pattern_lib = PatternLibrary()
     thought = ThoughtProcess(target_file=source_file)
@@ -503,6 +504,7 @@ def main() -> None:
                     )
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(meta_fixed_code)
+                    applied_fixes += 1
                     print("Meta-Architect applied interface refactoring. Retrying...")
                     time.sleep(2)
                     continue
@@ -545,6 +547,7 @@ def main() -> None:
                     )
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(meta_fixed_code)
+                    applied_fixes += 1
                     print("Meta-Architect applied interface refactoring. Retrying...")
                     time.sleep(2)
                     continue
@@ -579,6 +582,7 @@ def main() -> None:
                         pass
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(fixed_code)
+                    applied_fixes += 1
                     print(
                         "CEGIS generated loop invariant "
                         f"after {result_summary.iterations} iteration(s). Retrying..."
@@ -643,6 +647,7 @@ def main() -> None:
             # Overwrite source file
             with open(source_file, "w", encoding="utf-8") as f:
                 f.write(fixed_code)
+            applied_fixes += 1
 
             print("Code updated. Retrying...")
             time.sleep(2)
@@ -686,13 +691,14 @@ def main() -> None:
         if not success:
             shutil.copy2(backup_file, source_file)
             print(f"Healing failed. Original source restored from {backup_file}")
+        certificate_failed = False
         if args.proof_cert_out:
             try:
                 write_repair_certificate(
                     source_file,
                     repair_certificate_metadata(
                         converged=success,
-                        repair_attempts=len(outer_history.attempts),
+                        repair_attempts=applied_fixes,
                         token_cost=outer_history.total_tokens(),
                         consecutive_successes=1 if success else 0,
                         final_error=None if success else (stop_reason or "unknown"),
@@ -702,8 +708,9 @@ def main() -> None:
                 )
                 print(f"Repair certificate written to {args.proof_cert_out}")
             except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as exc:
-                print(f"Warning: repair certificate not written: {exc}")
-        if not success:
+                certificate_failed = True
+                print(f"Error: repair certificate not written: {exc}")
+        if not success or certificate_failed:
             sys.exit(1)
 
 
