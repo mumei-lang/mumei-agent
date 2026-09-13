@@ -1264,7 +1264,12 @@ lean-cert キー（`ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strate
 （OpenAI 互換 `LLM_BASE_URL`）で実行。Lean escalation 候補 6 は AI off / on ともに 6 `lean_verified`（delta +0、
 `ai_proof_used` 0、`manual_lemma_reason` 残 0 — 決定的 tactic ladder が AI 段の前に全候補を解いた）、
 repair convergence は `SKIP` → `MEASURED` 41.67%（10/24 atom、平均 1.3333 attempts、max 3 retries）。
-Wave 5（C-2 / R-8）は本計測確定後に別 PR。
+Wave 4 は完了（2026-09-13: mumei-agent #579 / mumei #558 + papers #6 / mumei-lean #118）。Wave 5（C-2 / R-8、mumei 側 P10-D nlsat 先行）は
+実装済み・レビュー中で、B-7 再測定を同一 PR 群で実施（escalation 候補 6 → 6、`lean_verified_delta` 0 不変、AI 段への影響なし）。
+C-1（mumei `docs/ROADMAP.md` P30）の群 3 — `while` ループ不変量 3 atom（`svcomp_style/loop_invariant.mm::sum_array` /
+`domain_compliance/regtech_exhaustiveness.mm::all_transactions_within_limit` /
+`domain_compliance/rtgs_balance_conservation.mm::queue_total_is_nonnegative`）— が B-4 AI 証明生成の対象義務入力
+（既存 `lean_fallback_strategy` / `ai_proof_attempts` / `ai_proof_used` で計測、新 alias なし）。
 
 ### 実装済み
 
