@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent.config import AgentConfig
 from agent.self_correction import StructuredFeedbackSelfCorrectionLoop
@@ -261,3 +264,87 @@ def test_config_self_correction_max_tokens_default_and_override(monkeypatch) -> 
     monkeypatch.setenv("SELF_CORRECTION_MAX_TOKENS", "5000")
     config2 = AgentConfig()
     assert config2.self_correction_max_tokens == 5000
+
+
+def test_repair_certificate_metadata_shape() -> None:
+    from agent.self_correction import repair_certificate_metadata
+
+    ok = repair_certificate_metadata(converged=True, repair_attempts=2, token_cost=17, consecutive_successes=1)
+    assert ok == {
+        "repair_attempts": 2,
+        "converged": True,
+        "consecutive_successes": 1,
+        "token_cost": 17,
+    }
+    failed = repair_certificate_metadata(
+        converged=False, repair_attempts=3, token_cost=0, final_error="max_retries_exhausted"
+    )
+    assert failed["converged"] is False
+    assert failed["final_error"] == "max_retries_exhausted"
+
+
+def _fake_mumei(tmp_path: Path, body: str) -> str:
+    script = tmp_path / "fake_mumei.py"
+    script.write_text(
+        "import json, os, sys\n"
+        "out = sys.argv[sys.argv.index('--output') + 1]\n"
+        f"{body}\n",
+        encoding="utf-8",
+    )
+    return f"{sys.executable} {script}"
+
+
+def test_write_repair_certificate_passes_metadata_env(tmp_path: Path) -> None:
+    from agent.self_correction import (
+        SELF_CORRECTION_METADATA_ENV,
+        write_repair_certificate,
+    )
+
+    source = tmp_path / "prog.mm"
+    source.write_text("fn f() {}\n", encoding="utf-8")
+    mumei_bin = _fake_mumei(
+        tmp_path,
+        "meta = json.loads(os.environ['MUMEI_SELF_CORRECTION_METADATA'])\n"
+        "json.dump({'atoms': [{'name': 'f', 'self_correction': meta}],"
+        " 'self_correction_summary': {'total_atoms': 1,"
+        " 'converged_atoms': int(meta['converged']),"
+        " 'average_repair_attempts': meta['repair_attempts']}},"
+        " open(out, 'w'))\n"
+        "sys.exit(0 if meta['converged'] else 1)",
+    )
+    assert SELF_CORRECTION_METADATA_ENV == "MUMEI_SELF_CORRECTION_METADATA"
+    cert = write_repair_certificate(
+        source,
+        {"repair_attempts": 3, "converged": False, "consecutive_successes": 0, "token_cost": 9},
+        mumei_bin=mumei_bin,
+        out_path=tmp_path / "certs" / "prog.proof.json",
+    )
+    assert cert["self_correction_summary"]["converged_atoms"] == 0
+    assert cert["self_correction_summary"]["average_repair_attempts"] == 3
+    assert cert["atoms"][0]["self_correction"]["token_cost"] == 9
+
+
+def test_write_repair_certificate_rejects_certificate_without_summary(tmp_path: Path) -> None:
+    from agent.self_correction import write_repair_certificate
+
+    source = tmp_path / "prog.mm"
+    source.write_text("fn f() {}\n", encoding="utf-8")
+    mumei_bin = _fake_mumei(tmp_path, "json.dump({'atoms': []}, open(out, 'w'))")
+    with pytest.raises(RuntimeError, match="self_correction_summary"):
+        write_repair_certificate(
+            source, {"repair_attempts": 0, "converged": True, "consecutive_successes": 1, "token_cost": 0},
+            mumei_bin=mumei_bin, out_path=tmp_path / "prog.proof.json",
+        )
+
+
+def test_write_repair_certificate_requires_output_file(tmp_path: Path) -> None:
+    from agent.self_correction import write_repair_certificate
+
+    source = tmp_path / "prog.mm"
+    source.write_text("fn f() {}\n", encoding="utf-8")
+    mumei_bin = _fake_mumei(tmp_path, "sys.exit(1)")
+    with pytest.raises(RuntimeError, match="did not write"):
+        write_repair_certificate(
+            source, {"repair_attempts": 1, "converged": False, "consecutive_successes": 0, "token_cost": 1},
+            mumei_bin=mumei_bin, out_path=tmp_path / "prog.proof.json",
+        )

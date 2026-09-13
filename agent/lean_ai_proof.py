@@ -2,37 +2,42 @@
 
 This module sits *after* the Task 2-C bridge (generated-module path and
 known witness modules) and *before* human review.  For every atom that is
-still ``z3_check_result == "unknown"`` it asks an LLM to write a Lean 4
-module containing ``theorem <atom>_correct``, builds that module with
-``lake build`` inside the configured ``mumei-lean`` checkout, and feeds the
-build log back to the LLM for repair up to a bounded number of attempts.
+still ``z3_check_result == "unknown"`` it asks an LLM for the tactic script
+of ``theorem <atom>_correct`` and hands all scripts of a round to
+mumei-lean's canonical ``scripts/bridge.py --external-proofs`` (B-2 tactic
+injection: the script becomes ``IngestedAtom.auto_tactic`` of the
+regenerated statement).  The bridge's B-3 per-atom failure report
+(``unsolved_goals`` / ``type_mismatch`` / ``import_error`` ...) is fed back
+to the LLM for repair up to a bounded number of rounds.
 
 Soundness contract
 ------------------
 
 * The theorem *statement* is never written by the LLM.  Each run re-runs
   the trusted translator (``scripts/ingest_cert.py``) on the certificate
-  being repaired into ``<evidence>/_statements/`` and takes the statement
-  verbatim from there -- never from ``<mumei-lean>/generated/``, where a
-  failed bridge may have left a stale module.  The LLM supplies only the
-  tactic script after ``:= by``; atoms for which the translator emits no
-  statement are skipped (``no_trusted_statement``) and stay ``unknown``.
-* An atom is promoted to ``lean_verified`` **only** when Lake compiles the
-  assembled module with exit code 0, no ``error:`` lines, no
-  ``declaration uses 'sorry'`` warning, and ``#print axioms`` reports
-  nothing beyond ``propext`` / ``Classical.choice`` / ``Quot.sound``.
+  being repaired into ``<evidence>/_statements/`` for the prompt, and the
+  bridge regenerates it again from the same certificate when it injects
+  the tactic -- never from ``<mumei-lean>/generated/``, where a failed
+  bridge may have left a stale module.  Atoms for which the translator
+  emits no statement are skipped (``no_trusted_statement``) and stay
+  ``unknown``.
+* An atom is promoted to ``lean_verified`` **only** when the bridge's
+  exported ``.lean-cert.json`` (gated by ``export_cert.py``'s translator /
+  result contract checks) reports it ``lean_verified`` with
+  ``ai_proof_used``, and a separate ``#print axioms`` probe of the built
+  theorem reports nothing beyond ``propext`` / ``Classical.choice`` /
+  ``Quot.sound``.
 * Tactic scripts that contain ``sorry`` / ``admit`` / ``native_decide`` /
   ``axiom`` / ``unsafe`` / meta-programming or IO escapes (``run_cmd``,
-  ``run_tac``, ``#eval``, ``set_option`` ...) are rejected before Lake.
-* Every attempt's Lean source and build log is copied to an evidence
-  directory, and promoted atoms carry ``ai_proof_used = True`` in both
+  ``run_tac``, ``#eval``, ``set_option`` ...) are rejected before they
+  reach the bridge (which applies the same rejection list again).
+* Every round's external-proof payload, bridge log, exported certificate
+  and failure report are kept in an evidence directory, and promoted
+  atoms carry ``ai_proof_used = True`` / ``ai_proof_attempts`` in both
   ``lean_metadata`` and ``lean_result_metadata`` so provenance is
   distinguishable from ``known_witness_used`` and the generated-module path.
-* The generated module is removed from the ``mumei-lean`` checkout after
-  each attempt so a stale AI module can never influence later
-  ``scripts/bridge.py`` runs.
 
-The module never imports ``mumei-lean``; Lake is invoked as a subprocess.
+The module never imports ``mumei-lean``; the bridge is a subprocess.
 """
 from __future__ import annotations
 
@@ -54,7 +59,6 @@ from agent.lean_bridge_helpers import (
     _classify_bridge_failure,
     _coerce_output,
     _load_json_file,
-    _mumei_lean_bridge_contract,
     _result,
     _upgrade_atoms_by_name,
     extract_unknown_atoms,
@@ -67,8 +71,6 @@ AI_PROOF_STRATEGY = "ai_generated_proof"
 AI_PROOF_MODULE_ROOT = "Generated.AiProof"
 DEFAULT_AI_PROOF_MAX_ATTEMPTS = 3
 
-_SORRY_RE = re.compile(r"declaration uses 'sorry'")
-_ERROR_LINE_RE = re.compile(r"(^|\n)[^\n]*\berror:")
 _AXIOMS_RE = re.compile(
     r"'(?P<decl>[^']+)' depends on axioms: \[(?P<axioms>[^\]]*)\]"
 )
@@ -565,8 +567,16 @@ def render_ai_proof_prompt(request: dict[str, Any]) -> str:
                 f"- attempt {item.get('attempt')}: "
                 f"{item.get('error_code') or item.get('rejection_reason')}"
             )
+            for failure in item.get("failures") or []:
+                where = ""
+                if failure.get("line") is not None:
+                    where = f" (line {failure['line']})"
+                lines.append(
+                    f"  - {failure.get('kind') or 'error'}{where}: "
+                    f"{str(failure.get('message') or '').strip()}"
+                )
             log_tail = item.get("log_tail")
-            if log_tail:
+            if log_tail and not item.get("failures"):
                 lines.append("```")
                 lines.append(str(log_tail))
                 lines.append("```")
@@ -606,15 +616,47 @@ class LLMAiProofGenerator:
         return response.choices[0].message.content or ""
 
 
-def _lake_build_module(
+EXTERNAL_PROOFS_SCHEMA = "mumei-agent.external_proofs/v1"
+_BRIDGE_TIMEOUT_MARKER = "bridge.py timed out"
+_AXIOM_AUDIT_TIMEOUT_MARKER = "axiom audit timed out"
+
+
+def _bridge_check_external_proofs(
     repo_path: Path,
-    module: str,
     *,
+    cert_path: Path,
+    external_proofs_path: Path,
+    lean_cert_out: Path,
+    failure_report_path: Path,
+    summary_path: Path,
     timeout: float | None,
 ) -> tuple[int, str]:
+    """Run mumei-lean's canonical ``scripts/bridge.py`` with injected tactics.
+
+    The bridge regenerates every statement from *cert_path* through
+    ``ingest_cert.py``, injects the tactic scripts from
+    *external_proofs_path* as the proof bodies (``IngestedAtom.auto_tactic``),
+    runs ``lake build`` and exports ``lean_cert_out`` through its
+    ``export_cert.py`` translator / result contract gates.  Returns the
+    process exit code and combined log.
+    """
+    cmd = [
+        sys.executable,
+        str(repo_path / "scripts" / "bridge.py"),
+        "--cert",
+        str(cert_path),
+        "--lean-cert-out",
+        str(lean_cert_out),
+        "--external-proofs",
+        str(external_proofs_path),
+        "--failure-report",
+        str(failure_report_path),
+        "--summary-json",
+        str(summary_path),
+    ]
     try:
         proc = subprocess.run(
-            ["lake", "build", module],
+            cmd,
             cwd=str(repo_path),
             capture_output=True,
             text=True,
@@ -624,37 +666,54 @@ def _lake_build_module(
     except subprocess.TimeoutExpired as exc:
         log = (
             f"{_coerce_output(exc.stdout)}\n{_coerce_output(exc.stderr)}\n"
-            f"error: lake build timed out after {timeout} seconds"
+            f"error: {_BRIDGE_TIMEOUT_MARKER} after {timeout} seconds"
         )
         return -1, log
     except OSError as exc:
-        return -1, f"error: could not execute lake: {exc}"
+        return -1, f"error: could not execute scripts/bridge.py: {exc}"
     return proc.returncode, f"{proc.stdout}\n{proc.stderr}"
 
 
-def _build_log_accepts(
-    returncode: int,
-    log: str,
+def _print_axioms(
+    repo_path: Path,
     *,
-    theorem_name: str | None = None,
-    module: str | None = None,
-) -> tuple[bool, str | None]:
-    if returncode != 0:
-        if "lake build timed out" in log:
-            return False, "timeout"
-        error_code, _ = _classify_bridge_failure(
-            stdout=log, stderr="", returncode=returncode
+    lean_module: str,
+    qualified_theorem: str,
+    timeout: float | None,
+) -> tuple[int, str]:
+    """Run ``#print axioms`` for a theorem the bridge just built.
+
+    The probe file lives outside the Lake source roots so it can never be
+    picked up by a later ``lake build``; it imports the bridge-generated
+    module by name and is deleted afterwards.
+    """
+    probe = repo_path / f".ai_proof_axioms_{uuid.uuid4().hex[:8]}.lean"
+    probe.write_text(
+        f"import {lean_module}\n#print axioms {qualified_theorem}\n",
+        encoding="utf-8",
+    )
+    try:
+        proc = subprocess.run(
+            ["lake", "env", "lean", str(probe)],
+            cwd=str(repo_path),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
-        return False, error_code or "bridge_failed"
-    if _SORRY_RE.search(log):
-        return False, "tactic_failed"
-    if _ERROR_LINE_RE.search(log):
-        return False, "bridge_failed"
-    if theorem_name is not None:
-        audit = _audit_axioms(log, theorem_name, module=module)
-        if audit is not None:
-            return False, audit
-    return True, None
+    except subprocess.TimeoutExpired as exc:
+        return -1, (
+            f"{_coerce_output(exc.stdout)}\n{_coerce_output(exc.stderr)}\n"
+            f"error: {_AXIOM_AUDIT_TIMEOUT_MARKER} after {timeout} seconds"
+        )
+    except OSError as exc:
+        return -1, f"error: could not execute lake env lean: {exc}"
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+    return proc.returncode, f"{proc.stdout}\n{proc.stderr}"
 
 
 def _tail(text: str, limit: int = 2000) -> str:
@@ -666,6 +725,78 @@ def _redact_log(log: str, repo_path: Path) -> str:
     redacted = log.replace(str(repo_path.resolve()), "<mumei-lean>")
     redacted = redacted.replace(str(repo_path), "<mumei-lean>")
     return redacted.replace(str(Path.home()), "~")
+
+
+def _redact_failure(failure: dict[str, Any], repo_path: Path) -> dict[str, Any]:
+    item = {
+        key: failure.get(key)
+        for key in ("kind", "message", "file", "line", "column")
+        if failure.get(key) is not None
+    }
+    for key in ("message", "file"):
+        if isinstance(item.get(key), str):
+            item[key] = _redact_log(item[key], repo_path)
+    return item
+
+
+def structured_failures_for(
+    failure_report: dict[str, Any] | None, atom_name: str
+) -> list[dict[str, Any]]:
+    """Per-atom entries of a mumei-lean B-3 ``lake_build_failures.json``."""
+    if not isinstance(failure_report, dict):
+        return []
+    failures = failure_report.get("failures")
+    if not isinstance(failures, list):
+        return []
+    return [
+        f
+        for f in failures
+        if isinstance(f, dict) and f.get("atom") == atom_name
+    ]
+
+
+_FAILURE_KIND_ERROR_CODES = {
+    "sorry": "tactic_failed",
+    "unsolved_goals": "tactic_failed",
+    "type_mismatch": "tactic_failed",
+    "unknown_identifier": "tactic_failed",
+    "import_error": "import_error",
+}
+
+
+def _failure_error_code(failures: list[dict[str, Any]], default: str) -> str:
+    for failure in failures:
+        kind = failure.get("kind")
+        if isinstance(kind, str) and kind in _FAILURE_KIND_ERROR_CODES:
+            return _FAILURE_KIND_ERROR_CODES[kind]
+    return default if not failures else "tactic_failed"
+
+
+def _bridge_atom(lean_cert: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
+    if not isinstance(lean_cert, dict):
+        return None
+    atoms = lean_cert.get("atoms")
+    if not isinstance(atoms, list):
+        return None
+    matches = [a for a in atoms if isinstance(a, dict) and a.get("name") == name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _bridge_promoted_by_ai(atom: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the bridge's ``lean_metadata`` when *atom* was closed by the injected proof."""
+    if atom is None or atom.get("z3_check_result") != Z3CheckResult.LEAN_VERIFIED.value:
+        return None
+    metadata = atom.get("lean_metadata")
+    if not isinstance(metadata, dict) or metadata.get("ai_proof_used") is not True:
+        return None
+    external = metadata.get("external_proof")
+    if not isinstance(external, dict) or external.get("source") != AI_PROOF_STRATEGY:
+        return None
+    if not isinstance(metadata.get("lean_module"), str) or not isinstance(
+        metadata.get("lean_theorem_name"), str
+    ):
+        return None
+    return metadata
 
 
 def annotate_residual_atoms(
@@ -702,66 +833,44 @@ def annotate_residual_atoms(
 
 
 def _ai_proof_atom_record(
-    atom: dict[str, Any],
+    bridge_atom: dict[str, Any],
     *,
-    module: str,
-    theorem_name: str,
     attempts: int,
     source_path: str,
     log_path: str,
-    bridge_contract: dict[str, str],
+    audit_log_path: str,
     statement_path: str | None = None,
 ) -> dict[str, Any]:
-    record = json.loads(json.dumps(atom))
+    """Promoted record: the canonical bridge atom plus AI provenance.
+
+    Everything contract-bearing (``translator_version``,
+    ``bridge_lemma_hash``, ``lean_module`` / ``lean_theorem_name``,
+    ``proof_path``) is taken verbatim from mumei-lean's exported atom; the
+    agent only adds where the attempt evidence lives.
+    """
+    record = json.loads(json.dumps(bridge_atom))
     record["z3_check_result"] = Z3CheckResult.LEAN_VERIFIED.value
     record["status"] = VerificationStatus.VERIFIED.value
-    existing_metadata = atom.get("lean_metadata")
-    metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+    metadata = record.get("lean_metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
     diagnostics = metadata.get("diagnostics")
     diagnostics = list(diagnostics) if isinstance(diagnostics, list) else []
     if AI_PROOF_STRATEGY not in diagnostics:
         diagnostics.append(AI_PROOF_STRATEGY)
     metadata.update(
         {
-            "status": "lean_verified",
-            "theorem_name": theorem_name,
-            "lean_module": module,
-            "lean_theorem_name": f"{module}.{theorem_name}",
             "known_witness_used": False,
             "ai_proof_used": True,
             "ai_proof_attempts": attempts,
-            "proof_path": source_path,
-            "build_log_path": log_path,
-            "statement_source_path": statement_path,
-            "diagnostics": diagnostics,
-            "proof_strategy": {
-                "strategy": AI_PROOF_STRATEGY,
-                "module": module,
-                "theorem": theorem_name,
+            "ai_proof_evidence": {
+                "tactic_path": source_path,
+                "build_log_path": log_path,
+                "axiom_audit_log_path": audit_log_path,
+                "statement_source_path": statement_path,
             },
+            "diagnostics": diagnostics,
         }
     )
-    for field_name in (
-        "z3_result_class",
-        "escalation_reason",
-        "logic_fragment_tag",
-        "logic_fragment_tags",
-        "unknown_obligation_domain",
-    ):
-        value = atom.get(field_name)
-        if value:
-            metadata.setdefault(field_name, value)
-    for const_key, field_name in (
-        ("TRANSLATOR_VERSION", "translator_version"),
-        ("BRIDGE_LEMMA_HASH", "bridge_lemma_hash"),
-    ):
-        value = bridge_contract.get(const_key)
-        if value:
-            record[field_name] = value
-            metadata[field_name] = value
-        elif isinstance(atom.get(field_name), str):
-            record[field_name] = atom[field_name]
-            metadata.setdefault(field_name, atom[field_name])
     record["lean_metadata"] = metadata
     record["lean_result_metadata"] = {
         "fallback_strategy": AI_PROOF_STRATEGY,
@@ -770,6 +879,18 @@ def _ai_proof_atom_record(
         "ai_proof_attempts": attempts,
     }
     return record
+
+
+@dataclass
+class _PendingAtom:
+    atom: dict[str, Any]
+    name: str
+    theorem_name: str
+    module: str
+    statement: TrustedStatement
+    evidence_dir: Path
+    outcome: AiProofAtomOutcome
+    feedback: list[dict[str, Any]] = field(default_factory=list)
 
 
 def run_ai_proof_repair(
@@ -783,11 +904,20 @@ def run_ai_proof_repair(
     evidence_dir: str | Path | None = None,
     skip_names: set[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Generate → Lake build → repair for every residual unknown atom in *cert*.
+    """Generate → canonical bridge → repair for every residual unknown atom.
+
+    Each round asks the generator for one tactic script per still-pending
+    atom, injects all of them through ``scripts/bridge.py
+    --external-proofs`` and reads back the exported ``.lean-cert.json`` plus
+    the B-3 structured failure report.  Atoms the bridge exported as
+    ``lean_verified`` with ``ai_proof_used`` and that pass the ``#print
+    axioms`` audit are promoted; the others receive their per-atom
+    failures as feedback for the next round and stay ``unknown`` when the
+    round budget is exhausted.
 
     Returns ``None`` when there is nothing to attempt, otherwise a result
     dict shaped like :func:`agent.lean_bridge_helpers._result` whose
-    ``lean_cert`` upgrades exactly the atoms Lake accepted.
+    ``lean_cert`` upgrades exactly the promoted atoms.
     """
     unknown_atoms = [
         atom
@@ -819,7 +949,6 @@ def run_ai_proof_repair(
         if evidence_dir is not None
         else repo_path / ".ai_proof_evidence"
     ) / run_id
-    bridge_contract = _mumei_lean_bridge_contract(repo_path)
     started = time.monotonic()
     statements_root = regenerate_trusted_modules(
         repo_path, cert, evidence_root / "_statements", timeout=timeout
@@ -833,21 +962,15 @@ def run_ai_proof_repair(
     outcomes: list[AiProofAtomOutcome] = []
     proved_records: dict[str, dict[str, Any]] = {}
     log_parts: list[str] = []
+    pending: list[_PendingAtom] = []
+    attempted: list[_PendingAtom] = []
 
     for atom in unknown_atoms:
         name = atom["name"]
-        # Per-run module name: concurrent repairs sharing one checkout must
-        # never write / build / delete the same Lean file.
-        module = f"{ai_proof_module_for(name)}_{run_tag}"
+        module = bridge_module_key_for(cert, atom) or ""
         theorem_name = f"{name}_correct"
         outcome = AiProofAtomOutcome(
-            name=name, proved=False, module=module, theorem=theorem_name
-        )
-        feedback: list[dict[str, Any]] = []
-        module_path = ai_proof_module_path(repo_path, module)
-        atom_evidence = evidence_root / (
-            f"{sanitize_lean_module_name(name)}_"
-            f"{hashlib.sha256(name.encode('utf-8')).hexdigest()[:8]}"
+            name=name, proved=False, module=module or None, theorem=theorem_name
         )
         if name in ambiguous:
             # Promotion is keyed by atom name; two unknown atoms sharing a
@@ -870,20 +993,50 @@ def run_ai_proof_repair(
             outcome.error_code = "no_trusted_statement"
             outcomes.append(outcome)
             continue
-        for attempt in range(1, max_attempts + 1):
-            request = build_ai_proof_request(
-                atom,
-                module=module,
+        attempted.append(
+            _PendingAtom(
+                atom=atom,
+                name=name,
                 theorem_name=theorem_name,
-                escalation_bundle=escalation_bundle,
-                feedback=feedback,
+                module=module,
                 statement=statement,
+                evidence_dir=evidence_root
+                / (
+                    f"{sanitize_lean_module_name(name)}_"
+                    f"{hashlib.sha256(name.encode('utf-8')).hexdigest()[:8]}"
+                ),
+                outcome=outcome,
+            )
+        )
+    pending = list(attempted)
+
+    input_cert_path = evidence_root / "input.proof-cert.json"
+    if pending:
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        input_cert_path.write_text(
+            json.dumps(cert, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    stop = False
+    for attempt in range(1, max_attempts + 1):
+        if not pending or stop:
+            break
+        proofs: list[dict[str, Any]] = []
+        submitted: list[_PendingAtom] = []
+        for item in pending:
+            request = build_ai_proof_request(
+                item.atom,
+                module=item.module,
+                theorem_name=item.theorem_name,
+                escalation_bundle=escalation_bundle,
+                feedback=item.feedback,
+                statement=item.statement,
             )
             try:
                 raw = generator.generate_lean_proof(request)
             except Exception as exc:  # noqa: BLE001 - LLM failures degrade to "not proved"
-                logger.warning("ai proof generation failed for %s: %s", name, exc)
-                outcome.attempts.append(
+                logger.warning("ai proof generation failed for %s: %s", item.name, exc)
+                item.outcome.attempts.append(
                     AiProofAttempt(
                         attempt=attempt,
                         accepted=False,
@@ -893,33 +1046,33 @@ def run_ai_proof_repair(
                         rejection_reason=str(exc),
                     )
                 )
-                outcome.error_code = "generator_error"
-                feedback.append(
-                    {
-                        "attempt": attempt,
-                        "error_code": "generator_error",
-                        "log_tail": "",
-                    }
+                item.outcome.error_code = "generator_error"
+                item.feedback.append(
+                    {"attempt": attempt, "error_code": "generator_error", "log_tail": ""}
                 )
                 continue
-            tactics = extract_tactic_script(raw, theorem_name)
-            atom_evidence.mkdir(parents=True, exist_ok=True)
-            source_path = atom_evidence / f"attempt_{attempt}.lean"
-            log_path = atom_evidence / f"attempt_{attempt}.log"
-            (atom_evidence / f"attempt_{attempt}.reply.txt").write_text(
+            tactics = extract_tactic_script(raw, item.theorem_name)
+            item.evidence_dir.mkdir(parents=True, exist_ok=True)
+            source_path = item.evidence_dir / f"attempt_{attempt}.lean"
+            log_path = item.evidence_dir / f"attempt_{attempt}.log"
+            (item.evidence_dir / f"attempt_{attempt}.reply.txt").write_text(
                 raw, encoding="utf-8"
             )
-            rejection = reject_unsound_lean_source(tactics, theorem_name)
-            source = assemble_ai_module(
-                statement,
-                module=module,
-                tactics=tactics or "skip",
-                nonce=f"{run_id}/{attempt}",
+            source_path.write_text(
+                assemble_ai_module(
+                    item.statement,
+                    module=item.module or ai_proof_module_for(item.name),
+                    tactics=tactics or "skip",
+                    nonce=f"{run_id}/{attempt}",
+                ),
+                encoding="utf-8",
             )
-            source_path.write_text(source, encoding="utf-8")
+            rejection = reject_unsound_lean_source(tactics, item.theorem_name)
             if rejection is not None:
-                log_path.write_text(f"rejected before lake: {rejection}\n", encoding="utf-8")
-                outcome.attempts.append(
+                log_path.write_text(
+                    f"rejected before bridge: {rejection}\n", encoding="utf-8"
+                )
+                item.outcome.attempts.append(
                     AiProofAttempt(
                         attempt=attempt,
                         accepted=False,
@@ -929,8 +1082,8 @@ def run_ai_proof_repair(
                         rejection_reason=rejection,
                     )
                 )
-                outcome.error_code = "unsound_source"
-                feedback.append(
+                item.outcome.error_code = "unsound_source"
+                item.feedback.append(
                     {
                         "attempt": attempt,
                         "rejection_reason": rejection,
@@ -938,31 +1091,107 @@ def run_ai_proof_repair(
                     }
                 )
                 continue
-
-            module_path.parent.mkdir(parents=True, exist_ok=True)
-            module_path.write_text(source, encoding="utf-8")
-            try:
-                returncode, log = _lake_build_module(
-                    repo_path, module, timeout=timeout
-                )
-                try:
-                    compiled = module_path.read_text(encoding="utf-8")
-                except OSError:
-                    compiled = None
-            finally:
-                try:
-                    module_path.unlink()
-                except OSError:
-                    pass
-            log_path.write_text(log, encoding="utf-8")
-            log_parts.append(f"[{module} attempt {attempt}]\n{log}")
-            accepted, error_code = _build_log_accepts(
-                returncode, log, theorem_name=theorem_name, module=module
+            proofs.append(
+                {
+                    "atom": item.name,
+                    "tactic_script": tactics,
+                    "module_key": bridge_module_key_for(cert, item.atom),
+                    "source": AI_PROOF_STRATEGY,
+                    "attempts": attempt,
+                }
             )
-            if accepted and compiled != source:
-                # The file Lake compiled is not the evidence we recorded.
-                accepted, error_code = False, "source_mismatch"
-            outcome.attempts.append(
+            submitted.append(item)
+        if not submitted:
+            continue
+
+        round_dir = evidence_root / f"round_{attempt}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        external_proofs_path = round_dir / "external_proofs.json"
+        external_proofs_path.write_text(
+            json.dumps(
+                {"schema": EXTERNAL_PROOFS_SCHEMA, "proofs": proofs},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        lean_cert_out = round_dir / "bridge.lean-cert.json"
+        failure_report_path = round_dir / "lake_build_failures.json"
+        summary_path = round_dir / "bridge.summary.json"
+        returncode, log = _bridge_check_external_proofs(
+            repo_path,
+            cert_path=input_cert_path,
+            external_proofs_path=external_proofs_path,
+            lean_cert_out=lean_cert_out,
+            failure_report_path=failure_report_path,
+            summary_path=summary_path,
+            timeout=timeout,
+        )
+        (round_dir / "bridge.log").write_text(log, encoding="utf-8")
+        log_parts.append(f"[bridge round {attempt}]\n{log}")
+        timed_out = _BRIDGE_TIMEOUT_MARKER in log
+        lean_cert = _load_json_file(lean_cert_out) if lean_cert_out.exists() else None
+        failure_report = (
+            _load_json_file(failure_report_path) if failure_report_path.exists() else None
+        )
+        bridge_error, _ = _classify_bridge_failure(
+            stdout=log, stderr="", returncode=returncode
+        )
+
+        for item in submitted:
+            source_path = item.evidence_dir / f"attempt_{attempt}.lean"
+            log_path = item.evidence_dir / f"attempt_{attempt}.log"
+            failures = structured_failures_for(failure_report, item.name)
+            bridge_atom = _bridge_atom(lean_cert, item.name)
+            metadata = _bridge_promoted_by_ai(bridge_atom)
+            error_code: str | None
+            accepted = False
+            audit_log_path = item.evidence_dir / f"attempt_{attempt}.axioms.log"
+            if timed_out:
+                error_code = "timeout"
+            elif metadata is None or failures:
+                if failures:
+                    error_code = _failure_error_code(failures, "tactic_failed")
+                elif returncode != 0:
+                    error_code = bridge_error or "bridge_failed"
+                else:
+                    error_code = "tactic_failed"
+            else:
+                lean_module = str(metadata["lean_module"])
+                qualified = str(metadata["lean_theorem_name"])
+                audit_rc, audit_log = _print_axioms(
+                    repo_path,
+                    lean_module=lean_module,
+                    qualified_theorem=qualified,
+                    timeout=timeout,
+                )
+                audit_log_path.write_text(audit_log, encoding="utf-8")
+                if audit_rc != 0:
+                    error_code = (
+                        "timeout"
+                        if _AXIOM_AUDIT_TIMEOUT_MARKER in audit_log
+                        else "axiom_audit_failed"
+                    )
+                else:
+                    error_code = _audit_axioms(
+                        audit_log, item.theorem_name, module=lean_module
+                    )
+                accepted = error_code is None
+            log_path.write_text(
+                "\n".join(
+                    part
+                    for part in (
+                        f"bridge exit status: {returncode}",
+                        json.dumps(failures, indent=2, ensure_ascii=False)
+                        if failures
+                        else "",
+                        log,
+                    )
+                    if part
+                ),
+                encoding="utf-8",
+            )
+            item.outcome.attempts.append(
                 AiProofAttempt(
                     attempt=attempt,
                     accepted=accepted,
@@ -971,31 +1200,40 @@ def run_ai_proof_repair(
                     log_path=str(log_path),
                 )
             )
-            if accepted:
-                outcome.proved = True
-                outcome.error_code = None
-                proved_records[name] = _ai_proof_atom_record(
-                    atom,
-                    module=module,
-                    theorem_name=theorem_name,
+            if accepted and bridge_atom is not None:
+                item.outcome.proved = True
+                item.outcome.error_code = None
+                item.outcome.module = str(metadata["lean_module"]) if metadata else item.module
+                proved_records[item.name] = _ai_proof_atom_record(
+                    bridge_atom,
                     attempts=attempt,
                     source_path=str(source_path),
                     log_path=str(log_path),
-                    bridge_contract=bridge_contract,
-                    statement_path=statement.source_path,
+                    audit_log_path=str(audit_log_path),
+                    statement_path=item.statement.source_path,
                 )
-                break
-            outcome.error_code = error_code
-            feedback.append(
+                continue
+            item.outcome.error_code = error_code
+            item.feedback.append(
                 {
                     "attempt": attempt,
                     "error_code": error_code,
+                    "failures": [_redact_failure(f, repo_path) for f in failures],
                     "log_tail": _tail(_redact_log(log, repo_path)),
                 }
             )
             if error_code in {"lake_missing", "timeout"}:
-                break
-        outcomes.append(outcome)
+                stop = True
+        pending = [item for item in pending if not item.outcome.proved]
+
+    ordered: dict[str, AiProofAtomOutcome] = {}
+    for outcome in outcomes:
+        ordered.setdefault(outcome.name, outcome)
+    for item in attempted:
+        ordered.setdefault(item.name, item.outcome)
+    outcomes = [ordered[a["name"]] for a in unknown_atoms if a["name"] in ordered]
+    seen: set[str] = set()
+    outcomes = [o for o in outcomes if not (o.name in seen or seen.add(o.name))]
 
     proved_names = set(proved_records)
     lean_cert = _upgrade_atoms_by_name(
@@ -1012,7 +1250,7 @@ def run_ai_proof_repair(
         error_code = next((o.error_code for o in failed if o.error_code), "tactic_failed")
     diagnostics.append(
         f"AI proof generation proved {len(proved_names)}/{len(outcomes)} "
-        "residual unknown atom(s) after Lake verification."
+        "residual unknown atom(s) through the mumei-lean bridge."
     )
     if failed:
         diagnostics.append(

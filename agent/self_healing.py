@@ -6,6 +6,7 @@ uses LLM to fix verification failures iteratively.
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import time
 import datetime
@@ -56,6 +57,10 @@ from agent.thought_log import (
 from agent.self_healing_repair import (
     _try_cegis_repair,
     _try_meta_architect_refactor,
+)
+from agent.self_correction import (
+    repair_certificate_metadata,
+    write_repair_certificate,
 )
 from agent.self_healing_report import (
     _retry_history_to_dict,
@@ -238,6 +243,17 @@ def main() -> None:
         metavar="POLICY_JSON",
         help="Path to retry budget policy JSON (default: built-in P8-G policy).",
     )
+    parser.add_argument(
+        "--proof-cert-out",
+        type=str,
+        default=None,
+        metavar="CERT_JSON",
+        help=(
+            "After healing, emit a proof certificate for the final source with "
+            "the repair outcome attached as self_correction_metadata "
+            "(input for mumei benchmarks/evaluation_suite.py --repair-cert-dir)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.generate is not None and args.output is None:
@@ -286,7 +302,22 @@ def main() -> None:
             client=client,
             mumei_client=mumei,
         )
-        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        payload = result.to_dict()
+        if args.proof_cert_out:
+            write_repair_certificate(
+                source_file,
+                repair_certificate_metadata(
+                    converged=result.converged,
+                    repair_attempts=result.repair_attempts,
+                    token_cost=result.token_cost,
+                    consecutive_successes=result.consecutive_successes,
+                    final_error=result.final_error,
+                ),
+                mumei_bin=config.mumei_bin,
+                out_path=args.proof_cert_out,
+            )
+            payload["proof_cert_out"] = args.proof_cert_out
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
 
     # --- Generate mode (P1-A): generate → verify → fix loop ---
@@ -630,6 +661,24 @@ def main() -> None:
         if not success:
             shutil.copy2(backup_file, source_file)
             print(f"Healing failed. Original source restored from {backup_file}")
+        if args.proof_cert_out:
+            try:
+                write_repair_certificate(
+                    source_file,
+                    repair_certificate_metadata(
+                        converged=success,
+                        repair_attempts=len(outer_history.attempts),
+                        token_cost=outer_history.total_tokens(),
+                        consecutive_successes=1 if success else 0,
+                        final_error=None if success else "max_retries_exhausted",
+                    ),
+                    mumei_bin=config.mumei_bin,
+                    out_path=args.proof_cert_out,
+                )
+                print(f"Repair certificate written to {args.proof_cert_out}")
+            except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as exc:
+                print(f"Warning: repair certificate not written: {exc}")
+        if not success:
             sys.exit(1)
 
 
