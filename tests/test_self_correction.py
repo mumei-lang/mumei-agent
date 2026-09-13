@@ -348,3 +348,47 @@ def test_write_repair_certificate_requires_output_file(tmp_path: Path) -> None:
             source, {"repair_attempts": 1, "converged": False, "consecutive_successes": 0, "token_cost": 1},
             mumei_bin=mumei_bin, out_path=tmp_path / "prog.proof.json",
         )
+
+
+def test_write_repair_certificate_discards_stale_output(tmp_path: Path) -> None:
+    from agent.self_correction import write_repair_certificate
+
+    source = tmp_path / "prog.mm"
+    source.write_text("fn f() {}\n", encoding="utf-8")
+    out = tmp_path / "prog.proof.json"
+    out.write_text(
+        json.dumps({"atoms": [], "self_correction_summary": {"converged_atoms": 1}}),
+        encoding="utf-8",
+    )
+    mumei_bin = _fake_mumei(tmp_path, "sys.exit(1)")
+    with pytest.raises(RuntimeError, match="did not write"):
+        write_repair_certificate(
+            source, {"repair_attempts": 1, "converged": False, "consecutive_successes": 0, "token_cost": 1},
+            mumei_bin=mumei_bin, out_path=out,
+        )
+    assert not out.exists()
+
+
+def test_loss_vector_loop_counts_written_fixes_not_verifier_calls(tmp_path: Path) -> None:
+    from agent.self_correction import _metadata_from_payload
+    from agent.strategies import fix_strategy
+
+    source = tmp_path / "prog.mm"
+    source.write_text("v0\n", encoding="utf-8")
+    verdicts = iter([False, False, True])
+
+    class Mumei:
+        def verify(self, path: str) -> dict:
+            return {"success": next(verdicts), "loss_vector": {"total": 1.0}}
+
+    class Llm:
+        def fix_with_loss_vector(self, path: Path, loss_vector: dict) -> str:
+            return "fixed\n"
+
+    result = fix_strategy.SelfCorrectionLoop(max_iterations=5).run(source, Mumei(), Llm())
+    assert result.success is True
+    assert result.iterations == 3
+    assert result.repair_attempts == 2
+    meta = _metadata_from_payload(result.to_dict())
+    assert meta["repair_attempts"] == 2
+    assert meta["converged"] is True

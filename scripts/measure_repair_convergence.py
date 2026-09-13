@@ -61,6 +61,7 @@ def heal_one(
     copy.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, copy)
     cert_out = cert_dir / rel.parent / f"{rel.stem}.proof.json"
+    cert_out.unlink(missing_ok=True)
     cmd = [
         sys.executable,
         "-m",

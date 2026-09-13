@@ -34,17 +34,39 @@ from agent.lean_bridge_helpers import (
 )
 
 
-def _z3_proof_cert(mumei_bin: str, source: Path, out: Path, timeout: float) -> dict | None:
+def _z3_proof_cert(
+    mumei_bin: str, source: Path, out: Path, timeout: float
+) -> tuple[dict | None, dict[str, object]]:
+    """Run ``mumei verify --proof-cert`` and return ``(certificate, diagnostics)``.
+
+    Any file already at ``out`` is removed first so a stale certificate from a
+    previous run can never be attributed to this invocation. ``diagnostics``
+    records the exit code and the tail of stdout/stderr so a missing
+    certificate can be told apart from a malformed one or a verifier crash.
+    """
     out.parent.mkdir(parents=True, exist_ok=True)
+    out.unlink(missing_ok=True)
     cmd = [*mumei_bin.split(), "verify", "--proof-cert", "--output", str(out), str(source)]
-    subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    diagnostics: dict[str, object] = {"returncode": None, "output_tail": ""}
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        diagnostics["error"] = f"timeout after {timeout}s: {exc}"
+        return None, diagnostics
+    diagnostics["returncode"] = proc.returncode
+    diagnostics["output_tail"] = (proc.stdout + proc.stderr)[-2000:]
     if not out.is_file():
-        return None
+        diagnostics["error"] = "no_proof_certificate"
+        return None, diagnostics
     try:
         cert = json.loads(out.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    return cert if isinstance(cert, dict) else None
+    except json.JSONDecodeError as exc:
+        diagnostics["error"] = f"malformed_proof_certificate: {exc}"
+        return None, diagnostics
+    if not isinstance(cert, dict):
+        diagnostics["error"] = "malformed_proof_certificate: not an object"
+        return None, diagnostics
+    return cert, diagnostics
 
 
 def _generator(config: AgentConfig, mode: str):
@@ -74,16 +96,18 @@ def measure_one(
     z3_cert_path = work_dir / rel.parent / f"{rel.stem}.z3.proof-cert.json"
     out = cert_dir / rel.parent / f"{rel.stem}.proof.json"
     started = time.monotonic()
-    cert = _z3_proof_cert(config.mumei_bin, source, z3_cert_path, timeout)
+    cert, verify_diag = _z3_proof_cert(config.mumei_bin, source, z3_cert_path, timeout)
     entry: dict[str, object] = {
         "file": str(rel).replace(os.sep, "/"),
         "certificate": None,
+        "verify_returncode": verify_diag["returncode"],
         "unknown_atoms": 0,
         "lean_verified_unknowns": 0,
         "bridge": None,
     }
     if cert is None:
-        entry["error"] = "no_proof_certificate"
+        entry["error"] = verify_diag.get("error", "no_proof_certificate")
+        entry["verify_output_tail"] = verify_diag["output_tail"]
         entry["elapsed_s"] = round(time.monotonic() - started, 3)
         return entry
     unknown = extract_unknown_atoms(cert)

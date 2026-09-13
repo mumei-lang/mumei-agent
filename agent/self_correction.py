@@ -100,10 +100,13 @@ def write_repair_certificate(
     :data:`SELF_CORRECTION_METADATA_ENV` set, so the certificate records the
     repair loop outcome for every atom and the summary block the mumei
     evaluation suite reads. Non-zero exit codes are expected for sources the
-    loop could not repair; the certificate is still written by mumei.
+    loop could not repair; the certificate is still written by mumei. Any
+    certificate already at ``out_path`` is removed first so only output of
+    this invocation is ever returned.
     """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    out.unlink(missing_ok=True)
     env = {**os.environ, SELF_CORRECTION_METADATA_ENV: json.dumps(metadata)}
     cmd = [
         *mumei_bin.split(),
@@ -445,7 +448,7 @@ def _metadata_from_payload(payload: dict[str, object]) -> dict[str, object]:
                     token_cost += int(tokens)
     return repair_certificate_metadata(
         converged=bool(payload.get("success")),
-        repair_attempts=int(payload.get("iterations") or 0),
+        repair_attempts=int(payload.get("repair_attempts") or 0),
         token_cost=token_cost,
         final_error=(
             str(payload["stop_reason"])

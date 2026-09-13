@@ -72,6 +72,17 @@ ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
 
 
+def _child_proof_cert_out(cert_dir: str, source_root: Path, source: Path) -> str:
+    """Per-source certificate path when ``--proof-cert-out`` names a directory.
+
+    ``<cert_dir>/<relative path of source>.proof.json``, mirroring the tree
+    under ``source_root`` so same-named files in different subdirectories never
+    collide.
+    """
+    relative = source.relative_to(source_root)
+    return str(Path(cert_dir) / relative.with_suffix(".proof.json"))
+
+
 def _run_directory_heal(
     source_path: Path,
     args: argparse.Namespace,
@@ -128,6 +139,13 @@ def _run_directory_heal(
                 next_argv.extend(["--strategy", args.strategy])
             if args.budget_policy is not None:
                 next_argv.extend(["--budget-policy", args.budget_policy])
+            if args.proof_cert_out is not None:
+                next_argv.extend(
+                    [
+                        "--proof-cert-out",
+                        _child_proof_cert_out(args.proof_cert_out, source_path, path),
+                    ]
+                )
             sys.argv = next_argv
             try:
                 main()
@@ -251,7 +269,9 @@ def main() -> None:
         help=(
             "After healing, emit a proof certificate for the final source with "
             "the repair outcome attached as self_correction_metadata "
-            "(input for mumei benchmarks/evaluation_suite.py --repair-cert-dir)."
+            "(input for mumei benchmarks/evaluation_suite.py --repair-cert-dir). "
+            "When SOURCE is a directory this is a directory too: each file gets "
+            "<dir>/<relative path>.proof.json."
         ),
     )
     args = parser.parse_args()
@@ -339,6 +359,7 @@ def main() -> None:
     print(f"Original source backed up to {backup_file}")
 
     success = False
+    stop_reason: str | None = None
     outer_history = RetryHistory()
     pattern_lib = PatternLibrary()
     thought = ThoughtProcess(target_file=source_file)
@@ -429,6 +450,7 @@ def main() -> None:
                     proposed_action_class=classify_action_class(report),
                 ).summary
                 summary["reason"] = "max_retries_exhausted"
+                stop_reason = "max_retries_exhausted"
                 print(json.dumps(summary, indent=2, ensure_ascii=False))
                 try:
                     _loop_span.set_attribute("mumei.loop.stop_reason", "max_retries_exhausted")
@@ -484,6 +506,7 @@ def main() -> None:
                     print("Meta-Architect applied interface refactoring. Retrying...")
                     time.sleep(2)
                     continue
+                stop_reason = "budget_denied"
                 try:
                     _loop_span.set_attribute("mumei.loop.stop_reason", "budget_denied")
                 except Exception:
@@ -611,6 +634,7 @@ def main() -> None:
             # Validate before overwriting
             if not fixed_code:
                 if "manual_review_required" in report:
+                    stop_reason = "manual_review_required"
                     print(json.dumps(report["manual_review_required"], indent=2, ensure_ascii=False))
                     return
                 print("Warning: AI returned empty fix. Skipping overwrite.")
@@ -624,6 +648,7 @@ def main() -> None:
             time.sleep(2)
 
     except Exception as exc:
+        stop_reason = f"exception:{type(exc).__name__}"
         print(f"Error during healing: {exc}")
     finally:
         try:
@@ -670,7 +695,7 @@ def main() -> None:
                         repair_attempts=len(outer_history.attempts),
                         token_cost=outer_history.total_tokens(),
                         consecutive_successes=1 if success else 0,
-                        final_error=None if success else "max_retries_exhausted",
+                        final_error=None if success else (stop_reason or "unknown"),
                     ),
                     mumei_bin=config.mumei_bin,
                     out_path=args.proof_cert_out,
