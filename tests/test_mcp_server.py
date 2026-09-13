@@ -92,6 +92,45 @@ class TestGetAgentStatus:
         assert "ENABLE_CODE_TO_SPEC" in result["feature_flags"]
         assert "USE_MCP_SAMPLING" in result["feature_flags"]
 
+    def test_without_context_reports_no_mcp_client_capabilities(self) -> None:
+        result = _payload(mcp_server.get_agent_status())
+        assert result["mcp_client"] == {
+            "name": None,
+            "version": None,
+            "protocol_version": None,
+            "supports_sampling": False,
+            "supports_sampling_tools": False,
+        }
+
+    def test_reports_connected_mcp_client_sampling_capabilities(self) -> None:
+        client_params = SimpleNamespace(
+            clientInfo=mcp_types.Implementation(name="devin", version="1.0"),
+            protocolVersion="2025-06-18",
+            capabilities=mcp_types.ClientCapabilities(
+                sampling=mcp_types.SamplingCapability()
+            ),
+        )
+
+        def check_client_capability(capabilities) -> bool:
+            sampling = capabilities.sampling
+            return sampling is not None and sampling.tools is None
+
+        ctx = SimpleNamespace(
+            session=SimpleNamespace(
+                client_params=client_params,
+                check_client_capability=check_client_capability,
+            )
+        )
+
+        result = _payload(mcp_server.get_agent_status(ctx=ctx))
+        assert result["mcp_client"] == {
+            "name": "devin",
+            "version": "1.0",
+            "protocol_version": "2025-06-18",
+            "supports_sampling": True,
+            "supports_sampling_tools": False,
+        }
+
     def test_status_tools_match_registered_tools(self) -> None:
         result = _payload(mcp_server.get_agent_status())
         registered = set(mcp_server.mcp._tool_manager._tools)

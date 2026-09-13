@@ -69,7 +69,7 @@ Exported tools:
 | `extract_spec(natural_language, domain_hint='', generate=false, mumei_repo='', check_contradiction_only=false)` | Extract a forge spec, optionally generate code, or run contradiction-only validation |
 | `extract_spec_from_code(code_file, language='', domain_hint='', generate=false, mumei_repo='')` | Extract natural-language specification from existing code (Layer A) |
 | `forge_task(task_json, mumei_repo, dry_run=true)` | Run a single forge spec (drop-in `MumeiForge.forge_one`) |
-| `get_agent_status()` | Report LLM provider, mumei binary, available subcommands, and registered MCP tools |
+| `get_agent_status(ctx)` | Report LLM provider, mumei binary, available subcommands, registered MCP tools, and connected MCP client capabilities |
 | `get_review_queue(mumei_repo)` | Return the human review queue emitted by `mumei verify` for an existing `mumei_repo` directory that contains `human_review_queue.json`, and set the active tracker for `approve_review` / `reject_review` / `escalate_to_lean` |
 | `get_spec_guide_summary()` | Return the agent-facing decidable-fragment guideline summary |
 | `get_spec_guidelines()` | Return proof-friendly generation guidance for the Z3-stable decidable fragment and Lean escalation candidates |
@@ -115,7 +115,7 @@ mumei `docs/MCP_TOOL_CONTRACT.md` table remains canonical.
 | `approve_review` | `atom_name: str, reviewer: str, notes: str` |  |
 | `escalate_to_lean` | `atom_name: str` |  |
 | `reject_review` | `atom_name: str, reviewer: str, notes: str` |  |
-| `get_agent_status` |  |  |
+| `get_agent_status` | `ctx: Context \| None = None` |  |
 | `send_latent_message` | `message: str, context: str = '{}', verify: bool = True` |  |
 | `send_latent_message_batch` | `messages: str, verify: bool = False` |  |
 | `async_send_latent_message` | `message: str, context: str = '{}', verify: bool = True` |  |
