@@ -339,6 +339,10 @@ def _typescript_type(type_name: str) -> str:
 
 def _rust_type(type_name: str) -> str:
     normalized = type_name.strip().lstrip("&").removeprefix("mut ").strip()
+    if "::" in normalized and "<" not in normalized:
+        segments = [segment.strip() for segment in normalized.split("::")]
+        if all(re.fullmatch(r"[A-Za-z_]\w*", segment) for segment in segments):
+            normalized = segments[-1]
     return _mumei_type(normalized)
 
 def _go_type(type_name: str) -> str:
@@ -494,14 +498,30 @@ def _detect_safety_issues(
         # re-strips each body before the regex safety heuristics run. Declared
         # ``const`` values are collected so a non-zero constant divisor/index is
         # not modeled as a free integer (#296, generalized across languages).
-        blocks = _rust_function_blocks(source)
+        scopes = _rust_function_scopes(source)
+        blocks = [(name, body) for name, body, _ in scopes]
         rust_constants = semantic_safety.collect_declared_constants(source, "rust")
-        param_info = _rust_function_param_info(source, rust_constants)
+        stripped_source = _strip_go_rust_literals_and_comments(source)
+        declared_constant_names = re.findall(
+            r"\b(?:const|static)\s+(?:mut\s+)?([A-Za-z_]\w*)\s*:",
+            stripped_source,
+        )
+        constant_counts = {
+            name: declared_constant_names.count(name)
+            for name in set(declared_constant_names)
+        }
+        duplicate_constants = {
+            name for name, count in constant_counts.items() if count > 1
+        }
+        rust_constants = {
+            name: value
+            for name, value in rust_constants.items()
+            if name not in duplicate_constants
+        }
         per_function_types: dict[int, dict[str, str]] = {}
         per_function_lengths: dict[int, dict[str, int]] = {}
-        per_function_locals: dict[int, set[str]] = {}
-        for block_idx, (block_name, block_body) in enumerate(blocks):
-            param_types, param_lengths = param_info.get(block_name, ({}, {}))
+        for block_idx, (block_name, block_body, params_text) in enumerate(scopes):
+            param_types, param_lengths = _rust_param_info(params_text, rust_constants)
             if param_types:
                 per_function_types[block_idx] = param_types
             scoped_lengths = {
@@ -514,18 +534,12 @@ def _detect_safety_issues(
             }
             if scoped_lengths:
                 per_function_lengths[block_idx] = scoped_lengths
-            # Params are excluded: adding them to local_names would make
-            # ``local_names`` suppress signed-param overflow checks.  Param
-            # shadowing of declared constants is rare; let-bound names cover
-            # the common shadowing and loop-variable cases.
-            per_function_locals[block_idx] = _rust_let_bound_names(block_body)
         issues = _detect_block_safety_issues(
             source,
             blocks,
             "Rust",
             known_constants=rust_constants,
             per_function_lengths=per_function_lengths,
-            per_function_locals=per_function_locals,
             per_function_param_types=per_function_types,
         )
         # Suppress false positives for ``(param - N) as usize`` indexing into
@@ -6989,6 +7003,55 @@ def _rust_function_blocks(source: str) -> list[tuple[str, str]]:
         blocks.append((_safe_identifier(match.group("name")), body))
     return blocks
 
+
+def _balanced_paren_end(source: str, opening_paren: int) -> int | None:
+    depth = 0
+    for index in range(opening_paren, len(source)):
+        char = source[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _rust_function_scopes(source: str) -> list[tuple[str, str, str]]:
+    """Return ``(name, body, params_text)`` per Rust declaration in source order."""
+    functions = tree_sitter_extract.extract_functions(
+        source, "rust", _safe_identifier
+    )
+    if functions is not None:
+        return [(fn.name, fn.body, fn.params_text) for fn in functions]
+
+    stripped = _strip_go_rust_literals_and_comments(source)
+    signature = re.compile(
+        r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]+>)?\s*"
+    )
+    scopes: list[tuple[str, str, str]] = []
+    for match in signature.finditer(stripped):
+        opening_paren = stripped.find("(", match.end())
+        if opening_paren < 0:
+            continue
+        closing_paren = _balanced_paren_end(stripped, opening_paren)
+        if closing_paren is None:
+            continue
+        opening_brace = stripped.find("{", closing_paren + 1)
+        if opening_brace < 0:
+            continue
+        body = _balanced_brace_body(stripped, opening_brace)
+        scopes.append(
+            (
+                _safe_identifier(match.group("name")),
+                body,
+                stripped[opening_paren + 1 : closing_paren],
+            )
+        )
+    return scopes
+
+
 def _rust_const_array_lengths(source: str) -> dict[str, int]:
     """Map Rust ``const``/``static`` array names to their element count."""
     lengths: dict[str, int] = {}
@@ -7005,66 +7068,42 @@ def _rust_const_array_lengths(source: str) -> dict[str, int]:
 
 
 _RUST_FIXED_ARRAY_PARAM_RE = re.compile(
-    r"^&?\s*(?:mut\s+)?\[\s*.+;\s*(?P<len>\d+|[A-Za-z_]\w*)\s*\]$",
-    re.DOTALL,
-)
-_RUST_FN_SIGNATURE_RE = re.compile(
-    r"(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
-    r"(?P<name>[A-Za-z_]\w*)\s*(?:<[^>]+>)?\s*"
-    r"\((?P<params>[^)]*)\)",
+    r"^&?\s*(?:mut\s+)?\[\s*.+;\s*(?P<len>[^\]]+)\s*\]$",
     re.DOTALL,
 )
 
 
-def _rust_function_param_info(
-    source: str, constants: dict[str, int] | None
-) -> dict[str, tuple[dict[str, str], dict[str, int]]]:
-    """Map each Rust function name to (param types, fixed-array param lengths).
+def _rust_param_info(
+    params_text: str, constants: dict[str, int] | None
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Return parameter types and fixed-array lengths for one Rust declaration.
 
     ``v: &mut [u32; 16]`` contributes ``len(v) = 16`` so ``v[i]`` is checked
-    against the real bound instead of a free ``len_v``.  Rust forbids function
-    overloading, so keying by name is unambiguous.
+    against the real bound instead of a free ``len_v``.
     """
-    stripped = _strip_go_rust_literals_and_comments(source)
-    info: dict[str, tuple[dict[str, str], dict[str, int]]] = {}
-    for match in _RUST_FN_SIGNATURE_RE.finditer(stripped):
-        raw_types: dict[str, str] = {}
-        for index, raw in enumerate(_split_params(match.group("params"))):
-            raw = raw.strip()
-            if raw in {"self", "&self", "&mut self", "mut self"}:
-                continue
-            name_text, _, type_text = raw.partition(":")
-            pname = _safe_identifier(
-                name_text.strip().removeprefix("mut ").strip() or f"arg{index}"
-            )
-            raw_types[pname] = type_text.strip()
-        types = {pname: _rust_type(ptype) for pname, ptype in raw_types.items()}
-        lengths: dict[str, int] = {}
-        for pname, ptype in raw_types.items():
-            array_match = _RUST_FIXED_ARRAY_PARAM_RE.match(ptype)
-            if array_match is None:
-                continue
-            token = array_match.group("len")
-            value = (
-                int(token)
-                if token.isdigit()
-                else (constants or {}).get(token)
-            )
-            if value is not None:
-                lengths[f"len({pname})"] = value
-        info[_safe_identifier(match.group("name"))] = (types, lengths)
-    return info
-
-
-def _rust_let_bound_names(body: str) -> set[str]:
-    """Return names introduced by ``let`` bindings in a function body."""
-    stripped = _strip_go_rust_literals_and_comments(body)
-    names = set(re.findall(r"\blet\s+(?:mut\s+)?([A-Za-z_]\w*)", stripped))
-    for group in re.findall(r"\blet\s+(?:mut\s+)?[\(\[\{]([^)\]\}]+)", stripped):
-        names.update(re.findall(r"[A-Za-z_]\w*", group))
-    names.discard("_")
-    names.discard("mut")
-    return names
+    raw_types: dict[str, str] = {}
+    for index, raw in enumerate(_split_params(params_text)):
+        raw = raw.strip()
+        if raw in {"self", "&self", "&mut self", "mut self"}:
+            continue
+        name_text, _, type_text = raw.partition(":")
+        pname = _safe_identifier(
+            name_text.strip().removeprefix("mut ").strip() or f"arg{index}"
+        )
+        raw_types[pname] = type_text.strip()
+    types = {pname: _rust_type(ptype) for pname, ptype in raw_types.items()}
+    lengths: dict[str, int] = {}
+    for pname, ptype in raw_types.items():
+        array_match = _RUST_FIXED_ARRAY_PARAM_RE.match(ptype)
+        if array_match is None:
+            continue
+        token = array_match.group("len").strip()
+        value = tree_sitter_extract._parse_constant_value(token)
+        if value is None and re.fullmatch(r"[A-Za-z_]\w*", token):
+            value = (constants or {}).get(token)
+        if value is not None:
+            lengths[f"len({pname})"] = value
+    return types, lengths
 
 
 def _rust_local_usize_cast_offsets(body: str) -> dict[str, tuple[str, int]]:

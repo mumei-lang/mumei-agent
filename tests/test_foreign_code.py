@@ -7258,6 +7258,103 @@ def test_rust_fixed_array_param_length_dropped_on_let_shadow() -> None:
     assert all(i.counterexample.get("len_v") != 16 for i in bounds)
 
 
+def test_rust_same_named_methods_keep_own_lengths() -> None:
+    """Same-named Rust methods keep fixed-array lengths by declaration position."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''impl First {
+    fn get(&self, v: &[u8; 8], i: usize) -> u8 {
+        v[i]
+    }
+}
+
+impl Second {
+    fn get(&self, v: &[u8; 16], i: usize) -> u8 {
+        v[i]
+    }
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    bounds = [i for i in issues if "v[i]" in i.message]
+    assert bounds
+    assert {issue.counterexample.get("len_v") for issue in bounds} >= {8, 16}
+
+
+def test_rust_tuple_param_does_not_truncate_signature() -> None:
+    """A tuple-typed parameter does not hide later fixed-array parameters."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''fn f(p: (u32, u32), v: &[u32; 4], i: usize) -> u32 {
+    v[i]
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    bounds = [i for i in issues if "v[i]" in i.message]
+    assert bounds
+    assert all(issue.counterexample.get("len_v") == 4 for issue in bounds)
+
+
+def test_rust_duplicate_const_name_leaves_length_unbound() -> None:
+    """Ambiguous same-named constants do not bind an array length."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''mod first {
+    const N: usize = 8;
+}
+mod second {
+    const N: usize = 16;
+}
+fn f(v: &[u8; N], i: usize) -> u8 {
+    v[i]
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    bounds = [i for i in issues if "v[i]" in i.message]
+    assert bounds
+    assert all(issue.counterexample.get("len_v") not in {8, 16} for issue in bounds)
+
+
+def test_rust_underscore_and_suffixed_array_lengths() -> None:
+    """Rust integer separators, suffixes, and bases resolve in array lengths."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''fn decimal(v: &[u8; 1_024], i: usize) -> u8 { v[i] }
+fn suffixed(v: &[u8; 16usize], i: usize) -> u8 { v[i] }
+fn hexadecimal(v: &[u8; 0x10], i: usize) -> u8 { v[i] }
+'''
+    issues = _detect_safety_issues(source, "rust")
+    lengths = {
+        issue.function_name: issue.counterexample.get("len_v")
+        for issue in issues
+        if "v[i]" in issue.message
+    }
+    assert lengths == {"decimal": 1024, "suffixed": 16, "hexadecimal": 16}
+
+
+def test_rust_qualified_usize_is_unsigned() -> None:
+    """Qualified primitive paths normalize to their primitive type."""
+    from agent.strategies.foreign_code_strategy_helpers import _rust_type
+
+    assert _rust_type("std::primitive::usize") == _rust_type("usize")
+
+
+def test_rust_nested_let_shadow_keeps_outer_constant() -> None:
+    """A nested let binding does not erase an outer constant declaration."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''const D: i32 = 2;
+fn f(x: i32) -> i32 {
+    {
+        let D = x;
+        let _ = D;
+    }
+    x / D
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    assert not any("non-zero" in issue.message and "D" in issue.message for issue in issues)
+
+
 def test_rust_slice_param_has_no_fixed_length() -> None:
     """``v: &[u32]`` keeps a free length, not a fabricated bound."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
