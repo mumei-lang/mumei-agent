@@ -7209,3 +7209,63 @@ func lsoffset(a As, o int32) int32 {
 '''
     issues = _detect_safety_issues(source, "go")
     assert not any("lsoffset" in issue.message and "non-zero" in issue.message for issue in issues)
+
+
+def test_rust_fixed_array_param_binds_length() -> None:
+    """``v: &mut [u32; 16]`` binds ``len(v) = 16`` for index checks."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''fn g_fn(v: &mut [u32; 16], a: usize, b: usize) {
+    v[a] = v[a].wrapping_add(v[b]);
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    bounds = [i for i in issues if "v[b]" in i.message]
+    assert bounds
+    assert all(i.counterexample.get("len_v") == 16 for i in bounds)
+    # usize index: no negative lower bound is required or modelled.
+    assert all(i.counterexample.get("b", 0) >= 0 for i in bounds)
+    assert all("b >= 0" not in i.required_contracts for i in bounds)
+
+
+def test_rust_fixed_array_param_named_length() -> None:
+    """``h: &[u32; N]`` resolves a declared constant length."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''const N: usize = 8;
+fn head(h: &[u32; N], i: usize) -> u32 {
+    h[i]
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    bounds = [i for i in issues if "h[i]" in i.message]
+    assert bounds
+    assert all(i.counterexample.get("len_h") == 8 for i in bounds)
+
+
+def test_rust_fixed_array_param_length_dropped_on_let_shadow() -> None:
+    """A ``let v = ...`` rebinding drops the parameter's fixed length."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''fn shrink(v: &[u32; 16], i: usize) -> u32 {
+    let v = &[0u32; 2];
+    v[i]
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    bounds = [i for i in issues if "v[i]" in i.message]
+    assert bounds
+    assert all(i.counterexample.get("len_v") != 16 for i in bounds)
+
+
+def test_rust_slice_param_has_no_fixed_length() -> None:
+    """``v: &[u32]`` keeps a free length, not a fabricated bound."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = '''fn at(v: &[u32], i: usize) -> u32 {
+    v[i]
+}
+'''
+    issues = _detect_safety_issues(source, "rust")
+    bounds = [i for i in issues if "v[i]" in i.message]
+    assert bounds
