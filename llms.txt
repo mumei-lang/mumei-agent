@@ -8,6 +8,7 @@
 - Detects spec↔code drift between natural-language requirements and implementations
 - Finds contradictions in natural-language specifications
 - Self-heals `.mm` files using an LLM + Z3 retry loop
+- Escalates Z3 `unknown` obligations to Lean 4 via mumei-lean, and (opt-in, `--enable-lean-ai-proof`) lets an LLM write Lean tactic scripts that only count as `lean_verified` after a real `lake build`
 - Runs as an MCP server for integration with Claude Code, Devin, and other AI agents
 
 ## Key links

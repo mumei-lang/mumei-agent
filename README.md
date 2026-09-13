@@ -56,6 +56,19 @@ The stable audit keys are `spec_health_issues`, `verification_violations`,
 uv run mumei-agent audit --code-file src/example.py --auto-migrate --auto-heal
 ```
 
+## Lean fallback and AI-generated Lean proofs (Task 2-C / 2-D)
+
+`proliferate` escalates Z3 `unknown` atoms to a `mumei-lang/mumei-lean` checkout
+(`MUMEI_LEAN_REPO`): the generated-module path and known witness modules run
+first (Task 2-C). With `--enable-lean-ai-proof` / `ENABLE_LEAN_AI_PROOF=1`
+(Task 2-D, opt-in) the atoms still `unknown` afterwards are handed to an LLM that
+writes only the tactic script for a translator-generated theorem statement; the
+atom is promoted to `lean_verified` solely when `lake build` succeeds (no
+`sorry`, axiom audit clean), and the lean-cert records `ai_proof_used` /
+`ai_proof_attempts` with `lean_fallback_strategy = "ai_generated_proof"`.
+Anything the AI stage cannot discharge stays `unknown` and is the only input to
+the human witness path. See [`docs/LEAN_FALLBACK.md`](docs/LEAN_FALLBACK.md).
+
 ## P9 NLAE Integration
 
 P9 NLAE connects loss-vector self-correction with the mumei-lean fidelity checker. Run `uv run mumei-agent self-correct ...` or the integrated pipeline; details are in [`docs/NLAE_INTEGRATION.md`](docs/NLAE_INTEGRATION.md).
@@ -135,7 +148,7 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) and the [cross-project roadmap](https:/
 | [`docs/OLLAMA_TUNING.md`](docs/OLLAMA_TUNING.md) | Ollama KV-cache and long-context tuning |
 | [`docs/AGENT_HARNESS_SPEC.md`](docs/AGENT_HARNESS_SPEC.md) | Harness and MCP sampling contract |
 | [`docs/VERIFICATION_WORKFLOW_GUIDE.md`](docs/VERIFICATION_WORKFLOW_GUIDE.md) | Verification workflows |
-| [`docs/LEAN_FALLBACK.md`](docs/LEAN_FALLBACK.md) | Lean fallback errors and troubleshooting |
+| [`docs/LEAN_FALLBACK.md`](docs/LEAN_FALLBACK.md) | Lean fallback stages (generated module → known witness → AI proof → human), error codes, provenance |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Agent roadmap |
 
 ## License

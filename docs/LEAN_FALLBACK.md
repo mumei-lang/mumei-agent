@@ -18,12 +18,18 @@ contains `scripts/bridge.py`.
 5. (Opt-in, Task 2-D) With `--enable-lean-ai-proof` / `ENABLE_LEAN_AI_PROOF=1`,
    atoms still `unknown` after steps 3–4 are handed to
    `agent.lean_ai_proof.run_ai_proof_repair()`. The theorem *statement* is
-   never authored by the LLM: it is lifted verbatim (header plus helper
-   `def`s / `open`s) from the bridge-generated `theorem <atom>_correct` under
-   `generated/Generated/`, and the LLM only supplies the tactic script after
-   `:= by`. mumei-agent assembles `Generated.AiProof.<Atom>` from the trusted
-   statement plus the tactics plus `#print axioms <atom>_correct`, writes it
-   under `generated/Generated/AiProof/`, runs `lake build`, and feeds the log
+   never authored by the LLM: each run re-executes mumei-lean's
+   `scripts/ingest_cert.py` on the certificate being repaired into
+   `<run-dir>/_statements/` and lifts `theorem <atom>_correct` verbatim
+   (header plus helper `def`s / `open`s) from there — not from the possibly
+   stale `generated/Generated/` tree (see "Provenance" below) — and the LLM
+   only supplies the tactic script after `:= by`. mumei-agent assembles
+   `Generated.AiProof.<Atom>_<run>` from the trusted statement plus the
+   tactics plus `#print axioms <atom>_correct`, writes it under
+   `generated/Generated/AiProof/`, runs `lake build` itself inside the
+   mumei-lean checkout (this stage does not go through `scripts/bridge.py`;
+   routing it through the mumei-lean acceptance surface is the follow-up
+   B-2 / B-3 in the cross-project roadmap), and feeds the log
    back to the LLM for up to `LEAN_AI_PROOF_MAX_ATTEMPTS` (default 3) repair
    rounds. Only a module that builds with exit code 0, no `error:` lines, no
    `declaration uses 'sorry'` and an axiom audit limited to `propext` /
