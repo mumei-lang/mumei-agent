@@ -1232,15 +1232,39 @@ python -m agent proliferate \
 「1 回目失敗 → 修復成功」「上限到達で unknown 残置」「`sorry` 等の `unsound_source` 拒否」「フラグ無効で
 既存結果不変」）と `tests/test_lean_bridge.py` / `tests/test_lean_bridge_e2e.py`（既存結果不変）。
 
-**mumei-lean 受理面（B-2 / B-3）に依存しない**: 当初計画（下記「cross-repo 位置づけ」）では B-4 は mumei-lean
-側 B-2 / B-3 の後としていたが、実装は mumei-lean の `scripts/ingest_cert.py` を subprocess として再実行して
-信頼できる `theorem <atom>_correct` statement を現在の certificate から再生成し（LLM は statement を書かない）、
-自前でモジュールを組み立てて mumei-lean checkout 内で独立に `lake build` + `#print axioms` 監査を実行する
-ことで自己完結している。mumei-lean 側 B-2（`IngestedAtom.auto_tactic` 一般化による外部 tactic 注入）/
-B-3（build-log の atom 単位構造化 JSON）は、本経路を将来 `scripts/bridge.py` 経由でも動かして mumei-agent 側の
-自前 lake 実行・ログ解釈を mumei-lean の正規ゲート（`export_cert.py`）に寄せるための後続タスクであり、
-実装際には既存の lean-cert キー（`ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy`）をそのまま採用して
-新 alias を作らない（mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25 Wave 表、2026-09-13 改訂）。
+**B-4 → mumei-lean B-2 / B-3 接続 ✅（Wave 4、2026-09-13）**: PR #572 時点の実装は mumei-lean checkout 内で
+自前に `lake build` を実行しログを解釈（`_build_log_accepts` 系）して `lean_verified` を判定していたが、
+現在は mumei-lean 正規経路を信頼境界として再利用する。統一契約は以下:
+
+1. statement は従来どおり `scripts/ingest_cert.py` の再実行でのみ再生成し、LLM には tactic script だけを要求する。
+2. `sorry` / `admit` / `axiom` / `unsafe` / `native_decide` / `implemented_by` を含む tactic は bridge 呼び出し前に
+   `unsound_source` として拒否する。
+3. 残余 atom ごとに `mumei-agent.external_proofs/v1`（`atom` / `tactic_script` / `module_key` /
+   `source = "ai_generated_proof"` / `attempts`）を書き出し、`scripts/bridge.py --cert … --lean-cert-out …
+   --external-proofs … --failure-report … --summary-json …` を呼ぶ。tactic は mumei-lean B-2 の
+   `IngestedAtom.auto_tactic` に注入され、`export_cert.py` の `_translator_contract_current` /
+   `_lean_result_contract_current` ゲートを通過した atom だけが `z3_check_result = "lean_verified"` になる。
+4. mumei-agent 側は正規 lean-cert の `lean_metadata` を読み、`lean_verified` かつ
+   `ai_proof_used = true` / `external_proof.source = "ai_generated_proof"` の provenance がある atom のみ昇格し、
+   別途 `#print axioms` 監査（`sorryAx` 拒否、`propext` / `Classical.choice` / `Quot.sound` のみ許容）を維持する。
+   失敗 atom は `unknown` のまま残す。
+5. 修復フィードバックは B-3 の `mumei-lean-build-failures-v1`（atom 単位の `kind` = `unsolved_goals` /
+   `type_mismatch` / `import_error` / `unknown_identifier` / `sorry` / `other_error` + `line` / `message`）を
+   次の LLM 試行プロンプトに構造化して渡す。
+
+lean-cert キー（`ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy`）、`translator_version` /
+`bridge_lemma_hash` は不変。フラグ無効時の出力は byte-identical。回帰は `tests/test_lean_ai_proof.py` の
+`FakeBridge` fixture（1 回目失敗 → 修復成功 / 上限到達で unknown 残置 / `sorry` 拒否 / bridge exit 0 でも
+昇格なし / import_error・type_mismatch の構造化フィードバック / 監査失敗で拒否）と mumei-lean 側
+`tests/test_lean_bridge_e2e.py -k external_proof_matrix`。
+
+**B-7 / R-7 計測（mumei `benchmarks/evaluation/evaluation_suite.json`、2026-09-13）**: `scripts/measure_lean_ai_proof.py`
+（AI on/off の proof-cert 生成）と `scripts/measure_repair_convergence.py`（counterexample ベンチ 20 件への
+`heal --proof-cert-out`、`self_correction_summary` 付き certificate）をローカル Ollama `qwen2.5-coder:3b`
+（OpenAI 互換 `LLM_BASE_URL`）で実行。Lean escalation 候補 6 は AI off / on ともに 6 `lean_verified`（delta +0、
+`ai_proof_used` 0、`manual_lemma_reason` 残 0 — 決定的 tactic ladder が AI 段の前に全候補を解いた）、
+repair convergence は `SKIP` → `MEASURED` 41.67%（10/24 atom、平均 1.3333 attempts、max 3 retries）。
+Wave 5（C-2 / R-8）は本計測確定後に別 PR。
 
 ### 実装済み
 
@@ -1250,8 +1274,8 @@ B-3（build-log の atom 単位構造化 JSON）は、本経路を将来 `script
   が `CEGISLoop.history` と `_extract_counterexample` の結果を渡す。
 - **B-4 AI 生成 + 修復ループ** — `agent/lean_ai_proof.py::run_ai_proof_repair`。
   `AiProofGenerator` Protocol（`LLMAiProofGenerator` が既定実装、テストはモック）が
-  `Generated.AiProof.<Atom>` モジュールを生成 → mumei-lean checkout 内で `lake build` →
-  失敗ログを feedback として最大 `LEAN_AI_PROOF_MAX_ATTEMPTS`（既定 3）回修復。
+  tactic script を生成 → `scripts/bridge.py --external-proofs` 経由で mumei-lean B-2 に注入 →
+  B-3 の構造化失敗 JSON を feedback として最大 `LEAN_AI_PROOF_MAX_ATTEMPTS`（既定 3）回修復。
   `sorry` / `admit` / `axiom` / `unsafe` / `native_decide` / `implemented_by` を含む
   ソースは Lake 前に `unsound_source` として拒否。`--enable-lean-ai-proof` /
   `ENABLE_LEAN_AI_PROOF` で opt-in、LLM キー無し / `CI_FIXTURE_MODE` では自動スキップ。

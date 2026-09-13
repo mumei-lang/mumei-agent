@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -15,6 +17,13 @@ from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.strategies import fix_strategy
 
 MAX_REPAIR_ATTEMPTS = 10
+
+# Environment variable read by ``mumei verify --proof-cert``
+# (``mumei-core/src/proof_cert/generation.rs``) to attach
+# ``self_correction_metadata`` to every atom and derive the certificate-level
+# ``self_correction_summary`` that ``benchmarks/evaluation_suite.py
+# --repair-cert-dir`` aggregates into the repair-convergence axis.
+SELF_CORRECTION_METADATA_ENV = "MUMEI_SELF_CORRECTION_METADATA"
 
 RepairFn = Callable[
     [OpenAI, str, str, dict[str, object], dict[str, object], MumeiClient, Path],
@@ -55,6 +64,69 @@ class SelfCorrectionLoopResult:
             "convergence_condition_met": self.converged or self.stop_reason == "max_retries_reached",
         }
         return payload
+
+
+def repair_certificate_metadata(
+    *,
+    converged: bool,
+    repair_attempts: int,
+    token_cost: int,
+    consecutive_successes: int = 0,
+    final_error: str | None = None,
+) -> dict[str, object]:
+    """Per-atom ``SelfCorrectionMetadata`` payload understood by mumei."""
+    payload: dict[str, object] = {
+        "repair_attempts": int(repair_attempts),
+        "converged": bool(converged),
+        "consecutive_successes": int(consecutive_successes),
+        "token_cost": int(token_cost),
+    }
+    if final_error:
+        payload["final_error"] = str(final_error)
+    return payload
+
+
+def write_repair_certificate(
+    source_path: str | Path,
+    metadata: dict[str, object],
+    *,
+    mumei_bin: str,
+    out_path: str | Path,
+    timeout: float | None = 600.0,
+) -> dict[str, object]:
+    """Emit a proof certificate carrying ``self_correction_summary``.
+
+    Runs ``mumei verify --proof-cert`` on the (possibly repaired) source with
+    :data:`SELF_CORRECTION_METADATA_ENV` set, so the certificate records the
+    repair loop outcome for every atom and the summary block the mumei
+    evaluation suite reads. Non-zero exit codes are expected for sources the
+    loop could not repair; the certificate is still written by mumei. Any
+    certificate already at ``out_path`` is removed first so only output of
+    this invocation is ever returned.
+    """
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.unlink(missing_ok=True)
+    env = {**os.environ, SELF_CORRECTION_METADATA_ENV: json.dumps(metadata)}
+    cmd = [
+        *mumei_bin.split(),
+        "verify",
+        "--proof-cert",
+        "--output",
+        str(out),
+        str(source_path),
+    ]
+    subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout, check=False)
+    if not out.is_file():
+        raise RuntimeError(f"mumei did not write a proof certificate to {out}")
+    cert = json.loads(out.read_text(encoding="utf-8"))
+    summary = cert.get("self_correction_summary") if isinstance(cert, dict) else None
+    if summary is None:
+        raise RuntimeError(
+            f"proof certificate {out} lacks self_correction_summary; "
+            f"is {mumei_bin} a build that honours {SELF_CORRECTION_METADATA_ENV}?"
+        )
+    return cert
 
 
 class StructuredFeedbackSelfCorrectionLoop:
@@ -297,6 +369,15 @@ def build_self_correct_parser(
     )
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument("--metadata-output", help="Write self-correction metadata JSON")
+    parser.add_argument(
+        "--proof-cert-out",
+        help=(
+            "After the loop, run `mumei verify --proof-cert` on the repaired "
+            "source with the loop outcome attached as self_correction_metadata "
+            "and write the certificate here (input for mumei "
+            "benchmarks/evaluation_suite.py --repair-cert-dir)."
+        ),
+    )
     return parser
 
 
@@ -330,8 +411,51 @@ def main_self_correct(
             json.dumps(payload, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+    proof_cert_out = getattr(args, "proof_cert_out", None)
+    if proof_cert_out:
+        write_repair_certificate(
+            source,
+            _metadata_from_payload(payload),
+            mumei_bin=config.mumei_bin,
+            out_path=proof_cert_out,
+        )
+        payload["proof_cert_out"] = str(proof_cert_out)
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return result
+
+
+def _metadata_from_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Map either loop result shape onto ``repair_certificate_metadata``."""
+    meta = payload.get("self_correction_metadata")
+    if isinstance(meta, dict):
+        return repair_certificate_metadata(
+            converged=bool(meta.get("converged")),
+            repair_attempts=int(meta.get("repair_attempts") or 0),
+            token_cost=int(meta.get("token_cost") or 0),
+            consecutive_successes=int(meta.get("consecutive_successes") or 0),
+            final_error=(
+                str(payload["final_error"]) if payload.get("final_error") else None
+            ),
+        )
+    # ``fix_strategy.SelfCorrectionResult``: success / iterations / history.
+    history = payload.get("history")
+    token_cost = 0
+    if isinstance(history, list):
+        for entry in history:
+            if isinstance(entry, dict):
+                tokens = entry.get("llm_tokens_used") or entry.get("token_cost") or 0
+                if isinstance(tokens, (int, float)):
+                    token_cost += int(tokens)
+    return repair_certificate_metadata(
+        converged=bool(payload.get("success")),
+        repair_attempts=int(payload.get("repair_attempts") or 0),
+        token_cost=token_cost,
+        final_error=(
+            str(payload["stop_reason"])
+            if payload.get("stop_reason") and not payload.get("success")
+            else None
+        ),
+    )
 
 
 def load_structured_feedback(value: dict[str, object] | str | Path) -> dict[str, object]:

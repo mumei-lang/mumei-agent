@@ -64,6 +64,8 @@ class SelfCorrectionResult:
     stop_reason: str | None = None
     loss_vector: dict | None = None
     history: list[dict[str, object]] = field(default_factory=list)
+    #: Candidate fixes written to the source; ``iterations`` counts verifier calls.
+    repair_attempts: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -93,6 +95,7 @@ class SelfCorrectionLoop:
         path = Path(code_file)
         history: list[dict[str, object]] = []
         last_loss_vector: dict | None = None
+        repair_attempts = 0
 
         for iteration in range(1, self.max_iterations + 1):
             verify_result = mumei_client.verify(str(path))
@@ -113,6 +116,7 @@ class SelfCorrectionLoop:
                     stop_reason="all_verified",
                     loss_vector=loss_vector,
                     history=history,
+                    repair_attempts=repair_attempts,
                 )
             if loss_vector is None:
                 return SelfCorrectionResult(
@@ -120,6 +124,7 @@ class SelfCorrectionLoop:
                     iterations=iteration,
                     stop_reason="loss_vector_missing",
                     history=history,
+                    repair_attempts=repair_attempts,
                 )
             fix = llm_client.fix_with_loss_vector(path, loss_vector)
             if not fix:
@@ -129,8 +134,10 @@ class SelfCorrectionLoop:
                     stop_reason="no_fix_produced",
                     loss_vector=loss_vector,
                     history=history,
+                    repair_attempts=repair_attempts,
                 )
             path.write_text(fix, encoding="utf-8")
+            repair_attempts += 1
 
         return SelfCorrectionResult(
             success=False,
@@ -138,6 +145,7 @@ class SelfCorrectionLoop:
             stop_reason="max_iterations",
             loss_vector=last_loss_vector,
             history=history,
+            repair_attempts=repair_attempts,
         )
 
     @staticmethod
