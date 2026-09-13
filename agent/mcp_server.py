@@ -45,6 +45,11 @@ from agent.cross_spec_artifacts import (
     session_protocol_missing_constraints,
     session_protocol_violations,
 )
+from agent.llm_provider import (
+    _client_supports_basic_sampling,
+    _client_supports_sampling_tools,
+    _field_value,
+)
 from agent.nlae_pipeline import NLAEPipeline
 from agent.prompts.spec_guide import SPEC_GUIDE_DECIDABLE_FRAGMENT
 
@@ -988,8 +993,40 @@ def _require_active_human_review_tracker():
         raise RuntimeError("no active human review queue; call get_review_queue first")
     return _active_human_review_tracker
 
+
+def _mcp_client_info(ctx: Context | None) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "name": None,
+        "version": None,
+        "protocol_version": None,
+        "supports_sampling": False,
+        "supports_sampling_tools": False,
+    }
+    if ctx is None:
+        return info
+
+    try:
+        session = _field_value(ctx, "session")
+        client_params = _field_value(session, "client_params")
+        if client_params is None:
+            client_params = _field_value(session, "_client_params")
+        client_info = _field_value(client_params, "clientInfo")
+        info.update(
+            {
+                "name": _field_value(client_info, "name") or None,
+                "version": _field_value(client_info, "version") or None,
+                "protocol_version": _field_value(client_params, "protocolVersion") or None,
+                "supports_sampling": bool(_client_supports_basic_sampling(ctx)),
+                "supports_sampling_tools": bool(_client_supports_sampling_tools(ctx)),
+            }
+        )
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
 @mcp.tool()
-def get_agent_status() -> str:
+def get_agent_status(ctx: Context | None = None) -> str:
     """Return information about the running mumei-agent installation.
 
     Useful for external agents (Claude Code, Devin, ...) that want to
@@ -998,7 +1035,8 @@ def get_agent_status() -> str:
     Returns:
         JSON string with the LLM provider/model, mumei binary path,
         available CLI subcommands, registered MCP tools, and the
-        relevant feature-flag environment variables.
+        relevant feature-flag environment variables, plus connected MCP
+        client information.
     """
     with telemetry.start_tool_span("get_agent_status"):
         try:
@@ -1048,6 +1086,7 @@ def get_agent_status() -> str:
                 "strategy": config.strategy,
                 "subcommands": subcommands,
                 "mcp_tools": sorted(mcp._tool_manager._tools),
+                "mcp_client": _mcp_client_info(ctx),
                 "feature_flags": {
                     "PREFER_MCP_GAPS": os.environ.get("PREFER_MCP_GAPS", ""),
                     "USE_MCP_CLIENT": os.environ.get("USE_MCP_CLIENT", ""),
