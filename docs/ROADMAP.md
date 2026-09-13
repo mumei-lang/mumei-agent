@@ -1223,7 +1223,24 @@ python -m agent proliferate \
 
 ---
 
-## Task 2-D: unknown atom の AI 主体 Lean 証明生成 ✅ Implemented (mumei-agent 側)
+## Task 2-D: unknown atom の AI 主体 Lean 証明生成 ✅ Implemented（PR #572、2026-09-11）
+
+実装は `agent/lean_ai_proof.py`（`run_ai_proof_repair` / `AiProofGenerator` / `LLMAiProofGenerator`）と
+`agent/lean_bridge.py::run_lean_bridge` の `ai_proof_generator` 経路、CLI / 環境変数の
+`--enable-lean-ai-proof` / `ENABLE_LEAN_AI_PROOF`、lean-cert / summary の `ai_proof_used` provenance
+（`lean_fallback_strategy = "ai_generated_proof"`）で構成される。回帰は `tests/test_lean_ai_proof.py`（LLM モックで
+「1 回目失敗 → 修復成功」「上限到達で unknown 残置」「`sorry` 等の `unsound_source` 拒否」「フラグ無効で
+既存結果不変」）と `tests/test_lean_bridge.py` / `tests/test_lean_bridge_e2e.py`（既存結果不変）。
+
+**mumei-lean 受理面（B-2 / B-3）に依存しない**: 当初計画（下記「cross-repo 位置づけ」）では B-4 は mumei-lean
+側 B-2 / B-3 の後としていたが、実装は mumei-lean の `scripts/ingest_cert.py` を subprocess として再実行して
+信頼できる `theorem <atom>_correct` statement を現在の certificate から再生成し（LLM は statement を書かない）、
+自前でモジュールを組み立てて mumei-lean checkout 内で独立に `lake build` + `#print axioms` 監査を実行する
+ことで自己完結している。mumei-lean 側 B-2（`IngestedAtom.auto_tactic` 一般化による外部 tactic 注入）/
+B-3（build-log の atom 単位構造化 JSON）は、本経路を将来 `scripts/bridge.py` 経由でも動かして mumei-agent 側の
+自前 lake 実行・ログ解釈を mumei-lean の正規ゲート（`export_cert.py`）に寄せるための後続タスクであり、
+実装際には既存の lean-cert キー（`ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy`）をそのまま採用して
+新 alias を作らない（mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25 Wave 表、2026-09-13 改訂）。
 
 ### 実装済み
 
@@ -1251,7 +1268,7 @@ python -m agent proliferate \
 
 以下は設計時の仕様（実装の根拠として保持）。
 
-**cross-repo 位置づけ**: 本タスクは [mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の **Track B** に対応する。mumei-agent 側の担当は B-0（契約合意: escalation bundle 拡張スキーマ / lean-cert の `ai_proof_used` provenance / build 失敗の構造化形式、docs のみ）、B-4（`--enable-lean-ai-proof` と AI 生成 + 修復ループ）、B-5（`merge_lean_cert_into_proof_cert` によるマージと `lean_verified_count` 伝搬）、B-6（`docs/LEAN_FALLBACK.md` error code 表と `human_review.py` / MCP `escalate_to_lean` の再配置）。B-4 / B-5 は mumei-lean 側の受理面 B-2 と構造化フィードバック B-3 が develop に入ってから着手する（Wave 3）。下記「パイプライン設計」の前提タスク（bundle スキーマ拡張）は B-0 に相当する。
+**cross-repo 位置づけ**: 本タスクは [mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の **Track B** に対応する。mumei-agent 側の担当は B-0（契約合意: escalation bundle 拡張スキーマ / lean-cert の `ai_proof_used` provenance / build 失敗の構造化形式、docs のみ）、B-4（`--enable-lean-ai-proof` と AI 生成 + 修復ループ）、B-5（`merge_lean_cert_into_proof_cert` によるマージと `lean_verified_count` 伝搬）、B-6（`docs/LEAN_FALLBACK.md` error code 表と `human_review.py` / MCP `escalate_to_lean` の再配置）。当初は B-4 / B-5 を mumei-lean 側の受理面 B-2 と構造化フィードバック B-3 の後（Wave 3）に置いていたが、実際には上記のとおり B-4 / B-5 / B-6 が PR #572 で先行完了し、B-2 / B-3 は後続タスクに位置づけ直された。下記「パイプライン設計」の前提タスク（bundle スキーマ拡張）は B-0 に相当し、こちらも PR #572 に含まれる。
 
 Task 2-C の Lean fallback は、`agent/lean_bridge.py` の `run_lean_bridge` /
 `agent/lean_bridge_helpers.py` の `extract_unknown_atoms` と known witness fallback
