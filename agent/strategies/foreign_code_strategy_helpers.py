@@ -4188,6 +4188,10 @@ def _go_is_known_interface_method(
         return True
     if name == "UnmarshalText" and "[]byte" in params_text and "error" in ret:
         return True
+    # ``fmt.Stringer`` implementations are invoked on non-nil concrete values by
+    # the fmt package and by callers holding the interface.
+    if name == "String" and not params_text.strip() and re.fullmatch(r"\(?\s*string\s*\)?", ret.strip()):
+        return True
     # ``error`` interface methods are invoked on non-nil concrete error values.
     if name == "Error" and not params_text.strip() and "string" in ret:
         return True
@@ -4304,7 +4308,10 @@ def _go_interface_method_names(source: str) -> set[str]:
     """Return method names declared by interface types in the source.
 
     Any concrete method with the same name is treated as an interface
-    implementation, so nil receiver counterexamples are suppressed.
+    implementation, so nil receiver counterexamples are suppressed.  Go
+    interfaces are package-scoped, so the package source (not just the audited
+    file) is the right input: an implementation in ``disk_sorter.go`` of an
+    interface declared in ``external_sorter.go`` is still caller-contract.
     """
     names: set[str] = set()
     for match in re.finditer(r"type\s+\w+\s+interface\s*\{(.*?)\}", source, flags=re.DOTALL):
@@ -4773,7 +4780,7 @@ def _detect_go_safety_issues(
         flag_value_types = _go_flag_value_receiver_types(functions)
         caller_contract_types = _go_caller_contract_receiver_types(source)
         callback_names = _go_callback_function_names(source, functions)
-        interface_method_names = _go_interface_method_names(source)
+        interface_method_names = _go_interface_method_names(package_source)
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         component_runner_receivers = _go_component_runner_receiver_types(source)
         file_map_names = _go_map_names(source)
@@ -4988,7 +4995,7 @@ def _detect_go_safety_issues(
     package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
     package_name = package_name.group(1) if package_name else ""
     caller_contract_types = _go_caller_contract_receiver_types(source)
-    interface_method_names = _go_interface_method_names(source)
+    interface_method_names = _go_interface_method_names(package_source)
     file_map_names = _go_map_names(source)
     map_type_names = _go_map_type_names(source)
     base_guaranteed_nonzero = (
