@@ -4890,6 +4890,36 @@ func (si *sstIter) Valid() bool {
     assert not any("si" == (i.required_contracts or [""])[0].split(" ")[0] for i in issues)
 
 
+def test_go_safety_sibling_interface_name_collision_still_flags(tmp_path) -> None:
+    """A sibling interface reusing a method name but not its signature must not
+    suppress the nil receiver check."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    (tmp_path / "iface.go").write_text(
+        """package pkg
+
+type Flusher interface {
+    Reset()
+}
+""",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl.go"
+    source = """package pkg
+
+type Cache struct {
+    entries map[string]int
+}
+
+func (c *Cache) Reset(key string) int {
+    return c.entries[key]
+}
+"""
+    impl.write_text(source, encoding="utf-8")
+    issues = _detect_safety_issues(source, "go", str(impl))
+    assert any("c" == (i.required_contracts or [""])[0].split(" ")[0] for i in issues)
+
+
 def test_go_safety_suppresses_json_marshaler_nil_receiver() -> None:
     """``MarshalJSON`` / ``UnmarshalJSON`` pointer-receiver methods are caller-contract."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
