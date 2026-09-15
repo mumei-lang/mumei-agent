@@ -4831,6 +4831,95 @@ func (a *GrafanaAuthorizer) Authorize(ctx context.Context, attr authorizer.Attri
     assert not any("GrafanaAuthorizer" in i.message for i in issues)
 
 
+def test_go_safety_suppresses_stringer_nil_receiver() -> None:
+    """``String() string`` implements ``fmt.Stringer`` and is caller-contract."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """package access
+
+import "strings"
+
+type DynamicPartitionAccessObject struct {
+    Partitions []string
+    Err        string
+}
+
+func (d *DynamicPartitionAccessObject) String() string {
+    if len(d.Err) > 0 {
+        return d.Err
+    }
+    return "partition:" + strings.Join(d.Partitions, ",")
+}
+"""
+    issues = _detect_safety_issues(source, "go")
+    assert not any("dereference" in i.message for i in issues)
+
+
+def test_go_safety_suppresses_package_interface_method_nil_receiver(tmp_path) -> None:
+    """Interfaces are package-scoped, so sibling-file declarations count."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    (tmp_path / "iface.go").write_text(
+        """package extsort
+
+type Iterator interface {
+    Seek(key []byte) bool
+    Valid() bool
+}
+""",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl.go"
+    source = """package extsort
+
+type sstIter struct {
+    iter *sstIterator
+    err  error
+}
+
+func (si *sstIter) Seek(key []byte) bool {
+    return si.iter.SeekGE(key)
+}
+
+func (si *sstIter) Valid() bool {
+    return si.err == nil
+}
+"""
+    impl.write_text(source, encoding="utf-8")
+    issues = _detect_safety_issues(source, "go", str(impl))
+    assert not any("si" == (i.required_contracts or [""])[0].split(" ")[0] for i in issues)
+
+
+def test_go_safety_sibling_interface_name_collision_still_flags(tmp_path) -> None:
+    """A sibling interface reusing a method name but not its signature must not
+    suppress the nil receiver check."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    (tmp_path / "iface.go").write_text(
+        """package pkg
+
+type Flusher interface {
+    Reset()
+}
+""",
+        encoding="utf-8",
+    )
+    impl = tmp_path / "impl.go"
+    source = """package pkg
+
+type Cache struct {
+    entries map[string]int
+}
+
+func (c *Cache) Reset(key string) int {
+    return c.entries[key]
+}
+"""
+    impl.write_text(source, encoding="utf-8")
+    issues = _detect_safety_issues(source, "go", str(impl))
+    assert any("c" == (i.required_contracts or [""])[0].split(" ")[0] for i in issues)
+
+
 def test_go_safety_suppresses_json_marshaler_nil_receiver() -> None:
     """``MarshalJSON`` / ``UnmarshalJSON`` pointer-receiver methods are caller-contract."""
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues

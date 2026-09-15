@@ -27,6 +27,7 @@ from agent.cross_validation_foreign import (
     _local_variable_names,
     _mask_nested_function_literals,
     _split_params,
+    _split_signature_params,
     _strip_go_rust_literals_and_comments,
 )
 
@@ -4188,6 +4189,10 @@ def _go_is_known_interface_method(
         return True
     if name == "UnmarshalText" and "[]byte" in params_text and "error" in ret:
         return True
+    # ``fmt.Stringer`` implementations are invoked on non-nil concrete values by
+    # the fmt package and by callers holding the interface.
+    if name == "String" and not params_text.strip() and re.fullmatch(r"\(?\s*string\s*\)?", ret.strip()):
+        return True
     # ``error`` interface methods are invoked on non-nil concrete error values.
     if name == "Error" and not params_text.strip() and "string" in ret:
         return True
@@ -4300,18 +4305,68 @@ def _go_float_array_names(source: str) -> set[str]:
     return names
 
 
-def _go_interface_method_names(source: str) -> set[str]:
-    """Return method names declared by interface types in the source.
+def _go_normalized_param_types(params_text: str) -> tuple[str, ...]:
+    """Return the ordered Go parameter types of a signature, ignoring names.
 
-    Any concrete method with the same name is treated as an interface
-    implementation, so nil receiver counterexamples are suppressed.
+    Handles grouped declarations (``key, value []byte``) and unnamed interface
+    parameters (``[]byte``).  A bare identifier whose type never resolves is
+    kept as-is so such signatures simply fail to match.
     """
-    names: set[str] = set()
-    for match in re.finditer(r"type\s+\w+\s+interface\s*\{(.*?)\}", source, flags=re.DOTALL):
-        body = match.group(1)
-        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", body):
-            names.add(m.group(1))
-    return names
+    types: list[str] = []
+    pending = 0
+    for raw in _split_signature_params(params_text):
+        raw = raw.strip()
+        if not raw:
+            continue
+        match = re.fullmatch(r"[A-Za-z_]\w*\s+(.+)", raw)
+        if match:
+            types.extend([match.group(1).strip()] * (pending + 1))
+            pending = 0
+        elif re.fullmatch(r"[A-Za-z_]\w*", raw):
+            pending += 1
+        else:
+            types.extend([raw] * (pending + 1))
+            pending = 0
+    types.extend(["?"] * pending)
+    return tuple(types)
+
+
+def _go_interface_method_signatures(source: str) -> set[tuple[str, tuple[str, ...], str]]:
+    """Return ``(name, param_types, return_type)`` tuples of interface methods.
+
+    Go interfaces are package-scoped, so the package source (not just the
+    audited file) is the right input: an implementation in ``disk_sorter.go``
+    of an interface declared in ``external_sorter.go`` is still
+    caller-contract.  Matching on full signatures — not just names — prevents
+    an unrelated interface reusing a method name from suppressing a real nil
+    receiver check.
+    """
+    stripped = _strip_go_rust_literals_and_comments(source)
+    sigs: set[tuple[str, tuple[str, ...], str]] = set()
+    for match in re.finditer(r"type\s+\w+\s+interface\s*\{(.*?)\}", stripped, flags=re.DOTALL):
+        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(([^)]*)\)\s*([^\n/]*)", match.group(1)):
+            ret = re.sub(r"\s+", "", m.group(3)).strip()
+            sigs.add(
+                (
+                    m.group(1),
+                    _go_normalized_param_types(m.group(2)),
+                    ret,
+                )
+            )
+    return sigs
+
+
+def _go_method_interface_signature(
+    name: str, params_text: str, return_type: str | None
+) -> tuple[str, tuple[str, ...], str] | None:
+    """Return the signature tuple used to match against interface methods."""
+    if not name or not params_text:
+        return None
+    return (
+        name,
+        _go_normalized_param_types(_go_method_body_params_text(params_text)),
+        re.sub(r"\s+", "", (return_type or "")).strip(),
+    )
 
 
 def _go_sort_interface_receiver_types(functions: list) -> set[str]:
@@ -4773,7 +4828,7 @@ def _detect_go_safety_issues(
         flag_value_types = _go_flag_value_receiver_types(functions)
         caller_contract_types = _go_caller_contract_receiver_types(source)
         callback_names = _go_callback_function_names(source, functions)
-        interface_method_names = _go_interface_method_names(source)
+        interface_sigs = _go_interface_method_signatures(package_source)
         sort_interface_receivers = _go_sort_interface_receiver_types(functions)
         component_runner_receivers = _go_component_runner_receiver_types(source)
         file_map_names = _go_map_names(source)
@@ -4846,7 +4901,8 @@ def _detect_go_safety_issues(
                     rtype_base in caller_contract_types
                     or _go_is_known_interface_method(fn.name, fn.params_text, fn.return_type)
                     or _go_is_hash_internal_helper(fn.name, fn.params_text, fn.return_type)
-                    or fn.name in interface_method_names
+                    or _go_method_interface_signature(fn.name, fn.params_text, fn.return_type)
+                    in interface_sigs
                     or (
                         fn.name in {"Len", "Less", "Swap"}
                         and rtype_base in sort_interface_receivers
@@ -4988,7 +5044,7 @@ def _detect_go_safety_issues(
     package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
     package_name = package_name.group(1) if package_name else ""
     caller_contract_types = _go_caller_contract_receiver_types(source)
-    interface_method_names = _go_interface_method_names(source)
+    interface_sigs = _go_interface_method_signatures(package_source)
     file_map_names = _go_map_names(source)
     map_type_names = _go_map_type_names(source)
     base_guaranteed_nonzero = (
@@ -5064,7 +5120,8 @@ def _detect_go_safety_issues(
                 rtype_base in caller_contract_types
                 or _go_is_known_interface_method(name, params_text, _return_type)
                 or _go_is_hash_internal_helper(name, params_text, _return_type)
-                or name in interface_method_names
+                or _go_method_interface_signature(name, params_text, _return_type)
+                in interface_sigs
             )
         )
         for index, expression in enumerate(expressions):
