@@ -5374,8 +5374,20 @@ def _go_contract_satisfied_by_args(
             if arg is None:
                 return None
             is_nil = arg == "nil"
-            if op == "!=" and is_nil:
-                return False
+            # Provably non-nil only for literals: &T{}, T{...}, []T{...},
+            # numbers, and quoted strings — a bare identifier or call may
+            # still evaluate to nil, so those stay undecidable.
+            provably_non_nil = bool(
+                arg.startswith("&")
+                or re.fullmatch(r"-?\d+", arg)
+                or re.fullmatch(r'"[^"]*"|`[^`]*`', arg)
+                or re.fullmatch(r"[\w.\[\]*]+\s*\{[^}]*\}", arg)
+            )
+            if op == "!=":
+                if is_nil:
+                    return False
+                if not provably_non_nil:
+                    return None
             if op == "==" and not is_nil:
                 return False
             continue

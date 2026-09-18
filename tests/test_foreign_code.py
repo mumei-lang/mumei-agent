@@ -7571,3 +7571,37 @@ def test_go_unreachable_counterexample_kept_for_exported(tmp_path) -> None:
     )
     issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
     assert any("Apply" in i.function_name for i in issues)
+
+
+def test_go_unreachable_counterexample_nil_arg_kept(tmp_path) -> None:
+    """A caller passing a maybe-nil identifier keeps the non-nil finding."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\n"
+        "func apply(p *int) int { return *p }\n"
+        "var q *int\n"
+        "func run() int { return apply(q) }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    assert any("apply" in i.function_name for i in issues)
+
+
+def test_go_unreachable_counterexample_nonnil_literal_suppressed(tmp_path) -> None:
+    """A caller passing &literal satisfies `p != nil` provably."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\n"
+        "type T struct{ v int }\n"
+        "func apply(p *T) int { return p.v }\n"
+        "func run() int { return apply(&T{v: 1}) }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    assert not any("apply" in i.function_name and "non-nil" in i.message for i in issues)
