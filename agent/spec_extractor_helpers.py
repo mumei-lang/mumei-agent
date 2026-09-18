@@ -386,7 +386,7 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
 _TRIVIAL_CLAUSE_RE = re.compile(
     r"^\s*(?:"
     r"true"
-    r"|[\w.\[\]()]+(?:\s+is\s+not\s+none|!\s*=\s*(?:null|none|nil)|\s+is\s+not\s+null)"
+    r"|[\w.\[\]()]+(?:\s+is\s+not\s+(?:none|nil|null)|!\s*=\s*(?:null|none|nil))"
     r"|non-?null"
     r"|result\s+is\s+not\s+none"
     r")\s*$",

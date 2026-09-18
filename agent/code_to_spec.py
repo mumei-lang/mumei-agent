@@ -80,7 +80,10 @@ def _write_spec_cache(
     path = _spec_cache_path(cache_dir, key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        # Write-then-rename keeps a killed run from leaving a truncated entry
+        # that a later audit would read.
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(
             json.dumps(
                 {
                     "natural_language_spec": natural_language_spec,
@@ -90,6 +93,7 @@ def _write_spec_cache(
             ),
             encoding="utf-8",
         )
+        tmp_path.replace(path)
     except OSError:
         logger.debug("Could not write spec cache at %s", path, exc_info=True)
 
