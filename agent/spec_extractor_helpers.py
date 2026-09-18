@@ -383,6 +383,52 @@ def _keyword_validation_errors(spec: dict, natural_language: str) -> list[str]:
     return errors
 
 
+_TRIVIAL_CLAUSE_RE = re.compile(
+    r"^\s*(?:"
+    r"true"
+    r"|[\w.\[\]()]+(?:\s+is\s+not\s+none|!\s*=\s*(?:null|none|nil)|\s+is\s+not\s+null)"
+    r"|non-?null"
+    r"|result\s+is\s+not\s+none"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def _clause_is_trivial(clause: str) -> bool:
+    """True when a requires/ensures clause asserts only non-nullness or true."""
+    normalized = clause.strip().strip(";")
+    if not normalized:
+        return True
+    # Split conjunctions/disjunctions: the clause is only trivial if every
+    # disjunct/conjunct is trivial.
+    parts = re.split(r"&&|\|\||\band\b|\bor\b", normalized)
+    return all(_TRIVIAL_CLAUSE_RE.match(part) for part in parts)
+
+
+def _trivial_spec_errors(spec: dict) -> list[str]:
+    """Flag specs whose atoms carry only tautological/non-nullness clauses.
+
+    Small local models often emit `requires: x is not None` / `ensures: true`
+    for every atom; such specs validate structurally but encode no contract,
+    so they are worth one re-prompt before being accepted.
+    """
+    atoms = spec.get("atoms")
+    if not isinstance(atoms, list) or not atoms:
+        return []
+    for index, atom in enumerate(atoms):
+        if not isinstance(atom, dict):
+            return []
+        for field_name in ("requires", "ensures"):
+            value = atom.get(field_name)
+            if not isinstance(value, str) or not _clause_is_trivial(value):
+                return []
+    return [
+        "all atoms have trivial requires/ensures (only non-nullness or 'true'); "
+        "extract semantic preconditions and postconditions that constrain "
+        "inputs, outputs, or state"
+    ]
+
+
 _RETRY_FEEDBACK_RAW_LIMIT = 2000
 
 

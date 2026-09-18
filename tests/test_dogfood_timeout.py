@@ -164,6 +164,27 @@ def test_unsupervised_audit_reports_elapsed_time(tmp_path: Path, monkeypatch) ->
     assert timing.elapsed_s >= 0.0
 
 
+def test_risky_timeout_scale_stretches_only_marked_files(tmp_path: Path) -> None:
+    """The scaled budget appears in the timeout reason; unmarked files keep the base."""
+    risky = tmp_path / "asm.sol"
+    risky.write_text(
+        "contract A {\n  function f() internal pure {\n"
+        "    assembly {\n      mstore(0, 1)\n    }\n  }\n}\n",
+        encoding="utf-8",
+    )
+    result, _ = audit_file_with_timeout(
+        risky, "solidity", 0.001, risky_timeout_scale=10.0
+    )
+    assert "timed out after 0.01s" in result.errors[0]
+
+    plain = tmp_path / "plain.py"
+    plain.write_text("def f(x):\n    return x + 1\n", encoding="utf-8")
+    result, _ = audit_file_with_timeout(
+        plain, "python", 0.001, risky_timeout_scale=10.0
+    )
+    assert "timed out after 0.001s" in result.errors[0]
+
+
 def test_timing_markdown_is_empty_when_nothing_is_slow(tmp_path: Path) -> None:
     timings = [FileAuditTiming(source_file=str(tmp_path / "a.py"), elapsed_s=0.2)]
     assert format_timing_markdown(timings, slow_threshold_s=10.0) == ""

@@ -123,14 +123,20 @@ def audit_file_with_timeout(
     path: Path,
     language: str,
     timeout_s: float,
+    *,
+    risky_timeout_scale: float = 1.0,
 ) -> tuple[AuditResult, FileAuditTiming]:
-    """Audit ``path``, abandoning it if it outlives ``timeout_s`` seconds.
+    """Audit ``path``, abandoning it if it outlives the effective timeout.
 
     The audit runs in a spawned child process so an unbounded solver or parser
     loop can actually be killed; ``timeout_s <= 0`` audits in-process without
-    supervision.
+    supervision.  When ``risky_timeout_scale`` exceeds 1 and the source carries
+    structural risk markers, the budget is stretched by that factor so a known
+    expensive shape gets a fairer share before being abandoned.
     """
     markers = source_risk_markers(path)
+    if markers and risky_timeout_scale > 1.0 and timeout_s > 0:
+        timeout_s = timeout_s * risky_timeout_scale
     started = time.monotonic()
 
     if timeout_s <= 0:

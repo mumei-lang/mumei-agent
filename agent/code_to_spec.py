@@ -1,6 +1,9 @@
 """Extract natural language specifications from existing source code."""
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +26,72 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _is_go_experimental,
     _is_go_test_helper,
 )
+
+logger = logging.getLogger(__name__)
+
+#: Bump when the extraction prompt or spec-alignment logic changes so stale
+#: cache entries are not mistaken for current output.
+_SPEC_CACHE_SCHEMA_VERSION = 1
+
+
+def _spec_cache_key(code: str, language: str, model: str, domain_hint: str) -> str:
+    """Content-addressed key for one extract_from_file LLM result."""
+    digest = hashlib.sha256()
+    digest.update(str(_SPEC_CACHE_SCHEMA_VERSION).encode())
+    digest.update(b"\x00")
+    digest.update(model.encode())
+    digest.update(b"\x00")
+    digest.update(language.encode())
+    digest.update(b"\x00")
+    digest.update(domain_hint.encode())
+    digest.update(b"\x00")
+    digest.update(code.encode("utf-8", errors="replace"))
+    return digest.hexdigest()
+
+
+def _spec_cache_path(cache_dir: str, key: str) -> Path:
+    return Path(cache_dir).expanduser() / f"{key}.json"
+
+
+def _read_spec_cache(
+    cache_dir: str, key: str
+) -> tuple[str, dict | None] | None:
+    """Return (natural_language_spec, forge_task_spec) on a cache hit."""
+    try:
+        payload = json.loads(
+            _spec_cache_path(cache_dir, key).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    natural_language_spec = payload.get("natural_language_spec")
+    if not isinstance(natural_language_spec, str) or not natural_language_spec:
+        return None
+    forge_task_spec = payload.get("forge_task_spec")
+    if forge_task_spec is not None and not isinstance(forge_task_spec, dict):
+        return None
+    return natural_language_spec, forge_task_spec
+
+
+def _write_spec_cache(
+    cache_dir: str, key: str, natural_language_spec: str, forge_task_spec: dict | None
+) -> None:
+    path = _spec_cache_path(cache_dir, key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "natural_language_spec": natural_language_spec,
+                    "forge_task_spec": forge_task_spec,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.debug("Could not write spec cache at %s", path, exc_info=True)
 
 Language = Literal[
     "rust",
@@ -545,6 +614,29 @@ class CodeToSpecExtractor:
                 errors=[],
             )
 
+        cache_dir = self.config.spec_cache_dir
+        cache_key = (
+            _spec_cache_key(code, detected_language, self.config.model, domain_hint)
+            if cache_dir
+            else ""
+        )
+        if cache_dir:
+            cached = _read_spec_cache(cache_dir, cache_key)
+            if cached is not None:
+                cached_spec, cached_forge_spec = cached
+                warnings.append(
+                    "Spec extraction served from cache "
+                    f"(key {cache_key[:12]}); source unchanged."
+                )
+                return CodeToSpecResult(
+                    success=True,
+                    natural_language_spec=cached_spec,
+                    forge_task_spec=cached_forge_spec,
+                    detected_language=detected_language,
+                    warnings=warnings,
+                    errors=[],
+                )
+
         try:
             client = self._injected_client or self.config.create_client()
             natural_language_spec = self._extract_spec_with_llm(
@@ -579,6 +671,10 @@ class CodeToSpecExtractor:
                     deterministic.atoms,
                     code_path,
                     warnings,
+                )
+            if cache_dir:
+                _write_spec_cache(
+                    cache_dir, cache_key, natural_language_spec, forge_task_spec
                 )
             return CodeToSpecResult(
                 success=True,

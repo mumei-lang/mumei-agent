@@ -109,6 +109,68 @@ def test_extract_from_file_with_mock_llm(tmp_path: Path) -> None:
     assert mock_extract.call_args.kwargs["domain_hint"] == ""
 
 
+def test_extract_from_file_uses_spec_cache(tmp_path: Path) -> None:
+    """Second run of the same source+model is served from the on-disk cache."""
+    source = tmp_path / "simple_add.rs"
+    source.write_text("pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")
+    forge_spec = {
+        "task_id": "code-simple-add",
+        "target_file": "std/math/simple_add.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "simple_add",
+                "description": "Add two signed integers",
+                "inputs": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "a + b <= i64::MAX",
+                "ensures": "result == a + b",
+                "effects": [],
+            }
+        ],
+    }
+    client = MagicMock()
+    client.chat.completions.create.return_value = _make_response("Adds two integers.")
+    cache_dir = tmp_path / "spec-cache"
+    config = AgentConfig(
+        api_key="test", model="test-model", spec_cache_dir=str(cache_dir)
+    )
+    config.create_client = MagicMock(return_value=client)
+
+    with patch("agent.spec_extractor.extract_spec", return_value=forge_spec) as mock_extract:
+        first = CodeToSpecExtractor(config).extract_from_file(source)
+    assert first.success is True
+    assert mock_extract.call_count == 1
+    assert list(cache_dir.glob("*.json")), "cache entry should be persisted"
+
+    second = CodeToSpecExtractor(config).extract_from_file(source)
+    assert second.success is True
+    assert second.forge_task_spec == forge_spec
+    assert client.chat.completions.create.call_count == 1
+    assert any("served from cache" in w for w in second.warnings)
+
+
+def test_extract_from_file_cache_key_tracks_content(tmp_path: Path) -> None:
+    """Editing the source must miss the cache written for the old content."""
+    source = tmp_path / "simple_add.rs"
+    source.write_text("pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")
+    client = MagicMock()
+    client.chat.completions.create.return_value = _make_response("Adds integers.")
+    config = AgentConfig(
+        api_key="test", model="test-model", spec_cache_dir=str(tmp_path / "cache")
+    )
+    config.create_client = MagicMock(return_value=client)
+
+    spec = {"task_id": "t", "target_file": "std/x.mm", "mode": "create", "atoms": []}
+    with patch("agent.spec_extractor.extract_spec", return_value=spec):
+        CodeToSpecExtractor(config).extract_from_file(source)
+        source.write_text(
+            "pub fn simple_sub(a: i64, b: i64) -> i64 { a - b }\n", encoding="utf-8"
+        )
+        CodeToSpecExtractor(config).extract_from_file(source)
+    assert client.chat.completions.create.call_count == 2
+
+
 def test_extract_from_shift_jis_file_with_mock_llm(tmp_path: Path) -> None:
     source = tmp_path / "simple_add.rs"
     source.write_bytes(

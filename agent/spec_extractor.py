@@ -35,6 +35,7 @@ from agent.spec_extractor_helpers import (
     _single_quoted_json_to_double,
     _strip_inline_json_comment,
     _strip_json_comments,
+    _trivial_spec_errors,
     _validate_extracted_spec,
     validate_forge_task_spec,
 )
@@ -129,6 +130,10 @@ def extract_spec(
         validation_errors = _validate_extracted_spec(spec)
         if not validation_errors:
             validation_errors = _keyword_validation_errors(spec, natural_language)
+        if not validation_errors and attempt < attempts:
+            # A spec that survives all retries is still useful as-is; only
+            # demand non-trivial clauses while a re-prompt is affordable.
+            validation_errors = _trivial_spec_errors(spec)
         if not validation_errors:
             if metrics is not None:
                 metrics.record_extraction_success()

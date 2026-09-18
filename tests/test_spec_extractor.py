@@ -209,6 +209,60 @@ def test_extract_spec_retry_on_invalid_json() -> None:
     assert "not json" in retry_prompt
 
 
+def test_extract_spec_retries_trivial_only_clauses() -> None:
+    trivial_spec = {
+        "task_id": "t",
+        "target_file": "std/math/add.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "add",
+                "description": "Add two integers",
+                "inputs": [{"name": "a", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "a is not None",
+                "ensures": "true",
+                "effects": [],
+            }
+        ],
+    }
+    client = _mock_client(json.dumps(trivial_spec), json.dumps(VALID_SPEC))
+
+    result = extract_spec(client, "m", "安全な加算", max_retries=3)
+
+    assert result == VALID_SPEC
+    assert client.chat.completions.create.call_count == 2
+    retry_prompt = (
+        client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    )
+    assert "trivial requires/ensures" in retry_prompt
+
+
+def test_extract_spec_accepts_trivial_spec_on_last_attempt() -> None:
+    """A spec that stays trivial through every retry is still returned."""
+    trivial_spec = {
+        "task_id": "t",
+        "target_file": "std/math/add.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "add",
+                "description": "Add two integers",
+                "inputs": [{"name": "a", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "a != null",
+                "ensures": "result is not None",
+                "effects": [],
+            }
+        ],
+    }
+    client = _mock_client(json.dumps(trivial_spec))
+
+    result = extract_spec(client, "m", "足し算", max_retries=1)
+
+    assert result == trivial_spec
+
+
 def test_extract_and_generate_integration() -> None:
     client = _mock_client(json.dumps(VALID_SPEC))
 
