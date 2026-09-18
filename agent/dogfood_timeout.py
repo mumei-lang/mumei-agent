@@ -55,6 +55,7 @@ class FileAuditTiming:
     elapsed_s: float
     timed_out: bool = False
     risk_markers: list[str] = field(default_factory=list)
+    effective_timeout_s: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable representation of the timing record."""
@@ -191,6 +192,7 @@ def audit_file_with_timeout(
         elapsed_s=elapsed,
         timed_out=True,
         risk_markers=markers,
+        effective_timeout_s=timeout_s,
     )
 
 

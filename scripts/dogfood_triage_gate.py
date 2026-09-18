@@ -344,9 +344,10 @@ def main(argv: list[str] | None = None) -> int:
     timed_out = [timing for timing in all_timings if timing.timed_out]
     for timing in timed_out:
         markers = ", ".join(timing.risk_markers) or "none detected"
+        effective = timing.effective_timeout_s or args.per_file_timeout
         print(
             f"::warning::{timing.source_file} exceeded the per-file timeout "
-            f"({args.per_file_timeout:g}s); risk markers: {markers}"
+            f"({effective:g}s); risk markers: {markers}"
         )
 
     refuted = int(totals["human_review_count"])
