@@ -530,8 +530,16 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   書き込み（`var m map[K]V` 未初期化のまま `m[k] = v`）、ロック二重取得（`mu.Lock()` 保持中の
   再 `Lock`）、ロック保持中の `return`（`defer Unlock` なし・当該パスで `Unlock` なし）、
   `os.Open` 等のハンドル未 `Close` での `return`（`defer Close` / 戻り値として返却 / 未知関数への
-  受け渡しは所有権移転として抑止）。未初期化値・状態遷移前提・契約由来事後条件は本 stage では
-  未着手で、データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
+  受け渡しは所有権移転として抑止）。未初期化値の使用も対応済み（`uninitialized_use`）:
+  `var` 宣言で nil 値を取るポインタ / スライス / `func` / `error`・`any`・`interface{…}` 型を
+  `_Env.held` に（`uninit_ptr` / `uninit_slice` / `uninit_func` / `uninit_iface` / 既存 `nilmap`）
+  として保持し、`nilable` 型事実が `p = &x` をまたいで残るため `p = nil` での再 nil 化や
+  `T(nil)` キャスト、`x := p` エイリアスも追随する。確定パニックのみを報告する:
+  `*p`・`p.field`・`p[i]`、`s[i]`（`s[a:b]` リスライスは `s[:0]` が合法なため対象外）、
+  `f(…)`、`i.m(…)` / `i.(T)`。`p.m(…)` の nil レシーバ許容メソッド呼び出し、`len(s)` /
+  `range s` / `append(s, …)` / nil マップ読み出し、`chan` の nil（`select` 無効化イディオム）は
+  報告しない。状態遷移前提・契約由来事後条件は本 stage では未着手で、データフロー事実だけで
+  閉じない義務は従来どおり `unverifiable` / Lean 送り。
 - テスト: `tests/test_dataflow_facts.py`（定数畳み込み / ガード / 早期 return / ループ条件 /
   到達定義 / `len` 由来値 / エイリアス / クロージャ・アドレス無効化 / 削除ヘルパの旧偽陽性ケース /
   新バグ種別の正例・偽陽性例）。既存 `tests/test_foreign_code.py` / `tests/test_cross_validation.py`

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-18: A-6 follow-up — `uninitialized_use` dataflow category
+
+- `agent/dataflow_facts.py` now reports uses of `var`-declared nil-able values that are still uninitialised on the path: nil-pointer dereference / field / index (`*p`, `p.x`, `p[i]`), nil-slice indexing (`s[i]`; reslices `s[a:b]` excluded since `s[:0]` is legal), nil `func` calls, and nil-interface method calls / type assertions (`error`, `any`, `interface{…}`).
+- Nil-able type facts live in a new `_Env.nilable` map so `p = &x` clears the marker but `p = nil`, `T(nil)` casts, and `x := p` aliases re-mark / propagate it. `p != nil` guards, nil-receiver-tolerant method calls `p.m(...)`, `len(s)` / `range s` / `append`, nil map reads, and nil channels (the `select`-disable idiom) are not reported.
+- Reported via `_dataflow_safety_issues` as category `uninitialized_use`, appended after the existing bounds → nil → division → overflow ordering. Regression gate: `tests/test_dataflow_facts.py` (+17 cases), `tests/test_foreign_code.py` / `tests/test_cross_validation.py` unchanged pass.
+
 ## 2026-07-26: P16-C benchmark feedback into the vStd forge / proliferate loop
 
 - Added `agent/benchmark_feedback.py`, which loads the mumei `mumei.benchmark_forge_feedback/v1` document emitted by `benchmarks/run_benchmarks.py --forge-feedback` and maps each benchmark category's weakness score to a negative `priority_delta` over its stdlib domains.

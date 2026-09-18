@@ -26,7 +26,8 @@ their regex fallbacks.
 
 The same walk also derives the resource / initialisation facts behind the
 new bug categories (nil-map assignment, lock held at return / double lock,
-resource opened but never released). Unlike the safety facts these are
+resource opened but never released, use of uninitialised nil-able values).
+Unlike the safety facts these are
 *may*-path findings: a single path on which the map is still nil / the lock
 is still held / the handle is still open at the exit is reported, because a
 handle that is definitely held on that path is a bug on that path. Merges
@@ -76,6 +77,39 @@ _BORROWING_CALLS = re.compile(
     r"json\.New(?:Decoder|Encoder)|csv\.New(?:Reader|Writer)|"
     r"ioutil\.ReadAll)\s*\("
 )
+# ``var``-declared names whose zero value is nil and whose improper use is a
+# guaranteed panic: dereference / field / index on a nil pointer, indexing a
+# nil slice, calling a nil ``func`` value, or a method call / type assertion
+# on a nil interface. They ride in ``_Env.held`` like the other resource
+# entries; assignment, ``!= nil`` guards and aliasing adjust them.
+_UNINIT_HELD_KINDS = frozenset({"uninit_ptr", "uninit_slice", "uninit_func", "uninit_iface"})
+# Held entries cleared by a proven-``nonnil`` guard or propagated to aliases.
+_NILABLE_HELD = _UNINIT_HELD_KINDS | {"nilmap"}
+# Keywords that may appear immediately before ``*p`` in an expression. A
+# preceding identifier / ``)`` / ``]`` means the ``*`` is multiplication.
+_DEREF_PREFIX_KEYWORDS = frozenset(
+    {"return", "case", "if", "for", "switch", "go", "defer", "range", "var", "const", "else"}
+)
+
+
+def _nilable_kind(type_text: str) -> str | None:
+    """Held kind for a ``var``-declared nil-able ``type_text``, or ``None``.
+
+    ``chan`` is deliberately excluded: nil-channel sends block rather than
+    panic, and nil channels are an idiom for disabling ``select`` cases."""
+    if type_text.startswith("map["):
+        return "nilmap"
+    if type_text.startswith("*"):
+        return "uninit_ptr"
+    if type_text.startswith("[]"):
+        return "uninit_slice"
+    if type_text.startswith("func"):
+        return "uninit_func"
+    if type_text in {"error", "any"} or type_text.startswith("interface"):
+        return "uninit_iface"
+    return None
+
+
 _OPEN_CALLS = re.compile(
     r"^(?:os\.(?:Open|OpenFile|Create|CreateTemp)|net\.(?:Dial|DialTimeout|Listen)|"
     r"os\.Pipe)\s*\("
@@ -312,6 +346,10 @@ class _Env:
     # Names known to be slices / arrays / strings (``range`` yields 0-based
     # indices for these, but map *keys* for maps).
     slices: set[str] = field(default_factory=set)
+    # name -> held kind for ``var``-declared nil-able names. Unlike the held
+    # entry itself this is a *type* fact: it survives ``p = &x`` so that a
+    # later ``p = nil`` can re-mark the name uninitialised.
+    nilable: dict[str, str] = field(default_factory=dict)
 
     def copy(self) -> "_Env":
         return _Env(
@@ -325,6 +363,7 @@ class _Env:
             aliases=dict(self.aliases),
             held=set(self.held),
             slices=set(self.slices),
+            nilable=dict(self.nilable),
         )
 
     def merge(self, other: "_Env") -> "_Env":
@@ -344,6 +383,9 @@ class _Env:
             # Resource state is a *may* fact: still held on either incoming path.
             held=self.held | other.held,
             slices=self.slices & other.slices,
+            nilable={
+                k: v for k, v in self.nilable.items() if other.nilable.get(k) == v
+            },
         )
 
     def kill(self, name: str) -> None:
@@ -457,6 +499,12 @@ class _Env:
             self.len_values[target] = self.len_values[source]
         if source in self.len_ge:
             self.len_ge[target] = self.len_ge[source]
+        # ``x := p`` aliases the nil-able zero value, so uninitialised (and
+        # nil-map) markers propagate to the alias.
+        for held in tuple(self.held):
+            if held[0] in _NILABLE_HELD and held[1] == source:
+                self.held.add((held[0], target))
+                self.nilable[target] = held[0]
 
 
 # ---------------------------------------------------------------------------
@@ -869,7 +917,7 @@ def _freeze(env: _Env) -> PathFacts:
 class DataflowIssue:
     """A bug found by the dataflow layer alone (new categories)."""
 
-    category: str  # "nil_map_write" | "lock_held_at_return" | "double_lock" | "resource_leak"
+    category: str  # "nil_map_write" | "lock_held_at_return" | "double_lock" | "resource_leak" | "uninitialized_use"
     subject: str
     statement: str
     offset: int
@@ -950,8 +998,11 @@ class _Walker:
         derived = self._facts(env).from_condition(condition, truth)
         self._filter_unreliable(derived)
         _absorb(result, derived)
-        # ``m != nil`` on this path rules out a nil-map write.
-        result.held = {h for h in result.held if not (h[0] == "nilmap" and h[1] in derived.nonnil)}
+        # ``m != nil`` on this path rules out a nil-map write, and likewise
+        # ``p != nil`` rules out an uninitialised-value panic.
+        result.held = {
+            h for h in result.held if not (h[0] in _NILABLE_HELD and h[1] in derived.nonnil)
+        }
         return result
 
     def _filter_unreliable(self, env: _Env) -> None:
@@ -1023,6 +1074,14 @@ class _Walker:
 
     def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
         kind = statement.kind
+        if kind in {"define", "assign", "inc", "dec", "expr", "return", "defer", "terminate"}:
+            for text in (*statement.targets, *statement.values):
+                self._check_uninit_text(text, statement.start, env)
+        elif kind in {"var", "range"}:
+            for value in statement.values:
+                self._check_uninit_text(value, statement.start, env)
+        elif kind in {"if", "for", "switch"} and statement.condition:
+            self._check_uninit_text(statement.condition, statement.start, env)
         if kind == "return":
             self._on_return(statement, env)
             return env, kind
@@ -1093,6 +1152,63 @@ class _Walker:
                 self._expression(value, env, statement.start)
             return env, ""
         return env, ""
+
+    # -- uninitialised nil-able values --------------------------------------
+
+    def _check_uninit_text(self, text: str, offset: int, env: _Env) -> None:
+        """Flag uses of ``var``-declared nil-able values still marked
+        uninitialised on this path — ``*p`` / ``p.field`` / ``p[i]`` on a nil
+        pointer, ``s[i]`` on a nil slice, calling a nil ``func`` value, or a
+        method call / type assertion on a nil interface. Each name is reported
+        at most once per statement; execution panics at the first use anyway."""
+        if not text or not ({"*", ".", "[", "("} & set(text)):
+            return
+        reported: set[str] = set()
+        for held in sorted(env.held):
+            if held[0] not in _UNINIT_HELD_KINDS or held[1] in reported:
+                continue
+            if self._uninit_use_hit(held[0], held[1], text):
+                reported.add(held[1])
+                self.issues.append(
+                    DataflowIssue("uninitialized_use", held[1], text.strip(), offset)
+                )
+
+    @staticmethod
+    def _uninit_use_hit(kind: str, name: str, text: str) -> bool:
+        n = re.escape(name)
+        word = rf"(?<![\w.]){n}(?![\w])"
+        if kind == "uninit_ptr":
+            if re.search(rf"{word}\s*\.\s*\w+\b(?!\s*\()", text) or re.search(
+                rf"{word}\s*\[", text
+            ):
+                # ``p.field`` / ``p[i]`` dereference the pointer and panic when
+                # it is nil. ``p.m(`` is a method call that may be
+                # nil-receiver-safe, so a trailing ``(`` suppresses the flag.
+                return True
+            # ``*p``: only a dereference when the ``*`` is not a binary
+            # multiply — i.e. the token before it is not an operand.
+            for match in re.finditer(rf"\*\s*{n}(?![\w])", text):
+                before = text[: match.start()].rstrip()
+                last = re.search(r"\w+$|\W$", before)
+                prev = last.group(0) if last else ""
+                if not prev or prev in _DEREF_PREFIX_KEYWORDS or (
+                    not prev[0].isalnum() and prev not in ")]"
+                ):
+                    return True
+            return False
+        if kind == "uninit_slice":
+            # ``s[i]`` panics on a nil slice. Reslices ``s[a:b]`` may stay
+            # legal (``s[:0]``), so only single-expression indexes count.
+            return any(
+                ":" not in match.group(1)
+                for match in re.finditer(rf"{word}\s*\[([^\[\]]*)\]", text)
+            )
+        if kind == "uninit_func":
+            return bool(re.search(rf"{word}\s*\(", text))
+        if kind == "uninit_iface":
+            # ``i.m(...)`` / ``i.(T)`` on a nil interface always panics.
+            return bool(re.search(rf"{word}\s*\.\s*(?:\w+\s*\(|\()", text))
+        return False
 
     def _on_return(self, statement: tree_sitter_extract.Statement, env: _Env) -> None:
         keys = set()
@@ -1187,6 +1303,7 @@ class _Walker:
             return
         held = set(inner.held)
         for name in names:
+            inner.nilable.pop(name, None)
             inner.kill(name)
             pattern = re.compile(rf"(?<![\w.]){re.escape(name)}(?![\w])")
 
@@ -1206,6 +1323,7 @@ class _Walker:
                 {k: v for k, v in outer.aliases.items() if mentions(k) or mentions(v)}
             )
             inner.slices |= {t for t in outer.slices if mentions(t)}
+            inner.nilable.update({k: v for k, v in outer.nilable.items() if k == name})
         inner.held = held
 
     def _for(self, statement: tree_sitter_extract.Statement, env: _Env) -> _Env:
@@ -1398,13 +1516,17 @@ class _Walker:
             value = statement.values[index] if index < len(statement.values) else ""
             type_text = _norm(types[index]) if index < len(types) else ""
             env.kill(name)
-            if value:
+            if value and _norm(value) != "nil":
                 self._define(name, value, env)
                 continue
             if not self._reliable(name):
                 continue
-            if type_text.startswith("map["):
-                env.held.add(("nilmap", name))
+            kind = _nilable_kind(type_text)
+            if kind is not None:
+                env.nilable[name] = kind
+                env.held.add((kind, name))
+                if kind == "uninit_slice":
+                    env.slices.add(name)
             elif type_text in _GO_INT_TYPES:
                 env.set_const(name, 0)
             elif type_text.startswith("[") or type_text == "string":
@@ -1466,6 +1588,9 @@ class _Walker:
                 self._escape(value, env)
                 continue
             self._define(target, value, env)
+            if _norm(value) == "nil" and target in env.nilable:
+                # ``p = nil`` re-zeroes a nil-able name instead of clearing it.
+                env.held.add((env.nilable[target], target))
 
     def _open_resource(self, targets: list[str], value: str, env: _Env) -> None:
         if not _OPEN_CALLS.match(value.strip()):
@@ -1504,6 +1629,16 @@ class _Walker:
         self._escape(value, env)
         if not self._reliable(target):
             return
+        if text.endswith("(nil)"):
+            # ``x := (*T)(nil)`` / ``x = T(nil)`` — an explicit nil cast.
+            kind = _nilable_kind(text[: -len("(nil)")].lstrip("(").rstrip(")"))
+            if kind is not None:
+                env.nilable[target] = kind
+                env.held.add((kind, target))
+                if kind == "uninit_slice":
+                    env.slices.add(target)
+                return
+            # otherwise an ordinary ``f(nil)`` call — normal handling below
         constant = env.value_of(text, self.constants)
         if constant is not None:
             env.set_const(target, constant)
@@ -1702,7 +1837,9 @@ class _Walker:
                 # ``defer func() { ... }()`` / ``defer cleanup(f)`` — treat any
                 # resource mentioned as released to stay conservative.
                 for held in list(env.held):
-                    if held[0] != "nilmap" and re.search(rf"(?<![\w.]){re.escape(held[1])}(?![\w])", value):
+                    if held[0] not in _NILABLE_HELD and re.search(
+                        rf"(?<![\w.]){re.escape(held[1])}(?![\w])", value
+                    ):
                         env.held.discard(held)
             else:
                 self._escape(value, env)
