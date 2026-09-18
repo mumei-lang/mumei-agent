@@ -1,6 +1,7 @@
 """LLM and Mumei CLI configuration."""
 import os
 from dataclasses import dataclass, field
+from typing import ClassVar
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -148,6 +149,16 @@ class AgentConfig:
         default_factory=lambda: os.getenv("MUMEI_SPEC_CACHE_DIR") or None
     )
 
+    # Named LLM deployment presets so dogfood/audit runs can switch between a
+    # small CPU model and a stronger GPU-hosted model without editing .env.
+    # LLM_MODEL/LLM_BASE_URL/LLM_MAX_TOKENS always win over the profile.
+    llm_profile: str | None = field(
+        default_factory=lambda: os.getenv("MUMEI_LLM_PROFILE") or None
+    )
+    spec_split_chars: int = field(
+        default_factory=lambda: int(os.getenv("MUMEI_SPEC_SPLIT_CHARS", "0"))
+    )
+
     def lean_ai_proof_active(self) -> bool:
         """True only when AI Lean proof generation may actually run."""
         return bool(
@@ -156,11 +167,29 @@ class AgentConfig:
             and not self.ci_fixture_mode
         )
 
+    _LLM_PROFILES: ClassVar[dict[str, dict[str, str | int]]] = {
+        # CPU-only Ollama tier used by the dogfooding audits.
+        "local-small": {"model": "qwen2.5-coder:1.5b-2k", "llm_max_tokens": 2048},
+        # GPU tier: stronger extraction quality for files the small model
+        # reduces to trivial specs.
+        "local-large": {"model": "qwen2.5-coder:7b", "llm_max_tokens": 4096},
+    }
+
     def __post_init__(self):
         # API key validation is deferred to create_client() so that
         # subcommands that never use the LLM (e.g. ``python -m agent
         # health``) can construct AgentConfig without requiring a key.
-        pass
+        if self.llm_profile:
+            preset = self._LLM_PROFILES.get(self.llm_profile)
+            if preset is None:
+                raise ValueError(
+                    f"unknown MUMEI_LLM_PROFILE {self.llm_profile!r}; "
+                    f"choose from {sorted(self._LLM_PROFILES)}"
+                )
+            if "LLM_MODEL" not in os.environ:
+                self.model = str(preset["model"])
+            if "LLM_MAX_TOKENS" not in os.environ:
+                self.llm_max_tokens = int(preset["llm_max_tokens"])
 
     def create_client(self) -> OpenAI:
         """Create an OpenAI-compatible client.

@@ -7481,3 +7481,40 @@ def test_go_cross_package_constant_resolves_via_module(tmp_path) -> None:
     assert _go_imported_package_constants(text, str(src)) == {"sizes.Width": 16}
     issues = _detect_safety_issues(text, "go", source_file=str(src))
     assert not any("non-zero" in i.message and "sizes.Width" in i.message for i in issues)
+
+
+def test_go_sibling_guard_asymmetry_flagged() -> None:
+    """A param bounds-guarded in one func but indexed unchecked in a sibling is flagged."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = (
+        "package opt\n"
+        "var props = []string{\"a\", \"b\"}\n"
+        "func Get(key int) string {\n"
+        "    if key < 0 || key >= len(props) { return \"\" }\n"
+        "    return props[key]\n"
+        "}\n"
+        "func Contains(key int) bool { return props[key] != \"\" }\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert any("sibling-guard asymmetry" in i.message for i in issues)
+    assert any("Contains" in i.message and "Get" in i.message for i in issues)
+
+
+def test_go_sibling_guard_asymmetry_not_flagged_when_all_guarded() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_go_safety_issues
+
+    source = (
+        "package opt\n"
+        "var props = []string{\"a\", \"b\"}\n"
+        "func Get(key int) string {\n"
+        "    if key < 0 || key >= len(props) { return \"\" }\n"
+        "    return props[key]\n"
+        "}\n"
+        "func Contains(key int) bool {\n"
+        "    if key < 0 || key >= len(props) { return false }\n"
+        "    return props[key] != \"\"\n"
+        "}\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert not any("sibling-guard asymmetry" in i.message for i in issues)
