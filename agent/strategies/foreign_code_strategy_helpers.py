@@ -5260,7 +5260,9 @@ def _go_sibling_guard_asymmetries(package_source: str) -> list[str]:
     without any guard, the pair is a defensive-consistency gap worth a human
     look even when every caller is provably safe (dogfood insight 4).
     """
-    decls = _go_function_declarations(package_source)
+    decls = _go_function_declarations(
+        _strip_go_rust_literals_and_comments(package_source)
+    )
     guarded_by: dict[str, str] = {}
     unguarded_indexers: list[tuple[str, str]] = []
     for name, params_text, _ret, body in decls:
