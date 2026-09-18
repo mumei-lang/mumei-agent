@@ -7455,3 +7455,78 @@ def test_rust_slice_param_has_no_fixed_length() -> None:
     issues = _detect_safety_issues(source, "rust")
     bounds = [i for i in issues if "v[i]" in i.message]
     assert bounds
+
+
+def test_go_cross_package_constant_resolves_via_module(tmp_path) -> None:
+    """An imported package's exported const seeds known_constants (#583 item 5)."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_safety_issues,
+        _go_imported_package_constants,
+    )
+
+    (tmp_path / "go.mod").write_text("module example.com/m\n", encoding="utf-8")
+    pkg = tmp_path / "sizes"
+    pkg.mkdir()
+    (pkg / "consts.go").write_text(
+        "package sizes\nconst Width = 16\nconst hidden = 3\n", encoding="utf-8"
+    )
+    src = tmp_path / "use" / "use.go"
+    src.parent.mkdir()
+    src.write_text(
+        'package use\nimport "example.com/m/sizes"\n'
+        "func f(x int) int { return x / sizes.Width }\n",
+        encoding="utf-8",
+    )
+    text = src.read_text(encoding="utf-8")
+    assert _go_imported_package_constants(text, str(src)) == {"sizes.Width": 16}
+    issues = _detect_safety_issues(text, "go", source_file=str(src))
+    assert not any("non-zero" in i.message and "sizes.Width" in i.message for i in issues)
+
+
+def test_go_unexported_function_suppresses_caller_contract(tmp_path) -> None:
+    """Bounds contracts on params of unexported functions are caller noise."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\n"
+        "func unexported(xs []int, i int) int { return xs[i] }\n"
+        "func Exported(xs []int, i int) int { return xs[i] }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    messages = [i.message for i in issues]
+    assert not any("`unexported`" in m for m in messages)
+    assert any("`Exported`" in m for m in messages)
+
+
+def test_go_unexported_function_keeps_non_caller_issues(tmp_path) -> None:
+    """Issues not about caller-supplied values are still reported."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\n"
+        "var denom int\n"
+        "func unexported(x int) int { return x / denom }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    # denom is not a caller-supplied param, so the finding stays.
+    assert any("denom" in i.message for i in issues)
+
+
+def test_go_unexported_function_keeps_nil_deref(tmp_path) -> None:
+    """#295 pins nil-deref findings even for unexported functions."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\nfunc unexported(p *int) int { return *p }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    assert any("non-nil" in i.message for i in issues)

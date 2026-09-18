@@ -582,6 +582,7 @@ def _detect_safety_issues(
             return []
         package_source = _go_package_source(source, source_file)
         known_constants = _go_declared_constants(package_source)
+        known_constants.update(_go_imported_package_constants(source, source_file))
         stripped_source = _strip_go_rust_literals_and_comments(source)
         return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source, source_file=source_file)
     if normalized == "python":
@@ -1302,6 +1303,73 @@ def _go_declared_constants(source: str) -> dict[str, int]:
         name, size = match.group(1), match.group(2)
         if int(size) > 0:
             constants[f"len({name})"] = int(size)
+    return constants
+
+
+def _go_module_root(source_file: str) -> tuple[Path, str] | None:
+    """Return ``(module_root_dir, module_path)`` from the nearest go.mod."""
+    directory = Path(source_file).parent
+    for candidate in [directory, *directory.parents]:
+        gomod = candidate / "go.mod"
+        try:
+            if not gomod.is_file():
+                continue
+            match = re.search(
+                r"^\s*module\s+(\S+)", gomod.read_text(encoding="utf-8", errors="replace"), re.MULTILINE
+            )
+        except OSError:
+            continue
+        if match:
+            return candidate, match.group(1)
+        return None
+    return None
+
+
+def _go_imported_package_constants(
+    source: str, source_file: str | None, max_chars: int = 500_000
+) -> dict[str, int]:
+    """Resolve same-module imported packages' exported constants.
+
+    A use like ``x / hash.Size`` or ``buf[crc32.Size]`` refers to a constant
+    declared in another package of the same module; without the value Z3 can
+    pick zero/negative and fabricate a caller-contract violation.  Import paths
+    under the module path in the nearest ``go.mod`` are mapped to directories,
+    and each package's exported integer constants are exposed qualified as
+    ``alias.Name``.
+    """
+    if not source_file:
+        return {}
+    aliases = _go_import_aliases(source)
+    if not aliases:
+        return {}
+    module = _go_module_root(source_file)
+    if module is None:
+        return {}
+    root_dir, module_path = module
+    constants: dict[str, int] = {}
+    for alias, pkg in aliases.items():
+        if pkg != module_path and not pkg.startswith(module_path + "/"):
+            continue
+        pkg_dir = root_dir / pkg[len(module_path):].lstrip("/")
+        if not pkg_dir.is_dir():
+            continue
+        parts: list[str] = []
+        total = 0
+        for sibling in sorted(pkg_dir.glob("*.go")):
+            if sibling.name.endswith("_test.go"):
+                continue
+            try:
+                text = sibling.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            total += len(text)
+            if total > max_chars:
+                break
+            parts.append(text[: max_chars])
+        for name, value in _go_declared_constants("\n".join(parts)).items():
+            # Only exported identifiers are reachable through the qualifier.
+            if name and name[0].isupper():
+                constants[f"{alias}.{name}"] = value
     return constants
 
 
@@ -4894,6 +4962,9 @@ def _detect_go_safety_issues(
                 and rtype in flag_value_types
             )
             is_method = source[fn.start_char : fn.body_start_char].lstrip().startswith("func (")
+            # Unexported functions are only reachable inside the package, so a
+            # missing precondition on a caller-supplied value is contract noise.
+            unexported = bool(fn.name) and fn.name[0].islower()
             rtype_base = _go_type_basename(rtype) if rtype else None
             suppress_receiver_nil = (
                 rtype is not None
@@ -5031,9 +5102,26 @@ def _detect_go_safety_issues(
                     expr_issues = [
                         issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                     ]
+                if unexported:
+                    expr_issues = [
+                        issue
+                        for issue in expr_issues
+                        if not _go_is_caller_contract_issue(
+                            issue, set(param_types), receiver_name
+                        )
+                    ]
                 issues.extend(expr_issues)
             if flow is not None:
-                issues.extend(_dataflow_safety_issues(fn.name, flow))
+                flow_issues = _dataflow_safety_issues(fn.name, flow)
+                if unexported:
+                    flow_issues = [
+                        issue
+                        for issue in flow_issues
+                        if not _go_is_caller_contract_issue(
+                            issue, set(param_types), receiver_name
+                        )
+                    ]
+                issues.extend(flow_issues)
         return issues
     # Regex fallback when tree-sitter / the grammar is unavailable.
     go_decls = list(_go_function_declarations(source))
@@ -5174,6 +5262,16 @@ def _detect_go_safety_issues(
             if name in {"Less", "Swap", "Stack"}:
                 expr_issues = [
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
+                ]
+            if name and name[0].islower():
+                # Unexported function: contracts on caller-supplied values are
+                # the package's own business, not this function's defect.
+                expr_issues = [
+                    issue
+                    for issue in expr_issues
+                    if not _go_is_caller_contract_issue(
+                        issue, set(param_types), receiver_name
+                    )
                 ]
             issues.extend(expr_issues)
     return issues
@@ -5375,6 +5473,38 @@ def _index_safety_issue(
         required_contracts=required_contracts,
         counterexample=counterexample,
     )
+
+
+_CALLER_CONTRACT_ATOMS = {"nil", "null", "true", "false", "len"}
+
+
+def _go_is_caller_contract_issue(
+    issue: ForeignSafetyIssue, param_names: set[str], receiver_name: str | None
+) -> bool:
+    """True when every required contract constrains only caller-supplied values.
+
+    For an unexported function all callers live in the same package and are
+    themselves auditable, so a missing precondition on a parameter or the
+    receiver (``p != nil``, ``i < len_s``) is contract noise rather than a
+    defect in this function (#583 dogfood insight 3a).
+    """
+    if not issue.required_contracts:
+        return False
+    # Nil-deref findings stay reported even for unexported functions (#295
+    # pins them as genuine); only bounds-style contracts are caller noise.
+    if any("!= nil" in contract for contract in issue.required_contracts):
+        return False
+    allowed = set(param_names)
+    if receiver_name:
+        allowed.add(receiver_name)
+    for contract in issue.required_contracts:
+        for ident in re.findall(r"[A-Za-z_]\w*", contract):
+            if ident in _CALLER_CONTRACT_ATOMS:
+                continue
+            base = ident[4:] if ident.startswith("len_") else ident
+            if base not in allowed:
+                return False
+    return True
 
 
 def _go_nil_safety_issue(function_name: str, value: str, label: str) -> ForeignSafetyIssue:
