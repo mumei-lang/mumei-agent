@@ -380,3 +380,63 @@ func ConstantTimeCompare(x, y []byte) int { return 0 }
     }
     aligned = _align_llm_spec_with_source(llm_spec, deterministic.atoms, Path("x.go"), [])
     assert [atom["name"] for atom in aligned["atoms"]] == ["ConstantTimeCompare"]
+
+
+def test_split_code_chunks_groups_functions() -> None:
+    from agent.code_to_spec import _split_code_chunks
+
+    code = (
+        "package p\nimport \"fmt\"\n\n"
+        "func a() { fmt.Println(1) }\n\n"
+        "func b() { fmt.Println(2) }\n\n"
+        "func c() { fmt.Println(3) }\n"
+    )
+    chunks = _split_code_chunks(code, "go", max_chars=60)
+    assert len(chunks) >= 2
+    assert all("package p" in c for c in chunks)
+    assert "".join(chunks).count("func") == 3
+
+
+def test_split_code_chunks_single_function_no_split() -> None:
+    from agent.code_to_spec import _split_code_chunks
+
+    code = "package p\nfunc a() {}\n"
+    assert _split_code_chunks(code, "go", max_chars=10) == []
+
+
+def test_merge_forge_task_specs_dedupes_atoms() -> None:
+    from agent.code_to_spec import _merge_forge_task_specs
+
+    a = {"task_id": "t", "atoms": [{"name": "f1", "requires": "true"}]}
+    b = {"task_id": "t", "atoms": [{"name": "f1"}, {"name": "f2"}]}
+    merged = _merge_forge_task_specs([a, b])
+    assert [atom["name"] for atom in merged["atoms"]] == ["f1", "f2"]
+
+
+def test_llm_profile_applies_preset(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-large")
+    from agent.config import AgentConfig
+
+    config = AgentConfig()
+    assert config.model == "qwen2.5-coder:7b"
+    assert config.llm_max_tokens == 4096
+
+
+def test_llm_profile_env_override_wins(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_MODEL", "explicit-model")
+    monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-large")
+    from agent.config import AgentConfig
+
+    assert AgentConfig().model == "explicit-model"
+
+
+def test_llm_profile_unknown_rejected(monkeypatch) -> None:
+    import pytest
+
+    monkeypatch.setenv("MUMEI_LLM_PROFILE", "bogus")
+    from agent.config import AgentConfig
+
+    with pytest.raises(ValueError, match="MUMEI_LLM_PROFILE"):
+        AgentConfig()

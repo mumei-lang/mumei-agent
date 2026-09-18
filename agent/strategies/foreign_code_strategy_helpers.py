@@ -5105,6 +5105,7 @@ def _detect_go_safety_issues(
                 issues.extend(expr_issues)
             if flow is not None:
                 issues.extend(_dataflow_safety_issues(fn.name, flow))
+        issues.extend(_go_sibling_guard_asymmetries(package_source))
         return issues
     # Regex fallback when tree-sitter / the grammar is unavailable.
     go_decls = list(_go_function_declarations(source))
@@ -5247,6 +5248,54 @@ def _detect_go_safety_issues(
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                 ]
             issues.extend(expr_issues)
+    issues.extend(_go_sibling_guard_asymmetries(package_source))
+    return issues
+
+
+def _go_sibling_guard_asymmetries(package_source: str) -> list[str]:
+    """Flag params bounds-guarded in one function but used unchecked in a sibling.
+
+    When one member of a package validates ``key < 0 || key >= Len`` before
+    indexing while a sibling function indexes with the same parameter name
+    without any guard, the pair is a defensive-consistency gap worth a human
+    look even when every caller is provably safe (dogfood insight 4).
+    """
+    decls = _go_function_declarations(package_source)
+    guarded_by: dict[str, str] = {}
+    unguarded_indexers: list[tuple[str, str]] = []
+    for name, params_text, _ret, body in decls:
+        param_names = {
+            part.split()[0]
+            for part in params_text.split(",")
+            if part.strip() and part.split() and part.split()[0].isidentifier()
+        }
+        for param in param_names:
+            guard = re.search(
+                rf"\bif\s+[^\n{{]*\b{re.escape(param)}\s*(?:<|>|<=|>=)\s*[^\n{{]*{{",
+                body,
+            )
+            indexed = re.search(rf"\w\[\s*{re.escape(param)}\s*\]", body)
+            if guard:
+                guarded_by.setdefault(param, name)
+            elif indexed:
+                unguarded_indexers.append((name, param))
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for name, param in unguarded_indexers:
+        sibling = guarded_by.get(param)
+        if not sibling or sibling == name or (name, param) in seen:
+            continue
+        seen.add((name, param))
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=name,
+                message=(
+                    f"Go function `{name}` indexes with `{param}` without the "
+                    f"bounds guard that sibling `{sibling}` applies to the same "
+                    "parameter (sibling-guard asymmetry)"
+                ),
+            )
+        )
     return issues
 
 

@@ -53,6 +53,68 @@ def _spec_cache_path(cache_dir: str, key: str) -> Path:
     return Path(cache_dir).expanduser() / f"{key}.json"
 
 
+# Top-level declaration markers used by the function-splitting extractor.  A
+# line at column 0 starting one of these begins a new chunk.
+_FUNCTION_START_RES: dict[str, re.Pattern[str]] = {
+    "go": re.compile(r"^func\b", re.MULTILINE),
+    "rust": re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\b", re.MULTILINE),
+    "python": re.compile(r"^(?:async\s+)?def\b|^class\b", re.MULTILINE),
+    "typescript": re.compile(r"^(?:export\s+)?(?:async\s+)?function\b|^(?:export\s+)?class\b", re.MULTILINE),
+    "javascript": re.compile(r"^(?:export\s+)?(?:async\s+)?function\b|^(?:export\s+)?class\b", re.MULTILINE),
+    "solidity": re.compile(r"^\s*function\b|^\s*constructor\b|^contract\b", re.MULTILINE),
+    "java": re.compile(r"^[ \t]*(?:public|private|protected|static|final|synchronized|\s)*\w[\w<>\[\]]*\s+\w+\s*\(", re.MULTILINE),
+    "c": re.compile(r"^[A-Za-z_]\w*[\s*]+\w+\s*\(", re.MULTILINE),
+    "cpp": re.compile(r"^[A-Za-z_]\w*[\s*:&<>]+\w+\s*\(", re.MULTILINE),
+}
+
+
+def _split_code_chunks(code: str, language: str, max_chars: int) -> list[str]:
+    """Split ``code`` into per-function chunks capped near ``max_chars``.
+
+    The preamble (package/imports/type decls before the first function) is
+    prepended to every chunk so each split keeps namespace context.  Returns
+    ``[]`` when the language has no boundary regex or no split point exists.
+    """
+    pattern = _FUNCTION_START_RES.get(language)
+    if pattern is None:
+        return []
+    starts = sorted({match.start() for match in pattern.finditer(code)})
+    if len(starts) < 2:
+        return []
+    preamble = code[: starts[0]]
+    units = [code[a:b] for a, b in zip(starts, [*starts[1:], len(code)])]
+    chunks: list[str] = []
+    current = preamble
+    for unit in units:
+        if len(current) + len(unit) > max_chars and current != preamble:
+            chunks.append(current)
+            current = preamble + unit
+        else:
+            current += unit
+    chunks.append(current)
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
+def _merge_forge_task_specs(specs: list[dict]) -> dict | None:
+    """Merge per-chunk forge task specs by concatenating unique atoms."""
+    merged: dict | None = None
+    seen: set[str] = set()
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        if merged is None:
+            merged = {**spec, "atoms": []}
+        for atom in spec.get("atoms") or []:
+            name = atom.get("name") if isinstance(atom, dict) else None
+            if name is None or name in seen:
+                continue
+            seen.add(name)
+            merged["atoms"].append(atom)
+    if merged is not None and not merged["atoms"]:
+        return None
+    return merged
+
+
 def _read_spec_cache(
     cache_dir: str, key: str
 ) -> tuple[str, dict | None] | None:
@@ -643,11 +705,55 @@ class CodeToSpecExtractor:
 
         try:
             client = self._injected_client or self.config.create_client()
-            natural_language_spec = self._extract_spec_with_llm(
-                client,
-                code,
-                detected_language,
-            ).strip()
+            from agent.spec_extractor import extract_spec
+
+            final_domain_hint = domain_hint or self._infer_domain(code, detected_language)
+            split_chars = self.config.spec_split_chars
+            chunks = (
+                _split_code_chunks(code, detected_language, split_chars)
+                if split_chars > 0 and len(code) > split_chars
+                else []
+            )
+            if chunks:
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _extract_chunk(chunk: str) -> tuple[str, dict | None]:
+                    nl = self._extract_spec_with_llm(
+                        client, chunk, detected_language
+                    ).strip()
+                    spec = (
+                        extract_spec(
+                            client,
+                            self.config.model,
+                            nl,
+                            domain_hint=final_domain_hint,
+                            mumei_client=mumei_client,
+                            max_retries=max_retries,
+                        )
+                        if nl
+                        else None
+                    )
+                    return nl, spec
+
+                with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as pool:
+                    per_chunk = list(pool.map(_extract_chunk, chunks))
+                natural_language_spec = "\n\n".join(
+                    nl for nl, _ in per_chunk if nl
+                )
+                forge_task_spec = _merge_forge_task_specs(
+                    [spec for _, spec in per_chunk if spec]
+                )
+                warnings.append(
+                    f"Spec extraction split into {len(chunks)} function chunks "
+                    f"(MUMEI_SPEC_SPLIT_CHARS={split_chars})."
+                )
+            else:
+                natural_language_spec = self._extract_spec_with_llm(
+                    client,
+                    code,
+                    detected_language,
+                ).strip()
+                forge_task_spec = None
             if not natural_language_spec:
                 return CodeToSpecResult(
                     success=False,
@@ -658,17 +764,15 @@ class CodeToSpecExtractor:
                     errors=["LLM returned an empty natural language specification"],
                 )
 
-            from agent.spec_extractor import extract_spec
-
-            final_domain_hint = domain_hint or self._infer_domain(code, detected_language)
-            forge_task_spec = extract_spec(
-                client,
-                self.config.model,
-                natural_language_spec,
-                domain_hint=final_domain_hint,
-                mumei_client=mumei_client,
-                max_retries=max_retries,
-            )
+            if forge_task_spec is None:
+                forge_task_spec = extract_spec(
+                    client,
+                    self.config.model,
+                    natural_language_spec,
+                    domain_hint=final_domain_hint,
+                    mumei_client=mumei_client,
+                    max_retries=max_retries,
+                )
             if forge_task_spec and not deterministic.errors:
                 forge_task_spec = _align_llm_spec_with_source(
                     forge_task_spec,
