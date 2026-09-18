@@ -16,6 +16,15 @@ it does NOT re-derive verdicts.
 - `mumei` binary: `/home/ubuntu/repos/mumei/target/debug/mumei` (set `MUMEI_BIN` to it).
 - Usually NO LLM key locally (`AgentConfig().api_key` is False), so audits run the
   deterministic extraction path only.
+- If the `mumei-ollama` docker container is up (see the local-llm-demo blueprint
+  knowledge), LLM-backed audits are possible: set `.env` per blueprint and count
+  `chat/completions` requests in `docker logs mumei-ollama` to verify the
+  `MUMEI_SPEC_CACHE_DIR` extraction cache actually skipped the LLM.
+
+## Supported extensions
+`AUDIT_EXTENSION_MAP` covers only `.py .rs .ts .tsx .go .sol` — `.c`/`.cpp` are
+NOT audited. Risk-marker fixtures for `audit_file_with_timeout` must use e.g.
+`.rs` with `asm!(...)`/`__asm__` or `.sol` with `assembly {`.
 
 ## Key fact that shapes the test
 Without an LLM, deterministic extraction infers each function's contract FROM its own

@@ -112,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--risky-timeout-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Multiply --per-file-timeout by this factor for files carrying "
+            "structural risk markers (large_function, inline_assembly, "
+            "complex_generics); 1.0 disables the stretch."
+        ),
+    )
+    parser.add_argument(
         "--slow-file-threshold",
         type=float,
         default=0.0,
@@ -187,7 +197,10 @@ def _audit_directory_supervised(
             code_path.suffix.lower(), ""
         )
         file_result, timing = audit_file_with_timeout(
-            code_path, language, args.per_file_timeout
+            code_path,
+            language,
+            args.per_file_timeout,
+            risky_timeout_scale=args.risky_timeout_scale,
         )
         file_results.append(file_result)
         timings.append(timing)
@@ -331,9 +344,10 @@ def main(argv: list[str] | None = None) -> int:
     timed_out = [timing for timing in all_timings if timing.timed_out]
     for timing in timed_out:
         markers = ", ".join(timing.risk_markers) or "none detected"
+        effective = timing.effective_timeout_s or args.per_file_timeout
         print(
             f"::warning::{timing.source_file} exceeded the per-file timeout "
-            f"({args.per_file_timeout:g}s); risk markers: {markers}"
+            f"({effective:g}s); risk markers: {markers}"
         )
 
     refuted = int(totals["human_review_count"])

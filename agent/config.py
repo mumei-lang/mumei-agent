@@ -141,6 +141,13 @@ class AgentConfig:
     )
     ci_fixture_mode: bool = field(default_factory=lambda: _env_bool("CI_FIXTURE_MODE"))
 
+    # Dogfood follow-up — spec extraction is the dominant audit cost on
+    # CPU-only LLM runs, so a content-addressed result cache lets re-runs and
+    # partial resumes skip unchanged files.  Off unless a directory is set.
+    spec_cache_dir: str | None = field(
+        default_factory=lambda: os.getenv("MUMEI_SPEC_CACHE_DIR") or None
+    )
+
     def lean_ai_proof_active(self) -> bool:
         """True only when AI Lean proof generation may actually run."""
         return bool(
