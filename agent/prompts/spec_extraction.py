@@ -23,6 +23,13 @@ SPEC_EXTRACTION_SYSTEM_PROMPT = (
     "atom per operation in the atoms array instead of collapsing them into a "
     "single atom. For example, bank-transfer requirements with both debit and "
     "credit behavior should emit debit_transfer and credit_transfer atoms.\n\n"
+    "Minimum spec quality: every atom's `requires`/`ensures` must express "
+    "semantic constraints (numeric ranges, ordering, value relations, or "
+    "state transitions). Do NOT emit clauses that are only non-nullness "
+    "(`x is not null`, `x != nil`) or tautologies (`true`); when the "
+    "description implies no stronger contract, infer the domain-meaningful "
+    "one (e.g. `index >= 0 && index < length` for an accessor, "
+    "`denominator != 0` for a division).\n\n"
     "Output ONLY valid JSON, no explanation."
 )
 

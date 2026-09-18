@@ -7518,3 +7518,56 @@ def test_go_sibling_guard_asymmetry_not_flagged_when_all_guarded() -> None:
     )
     issues = _detect_go_safety_issues(source)
     assert not any("sibling-guard asymmetry" in i.message for i in issues)
+
+
+def test_go_unreachable_counterexample_suppressed(tmp_path) -> None:
+    """All-visible-callers-satisfy: index into ops[o] with const arg is noise."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\n"
+        "var ops = []int{1, 2, 3}\n"
+        "func apply(o int) int { return ops[o] }\n"
+        "func run() int { return apply(1) + apply(2) }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    assert not any(
+        "apply" in i.function_name and "bounds" in i.message for i in issues
+    )
+
+
+def test_go_unreachable_counterexample_kept_when_unsatisfying_caller(tmp_path) -> None:
+    """A caller passing an out-of-range literal keeps the finding reachable."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\n"
+        "var ops = []int{1, 2, 3}\n"
+        "func apply(o int) int { return ops[o] }\n"
+        "func run() int { return apply(99) }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    assert any("apply" in i.function_name for i in issues)
+
+
+def test_go_unreachable_counterexample_kept_for_exported(tmp_path) -> None:
+    """Exported functions may have external callers — never suppressed."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = tmp_path / "p" / "p.go"
+    src.parent.mkdir()
+    src.write_text(
+        "package p\n"
+        "var ops = []int{1, 2, 3}\n"
+        "func Apply(o int) int { return ops[o] }\n"
+        "func run() int { return Apply(1) }\n",
+        encoding="utf-8",
+    )
+    issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
+    assert any("Apply" in i.function_name for i in issues)

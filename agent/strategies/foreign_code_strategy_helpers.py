@@ -5105,6 +5105,17 @@ def _detect_go_safety_issues(
                 issues.extend(expr_issues)
             if flow is not None:
                 issues.extend(_dataflow_safety_issues(fn.name, flow))
+        issues = [
+            issue
+            for issue in issues
+            if not (
+                issue.function_name
+                and issue.function_name[0].islower()
+                and _go_unreachable_counterexample(
+                    issue, package_source, known_constants or {}
+                )
+            )
+        ]
         issues.extend(_go_sibling_guard_asymmetries(package_source))
         return issues
     # Regex fallback when tree-sitter / the grammar is unavailable.
@@ -5248,8 +5259,183 @@ def _detect_go_safety_issues(
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                 ]
             issues.extend(expr_issues)
+    issues = [
+        issue
+        for issue in issues
+        if not (
+            issue.function_name
+            and issue.function_name[0].islower()
+            and _go_unreachable_counterexample(
+                issue, package_source, known_constants or {}
+            )
+        )
+    ]
     issues.extend(_go_sibling_guard_asymmetries(package_source))
     return issues
+
+
+def _go_eval_const_arg(expr: str, constants: dict[str, int]) -> int | None:
+    """Evaluate a call-site argument as a compile-time integer if possible."""
+    expr = expr.strip()
+    if re.fullmatch(r"-?\d+", expr):
+        return int(expr)
+    if expr in constants:
+        return constants[expr]
+    return None
+
+
+def _go_callsite_args(
+    package_source: str, function_name: str
+) -> list[list[str]]:
+    """Return argument lists for ``name(...)`` call sites (not the decl)."""
+    pattern = re.compile(rf"\b{re.escape(function_name)}\s*\(")
+    calls: list[list[str]] = []
+    for match in pattern.finditer(package_source):
+        # Skip the declaration itself: `func name(` or `func (r T) name(`.
+        prefix = package_source[: match.start()]
+        tail = prefix.rstrip()
+        if tail.endswith("func") or re.search(r"func\s*\([^)]*\)\s*$", tail):
+            continue
+        depth = 0
+        end = match.end()
+        for i in range(match.end(), len(package_source)):
+            ch = package_source[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    end = i
+                    break
+                depth -= 1
+        inner = package_source[match.end():end]
+        args = [a.strip() for a in inner.split(",")] if inner.strip() else []
+        calls.append(args)
+    return calls
+
+
+def _go_contract_satisfied_by_args(
+    contract: str,
+    param_order: list[str],
+    args: list[str],
+    constants: dict[str, int],
+) -> bool | None:
+    """Check one contract against call-site args.
+
+    Returns True/False when decidable, None when the contract references
+    something outside the bound params (can't prove either way).
+    """
+    mapping: dict[str, str] = {}
+    for index, name in enumerate(param_order):
+        if index < len(args):
+            mapping[name] = args[index]
+
+    def _value(token: str) -> int | None:
+        token = token.strip()
+        if token in mapping:
+            return _go_eval_const_arg(mapping[token], constants)
+        if token.startswith("len_"):
+            arg = mapping.get(token[4:], "")
+            m = re.fullmatch(r"\[[^\]]*\]\w+\s*\{([^}]*)\}", arg) or re.fullmatch(
+                r"\[\]\w+\s*\{([^}]*)\}", arg
+            )
+            if m:
+                inner = m.group(1).strip()
+                return len([x for x in inner.split(",") if x.strip()]) if inner else 0
+            # Package-level slices (e.g. `var ops = []int{...}`) already have
+            # their literal length recorded as `len(ops)` in known_constants.
+            if arg in (None, ""):
+                return constants.get(f"len({token[4:]})")
+            return None
+        return _go_eval_const_arg(token, constants)
+
+    comparisons = re.findall(
+        r"([A-Za-z_]\w*|\d+)\s*(>=|<=|==|!=|>|<)\s*([A-Za-z_]\w*|-?\d+)",
+        contract,
+    )
+    if not comparisons:
+        return None
+    for left, op, right in comparisons:
+        if left == "nil" or right == "nil":
+            arg = mapping.get(left if right == "nil" else right)
+            if arg is None:
+                return None
+            is_nil = arg == "nil"
+            if op == "!=" and is_nil:
+                return False
+            if op == "==" and not is_nil:
+                return False
+            continue
+        lv, rv = _value(left), _value(right)
+        if lv is None or rv is None:
+            return None
+        if not {
+            ">=": lv >= rv,
+            "<=": lv <= rv,
+            "==": lv == rv,
+            "!=": lv != rv,
+            ">": lv > rv,
+            "<": lv < rv,
+        }[op]:
+            return False
+    return True
+
+
+_PACKAGE_SLICE_LITERAL_RE = re.compile(
+    r"^\s*var\s+(\w+)\s*(?:=\s*)?\[\s*\d*\s*\]\w[\w\[\]*.]*\s*\{([^}]*)\}",
+    re.MULTILINE,
+)
+
+
+def _go_package_slice_literal_lens(source: str) -> dict[str, int]:
+    """Element counts of package-level slice/array literals (``var ops = []int{...}``)."""
+    lens: dict[str, int] = {}
+    for match in _PACKAGE_SLICE_LITERAL_RE.finditer(source):
+        inner = match.group(2).strip()
+        lens[match.group(1)] = (
+            len([x for x in inner.split(",") if x.strip()]) if inner else 0
+        )
+    return lens
+
+
+def _go_unreachable_counterexample(
+    issue: ForeignSafetyIssue,
+    package_source: str,
+    constants: dict[str, int],
+) -> bool:
+    """True when every visible call site provably satisfies the contracts.
+
+    Caller-contract findings like ``ops[o]`` (enum-bounded) are noise when all
+    callers pass values already inside the required range — the counterexample
+    is unreachable in this package (dogfood insight 3b).
+    """
+    if not issue.required_contracts:
+        return False
+    decls = _go_function_declarations(package_source)
+    param_order: list[str] = []
+    for name, params_text, _ret, _body in decls:
+        if name == issue.function_name:
+            param_order = [
+                part.split()[0]
+                for part in params_text.split(",")
+                if part.strip() and part.split() and part.split()[0].isidentifier()
+            ]
+            break
+    if not param_order:
+        return False
+    calls = _go_callsite_args(package_source, issue.function_name)
+    if not calls:
+        return False
+    const_and_lens = dict(constants)
+    for name, length in _go_package_slice_literal_lens(package_source).items():
+        const_and_lens.setdefault(f"len({name})", length)
+    for args in calls:
+        for contract in issue.required_contracts:
+            satisfied = _go_contract_satisfied_by_args(
+                contract, param_order, args, const_and_lens
+            )
+            if satisfied is not True:
+                return False
+    return True
 
 
 def _go_sibling_guard_asymmetries(package_source: str) -> list[str]:
