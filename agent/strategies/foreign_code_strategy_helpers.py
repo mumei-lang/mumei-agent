@@ -582,6 +582,7 @@ def _detect_safety_issues(
             return []
         package_source = _go_package_source(source, source_file)
         known_constants = _go_declared_constants(package_source)
+        known_constants.update(_go_imported_package_constants(source, source_file))
         stripped_source = _strip_go_rust_literals_and_comments(source)
         return _detect_go_safety_issues(stripped_source, known_constants=known_constants, original_source=original_source, source_file=source_file)
     if normalized == "python":
@@ -1302,6 +1303,76 @@ def _go_declared_constants(source: str) -> dict[str, int]:
         name, size = match.group(1), match.group(2)
         if int(size) > 0:
             constants[f"len({name})"] = int(size)
+    return constants
+
+
+def _go_module_root(source_file: str) -> tuple[Path, str] | None:
+    """Return ``(module_root_dir, module_path)`` from the nearest go.mod."""
+    directory = Path(source_file).parent
+    for candidate in [directory, *directory.parents]:
+        gomod = candidate / "go.mod"
+        try:
+            if not gomod.is_file():
+                continue
+            match = re.search(
+                r"^\s*module\s+(\S+)", gomod.read_text(encoding="utf-8", errors="replace"), re.MULTILINE
+            )
+        except OSError:
+            continue
+        if match:
+            return candidate, match.group(1)
+        return None
+    return None
+
+
+def _go_imported_package_constants(
+    source: str, source_file: str | None, max_chars: int = 500_000
+) -> dict[str, int]:
+    """Resolve same-module imported packages' exported constants.
+
+    A use like ``x / hash.Size`` or ``buf[crc32.Size]`` refers to a constant
+    declared in another package of the same module; without the value Z3 can
+    pick zero/negative and fabricate a caller-contract violation.  Import paths
+    under the module path in the nearest ``go.mod`` are mapped to directories,
+    and each package's exported integer constants are exposed qualified as
+    ``alias.Name``.
+    """
+    if not source_file:
+        return {}
+    aliases = _go_import_aliases(source)
+    if not aliases:
+        return {}
+    module = _go_module_root(source_file)
+    if module is None:
+        return {}
+    root_dir, module_path = module
+    constants: dict[str, int] = {}
+    for alias, pkg in aliases.items():
+        if pkg != module_path and not pkg.startswith(module_path + "/"):
+            continue
+        rel = pkg[len(module_path):].lstrip("/")
+        if ".." in rel.split("/"):
+            continue
+        pkg_dir = root_dir / rel
+        if not pkg_dir.is_dir():
+            continue
+        parts: list[str] = []
+        total = 0
+        for sibling in sorted(pkg_dir.glob("*.go")):
+            if sibling.name.endswith("_test.go"):
+                continue
+            try:
+                text = sibling.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            total += len(text)
+            if total > max_chars:
+                break
+            parts.append(text[: max_chars])
+        for name, value in _go_declared_constants("\n".join(parts)).items():
+            # Only exported identifiers are reachable through the qualifier.
+            if name and name[0].isupper():
+                constants[f"{alias}.{name}"] = value
     return constants
 
 

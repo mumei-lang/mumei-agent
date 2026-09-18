@@ -7455,3 +7455,29 @@ def test_rust_slice_param_has_no_fixed_length() -> None:
     issues = _detect_safety_issues(source, "rust")
     bounds = [i for i in issues if "v[i]" in i.message]
     assert bounds
+
+
+def test_go_cross_package_constant_resolves_via_module(tmp_path) -> None:
+    """An imported package's exported const seeds known_constants (#583 item 5)."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _detect_safety_issues,
+        _go_imported_package_constants,
+    )
+
+    (tmp_path / "go.mod").write_text("module example.com/m\n", encoding="utf-8")
+    pkg = tmp_path / "sizes"
+    pkg.mkdir()
+    (pkg / "consts.go").write_text(
+        "package sizes\nconst Width = 16\nconst hidden = 3\n", encoding="utf-8"
+    )
+    src = tmp_path / "use" / "use.go"
+    src.parent.mkdir()
+    src.write_text(
+        'package use\nimport "example.com/m/sizes"\n'
+        "func f(x int) int { return x / sizes.Width }\n",
+        encoding="utf-8",
+    )
+    text = src.read_text(encoding="utf-8")
+    assert _go_imported_package_constants(text, str(src)) == {"sizes.Width": 16}
+    issues = _detect_safety_issues(text, "go", source_file=str(src))
+    assert not any("non-zero" in i.message and "sizes.Width" in i.message for i in issues)
