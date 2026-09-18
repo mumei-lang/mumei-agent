@@ -415,7 +415,7 @@ def _trivial_spec_errors(spec: dict) -> list[str]:
     atoms = spec.get("atoms")
     if not isinstance(atoms, list) or not atoms:
         return []
-    for index, atom in enumerate(atoms):
+    for atom in atoms:
         if not isinstance(atom, dict):
             return []
         for field_name in ("requires", "ensures"):
