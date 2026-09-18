@@ -718,21 +718,29 @@ class CodeToSpecExtractor:
                 from concurrent.futures import ThreadPoolExecutor
 
                 def _extract_chunk(chunk: str) -> tuple[str, dict | None]:
-                    nl = self._extract_spec_with_llm(
-                        client, chunk, detected_language
-                    ).strip()
-                    spec = (
-                        extract_spec(
-                            client,
-                            self.config.model,
-                            nl,
-                            domain_hint=final_domain_hint,
-                            mumei_client=mumei_client,
-                            max_retries=max_retries,
+                    try:
+                        nl = self._extract_spec_with_llm(
+                            client, chunk, detected_language
+                        ).strip()
+                    except Exception as exc:  # keep other chunks' results
+                        logger.debug("spec split chunk extraction failed: %s", exc)
+                        return "", None
+                    try:
+                        spec = (
+                            extract_spec(
+                                client,
+                                self.config.model,
+                                nl,
+                                domain_hint=final_domain_hint,
+                                mumei_client=mumei_client,
+                                max_retries=max_retries,
+                            )
+                            if nl
+                            else None
                         )
-                        if nl
-                        else None
-                    )
+                    except Exception as exc:
+                        logger.debug("spec split chunk forge extraction failed: %s", exc)
+                        spec = None
                     return nl, spec
 
                 with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as pool:
