@@ -7605,3 +7605,19 @@ def test_go_unreachable_counterexample_nonnil_literal_suppressed(tmp_path) -> No
     )
     issues = _detect_safety_issues(src.read_text(encoding="utf-8"), "go", source_file=str(src))
     assert not any("apply" in i.function_name and "non-nil" in i.message for i in issues)
+
+
+def test_go_unreachable_counterexample_nested_literal_len(tmp_path) -> None:
+    """Composite literals with nested braces count only top-level elements."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _go_package_slice_literal_lens,
+    )
+
+    lens = _go_package_slice_literal_lens(
+        "package p\n"
+        "type Pt struct{ x, y int }\n"
+        "var pts = []Pt{{0, 0}, {1, 1}, {2, 2}}\n"
+        "var empty = []int{}\n"
+        "var trailing = []int{1, 2,}\n"
+    )
+    assert lens == {"pts": 3, "empty": 0, "trailing": 2}

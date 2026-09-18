@@ -5349,12 +5349,10 @@ def _go_contract_satisfied_by_args(
             return _go_eval_const_arg(mapping[token], constants)
         if token.startswith("len_"):
             arg = mapping.get(token[4:], "")
-            m = re.fullmatch(r"\[[^\]]*\]\w+\s*\{([^}]*)\}", arg) or re.fullmatch(
-                r"\[\]\w+\s*\{([^}]*)\}", arg
-            )
+            m = re.fullmatch(r"\[[^\]]*\]\w[\w\[\]*.]*\s*\{(.*)\}", arg, re.DOTALL)
             if m:
-                inner = m.group(1).strip()
-                return len([x for x in inner.split(",") if x.strip()]) if inner else 0
+                n, closed = _top_level_commas(m.group(1) + "}")
+                return n if closed else None
             # Package-level slices (e.g. `var ops = []int{...}`) already have
             # their literal length recorded as `len(ops)` in known_constants.
             if arg in (None, ""):
@@ -5407,19 +5405,42 @@ def _go_contract_satisfied_by_args(
 
 
 _PACKAGE_SLICE_LITERAL_RE = re.compile(
-    r"^\s*var\s+(\w+)\s*(?:=\s*)?\[\s*\d*\s*\]\w[\w\[\]*.]*\s*\{([^}]*)\}",
+    r"^\s*var\s+(\w+)\s*(?:=\s*)?\[\s*\d*\s*\]\w[\w\[\]*.]*\s*\{",
     re.MULTILINE,
 )
+
+
+def _top_level_commas(inner: str) -> tuple[int, bool]:
+    """Count non-empty elements split at depth-0 commas until the closing ``}``."""
+    depth = 0
+    count = 0
+    seen_non_ws = False
+    for ch in inner:
+        if ch in "({[":
+            depth += 1
+        elif ch in ")}]":
+            depth -= 1
+            if depth < 0:
+                if seen_non_ws:
+                    count += 1
+                return count, True  # hit closing brace
+        elif ch == "," and depth == 0:
+            if seen_non_ws:
+                count += 1
+            seen_non_ws = False
+            continue
+        if not ch.isspace():
+            seen_non_ws = True
+    return count, False
 
 
 def _go_package_slice_literal_lens(source: str) -> dict[str, int]:
     """Element counts of package-level slice/array literals (``var ops = []int{...}``)."""
     lens: dict[str, int] = {}
     for match in _PACKAGE_SLICE_LITERAL_RE.finditer(source):
-        inner = match.group(2).strip()
-        lens[match.group(1)] = (
-            len([x for x in inner.split(",") if x.strip()]) if inner else 0
-        )
+        n, closed = _top_level_commas(source[match.end():])
+        if closed:
+            lens[match.group(1)] = n
     return lens
 
 
