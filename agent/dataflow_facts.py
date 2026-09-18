@@ -1074,7 +1074,10 @@ class _Walker:
 
     def statement(self, statement: tree_sitter_extract.Statement, env: _Env) -> tuple[_Env, str]:
         kind = statement.kind
-        if kind in {"define", "assign", "inc", "dec", "expr", "return", "defer", "terminate"}:
+        if kind in {
+            "define", "assign", "inc", "dec", "expr",
+            "return", "defer", "terminate", "go", "case",
+        }:
             for text in (*statement.targets, *statement.values):
                 self._check_uninit_text(text, statement.start, env)
         elif kind in {"var", "range"}:
@@ -1163,6 +1166,10 @@ class _Walker:
         at most once per statement; execution panics at the first use anyway."""
         if not text or not ({"*", ".", "[", "("} & set(text)):
             return
+        if re.search(r"\bfunc\b", text):
+            # A ``func`` literal's body is not evaluated at this point in the
+            # path, so uses inside it must not count here.
+            return
         reported: set[str] = set()
         for held in sorted(env.held):
             if held[0] not in _UNINIT_HELD_KINDS or held[1] in reported:
@@ -1183,7 +1190,9 @@ class _Walker:
             ):
                 # ``p.field`` / ``p[i]`` dereference the pointer and panic when
                 # it is nil. ``p.m(`` is a method call that may be
-                # nil-receiver-safe, so a trailing ``(`` suppresses the flag.
+                # nil-receiver-safe, so a trailing ``(`` suppresses the flag
+                # (a method *value* ``f := p.m`` is still flagged — the pointer
+                # is the only receiver a nil-able ``var`` can have).
                 return True
             # ``*p``: only a dereference when the ``*`` is not a binary
             # multiply — i.e. the token before it is not an operand.
@@ -1456,6 +1465,8 @@ class _Walker:
         exits: list[str] = []
         self.break_targets.append([])
         for case in statement.body:
+            for value in case.values:
+                self._check_uninit_text(value, case.start, base)
             case_env = base.copy()
             if case.kind == "default":
                 has_default = True
@@ -1511,31 +1522,63 @@ class _Walker:
     # -- assignments -----------------------------------------------------
 
     def _var(self, statement: tree_sitter_extract.Statement, env: _Env) -> None:
+        if not statement.targets:
+            # A grouped ``var (`` block: the extractor reports no targets, so
+            # parse the inner specs line-wise (``name T`` / ``name T = v`` /
+            # ``name = v`` / ``name, name T``).
+            for name, type_text, value in self._grouped_var_specs(statement.text):
+                self._var_one(name, type_text, value, env)
+            return
         types = statement.operator.split("|") if statement.operator else []
         for index, name in enumerate(statement.targets):
             value = statement.values[index] if index < len(statement.values) else ""
             type_text = _norm(types[index]) if index < len(types) else ""
-            env.kill(name)
-            if value and _norm(value) != "nil":
-                self._define(name, value, env)
+            self._var_one(name, type_text, value, env)
+
+    @staticmethod
+    def _grouped_var_specs(text: str) -> list[tuple[str, str, str]]:
+        inner = re.sub(r"^var\s*\(", "", text.strip(), count=1)
+        inner = inner.rsplit(")", 1)[0] if ")" in inner else inner
+        specs: list[tuple[str, str, str]] = []
+        for line in inner.splitlines():
+            line = line.strip().rstrip(";")
+            spec = re.match(rf"^({_IDENT}(?:\s*,\s*{_IDENT})*)\s+(.+?)(?:\s*=\s*(.+))?$", line)
+            if not spec:
                 continue
-            if not self._reliable(name):
-                continue
-            kind = _nilable_kind(type_text)
-            if kind is not None:
-                env.nilable[name] = kind
-                env.held.add((kind, name))
-                if kind == "uninit_slice":
-                    env.slices.add(name)
-            elif type_text in _GO_INT_TYPES:
-                env.set_const(name, 0)
-            elif type_text.startswith("[") or type_text == "string":
+            names = [n.strip() for n in spec.group(1).split(",")]
+            type_text, _, value = "", "", spec.group(3) or ""
+            tail = spec.group(2).strip()
+            if "=" in tail:
+                type_text, _, value = tail.partition("=")
+            elif tail:
+                type_text = tail
+            for name in names:
+                specs.append((name, type_text.strip(), value.strip()))
+        return specs
+
+    def _var_one(self, name: str, type_text: str, value: str, env: _Env) -> None:
+        type_text = _norm(type_text)
+        env.kill(name)
+        if value and _norm(value) != "nil":
+            self._define(name, value, env)
+            return
+        if not self._reliable(name):
+            return
+        kind = _nilable_kind(type_text)
+        if kind is not None:
+            env.nilable[name] = kind
+            env.held.add((kind, name))
+            if kind == "uninit_slice":
                 env.slices.add(name)
-                fixed = re.match(r"^\[(\w+)\]", type_text)
-                if fixed:
-                    size = env.value_of(fixed.group(1), self.constants)
-                    if size is not None and size >= 1:
-                        env.set_len_ge(name, size)
+        elif type_text in _GO_INT_TYPES:
+            env.set_const(name, 0)
+        elif type_text.startswith("[") or type_text == "string":
+            env.slices.add(name)
+            fixed = re.match(r"^\[(\w+)\]", type_text)
+            if fixed:
+                size = env.value_of(fixed.group(1), self.constants)
+                if size is not None and size >= 1:
+                    env.set_len_ge(name, size)
 
     def _assign(self, statement: tree_sitter_extract.Statement, env: _Env) -> None:
         targets = [_norm(t) for t in statement.targets]

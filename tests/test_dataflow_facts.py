@@ -979,3 +979,83 @@ def test_nil_map_read_is_not_uninitialised_use() -> None:
         "}\n"
     )
     assert _uninit_messages(source) == []
+
+
+def test_grouped_var_uninitialised_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read() int {\n"
+        "    var (\n"
+        "        p *int\n"
+        "        s []int\n"
+        "    )\n"
+        "    return *p + s[0]\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_grouped_var_nil_map_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Build() map[string]int {\n"
+        "    var (\n"
+        "        m map[string]int\n"
+        "    )\n"
+        "    m[\"k\"] = 1\n"
+        "    return m\n"
+        "}\n"
+    )
+    assert any("never initialized" in m for m in _messages(source)), _messages(source)
+
+
+def test_func_literal_body_use_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Later(x *int) int {\n"
+        "    var p *int\n"
+        "    cb := func() int { return *p }\n"
+        "    p = x\n"
+        "    return cb()\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_deferred_nil_func_call_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Run() int {\n"
+        "    var f func()\n"
+        "    defer f()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_use_in_case_label_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Pick(x int) int {\n"
+        "    var p *int\n"
+        "    switch x {\n"
+        "    case *p:\n"
+        "        return 1\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_go_nil_func_call_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Spawn() int {\n"
+        "    var f func()\n"
+        "    go f()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
