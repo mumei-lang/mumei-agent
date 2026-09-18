@@ -5308,7 +5308,21 @@ def _go_callsite_args(
                     break
                 depth -= 1
         inner = package_source[match.end():end]
-        args = [a.strip() for a in inner.split(",")] if inner.strip() else []
+        if not inner.strip():
+            calls.append([])
+            continue
+        args: list[str] = []
+        depth = 0
+        start = 0
+        for i, ch in enumerate(inner):
+            if ch in "({[":
+                depth += 1
+            elif ch in ")}]":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append(inner[start:i].strip())
+                start = i + 1
+        args.append(inner[start:].strip())
         calls.append(args)
     return calls
 
@@ -5410,6 +5424,7 @@ def _go_unreachable_counterexample(
     """
     if not issue.required_contracts:
         return False
+    package_source = _strip_go_rust_literals_and_comments(package_source)
     decls = _go_function_declarations(package_source)
     param_order: list[str] = []
     for name, params_text, _ret, _body in decls:
