@@ -1330,7 +1330,8 @@ C-1（mumei `docs/ROADMAP.md` P30）の群 3 — `while` ループ不変量 3 at
 `extract_unknown_atoms` に載らなかった設計を補完。`run.json` の `force_lean_atoms` / per-file `forced_atoms` /
 `lean_verified_forced` が出処、bridge 失敗時は元の Z3 verdict に復帰（`_restore_forced_misses`、回帰なし）。
 実 cert 実走行（gpt-4o）で `all_transactions_within_limit` が手動 `--external-proofs` 無しに `lean_verified` 到達
-（`sum_array` / `queue_total_is_nonnegative` は LLM 429 quota で attempt 失敗 — 経路自体は実証済み）。
+（残 2 atom は OpenAI 429 で停止 → ローカル Ollama `qwen2.5-coder:1.5b` で再実行したところ AI 段まで到達するも
+`tactic_failed` / `unsound_source` で未証明 — 小規模モデルの能力限界、forced atom は元の Z3 verdict 復帰を実走行で確認）。
 
 ### 実装済み
 
