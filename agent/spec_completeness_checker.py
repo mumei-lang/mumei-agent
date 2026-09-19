@@ -156,7 +156,6 @@ def check_domain_completeness(
             *[atom.ensures for atom in atoms],
         ]
     ).lower()
-    formal_clauses_present = bool(requires_text.strip() or ensures_text.strip())
     normalized_domain = domain.strip().lower()
     warnings: list[str] = []
     for item in checklist:
@@ -167,11 +166,10 @@ def check_domain_completeness(
         clause = str(item.get("clause") or "any").lower()
         clause_label = ""
         if clause in {"requires", "ensures"}:
-            haystack = (
-                (requires_text if clause == "requires" else ensures_text)
-                if formal_clauses_present
-                else full_text
-            )
+            # Scope to the named clause when the spec actually has one;
+            # prose-only specs fall back to the full text per clause side.
+            scoped = requires_text if clause == "requires" else ensures_text
+            haystack = scoped if scoped.strip() else full_text
             clause_label = clause
         else:
             haystack = full_text

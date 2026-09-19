@@ -307,6 +307,18 @@ def test_suggest_fix_verification_templates(message: str, expected: str) -> None
     assert expected in suggestion
 
 
+def test_suggest_fix_unsat_not_shadowed_by_nullish_evidence() -> None:
+    """Serialized verify evidence often contains bare `None`/`null` fields; an
+    unsat finding must still route to the satisfiability template."""
+    suggestion = _suggest_fix(
+        "verification",
+        "mumei verify reported an unsatisfied or inconsistent inferred contract.",
+        "{'status': 'failed', 'counterexample': None, 'certificate': null}",
+    )
+
+    assert "unsatisfiable or inconsistent" in suggestion
+
+
 def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
     mumei = MagicMock()
     mumei.verify.return_value = {

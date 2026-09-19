@@ -177,6 +177,15 @@ def _suggest_verification_fix(message: str, evidence: str) -> str:
             "Add a non-zero-divisor contract (e.g. `requires: divisor != 0;`) "
             "or guard the division site."
         )
+    # Contract-level satisfiability failures outrank the null/balance keyword
+    # buckets: serialized verify evidence often contains bare `None`/`null`
+    # fields that would otherwise route an unsat finding to the null template.
+    if "unsatisfiable" in text or "inconsistent" in text or "unsat" in text:
+        return (
+            "The inferred contract is unsatisfiable or inconsistent; relax the "
+            "conflicting requires/ensures clauses or split them into narrower "
+            f"cases. Evidence: `{(evidence or message)[:200]}`."
+        )
     if "overflow" in text or "underflow" in text:
         return (
             "Constrain the operands so the arithmetic cannot wrap "
@@ -204,12 +213,6 @@ def _suggest_verification_fix(message: str, evidence: str) -> str:
             "Add a `requires` clause keeping amounts positive and balances "
             "sufficient (e.g. `requires: amount > 0 && balance >= amount;`) "
             "before the state update."
-        )
-    if "unsatisfiable" in text or "inconsistent" in text or "unsat" in text:
-        return (
-            "The inferred contract is unsatisfiable or inconsistent; relax the "
-            "conflicting requires/ensures clauses or split them into narrower "
-            f"cases. Evidence: `{(evidence or message)[:200]}`."
         )
     return (
         "Add a `requires` clause or an explicit guard so the reported path "
