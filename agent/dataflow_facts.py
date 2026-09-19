@@ -1413,13 +1413,12 @@ class _Walker:
         self._check_resources_at_exit(statement, env, statement.values)
 
     def _note_output_args(self, text: str, env: _Env) -> None:
-        """A contract-referenced ``*T`` parameter passed to a call — including
-        as ``&out`` — is normally written through the pointer, so it counts
-        as established."""
+        """A contract-referenced ``*T`` parameter passed to a call as
+        ``f(out)`` lets the callee write the pointee, so it counts as
+        established. ``f(&out)`` passes a ``**T`` and only rewrites the
+        parameter variable itself — not the pointee — so it does not."""
         for name in self.contract_outputs:
-            if re.search(
-                rf"[(,&]\s*&?{re.escape(name)}\s*[,)]", text
-            ):
+            if re.search(rf"[(,]\s*{re.escape(name)}\s*[,)]", text):
                 env.defined.add(name)
 
     def _check_contract_outputs(
@@ -1843,7 +1842,12 @@ class _Walker:
                 if statement.operator == "=":
                     # ``=`` writes the name; ``:=`` on a contract-referenced
                     # named result shadows it instead, so it must not count.
-                    env.defined.add(target.split("[")[0].split(".")[0].lstrip("*"))
+                    # Reassigning an output param itself (``out = &x``) does
+                    # not write its pointee, so only ``*out`` / ``out.f`` /
+                    # ``out[i]`` targets establish it.
+                    root = target.split("[")[0].split(".")[0].lstrip("*")
+                    if not (target == root and root in self.contract_outputs):
+                        env.defined.add(root)
                 if not re.fullmatch(_IDENT, target):
                     root = target.split("[")[0].split(".")[0].lstrip("*")
                     if target.startswith("*"):

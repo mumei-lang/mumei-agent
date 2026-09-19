@@ -4,7 +4,7 @@
 
 - New category `contract_output_unassigned`: identifiers referenced by a function's doc-comment `ensures:` / `@ensures` / `postcondition:` contract that are named results (`func f() (r int, err error)`) or `*T` output params are checked against a new `_Env.defined` *must-assign* fact (intersected at merges). A `return` (or named-result fall-off-end) on a path that never `=`-assigned the name reports the unestablished postcondition.
 - `return <exprs>` satisfies named results positionally (Go requires full coverage), so only `*T` params are checked there; `r := …` shadows and does not establish; `*out = …` / `out.f = …` writes and `f(out)` / `f(&out)` call args establish output params.
-- Regression gate: `tests/test_dataflow_facts.py` (+13 cases); full suite green. This completes the A-6 extension set (uninitialised use, guard-state call ordering, contract-derived postconditions).
+- Regression gate: `tests/test_dataflow_facts.py` (+17 cases); full suite green. This completes the A-6 extension set (uninitialised use, guard-state call ordering, contract-derived postconditions).
 
 ## 2026-09-19: A-6 follow-up — guard-state call-ordering categories
 

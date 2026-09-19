@@ -1793,3 +1793,51 @@ def test_no_contract_reports_nothing() -> None:
         "}\n"
     )
     assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_output_param_pointer_reassign_does_not_establish() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) {\n"
+        "    out = new(int)\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_output_param_address_arg_does_not_establish() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) {\n"
+        "    f(&out)\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_output_param_field_write_establishes() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out ok\n"
+        "func G(out *S) {\n"
+        "    out.x = 1\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_named_result_compound_assign_establishes() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: r > 0\n"
+        "func F() (r int) {\n"
+        "    r += 3\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
