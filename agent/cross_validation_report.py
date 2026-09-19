@@ -142,9 +142,82 @@ def _suggest_fix(kind: IssueKind, message: str, evidence: str) -> str:
             "as the conflicting set and relax or split at least one constraint: "
             f"`{evidence_text or message_text}`."
         )
+    if kind == "verification":
+        return _suggest_verification_fix(message_text, evidence_text)
     return (
         "Review the finding and update the spec or implementation so the reported "
         f"constraint is explicit and verifiable. Evidence: `{evidence_text or message_text}`."
+    )
+
+def _suggest_verification_fix(message: str, evidence: str) -> str:
+    """Template-based per-violation fix hint for ``validate-code`` findings.
+
+    Cheap keyword heuristics over the violation text; the suggestion is advice
+    only — nothing is auto-applied.
+    """
+    text = f"{message} {evidence}".lower()
+    if "reentr" in text or "checks-effects-interactions" in text:
+        return (
+            "Apply checks-effects-interactions (move state writes before "
+            "external calls) or add a reentrancy guard such as `nonReentrant`."
+        )
+    if (
+        "access-control" in text
+        or "access control" in text
+        or "permissionless" in text
+        or "unauthorized" in text
+    ):
+        return (
+            "Gate the state-mutating entry point with an access-control check "
+            "(`onlyOwner`-style modifier or `require(msg.sender == ...)`), or "
+            "document the function as intentionally permissionless."
+        )
+    if "divid" in text or "division" in text or "by zero" in text:
+        return (
+            "Add a non-zero-divisor contract (e.g. `requires: divisor != 0;`) "
+            "or guard the division site."
+        )
+    # Contract-level satisfiability failures outrank the null/balance keyword
+    # buckets: serialized verify evidence often contains bare `None`/`null`
+    # fields that would otherwise route an unsat finding to the null template.
+    if "unsatisfiable" in text or "inconsistent" in text or "unsat" in text:
+        return (
+            "The inferred contract is unsatisfiable or inconsistent; relax the "
+            "conflicting requires/ensures clauses or split them into narrower "
+            f"cases. Evidence: `{(evidence or message)[:200]}`."
+        )
+    if "overflow" in text or "underflow" in text:
+        return (
+            "Constrain the operands so the arithmetic cannot wrap "
+            "(e.g. `requires: a <= max_value - b;`) or use a checked/widening type."
+        )
+    if "index" in text or "bounds" in text or "out of range" in text:
+        return (
+            "Add a bounds contract or guard before the indexing expression "
+            "(e.g. `requires: 0 <= index && index < len(values);`)."
+        )
+    if (
+        "non-null" in text
+        or "non-nil" in text
+        or "null" in text
+        or "nil" in text
+        or "undefined" in text
+        or "none" in text
+    ):
+        return (
+            "Add a non-null/non-nil precondition (e.g. `requires: value != null;`) "
+            "before dereferencing the value."
+        )
+    if "negative" in text or "balance" in text or "amount" in text:
+        return (
+            "Add a `requires` clause keeping amounts positive and balances "
+            "sufficient (e.g. `requires: amount > 0 && balance >= amount;`) "
+            "before the state update."
+        )
+    return (
+        "Add a `requires` clause or an explicit guard so the reported path "
+        "cannot violate the contract, or explain why the path is unreachable. "
+        f"Evidence: `{(evidence or message)[:200]}`."
     )
 
 def _format_validate_spec_markdown(result: NLSpecValidationResult) -> str:

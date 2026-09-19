@@ -922,7 +922,7 @@ def validate_foreign_code(
         verification=verification,
         proof_certificate=proof_certificate,
         lean_bridge=lean_bridge_result,
-        issues=issues,
+        issues=_with_fix_suggestions(issues),
         source_line_map=source_line_map,
         warnings=warnings,
         errors=errors,
@@ -1007,6 +1007,8 @@ def build_validate_spec_parser(parser: argparse.ArgumentParser | None = None) ->
     )
     parser.add_argument(
         "--domain",
+        "--domain-hint",
+        dest="domain",
         default="",
         help="Domain hint (financial/security/crypto/data_structure).",
     )
