@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-19: A-6 follow-up — guard-state call-ordering categories
+
+- `agent/dataflow_facts.py` now tracks four more terminal-transition states in `_Env.held` and reports guaranteed-failure call orderings: `send_on_closed_channel` (`ch <- v` or re-`close` after `close(ch)`, including `select` send clauses and deferred `close`), `close_nil_channel` (`close` on a `var ch chan T` still nil), `use_after_close` (error-returning method calls like `Read`/`Write`/`Stat` after `x.Close()`, double `Close` included), and `unlock_of_unlocked` (`Unlock`/`RUnlock` on a mutex provably unlocked — `var mu sync.Mutex`, `sync.Mutex{}`, `new(sync.Mutex)`, or a completed `Unlock`; a successful `Unlock` always transitions to unlocked so a second call panics).
+- Nil-channel sends / receives / `range` are never reported (they block rather than panic — the `select`-disable idiom); `defer close(ch)` does not mark the channel closed (only its guaranteed panic at return is flagged). `nil`-able held entries survive `x.Close()`/`x.Unlock()` so a still-nil `var f *os.File` keeps flagging later dereferences.
+- Terminal-state markers propagate through `x2 := x` aliases and `x.Close()` / `close(x)` mark the whole alias cluster; `make(chan|map|slice)` / `&x` / `new(T)` / ident-alias `:=` definitions seed `nilable` type facts so a later `x = nil` re-marks even non-`var` locals.
+- `defer mu.Unlock()` / `defer func(){ mu.Unlock() }()` / `go close(ch)` / `go func(){ ch <- v }()` forms are checked at registration: a deferred/goroutine `Unlock` on an unlocked mutex or `close`/send on a nil/closed channel still panics when the deferred call or goroutine runs. `*sync.Mutex` / `*sync.RWMutex` nil values use the dedicated `uninit_mutex` kind — every mutex method dereferences its receiver so nil-receiver `mu.Unlock()` panics (and a nil mutex is never recorded as locked).
+- Regression gate: `tests/test_dataflow_facts.py` (+42 cases), `tests/test_foreign_code.py` / `tests/test_cross_validation.py` unchanged pass; full suite green.
+
 ## 2026-09-18: A-6 follow-up — `uninitialized_use` dataflow category
 
 - `agent/dataflow_facts.py` now reports uses of `var`-declared nil-able values that are still uninitialised on the path: nil-pointer dereference / field / index (`*p`, `p.x`, `p[i]`), nil-slice indexing (`s[i]`; reslices `s[a:b]` excluded since `s[:0]` is legal), nil `func` calls, and nil-interface method calls / type assertions (`error`, `any`, `interface{…}`).

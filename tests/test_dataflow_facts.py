@@ -1059,3 +1059,578 @@ def test_go_nil_func_call_is_reported() -> None:
         "}\n"
     )
     assert _uninit_messages(source), _messages(source)
+
+
+def _transition_messages(source: str, category: str) -> list[str]:
+    return [
+        issue.message
+        for issue in _detect_go_safety_issues(source)
+        if issue.counterexample and issue.counterexample.get("category") == category
+    ]
+
+
+def test_send_on_closed_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    ch <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_reclose_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    close(ch)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_close_nil_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    var ch chan int\n"
+        "    close(ch)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel")
+
+
+def test_send_on_nil_channel_is_not_reported() -> None:
+    # Sends on a nil channel block rather than panic (select-disable idiom).
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    var ch chan int\n"
+        "    ch <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_recv_from_closed_channel_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Pop() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    v := <-ch\n"
+        "    return v\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_select_send_on_closed_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    select {\n"
+        "    case ch <- 1:\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_select_recv_on_closed_channel_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Pop() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    select {\n"
+        "    case <-ch:\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_channel_recreated_after_close_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    ch = make(chan int)\n"
+        "    ch <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_use_after_file_close_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read(p string) int {\n"
+        "    f, _ := os.Open(p)\n"
+        "    f.Close()\n"
+        "    buf := 0\n"
+        "    _, _ = f.Read(buf)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_deferred_close_allows_reads() -> None:
+    source = (
+        "package demo\n"
+        "func Read(p string) int {\n"
+        "    f, _ := os.Open(p)\n"
+        "    defer f.Close()\n"
+        "    buf := 0\n"
+        "    _, _ = f.Read(buf)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close") == []
+
+
+def test_file_reopened_after_close_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read(p, q string) int {\n"
+        "    f, _ := os.Open(p)\n"
+        "    f.Close()\n"
+        "    f, _ = os.Open(q)\n"
+        "    buf := 0\n"
+        "    _, _ = f.Read(buf)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close") == []
+
+
+def test_dotted_handle_close_then_read_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read() int {\n"
+        "    resp, _ := get()\n"
+        "    resp.Body.Close()\n"
+        "    buf := 0\n"
+        "    _, _ = resp.Body.Read(buf)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_unlock_of_uninitialised_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_double_unlock_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    mu := sync.Mutex{}\n"
+        "    mu.Lock()\n"
+        "    mu.Unlock()\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_paired_lock_unlock_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked") == []
+
+
+def test_deferred_unlock_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    defer mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked") == []
+
+
+def test_rwlock_runlock_twice_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.RWMutex\n"
+        "    mu.RLock()\n"
+        "    mu.RUnlock()\n"
+        "    mu.RUnlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_nil_chan_guard_close_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    var ch chan int\n"
+        "    if ch != nil {\n"
+        "        close(ch)\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel") == []
+
+
+def test_nil_reassign_after_make_chan_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    ch := make(chan int)\n"
+        "    ch = nil\n"
+        "    close(ch)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel")
+
+
+def test_send_through_alias_of_closed_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    ch2 := ch\n"
+        "    close(ch)\n"
+        "    ch2 <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_close_through_alias_marks_origin_closed() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    ch2 := ch\n"
+        "    close(ch2)\n"
+        "    ch <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_use_after_close_through_alias_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read(p string) int {\n"
+        "    f, _ := os.Open(p)\n"
+        "    f2 := f\n"
+        "    f.Close()\n"
+        "    buf := 0\n"
+        "    _, _ = f2.Read(buf)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_unlock_on_copy_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    mu := sync.Mutex{}\n"
+        "    mu2 := mu\n"
+        "    mu2.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_unlock_on_copy_of_locked_mutex_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    mu := sync.Mutex{}\n"
+        "    mu.Lock()\n"
+        "    mu2 := mu\n"
+        "    mu2.Unlock()\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked") == []
+
+
+def test_unlock_after_branchy_unlock_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard(c bool) int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    if c {\n"
+        "        mu.Unlock()\n"
+        "    }\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_nil_reassign_after_make_slice_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Use() int {\n"
+        "    s := make([]int, 3)\n"
+        "    s = nil\n"
+        "    return s[0]\n"
+        "}\n"
+    )
+    assert _uninit_messages(source)
+
+
+def test_nil_reassign_after_open_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Use(p string) int {\n"
+        "    f, _ := os.Open(p)\n"
+        "    f = nil\n"
+        "    return *f\n"
+        "}\n"
+    )
+    assert _uninit_messages(source)
+
+
+def test_deferred_unlock_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    defer mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_deferred_unlock_of_locked_mutex_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    defer mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked") == []
+
+
+def test_nil_mutex_pointer_unlock_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu *sync.Mutex\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source)
+
+
+def test_closure_unlock_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    defer func() { mu.Unlock() }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_closure_close_of_nil_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    var ch chan int\n"
+        "    defer func() { close(ch) }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel")
+
+
+def test_send_on_closed_channel_in_for_post_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    for i := 0; i < 3; ch <- 1 {\n"
+        "        i++\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_go_close_of_nil_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    var ch chan int\n"
+        "    go close(ch)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel")
+
+
+def test_go_unlock_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    go mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_closure_send_on_closed_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    go func() { ch <- 1 }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_closure_receive_on_closed_channel_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Pull() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    go func() { v := <-ch; _ = v }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_deferred_cleanup_call_preserves_closed_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var f *os.File\n"
+        "    f.Close()\n"
+        "    defer cleanup(f)\n"
+        "    f.Read()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_deferred_cleanup_call_preserves_unlocked_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    defer cleanup(mu)\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_go_unlock_does_not_release_lock_for_exit_check() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    go mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert any(
+        issue.counterexample.get("category") == "lock_held_at_return"
+        for issue in issues
+    )
+
+
+def test_go_closure_does_not_discard_tracked_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var f *os.File\n"
+        "    f.Close()\n"
+        "    go func() { f.Close() }()\n"
+        "    f.Read()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_defer_closure_preserves_closed_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var f *os.File\n"
+        "    f.Close()\n"
+        "    defer func() { f.Close() }()\n"
+        "    f.Read()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
