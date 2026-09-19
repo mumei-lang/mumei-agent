@@ -3466,6 +3466,59 @@ def _go_runtime_level_guarded_indices(body: str, package_name: str, param_names:
     return set()
 
 
+_GO_PREDECLARED = frozenset(
+    {
+        "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        "string", "bool", "byte", "rune", "error", "any",
+        "float32", "float64", "complex64", "complex128",
+        "true", "false", "nil", "len", "cap", "new", "make", "old",
+        "if", "for", "return", "and", "or", "not",
+    }
+)
+
+
+def _go_ensures_identifiers(source: str, start_char: int) -> set[str]:
+    """Identifiers referenced by ``ensures`` / ``@ensures`` / ``postcondition``
+    markers in the doc comment directly above the function at ``start_char``."""
+    preceding = source[:start_char]
+    lines: list[str] = []
+    for line in reversed(preceding.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            lines.insert(0, stripped[2:])
+        elif not stripped:
+            # A blank line detaches a doc comment from the declaration.
+            break
+        else:
+            block = re.search(r"/\*(.*?)\*/\s*$", preceding, flags=re.DOTALL)
+            if block:
+                lines.insert(0, block.group(1))
+            break
+    names: set[str] = set()
+    for match in re.finditer(
+        r"(?im)^\s*(?:@ensures|@post\b|ensures:|postconditions?:)\s*(.+)$",
+        "\n".join(lines),
+    ):
+        names.update(re.findall(r"\b[A-Za-z_]\w*\b", match.group(1)))
+    return names - _GO_PREDECLARED
+
+
+def _go_named_results(return_type: str | None) -> set[str]:
+    """Named result identifiers in a Go return signature like
+    ``(r int, err error)``. Unnamed ``(int, error)`` yields none."""
+    if not return_type:
+        return set()
+    text = return_type.strip()
+    if not (text.startswith("(") and text.endswith(")")):
+        return set()
+    return {
+        name
+        for name in _go_param_types(text[1:-1])
+        if name not in _GO_PREDECLARED
+    }
+
+
 def _go_doc_comment_suppresses_bounds(source: str, start_char: int) -> bool:
     """Return True when the comment before a function declares bounds are assumed."""
     preceding = source[:start_char]
@@ -5011,6 +5064,13 @@ def _detect_go_safety_issues(
                 name for name, raw_type in param_types.items()
                 if raw_type.strip().lstrip("*") == "string"
             }
+            ensures_names = _go_ensures_identifiers(orig_source, orig_start if orig_start >= 0 else fn.start_char)
+            contract_results = _go_named_results(fn.return_type) & ensures_names
+            contract_outputs = {
+                name
+                for name, raw_type in param_types.items()
+                if raw_type.strip().startswith("*")
+            } & ensures_names
             flow = dataflow_facts.analyze_function(
                 body,
                 "go",
@@ -5024,6 +5084,8 @@ def _detect_go_safety_issues(
                 }
                 | known_strings
                 | _go_package_slice_names(package_source),
+                contract_results=contract_results,
+                contract_outputs=contract_outputs,
             )
             for index, expression in enumerate(expressions):
                 facts = flow.facts_for_expression(expression) if flow is not None else None
@@ -5550,6 +5612,7 @@ _DATAFLOW_ISSUE_MESSAGES = {
     "close_nil_channel": "closes channel `{subject}` which is still nil on this path (close of nil channel panics)",
     "use_after_close": "uses `{subject}` after `.Close()` on this path (post-close calls fail)",
     "unlock_of_unlocked": "unlocks `{subject}` which is not locked on this path (unlock of unlocked mutex panics)",
+    "contract_output_unassigned": "returns without assigning `{subject}` on this path, leaving the doc-comment contract's `ensures` unestablished",
 }
 
 

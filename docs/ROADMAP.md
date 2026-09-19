@@ -558,12 +558,21 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   即時遷移としてマークしないが、登録時点で確定するパニック（nil / closed chan への
   `close`・送信、unlocked mutex の `Unlock`）は報告する。`*sync.Mutex` /
   `*sync.RWMutex` の nil 値は `uninit_mutex`（全メソッドがレシーバを deref するため
-  `mu.Unlock()` も確定パニック）。契約由来事後条件は本 stage では未着手で、
-  データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
+  `mu.Unlock()` も確定パニック）。契約由来事後条件（`contract_output_unassigned`）も
+  対応済み: doc コメントの `ensures:` / `@ensures` / `postcondition:` が指名した
+  named result / `*T` 出力引数が return パス上で一度も `=` 代入されない場合を報告する
+  （`_Env.defined` の must-assign 交差マージで追跡。`return <exprs>` は named result を
+  位置代入で満たすため対象外、`r := …` のシャドーイングは確立とみなさない、`*out` への
+  書き込み・`f(out)` 呼出し引数は確立とみなすが、変数自体の再代入
+  （`out = &x`）や `f(&out)`（`**T` は pointee を書かない）は確立とみなさない）。
+  既知の制限: `goto` を含む関数は全体未解析（従来仕様）、ループ内 `continue` のみ先行する
+  経路の代入は exit 交差マージで未確立扱いになり得る（偽陽性側）、`for` post 句での
+  呼出し引数書き込みは 0 回実行があり得るため確立とみなさない。これで A-6 の拡張種別は
+  全件対応。データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
 - テスト: `tests/test_dataflow_facts.py`（定数畳み込み / ガード / 早期 return / ループ条件 /
   到達定義 / `len` 由来値 / エイリアス / クロージャ・アドレス無効化 / 削除ヘルパの旧偽陽性ケース /
-  新バグ種別の正例・偽陽性例）。既存 `tests/test_foreign_code.py` / `tests/test_cross_validation.py`
-  は無変更で通過。
+  新バグ種別の正例・偽陽性例 / 契約由来事後条件の到達定義ケース）。既存
+  `tests/test_foreign_code.py` / `tests/test_cross_validation.py` は無変更で通過。
 - 解析は関数内ローカルに閉じ、LLM・`solc` / `rustc` / `tsc` に依存せず決定論的。
 
 **cross-repo 位置づけ**: 本タスクは [mumei `docs/CROSS_PROJECT_ROADMAP.md` Priority 25](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) の **Track A**（A-1 データフロー事実の器 + 定数畳み込み → A-2 ガード伝播 → A-3 到達定義 / `len` 由来値 → A-4 局所エイリアス → A-5 抑制ヘルパ置換と削減計測 → A-6 新バグ種別）として順序付けられている。Track B（Task 2-D）とは非依存で完全並行。A-6 は A-5 の削減計測が出てから着手する。完了時は Priority 25 の表と本節を同一 diff で更新する。

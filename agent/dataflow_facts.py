@@ -28,7 +28,9 @@ The same walk also derives the resource / initialisation facts behind the
 new bug categories (nil-map assignment, lock held at return / double lock,
 resource opened but never released, use of uninitialised nil-able values,
 and guard-state call ordering: use after ``Close``, sends on / re-close of a
-closed channel, ``close`` of a nil channel, ``Unlock`` of an unlocked mutex).
+closed channel, ``close`` of a nil channel, ``Unlock`` of an unlocked mutex,
+and contract-referenced outputs — named results / ``*T`` params named by a
+doc-comment ``ensures`` — that a ``return`` path leaves unassigned).
 Unlike the safety facts these are
 *may*-path findings: a single path on which the map is still nil / the lock
 is still held / the handle is still open at the exit is reported, because a
@@ -318,6 +320,13 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _root_name(target: str) -> str:
+    """Root variable of an assignment target: ``*out`` / ``(*out).f`` /
+    ``m[k]`` all yield their base name (``out`` / ``out`` / ``m``)."""
+    root = target.split("[")[0].split(".")[0]
+    return root.strip("()").lstrip("*").strip("()")
+
+
 def _parse_int(text: str) -> int | None:
     text = _norm(text).replace("_", "")
     if not text:
@@ -386,6 +395,10 @@ class _Env:
     # entry itself this is a *type* fact: it survives ``p = &x`` so that a
     # later ``p = nil`` can re-mark the name uninitialised.
     nilable: dict[str, str] = field(default_factory=dict)
+    # Names definitely assigned on the current path (a *must* fact —
+    # intersected at merges). Used to check that contract-referenced results
+    # / output params are established before a ``return``.
+    defined: set[str] = field(default_factory=set)
 
     def copy(self) -> "_Env":
         return _Env(
@@ -400,6 +413,7 @@ class _Env:
             held=set(self.held),
             slices=set(self.slices),
             nilable=dict(self.nilable),
+            defined=set(self.defined),
         )
 
     def merge(self, other: "_Env") -> "_Env":
@@ -422,6 +436,7 @@ class _Env:
             nilable={
                 k: v for k, v in self.nilable.items() if other.nilable.get(k) == v
             },
+            defined=self.defined & other.defined,
         )
 
     def kill(self, name: str) -> None:
@@ -957,7 +972,7 @@ def _freeze(env: _Env) -> PathFacts:
 class DataflowIssue:
     """A bug found by the dataflow layer alone (new categories)."""
 
-    category: str  # "nil_map_write" | "lock_held_at_return" | "double_lock" | "resource_leak"
+    category: str  # e.g. "nil_map_write" | "lock_held_at_return" | "resource_leak" | "uninitialized_use" | "send_on_closed_channel" | "close_nil_channel" | "use_after_close" | "unlock_of_unlocked" | "contract_output_unassigned"
     # | "uninitialized_use" | "send_on_closed_channel" | "close_nil_channel"
     # | "use_after_close" | "unlock_of_unlocked"
     subject: str
@@ -1009,6 +1024,8 @@ class _Walker:
         constants: dict[str, int],
         param_names: set[str],
         body: str,
+        contract_results: set[str] | None = None,
+        contract_outputs: set[str] | None = None,
     ) -> None:
         self.tree = tree
         self.constants = dict(constants)
@@ -1017,6 +1034,10 @@ class _Walker:
         self.unreliable = set(tree.closure_assigned) | set(tree.address_taken)
         self.return_facts: dict[str, list[_Env]] = {}
         self.issues: list[DataflowIssue] = []
+        # Contract-referenced outputs: named results and ``*T`` params named
+        # by the function's ``ensures`` doc-comment contract.
+        self.contract_results = set(contract_results or ())
+        self.contract_outputs = set(contract_outputs or ())
         # Environments carried by ``break`` to the innermost enclosing switch /
         # loop (one list per open construct).
         self.break_targets: list[list[_Env]] = []
@@ -1123,13 +1144,19 @@ class _Walker:
             for text in (*statement.targets, *statement.values):
                 self._check_uninit_text(text, statement.start, env)
                 self._check_transition_text(text, statement.start, env)
+                # ``go f(out)`` may not run before the caller reads ``out`` —
+                # only direct and deferred calls establish the pointee.
+                if kind != "go":
+                    self._note_output_args(text, env)
         elif kind in {"var", "range"}:
             for value in statement.values:
                 self._check_uninit_text(value, statement.start, env)
                 self._check_transition_text(value, statement.start, env)
+                self._note_output_args(value, env)
         elif kind in {"if", "for", "switch"} and statement.condition:
             self._check_uninit_text(statement.condition, statement.start, env)
             self._check_transition_text(statement.condition, statement.start, env)
+            self._note_output_args(statement.condition, env)
         if kind == "other":
             # Send statements surface as ``other`` with no values.
             send = re.match(r"\s*([\w.]+)\s*<-", statement.text)
@@ -1174,6 +1201,7 @@ class _Walker:
                 env.kill(name)
                 if keep_nonneg:
                     env.nonneg.add(name)
+                env.defined.add(_root_name(name))
             return env, ""
         if kind == "const":
             declarations = [
@@ -1387,7 +1415,49 @@ class _Walker:
             keys.add(_norm(value))
         for key in keys:
             self.return_facts.setdefault(key, []).append(env.copy())
+        # A ``return <exprs>`` assigns every named result positionally, so
+        # only ``*T`` output params can stay unestablished on that path.
+        self._check_contract_outputs(
+            env,
+            statement.start,
+            statement.text.strip() or "return",
+            results_satisfied=bool(statement.values),
+        )
         self._check_resources_at_exit(statement, env, statement.values)
+
+    def _note_output_args(self, text: str, env: _Env) -> None:
+        """A contract-referenced ``*T`` parameter passed to a call as
+        ``f(out)`` lets the callee write the pointee, so it counts as
+        established. ``f(&out)`` passes a ``**T`` and only rewrites the
+        parameter variable itself — not the pointee — so it does not."""
+        for name in self.contract_outputs:
+            if re.search(rf"[(,]\s*{re.escape(name)}\s*[,)]", text):
+                env.defined.add(name)
+
+    def _check_contract_outputs(
+        self,
+        env: _Env,
+        offset: int,
+        text: str,
+        *,
+        results_satisfied: bool = False,
+    ) -> None:
+        """On a ``return`` path, a contract-referenced named result or output
+        parameter that was never assigned leaves the ``ensures`` contract
+        unestablished (it returns the zero value / untouched memory)."""
+        names = set(self.contract_outputs)
+        if not results_satisfied:
+            names |= self.contract_results
+        for name in sorted(names):
+            if name not in env.defined:
+                self.issues.append(
+                    DataflowIssue(
+                        "contract_output_unassigned",
+                        name,
+                        text,
+                        offset,
+                    )
+                )
 
     def _check_resources_at_exit(
         self, statement: tree_sitter_extract.Statement, env: _Env, values: tuple[str, ...]
@@ -1627,6 +1697,7 @@ class _Walker:
             for value in case.values:
                 self._check_uninit_text(value, case.start, base)
                 self._check_transition_text(value, case.start, base)
+                self._note_output_args(value, base)
             if not case.values:
                 # ``select`` comm clauses (``case <-ch:`` / ``case ch <- v:``)
                 # carry no ``values`` — scan the clause text for closed
@@ -1634,6 +1705,7 @@ class _Walker:
                 clause = re.match(r"^\s*case\s+(.+?)\s*:", case.text)
                 if clause:
                     self._check_transition_text(clause.group(1), case.start, base)
+                    self._note_output_args(clause.group(1), base)
             case_env = base.copy()
             if case.kind == "default":
                 has_default = True
@@ -1754,6 +1826,7 @@ class _Walker:
         values = list(statement.values)
         if statement.operator not in {"=", ":="}:
             for target in targets:
+                env.defined.add(_root_name(target))
                 keep_nonneg = (
                     target in env.nonneg
                     and len(values) == 1
@@ -1786,8 +1859,17 @@ class _Walker:
         for target in targets:
             if target != "_":
                 env.kill(target)
+                if statement.operator == "=":
+                    # ``=`` writes the name; ``:=`` on a contract-referenced
+                    # named result shadows it instead, so it must not count.
+                    # Reassigning an output param itself (``out = &x``) does
+                    # not write its pointee, so only ``*out`` / ``out.f`` /
+                    # ``out[i]`` targets establish it.
+                    root = _root_name(target)
+                    if not (target == root and root in self.contract_outputs):
+                        env.defined.add(root)
                 if not re.fullmatch(_IDENT, target):
-                    root = target.split("[")[0].split(".")[0].lstrip("*")
+                    root = _root_name(target)
                     if target.startswith("*"):
                         env.kill(root)
         if len(targets) >= 2 and len(values) == 1:
@@ -2186,7 +2268,11 @@ class _Walker:
         env = seed.copy() if seed is not None else _Env()
         final_env, terminated = self.walk(self.tree.statements, env)
         if not terminated:
-            # Fall-through end of body (procedure without a trailing return).
+            # Fall-through end of body: with named results this *is* a return,
+            # so contract outputs must still be established on this path.
+            self._check_contract_outputs(
+                final_env, len(self.body), "(end of function)"
+            )
             self._check_resources_at_exit(
                 tree_sitter_extract.Statement(kind="end", text="", start=len(self.body)),
                 final_env,
@@ -2214,6 +2300,8 @@ def analyze_function(
     nonneg_names: set[str] | None = None,
     nonzero_names: set[str] | None = None,
     sequence_names: set[str] | None = None,
+    contract_results: set[str] | None = None,
+    contract_outputs: set[str] | None = None,
 ) -> FunctionDataflow | None:
     """Return function-local dataflow facts for ``body`` or ``None`` to fall back.
 
@@ -2226,7 +2314,14 @@ def analyze_function(
     tree = tree_sitter_extract.extract_statements(body, language)
     if tree is None or _contains_kind(tree.statements, "goto"):
         return None
-    walker = _Walker(tree, constants or {}, param_names or set(), body)
+    walker = _Walker(
+        tree,
+        constants or {},
+        param_names or set(),
+        body,
+        contract_results=contract_results,
+        contract_outputs=contract_outputs,
+    )
     seed = _Env()
     seed.nonneg |= {_norm(n) for n in nonneg_names or ()}
     seed.nonzero |= {_norm(n) for n in nonzero_names or ()}
