@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 import shutil
 import sys
 import time
@@ -98,7 +99,13 @@ def run_challenge(spec_path: str, dry_run: bool = False) -> dict:
     with open(spec_path, encoding="utf-8") as f:
         spec = json.load(f)
 
-    challenge_name = spec.get("module_name", spec.get("name", "unnamed"))
+    # The spec-provided name becomes a results subdirectory — sanitize so
+    # a crafted name ('../x', nested slashes) cannot escape or clobber
+    # directories.
+    raw_name = spec.get("module_name", spec.get("name", "unnamed"))
+    challenge_name = re.sub(r"[^\w.-]", "_", raw_name)
+    if challenge_name in {"", ".", ".."}:
+        challenge_name = "unnamed"
 
     result: dict = {
         "spec": spec,

@@ -356,11 +356,17 @@ jobs:
           MUMEI_BIN: mumei
         run: |
           mkdir -p /tmp/proliferate
-          uv run python -m agent health \
+          # Non-fatal like the post-flight check: `agent health` exits 2
+          # when std already has failures — which is precisely when
+          # proliferation is needed — so it must not gate the run.
+          if ! uv run python -m agent health \
             --mumei-repo ../mumei \
             --format json \
-            > /tmp/proliferate/pre_health.json
-          cat /tmp/proliferate/pre_health.json
+            > /tmp/proliferate/pre_health.json; then
+            echo "::warning::Pre-flight health check failed; baseline snapshot may be incomplete" >> "$GITHUB_STEP_SUMMARY" || true
+            echo "::warning::Pre-flight health check failed; continuing"
+          fi
+          cat /tmp/proliferate/pre_health.json || true
 
       - name: Analyze vStd roadmap forge coverage
         working-directory: mumei-agent

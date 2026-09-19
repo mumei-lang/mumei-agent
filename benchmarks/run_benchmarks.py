@@ -57,7 +57,12 @@ def main() -> None:
             evaluator.results.append(evaluator.run_benchmark(file, method=args.method))
 
     if args.category in ("zero_human", "all"):
-        for file in sorted((agent_root / "examples" / "challenges").glob("*_spec.json")):
+        # Challenge *_spec.json files are generation specs for
+        # examples/challenges/run_challenge.py, not .mm sources — feeding
+        # them to `mumei verify` / `agent.self_healing` records meaningless
+        # failures. Only *.mm files under the challenges tree are verifiable
+        # here.
+        for file in sorted((agent_root / "examples" / "challenges").rglob("*.mm")):
             evaluator.results.append(evaluator.run_benchmark(file, method=args.method))
 
     report_path = args.results_dir / "report.json"

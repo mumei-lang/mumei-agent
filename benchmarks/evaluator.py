@@ -7,11 +7,25 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import shlex
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+# Wall-clock bound for a single benchmark invocation — a hung mumei/LLM
+# call must record a failure, not block the whole run.
+BENCHMARK_SUBPROCESS_TIMEOUT_S = 600
+
+
+def _mumei_cmd() -> list[str]:
+    """Resolve the mumei binary per the repo's `MUMEI_BIN` convention
+    (may be a multi-word invocation such as ``cargo run --``)."""
+    env_bin = os.environ.get("MUMEI_BIN", "").strip()
+    return shlex.split(env_bin) if env_bin else ["mumei"]
 
 
 @dataclass
@@ -60,28 +74,33 @@ class BenchmarkEvaluator:
         source_file = source_file.resolve()
 
         if method == "agent":
-            result = subprocess.run(
-                [
-                    "python",
-                    "-m",
-                    "agent.self_healing",
-                    str(source_file),
-                    "--max-attempts",
-                    str(max_attempts),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            attempts = self._parse_attempts(result.stdout)
-            tokens_used = self._parse_tokens(result.stdout)
+            cmd = [
+                sys.executable,
+                "-m",
+                "agent.self_healing",
+                str(source_file),
+                "--max-retries",
+                str(max_attempts),
+            ]
         else:
+            cmd = [*_mumei_cmd(), "verify", str(source_file)]
+        try:
             result = subprocess.run(
-                ["mumei", "verify", str(source_file)],
+                cmd,
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=BENCHMARK_SUBPROCESS_TIMEOUT_S,
             )
+            stdout = result.stdout
+            returncode = result.returncode
+        except subprocess.TimeoutExpired:
+            stdout = ""
+            returncode = 124
+        if method == "agent":
+            attempts = self._parse_attempts(stdout)
+            tokens_used = self._parse_tokens(stdout)
+        else:
             attempts = 1
             tokens_used = 0
 
@@ -90,11 +109,11 @@ class BenchmarkEvaluator:
         return BenchmarkResult(
             name=source_file.stem,
             category=self._categorize_benchmark(source_file),
-            success=result.returncode == 0,
+            success=returncode == 0,
             attempts=attempts,
             verification_time_ms=elapsed_ms,
             code_length=len(source_file.read_text(encoding="utf-8")),
-            solver_time_ms=self._parse_solver_time(result.stdout),
+            solver_time_ms=self._parse_solver_time(stdout),
             tokens_used=tokens_used,
             method=method,
         )
@@ -139,7 +158,10 @@ class BenchmarkEvaluator:
         method: str,
         category: str | None = None,
     ) -> list[BenchmarkResult]:
-        results = [r for r in self.results if r.method == method]
+        # The CLI offers "baseline" (a manual `mumei verify` run) as the
+        # comparator; report columns name that bucket "human".
+        names = {"human", "baseline"} if method == "human" else {method}
+        results = [r for r in self.results if r.method in names]
         if category is not None:
             results = [r for r in results if r.category == category]
         return results

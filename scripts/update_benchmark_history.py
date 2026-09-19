@@ -72,7 +72,10 @@ def _table_rows(history_path: Path) -> list[str]:
         if in_table:
             if line.startswith("|"):
                 if line.count("|") == 5:
-                    rows.append(line[:-1].rstrip() + " | 0.000 |")
+                    # Legacy 4-data-column rows have no avg_time — leave the
+                    # cell empty so the parser keeps "unknown" semantics
+                    # (a fabricated 0.000 would win runtime tie-breaks).
+                    rows.append(line[:-1].rstrip() + " |  |")
                 else:
                     rows.append(line)
             elif rows:

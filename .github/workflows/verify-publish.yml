@@ -160,7 +160,9 @@ jobs:
               echo "::group::Validate Python syntax"
               set +e
               for pyfile in katana/*.py; do
-                PY_OUTPUT=$(python -c "import ast; ast.parse(open('$pyfile').read())" 2>&1)
+                # argv, not interpolation: a filename containing a quote
+                # would otherwise break (or alter) the check.
+                PY_OUTPUT=$(python -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$pyfile" 2>&1)
                 PY_RC=$?
                 if [ $PY_RC -ne 0 ]; then
                   REPORT+="  - :x: **python syntax** ($pyfile) — invalid\n"

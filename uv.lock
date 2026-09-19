@@ -1,15 +1,15 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
@@ -953,7 +953,6 @@ dependencies = [
     { name = "numpy" },
     { name = "openai" },
     { name = "python-dotenv" },
-    { name = "streamlit" },
     { name = "tree-sitter" },
     { name = "tree-sitter-go" },
     { name = "tree-sitter-rust" },
@@ -978,6 +977,9 @@ test = [
     { name = "pytest-cov" },
     { name = "pyyaml" },
 ]
+viz = [
+    { name = "streamlit" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -995,15 +997,15 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
-    { name = "streamlit", specifier = ">=1.30" },
+    { name = "streamlit", marker = "extra == 'viz'", specifier = ">=1.30" },
     { name = "tree-sitter", specifier = ">=0.23,<0.27" },
     { name = "tree-sitter-go", specifier = ">=0.23" },
     { name = "tree-sitter-rust", specifier = ">=0.23" },
-    { name = "tree-sitter-solidity", specifier = ">=1.2" },
+    { name = "tree-sitter-solidity", specifier = ">=1.2,<2" },
     { name = "tree-sitter-typescript", specifier = ">=0.23" },
     { name = "z3-solver", specifier = ">=4.12" },
 ]
-provides-extras = ["mcp", "otel", "test"]
+provides-extras = ["mcp", "viz", "otel", "test"]
 
 [[package]]
 name = "narwhals"
