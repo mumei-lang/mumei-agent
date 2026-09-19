@@ -529,7 +529,9 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   条件ガードで汎用カバー、クロージャ本体は対象外）も削除した。あわせて `_define` が
   `x := len(c)` で `len_values` を seed しない非対称を修正し、`(a+b)>>k` / `(a+b)/k`
   （両項が同一コンテナの `lt_len`/`len_values` で非負・少なくとも一方は厳格 `< len`）を
-  midpoint 規則として `_assign` に追加した。残る特化ヘルパは置換不可を確認済み:
+  midpoint 規則として `_define`（`=`/`:=` 共通）に追加した。あわせて `_comparison` で
+  左辺が既知 const の比較（`0 < hi` 等）が演算子反転で `lt_len` を失っていた点を修正し、
+  反転前に len-alias 右辺へ `lt_len` を記録するようにした。残る特化ヘルパは置換不可を確認済み:
   `_go_binary_search_guarded_indices`（`hi = m` のループ内再代入で `len_values` が
   kill されるため不変式推論が必要 — 単一パス walk の範囲外）、`_go_enum_string_guarded_indices`
   / `_go_enum_string_array_guarded_indices`（`iota` enum 定数が `constants` で未解決のため
