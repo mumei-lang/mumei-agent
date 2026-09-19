@@ -2608,20 +2608,28 @@ def _go_guarded_indices(
         ):
             guarded.add(idx)
     # ``op := v.Op`` followed by ``opcodeTable[op]`` is safe: ``Op`` is an enum whose
-    # values are valid indices into the static ``opcodeTable``.
+    # values are valid indices into the static ``opcodeTable``. Kept: enum value
+    # ranges (iota-typed fields) are not resolved, so no generic upper bound exists.
     guarded |= _go_op_enum_guarded_indices(body)
     # ``builtinId`` values are valid indices for the package-level ``predeclaredFuncs``
     # array in ``go/types`` / ``cmd/compile/internal/types2``.
     if param_types and source:
         guarded |= _go_predeclared_funcs_guarded_indices(body, param_types, source)
     # Range-loop indices assigned to another variable (``for i, x := range a { idx = i }``)
-    # stay within ``a``'s bounds, so ``a[idx]`` is safe.
+    # stay within ``a``'s bounds, so ``a[idx]`` is safe. The dataflow layer already
+    # grants ``lt_len(i, a)`` inside the loop body; this helper is kept only for
+    # aliases whose use sits after the loop, where the may-fact merge drops it.
     guarded |= _go_range_index_guarded_indices(body)
     # Range over a 2-D slice with an inner non-nil guard implies the column index is valid.
     guarded |= _go_2d_slice_loop_guarded_indices(body)
     # ``len(arr) == idx || arr[idx]`` short-circuit guards the index access.
+    # Kept: the disjunction requires conjunctive reasoning over two facts
+    # (``i <= len`` from a prior guard AND ``i != len`` from the ``||`` left
+    # operand being false), which the single-pass fact model cannot express.
     guarded |= _go_short_circuit_or_guarded_indices(body)
     # ``log10Pow2(bits.Len64(x))`` indexing ``uint64pow10`` stays within the table.
+    # Kept: ``bits.Len64 <= 64`` combined with the ``log10Pow2`` range mapping and
+    # the 20-element table size are not modelled by generic facts.
     guarded |= _go_pow10_guarded_indices(body)
     # Binary-search midpoint ``m`` is bounded by the initial ``len(arr)`` and the loop invariant.
     # (Requires loop-invariant reasoning: ``hi`` is reassigned inside the loop,
@@ -2646,7 +2654,8 @@ def _go_guarded_indices(
     # indexing ``digestSizes`` or ``hashes``.
     guarded |= _go_crypto_hash_guarded_indices(body, param_types, source, package_name)
     # ``mapfast(t)`` returns a bounded enum used to index ``mapaccess1`` / ``mapaccess2`` /
-    # ``mapassign`` / ``mapdelete`` tables in ``cmd/compile/internal/walk``.
+    # ``mapassign`` / ``mapdelete`` tables in ``cmd/compile/internal/walk``. Kept: the
+    # ``mapfast`` result range (``< nmapfast``) is a domain invariant of the callee.
     guarded |= _go_mapfast_guarded_indices(body)
     # Inverted guard: ``if idx >= len(arr) { return }`` before ``arr[idx]``.
     for match in re.finditer(
@@ -2763,6 +2772,9 @@ def _go_guarded_indices(
     # SSA dominator-tree helpers use ``ID`` parameters that are valid node IDs.
     if param_types and function_name:
         guarded |= _go_ssa_dom_guarded_indices(body, function_name, param_types)
+    # ``a >= C_NONE && a <= C_NCLASS`` bounds ``a`` for the ``cnames*`` tables.
+    # Kept: ``C_NONE``/``C_NCLASS`` are unresolved iota block constants, so the
+    # range guard cannot be proved by generic facts.
     guarded |= _go_cnames_guarded_indices(body)
     return guarded
 

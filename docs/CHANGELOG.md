@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-19: A-5 suppression-helper audit — third batch (concluding)
+
+- Probe-verified every remaining `_go_*_guarded_indices` helper by disabling it and re-running its covering tests: none are generically replaceable. `_go_range_index_guarded_indices` stays only for post-loop alias uses (the dataflow `_range` walk already grants `lt_len` to the loop variable; the may-fact merge drops it after the loop), `_go_short_circuit_or_guarded_indices` needs conjunctive `i <= len` ∧ `i != len` reasoning outside the single-pass model, and `_go_pow10` / `_go_op_enum` / `_go_mapfast` / `_go_cnames` depend on unresolved enum/iota value ranges or unmodelled domain invariants. Call-site comments now record the keep-rationale for each.
+- No behaviour change; full suite green. This concludes A-5.
+
 ## 2026-09-19: A-5 suppression-helper reduction — second batch
 
 - Removed `_go_median_guarded_indices` and `_go_sort_search_guarded_indices`: the median idiom `mid := len(arr)/2` after an empty-return guard is already covered by `_LEN_DIV` + `min_len`, and `sort.Search` result indices are covered by the ordinary `i < len(files)` condition guard (closure bodies stay out of dataflow scope).
