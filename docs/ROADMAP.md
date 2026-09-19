@@ -554,8 +554,11 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   コピーが *locked copy* になるため非伝播）。`make(chan|map|[]…)` / `&x` / `new(T)` / ident
   エイリアス由来の `:=` は nilable 型事実を seed するため `ch = nil` 等の再 nil 化も追随する
   （`var` 宣言以外でも）。nil chan への `ch <- v`・`<-ch`・`range ch` は panic ではなく
-  ブロックのため対象外（`select` 無効化イディオム）。`defer close(ch)` は即時 close として
-  マークしない（return 時のパニックのみ報告）。契約由来事後条件は本 stage では未着手で、
+  ブロックのため対象外（`select` 無効化イディオム）。`defer close(ch)` / `defer mu.Unlock()`
+  は即時遷移としてマークしないが、登録時点で確定するパニック（nil / closed chan の close、
+  unlocked mutex の Unlock、クロージャ本体内の同種呼出し）は報告する。`*sync.Mutex` /
+  `*sync.RWMutex` の nil 値は `uninit_mutex`（全メソッドがレシーバを deref するため
+  `mu.Unlock()` も確定パニック）。契約由来事後条件は本 stage では未着手で、
   データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
 - テスト: `tests/test_dataflow_facts.py`（定数畳み込み / ガード / 早期 return / ループ条件 /
   到達定義 / `len` 由来値 / エイリアス / クロージャ・アドレス無効化 / 削除ヘルパの旧偽陽性ケース /

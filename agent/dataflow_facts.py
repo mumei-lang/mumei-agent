@@ -84,7 +84,9 @@ _BORROWING_CALLS = re.compile(
 # nil slice, calling a nil ``func`` value, or a method call / type assertion
 # on a nil interface. They ride in ``_Env.held`` like the other resource
 # entries; assignment, ``!= nil`` guards and aliasing adjust them.
-_UNINIT_HELD_KINDS = frozenset({"uninit_ptr", "uninit_slice", "uninit_func", "uninit_iface"})
+_UNINIT_HELD_KINDS = frozenset(
+    {"uninit_ptr", "uninit_slice", "uninit_func", "uninit_iface", "uninit_mutex"}
+)
 # Held entries cleared by a proven-``nonnil`` guard or propagated to aliases.
 # ``uninit_chan`` is nil-able (a ``chan`` var stays nil until ``make``) but is
 # never reported by the uninitialised-use patterns — nil-channel sends block
@@ -127,6 +129,10 @@ def _nilable_kind(type_text: str) -> str | None:
     ``close(ch)`` is ever flagged for it."""
     if type_text.startswith("map["):
         return "nilmap"
+    if type_text in {"*sync.Mutex", "*sync.RWMutex"}:
+        # ``sync.Mutex`` methods dereference the receiver — a nil *Mutex has
+        # no nil-safe method call, so ``mu.Unlock()`` panics too.
+        return "uninit_mutex"
     if type_text.startswith("*"):
         return "uninit_ptr"
     if type_text.startswith("[]"):
@@ -1195,9 +1201,40 @@ class _Walker:
             for value in statement.values:
                 if re.search(r"\.(Unlock|RUnlock|Close)\s*\(", value):
                     for match in re.finditer(r"(&?[A-Za-z_][\w.]*)\.(Unlock|RUnlock|Close)\s*\(", value):
+                        subject = match.group(1).lstrip("&")
+                        if (
+                            match.group(2) in {"Unlock", "RUnlock"}
+                            and ("mutex_unlocked", subject) in env.held
+                        ):
+                            # A deferred / goroutine ``Unlock`` on an unlocked
+                            # mutex still panics when the literal runs.
+                            self.issues.append(
+                                DataflowIssue(
+                                    "unlock_of_unlocked",
+                                    subject,
+                                    match.group(0),
+                                    statement.start,
+                                )
+                            )
                         env.held = {
-                            h for h in env.held if h[1] != match.group(1).lstrip("&")
+                            h
+                            for h in env.held
+                            if h[1] != subject or h[0] in _NILABLE_HELD
                         }
+                for match in re.finditer(r"\bclose\s*\(\s*([\w.]+)\s*\)", value):
+                    subject = match.group(1)
+                    if ("uninit_chan", subject) in env.held:
+                        self.issues.append(
+                            DataflowIssue(
+                                "close_nil_channel", subject, match.group(0), statement.start
+                            )
+                        )
+                    elif ("closed_chan", subject) in env.held:
+                        self.issues.append(
+                            DataflowIssue(
+                                "send_on_closed_channel", subject, match.group(0), statement.start
+                            )
+                        )
             for name in statement.targets:
                 env.kill(name)
             return env, ""
@@ -1235,7 +1272,13 @@ class _Walker:
     def _uninit_use_hit(kind: str, name: str, text: str) -> bool:
         n = re.escape(name)
         word = rf"(?<![\w.]){n}(?![\w])"
-        if kind == "uninit_ptr":
+        if kind in {"uninit_ptr", "uninit_mutex"}:
+            if kind == "uninit_mutex" and re.search(
+                rf"{word}\s*\.\s*(?:Lock|RLock|Unlock|RUnlock)\s*\(", text
+            ):
+                # ``*sync.Mutex`` / ``*sync.RWMutex`` methods dereference the
+                # receiver, so a nil-receiver call panics.
+                return True
             if re.search(rf"{word}\s*\.\s*\w+\b(?!\s*\()", text) or re.search(
                 rf"{word}\s*\[", text
             ):
@@ -1273,7 +1316,6 @@ class _Walker:
             # channels legitimately disable ``select`` cases. Only ``close``
             # (a guaranteed panic) is flagged — handled in ``_expression``.
             return False
-        return False
 
     def _check_transition_text(self, text: str, offset: int, env: _Env) -> None:
         """Flag call-ordering violations against provable state transitions:
@@ -1801,6 +1843,9 @@ class _Walker:
         if _MUTEX_VALUE.match(text):
             env.nonnil.add(target)
             env.held.add(("mutex_unlocked", target))
+            if text.startswith(("&", "new(")):
+                # ``&sync.Mutex{}`` / ``new(sync.Mutex)`` produce ``*Mutex``.
+                env.nilable[target] = "uninit_mutex"
             return
         constant = env.value_of(text, self.constants)
         if constant is not None:
@@ -1987,7 +2032,9 @@ class _Walker:
                     self.issues.append(
                         DataflowIssue("double_lock", subject, value.strip(), offset)
                     )
-                env.held.add(("lock", subject))
+                if ("uninit_mutex", subject) not in env.held:
+                    # A nil *Mutex panics inside Lock — it is never held.
+                    env.held.add(("lock", subject))
                 env.held.discard(("mutex_unlocked", subject))
             else:
                 self._release(value, env, deferred=False, offset=offset)
@@ -2054,6 +2101,14 @@ class _Walker:
         subject = match.group(1).lstrip("&")
         if deferred:
             env.held.add(("deferred", subject))
+            if (
+                match.group(2) in {"Unlock", "RUnlock"}
+                and ("mutex_unlocked", subject) in env.held
+            ):
+                # ``defer mu.Unlock()`` on an unlocked mutex panics at return.
+                self.issues.append(
+                    DataflowIssue("unlock_of_unlocked", subject, value.strip(), offset)
+                )
             return
         was_locked = ("lock", subject) in env.held
         was_unlocked = ("mutex_unlocked", subject) in env.held

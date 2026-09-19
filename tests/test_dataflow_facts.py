@@ -1436,3 +1436,79 @@ def test_nil_reassign_after_open_is_reported() -> None:
         "}\n"
     )
     assert _uninit_messages(source)
+
+
+def test_deferred_unlock_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    defer mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_deferred_unlock_of_locked_mutex_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    defer mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked") == []
+
+
+def test_nil_mutex_pointer_unlock_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu *sync.Mutex\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source)
+
+
+def test_closure_unlock_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    defer func() { mu.Unlock() }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_closure_close_of_nil_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    var ch chan int\n"
+        "    defer func() { close(ch) }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel")
+
+
+def test_send_on_closed_channel_in_for_post_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    for i := 0; i < 3; ch <- 1 {\n"
+        "        i++\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
