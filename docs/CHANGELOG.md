@@ -6,7 +6,7 @@
 - Nil-channel sends / receives / `range` are never reported (they block rather than panic — the `select`-disable idiom); `defer close(ch)` does not mark the channel closed (only its guaranteed panic at return is flagged). `nil`-able held entries survive `x.Close()`/`x.Unlock()` so a still-nil `var f *os.File` keeps flagging later dereferences.
 - Terminal-state markers propagate through `x2 := x` aliases and `x.Close()` / `close(x)` mark the whole alias cluster; `make(chan|map|slice)` / `&x` / `new(T)` / ident-alias `:=` definitions seed `nilable` type facts so a later `x = nil` re-marks even non-`var` locals.
 - `defer mu.Unlock()` / `defer func(){ mu.Unlock() }()` / `go close(ch)` / `go func(){ ch <- v }()` forms are checked at registration: a deferred/goroutine `Unlock` on an unlocked mutex or `close`/send on a nil/closed channel still panics when the deferred call or goroutine runs. `*sync.Mutex` / `*sync.RWMutex` nil values use the dedicated `uninit_mutex` kind — every mutex method dereferences its receiver so nil-receiver `mu.Unlock()` panics (and a nil mutex is never recorded as locked).
-- Regression gate: `tests/test_dataflow_facts.py` (+39 cases), `tests/test_foreign_code.py` / `tests/test_cross_validation.py` unchanged pass; full suite green.
+- Regression gate: `tests/test_dataflow_facts.py` (+42 cases), `tests/test_foreign_code.py` / `tests/test_cross_validation.py` unchanged pass; full suite green.
 
 ## 2026-09-18: A-6 follow-up — `uninitialized_use` dataflow category
 

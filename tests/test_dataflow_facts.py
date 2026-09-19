@@ -1589,3 +1589,48 @@ def test_deferred_cleanup_call_preserves_unlocked_state() -> None:
         "}\n"
     )
     assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_go_unlock_does_not_release_lock_for_exit_check() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    go mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    issues = _detect_go_safety_issues(source)
+    assert any(
+        issue.counterexample.get("category") == "lock_held_at_return"
+        for issue in issues
+    )
+
+
+def test_go_closure_does_not_discard_tracked_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var f *os.File\n"
+        "    f.Close()\n"
+        "    go func() { f.Close() }()\n"
+        "    f.Read()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_defer_closure_preserves_closed_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var f *os.File\n"
+        "    f.Close()\n"
+        "    defer func() { f.Close() }()\n"
+        "    f.Read()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")

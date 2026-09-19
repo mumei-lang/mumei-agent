@@ -1196,11 +1196,27 @@ class _Walker:
         if kind in {"defer", "go"}:
             # ``go f()`` defers evaluation to a goroutine like ``defer`` — a
             # ``Unlock`` on an unlocked mutex or ``close`` on a nil/closed
-            # channel still panics, just when the goroutine runs.
+            # channel still panics when the goroutine runs. Unlike ``defer``
+            # it does NOT run at return, so it must not mark the call deferred
+            # or release the tracked state.
             for value in statement.values:
-                self._release(value, env, deferred=True, offset=statement.start)
+                self._release(
+                    value,
+                    env,
+                    deferred=True,
+                    offset=statement.start,
+                    at_return=kind == "defer",
+                )
             return env, ""
         if kind == "closure":
+            # ``defer func(){…}()`` runs at return — a release inside it may be
+            # treated like ``defer x.M()``. ``go func(){…}()`` may never run
+            # before return, so it can only *flag* guaranteed panics; it must
+            # not discard tracked state.
+            runs_at_return = statement.text.lstrip().startswith("defer")
+            preserved = _NILABLE_HELD | {
+                "closed_file", "closed_chan", "mutex_unlocked"
+            }
             for value in statement.values:
                 if re.search(r"\.(Unlock|RUnlock|Close)\s*\(", value):
                     for match in re.finditer(r"(&?[A-Za-z_][\w.]*)\.(Unlock|RUnlock|Close)\s*\(", value):
@@ -1219,11 +1235,12 @@ class _Walker:
                                     statement.start,
                                 )
                             )
-                        env.held = {
-                            h
-                            for h in env.held
-                            if h[1] != subject or h[0] in _NILABLE_HELD
-                        }
+                        if runs_at_return:
+                            env.held = {
+                                h
+                                for h in env.held
+                                if h[1] != subject or h[0] in preserved
+                            }
                 for match in re.finditer(r"\bclose\s*\(\s*([\w.]+)\s*\)", value):
                     subject = match.group(1)
                     if ("uninit_chan", subject) in env.held:
@@ -2078,12 +2095,21 @@ class _Walker:
         root = env.root(name)
         return {name, root} | {a for a in env.aliases if env.root(a) == root}
 
-    def _release(self, value: str, env: _Env, *, deferred: bool, offset: int = 0) -> None:
+    def _release(
+        self,
+        value: str,
+        env: _Env,
+        *,
+        deferred: bool,
+        offset: int = 0,
+        at_return: bool = True,
+    ) -> None:
         match = re.match(r"^(&?[A-Za-z_][\w.]*)\.(Unlock|RUnlock|Close)\s*\(", value.strip())
         if not match:
             if deferred:
                 # ``defer func() { ... }()`` / ``defer cleanup(f)`` — treat any
-                # resource mentioned as released to stay conservative. A
+                # resource mentioned as released to stay conservative (not for
+                # ``go``, which may never run before return). A
                 # deferred ``close(ch)`` on a nil channel still panics at
                 # return, so it is reported even here.
                 for held in list(env.held):
@@ -2102,10 +2128,14 @@ class _Walker:
                                 offset,
                             )
                         )
-                    elif held[0] not in _NILABLE_HELD | {
-                        "closed_file", "closed_chan", "mutex_unlocked"
-                    } and re.search(
-                        rf"(?<![\w.]){re.escape(held[1])}(?![\w])", value
+                    elif (
+                        at_return
+                        and held[0] not in _NILABLE_HELD | {
+                            "closed_file", "closed_chan", "mutex_unlocked"
+                        }
+                        and re.search(
+                            rf"(?<![\w.]){re.escape(held[1])}(?![\w])", value
+                        )
                     ):
                         # ``closed_*`` states are terminal and ``mutex_unlocked``
                         # is a may-fact — a deferred call cannot make them
@@ -2116,12 +2146,14 @@ class _Walker:
             return
         subject = match.group(1).lstrip("&")
         if deferred:
-            env.held.add(("deferred", subject))
+            if at_return:
+                env.held.add(("deferred", subject))
             if (
                 match.group(2) in {"Unlock", "RUnlock"}
                 and ("mutex_unlocked", subject) in env.held
             ):
-                # ``defer mu.Unlock()`` on an unlocked mutex panics at return.
+                # ``defer mu.Unlock()`` on an unlocked mutex panics at return
+                # (``go`` runs it in a goroutine — the panic is the same).
                 self.issues.append(
                     DataflowIssue("unlock_of_unlocked", subject, value.strip(), offset)
                 )
