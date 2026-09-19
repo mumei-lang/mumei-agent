@@ -224,10 +224,6 @@ def measure_one(
             entry["lean_verified_forced"] = _count_verified(
                 upgraded, set(forced_names)
             )
-            if forced_names:
-                upgraded = _restore_forced_misses(
-                    cert, upgraded, set(forced_names)
-                )
         entry["bridge"] = {
             key: bridge_result.get(key)
             for key in (
@@ -242,6 +238,10 @@ def measure_one(
                 "ai_proof_residual",
             )
         }
+    if forced_names:
+        # Whether the bridge produced a lean_cert or failed outright, a
+        # forced atom that did not reach lean_verified keeps its Z3 verdict.
+        upgraded = _restore_forced_misses(cert, upgraded, set(forced_names))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(upgraded, indent=2, ensure_ascii=False), encoding="utf-8")
     entry["certificate"] = str(out)
