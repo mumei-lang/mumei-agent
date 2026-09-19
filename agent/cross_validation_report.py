@@ -191,14 +191,18 @@ def _verification_kind_tag(text: str) -> str:
         or _has_stem(text, "unauthorized")
     ):
         return "access-control"
-    if _has_stem(text, "divid") or _has_stem(text, "division") or "by zero" in text:
+    if (
+        (_has_stem(text, "divid") and not _has_stem(text, "dividend"))
+        or _has_stem(text, "division")
+        or "by zero" in text
+    ):
         return "division"
     # Contract-level satisfiability failures outrank the null/balance keyword
     # buckets: serialized verify evidence often contains bare `None`/`null`
     # fields that would otherwise route an unsat finding to the null template.
     if (
         _has_stem(text, "unsatisfi")
-        or _has_word(text, "inconsistent")
+        or _has_stem(text, "inconsisten")
         or _has_stem(text, "unsat")
     ):
         return "unsatisfiable"
@@ -300,8 +304,6 @@ _CONTRACT_COMMENT_PREFIX = {
     "solidity": "//",
 }
 
-_BACKTICK_EXPR_RE = re.compile(r"`(?P<expr>[^`]+)`")
-
 
 def _verification_condition(
     tag: str, message: str, language: str
@@ -324,13 +326,13 @@ def _verification_condition(
         )
         return f"0 <= {index} && {index} < {length}"
     if tag == "division":
-        divided = re.search(r"divide by `?(?P<divisor>[A-Za-z_]\w*)`?", message)
+        divided = re.search(r"divide by `(?P<divisor>[A-Za-z_]\w*)`", message)
         if not divided:
             return None
         return f"{divided.group('divisor')} != 0"
     if tag == "overflow":
         overflowed = re.search(
-            r"overflow `?(?P<left>[A-Za-z_]\w*)\s*\+\s*(?P<right>[A-Za-z_]\w*)`?",
+            r"overflow `(?P<left>[A-Za-z_]\w*)\s*\+\s*(?P<right>[A-Za-z_]\w*)`",
             message,
         )
         if not overflowed:
@@ -339,7 +341,7 @@ def _verification_condition(
         left, right = overflowed.group("left"), overflowed.group("right")
         return f"{left} + {right} <= {bound}"
     if tag == "null-safety":
-        deref = re.search(r"dereference `?(?P<value>[A-Za-z_]\w*(?:\.\w+)*)`?", message)
+        deref = re.search(r"dereference `(?P<value>[A-Za-z_]\w*(?:\.\w+)*)`", message)
         if not deref:
             return None
         value = deref.group("value")
