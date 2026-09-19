@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-19: A-5 suppression-helper reduction — second batch
+
+- Removed `_go_median_guarded_indices` and `_go_sort_search_guarded_indices`: the median idiom `mid := len(arr)/2` after an empty-return guard is already covered by `_LEN_DIV` + `min_len`, and `sort.Search` result indices are covered by the ordinary `i < len(files)` condition guard (closure bodies stay out of dataflow scope).
+- Two generic fact fixes in `agent/dataflow_facts.py` make `:=` symmetric with `=`: `x := len(c)`/`len(c)±k` now seeds `len_values` (previously only `_assign` recorded it), and a midpoint rule bounds `(a+b)>>k`/`(a+b)/k` when both terms are non-negative `lt_len`/`len_values` of the same container with at least one strict side — covers binary-search midpoints whose bounds don't need the loop-invariant helper.
+- Kept (verified not generically replaceable): `_go_binary_search_guarded_indices` (loop-invariant `hi = m` narrowing kills `len_values` before the condition applies), `_go_enum_string_guarded_indices` / `_go_enum_string_array_guarded_indices` (`iota` enum constants are unresolved, so range-guard upper bounds can't be proved), `_go_bits_uint8_lookup_guarded_indices` (lookup tables are undeclared in the analysed source and `uint8 < 256` type upper bounds aren't modelled).
+- Regression gate: `tests/test_dataflow_facts.py` (+3 pinned cases); full suite green.
+
 ## 2026-09-19: A-6 final kind — contract-derived postcondition reaching-defs
 
 - New category `contract_output_unassigned`: identifiers referenced by a function's doc-comment `ensures:` / `@ensures` / `postcondition:` contract that are named results (`func f() (r int, err error)`) or `*T` output params are checked against a new `_Env.defined` *must-assign* fact (intersected at merges). A `return` (or named-result fall-off-end) on a path that never `=`-assigned the name reports the unestablished postcondition.
