@@ -2174,3 +2174,111 @@ def test_audit_reports_underspecified_intent_without_downgrading_the_verdict(
     # The stored text report is rendered after the step is recorded, so every
     # output format carries the same clarification request.
     assert "underspecified" in result.report
+
+
+def _financial_forge_spec(requires: str, ensures: str) -> dict[str, object]:
+    return {
+        "task_id": "audit-payment",
+        "target_file": "audit/payment.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "withdraw",
+                "inputs": [
+                    {"name": "balance", "type": "i64"},
+                    {"name": "amount", "type": "i64"},
+                ],
+                "return_type": "i64",
+                "requires": requires,
+                "ensures": ensures,
+            }
+        ],
+    }
+
+
+def test_audit_domain_hint_emits_domain_completeness_issues(
+    tmp_path: Path,
+) -> None:
+    """V1-A-2: `audit --domain-hint financial` flags checklist items the
+    extracted spec does not cover, inside spec_health_issues (no new keys)."""
+    source = tmp_path / "payment.sol"
+    source.write_text(
+        "function withdraw(uint256 amount) public returns (uint256) {\n"
+        "    return amount;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    spec = _financial_forge_spec(
+        requires="amount > 0 && amount >= 0 && balance >= amount",
+        ensures="result == balance - amount",
+    )
+
+    result = _ambiguity_pipeline(
+        "withdraw moves funds between accounts", spec
+    ).audit_file(source, "solidity", domain_hint="financial")
+
+    domain_issues = [
+        issue
+        for issue in result.spec_health_issues
+        if issue.startswith("domain-completeness:")
+    ]
+    assert domain_issues == [
+        "domain-completeness: financial spec lacks balance conservation "
+        "(残高保存則（送受信合計が不変）; expected in ensures)"
+    ]
+    assert result.success is False
+    # Domain completeness stays a spec-health finding, not a code violation.
+    assert not any(
+        "domain-completeness" in violation
+        for violation in result.verification_violations
+    )
+
+
+def test_audit_domain_hint_quiet_when_checklist_is_covered(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "payment.sol"
+    source.write_text(
+        "function withdraw(uint256 amount) public returns (uint256) {\n"
+        "    return amount;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    spec = _financial_forge_spec(
+        requires="amount > 0 && amount >= 0 && balance >= amount",
+        ensures="old(balance) == result + amount",
+    )
+
+    result = _ambiguity_pipeline(
+        "withdraw moves funds between accounts", spec
+    ).audit_file(source, "solidity", domain_hint="financial")
+
+    assert not any(
+        issue.startswith("domain-completeness:")
+        for issue in result.spec_health_issues
+    )
+
+
+def test_audit_without_domain_hint_emits_no_domain_issues(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "payment.sol"
+    source.write_text(
+        "function withdraw(uint256 amount) public returns (uint256) {\n"
+        "    return amount;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    spec = _financial_forge_spec(
+        requires="amount > 0",
+        ensures="result == balance - amount",
+    )
+
+    result = _ambiguity_pipeline(
+        "withdraw moves funds between accounts", spec
+    ).audit_file(source, "solidity")
+
+    assert not any(
+        issue.startswith("domain-completeness:")
+        for issue in result.spec_health_issues
+    )

@@ -88,6 +88,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     extract_solidity_access_control_atoms,
     extract_solidity_cei_atoms,
 )
+from agent.spec_completeness_checker import check_forge_spec_domain_completeness
 from agent.strategies.spec_health_strategy import SpecHealthChecker, SpecHealthReport
 
 SUPPORTED_AUDIT_LANGUAGES = ("python", "rust", "typescript", "go", "solidity")
@@ -287,6 +288,20 @@ class AuditPipeline:
                 spec_path.write_text(spec_source, encoding="utf-8")
                 health_report = self._check_spec_health(spec_path, tmp)
                 spec_health_issues = _spec_health_issue_strings(health_report)
+
+            # V1-A-2: with a domain hint the extracted spec is also checked
+            # against the domain's required-condition checklist; missing
+            # conditions land in spec_health_issues as domain-completeness
+            # entries. next_steps remains the only human-review entrypoint.
+            if domain_hint:
+                spec_health_issues = [
+                    *spec_health_issues,
+                    *check_forge_spec_domain_completeness(
+                        extraction.forge_task_spec,
+                        domain_hint,
+                        spec_text=extraction.natural_language_spec or "",
+                    ),
+                ]
 
             proof_certificate = (
                 build_solidity_guard_trace_proof_certificate(

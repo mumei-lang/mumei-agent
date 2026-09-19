@@ -24,6 +24,7 @@ from agent.cross_validation import (
     validate_spec_to_code,
 )
 from agent.conformance_verifier import verify_conformance
+from agent.cross_validation_report import _suggest_fix
 from agent.report_formatter import format_cross_validation_report
 from agent.verify_conformance import (
     _emit as emit_conformance_report,
@@ -203,6 +204,107 @@ def test_validate_foreign_code_reports_solidity_reentrancy_and_access_control() 
     assert any("setOwner" in message and "access-control guard" in message for message in messages)
     assert all("withdrawAll" not in message for message in messages)
     assert all("getBalance" not in message for message in messages)
+
+
+def test_validate_foreign_code_emits_fix_suggestions_for_violations() -> None:
+    """V1-B-3: every validate-code violation carries a concrete fix hint inside
+    the existing issue structure (no new top-level keys, no auto-apply)."""
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            source,
+            "solidity",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+
+    assert result.issues
+    assert all(issue.fix_suggestion for issue in result.issues)
+    reentrancy = next(
+        issue for issue in result.issues if "reentrancy" in issue.message
+    )
+    assert "nonReentrant" in reentrancy.fix_suggestion
+    access = next(
+        issue for issue in result.issues if "access-control" in issue.message
+    )
+    assert "onlyOwner" in access.fix_suggestion
+    assert "msg.sender" in access.fix_suggestion
+
+
+def test_validate_foreign_code_mumei_failure_carries_fix_suggestion(tmp_path: Path) -> None:
+    source = tmp_path / "unsat.go"
+    source.write_text(
+        "package demo\nfunc size(input []byte) int { return len(input) + 1 }\n",
+        encoding="utf-8",
+    )
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {"status": "failed"},
+        "stdout": "",
+        "stderr": "verification failed",
+    }
+
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            source.read_text(encoding="utf-8"),
+            "go",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+
+    verification_issues = [issue for issue in result.issues if issue.kind == "verification"]
+    assert verification_issues
+    assert all(issue.fix_suggestion for issue in verification_issues)
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "Solidity function `withdraw` may be vulnerable to reentrancy",
+            "nonReentrant",
+        ),
+        (
+            "function has no access-control guard",
+            "onlyOwner",
+        ),
+        (
+            "division may divide by zero",
+            "divisor != 0",
+        ),
+        (
+            "addition can overflow the declared type",
+            "max_value - b",
+        ),
+        (
+            "index expression without a bounds contract",
+            "0 <= index",
+        ),
+        (
+            "withdraw can return a balance that goes negative",
+            "amount > 0",
+        ),
+        (
+            "the inferred contract is unsatisfiable",
+            "unsatisfiable",
+        ),
+    ],
+)
+def test_suggest_fix_verification_templates(message: str, expected: str) -> None:
+    suggestion = _suggest_fix("verification", message, "")
+
+    assert expected in suggestion
 
 
 def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
