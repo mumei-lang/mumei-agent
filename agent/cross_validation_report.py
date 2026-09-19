@@ -229,6 +229,25 @@ def _verification_kind_tag(text: str) -> str:
         or _has_stem(text, "amount")
     ):
         return "amount"
+    # V1-B-2 language-pattern advisories (agent/language_patterns.py). These
+    # key on phrases distinctive to those messages so they cannot steal
+    # routing from the dataflow buckets above.
+    if "mutable default" in text:
+        return "mutable_default"
+    if "swallow" in text:
+        return "swallow_except"
+    if "can panic via" in text:
+        return "unwrap_panic"
+    if "inside a loop" in text:
+        return "defer_in_loop"
+    if "floating promise" in text:
+        return "floating_promise"
+    if "tx.origin" in text:
+        return "tx_origin"
+    if "selfdestruct" in text:
+        return "selfdestruct"
+    if "low-level call" in text:
+        return "unchecked_call"
     return "generic"
 
 
@@ -267,6 +286,44 @@ _VERIFICATION_FIX_TEXT = {
         "Add a `requires` clause keeping amounts positive and balances "
         "sufficient (e.g. `requires: amount > 0 && balance >= amount;`) "
         "before the state update."
+    ),
+    "mutable_default": (
+        "Replace the mutable default with `None` and initialize it inside "
+        "the function body (e.g. `items = items if items is not None else []`)."
+    ),
+    "swallow_except": (
+        "Catch a narrower exception type and handle or re-raise it — a "
+        "bare or empty handler hides real failures from verification."
+    ),
+    "unwrap_panic": (
+        "Add a contract that the value is `Ok`/`Some` (e.g. "
+        "`requires: opt.is_some();`) or replace `unwrap()`/`expect()` with "
+        "`?`, `match`, or `unwrap_or(...)`."
+    ),
+    "defer_in_loop": (
+        "Move the `defer` out of the loop — e.g. into a helper invoked per "
+        "iteration — so the resource is released each iteration instead of "
+        "at function return."
+    ),
+    "floating_promise": (
+        "`await` the call, `return` the promise, attach `.catch(...)`, or "
+        "mark it intentional with `void` — an unobserved rejection escapes "
+        "verification."
+    ),
+    "tx_origin": (
+        "Replace `tx.origin` authorization with `msg.sender` — `tx.origin` "
+        "identifies the originating EOA and is phishable through "
+        "intermediate contracts."
+    ),
+    "selfdestruct": (
+        "Confirm `selfdestruct` is behind a strict authorization guard and "
+        "document the storage-removal plan (post-Cancun it only sweeps the "
+        "balance unless executed in the creating transaction)."
+    ),
+    "unchecked_call": (
+        "Check the low-level call's success flag (e.g. `(bool ok, ) = "
+        "target.call(...); require(ok);`) or use a higher-level transfer "
+        "wrapper."
     ),
 }
 
