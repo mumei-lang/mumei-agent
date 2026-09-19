@@ -1512,3 +1512,53 @@ def test_send_on_closed_channel_in_for_post_is_reported() -> None:
         "}\n"
     )
     assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_go_close_of_nil_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    var ch chan int\n"
+        "    go close(ch)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel")
+
+
+def test_go_unlock_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    go mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_closure_send_on_closed_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    go func() { ch <- 1 }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_closure_receive_on_closed_channel_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Pull() int {\n"
+        "    ch := make(chan int)\n"
+        "    close(ch)\n"
+        "    go func() { v := <-ch; _ = v }()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel") == []

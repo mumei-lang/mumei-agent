@@ -1193,9 +1193,12 @@ class _Walker:
         if kind == "var":
             self._var(statement, env)
             return env, ""
-        if kind == "defer":
+        if kind in {"defer", "go"}:
+            # ``go f()`` defers evaluation to a goroutine like ``defer`` — a
+            # ``Unlock`` on an unlocked mutex or ``close`` on a nil/closed
+            # channel still panics, just when the goroutine runs.
             for value in statement.values:
-                self._release(value, env, deferred=True)
+                self._release(value, env, deferred=True, offset=statement.start)
             return env, ""
         if kind == "closure":
             for value in statement.values:
@@ -1230,6 +1233,14 @@ class _Walker:
                             )
                         )
                     elif ("closed_chan", subject) in env.held:
+                        self.issues.append(
+                            DataflowIssue(
+                                "send_on_closed_channel", subject, match.group(0), statement.start
+                            )
+                        )
+                for match in re.finditer(r"(?<![\w<-])\b([\w.]+)\s*<-", value):
+                    subject = match.group(1)
+                    if ("closed_chan", subject) in env.held:
                         self.issues.append(
                             DataflowIssue(
                                 "send_on_closed_channel", subject, match.group(0), statement.start
