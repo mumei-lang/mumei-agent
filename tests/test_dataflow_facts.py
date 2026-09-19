@@ -280,9 +280,12 @@ def test_extract_statements_returns_none_for_unsupported_language() -> None:
         # is guarded by ``i < len(files)`` before use
         "package demo\nfunc lookup(files []file, name string) *file {\n    if len(files) == 0 {\n        return nil\n    }\n    i := sortSearch(len(files), func(i int) bool {\n        return files[i].name >= name\n    })\n    if i < len(files) && files[i].name == name {\n        return &files[i]\n    }\n    return nil\n}\n",
         # binary-search midpoint whose bounds come from len-alias facts alone
-        # (``hi`` never reassigned, so ``lo < hi`` makes ``lo`` lt_len(arr) and
-        # ``(lo+hi)>>1`` stays bounded without the dedicated helper)
-        "package demo\nvar arr []int\nfunc Mid(lo0 int) int {\n    lo := lo0\n    hi := len(arr)\n    for lo < hi {\n        m := int(uint(lo+hi) >> 1)\n        if arr[m] == 0 {\n            return m\n        }\n        lo = m\n    }\n    return -1\n}\n",
+        # (``lo`` never reassigned in the loop body, so ``lo < hi`` keeps
+        # ``lt_len(lo, arr)`` and ``(lo+hi)>>1`` stays bounded without the
+        # dedicated helper). The index is in ``return`` position — a scanned
+        # expression shape; the ``lo = m`` narrowing idiom itself still needs
+        # the ``_go_binary_search_guarded_indices`` helper.
+        "package demo\nvar arr []int\nfunc Mid(lo uint) int {\n    hi := len(arr)\n    for lo < hi {\n        m := int(uint(lo+hi) >> 1)\n        if m == 0 {\n            return arr[m]\n        }\n    }\n    return -1\n}\n",
     ],
 )
 def test_historical_false_positives_are_suppressed_by_dataflow(source: str) -> None:
