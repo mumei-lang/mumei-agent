@@ -26,7 +26,9 @@ their regex fallbacks.
 
 The same walk also derives the resource / initialisation facts behind the
 new bug categories (nil-map assignment, lock held at return / double lock,
-resource opened but never released, use of uninitialised nil-able values).
+resource opened but never released, use of uninitialised nil-able values,
+and guard-state call ordering: use after ``Close``, sends on / re-close of a
+closed channel, ``close`` of a nil channel, ``Unlock`` of an unlocked mutex).
 Unlike the safety facts these are
 *may*-path findings: a single path on which the map is still nil / the lock
 is still held / the handle is still open at the exit is reported, because a
@@ -84,7 +86,26 @@ _BORROWING_CALLS = re.compile(
 # entries; assignment, ``!= nil`` guards and aliasing adjust them.
 _UNINIT_HELD_KINDS = frozenset({"uninit_ptr", "uninit_slice", "uninit_func", "uninit_iface"})
 # Held entries cleared by a proven-``nonnil`` guard or propagated to aliases.
-_NILABLE_HELD = _UNINIT_HELD_KINDS | {"nilmap"}
+# ``uninit_chan`` is nil-able (a ``chan`` var stays nil until ``make``) but is
+# never reported by the uninitialised-use patterns — nil-channel sends block
+# rather than panic, and nil channels are an idiom for disabling ``select``
+# cases. Only ``close(ch)`` on it is a guaranteed panic.
+_NILABLE_HELD = _UNINIT_HELD_KINDS | {"nilmap", "uninit_chan"}
+# ``x.M(...)`` on a handle already ``Close()``-d on this path is a guaranteed
+# failure for the common ``io.Closer`` types (``*os.File`` returns
+# ``os.ErrClosed`` / ``ErrInvalid``, ``net.Conn`` errors, ...). Methods that
+# stay meaningful post-close (``Name``, ``LocalAddr``, ...) are excluded.
+_CLOSED_FILE_METHODS = frozenset(
+    {
+        "Read", "ReadAt", "ReadFrom", "Readdir", "Readdirnames",
+        "Write", "WriteAt", "WriteString", "WriteTo",
+        "Seek", "Stat", "Sync", "Truncate", "Chmod", "Chown", "Fd", "Close",
+        "SetDeadline", "SetReadDeadline", "SetWriteDeadline",
+    }
+)
+# Values that create a provably-unlocked mutex (``mutex_unlocked`` held kind).
+_MUTEX_VALUE = re.compile(r"^&?sync\.(?:RW)?Mutex\s*\{\s*\}$|^new\(sync\.(?:RW)?Mutex\)$")
+_MUTEX_TYPES = frozenset({"sync.Mutex", "sync.RWMutex"})
 # Keywords that may appear immediately before ``*p`` in an expression. A
 # preceding identifier / ``)`` / ``]`` means the ``*`` is multiplication.
 _DEREF_PREFIX_KEYWORDS = frozenset(
@@ -95,8 +116,9 @@ _DEREF_PREFIX_KEYWORDS = frozenset(
 def _nilable_kind(type_text: str) -> str | None:
     """Held kind for a ``var``-declared nil-able ``type_text``, or ``None``.
 
-    ``chan`` is deliberately excluded: nil-channel sends block rather than
-    panic, and nil channels are an idiom for disabling ``select`` cases."""
+    ``chan`` yields ``uninit_chan``: sends/receives on a nil channel block
+    rather than panic and nil channels disable ``select`` cases, so only
+    ``close(ch)`` is ever flagged for it."""
     if type_text.startswith("map["):
         return "nilmap"
     if type_text.startswith("*"):
@@ -105,6 +127,8 @@ def _nilable_kind(type_text: str) -> str | None:
         return "uninit_slice"
     if type_text.startswith("func"):
         return "uninit_func"
+    if type_text.startswith("chan") or type_text.startswith("<-chan"):
+        return "uninit_chan"
     if type_text in {"error", "any"} or type_text.startswith("interface"):
         return "uninit_iface"
     return None
@@ -917,7 +941,9 @@ def _freeze(env: _Env) -> PathFacts:
 class DataflowIssue:
     """A bug found by the dataflow layer alone (new categories)."""
 
-    category: str  # "nil_map_write" | "lock_held_at_return" | "double_lock" | "resource_leak" | "uninitialized_use"
+    category: str  # "nil_map_write" | "lock_held_at_return" | "double_lock" | "resource_leak"
+    # | "uninitialized_use" | "send_on_closed_channel" | "close_nil_channel"
+    # | "use_after_close" | "unlock_of_unlocked"
     subject: str
     statement: str
     offset: int
@@ -1080,11 +1106,26 @@ class _Walker:
         }:
             for text in (*statement.targets, *statement.values):
                 self._check_uninit_text(text, statement.start, env)
+                self._check_transition_text(text, statement.start, env)
         elif kind in {"var", "range"}:
             for value in statement.values:
                 self._check_uninit_text(value, statement.start, env)
+                self._check_transition_text(value, statement.start, env)
         elif kind in {"if", "for", "switch"} and statement.condition:
             self._check_uninit_text(statement.condition, statement.start, env)
+            self._check_transition_text(statement.condition, statement.start, env)
+        if kind == "other":
+            # Send statements surface as ``other`` with no values.
+            send = re.match(r"\s*([\w.]+)\s*<-", statement.text)
+            if send and ("closed_chan", send.group(1)) in env.held:
+                self.issues.append(
+                    DataflowIssue(
+                        "send_on_closed_channel",
+                        send.group(1),
+                        statement.text.strip(),
+                        statement.start,
+                    )
+                )
         if kind == "return":
             self._on_return(statement, env)
             return env, kind
@@ -1217,7 +1258,45 @@ class _Walker:
         if kind == "uninit_iface":
             # ``i.m(...)`` / ``i.(T)`` on a nil interface always panics.
             return bool(re.search(rf"{word}\s*\.\s*(?:\w+\s*\(|\()", text))
+        if kind == "uninit_chan":
+            # Sends / receives on a nil channel block but do not panic; nil
+            # channels legitimately disable ``select`` cases. Only ``close``
+            # (a guaranteed panic) is flagged — handled in ``_expression``.
+            return False
         return False
+
+    def _check_transition_text(self, text: str, offset: int, env: _Env) -> None:
+        """Flag call-ordering violations against provable state transitions:
+        a method call on a handle already ``Close()``-d on this path
+        (``use_after_close``) and sends on a closed channel
+        (``send_on_closed_channel``). Each name is reported at most once per
+        statement."""
+        if not text or re.search(r"\bfunc\b", text):
+            # A ``func`` literal's body is not evaluated here.
+            return
+        reported: set[str] = set()
+        for held in sorted(env.held):
+            name = held[1]
+            if name in reported:
+                continue
+            if held[0] == "closed_file":
+                call = re.search(rf"(?<![\w.]){re.escape(name)}\s*\.\s*(\w+)\s*\(", text)
+                if call and call.group(1) in _CLOSED_FILE_METHODS:
+                    reported.add(name)
+                    self.issues.append(
+                        DataflowIssue("use_after_close", name, text.strip(), offset)
+                    )
+            elif held[0] == "closed_chan":
+                # ``close(ch)`` re-close is handled by ``_expression`` (it is
+                # also the call that installs the closed marker), so only
+                # sends are checked here.
+                if re.search(rf"(?<![\w.]){re.escape(name)}\s*<-", text):
+                    reported.add(name)
+                    self.issues.append(
+                        DataflowIssue(
+                            "send_on_closed_channel", name, text.strip(), offset
+                        )
+                    )
 
     def _on_return(self, statement: tree_sitter_extract.Statement, env: _Env) -> None:
         keys = set()
@@ -1467,6 +1546,14 @@ class _Walker:
         for case in statement.body:
             for value in case.values:
                 self._check_uninit_text(value, case.start, base)
+                self._check_transition_text(value, case.start, base)
+            if not case.values:
+                # ``select`` comm clauses (``case <-ch:`` / ``case ch <- v:``)
+                # carry no ``values`` — scan the clause text for closed
+                # transitions (``name <-`` sends are checked inside).
+                clause = re.match(r"^\s*case\s+(.+?)\s*:", case.text)
+                if clause:
+                    self._check_transition_text(clause.group(1), case.start, base)
             case_env = base.copy()
             if case.kind == "default":
                 has_default = True
@@ -1570,6 +1657,8 @@ class _Walker:
             env.held.add((kind, name))
             if kind == "uninit_slice":
                 env.slices.add(name)
+        elif type_text in _MUTEX_TYPES:
+            env.held.add(("mutex_unlocked", name))
         elif type_text in _GO_INT_TYPES:
             env.set_const(name, 0)
         elif type_text.startswith("[") or type_text == "string":
@@ -1682,6 +1771,10 @@ class _Walker:
                     env.slices.add(target)
                 return
             # otherwise an ordinary ``f(nil)`` call — normal handling below
+        if _MUTEX_VALUE.match(text):
+            env.nonnil.add(target)
+            env.held.add(("mutex_unlocked", target))
+            return
         constant = env.value_of(text, self.constants)
         if constant is not None:
             env.set_const(target, constant)
@@ -1868,19 +1961,55 @@ class _Walker:
                         DataflowIssue("double_lock", subject, value.strip(), offset)
                     )
                 env.held.add(("lock", subject))
+                env.held.discard(("mutex_unlocked", subject))
             else:
-                self._release(value, env, deferred=False)
+                self._release(value, env, deferred=False, offset=offset)
+            return
+        close_call = re.match(r"^close\s*\(\s*([\w.]+)\s*\)\s*$", value.strip())
+        if close_call:
+            # ``close(ch)`` panics on a nil channel and on an already-closed
+            # channel; afterwards ``ch <- v`` / ``close(ch)`` panic.
+            subject = close_call.group(1)
+            if ("uninit_chan", subject) in env.held:
+                self.issues.append(
+                    DataflowIssue("close_nil_channel", subject, value.strip(), offset)
+                )
+            elif ("closed_chan", subject) in env.held:
+                self.issues.append(
+                    DataflowIssue(
+                        "send_on_closed_channel", subject, value.strip(), offset
+                    )
+                )
+            env.held.add(("closed_chan", subject))
+            env.held.discard(("uninit_chan", subject))
             return
         self._escape(value, env)
 
-    def _release(self, value: str, env: _Env, *, deferred: bool) -> None:
+    def _release(self, value: str, env: _Env, *, deferred: bool, offset: int = 0) -> None:
         match = re.match(r"^(&?[A-Za-z_][\w.]*)\.(Unlock|RUnlock|Close)\s*\(", value.strip())
         if not match:
             if deferred:
                 # ``defer func() { ... }()`` / ``defer cleanup(f)`` — treat any
-                # resource mentioned as released to stay conservative.
+                # resource mentioned as released to stay conservative. A
+                # deferred ``close(ch)`` on a nil channel still panics at
+                # return, so it is reported even here.
                 for held in list(env.held):
-                    if held[0] not in _NILABLE_HELD and re.search(
+                    if (
+                        held[0] in {"uninit_chan", "closed_chan"}
+                        and re.search(
+                            rf"\bclose\s*\(\s*{re.escape(held[1])}\s*\)", value
+                        )
+                    ):
+                        self.issues.append(
+                            DataflowIssue(
+                                "close_nil_channel" if held[0] == "uninit_chan"
+                                else "send_on_closed_channel",
+                                held[1],
+                                value.strip(),
+                                offset,
+                            )
+                        )
+                    elif held[0] not in _NILABLE_HELD and re.search(
                         rf"(?<![\w.]){re.escape(held[1])}(?![\w])", value
                     ):
                         env.held.discard(held)
@@ -1890,8 +2019,26 @@ class _Walker:
         subject = match.group(1).lstrip("&")
         if deferred:
             env.held.add(("deferred", subject))
+            return
+        was_locked = ("lock", subject) in env.held
+        was_unlocked = ("mutex_unlocked", subject) in env.held
+        # ``Unlock``/``Close`` end the state but never initialise the variable
+        # itself, so nil-able markers (``var f *os.File`` stays nil) survive.
+        env.held = {
+            h for h in env.held if h[1] != subject or h[0] in _NILABLE_HELD
+        }
+        if match.group(2) == "Close":
+            env.held.add(("closed_file", subject))
         else:
-            env.held = {h for h in env.held if h[1] != subject}
+            # A successful ``Unlock`` leaves the mutex unlocked no matter what
+            # it was before; unlocking a provably-unlocked mutex panics.
+            env.held.add(("mutex_unlocked", subject))
+            if was_unlocked and not was_locked:
+                self.issues.append(
+                    DataflowIssue(
+                        "unlock_of_unlocked", subject, value.strip(), offset
+                    )
+                )
 
     # -- entry -----------------------------------------------------------
 

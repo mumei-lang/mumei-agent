@@ -5546,6 +5546,10 @@ _DATAFLOW_ISSUE_MESSAGES = {
     "lock_held_at_return": "returns while `{subject}` is still held (missing unlock on this path)",
     "resource_leak": "returns without closing `{subject}` (resource leak on this path)",
     "uninitialized_use": "uses `{subject}` which is declared but never initialized on this path (nil value use panics)",
+    "send_on_closed_channel": "sends on / re-closes channel `{subject}` which is already closed on this path (panic)",
+    "close_nil_channel": "closes channel `{subject}` which is still nil on this path (close of nil channel panics)",
+    "use_after_close": "uses `{subject}` after `.Close()` on this path (post-close calls fail)",
+    "unlock_of_unlocked": "unlocks `{subject}` which is not locked on this path (unlock of unlocked mutex panics)",
 }
 
 

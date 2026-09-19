@@ -541,9 +541,18 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   報告しない。`var (…)` グループ宣言は extractor が targets を返さないため `_var` が文面を
   行単位でパースして個別 spec に展開する（`nilmap` も同じ経路でカバー）。既知制約: 単一行の
   `var (x T)` は tree-sitter-go が parse error とし関数全体が regex フォールバックに落ちる
-  （`nil_map_write` 等他カテゴリにも共通する従来制約）。状態遷移前提・契約由来
-  事後条件は本 stage では未着手で、データフロー事実だけで
-  閉じない義務は従来どおり `unverifiable` / Lean 送り。
+  （`nil_map_write` 等他カテゴリにも共通する従来制約）。状態遷移前提（ガード状態に
+  依存する呼び出し順序）も対応済み: `close(ch)` 済み channel への `ch <- v` / 再 `close`
+  （`send_on_closed_channel`）、nil channel の `close`（`close_nil_channel`）、
+  `Close()` 済みハンドルの `Read`/`Write`/`Stat` 等の呼び出し（`use_after_close`）、
+  `var mu sync.Mutex`・`sync.Mutex{}`/`new(sync.Mutex)` で未ロックと分かる mutex の
+  `Unlock`/`RUnlock`（`unlock_of_unlocked`）を `_Env.held` の `closed_chan` /
+  `closed_file` / `mutex_unlocked` / `uninit_chan` マーカで追跡する。`Unlock` 成功後は
+  常に unlocked へ遷移するため、仮引数 mutex の 2 回目 `Unlock` も確定パニックとして報告。
+  nil chan への `ch <- v`・`<-ch`・`range ch` は panic ではなくブロックのため対象外
+  （`select` 無効化イディオム）。`defer close(ch)` は即時 close としてマークしない
+  （return 時のパニックのみ報告）。契約由来事後条件は本 stage では未着手で、
+  データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
 - テスト: `tests/test_dataflow_facts.py`（定数畳み込み / ガード / 早期 return / ループ条件 /
   到達定義 / `len` 由来値 / エイリアス / クロージャ・アドレス無効化 / 削除ヘルパの旧偽陽性ケース /
   新バグ種別の正例・偽陽性例）。既存 `tests/test_foreign_code.py` / `tests/test_cross_validation.py`
