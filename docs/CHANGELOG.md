@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-19: A-6 final kind — contract-derived postcondition reaching-defs
+
+- New category `contract_output_unassigned`: identifiers referenced by a function's doc-comment `ensures:` / `@ensures` / `postcondition:` contract that are named results (`func f() (r int, err error)`) or `*T` output params are checked against a new `_Env.defined` *must-assign* fact (intersected at merges). A `return` (or named-result fall-off-end) on a path that never `=`-assigned the name reports the unestablished postcondition.
+- `return <exprs>` satisfies named results positionally (Go requires full coverage), so only `*T` params are checked there; `r := …` shadows and does not establish; `*out = …` / `out.f = …` writes and `f(out)` / `f(&out)` call args establish output params.
+- Regression gate: `tests/test_dataflow_facts.py` (+13 cases); full suite green. This completes the A-6 extension set (uninitialised use, guard-state call ordering, contract-derived postconditions).
+
 ## 2026-09-19: A-6 follow-up — guard-state call-ordering categories
 
 - `agent/dataflow_facts.py` now tracks four more terminal-transition states in `_Env.held` and reports guaranteed-failure call orderings: `send_on_closed_channel` (`ch <- v` or re-`close` after `close(ch)`, including `select` send clauses and deferred `close`), `close_nil_channel` (`close` on a `var ch chan T` still nil), `use_after_close` (error-returning method calls like `Read`/`Write`/`Stat` after `x.Close()`, double `Close` included), and `unlock_of_unlocked` (`Unlock`/`RUnlock` on a mutex provably unlocked — `var mu sync.Mutex`, `sync.Mutex{}`, `new(sync.Mutex)`, or a completed `Unlock`; a successful `Unlock` always transitions to unlocked so a second call panics).

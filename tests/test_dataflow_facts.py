@@ -1634,3 +1634,162 @@ def test_defer_closure_preserves_closed_state() -> None:
         "}\n"
     )
     assert _transition_messages(source, "use_after_close")
+
+
+# --------------------------------------------------------------------------- #
+# contract-derived postcondition reaching-defs
+# --------------------------------------------------------------------------- #
+
+
+def test_named_result_unassigned_on_bare_return_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: r > 0\n"
+        "func F() (r int) {\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_named_result_assigned_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: r > 0\n"
+        "func F() (r int) {\n"
+        "    r = 1\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_named_result_assigned_on_one_path_only_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: r > 0\n"
+        "func F(x int) (r int) {\n"
+        "    if x > 0 {\n"
+        "        r = 1\n"
+        "        return\n"
+        "    }\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_explicit_return_values_satisfy_named_results() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: r > 0\n"
+        "func F() (r int) {\n"
+        "    return 5\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_fall_off_end_leaves_named_result_unassigned() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: r > 0\n"
+        "func F() (r int) {\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_shadowing_define_does_not_establish_result() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: r > 0\n"
+        "func F() (r int) {\n"
+        "    if true {\n"
+        "        r := 9\n"
+        "        _ = r\n"
+        "    }\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_output_param_unwritten_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "// @ensures out >= 0\n"
+        "func G(out *int) {\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_output_param_written_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) {\n"
+        "    *out = 1\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_output_param_passed_to_call_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) {\n"
+        "    fill(out)\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_output_param_still_flagged_on_explicit_return() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) int {\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_ensures_without_matching_name_reports_nothing() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: x > 0\n"
+        "func K(x int) int {\n"
+        "    return x\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_block_comment_ensures_is_parsed() -> None:
+    source = (
+        "package demo\n"
+        "/* Contract.\n"
+        "ensures: r > 0\n"
+        "*/\n"
+        "func F() (r int) {\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_no_contract_reports_nothing() -> None:
+    source = (
+        "package demo\n"
+        "func F() (r int) {\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
