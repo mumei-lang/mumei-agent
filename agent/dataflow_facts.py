@@ -1137,7 +1137,10 @@ class _Walker:
             for text in (*statement.targets, *statement.values):
                 self._check_uninit_text(text, statement.start, env)
                 self._check_transition_text(text, statement.start, env)
-                self._note_output_args(text, env)
+                # ``go f(out)`` may not run before the caller reads ``out`` —
+                # only direct and deferred calls establish the pointee.
+                if kind != "go":
+                    self._note_output_args(text, env)
         elif kind in {"var", "range"}:
             for value in statement.values:
                 self._check_uninit_text(value, statement.start, env)

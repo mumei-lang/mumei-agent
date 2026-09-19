@@ -1841,3 +1841,27 @@ def test_named_result_compound_assign_establishes() -> None:
         "}\n"
     )
     assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_go_call_arg_does_not_establish_output_param() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) {\n"
+        "    go fill(out)\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned")
+
+
+def test_defer_call_arg_establishes_output_param() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) {\n"
+        "    defer fill(out)\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
