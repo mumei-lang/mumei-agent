@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-19: `bridge_lemma_hash` lockstep bump for `concurrency_obligation`
+
+- `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH` updated to `5716cfdd945d68b4a0d75d75c5ade1934cbd76e0dfe16734a8f3dd723cfdd8e9`, matching mumei-lean's catalog addition of the `concurrency_obligation` class (`MumeiLean.Concurrency.task_group_all_result_last` / `task_group_any_result_mem` / `task_value_result`) for `task` / `task_group:all` body lowering (mumei P31, spec §4.7/§10). `translator_version` stays `mumei-lean-translator-ir-v2`. Same-hash requirement lives in `tests/test_contract_vocabulary.py` across all three repos.
+
 ## 2026-09-19: A-5 suppression-helper audit — third batch (concluding)
 
 - Probe-verified every remaining `_go_*_guarded_indices` helper by disabling it and re-running its covering tests: none are generically replaceable. `_go_range_index_guarded_indices` stays only for post-loop alias uses (the dataflow `_range` walk already grants `lt_len` to the loop variable; the may-fact merge drops it after the loop), `_go_short_circuit_or_guarded_indices` needs conjunctive `i <= len` ∧ `i != len` reasoning outside the single-pass model, and `_go_pow10` / `_go_op_enum` / `_go_mapfast` / `_go_cnames` depend on unresolved enum/iota value ranges or unmodelled domain invariants. Call-site comments now record the keep-rationale for each.
