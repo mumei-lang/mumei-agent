@@ -2102,9 +2102,14 @@ class _Walker:
                                 offset,
                             )
                         )
-                    elif held[0] not in _NILABLE_HELD and re.search(
+                    elif held[0] not in _NILABLE_HELD | {
+                        "closed_file", "closed_chan", "mutex_unlocked"
+                    } and re.search(
                         rf"(?<![\w.]){re.escape(held[1])}(?![\w])", value
                     ):
+                        # ``closed_*`` states are terminal and ``mutex_unlocked``
+                        # is a may-fact — a deferred call cannot make them
+                        # provably false, so all three survive the discard.
                         env.held.discard(held)
             else:
                 self._escape(value, env)

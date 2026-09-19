@@ -1562,3 +1562,30 @@ def test_closure_receive_on_closed_channel_is_not_reported() -> None:
         "}\n"
     )
     assert _transition_messages(source, "send_on_closed_channel") == []
+
+
+def test_deferred_cleanup_call_preserves_closed_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var f *os.File\n"
+        "    f.Close()\n"
+        "    defer cleanup(f)\n"
+        "    f.Read()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_deferred_cleanup_call_preserves_unlocked_state() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    var mu sync.Mutex\n"
+        "    defer cleanup(mu)\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
