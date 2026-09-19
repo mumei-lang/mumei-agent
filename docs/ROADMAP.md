@@ -539,7 +539,9 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   `f(…)`、`i.m(…)` / `i.(T)`。`p.m(…)` の nil レシーバ許容メソッド呼び出し、`len(s)` /
   `range s` / `append(s, …)` / nil マップ読み出し、`chan` の nil（`select` 無効化イディオム）は
   報告しない。`var (…)` グループ宣言は extractor が targets を返さないため `_var` が文面を
-  行単位でパースして個別 spec に展開する（`nilmap` も同じ経路でカバー）。状態遷移前提・契約由来
+  行単位でパースして個別 spec に展開する（`nilmap` も同じ経路でカバー）。既知制約: 単一行の
+  `var (x T)` は tree-sitter-go が parse error とし関数全体が regex フォールバックに落ちる
+  （`nil_map_write` 等他カテゴリにも共通する従来制約）。状態遷移前提・契約由来
   事後条件は本 stage では未着手で、データフロー事実だけで
   閉じない義務は従来どおり `unverifiable` / Lean 送り。
 - テスト: `tests/test_dataflow_facts.py`（定数畳み込み / ガード / 早期 return / ループ条件 /
