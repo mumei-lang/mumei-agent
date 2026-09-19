@@ -5545,6 +5545,7 @@ _DATAFLOW_ISSUE_MESSAGES = {
     "double_lock": "acquires `{subject}` again while it is already held on this path (deadlock)",
     "lock_held_at_return": "returns while `{subject}` is still held (missing unlock on this path)",
     "resource_leak": "returns without closing `{subject}` (resource leak on this path)",
+    "uninitialized_use": "uses `{subject}` which is declared but never initialized on this path (nil value use panics)",
 }
 
 

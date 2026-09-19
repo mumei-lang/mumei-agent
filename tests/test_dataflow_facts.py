@@ -780,3 +780,282 @@ def test_double_lock_reports_statement_offset() -> None:
     flow = _go(body)
     doubles = [issue for issue in flow.issues if issue.category == "double_lock"]
     assert doubles and doubles[0].offset == body.index("c.mu.Lock()", 1)
+
+
+# --------------------------------------------------------------------------- #
+# Expanded categories: uninitialised nil-able values
+# --------------------------------------------------------------------------- #
+
+
+def _uninit_messages(source: str) -> list[str]:
+    return [m for m in _messages(source) if "never initialized on this path" in m]
+
+
+def test_uninitialised_pointer_deref_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read() int {\n"
+        "    var p *int\n"
+        "    return *p\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_pointer_field_access_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read() int {\n"
+        "    var p *S\n"
+        "    p.x = 5\n"
+        "    return p.x\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_slice_index_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func First() int {\n"
+        "    var s []int\n"
+        "    return s[0]\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_func_call_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Run() int {\n"
+        "    var g func() int\n"
+        "    return g()\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_interface_method_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Describe() string {\n"
+        "    var e error\n"
+        "    return e.Error()\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_interface_assertion_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Width() int {\n"
+        "    var x any\n"
+        "    return x.(int)\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_use_in_condition_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Sign() int {\n"
+        "    var p *int\n"
+        "    if *p > 0 {\n"
+        "        return 1\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_alias_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read() int {\n"
+        "    var p *int\n"
+        "    q := p\n"
+        "    return *q\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_renil_assignment_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read(x *int) int {\n"
+        "    var p *int\n"
+        "    p = x\n"
+        "    p = nil\n"
+        "    return *p\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_nil_guard_suppresses_uninitialised_use() -> None:
+    source = (
+        "package demo\n"
+        "func Read() int {\n"
+        "    var p *int\n"
+        "    if p == nil {\n"
+        "        return 0\n"
+        "    }\n"
+        "    return *p\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_assignment_suppresses_uninitialised_use() -> None:
+    source = (
+        "package demo\n"
+        "func Read(x int) int {\n"
+        "    var p *int\n"
+        "    p = &x\n"
+        "    return *p\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_nil_receiver_method_call_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Size() int {\n"
+        "    var l *List\n"
+        "    return l.Len()\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_multiplication_is_not_a_deref() -> None:
+    source = (
+        "package demo\n"
+        "func Mul(a int) int {\n"
+        "    var p *int\n"
+        "    _ = p\n"
+        "    return a * 3\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_reslice_and_len_on_nil_slice_are_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Prefix() int {\n"
+        "    var s []int\n"
+        "    _ = s[:0]\n"
+        "    return len(s)\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_struct_zero_value_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Kick() int {\n"
+        "    var w Worker\n"
+        "    w.Start()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_nil_map_read_is_not_uninitialised_use() -> None:
+    source = (
+        "package demo\n"
+        "func Get() int {\n"
+        "    var m map[string]int\n"
+        "    return m[\"k\"]\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_grouped_var_uninitialised_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read() int {\n"
+        "    var (\n"
+        "        p *int\n"
+        "        s []int\n"
+        "    )\n"
+        "    return *p + s[0]\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_grouped_var_nil_map_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Build() map[string]int {\n"
+        "    var (\n"
+        "        m map[string]int\n"
+        "    )\n"
+        "    m[\"k\"] = 1\n"
+        "    return m\n"
+        "}\n"
+    )
+    assert any("never initialized" in m for m in _messages(source)), _messages(source)
+
+
+def test_func_literal_body_use_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Later(x *int) int {\n"
+        "    var p *int\n"
+        "    cb := func() int { return *p }\n"
+        "    p = x\n"
+        "    return cb()\n"
+        "}\n"
+    )
+    assert _uninit_messages(source) == []
+
+
+def test_deferred_nil_func_call_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Run() int {\n"
+        "    var f func()\n"
+        "    defer f()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_uninitialised_use_in_case_label_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Pick(x int) int {\n"
+        "    var p *int\n"
+        "    switch x {\n"
+        "    case *p:\n"
+        "        return 1\n"
+        "    }\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
+
+
+def test_go_nil_func_call_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Spawn() int {\n"
+        "    var f func()\n"
+        "    go f()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _uninit_messages(source), _messages(source)
