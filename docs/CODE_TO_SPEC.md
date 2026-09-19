@@ -25,7 +25,10 @@ Optional flags:
 - `--code-language rust|c|go|python|javascript|typescript|java|cpp|unknown`
   overrides auto-detection.
 - `--domain math|financial|security|...` supplies a domain hint to the existing
-  natural-language spec extractor.
+  natural-language spec extractor. The domain completeness checklist also runs
+  on the extracted spec: missing domain-required conditions print as
+  `Warning: domain-completeness: <domain> spec lacks …` on stderr (additive
+  warnings only — the spec payload is unchanged).
 - Existing `extract-spec` flags such as `--generate`, `--forge`, and
   `--max-retries` continue to work.
 
@@ -48,7 +51,9 @@ The response includes:
 - `natural_language_spec`
 - `detected_language`
 - `spec`
-- `warnings`
+- `warnings` — includes `domain-completeness: <domain> spec lacks …` entries
+  when `domain_hint` is set and the extracted spec misses domain-required
+  conditions (file mode only)
 - optional `code`, `verified`, and `final_spec` when `generate=true`
 
 ## Configuration

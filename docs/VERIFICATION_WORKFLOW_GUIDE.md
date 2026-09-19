@@ -218,7 +218,7 @@ uv run mumei-agent validate-spec \
 - `contradictions[]`: 論理的矛盾（例: x > 0 かつ x < 0）
 - `ambiguities[]`: 曖昧な記述（複数解釈が可能な箇所）
 - `overconstraints[]`: 過制約（Z3で充足不可能な組み合わせ）
-- `completeness_warnings[]`: `--domain`/`--domain-hint` 指定時のドメイン必須条件チェック。欠落は `domain-completeness: financial spec lacks …` 形式で列挙される（追加の出力キーではなく警告文字列）。
+- `completeness_warnings[]`: `--domain`/`--domain-hint` 指定時のドメイン必須条件チェック。欠落は `domain-completeness: financial spec lacks …` 形式で列挙される（追加の出力キーではなく警告文字列）。対応ドメインは `financial`/`security`/`crypto`/`data_structure`/`compliance`/`regtech`/`iot`/`web`/`math`。同じチェックは `extract-spec --domain`（stderr 警告）と MCP `extract_spec_from_code` の `domain_hint`（ファイルモードの `warnings` に追記）にも適用される。
 - `contradiction_type`: 主要な矛盾分類。例: `spec_internal`,
   `spec_overconstraint`, `spec_vacuity`, `spec_vs_code`。CLI / MCP / Markdown report で同じ分類を使う。
 - `satisfiable`: Z3による充足可能性（true/false/null）
@@ -343,7 +343,7 @@ uv run mumei-agent validate-code --input src/payment.py
 - `inferred_atoms[]`: 推論されたMumeiコントラクト
 - `mumei_source`: 生成されたMumei仕様コード
 - `satisfiable`: Z3による充足可能性
-- `issues[]`: 検出された問題（kind: contradiction/overconstraint/verification等）。各 issue の `fix_suggestion` に違反種別ごとの修正ヒント文字列が入る（ヒューリスティックなテキスト提案のみ。自動編集は行わない）。
+- `issues[]`: 検出された問題（kind: contradiction/overconstraint/verification等）。各 issue の `fix_suggestion` に違反種別ごとの修正ヒント文字列が入る（ヒューリスティックなテキスト提案のみ。自動編集は行わない）。`source_line` と解析可能な条件式がある場合は `Suggested diff` フェンスブロックも付き、該当シグネチャ行の直上に挿入する `requires: <condition>` コントラクトコメント（Solidity アドバイザリは `nonReentrant` / `require(msg.sender == owner, …)` の実編集）が示される。
 
 ## 3. 自然言語仕様 → 既存コードの整合性検証
 

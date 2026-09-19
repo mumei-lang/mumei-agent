@@ -1208,6 +1208,63 @@ class TestExtractSpecFromCode:
         assert result["detected_language"] == "rust"
         assert result["spec"]["task_id"] == "code-simple-add"
 
+    def test_domain_hint_appends_domain_completeness_warnings(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "payment.py"
+        source.write_text(
+            "def withdraw(balance: int, amount: int) -> int:\n"
+            "    return balance - amount\n",
+            encoding="utf-8",
+        )
+
+        fake_result = MagicMock()
+        fake_result.success = True
+        fake_result.natural_language_spec = "withdraw moves funds."
+        fake_result.forge_task_spec = {
+            "task_id": "code-payment",
+            "atoms": [
+                {
+                    "name": "withdraw",
+                    "inputs": [
+                        {"name": "balance", "type": "i64"},
+                        {"name": "amount", "type": "i64"},
+                    ],
+                    "return_type": "i64",
+                    "requires": "amount > 0",
+                    "ensures": "result == balance - amount",
+                }
+            ],
+        }
+        fake_result.detected_language = "python"
+        fake_result.warnings = ["existing-warning"]
+
+        fake_config = MagicMock()
+        fake_config.mumei_bin = "mumei"
+
+        fake_extractor = MagicMock()
+        fake_extractor.extract_from_file.return_value = fake_result
+
+        with (
+            patch("agent.config.AgentConfig", return_value=fake_config),
+            patch(
+                "agent.code_to_spec.CodeToSpecExtractor", return_value=fake_extractor
+            ),
+            patch("agent.mumei_client.create_mumei_client", return_value=MagicMock()),
+        ):
+            result = _payload(
+                mcp_server.extract_spec_from_code(
+                    str(source), domain_hint="financial"
+                )
+            )
+
+        assert result["status"] == "ok"
+        assert "existing-warning" in result["warnings"]
+        assert any(
+            warning.startswith("domain-completeness: financial")
+            for warning in result["warnings"]
+        )
+
     def test_extracts_directory_with_merged_spec(self, tmp_path: Path) -> None:
         source_dir = tmp_path / "code"
         source_dir.mkdir()

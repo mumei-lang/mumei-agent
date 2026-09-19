@@ -93,7 +93,16 @@ def _matching_code_atom(
         return code_atoms[0]
     return None
 
-def _suggest_fix(kind: IssueKind, message: str, evidence: str) -> str:
+def _suggest_fix(
+    kind: IssueKind,
+    message: str,
+    evidence: str,
+    *,
+    code: str = "",
+    language: str = "",
+    source_line: int = 0,
+    location: str = "",
+) -> str:
     """Generate a concrete remediation hint for a validation issue."""
     evidence_text = evidence.strip()
     message_text = message.strip()
@@ -143,11 +152,124 @@ def _suggest_fix(kind: IssueKind, message: str, evidence: str) -> str:
             f"`{evidence_text or message_text}`."
         )
     if kind == "verification":
-        return _suggest_verification_fix(message_text, evidence_text)
+        suggestion = _suggest_verification_fix(message_text, evidence_text)
+        diff = _verification_diff_hint(
+            message_text,
+            evidence_text,
+            code=code,
+            language=language,
+            source_line=source_line,
+            location=location,
+        )
+        return f"{suggestion}\n\n{diff}" if diff else suggestion
     return (
         "Review the finding and update the spec or implementation so the reported "
         f"constraint is explicit and verifiable. Evidence: `{evidence_text or message_text}`."
     )
+
+def _has_stem(text: str, stem: str) -> bool:
+    """Left-boundary stem match: ``divid`` hits ``divisor``/``dividing`` but
+    not ``individual``."""
+    return bool(re.search(rf"(?<!\w){re.escape(stem)}", text))
+
+
+def _has_word(text: str, word: str) -> bool:
+    """Whole-word match: ``nil`` hits a bare ``nil`` but not ``vanilla``."""
+    return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text))
+
+
+def _verification_kind_tag(text: str) -> str:
+    """Route a verification violation to its template tag. Order matters:
+    more specific structural findings precede the generic satisfiability and
+    amount buckets."""
+    if _has_stem(text, "reentr") or "checks-effects-interactions" in text:
+        return "reentrancy"
+    if (
+        "access-control" in text
+        or "access control" in text
+        or _has_stem(text, "permissionless")
+        or _has_stem(text, "unauthorized")
+    ):
+        return "access-control"
+    if (
+        (_has_stem(text, "divid") and not _has_stem(text, "dividend"))
+        or _has_stem(text, "division")
+        or "by zero" in text
+    ):
+        return "division"
+    # Contract-level satisfiability failures outrank the null/balance keyword
+    # buckets: serialized verify evidence often contains bare `None`/`null`
+    # fields that would otherwise route an unsat finding to the null template.
+    if (
+        _has_stem(text, "unsatisfi")
+        or _has_stem(text, "inconsisten")
+        or _has_stem(text, "unsat")
+    ):
+        return "unsatisfiable"
+    if _has_stem(text, "overflow") or _has_stem(text, "underflow"):
+        return "overflow"
+    if (
+        _has_stem(text, "index")
+        or _has_stem(text, "bounds")
+        or "out of range" in text
+    ):
+        return "bounds"
+    if (
+        "non-null" in text
+        or "non-nil" in text
+        or _has_word(text, "null")
+        or _has_word(text, "nil")
+        or _has_word(text, "undefined")
+        or _has_word(text, "none")
+    ):
+        return "null-safety"
+    if (
+        _has_stem(text, "negative")
+        or _has_stem(text, "balance")
+        or _has_stem(text, "amount")
+    ):
+        return "amount"
+    return "generic"
+
+
+_VERIFICATION_FIX_TEXT = {
+    "reentrancy": (
+        "Apply checks-effects-interactions (move state writes before "
+        "external calls) or add a reentrancy guard such as `nonReentrant`."
+    ),
+    "access-control": (
+        "Gate the state-mutating entry point with an access-control check "
+        "(`onlyOwner`-style modifier or `require(msg.sender == ...)`), or "
+        "document the function as intentionally permissionless."
+    ),
+    "division": (
+        "Add a non-zero-divisor contract (e.g. `requires: divisor != 0;`) "
+        "or guard the division site."
+    ),
+    "unsatisfiable": (
+        "The inferred contract is unsatisfiable or inconsistent; relax the "
+        "conflicting requires/ensures clauses or split them into narrower "
+        "cases."
+    ),
+    "overflow": (
+        "Constrain the operands so the arithmetic cannot wrap "
+        "(e.g. `requires: a <= max_value - b;`) or use a checked/widening type."
+    ),
+    "bounds": (
+        "Add a bounds contract or guard before the indexing expression "
+        "(e.g. `requires: 0 <= index && index < len(values);`)."
+    ),
+    "null-safety": (
+        "Add a non-null/non-nil precondition (e.g. `requires: value != null;`) "
+        "before dereferencing the value."
+    ),
+    "amount": (
+        "Add a `requires` clause keeping amounts positive and balances "
+        "sufficient (e.g. `requires: amount > 0 && balance >= amount;`) "
+        "before the state update."
+    ),
+}
+
 
 def _suggest_verification_fix(message: str, evidence: str) -> str:
     """Template-based per-violation fix hint for ``validate-code`` findings.
@@ -155,69 +277,141 @@ def _suggest_verification_fix(message: str, evidence: str) -> str:
     Cheap keyword heuristics over the violation text; the suggestion is advice
     only — nothing is auto-applied.
     """
-    text = f"{message} {evidence}".lower()
-    if "reentr" in text or "checks-effects-interactions" in text:
+    tag = _verification_kind_tag(f"{message} {evidence}".lower())
+    template = _VERIFICATION_FIX_TEXT.get(tag)
+    if template is None:
         return (
-            "Apply checks-effects-interactions (move state writes before "
-            "external calls) or add a reentrancy guard such as `nonReentrant`."
+            "Add a `requires` clause or an explicit guard so the reported path "
+            "cannot violate the contract, or explain why the path is unreachable. "
+            f"Evidence: `{(evidence or message)[:200]}`."
         )
-    if (
-        "access-control" in text
-        or "access control" in text
-        or "permissionless" in text
-        or "unauthorized" in text
-    ):
-        return (
-            "Gate the state-mutating entry point with an access-control check "
-            "(`onlyOwner`-style modifier or `require(msg.sender == ...)`), or "
-            "document the function as intentionally permissionless."
+    if tag == "unsatisfiable":
+        return template + f" Evidence: `{(evidence or message)[:200]}`."
+    return template
+
+
+_UINT64_MAX = "18446744073709551615"
+_INT64_MAX = "9223372036854775807"
+_UINT256_MAX = (
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+)
+
+_CONTRACT_COMMENT_PREFIX = {
+    "python": "#",
+    "rust": "//",
+    "typescript": "//",
+    "go": "//",
+    "solidity": "//",
+}
+
+
+def _verification_condition(
+    tag: str, message: str, language: str
+) -> str | None:
+    """Extract a concrete contract condition for the violation, when the
+    offending expression is named in the message."""
+    if tag == "bounds":
+        indexed = re.search(
+            r"`(?P<container>[A-Za-z_]\w*(?:\.\w+)*)\s*\[\s*(?P<index>[^\]]+)\]`",
+            message,
         )
-    if "divid" in text or "division" in text or "by zero" in text:
-        return (
-            "Add a non-zero-divisor contract (e.g. `requires: divisor != 0;`) "
-            "or guard the division site."
+        if not indexed:
+            return None
+        container = indexed.group("container")
+        index = indexed.group("index").strip()
+        length = (
+            f"{container}.length"
+            if language in {"typescript", "solidity"}
+            else (f"{container}.len()" if language == "rust" else f"len({container})")
         )
-    # Contract-level satisfiability failures outrank the null/balance keyword
-    # buckets: serialized verify evidence often contains bare `None`/`null`
-    # fields that would otherwise route an unsat finding to the null template.
-    if "unsatisfiable" in text or "inconsistent" in text or "unsat" in text:
-        return (
-            "The inferred contract is unsatisfiable or inconsistent; relax the "
-            "conflicting requires/ensures clauses or split them into narrower "
-            f"cases. Evidence: `{(evidence or message)[:200]}`."
+        return f"0 <= {index} && {index} < {length}"
+    if tag == "division":
+        divided = re.search(r"divide by `(?P<divisor>[A-Za-z_]\w*)`", message)
+        if not divided:
+            return None
+        return f"{divided.group('divisor')} != 0"
+    if tag == "overflow":
+        overflowed = re.search(
+            r"overflow `(?P<left>[A-Za-z_]\w*)\s*\+\s*(?P<right>[A-Za-z_]\w*)`",
+            message,
         )
-    if "overflow" in text or "underflow" in text:
-        return (
-            "Constrain the operands so the arithmetic cannot wrap "
-            "(e.g. `requires: a <= max_value - b;`) or use a checked/widening type."
-        )
-    if "index" in text or "bounds" in text or "out of range" in text:
-        return (
-            "Add a bounds contract or guard before the indexing expression "
-            "(e.g. `requires: 0 <= index && index < len(values);`)."
-        )
-    if (
-        "non-null" in text
-        or "non-nil" in text
-        or "null" in text
-        or "nil" in text
-        or "undefined" in text
-        or "none" in text
-    ):
-        return (
-            "Add a non-null/non-nil precondition (e.g. `requires: value != null;`) "
-            "before dereferencing the value."
-        )
-    if "negative" in text or "balance" in text or "amount" in text:
-        return (
-            "Add a `requires` clause keeping amounts positive and balances "
-            "sufficient (e.g. `requires: amount > 0 && balance >= amount;`) "
-            "before the state update."
-        )
+        if not overflowed:
+            return None
+        bound = _UINT256_MAX if language == "solidity" else _INT64_MAX
+        left, right = overflowed.group("left"), overflowed.group("right")
+        return f"{left} + {right} <= {bound}"
+    if tag == "null-safety":
+        deref = re.search(r"dereference `(?P<value>[A-Za-z_]\w*(?:\.\w+)*)`", message)
+        if not deref:
+            return None
+        value = deref.group("value")
+        if language == "python":
+            return f"{value} is not None"
+        if language == "go":
+            return f"{value} != nil"
+        if language == "typescript":
+            return f"{value} != null && {value} != undefined"
+        return f"{value} != null"
+    return None
+
+
+def _verification_diff_hint(
+    message: str,
+    evidence: str,
+    *,
+    code: str,
+    language: str,
+    source_line: int,
+    location: str,
+) -> str | None:
+    """Render a concrete ``+``-line diff hint anchored at the violating
+    function. Returns ``None`` when no concrete anchor/condition is derivable;
+    callers fall back to the plain text hint."""
+    if not code or not source_line:
+        return None
+    lines = code.splitlines()
+    if not (0 < source_line <= len(lines)):
+        return None
+    signature = lines[source_line - 1]
+    indent = signature[: len(signature) - len(signature.lstrip())]
+    body_indent = indent + "    "
+    tag = _verification_kind_tag(f"{message} {evidence}".lower())
+    anchor = location or "the flagged function"
+
+    if language == "solidity" and tag == "access-control":
+        if signature.rstrip().endswith("{"):
+            return (
+                f"Suggested diff for `{anchor}` (line {source_line}):\n"
+                "```diff\n"
+                f"  {signature}\n"
+                f"+ {body_indent}require(msg.sender == owner, \"unauthorized\");\n"
+                "```"
+            )
+        return None
+    if language == "solidity" and tag == "reentrancy":
+        match = re.match(r"(?P<head>.*?)(?P<tail>\{|\breturns\b)", signature)
+        if match:
+            head, tail = match.group("head"), match.group("tail")
+            new_signature = f"{head}nonReentrant {tail}{signature[match.end('tail'):]}"
+            return (
+                f"Suggested diff for `{anchor}` (line {source_line}):\n"
+                "```diff\n"
+                f"- {signature}\n"
+                f"+ {new_signature}\n"
+                "```"
+            )
+        return None
+
+    condition = _verification_condition(tag, message, language)
+    if condition is None:
+        return None
+    comment = _CONTRACT_COMMENT_PREFIX.get(language, "//")
     return (
-        "Add a `requires` clause or an explicit guard so the reported path "
-        "cannot violate the contract, or explain why the path is unreachable. "
-        f"Evidence: `{(evidence or message)[:200]}`."
+        f"Suggested diff for `{anchor}` (line {source_line}):\n"
+        "```diff\n"
+        f"+ {indent}{comment} requires: {condition}\n"
+        f"  {signature}\n"
+        "```"
     )
 
 def _format_validate_spec_markdown(result: NLSpecValidationResult) -> str:

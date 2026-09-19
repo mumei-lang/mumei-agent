@@ -106,12 +106,120 @@ DOMAIN_CHECKLISTS: dict[str, list[dict[str, object]]] = {
             "description": "null安全性",
         },
     ],
+    "compliance": [
+        {
+            "keywords": ["audit", "logging", "logged"],
+            "clause": "any",
+            "description": "監査ログ・記録要件",
+        },
+        {
+            "keywords": ["authoriz", "permission", "approval", "consent"],
+            "clause": "requires",
+            "description": "承認・権限条件",
+        },
+        {
+            "keywords": ["retention", "delete", "erase", "purge"],
+            "clause": "any",
+            "description": "データ保持・削除条件",
+        },
+    ],
+    "regtech": [
+        {
+            "keywords": ["kyc", "aml", "sanction", "blacklist", "whitelist"],
+            "clause": "requires",
+            "description": "本人確認・制裁リスト照合",
+        },
+        {
+            "keywords": ["limit", "threshold", "ceiling"],
+            "clause": "requires",
+            "description": "取引上限条件",
+        },
+        {
+            "keywords": ["report", "disclose", "filing"],
+            "clause": "ensures",
+            "description": "報告・開示義務",
+        },
+    ],
+    "iot": [
+        {
+            "keywords": ["range", "clamp", "calibrat", "min <=", "<= max"],
+            "clause": "any",
+            "description": "センサー値域・校正条件",
+        },
+        {
+            "keywords": ["authenticat", "signature", "firmware", "device"],
+            "clause": "requires",
+            "description": "デバイス認証条件",
+        },
+        {
+            "keywords": ["fail-safe", "failsafe", "fallback", "safe state"],
+            "clause": "ensures",
+            "description": "フェイルセーフ条件",
+        },
+    ],
+    "web": [
+        {
+            "keywords": ["sanitize", "escape", "validate"],
+            "clause": "requires",
+            "description": "入力検証・サニタイズ",
+        },
+        {
+            "keywords": ["authenticat", "session", "csrf", "token"],
+            "clause": "requires",
+            "description": "認証・セッション条件",
+        },
+        {
+            "keywords": ["rate limit", "ratelimit", "throttle"],
+            "clause": "any",
+            "description": "レート制限",
+        },
+    ],
+    "math": [
+        {
+            "keywords": ["domain", "defined", "nonzero", "non-zero", ">= 0"],
+            "clause": "requires",
+            "description": "定義域・非零条件",
+        },
+        {
+            "keywords": ["epsilon", "precision", "tolerance", "round"],
+            "clause": "any",
+            "description": "精度・誤差条件",
+        },
+        {
+            "keywords": ["converge", "terminat", "monoton"],
+            "clause": "ensures",
+            "description": "収束・停止性",
+        },
+    ],
 }
 
 
 _REQUIRES_LINE_RE = re.compile(r"requires|precondition", re.IGNORECASE)
 _ENSURES_LINE_RE = re.compile(r"ensures|postcondition|invariant", re.IGNORECASE)
 _TRIVIAL_CLAUSES = {"", "true", "false"}
+
+# Short keywords that commonly appear inside larger identifiers get a
+# right-side boundary as well (e.g. "nil" must not match "vanilla",
+# "audit" must not match "auditory").
+_WHOLE_WORD_KEYWORDS = frozenset({"none", "nil", "null", "undefined", "audit"})
+
+
+def _keyword_matches(keyword: str, text: str) -> bool:
+    """Word-aware keyword match.
+
+    Alphabetic keywords match with a left word boundary only, so stems still
+    hit their inflections (``sanitize`` -> ``sanitizes``) but not unrelated
+    words containing them (``divid`` in ``individual``). Keywords starting
+    with a symbol (``>= 0``) keep plain substring semantics on the left so
+    ``x>=0`` still matches. Words in ``_WHOLE_WORD_KEYWORDS`` additionally
+    require a right boundary.
+    """
+    pattern = re.escape(keyword)
+    if keyword[:1].isalnum() or keyword[:1] == "_":
+        pattern = r"(?<!\w)" + pattern
+    if keyword in _WHOLE_WORD_KEYWORDS:
+        pattern += r"(?!\w)"
+    return bool(re.search(pattern, text))
 
 
 def _clause_lines(spec_text: str, pattern: re.Pattern[str]) -> str:
@@ -173,7 +281,7 @@ def check_domain_completeness(
             clause_label = clause
         else:
             haystack = full_text
-        if any(keyword in haystack for keyword in keywords):
+        if any(_keyword_matches(keyword, haystack) for keyword in keywords):
             continue
         description = str(item.get("description") or "")
         detail_parts = [part for part in (description,) if part]
