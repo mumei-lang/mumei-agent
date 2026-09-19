@@ -18,6 +18,7 @@ LLM model, mumei-lean checkout and per-file bridge outcome.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -32,6 +33,70 @@ from agent.lean_bridge_helpers import (
     extract_unknown_atoms,
     merge_lean_cert_into_proof_cert,
 )
+
+
+def demote_atoms_to_unknown(
+    cert: dict, atom_names: set[str]
+) -> tuple[dict, list[str]]:
+    """Return a copy of *cert* with the named atoms demoted to Z3 ``unknown``.
+
+    B-4 demonstrator hook: a benchmark atom Z3 actually proved (``unsat``)
+    can be exercised through the external-proof route as if the solver had
+    been inconclusive — e.g. the 群 3 while-loop atoms whose verification
+    conditions are the intended AI-proof inputs.  Only the bridge reads the
+    demoted copy (it is written to ``<stem>.forced.proof-cert.json``); the
+    merged output certificate then carries the atom's ``lean_verified``
+    upgrade like any proven escalation, and ``forced_atoms`` in the run
+    manifest records which atoms were demoted for the run.
+    """
+    bridge_cert = copy.deepcopy(cert)
+    forced: list[str] = []
+    for atom in bridge_cert.get("atoms", []):
+        if isinstance(atom, dict) and atom.get("name") in atom_names:
+            atom["status"] = "unknown"
+            atom["z3_check_result"] = "unknown"
+            atom["z3_result_class"] = "unknown"
+            forced.append(str(atom["name"]))
+    if forced:
+        bridge_cert["all_verified"] = False
+    return bridge_cert, forced
+
+
+def _count_verified(cert: dict, names: set[str]) -> int:
+    return sum(
+        1
+        for atom in cert.get("atoms", [])
+        if isinstance(atom, dict)
+        and atom.get("name") in names
+        and atom.get("z3_check_result") == "lean_verified"
+    )
+
+
+def _restore_forced_misses(
+    original: dict, upgraded: dict, names: set[str]
+) -> dict:
+    """Forced atoms whose Lean attempt failed revert to the Z3 verdict.
+
+    A forced atom is ``unknown`` only in the bridge input; when the
+    external-proof route does not verify it, the output certificate must
+    keep Z3's original verdict instead of reporting a regression."""
+    original_by_name = {
+        a.get("name"): a
+        for a in original.get("atoms", [])
+        if isinstance(a, dict)
+    }
+    for atom in upgraded.get("atoms", []):
+        if not isinstance(atom, dict) or atom.get("name") not in names:
+            continue
+        if atom.get("z3_check_result") == "lean_verified":
+            continue
+        source = original_by_name.get(atom.get("name"))
+        if not isinstance(source, dict):
+            continue
+        for field in ("z3_check_result", "z3_result_class", "status"):
+            if field in source:
+                atom[field] = source[field]
+    return upgraded
 
 
 def _z3_proof_cert(
@@ -91,6 +156,7 @@ def measure_one(
     config: AgentConfig,
     generator,
     timeout: float,
+    force_atoms: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     rel = source.relative_to(benchmarks_dir)
     z3_cert_path = work_dir / rel.parent / f"{rel.stem}.z3.proof-cert.json"
@@ -104,6 +170,8 @@ def measure_one(
         "verify_returncode": verify_diag["returncode"],
         "unknown_atoms": 0,
         "lean_verified_unknowns": 0,
+        "forced_atoms": [],
+        "lean_verified_forced": 0,
         "bridge": None,
     }
     if cert is None:
@@ -113,8 +181,25 @@ def measure_one(
         return entry
     unknown = extract_unknown_atoms(cert)
     entry["unknown_atoms"] = len(unknown)
-    upgraded = cert
-    if unknown:
+    bridge_cert_path = z3_cert_path
+    bridge_cert = cert
+    forced_names: list[str] = []
+    if force_atoms:
+        bridge_cert, forced_names = demote_atoms_to_unknown(cert, force_atoms)
+        if forced_names:
+            forced_path = (
+                work_dir / rel.parent / f"{rel.stem}.forced.proof-cert.json"
+            )
+            forced_path.write_text(
+                json.dumps(bridge_cert, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            bridge_cert_path = forced_path
+    entry["forced_atoms"] = forced_names
+    # The merge reads the bridge input: a forced atom is ``unknown`` there,
+    # so its lean_verified record upgrades like any proven escalation.
+    upgraded = bridge_cert
+    if unknown or forced_names:
         lean_cert_out = work_dir / rel.parent / f"{rel.stem}.lean-cert.json"
         evidence_dir = (
             Path(config.lean_ai_proof_evidence_dir) / rel.parent / rel.stem
@@ -122,7 +207,7 @@ def measure_one(
             else None
         )
         bridge_result = lean_bridge.run_lean_bridge(
-            cert_path=z3_cert_path,
+            cert_path=bridge_cert_path,
             lean_cert_out=lean_cert_out,
             mumei_lean_repo=config.mumei_lean_repo or "",
             timeout=timeout,
@@ -132,8 +217,17 @@ def measure_one(
         )
         lean_cert = bridge_result.get("lean_cert")
         if isinstance(lean_cert, dict):
-            upgraded = merge_lean_cert_into_proof_cert(cert, lean_cert)
-            entry["lean_verified_unknowns"] = count_lean_verified_unknowns(cert, upgraded)
+            upgraded = merge_lean_cert_into_proof_cert(bridge_cert, lean_cert)
+            entry["lean_verified_unknowns"] = count_lean_verified_unknowns(
+                cert, upgraded
+            )
+            entry["lean_verified_forced"] = _count_verified(
+                upgraded, set(forced_names)
+            )
+            if forced_names:
+                upgraded = _restore_forced_misses(
+                    cert, upgraded, set(forced_names)
+                )
         entry["bridge"] = {
             key: bridge_result.get(key)
             for key in (
@@ -173,6 +267,16 @@ def main() -> int:
         action="store_true",
         help="Only write certificates for files that had Z3 unknown atoms",
     )
+    parser.add_argument(
+        "--force-lean-atom",
+        action="append",
+        default=[],
+        metavar="ATOM",
+        help="B-4 demonstrator: demote the named atom to Z3 'unknown' for the "
+        "bridge input (repeatable), so an atom Z3 already proved still "
+        "reaches the external-proof route (e.g. the 群3 while-loop VCs). "
+        "Recorded under forced_atoms in run.json.",
+    )
     args = parser.parse_args()
 
     config = AgentConfig()
@@ -198,6 +302,8 @@ def main() -> int:
         "mumei_lean_repo": config.mumei_lean_repo,
         "files": [],
     }
+    force_atoms = frozenset(args.force_lean_atom)
+    manifest["force_lean_atoms"] = sorted(force_atoms)
     entries: list[dict[str, object]] = []
     for source in files:
         rel = str(source.relative_to(args.benchmarks_dir)).replace(os.sep, "/")
@@ -210,8 +316,13 @@ def main() -> int:
             config=config,
             generator=generator,
             timeout=args.timeout,
+            force_atoms=force_atoms,
         )
-        if args.candidates_only and not entry["unknown_atoms"]:
+        if (
+            args.candidates_only
+            and not entry["unknown_atoms"]
+            and not entry["forced_atoms"]
+        ):
             cert_path = entry.get("certificate")
             if isinstance(cert_path, str):
                 Path(cert_path).unlink(missing_ok=True)
@@ -223,7 +334,9 @@ def main() -> int:
         )
         print(
             f"  -> unknown={entry['unknown_atoms']} "
-            f"lean_verified={entry['lean_verified_unknowns']} "
+            f"forced={len(entry['forced_atoms'])} "
+            f"lean_verified={entry['lean_verified_unknowns']}"
+            f"+{entry['lean_verified_forced']} "
             f"elapsed={entry.get('elapsed_s')}s",
             flush=True,
         )

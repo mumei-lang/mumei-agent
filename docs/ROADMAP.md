@@ -1325,6 +1325,12 @@ C-1（mumei `docs/ROADMAP.md` P30）の群 3 — `while` ループ不変量 3 at
 `domain_compliance/regtech_exhaustiveness.mm::all_transactions_within_limit` /
 `domain_compliance/rtgs_balance_conservation.mm::queue_total_is_nonnegative`）— が B-4 AI 証明生成の対象義務入力
 （既存 `lean_fallback_strategy` / `ai_proof_attempts` / `ai_proof_used` で計測、新 alias なし）。
+**2026-09-19 実運用化**: `measure_lean_ai_proof.py --force-lean-atom <atom>`（repeatable）で Z3 が `unsat` と
+判定した atom を bridge 入力側のみ `unknown` へ降格し AI 証明生成経路へ投入 — 群 3 atom は unsat のため
+`extract_unknown_atoms` に載らなかった設計を補完。`run.json` の `force_lean_atoms` / per-file `forced_atoms` /
+`lean_verified_forced` が出処、bridge 失敗時は元の Z3 verdict に復帰（`_restore_forced_misses`、回帰なし）。
+実 cert 実走行（gpt-4o）で `all_transactions_within_limit` が手動 `--external-proofs` 無しに `lean_verified` 到達
+（`sum_array` / `queue_total_is_nonnegative` は LLM 429 quota で attempt 失敗 — 経路自体は実証済み）。
 
 ### 実装済み
 

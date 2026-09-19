@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-19: B-4 operationalisation — `--force-lean-atom` routes Z3-sat atoms into the AI-proof bridge
+
+- `scripts/measure_lean_ai_proof.py --force-lean-atom <atom>` (repeatable): demotes the named atom to `z3_check_result: "unknown"` on a **copied** bridge-input certificate (`<stem>.forced.proof-cert.json`), so atoms Z3 already discharged still reach the external-proof / AI-proof-generation route. Addresses the C-1 群3 gap: `mumei verify` marks the while-loop VC atoms `unsat`, so `extract_unknown_atoms` never routed them to Lean.
+- `measure_one` gains `force_atoms`; merge now upgrades on the bridge-input cert so a forced atom reaching `lean_verified` records like any proven escalation. Forced atoms whose Lean attempt fails revert to the original Z3 verdict in the written certificate (`_restore_forced_misses`) — the demotion only lives in the bridge input, never a reported regression. run.json gains `force_lean_atoms` and per-file `forced_atoms` / `lean_verified_forced` as the provenance record; `--candidates-only` keeps a file's certificate when it only had forced atoms.
+- Demonstrated live against real emitted certs (gpt-4o, `ENABLE_LEAN_AI_PROOF=1`): `all_transactions_within_limit` reached `lean_verified` via AI proof generation with no manual `--external-proofs`; the remaining two 群3 atoms hit provider 429 (quota) mid-run, not a code failure.
+- Regression gate: `tests/test_measure_lean_ai_proof.py` (5 cases); full suite green.
+
 ## 2026-09-19: `bridge_lemma_hash` lockstep bump for `concurrency_obligation`
 
 - `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH` updated to `5716cfdd945d68b4a0d75d75c5ade1934cbd76e0dfe16734a8f3dd723cfdd8e9`, matching mumei-lean's catalog addition of the `concurrency_obligation` class (`MumeiLean.Concurrency.task_group_all_result_last` / `task_group_any_result_mem` / `task_value_result`) for `task` / `task_group:all` body lowering (mumei P31, spec §4.7/§10). `translator_version` stays `mumei-lean-translator-ir-v2`. Same-hash requirement lives in `tests/test_contract_vocabulary.py` across all three repos.
