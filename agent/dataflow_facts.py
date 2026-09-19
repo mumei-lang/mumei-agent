@@ -106,6 +106,12 @@ _CLOSED_FILE_METHODS = frozenset(
 # Values that create a provably-unlocked mutex (``mutex_unlocked`` held kind).
 _MUTEX_VALUE = re.compile(r"^&?sync\.(?:RW)?Mutex\s*\{\s*\}$|^new\(sync\.(?:RW)?Mutex\)$")
 _MUTEX_TYPES = frozenset({"sync.Mutex", "sync.RWMutex"})
+# Held kinds that transfer to an alias (``x2 := x``): nil-able zero values,
+# terminal close states, and provably-unlocked mutexes. ``("lock", …)`` and
+# ``("file", …)`` deliberately do not — a copied locked mutex is a *locked
+# copy* (its ``Unlock`` is legal) and an aliased open handle is tracked via
+# the ``("file", …)`` owner entry already.
+_ALIAS_PROPAGATED_HELD = _NILABLE_HELD | {"closed_file", "closed_chan", "mutex_unlocked"}
 # Keywords that may appear immediately before ``*p`` in an expression. A
 # preceding identifier / ``)`` / ``]`` means the ``*`` is multiplication.
 _DEREF_PREFIX_KEYWORDS = frozenset(
@@ -523,12 +529,16 @@ class _Env:
             self.len_values[target] = self.len_values[source]
         if source in self.len_ge:
             self.len_ge[target] = self.len_ge[source]
-        # ``x := p`` aliases the nil-able zero value, so uninitialised (and
-        # nil-map) markers propagate to the alias.
+        # ``x := p`` aliases the nil-able zero value and the terminal-state
+        # markers, so uninitialised / nil-map / closed / unlocked facts
+        # propagate to the alias. ``("lock", …)`` deliberately does not
+        # propagate: copying a locked mutex yields a *locked copy* whose
+        # ``Unlock`` is legal.
         for held in tuple(self.held):
-            if held[0] in _NILABLE_HELD and held[1] == source:
+            if held[0] in _ALIAS_PROPAGATED_HELD and held[1] == source:
                 self.held.add((held[0], target))
-                self.nilable[target] = held[0]
+                if held[0] in _NILABLE_HELD:
+                    self.nilable[target] = held[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1733,6 +1743,8 @@ class _Walker:
             if handle == "_" or not re.fullmatch(_IDENT, handle) or not self._reliable(handle):
                 continue
             env.held.add(("file", handle, err))
+            # Open calls return pointers — a later ``f = nil`` re-marks it.
+            env.nilable[handle] = "uninit_ptr"
 
     def _escape(self, value: str, env: _Env) -> None:
         """Forget open handles that are passed on / stored (ownership transfer).
@@ -1761,6 +1773,21 @@ class _Walker:
         self._escape(value, env)
         if not self._reliable(target):
             return
+        # Record the nil-able *type* of the target so a later ``x = nil``
+        # re-marks it even when this assignment produced a non-nil value.
+        nilable: str | None = None
+        if text.startswith(("make(chan", "make(<-chan")):
+            nilable = "uninit_chan"
+        elif text.startswith(("make(map[", "map[")):
+            nilable = "nilmap"
+        elif text.startswith(("make([", "[]")) or _SLICE_EXPR.match(text):
+            nilable = "uninit_slice"
+        elif text.startswith("&") or text.startswith("new("):
+            nilable = "uninit_ptr"
+        elif re.fullmatch(_IDENT, text) and text in env.nilable:
+            nilable = env.nilable[text]
+        if nilable is not None:
+            env.nilable[target] = nilable
         if text.endswith("(nil)"):
             # ``x := (*T)(nil)`` / ``x = T(nil)`` — an explicit nil cast.
             kind = _nilable_kind(text[: -len("(nil)")].lstrip("(").rstrip(")"))
@@ -1980,10 +2007,18 @@ class _Walker:
                         "send_on_closed_channel", subject, value.strip(), offset
                     )
                 )
-            env.held.add(("closed_chan", subject))
-            env.held.discard(("uninit_chan", subject))
+            for alias in self._alias_cluster(subject, env):
+                env.held.add(("closed_chan", alias))
+                env.held.discard(("uninit_chan", alias))
             return
         self._escape(value, env)
+
+    @staticmethod
+    def _alias_cluster(name: str, env: _Env) -> set[str]:
+        """All names sharing ``name``'s alias root — a terminal transition
+        (``x.Close()`` / ``close(x)``) applies to every alias of the handle."""
+        root = env.root(name)
+        return {name, root} | {a for a in env.aliases if env.root(a) == root}
 
     def _release(self, value: str, env: _Env, *, deferred: bool, offset: int = 0) -> None:
         match = re.match(r"^(&?[A-Za-z_][\w.]*)\.(Unlock|RUnlock|Close)\s*\(", value.strip())
@@ -2028,12 +2063,14 @@ class _Walker:
             h for h in env.held if h[1] != subject or h[0] in _NILABLE_HELD
         }
         if match.group(2) == "Close":
-            env.held.add(("closed_file", subject))
+            for alias in self._alias_cluster(subject, env):
+                env.held.add(("closed_file", alias))
         else:
             # A successful ``Unlock`` leaves the mutex unlocked no matter what
-            # it was before; unlocking a provably-unlocked mutex panics.
+            # it was before; unlocking a mutex that is provably-unlocked on
+            # *some* merged path panics on that path (may-fact reporting).
             env.held.add(("mutex_unlocked", subject))
-            if was_unlocked and not was_locked:
+            if was_unlocked:
                 self.issues.append(
                     DataflowIssue(
                         "unlock_of_unlocked", subject, value.strip(), offset

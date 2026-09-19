@@ -1312,3 +1312,127 @@ def test_nil_chan_guard_close_is_not_reported() -> None:
         "}\n"
     )
     assert _transition_messages(source, "close_nil_channel") == []
+
+
+def test_nil_reassign_after_make_chan_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Done() int {\n"
+        "    ch := make(chan int)\n"
+        "    ch = nil\n"
+        "    close(ch)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "close_nil_channel")
+
+
+def test_send_through_alias_of_closed_channel_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    ch2 := ch\n"
+        "    close(ch)\n"
+        "    ch2 <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_close_through_alias_marks_origin_closed() -> None:
+    source = (
+        "package demo\n"
+        "func Push() int {\n"
+        "    ch := make(chan int)\n"
+        "    ch2 := ch\n"
+        "    close(ch2)\n"
+        "    ch <- 1\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "send_on_closed_channel")
+
+
+def test_use_after_close_through_alias_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Read(p string) int {\n"
+        "    f, _ := os.Open(p)\n"
+        "    f2 := f\n"
+        "    f.Close()\n"
+        "    buf := 0\n"
+        "    _, _ = f2.Read(buf)\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "use_after_close")
+
+
+def test_unlock_on_copy_of_unlocked_mutex_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    mu := sync.Mutex{}\n"
+        "    mu2 := mu\n"
+        "    mu2.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_unlock_on_copy_of_locked_mutex_is_not_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard() int {\n"
+        "    mu := sync.Mutex{}\n"
+        "    mu.Lock()\n"
+        "    mu2 := mu\n"
+        "    mu2.Unlock()\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked") == []
+
+
+def test_unlock_after_branchy_unlock_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Guard(c bool) int {\n"
+        "    var mu sync.Mutex\n"
+        "    mu.Lock()\n"
+        "    if c {\n"
+        "        mu.Unlock()\n"
+        "    }\n"
+        "    mu.Unlock()\n"
+        "    return 0\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "unlock_of_unlocked")
+
+
+def test_nil_reassign_after_make_slice_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Use() int {\n"
+        "    s := make([]int, 3)\n"
+        "    s = nil\n"
+        "    return s[0]\n"
+        "}\n"
+    )
+    assert _uninit_messages(source)
+
+
+def test_nil_reassign_after_open_is_reported() -> None:
+    source = (
+        "package demo\n"
+        "func Use(p string) int {\n"
+        "    f, _ := os.Open(p)\n"
+        "    f = nil\n"
+        "    return *f\n"
+        "}\n"
+    )
+    assert _uninit_messages(source)

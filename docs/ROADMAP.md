@@ -549,9 +549,13 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   `Unlock`/`RUnlock`（`unlock_of_unlocked`）を `_Env.held` の `closed_chan` /
   `closed_file` / `mutex_unlocked` / `uninit_chan` マーカで追跡する。`Unlock` 成功後は
   常に unlocked へ遷移するため、仮引数 mutex の 2 回目 `Unlock` も確定パニックとして報告。
-  nil chan への `ch <- v`・`<-ch`・`range ch` は panic ではなくブロックのため対象外
-  （`select` 無効化イディオム）。`defer close(ch)` は即時 close としてマークしない
-  （return 時のパニックのみ報告）。契約由来事後条件は本 stage では未着手で、
+  `x2 := x` のエイリアスには `closed_file` / `closed_chan` / `mutex_unlocked` / nil-able マーカが
+  伝播し、`x.Close()` / `close(x)` は alias クラスタ全体に適用される（`("lock", …)` は
+  コピーが *locked copy* になるため非伝播）。`make(chan|map|[]…)` / `&x` / `new(T)` / ident
+  エイリアス由来の `:=` は nilable 型事実を seed するため `ch = nil` 等の再 nil 化も追随する
+  （`var` 宣言以外でも）。nil chan への `ch <- v`・`<-ch`・`range ch` は panic ではなく
+  ブロックのため対象外（`select` 無効化イディオム）。`defer close(ch)` は即時 close として
+  マークしない（return 時のパニックのみ報告）。契約由来事後条件は本 stage では未着手で、
   データフロー事実だけで閉じない義務は従来どおり `unverifiable` / Lean 送り。
 - テスト: `tests/test_dataflow_facts.py`（定数畳み込み / ガード / 早期 return / ループ条件 /
   到達定義 / `len` 由来値 / エイリアス / クロージャ・アドレス無効化 / 削除ヘルパの旧偽陽性ケース /
