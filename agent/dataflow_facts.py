@@ -368,6 +368,30 @@ _COMPOSITE = re.compile(r"^(?:&?\[\][^{]+|&?map\[[^\]]+\][^{]+|&?[A-Za-z_][\w.]*
 _SLICE_EXPR = re.compile(rf"^{_IDENT}\[[^\]]*:[^\]]*\]$")
 _SLICE_LITERAL = re.compile(r"^\[\][^{]+\{(.*)\}$", re.DOTALL)
 _CAST = re.compile(rf"^(?:{'|'.join(sorted(_GO_INT_TYPES))})\((.+)\)$")
+_GO_INT_CAST = re.compile(rf"\b(?:{'|'.join(sorted(_GO_INT_TYPES))}|uintptr|byte|rune)\(")
+
+
+def _strip_int_casts(text: str) -> str:
+    """Replace every ``T(expr)`` integer-cast subterm with ``(expr)``."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        match = _GO_INT_CAST.match(text, i)
+        if not match:
+            out.append(text[i])
+            i += 1
+            continue
+        depth = 1
+        j = match.end()
+        while j < len(text) and depth:
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+            j += 1
+        out.append("(" + _strip_int_casts(text[match.end() : j - 1]) + ")")
+        i = j
+    return "".join(out)
 
 
 @dataclass
@@ -690,6 +714,18 @@ class _Facts:
         left_value = self.env.value_of(left, self.constants)
         right_value = self.env.value_of(right, self.constants)
         if left_value is not None and right_value is None:
+            # ``0 < hi`` where ``hi`` is ``len(c)`` still bounds the constant
+            # left side — record ``lt_len(left, c)`` before flipping to
+            # ``hi > 0`` (the flipped form only yields ``nonneg``).
+            length = self._length_of(right)
+            if length is not None:
+                container, delta = length
+                if op == "<" and delta <= 0:
+                    out.add_lt_len(left, container)
+                    self._mirror_alias_bounds(out, left, container)
+                elif op == "<=" and delta <= -1:
+                    out.add_lt_len(left, container)
+                    self._mirror_alias_bounds(out, left, container)
             left, right, op, left_value, right_value = right, left, _FLIP_OP[op], right_value, left_value
         if right == "nil":
             if op == "!=":
@@ -1961,6 +1997,62 @@ class _Walker:
         if constant is not None:
             env.set_const(target, constant)
             return
+        # ``x := len(c)`` (or ``len(c) + delta``) makes ``x`` an alias of the
+        # container's length — the same fact ``_assign`` records for ``=``.
+        length = _Facts(env, self.constants)._length_of(text)
+        if length is not None and self._reliable(length[0]):
+            container, delta = length
+            env.len_values[target] = (container, delta)
+            if delta >= 0:
+                env.nonneg.add(target)
+            if delta <= -1:
+                env.add_lt_len(target, container)
+                if env.min_len(container) + delta >= 0:
+                    env.nonneg.add(target)
+            return
+        # Halving a sum that is bounded by ``2 * len(C)`` — e.g. the
+        # binary-search midpoint ``m := int(uint(lo+hi) >> 1)`` where the loop
+        # invariant gives ``lo < hi == len(arr)`` — yields an index still in
+        # bounds for ``C`` (the strict side keeps the sum below ``2*len``).
+        halving = re.match(r"^(.+?)(>>|/)(\w+)$", _strip_parens(_strip_int_casts(text)))
+        if halving:
+            num_text, op, amount_text = halving.groups()
+            amount = env.value_of(amount_text, self.constants)
+            divisor_ok = amount is not None and (
+                (op == ">>" and amount >= 1) or (op == "/" and amount >= 2)
+            )
+            terms = [
+                _strip_parens(term)
+                for term in _split_top_level(_strip_parens(num_text), "+")
+            ]
+            if divisor_ok and len(terms) == 2:
+                # Every term must be bounded by the SAME container and at
+                # least one must be strict (``< len``); a term with no bound
+                # makes the sum unbounded.
+                loose: list[set[str]] = []
+                strict: list[set[str]] = []
+                ok = True
+                for term in terms:
+                    if term not in env.nonneg and env.consts.get(term, -1) < 0:
+                        ok = False
+                        break
+                    strict_set = {c for i, c in env.lt_len if i == term}
+                    loose_set = set(strict_set)
+                    bound = env.len_values.get(term)
+                    if bound is not None and bound[1] == 0:
+                        loose_set |= {bound[0]}
+                    if not loose_set:
+                        ok = False
+                        break
+                    loose.append(loose_set)
+                    strict.append(strict_set)
+                if ok:
+                    common = loose[0] & loose[1]
+                    for container in common:
+                        if any(container in s for s in strict):
+                            env.nonneg.add(target)
+                            env.add_lt_len(target, container)
+                            return
         if _NONNEG_CALLS.match(text) and _is_whole_call(text):
             env.nonneg.add(target)
             return

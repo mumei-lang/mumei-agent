@@ -252,7 +252,8 @@ def test_extract_statements_returns_none_for_unsupported_language() -> None:
 # Historical false positives previously handled by dedicated helpers
 # (``_go_zero_guarded_nonzero_*``, ``_go_dual_len_loop_guarded_indices``,
 # ``_go_grow_guarded_indices``, ``_go_last_index_guarded_indices``,
-# ``_go_reverse_loop_guarded_indices``, ``_go_modulo_bounded_indices``).
+# ``_go_reverse_loop_guarded_indices``, ``_go_modulo_bounded_indices``,
+# ``_go_median_guarded_indices``, ``_go_sort_search_guarded_indices``).
 # --------------------------------------------------------------------------- #
 
 
@@ -273,6 +274,18 @@ def test_extract_statements_returns_none_for_unsupported_language() -> None:
         "package demo\nfunc Rev(xs []int) int {\n    for i := len(xs) - 1; i >= 0; i-- {\n        return xs[i]\n    }\n    return 0\n}\n",
         # modulo bounded by nonempty length
         "package demo\nfunc Wrap(colors []string, k uint) string {\n    if len(colors) == 0 {\n        return \"\"\n    }\n    idx := k % uint(len(colors))\n    return colors[idx]\n}\n",
+        # median idiom: ``mid := len(v)/2`` after an empty-slice early return
+        "package demo\nfunc Median(values []float64) float64 {\n    if len(values) == 0 {\n        return 0\n    }\n    mid := len(values) / 2\n    return values[mid]\n}\n",
+        # sort.Search: closure body is out of dataflow scope; the result index
+        # is guarded by ``i < len(files)`` before use
+        "package demo\nfunc lookup(files []file, name string) *file {\n    if len(files) == 0 {\n        return nil\n    }\n    i := sortSearch(len(files), func(i int) bool {\n        return files[i].name >= name\n    })\n    if i < len(files) && files[i].name == name {\n        return &files[i]\n    }\n    return nil\n}\n",
+        # binary-search midpoint whose bounds come from len-alias facts alone
+        # (``lo`` never reassigned in the loop body, so ``lo < hi`` keeps
+        # ``lt_len(lo, arr)`` and ``(lo+hi)>>1`` stays bounded without the
+        # dedicated helper). The index is in ``return`` position — a scanned
+        # expression shape; the ``lo = m`` narrowing idiom itself still needs
+        # the ``_go_binary_search_guarded_indices`` helper.
+        "package demo\nvar arr []int\nfunc Mid(lo uint) int {\n    hi := len(arr)\n    for lo < hi {\n        m := int(uint(lo+hi) >> 1)\n        if m == 0 {\n            return arr[m]\n        }\n    }\n    return -1\n}\n",
     ],
 )
 def test_historical_false_positives_are_suppressed_by_dataflow(source: str) -> None:

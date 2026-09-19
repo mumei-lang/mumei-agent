@@ -523,9 +523,20 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   `_go_zero_guarded_nonzero_locals` / `_go_zero_guarded_nonzero_names` /
   `_go_dual_len_loop_guarded_indices` / `_go_grow_guarded_indices` /
   `_go_last_index_guarded_indices` / `_go_reverse_loop_guarded_indices` /
-  `_go_modulo_bounded_indices`）をデータフロー層で置換・削除した。binary search / sort.Search /
-  enum 文字列配列 / median / lookup-table など残る特化ヘルパは、汎用事実で等価に抑止できる
-  ことを回帰テストで示してから順次置換する。
+  `_go_modulo_bounded_indices`）をデータフロー層で置換・削除した。続く第 2 弾で
+  `_go_median_guarded_indices`（`mid := len(arr)/2` は `_LEN_DIV` + 非空ガードで汎用
+  カバー）と `_go_sort_search_guarded_indices`（`sort.Search` 結果は `i < len(files)`
+  条件ガードで汎用カバー、クロージャ本体は対象外）も削除した。あわせて `_define` が
+  `x := len(c)` で `len_values` を seed しない非対称を修正し、`(a+b)>>k` / `(a+b)/k`
+  （両項が同一コンテナの `lt_len`/`len_values` で非負・少なくとも一方は厳格 `< len`）を
+  midpoint 規則として `_define`（`=`/`:=` 共通）に追加した。あわせて `_comparison` で
+  左辺が既知 const の比較（`0 < hi` 等）が演算子反転で `lt_len` を失っていた点を修正し、
+  反転前に len-alias 右辺へ `lt_len` を記録するようにした。残る特化ヘルパは置換不可を確認済み:
+  `_go_binary_search_guarded_indices`（`hi = m` のループ内再代入で `len_values` が
+  kill されるため不変式推論が必要 — 単一パス walk の範囲外）、`_go_enum_string_guarded_indices`
+  / `_go_enum_string_array_guarded_indices`（`iota` enum 定数が `constants` で未解決のため
+  範囲ガードの上端を証明できない）、`_go_bits_uint8_lookup_guarded_indices`（テーブル宣言が
+  ソース内に存在せず `uint8 < 256` の型上端も未モデル化）。
 - A-6 新バグ種別（データフロー層のみで判定、既存 4 カテゴリの後ろに追記）: nil マップへの
   書き込み（`var m map[K]V` 未初期化のまま `m[k] = v`）、ロック二重取得（`mu.Lock()` 保持中の
   再 `Lock`）、ロック保持中の `return`（`defer Unlock` なし・当該パスで `Unlock` なし）、
@@ -582,7 +593,7 @@ stage 1 / stage 2 / 意味解析強化で「構文的事実の抽出」と「型
 `agent/strategies/foreign_code_strategy_helpers.py` の `_detect_go_safety_issues` /
 `_issues_from_findings` / `_i64_overflow_safety_issue` などは、抽出した式テキストを
 構文的に走査し、遭遇した偽陽性パターンごとに抑制分岐（`_go_enum_string_guarded_indices` /
-`_go_binary_search_guarded_indices` / `_go_sort_search_guarded_indices` 等の
+`_go_binary_search_guarded_indices` 等の
 `_go_*_guarded_indices` 群、`_solidity_guaranteed_nonzero_params` 等の `guaranteed_nonzero`
 系ヘルパ）を追加する構造になっている。その結果、検証できるバグ種別は bounds / nil /
 division / overflow の 4 カテゴリに留まる一方、実装量は「検証できるバグ種別数」ではなく

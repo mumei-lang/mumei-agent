@@ -2412,90 +2412,6 @@ def _go_short_circuit_or_guarded_indices(body: str) -> set[str]:
     return guarded
 
 
-def _go_median_guarded_indices(body: str) -> set[str]:
-    """``mid := len(arr) / 2`` in a median helper is bounded by ``len(arr) > 0``.
-
-    The median idiom first returns on empty arrays, so ``arr[mid]`` is safe.
-    """
-    guarded: set[str] = set()
-    for match in re.finditer(
-        r"\b(\w+)\s*:=\s*len\(\s*(\w+)\s*\)\s*/\s*2\b",
-        body,
-    ):
-        mid, arr = match.group(1), match.group(2)
-        # Require an early return when the array is empty.
-        if re.search(
-            rf"\bif\s+len\(\s*{re.escape(arr)}\s*\)\s*(?:==|<=)\s*0\s*\{{[^}}]*\breturn\b",
-            body,
-        ):
-            if re.search(
-                rf"\b{re.escape(arr)}\s*\[\s*{re.escape(mid)}\s*\]",
-                body,
-            ):
-                guarded.add(mid)
-    return guarded
-
-
-def _go_sort_search_guarded_indices(body: str) -> set[str]:
-    """Indices used in ``sort.Search``/``sortSearch`` closures are in bounds.
-
-    The closure parameter is always called with ``0 <= i < n``; the returned
-    result is in ``[0, n]`` and typically checked with ``if i < n`` before use.
-    """
-    guarded: set[str] = set()
-    search_re = re.compile(r"(?:sortSearch|sort\.Search)\s*\(")
-    i = 0
-    while True:
-        m = search_re.search(body, i)
-        if not m:
-            break
-        # The regex matched up to and including the opening paren.
-        paren = m.end() - 1
-        # Find the matching close paren for the sort.Search call.
-        depth = 1
-        j = m.end()
-        while j < len(body) and depth > 0:
-            if body[j] == "(":
-                depth += 1
-            elif body[j] == ")":
-                depth -= 1
-            j += 1
-        call = body[m.end() : j - 1]
-        # First argument should be ``len(arr)``.
-        arr_match = re.match(r"\s*len\(\s*(\w+)\s*\)\s*,", call)
-        if not arr_match:
-            i = j
-            continue
-        arr = arr_match.group(1)
-        rest = call[arr_match.end() :]
-        # Match ``func(i int) bool { ... }``
-        func_match = re.search(r"func\s*\(\s*(\w+)\s+int\s*\)\s*bool\s*\{", rest)
-        if func_match:
-            idx = func_match.group(1)
-            brace = rest.find("{", func_match.end() - 1)
-            if brace != -1:
-                bdepth = 1
-                k = brace + 1
-                while k < len(rest) and bdepth > 0:
-                    if rest[k] == "{":
-                        bdepth += 1
-                    elif rest[k] == "}":
-                        bdepth -= 1
-                    k += 1
-                closure_body = rest[brace + 1 : k - 1]
-                if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(idx)}\s*\]", closure_body):
-                    guarded.add(idx)
-        # The assignment result variable (``i := sortSearch(...)``) is also in bounds.
-        before = body[:m.start()]
-        assign_match = re.search(r"(\w+)\s*:=\s*$", before)
-        if assign_match:
-            result = assign_match.group(1)
-            if re.search(rf"\b{re.escape(arr)}\s*\[\s*{re.escape(result)}\s*\]", body):
-                guarded.add(result)
-        i = j
-    return guarded
-
-
 def _go_pow10_guarded_indices(body: str) -> set[str]:
     """``nd := log10Pow2(bits.Len64(x))`` indexing ``uint64pow10[nd]`` is in bounds.
 
@@ -2705,13 +2621,12 @@ def _go_guarded_indices(
     guarded |= _go_2d_slice_loop_guarded_indices(body)
     # ``len(arr) == idx || arr[idx]`` short-circuit guards the index access.
     guarded |= _go_short_circuit_or_guarded_indices(body)
-    # Median idiom ``mid := len(arr) / 2`` with an early return on empty arrays.
-    guarded |= _go_median_guarded_indices(body)
-    # ``sort.Search``/``sortSearch`` closures and their results index the searched slice.
-    guarded |= _go_sort_search_guarded_indices(body)
     # ``log10Pow2(bits.Len64(x))`` indexing ``uint64pow10`` stays within the table.
     guarded |= _go_pow10_guarded_indices(body)
     # Binary-search midpoint ``m`` is bounded by the initial ``len(arr)`` and the loop invariant.
+    # (Requires loop-invariant reasoning: ``hi`` is reassigned inside the loop,
+    # so its ``len_values`` fact is killed before the condition is applied —
+    # the single-pass walker intentionally keeps this helper.)
     if source:
         guarded |= _go_binary_search_guarded_indices(body, source)
     # Prysm end-to-end tests loop over validator-index slices and index the
