@@ -320,6 +320,13 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _root_name(target: str) -> str:
+    """Root variable of an assignment target: ``*out`` / ``(*out).f`` /
+    ``m[k]`` all yield their base name (``out`` / ``out`` / ``m``)."""
+    root = target.split("[")[0].split(".")[0]
+    return root.strip("()").lstrip("*").strip("()")
+
+
 def _parse_int(text: str) -> int | None:
     text = _norm(text).replace("_", "")
     if not text:
@@ -1194,7 +1201,7 @@ class _Walker:
                 env.kill(name)
                 if keep_nonneg:
                     env.nonneg.add(name)
-                env.defined.add(name.split("[")[0].split(".")[0].lstrip("*"))
+                env.defined.add(_root_name(name))
             return env, ""
         if kind == "const":
             declarations = [
@@ -1690,6 +1697,7 @@ class _Walker:
             for value in case.values:
                 self._check_uninit_text(value, case.start, base)
                 self._check_transition_text(value, case.start, base)
+                self._note_output_args(value, base)
             if not case.values:
                 # ``select`` comm clauses (``case <-ch:`` / ``case ch <- v:``)
                 # carry no ``values`` — scan the clause text for closed
@@ -1697,6 +1705,7 @@ class _Walker:
                 clause = re.match(r"^\s*case\s+(.+?)\s*:", case.text)
                 if clause:
                     self._check_transition_text(clause.group(1), case.start, base)
+                    self._note_output_args(clause.group(1), base)
             case_env = base.copy()
             if case.kind == "default":
                 has_default = True
@@ -1817,7 +1826,7 @@ class _Walker:
         values = list(statement.values)
         if statement.operator not in {"=", ":="}:
             for target in targets:
-                env.defined.add(target.split("[")[0].split(".")[0].lstrip("*"))
+                env.defined.add(_root_name(target))
                 keep_nonneg = (
                     target in env.nonneg
                     and len(values) == 1
@@ -1856,11 +1865,11 @@ class _Walker:
                     # Reassigning an output param itself (``out = &x``) does
                     # not write its pointee, so only ``*out`` / ``out.f`` /
                     # ``out[i]`` targets establish it.
-                    root = target.split("[")[0].split(".")[0].lstrip("*")
+                    root = _root_name(target)
                     if not (target == root and root in self.contract_outputs):
                         env.defined.add(root)
                 if not re.fullmatch(_IDENT, target):
-                    root = target.split("[")[0].split(".")[0].lstrip("*")
+                    root = _root_name(target)
                     if target.startswith("*"):
                         env.kill(root)
         if len(targets) >= 2 and len(values) == 1:

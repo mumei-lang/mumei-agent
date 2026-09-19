@@ -1865,3 +1865,41 @@ def test_defer_call_arg_establishes_output_param() -> None:
         "}\n"
     )
     assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_parenthesised_deref_assign_establishes_output_param() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int) {\n"
+        "    (*out) = 1\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_parenthesised_deref_field_write_establishes_output_param() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out.x >= 0\n"
+        "func G(out *S) {\n"
+        "    (*out).x = 1\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
+
+
+def test_switch_case_call_arg_establishes_output_param() -> None:
+    source = (
+        "package demo\n"
+        "// ensures: out >= 0\n"
+        "func G(out *int, x int) {\n"
+        "    switch x {\n"
+        "    case fill(out):\n"
+        "    }\n"
+        "    return\n"
+        "}\n"
+    )
+    assert _transition_messages(source, "contract_output_unassigned") == []
