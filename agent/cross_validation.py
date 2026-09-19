@@ -831,7 +831,9 @@ def validate_foreign_code(
     warnings.extend(z3_warnings)
     issues = _with_source_lines(_dedupe_issues([*llm_issues, *z3_issues]), source_line_map)
     if normalized_language == "solidity":
-        issues.extend(_solidity_advisory_issues(code))
+        issues.extend(
+            _with_source_lines(_solidity_advisory_issues(code), source_line_map)
+        )
 
     def _is_void_return_type(return_type: str) -> bool:
         return return_type.strip().lower() in {"none", "void", "nonetype", "()", "unit"}
@@ -922,7 +924,11 @@ def validate_foreign_code(
         verification=verification,
         proof_certificate=proof_certificate,
         lean_bridge=lean_bridge_result,
-        issues=_with_fix_suggestions(issues),
+        issues=_with_fix_suggestions(
+            issues,
+            code=code,
+            language=normalized_language,
+        ),
         source_line_map=source_line_map,
         warnings=warnings,
         errors=errors,
@@ -1381,13 +1387,26 @@ def _fix_suggestions(issues: Iterable[CrossValidationIssue]) -> list[str]:
     return suggestions
 
 
-def _with_fix_suggestions(issues: list[CrossValidationIssue]) -> list[CrossValidationIssue]:
+def _with_fix_suggestions(
+    issues: list[CrossValidationIssue],
+    *,
+    code: str = "",
+    language: str = "",
+) -> list[CrossValidationIssue]:
     return [
         issue
         if issue.fix_suggestion
         else replace(
             issue,
-            fix_suggestion=_suggest_fix(issue.kind, issue.message, issue.evidence),
+            fix_suggestion=_suggest_fix(
+                issue.kind,
+                issue.message,
+                issue.evidence,
+                code=code,
+                language=language,
+                source_line=issue.source_line,
+                location=issue.location,
+            ),
         )
         for issue in issues
     ]

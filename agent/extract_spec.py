@@ -382,6 +382,19 @@ def main(args=None):
                 file=sys.stderr,
             )
 
+        # Domain-required-condition checklist (V1-A-2): additive warnings only,
+        # printed like other extraction warnings — the spec payload itself is
+        # unchanged.
+        from agent.spec_completeness_checker import (
+            check_forge_spec_domain_completeness,
+        )
+        for domain_warning in check_forge_spec_domain_completeness(
+            forge_spec,
+            domain_hint,
+            spec_text=natural_language,
+        ):
+            print(f"Warning: {domain_warning}", file=sys.stderr)
+
         if args.check_contradiction_only:
             contradiction_report = check_spec_contradiction_from_spec(forge_spec, mumei)
             if directory_result is not None:

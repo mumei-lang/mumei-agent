@@ -11,6 +11,7 @@ from agent.cross_validation import (
     validate_nl_spec_multi,
 )
 from agent.spec_completeness_checker import (
+    _keyword_matches,
     check_domain_completeness,
     check_forge_spec_domain_completeness,
     check_nl_vacuity,
@@ -67,6 +68,42 @@ def test_domain_completeness_falls_back_to_prose_without_formal_clauses() -> Non
 
 def test_domain_completeness_unknown_domain_is_quiet() -> None:
     assert check_domain_completeness("anything", [], "unknown-domain") == []
+
+
+def test_keyword_matching_uses_word_boundaries() -> None:
+    # Stems still match their inflections.
+    assert _keyword_matches("sanitize", "sanitizes all inputs")
+    assert _keyword_matches("limit", "limit is enforced")
+    # ...but not unrelated words containing them.
+    assert not _keyword_matches("limit", "delimited scope")
+    assert not _keyword_matches("audit", "auditory output")
+    # Whole-word keywords reject embedded occurrences entirely.
+    assert not _keyword_matches("nil", "vanilla values")
+    assert not _keyword_matches("none", "nonempty list")
+    assert _keyword_matches("nil", "x != nil")
+    # Symbol-leading keywords keep substring semantics on the left.
+    assert _keyword_matches(">= 0", "amount >= 0")
+    assert _keyword_matches(">=0", "amount>=0")
+
+
+def test_domain_completeness_expanded_domains() -> None:
+    for domain in ("compliance", "regtech", "iot", "web", "math"):
+        warnings = check_domain_completeness("add returns the sum", [], domain)
+        assert warnings, domain
+        assert all(
+            warning.startswith(f"domain-completeness: {domain}")
+            for warning in warnings
+        )
+
+
+def test_domain_completeness_web_domain_covered() -> None:
+    warnings = check_domain_completeness(
+        "All inputs are sanitized and validated; requests require an "
+        "authenticated session token; rate limits apply to every endpoint.",
+        [],
+        "web",
+    )
+    assert warnings == []
 
 
 def test_forge_spec_domain_completeness_reads_forge_atoms() -> None:

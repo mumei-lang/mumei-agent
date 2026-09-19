@@ -295,3 +295,92 @@ def test_extract_spec_generate_and_forge_uses_raw_forge_spec(tmp_path: Path) -> 
     assert (mumei_repo / "std" / "math" / "abs_i64.mm").read_text(encoding="utf-8") == forge_code
     forge_log = json.loads(log_path.read_text(encoding="utf-8"))
     assert forge_log["runs"][0]["status"] == "success"
+
+
+def test_extract_spec_domain_hint_warns_missing_conditions(
+    tmp_path: Path, capsys
+) -> None:
+    """V1-A-2 follow-up: extract-spec --domain prints domain checklist gaps as
+    warnings; the spec payload itself is unchanged."""
+    spec = {
+        "task_id": "nl-withdraw",
+        "target_file": "std/financial/withdraw.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "withdraw",
+                "inputs": [
+                    {"name": "balance", "type": "i64"},
+                    {"name": "amount", "type": "i64"},
+                ],
+                "return_type": "i64",
+                "requires": "amount > 0",
+                "ensures": "result == balance - amount",
+            }
+        ],
+    }
+    output_path = tmp_path / "extracted.json"
+
+    fake_config = MagicMock()
+    fake_config.model = "test-model"
+    fake_config.max_retries = 2
+    fake_config.mumei_bin = "mumei"
+    fake_config.create_client.return_value = _mock_client(json.dumps(spec))
+
+    args = build_parser().parse_args(
+        [
+            "--text",
+            "withdraw moves funds between accounts.",
+            "--domain",
+            "financial",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=fake_config),
+        patch("agent.extract_spec.create_mumei_client", return_value=MagicMock()),
+        patch("agent.extract_spec.extract_spec", return_value=spec),
+    ):
+        main(args)
+
+    captured = capsys.readouterr()
+    assert "domain-completeness: financial spec lacks balance conservation" in (
+        captured.err
+    )
+    # The written spec artifact carries no extra keys.
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["task_id"] == "nl-withdraw"
+    assert "domain_warnings" not in payload
+
+
+def test_extract_spec_without_domain_hint_emits_no_domain_warnings(
+    tmp_path: Path, capsys
+) -> None:
+    spec = {"task_id": "nl-add", "mode": "create", "atoms": []}
+    output_path = tmp_path / "extracted.json"
+
+    fake_config = MagicMock()
+    fake_config.model = "test-model"
+    fake_config.max_retries = 2
+    fake_config.mumei_bin = "mumei"
+    fake_config.create_client.return_value = _mock_client(json.dumps(spec))
+
+    args = build_parser().parse_args(
+        [
+            "--text",
+            "add returns the sum.",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=fake_config),
+        patch("agent.extract_spec.create_mumei_client", return_value=MagicMock()),
+        patch("agent.extract_spec.extract_spec", return_value=spec),
+    ):
+        main(args)
+
+    assert "domain-completeness" not in capsys.readouterr().err

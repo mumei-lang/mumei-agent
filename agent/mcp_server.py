@@ -2205,6 +2205,22 @@ def extract_spec_from_code(
                     "warnings": result.warnings,
                 }
                 forge_task_spec = result.forge_task_spec
+                # V1-A-2: domain checklist findings ride the existing
+                # `warnings` list — no new payload keys.
+                if domain_hint and forge_task_spec:
+                    from agent.spec_completeness_checker import (
+                        check_forge_spec_domain_completeness,
+                    )
+                    domain_warnings = check_forge_spec_domain_completeness(
+                        forge_task_spec,
+                        domain_hint,
+                        spec_text=result.natural_language_spec or "",
+                    )
+                    if domain_warnings:
+                        payload["warnings"] = [
+                            *(result.warnings or []),
+                            *domain_warnings,
+                        ]
         except Exception as exc:
             return _err(
                 f"extract_spec_from_code failed: {exc}",

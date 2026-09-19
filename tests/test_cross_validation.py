@@ -319,6 +319,193 @@ def test_suggest_fix_unsat_not_shadowed_by_nullish_evidence() -> None:
     assert "unsatisfiable or inconsistent" in suggestion
 
 
+def test_suggest_fix_verification_keyword_precision() -> None:
+    """Left-boundary stems reject embedded-substring false positives."""
+    suggestion = _suggest_fix(
+        "verification",
+        "each individual element is compared on this path",
+        "",
+    )
+    assert "divisor != 0" not in suggestion
+    assert "explicit guard" in suggestion
+
+    suggestion = _suggest_fix(
+        "verification",
+        "the returned value is a vanilla scalar",
+        "",
+    )
+    assert "value != null" not in suggestion
+
+
+@pytest.mark.parametrize(
+    ("language", "message", "line", "expected_condition"),
+    [
+        (
+            "go",
+            "Go function `nth` can index `values[idx]` without a bounds contract",
+            2,
+            "0 <= idx && idx < len(values)",
+        ),
+        (
+            "python",
+            "Python function `get` can index `rows[i]` without a bounds contract",
+            1,
+            "0 <= i && i < len(rows)",
+        ),
+        (
+            "typescript",
+            "TypeScript function `first` can index `items[k]` without a bounds contract",
+            1,
+            "0 <= k && k < items.length",
+        ),
+        (
+            "python",
+            "Python function `divide` can divide by `b` without a non-zero contract",
+            1,
+            "b != 0",
+        ),
+        (
+            "go",
+            "Go function `age` can dereference `user` without a non-nil contract",
+            2,
+            "user != nil",
+        ),
+        (
+            "python",
+            "Python function `age` can dereference `user` without a non-null contract",
+            1,
+            "user is not None",
+        ),
+        (
+            "typescript",
+            "TypeScript function `len` can dereference `name` without a non-null contract",
+            1,
+            "name != null && name != undefined",
+        ),
+        (
+            "go",
+            "Go function `add` can overflow `a + b` without an arithmetic bounds contract",
+            2,
+            "a + b <= 9223372036854775807",
+        ),
+        (
+            "solidity",
+            "Solidity function `add` can overflow `a + b` without a uint256 bounds contract",
+            1,
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        ),
+    ],
+)
+def test_suggest_fix_renders_anchored_diff(
+    language: str, message: str, line: int, expected_condition: str
+) -> None:
+    signatures = {
+        "python": "def f(x):\n",
+        "go": "func f(x int) int {\n",
+        "typescript": "export function f(x: number): number {\n",
+        "solidity": "function f(uint256 x) public {\n",
+    }
+    code_lines = (["package demo\n"] if language == "go" else []) + [
+        signatures[language]
+    ] + ["    return x\n"]
+    code = "".join(code_lines)
+
+    suggestion = _suggest_fix(
+        "verification",
+        message,
+        "",
+        code=code,
+        language=language,
+        source_line=line,
+        location="f",
+    )
+
+    assert "Suggested diff" in suggestion
+    assert "```diff" in suggestion
+    assert "requires:" in suggestion
+    assert expected_condition in suggestion
+    assert signatures[language].strip() in suggestion
+
+
+def test_suggest_fix_solidity_advisory_diffs() -> None:
+    code = "contract Vault {\n    function withdraw(uint256 amount) public {\n    }\n}\n"
+    access = _suggest_fix(
+        "verification",
+        "Solidity function `withdraw` is an externally callable state-mutating "
+        "function with no access-control guard",
+        "",
+        code=code,
+        language="solidity",
+        source_line=2,
+        location="withdraw",
+    )
+    assert "Suggested diff" in access
+    assert "require(msg.sender == owner" in access
+
+    reentrancy = _suggest_fix(
+        "verification",
+        "Solidity function `withdraw` may be vulnerable to reentrancy",
+        "",
+        code=code,
+        language="solidity",
+        source_line=2,
+        location="withdraw",
+    )
+    assert "```diff" in reentrancy
+    assert "nonReentrant {" in reentrancy
+
+
+def test_suggest_fix_no_diff_without_anchor_or_condition() -> None:
+    # No source line -> text hint only.
+    suggestion = _suggest_fix(
+        "verification",
+        "Go function `nth` can index `values[idx]` without a bounds contract",
+        "",
+        code="func nth() {}",
+        language="go",
+    )
+    assert "Suggested diff" not in suggestion
+
+    # Unrecognizable condition -> text hint only.
+    suggestion = _suggest_fix(
+        "verification",
+        "the inferred contract is unsatisfiable",
+        "",
+        code="func f() {}",
+        language="go",
+        source_line=1,
+        location="f",
+    )
+    assert "Suggested diff" not in suggestion
+
+
+def test_validate_foreign_code_fix_suggestions_include_diff_block() -> None:
+    source = (FIXTURES / "sample_solidity_vulnerable.sol").read_text(encoding="utf-8")
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": True,
+        "report": {"status": "ok"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            source,
+            "solidity",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+
+    access = next(
+        issue for issue in result.issues if "access-control" in issue.message
+    )
+    assert "Suggested diff" in access.fix_suggestion
+    assert "require(msg.sender == owner" in access.fix_suggestion
+    assert access.source_line > 0
+
+
 def test_validate_foreign_code_preserves_typescript_signature_types() -> None:
     mumei = MagicMock()
     mumei.verify.return_value = {
