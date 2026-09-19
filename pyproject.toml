@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "mumei-agent"
 version = "0.1.0"
 description = "AI-driven autonomous fix loop for the Mumei programming language"
+readme = "README.md"
+license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 dependencies = [
     "chardet>=5.0",
@@ -13,7 +15,6 @@ dependencies = [
     "numpy>=1.26",
     "openai>=1.0",
     "python-dotenv>=1.0",
-    "streamlit>=1.30",
     "z3-solver>=4.12",
     # Layer B stage 1 — deterministic syntactic function/block extraction.
     # tree-sitter is a pure in-process parser (no solc/rustc/tsc, no network),
@@ -22,7 +23,7 @@ dependencies = [
     "tree-sitter-rust>=0.23",
     "tree-sitter-go>=0.23",
     "tree-sitter-typescript>=0.23",
-    "tree-sitter-solidity>=1.2",
+    "tree-sitter-solidity>=1.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,11 @@ mcp = [
 # LLM/tool spans and token metrics to an OTLP backend.  The agent's
 # heal / generate / forge / proliferate flows fall back to NoOp
 # tracers/meters and run unchanged when this extra is not installed.
+# Streamlit only backs the optional proof-graph dashboard in
+# visualizer/app.py — install with ``pip install mumei-agent[viz]``.
+viz = [
+    "streamlit>=1.30",
+]
 otel = [
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",

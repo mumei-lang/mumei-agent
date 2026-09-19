@@ -1,9 +1,15 @@
 """Tests for Zero-Human Challenge specs and runner.
 
 .. deprecated::
-    This module has been consolidated into ``test_challenge.py``, which covers
-    all spec validation, dry-run, multi-atom format, and import tests.
-    This file is kept as a redirect so that any CI or script referencing it
-    by name still discovers at least one test.
+    The suite has been consolidated into ``test_challenge.py``. This module
+    keeps a single redirect check so that CI or scripts referencing this
+    filename by name still discover a test — previously a star-import made
+    pytest collect and run the entire challenge suite twice.
 """
-from tests.test_challenge import *  # noqa: F401,F403
+
+import importlib
+
+
+def test_consolidated_challenge_suite_exists():
+    """The real challenge test module must still be importable."""
+    assert importlib.import_module("tests.test_challenge") is not None

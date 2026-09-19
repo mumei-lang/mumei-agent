@@ -221,16 +221,19 @@ jobs:
             FAIL_FLAG="--fail-on-refuted"
           fi
           # CORPUS_PATHS is intentionally word-split into multiple directory
-          # arguments; the input is a space-separated list.
+          # arguments; the input is a space-separated list. The `--`
+          # separator keeps a path beginning with '-' (e.g.
+          # '--fail-on-refuted') from being parsed as a flag.
           # shellcheck disable=SC2086
           set -o pipefail
-          uv run python scripts/dogfood_triage_gate.py ${CORPUS_PATHS} \
+          uv run python scripts/dogfood_triage_gate.py \
             --json-output /tmp/dogfood/triage.json \
             --markdown-output /tmp/dogfood/triage.md \
             --per-file-timeout "${PER_FILE_TIMEOUT}" \
             --slow-file-threshold 30 \
             --history-file /tmp/dogfood-history/verdict_history.json \
             $FAIL_FLAG \
+            -- ${CORPUS_PATHS} \
             2>&1 | tee /tmp/dogfood/triage.log
           cp /tmp/dogfood-history/verdict_history.json /tmp/dogfood/ || true
 

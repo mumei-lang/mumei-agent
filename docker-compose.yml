@@ -2,14 +2,16 @@
 #
 # Usage:
 #   1. docker compose up -d
-#   2. docker exec mumei-ollama ollama pull qwen3.5
-#      (or lightweight: docker exec mumei-ollama ollama pull qwen3.5:small)
+#   2. docker exec mumei-ollama ollama pull qwen3.5:4b
+#      (the benchmark-selected default; see .env.example / dogfood workflows)
 #   3. Configure .env (Pattern 1 is pre-configured)
 #   4. Run: uv run python -m agent.self_healing
 
 services:
   ollama:
-    image: ollama/ollama:latest
+    # Pinned tag: `latest` is mutable and would make the local LLM env
+    # non-reproducible.
+    image: ollama/ollama:0.34.2
     container_name: mumei-ollama
     ports:
       - "11434:11434"

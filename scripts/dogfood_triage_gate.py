@@ -283,6 +283,34 @@ def main(argv: list[str] | None = None) -> int:
             continue
         if path.is_dir() and args.per_file_timeout > 0:
             result, timings = _audit_directory_supervised(path, args)
+        elif path.is_file() and args.per_file_timeout > 0:
+            # File-path inputs deserve the same per-file supervision as
+            # directory members — otherwise a pathological file hangs the
+            # gate despite --per-file-timeout being set.
+            file_result, timing = audit_file_with_timeout(
+                path,
+                args.language or AUDIT_EXTENSION_MAP.get(path.suffix.lower(), ""),
+                args.per_file_timeout,
+                risky_timeout_scale=args.risky_timeout_scale,
+            )
+            result = AuditDirectoryResult(
+                success=file_result.success,
+                source_dir=str(path),
+                language=file_result.language,
+                file_results=[file_result],
+                total_files=1,
+                files_with_issues=0 if file_result.success else 1,
+                verification_status=file_result.verification_status,
+                spec_health_issues=list(file_result.spec_health_issues),
+                verification_violations=list(file_result.verification_violations),
+                cross_validation_gaps=list(file_result.cross_validation_gaps),
+                migration_hints=list(file_result.migration_hints),
+                healed_files=list(file_result.healed_files),
+                heal_errors=list(file_result.heal_errors),
+                next_steps=list(file_result.next_steps),
+                errors=list(file_result.errors),
+            )
+            timings = [timing]
         else:
             result, timings = _audit(pipeline, path, args), []
         report = triage_directory_result(result)
@@ -312,7 +340,8 @@ def main(argv: list[str] | None = None) -> int:
         history = load_history(history_path)
         history.append(snapshot_from_totals(totals, args.run_id))
         save_history(history_path, history, args.history_limit)
-        history = history[-args.history_limit :]
+        # history[-0:] is history[0:] — the whole list, not "keep 0".
+        history = history[-args.history_limit :] if args.history_limit > 0 else []
         alerts = [
             *detect_refuted_spike(
                 history, min_delta=args.refuted_spike_min_delta
