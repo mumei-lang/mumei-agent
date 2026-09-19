@@ -536,7 +536,14 @@ stage 3 も実装完了しており、本タスクは全 stage が完了済み:
   kill されるため不変式推論が必要 — 単一パス walk の範囲外）、`_go_enum_string_guarded_indices`
   / `_go_enum_string_array_guarded_indices`（`iota` enum 定数が `constants` で未解決のため
   範囲ガードの上端を証明できない）、`_go_bits_uint8_lookup_guarded_indices`（テーブル宣言が
-  ソース内に存在せず `uint8 < 256` の型上端も未モデル化）。
+  ソース内に存在せず `uint8 < 256` の型上端も未モデル化）。第 3 弾の監査では残存ヘルパを
+  全件 probe 検証し、いずれも置換不可と確認: `_go_range_index_guarded_indices`（ループ内の
+  直接 index は `_range` が `lt_len` を汎用付与済みだが、ループ後の alias 使用は may-fact
+  merge で落ちる）、`_go_short_circuit_or_guarded_indices`（`i <= len` ∧ `i != len` の
+  合成交差は単一パス事実モデルの範囲外）、`_go_pow10_guarded_indices`（`bits.Len64` の値域と
+  テーブルサイズが未モデル）、`_go_op_enum_guarded_indices` / `_go_mapfast_guarded_indices` /
+  `_go_cnames_guarded_indices`（enum・iota 定数の値域が未解決）。call site に保持理由を
+  明記済みで A-5 は完了。
 - A-6 新バグ種別（データフロー層のみで判定、既存 4 カテゴリの後ろに追記）: nil マップへの
   書き込み（`var m map[K]V` 未初期化のまま `m[k] = v`）、ロック二重取得（`mu.Lock()` 保持中の
   再 `Lock`）、ロック保持中の `return`（`defer Unlock` なし・当該パスで `Unlock` なし）、
