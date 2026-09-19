@@ -1411,7 +1411,10 @@ class _Walker:
         # A ``return <exprs>`` assigns every named result positionally, so
         # only ``*T`` output params can stay unestablished on that path.
         self._check_contract_outputs(
-            env, statement.start, results_satisfied=bool(statement.values)
+            env,
+            statement.start,
+            statement.text.strip() or "return",
+            results_satisfied=bool(statement.values),
         )
         self._check_resources_at_exit(statement, env, statement.values)
 
@@ -1425,7 +1428,12 @@ class _Walker:
                 env.defined.add(name)
 
     def _check_contract_outputs(
-        self, env: _Env, offset: int, *, results_satisfied: bool = False
+        self,
+        env: _Env,
+        offset: int,
+        text: str,
+        *,
+        results_satisfied: bool = False,
     ) -> None:
         """On a ``return`` path, a contract-referenced named result or output
         parameter that was never assigned leaves the ``ensures`` contract
@@ -1439,7 +1447,7 @@ class _Walker:
                     DataflowIssue(
                         "contract_output_unassigned",
                         name,
-                        "",
+                        text,
                         offset,
                     )
                 )
@@ -2253,7 +2261,9 @@ class _Walker:
         if not terminated:
             # Fall-through end of body: with named results this *is* a return,
             # so contract outputs must still be established on this path.
-            self._check_contract_outputs(final_env, len(self.body))
+            self._check_contract_outputs(
+                final_env, len(self.body), "(end of function)"
+            )
             self._check_resources_at_exit(
                 tree_sitter_extract.Statement(kind="end", text="", start=len(self.body)),
                 final_env,
