@@ -358,6 +358,13 @@ def test_registry_covers_the_five_languages() -> None:
     for language in ("python", "rust", "go", "typescript", "solidity"):
         assert language in covered
     assert all(p.name and callable(p.detect) for p in LANGUAGE_PATTERNS)
+    # Registry entries must be uniquely named and hold normalized languages —
+    # dispatch normalizes before matching, so a raw alias ("javascript") would
+    # be a dead entry.
+    assert len({p.name for p in LANGUAGE_PATTERNS}) == len(LANGUAGE_PATTERNS)
+    for pattern in LANGUAGE_PATTERNS:
+        for language in pattern.languages:
+            assert language == language.strip().lower()
 
 
 def test_unsupported_language_returns_no_issues() -> None:

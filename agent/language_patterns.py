@@ -383,9 +383,10 @@ LANGUAGE_PATTERNS: tuple[LanguagePattern, ...] = (
     LanguagePattern(
         "go_defer_in_loop", frozenset({"go"}), _go_defer_in_loop_issues
     ),
+    # ``javascript``/``ts``/``tsx`` aliases normalize to "typescript".
     LanguagePattern(
         "typescript_floating_promise",
-        frozenset({"typescript", "javascript"}),
+        frozenset({"typescript"}),
         _typescript_floating_promise_issues,
     ),
     LanguagePattern(
