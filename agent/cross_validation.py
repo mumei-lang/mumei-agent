@@ -162,6 +162,7 @@ from agent.cross_validation_z3 import (
     _spec_has_matching_atom,
 )
 from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+from agent.language_patterns import language_pattern_issues
 
 
 
@@ -830,10 +831,11 @@ def validate_foreign_code(
     satisfiable, z3_issues, z3_warnings = _check_atoms_with_z3(atoms)
     warnings.extend(z3_warnings)
     issues = _with_source_lines(_dedupe_issues([*llm_issues, *z3_issues]), source_line_map)
-    if normalized_language == "solidity":
-        issues.extend(
-            _with_source_lines(_solidity_advisory_issues(code), source_line_map)
+    issues.extend(
+        _with_source_lines(
+            _language_advisory_issues(code, normalized_language), source_line_map
         )
+    )
 
     def _is_void_return_type(return_type: str) -> bool:
         return return_type.strip().lower() in {"none", "void", "nonetype", "()", "unit"}
@@ -989,7 +991,21 @@ def _run_solidity_guard_trace_lean_bridge(
     )
 
 
-def _solidity_advisory_issues(code: str) -> list[CrossValidationIssue]:
+def _language_advisory_issues(
+    code: str, language: str
+) -> list[CrossValidationIssue]:
+    """Advisory findings surfaced as ``verification`` issues: language-specific
+    "common problem" patterns (V1-B-2, `agent/language_patterns.py`) plus the
+    existing Solidity contract advisories. Issues without a counterexample are
+    warnings."""
+    foreign_issues = list(
+        language_pattern_issues(code, language)
+    )
+    if language == "solidity":
+        foreign_issues = [
+            *_detect_solidity_contract_issues(code),
+            *foreign_issues,
+        ]
     return [
         CrossValidationIssue(
             kind="verification",
@@ -997,7 +1013,7 @@ def _solidity_advisory_issues(code: str) -> list[CrossValidationIssue]:
             location=issue.function_name,
             severity="error" if issue.counterexample else "warning",
         )
-        for issue in _detect_solidity_contract_issues(code)
+        for issue in foreign_issues
     ]
 
 

@@ -22,6 +22,7 @@ from agent.cross_validation import (
 )
 from agent.mumei_client import create_mumei_client
 
+from agent.language_patterns import language_pattern_issues
 from agent.strategies.foreign_code_strategy_helpers import (
     ForeignCodeSpec,
     ForeignSafetyIssue,
@@ -650,6 +651,15 @@ class ForeignCodeVerifier:
             _detect_safety_issues(source_code, normalized_language, source_file=source_file),
             specs,
         )
+        # V1-B-2: language-pattern advisories ride the warnings channel —
+        # they are heuristics, not contract violations, so they never gate
+        # `success` or land in `errors`.
+        pattern_warnings = [
+            issue.message
+            for issue in language_pattern_issues(
+                source_code, normalized_language, source_file=source_file
+            )
+        ]
         atoms = [to_mumei_atom(spec) for spec in specs]
         mumei_source = "\n\n".join(atoms) + ("\n" if atoms else "")
         if not specs:
@@ -667,7 +677,8 @@ class ForeignCodeVerifier:
                     "verification": {"success": True, "report": {"status": "verified"}},
                     "errors": [],
                     "warnings": [
-                        "No function signatures were extracted; source contains no function declarations."
+                        "No function signatures were extracted; source contains no function declarations.",
+                        *pattern_warnings,
                     ],
                     **_first_counterexample_payload([]),
                 }
@@ -683,7 +694,7 @@ class ForeignCodeVerifier:
                     "No function signatures were extracted.",
                     *[issue.message for issue in safety_issues],
                 ],
-                "warnings": [],
+                "warnings": pattern_warnings,
                 **_first_counterexample_payload(safety_issues),
             }
 
@@ -711,7 +722,7 @@ class ForeignCodeVerifier:
             "mumei_source": mumei_source,
             "verification": verification,
             "errors": errors,
-            "warnings": [],
+            "warnings": pattern_warnings,
             **_first_counterexample_payload(safety_issues),
         }
 
