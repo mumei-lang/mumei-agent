@@ -303,7 +303,8 @@ _SOLIDITY_STATEMENT_GUARD_RE = re.compile(
 
 def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
-    for name, _attrs, body in _solidity_function_blocks_with_attrs(source):
+    for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
+        body = _strip_go_rust_literals_and_comments(raw_body)
         if re.search(r"\btx\.origin\b", body):
             issues.append(
                 ForeignSafetyIssue(

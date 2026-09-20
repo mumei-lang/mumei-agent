@@ -473,3 +473,28 @@ def test_validate_foreign_code_pattern_fix_templates_routed() -> None:
     }
     for message, expected in cases.items():
         assert expected in _suggest_verification_fix(message, ""), message
+
+
+def test_solidity_comment_mentions_not_flagged() -> None:
+    source = (
+        "contract C {\n"
+        "    function ok() public {\n"
+        "        // never use tx.origin for auth\n"
+        "        require(msg.sender == owner);\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "solidity")
+    assert not any("tx.origin" in i.message for i in issues)
+
+
+def test_solidity_staticcall_unchecked_detected() -> None:
+    source = (
+        "contract C {\n"
+        "    function probe() external {\n"
+        "        target.staticcall(data);\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "solidity")
+    assert any("staticcall" in i.message for i in issues)
