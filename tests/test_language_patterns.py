@@ -696,7 +696,12 @@ def test_rust_unwrap_expression_receiver_guarded_is_quiet() -> None:
 
 def test_typescript_expression_body_arrow_is_not_floating() -> None:
     """`const h = x => send(x)` returns the promise to the caller."""
-    for arrow in ("x => send(x)", "(x) => send(x)"):
+    for arrow in (
+        "x => send(x)",
+        "(x) => send(x)",
+        "async x => send(x)",
+        "async (x) => send(x)",
+    ):
         source = (
             "async function send(x) { return x }\n"
             f"function g() {{ const h = {arrow}; }}"

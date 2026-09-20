@@ -302,7 +302,7 @@ _TS_PROMISE_CHAIN_RE = re.compile(r"^\s*\.\s*(?:then|catch|finally)\s*\(")
 # so a promise callee inside them is handed to the caller — not floating.
 _TS_EXPR_ARROW_RE = re.compile(
     r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
-    r"(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>(?!\s*\{)"
+    r"(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>(?!\s*\{)"
 )
 
 
