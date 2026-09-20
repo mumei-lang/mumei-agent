@@ -716,3 +716,14 @@ def test_typescript_block_body_arrow_still_flags() -> None:
     )
     issues = language_pattern_issues(source, "typescript")
     assert any(i.function_name == "h" for i in issues)
+
+
+def test_rust_unwrap_is_err_is_none_guards_are_quiet() -> None:
+    """`if r.is_err() { return } r.unwrap()` is the common propagation idiom."""
+    for guard in ("is_err", "is_none"):
+        source = (
+            f"fn f(r: Result<i32, E>) -> i32 {{\n"
+            f"    if r.{guard}() {{ return 0; }}\n"
+            "    r.unwrap()\n}"
+        )
+        assert language_pattern_issues(source, "rust") == []

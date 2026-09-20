@@ -194,7 +194,9 @@ def _mask_rust_nested_fns(body: str) -> str:
 def _rust_unwrap_guarded(body: str, receiver: str) -> bool:
     recv = re.escape(receiver)
     return bool(
-        re.search(rf"\b{recv}\s*\.\s*(?:is_ok|is_some)\s*\(", body)
+        re.search(
+            rf"\b{recv}\s*\.\s*(?:is_ok|is_some|is_err|is_none)\s*\(", body
+        )
         or re.search(rf"\b(?:if|while)\s+let\b[^{{}};]*\b{recv}\b", body)
         or re.search(rf"\blet\b[^{{}};]*\b{recv}\b[^{{}};]*\belse\b", body)
         or re.search(rf"\bmatch\s+{recv}\b", body)
