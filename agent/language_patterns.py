@@ -248,7 +248,20 @@ _TS_ASYNC_NAME_RES = (
 _TS_AWAIT_PREFIX_RE = re.compile(
     r"(?:\bawait|\bvoid|\breturn|\byield|\bPromise\.(?:all|allSettled|race|any)\s*\([^()]*|[\[(=,])\s*$"
 )
-_TS_PROMISE_CHAIN_RE = re.compile(r"\)\s*\.\s*(?:then|catch|finally)\s*\(")
+_TS_PROMISE_CHAIN_RE = re.compile(r"^\s*\.\s*(?:then|catch|finally)\s*\(")
+
+
+def _ts_call_close(text: str, open_paren: int) -> int:
+    """Index of the ``)`` matching the ``(`` at ``open_paren``, or -1."""
+    depth = 0
+    for i in range(open_paren, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
 
 
 def _typescript_floating_promise_issues(source: str) -> list[ForeignSafetyIssue]:
@@ -267,11 +280,12 @@ def _typescript_floating_promise_issues(source: str) -> list[ForeignSafetyIssue]
                 continue
             for match in re.finditer(rf"\b{re.escape(callee)}\s*\(", masked):
                 prefix = masked[max(0, match.start() - 80) : match.start()]
-                closing = masked.find(")", match.end())
-                after = masked[closing : closing + 60] if closing >= 0 else ""
+                open_paren = masked.find("(", match.start())
+                closing = _ts_call_close(masked, open_paren) if open_paren >= 0 else -1
+                after = masked[closing + 1 : closing + 61] if closing >= 0 else ""
                 if _TS_AWAIT_PREFIX_RE.search(prefix):
                     continue
-                if _TS_PROMISE_CHAIN_RE.search(after):
+                if _TS_PROMISE_CHAIN_RE.match(after):
                     continue
                 issues.append(
                     ForeignSafetyIssue(

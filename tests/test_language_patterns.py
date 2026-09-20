@@ -505,3 +505,30 @@ def test_solidity_staticcall_unchecked_detected() -> None:
     )
     issues = language_pattern_issues(source, "solidity")
     assert any("staticcall" in i.message for i in issues)
+
+
+def test_typescript_later_promise_chain_does_not_suppress() -> None:
+    """`send(1)` followed by an unrelated `foo().then(...)` must still flag —
+    only a `.then/.catch/.finally` on this call's own `)` suppresses."""
+    source = (
+        "async function send(x: number): Promise<number> { return x; }\n"
+        "function foo(): Promise<void> { return Promise.resolve(); }\n"
+        "async function run(): Promise<void> {\n"
+        "    send(1),\n"
+        "    foo().then(() => {});\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert any("`send()`" in i.message or "async `send`" in i.message for i in issues)
+
+
+def test_typescript_nested_args_then_chain_suppressed() -> None:
+    source = (
+        "async function send(x: number): Promise<number> { return x; }\n"
+        "function wrap(f: () => number, n: number): number { return n; }\n"
+        "async function run(): Promise<void> {\n"
+        "    send(wrap(() => 2, 1)).catch(() => {});\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert not any("floating promise" in i.message for i in issues)
