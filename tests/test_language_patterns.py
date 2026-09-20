@@ -624,3 +624,47 @@ def test_rust_nested_fn_unwrap_attributed_to_inner_only() -> None:
     issues = language_pattern_issues(source, "rust")
     assert any("`inner`" in i.message for i in issues)
     assert not any("`outer`" in i.message for i in issues)
+
+
+def test_solidity_mock_contract_suppresses_pattern_advisories() -> None:
+    source = (
+        "contract TokenMock {\n"
+        "    function poke() public {\n"
+        "        require(tx.origin == msg.sender);\n"
+        "        selfdestruct(payable(msg.sender));\n"
+        "        target.call(\"\")\n"
+        "    }\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "solidity") == []
+
+
+def test_solidity_mocks_path_suppresses_pattern_advisories() -> None:
+    source = (
+        "contract Vault {\n"
+        "    function poke() public {\n"
+        "        require(tx.origin == msg.sender);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert (
+        language_pattern_issues(
+            source, "solidity", source_file="contracts/mocks/Vault.sol"
+        )
+        == []
+    )
+    assert language_pattern_issues(
+        source, "solidity", source_file="contracts/Vault.sol"
+    )
+
+
+def test_solidity_non_mock_contract_still_flags() -> None:
+    source = (
+        "contract Vault {\n"
+        "    function poke() public {\n"
+        "        require(tx.origin == msg.sender);\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "solidity")
+    assert any("tx.origin" in i.message for i in issues)

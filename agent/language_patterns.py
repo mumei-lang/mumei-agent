@@ -20,6 +20,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _balanced_brace_body,
     _go_function_blocks,
     _is_generated_source,
+    _is_solidity_mock_source,
     _mask_nested_function_literals,
     _normalize_language,
     _rust_function_scopes,
@@ -359,6 +360,8 @@ _SOLIDITY_STATEMENT_GUARD_RE = re.compile(
 
 
 def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
+    if _is_solidity_mock_source(source):
+        return []
     issues: list[ForeignSafetyIssue] = []
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
         body = _strip_go_rust_literals_and_comments(raw_body)
@@ -460,9 +463,14 @@ def language_pattern_issues(
     Advisory only: issues carry no counterexample, so downstream surfaces
     treat them as warnings, not violations.
     """
-    del source_file  # reserved for path-based suppression (e.g. test dirs)
     normalized = _normalize_language(language)
     if _is_generated_source(source):
+        return []
+    if (
+        normalized == "solidity"
+        and source_file
+        and ("/mocks/" in source_file or "\\mocks\\" in source_file)
+    ):
         return []
     issues: list[ForeignSafetyIssue] = []
     seen: set[tuple[str, str]] = set()
