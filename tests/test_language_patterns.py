@@ -727,3 +727,39 @@ def test_rust_unwrap_is_err_is_none_guards_are_quiet() -> None:
             "    r.unwrap()\n}"
         )
         assert language_pattern_issues(source, "rust") == []
+
+
+def test_solidity_flags_each_unchecked_call_type_once() -> None:
+    source = (
+        "contract C {\n"
+        "  function f() public {\n"
+        "    a.send(1);\n"
+        "    b.delegatecall(x);\n"
+        "    c.send(2);\n"
+        "  }\n}"
+    )
+    issues = language_pattern_issues(source, "solidity")
+    kinds = [i.message for i in issues if "low-level call" in i.message]
+    assert any("`send`" in m for m in kinds)
+    assert any("`delegatecall`" in m for m in kinds)
+    assert len(kinds) == 2  # the duplicate `send` is deduplicated
+
+
+def test_python_except_tuple_with_exception_flags() -> None:
+    source = (
+        "def f():\n"
+        "    try: x()\n"
+        "    except (Exception, OSError): pass\n"
+    )
+    issues = language_pattern_issues(source, "python")
+    assert any("swallow" in i.message for i in issues)
+
+
+def test_python_except_specific_tuple_is_quiet() -> None:
+    source = (
+        "def f():\n"
+        "    try: x()\n"
+        "    except (OSError, ValueError): pass\n"
+    )
+    issues = language_pattern_issues(source, "python")
+    assert not any("swallow" in i.message for i in issues)

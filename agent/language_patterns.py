@@ -52,6 +52,25 @@ def _python_noop_statement(stmt: ast.AST) -> bool:
     )
 
 
+def _python_swallow_all_name(handler_type: ast.AST | None) -> str | None:
+    """Name of the catch-all exception in ``handler_type`` — bare
+    ``Exception``/``BaseException`` or a tuple containing either."""
+    names = (
+        (handler_type,)
+        if isinstance(handler_type, ast.Name)
+        else handler_type.elts
+        if isinstance(handler_type, ast.Tuple)
+        else ()
+    )
+    for node in names:
+        if (
+            isinstance(node, ast.Name)
+            and node.id in {"Exception", "BaseException"}
+        ):
+            return node.id
+    return None
+
+
 def _python_own_statements(function: ast.AST) -> Iterable[ast.AST]:
     """Yield the statements of ``function`` without descending into nested
     function/class definitions."""
@@ -137,8 +156,8 @@ def _python_swallow_except_issues(source: str) -> list[ForeignSafetyIssue]:
                         )
                     )
                 elif (
-                    isinstance(handler.type, ast.Name)
-                    and handler.type.id in {"Exception", "BaseException"}
+                    (swallow_name := _python_swallow_all_name(handler.type))
+                    is not None
                     and all(_python_noop_statement(stmt) for stmt in handler.body)
                 ):
                     issues.append(
@@ -146,7 +165,7 @@ def _python_swallow_except_issues(source: str) -> list[ForeignSafetyIssue]:
                             function_name=node.name,
                             message=(
                                 f"Python function `{node.name}` catches "
-                                f"`{handler.type.id}` and does nothing — "
+                                f"`{swallow_name}` and does nothing — "
                                 "the error is silently swallowed"
                             ),
                         )
@@ -432,7 +451,6 @@ def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
                     ),
                 )
             )
-            break
     return issues
 
 
