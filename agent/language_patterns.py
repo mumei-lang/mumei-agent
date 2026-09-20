@@ -298,6 +298,12 @@ _TS_AWAIT_PREFIX_RE = re.compile(
     r"(?:\bawait|\bvoid|\breturn|\byield|\bPromise\.(?:all|allSettled|race|any)\s*\([^()]*|[\[(=,])\s*$"
 )
 _TS_PROMISE_CHAIN_RE = re.compile(r"^\s*\.\s*(?:then|catch|finally)\s*\(")
+# Expression-bodied arrows (`const h = x => send(x)`) return the call result,
+# so a promise callee inside them is handed to the caller — not floating.
+_TS_EXPR_ARROW_RE = re.compile(
+    r"\b(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>(?!\s*\{)"
+)
 
 
 def _ts_call_close(text: str, open_paren: int) -> int:
@@ -324,8 +330,13 @@ def _typescript_floating_promise_issues(source: str) -> list[ForeignSafetyIssue]
     }
     if not async_names:
         return []
+    expr_arrow_names = {
+        match.group("name") for match in _TS_EXPR_ARROW_RE.finditer(stripped)
+    }
     issues: list[ForeignSafetyIssue] = []
     for name, body in _typescript_function_blocks(source):
+        if name in expr_arrow_names:
+            continue
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "typescript")
         )

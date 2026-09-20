@@ -692,3 +692,22 @@ def test_rust_unwrap_expression_receiver_guarded_is_quiet() -> None:
         "}\n"
     )
     assert language_pattern_issues(source, "rust") == []
+
+
+def test_typescript_expression_body_arrow_is_not_floating() -> None:
+    """`const h = x => send(x)` returns the promise to the caller."""
+    for arrow in ("x => send(x)", "(x) => send(x)"):
+        source = (
+            "async function send(x) { return x }\n"
+            f"function g() {{ const h = {arrow}; }}"
+        )
+        assert language_pattern_issues(source, "typescript") == []
+
+
+def test_typescript_block_body_arrow_still_flags() -> None:
+    source = (
+        "async function send(x) { return x }\n"
+        "function g() { const h = x => { send(x); }; }"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert any(i.function_name == "h" for i in issues)
