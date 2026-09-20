@@ -532,3 +532,54 @@ def test_typescript_nested_args_then_chain_suppressed() -> None:
     )
     issues = language_pattern_issues(source, "typescript")
     assert not any("floating promise" in i.message for i in issues)
+
+
+def test_go_defer_in_loop_with_composite_literal_header() -> None:
+    """`for _, x := range []int{1,2} {` — the literal's `{...}` must not be
+    mistaken for the loop body."""
+    source = (
+        "package p\n"
+        "func f() {\n"
+        "    for _, x := range []int{1, 2, 3} {\n"
+        "        defer c(x)\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "go")
+    assert any("inside a loop" in i.message for i in issues)
+
+
+def test_go_defer_after_loop_not_flagged() -> None:
+    """A `defer` inside an `if` AFTER a composite-literal loop header is not
+    inside the loop."""
+    source = (
+        "package p\n"
+        "func f() {\n"
+        "    for _, x := range []int{1, 2, 3} {\n"
+        "        work(x)\n"
+        "    }\n"
+        "    if done {\n"
+        "        defer report()\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "go")
+    assert not issues
+
+
+def test_go_defer_in_loop_after_literal_and_second_loop() -> None:
+    """defer in a later real loop is still found when an earlier loop header
+    carried a composite literal."""
+    source = (
+        "package p\n"
+        "func f() {\n"
+        "    for _, x := range []int{1, 2, 3} {\n"
+        "        work(x)\n"
+        "    }\n"
+        "    for j := 0; j < 3; j++ {\n"
+        "        defer c(j)\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "go")
+    assert any("inside a loop" in i.message for i in issues)

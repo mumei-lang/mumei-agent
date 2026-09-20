@@ -211,16 +211,36 @@ def _go_defer_in_loop_issues(source: str) -> list[ForeignSafetyIssue]:
         )
         deferred = None
         for match in _GO_FOR_HEADER_RE.finditer(masked):
-            opening = masked.find("{", match.end())
-            if opening < 0:
-                continue
-            header = masked[match.end() : opening]
-            if ";" in header and header.count(";") > 2:
-                continue
-            loop_body = _balanced_brace_body(masked, opening)
-            defer_match = re.search(r"\bdefer\s+(.+)", loop_body)
-            if defer_match:
-                deferred = defer_match.group(1).strip()
+            # The first `{` after `for` may belong to a composite literal in
+            # the header (`for _, x := range []int{1,2} {`) — skip balanced
+            # `{...}` groups until the segment before the `{` is plain
+            # header text.
+            pos = match.end()
+            while True:
+                opening = masked.find("{", pos)
+                if opening < 0:
+                    break
+                header = masked[pos:opening]
+                if ";" in header and header.count(";") > 2:
+                    break
+                loop_body = _balanced_brace_body(masked, opening)
+                close = opening + len(loop_body) + 1  # index of matching `}`
+                defer_match = re.search(r"\bdefer\s+(.+)", loop_body)
+                if defer_match:
+                    deferred = defer_match.group(1).strip()
+                    break
+                if close >= len(masked):
+                    break
+                # A composite literal's `}` is followed directly (whitespace
+                # only) by the loop's own `{`. Any other content means the
+                # header already ended — the next `{` starts a different
+                # statement and must not be scanned as the loop body.
+                rest = masked[close + 1 :]
+                next_brace = rest.find("{")
+                if next_brace < 0 or rest[:next_brace].strip():
+                    break
+                pos = close + 1 + next_brace
+            if deferred:
                 break
         if deferred:
             issues.append(
