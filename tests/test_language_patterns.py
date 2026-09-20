@@ -583,3 +583,29 @@ def test_go_defer_in_loop_after_literal_and_second_loop() -> None:
     )
     issues = language_pattern_issues(source, "go")
     assert any("inside a loop" in i.message for i in issues)
+
+
+def test_typescript_async_name_in_comment_does_not_mark() -> None:
+    """`// async function send()` in a comment must not mark `send` async."""
+    source = (
+        "// async function send(x: number) { return x; }\n"
+        "function send(x: number): number { return x; }\n"
+        "function run(): void {\n"
+        "    send(1);\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert not issues
+
+
+def test_typescript_call_inside_comment_not_flagged() -> None:
+    source = (
+        "async function send(x: number): Promise<number> { return x; }\n"
+        "function run(): void {\n"
+        "    // send(1);\n"
+        "    /* send(2); */\n"
+        "    work();\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert not issues

@@ -285,16 +285,21 @@ def _ts_call_close(text: str, open_paren: int) -> int:
 
 
 def _typescript_floating_promise_issues(source: str) -> list[ForeignSafetyIssue]:
+    # Collect async names from the comment/string-stripped source — an
+    # `async function f` mention inside a comment must not mark `f` async.
+    stripped = _strip_go_rust_literals_and_comments(source)
     async_names = {
         match.group("name")
         for pattern in _TS_ASYNC_NAME_RES
-        for match in pattern.finditer(source)
+        for match in pattern.finditer(stripped)
     }
     if not async_names:
         return []
     issues: list[ForeignSafetyIssue] = []
     for name, body in _typescript_function_blocks(source):
-        masked = _mask_nested_function_literals(body, "typescript")
+        masked = _strip_go_rust_literals_and_comments(
+            _mask_nested_function_literals(body, "typescript")
+        )
         for callee in sorted(async_names):
             if callee == name:
                 continue
