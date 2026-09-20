@@ -609,3 +609,18 @@ def test_typescript_call_inside_comment_not_flagged() -> None:
     )
     issues = language_pattern_issues(source, "typescript")
     assert not issues
+
+
+def test_rust_nested_fn_unwrap_attributed_to_inner_only() -> None:
+    """An unwrap inside a nested `fn` item must report `inner`, not `outer`."""
+    source = (
+        "fn outer(res: Option<i32>) -> i32 {\n"
+        "    fn inner(v: Option<i32>) -> i32 {\n"
+        "        v.unwrap()\n"
+        "    }\n"
+        "    inner(res)\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("`inner`" in i.message for i in issues)
+    assert not any("`outer`" in i.message for i in issues)

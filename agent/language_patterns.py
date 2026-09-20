@@ -160,6 +160,24 @@ def _python_swallow_except_issues(source: str) -> list[ForeignSafetyIssue]:
 _RUST_UNWRAP_RE = re.compile(
     r"\b(?P<recv>[A-Za-z_]\w*)\s*\.\s*(?P<call>unwrap|expect)\s*\("
 )
+_RUST_NESTED_FN_RE = re.compile(r"\bfn\s+[A-Za-z_]\w*")
+
+
+def _mask_rust_nested_fns(body: str) -> str:
+    """Blank out nested ``fn`` item spans — ``_rust_function_scopes`` returns
+    an outer function's body including nested ``fn`` items, so without
+    masking a call inside ``inner`` would be attributed to ``outer`` too."""
+    chars = list(body)
+    for match in _RUST_NESTED_FN_RE.finditer(body):
+        brace = body.find("{", match.end())
+        if brace < 0:
+            continue
+        inner = _balanced_brace_body(body, brace)
+        end = brace + len(inner) + 1
+        for i in range(match.start(), min(end, len(body))):
+            if chars[i] != "\n":
+                chars[i] = " "
+    return "".join(chars)
 
 
 def _rust_unwrap_guarded(body: str, receiver: str) -> bool:
@@ -176,7 +194,7 @@ def _rust_unwrap_guarded(body: str, receiver: str) -> bool:
 def _rust_unwrap_expect_issues(source: str) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, body, _params in _rust_function_scopes(source):
-        masked = _strip_go_rust_literals_and_comments(body)
+        masked = _mask_rust_nested_fns(_strip_go_rust_literals_and_comments(body))
         for match in _RUST_UNWRAP_RE.finditer(masked):
             receiver = match.group("recv")
             if _rust_unwrap_guarded(masked, receiver):
