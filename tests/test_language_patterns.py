@@ -668,3 +668,27 @@ def test_solidity_non_mock_contract_still_flags() -> None:
     )
     issues = language_pattern_issues(source, "solidity")
     assert any("tx.origin" in i.message for i in issues)
+
+
+def test_rust_unwrap_flags_expression_receivers() -> None:
+    """Call/index/member-chain receivers are the common panic sites."""
+    cases = [
+        "fn f(v: &mut Vec<i32>) -> i32 {\n    v.pop().unwrap()\n}",
+        "fn f(l: &Mutex<u8>) {\n    l.lock().unwrap();\n}",
+        "fn f(s: &str) -> i32 {\n    s.parse::<i32>().unwrap()\n}",
+        'fn f() -> String {\n    std::fs::read_to_string("x").unwrap()\n}',
+    ]
+    for source in cases:
+        issues = language_pattern_issues(source, "rust")
+        assert issues, source
+        assert all("can panic via" in i.message for i in issues)
+
+
+def test_rust_unwrap_expression_receiver_guarded_is_quiet() -> None:
+    source = (
+        "fn f(v: &mut Vec<i32>) -> i32 {\n"
+        "    if v.pop().is_some() { return v.pop().unwrap(); }\n"
+        "    0\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []

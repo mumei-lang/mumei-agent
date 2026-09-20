@@ -158,8 +158,18 @@ def _python_swallow_except_issues(source: str) -> list[ForeignSafetyIssue]:
 # Rust
 # ---------------------------------------------------------------------------
 
+# Receivers cover the common expression chains: plain idents, call/index
+# segments (`v.pop()`, `m["k"]`), member chains (`self.opt`), and `::` path
+# prefixes with single-level turbofish (`fs::read(path)`). Nested parens or
+# nested generics in turbofish (`collect::<Vec<i32>>()`) fall back to the
+# nearest simple ident or go unreported.
 _RUST_UNWRAP_RE = re.compile(
-    r"\b(?P<recv>[A-Za-z_]\w*)\s*\.\s*(?P<call>unwrap|expect)\s*\("
+    r"\b(?P<recv>"
+    r"(?:[A-Za-z_]\w*::)*"
+    r"[A-Za-z_]\w*(?:::<[^<>]*>)?"
+    r"(?:\([^()]*\))?"
+    r"(?:(?:\.[A-Za-z_]\w*|\[[^\[\]]*\])(?:\([^()]*\))?)*"
+    r")\s*\.\s*(?P<call>unwrap|expect)\s*\("
 )
 _RUST_NESTED_FN_RE = re.compile(r"\bfn\s+[A-Za-z_]\w*")
 
