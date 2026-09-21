@@ -230,7 +230,11 @@ _RUST_POSITIVE_CHECKS = frozenset({"is_some", "is_ok"})
 _RUST_NEGATIVE_CHECKS = frozenset({"is_err", "is_none"})
 _RUST_DIVERGING_MACROS = frozenset({"panic", "unreachable", "todo", "unimplemented"})
 _RUST_ASSERT_MACROS = frozenset({"assert", "debug_assert"})
-_RUST_FN_BOUNDARY_TYPES = frozenset({"function_item", "closure_expression"})
+# ``async {}`` blocks are deferred like closures; ``unsafe``/``const``
+# blocks evaluate inline and stay transparent.
+_RUST_FN_BOUNDARY_TYPES = frozenset(
+    {"function_item", "closure_expression", "async_block"}
+)
 # Patterns that select the value-carrying variant: inside a ``Some``/``Ok``
 # arm (or after a let-else on one) the receiver is safe to unwrap. ``None``/
 # ``Err`` arms run precisely when it is not.
@@ -300,6 +304,15 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
 def _rust_expr_key(source_bytes: bytes, node) -> str:
     """Whitespace-insensitive text for comparing receiver expressions."""
     return re.sub(r"\s+", "", _node_text(source_bytes, node))
+
+
+def _rust_iterable_base_key(source_bytes: bytes, node) -> str:
+    """Receiver key behind a ``for`` iterable: strips a leading borrow
+    (``&``/``& mut``) and a trailing ``.iter()``/``.iter_mut()`` so
+    ``for v in &res`` / ``for v in res.iter()`` still identify ``res``."""
+    key = _rust_expr_key(source_bytes, node)
+    key = re.sub(r"^&(?:mut)?", "", key)
+    return re.sub(r"\.(?:iter|iter_mut|into_iter)\(\)$", "", key)
 
 
 def _rust_call_parts(node, source_bytes: bytes) -> tuple[str, str] | None:
@@ -727,10 +740,19 @@ def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
                     == "then"
                 ):
                     return True
-            elif owner.type in {"while_expression", "for_expression"}:
+            elif owner.type == "while_expression":
                 if _rust_condition_polarity(
                     owner.child_by_field_name("condition"), recv, source_bytes
                 ) == "then":
+                    return True
+            elif owner.type == "for_expression":
+                # `for v in res` (or `&res`/`res.iter()`) over an
+                # Option/Result runs the body only for the value variant.
+                iterable = owner.child_by_field_name("value")
+                if (
+                    iterable is not None
+                    and _rust_iterable_base_key(source_bytes, iterable) == recv
+                ):
                     return True
             # Any other owner (mod, impl, unsafe/async blocks, loops, ...)
             # is transparent — keep climbing.
@@ -1073,6 +1095,10 @@ def _ts_call_callee_name(call_node, source_bytes: bytes) -> str | None:
         prop = function.child_by_field_name("property")
         if prop is not None:
             return _node_text(source_bytes, prop)
+    if function.type == "subscript_expression":
+        index = function.child_by_field_name("index")
+        if index is not None and index.type == "string":
+            return _node_text(source_bytes, index).strip("'\"")
     return None
 
 
@@ -1089,7 +1115,9 @@ def _ts_call_is_handled(call_node, source_bytes: bytes) -> bool:
         if parent is None:
             return False
         ptype = parent.type
-        if ptype == "expression_statement":
+        if ptype in {"expression_statement", "jsx_expression", "jsx_attribute"}:
+            # A promise passed as a JSX attribute/child value is dropped —
+            # the DOM consumer never awaits it.
             return False
         if ptype in _TS_HANDLED_PARENT_TYPES:
             return True

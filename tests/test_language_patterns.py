@@ -1079,3 +1079,116 @@ def test_rust_empty_variant_match_arm_unwrap_flags() -> None:
     )
     issues = language_pattern_issues(source, "rust")
     assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_rust_async_block_is_a_guard_boundary() -> None:
+    """`async {}` blocks are deferred like closures — an enclosing
+    `if res.is_some()` guard does not prove the unwrap safe at poll
+    time."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_some() {\n"
+        "        let fut = async { res.unwrap() };\n"
+        "        1\n"
+        "    } else {\n"
+        "        0\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        # `unsafe {}` blocks evaluate inline — the guard still dominates.
+        "unsafe { res.unwrap() }",
+        # Labeled blocks run inline too.
+        "'lbl: { res.unwrap() }",
+    ],
+)
+def test_rust_inline_blocks_stay_transparent_to_guards(wrapper: str) -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        f"    if res.is_some() {{ {wrapper} }} else {{ 0 }}\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+@pytest.mark.parametrize(
+    "jsx",
+    [
+        # Promise dropped as an attribute value.
+        "<div onClick={api.send(1)} />",
+        # Promise dropped as a child.
+        "<div>{api.send(2)}</div>",
+    ],
+)
+def test_typescript_jsx_consumed_call_flags_floating(jsx: str) -> None:
+    """`onClick={send(1)}` / `{send(2)}` — the DOM consumer drops the
+    promise, so the call is as floating as a bare statement."""
+    source = (
+        "const api = { send: async (x) => x };\n"
+        f"function h() {{ return {jsx}; }}\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert any("`send()`" in i.message for i in issues)
+
+
+def test_typescript_jsx_await_is_quiet() -> None:
+    source = (
+        "const api = { send: async (x) => x };\n"
+        "async function h() { return <div>{await api.send(1)}</div>; }\n"
+    )
+    assert language_pattern_issues(source, "typescript") == []
+
+
+@pytest.mark.parametrize(
+    "iterable",
+    [
+        # Iterating an Option/Result yields once, only for the value
+        # variant — the body runs under an implicit guard.
+        "res",
+        "&res",
+        "res.iter()",
+        "res.iter_mut()",
+        "res.into_iter()",
+    ],
+)
+def test_rust_for_over_receiver_guards_unwrap(iterable: str) -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    let mut s = 0;\n"
+        f"    for v in {iterable} {{ s += res.unwrap(); }}\n"
+        "    s\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_for_over_other_iterable_still_flags() -> None:
+    source = (
+        "fn f(res: Option<i32>, xs: Vec<i32>) -> i32 {\n"
+        "    let mut s = 0;\n"
+        "    for v in xs { s += res.unwrap(); }\n"
+        "    s\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_typescript_computed_member_call_flags_floating() -> None:
+    """`api['send'](1)` — the callee resolves through the string index."""
+    source = (
+        "const api = { send: async (x) => x };\n"
+        "function h() { api['send'](1); }\n"
+        "function g() { api['send'](2).catch(() => {}); }\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert any(
+        i.function_name == "h" and "`send()`" in i.message for i in issues
+    )
+    assert not any(i.function_name == "g" for i in issues)
