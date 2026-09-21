@@ -1382,3 +1382,43 @@ def test_rust_mut_alias_write_invalidates_guard(body: str) -> None:
 def test_rust_mut_alias_nuance(body: str) -> None:
     source = f"fn f(mut res: Option<i32>, mut other: Option<i32>) -> i32 {{\n    {body}\n}}\n"
     assert language_pattern_issues(source, "rust") == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # `p` rebound to a different target — writes through it do not
+        # reach `res`, so the guard stays valid.
+        "let p = &mut res;\n    if res.is_some() { { let p = &mut other; *p = None; } res.unwrap() } else { 0 }",
+        # `p` shadowed by a non-alias — not a write to `res`.
+        "let p = &mut res;\n    { let p = 5i32; }\n    if res.is_some() { res.unwrap() } else { 0 }",
+    ],
+)
+def test_rust_conflicting_alias_rebinding_keeps_guard(body: str) -> None:
+    source = (
+        "fn f(mut res: Option<i32>, mut other: Option<i32>) -> i32 {\n"
+        f"    {body}\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_deref_param_write_invalidates_guard() -> None:
+    """`res: &mut Option` — `*res = None` writes through the reference the
+    way a direct assignment would."""
+    source = (
+        "fn f(res: &mut Option<i32>) -> i32 {\n"
+        "    if (*res).is_some() { *res = None; (*res).unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("unwrap" in i.message for i in issues)
+
+
+def test_rust_parenthesized_receiver_matches_guard() -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if (res).is_some() { (res).unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []

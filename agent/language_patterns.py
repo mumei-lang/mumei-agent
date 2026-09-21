@@ -302,7 +302,13 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
 
 
 def _rust_expr_key(source_bytes: bytes, node) -> str:
-    """Whitespace-insensitive text for comparing receiver expressions."""
+    """Whitespace-insensitive text for comparing receiver expressions —
+    parenthesized wrappers peel to the inner expression."""
+    while node.type == "parenthesized_expression":
+        inner = next(iter(node.named_children), None)
+        if inner is None:
+            break
+        node = inner
     return re.sub(r"\s+", "", _node_text(source_bytes, node))
 
 
@@ -690,23 +696,27 @@ def _rust_write_target_key(source_bytes: bytes, node) -> str:
     return _rust_expr_key(source_bytes, node)
 
 
-def _rust_alias_source(value, targets: set, source_bytes: bytes) -> bool:
-    """True when ``value`` binds a ``&mut`` alias of a tracked target —
-    ``&mut res`` directly, or an identifier copying an existing alias."""
+def _rust_alias_target_key(value, alias_of: dict, recv: str, source_bytes: bytes):
+    """The receiver key a ``&mut``-binding ultimately writes through:
+    ``&mut res`` -> ``res``, ``&mut p``/``let q = p`` resolve through the
+    alias map, anything else returns ``None``."""
     if value.type == "reference_expression":
-        return _rust_expr_key(source_bytes, value).startswith(
-            "&mut"
-        ) and _rust_iterable_base_key(source_bytes, value) in targets
+        key = _rust_expr_key(source_bytes, value)
+        if not key.startswith("&mut"):
+            return None
+        inner = key[len("&mut"):]
+        return alias_of.get(inner, inner if inner == recv else None)
     if value.type == "identifier":
-        return _node_text(source_bytes, value) in targets
-    return False
+        return alias_of.get(_node_text(source_bytes, value))
+    return None
 
 
-def _rust_collect_mut_aliases(scope, targets: set, source_bytes: bytes) -> set:
-    """Names bound to ``&mut <target>`` (or copied from another alias)
-    inside ``scope`` — collected over the whole enclosing function so
-    aliases apply wherever they are in scope. Copied aliases
-    (``let q = p``) resolve through a fixpoint pass."""
+def _rust_collect_mut_aliases(scope, recv: str, source_bytes: bytes) -> set:
+    """Names bound to ``&mut recv`` (directly or copied from another
+    alias) inside ``scope`` — collected over the whole enclosing function
+    so aliases apply wherever they are in scope. Copies resolve through a
+    fixpoint pass; a name re-bound to a different target is dropped
+    (conservative — writes through it may not reach ``recv``)."""
     binders = []
 
     def walk(node):
@@ -718,7 +728,8 @@ def _rust_collect_mut_aliases(scope, targets: set, source_bytes: bytes) -> set:
             walk(child)
 
     walk(scope)
-    aliases: set[str] = set()
+    alias_of: dict[str, str] = {}
+    conflicts: set[str] = set()
     changed = True
     while changed:
         changed = False
@@ -735,17 +746,21 @@ def _rust_collect_mut_aliases(scope, targets: set, source_bytes: bytes) -> set:
                 value = node.child_by_field_name("right")
                 if left is not None and left.type == "identifier":
                     bound = _node_text(source_bytes, left)
-            if (
-                bound is not None
-                and bound not in aliases
-                and value is not None
-                and _rust_alias_source(
-                    value, targets | aliases, source_bytes
-                )
-            ):
-                aliases.add(bound)
+            if bound is None or bound in conflicts or value is None:
+                continue
+            target = _rust_alias_target_key(
+                value, alias_of, recv, source_bytes
+            )
+            if bound in alias_of and alias_of[bound] != target:
+                # The name is (re)bound to something that is not an alias
+                # of ``recv`` — stop trusting it as one.
+                del alias_of[bound]
+                conflicts.add(bound)
                 changed = True
-    return aliases
+            elif bound not in alias_of and target is not None:
+                alias_of[bound] = target
+                changed = True
+    return set(alias_of)
 
 
 def _rust_statement_repairs(node, targets: set, recv: str, source_bytes: bytes) -> bool:
@@ -766,7 +781,10 @@ def _rust_statement_repairs(node, targets: set, recv: str, source_bytes: bytes) 
         return (
             left is not None
             and right is not None
-            and _rust_write_target_key(source_bytes, left) in targets
+            and (
+                _rust_expr_key(source_bytes, left) in targets
+                or _rust_write_target_key(source_bytes, left) in targets
+            )
             and bool(_RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, right)))
         )
     if inner.type == "let_declaration":
@@ -809,9 +827,9 @@ def _rust_subtree_assigns(
         return False
     if node.type in {"assignment_expression", "compound_assignment_expr"}:
         left = node.child_by_field_name("left")
-        if (
-            left is not None
-            and _rust_write_target_key(source_bytes, left) in targets
+        if left is not None and (
+            _rust_expr_key(source_bytes, left) in targets
+            or _rust_write_target_key(source_bytes, left) in targets
         ):
             return True
     if node.type == "let_declaration":
@@ -881,9 +899,7 @@ def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
     scope = call_node
     while scope.parent is not None and scope.type != "function_item":
         scope = scope.parent
-    targets = {recv} | _rust_collect_mut_aliases(
-        scope, {recv}, source_bytes
-    )
+    targets = {recv} | _rust_collect_mut_aliases(scope, recv, source_bytes)
     aliases = targets - {recv}
     while node is not None:
         if node.type == "binary_expression":
