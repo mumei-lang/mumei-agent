@@ -941,11 +941,24 @@ def test_tree_sitter_fallback_uses_text_scan_at_medium_confidence(
 def test_advisory_confidence_flows_to_cross_validation_issue() -> None:
     """warnings-only design is preserved; the issue exposes the detector's
     confidence so consumers can grade advisories."""
-    from agent.cross_validation import _language_advisory_issues
-
-    issues = _language_advisory_issues(
-        "fn f(res: Option<i32>) -> i32 {\n    res.unwrap()\n}\n", "rust"
+    mumei = MagicMock()
+    mumei.verify.return_value = {
+        "success": False,
+        "report": {"status": "failed", "failed": 1},
+        "stdout": "{}",
+        "stderr": "",
+    }
+    source = "fn f(res: Option<i32>) -> i32 {\n    res.unwrap()\n}\n"
+    with patch("agent.cross_validation.create_mumei_client", return_value=mumei):
+        result = validate_foreign_code(
+            source,
+            "rust",
+            config=AgentConfig(api_key=""),
+            use_llm=False,
+            run_mumei=True,
+        )
+    advisory = next(
+        issue for issue in result.issues if "can panic via" in issue.message
     )
-    assert issues
-    assert all(i.severity == "warning" for i in issues)
-    assert all(i.confidence == "high" for i in issues)
+    assert advisory.severity == "warning"
+    assert advisory.confidence == "high"

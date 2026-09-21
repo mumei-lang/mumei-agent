@@ -447,7 +447,8 @@ def _rust_if_always_diverges(node, source_bytes: bytes) -> bool:
 
 def _rust_statement_diverges(node, source_bytes: bytes) -> bool:
     """True when a block-level statement always exits (return/break/
-    continue/panic!/unreachable!, or an if whose every arm diverges)."""
+    continue/panic!/unreachable!, a bare nested block that diverges, or an
+    if whose every arm diverges)."""
     inner = _rust_statement_inner(node)
     if inner is None:
         return False
@@ -459,6 +460,8 @@ def _rust_statement_diverges(node, source_bytes: bytes) -> bool:
         return True
     if _rust_is_diverging_macro(inner, source_bytes):
         return True
+    if inner.type == "block":
+        return _rust_block_diverges(inner, source_bytes)
     if inner.type == "if_expression":
         return _rust_if_always_diverges(inner, source_bytes)
     return False
@@ -525,6 +528,9 @@ def _rust_match_guards_fallthrough(match_node, recv: str, source_bytes: bytes) -
         if arm_value.type == "block":
             if not _rust_block_diverges(arm_value, source_bytes):
                 return False
+        elif arm_value.type == "if_expression":
+            if not _rust_if_always_diverges(arm_value, source_bytes):
+                return False
         elif arm_value.type in {
             "return_expression",
             "break_expression",
@@ -538,7 +544,9 @@ def _rust_match_guards_fallthrough(match_node, recv: str, source_bytes: bytes) -
 
 def _rust_subtree_has_try(node, recv: str, source_bytes: bytes) -> bool:
     """True when ``recv?`` (the try operator) appears under ``node`` — it
-    returns early on the empty variant, guarding the code below it."""
+    returns early on the empty variant, guarding the code below it.
+    Function-item/closure subtrees are skipped: a ``?`` inside them returns
+    from the nested function, not the enclosing one."""
     stack = [node]
     while stack:
         current = stack.pop()
@@ -549,7 +557,12 @@ def _rust_subtree_has_try(node, recv: str, source_bytes: bytes) -> bool:
                 and _rust_expr_key(source_bytes, operand) == recv
             ):
                 return True
-        stack.extend(current.children)
+            continue
+        stack.extend(
+            child
+            for child in current.children
+            if child.type not in _RUST_FN_BOUNDARY_TYPES
+        )
     return False
 
 
@@ -572,16 +585,10 @@ def _rust_statement_guards(node, recv: str, source_bytes: bytes) -> bool:
                 and _rust_pattern_is_value_arm(pattern, source_bytes)
             ):
                 return True
-        # ``let x = recv?;`` / ``foo(recv?);`` also early-return on empty.
-        if _rust_subtree_has_try(inner, recv, source_bytes):
-            return True
-    if inner.type == "try_expression":
-        operand = next(iter(inner.named_children), None)
-        if (
-            operand is not None
-            and _rust_expr_key(source_bytes, operand) == recv
-        ):
-            return True
+    # ``let x = recv?;``, ``recv?;``, ``foo(recv?);`` — a ``?`` anywhere in
+    # the statement early-returns on the empty variant.
+    if _rust_subtree_has_try(inner, recv, source_bytes):
+        return True
     if inner.type == "if_expression" and _rust_if_guards_fallthrough(
         inner, recv, source_bytes
     ):
@@ -600,9 +607,8 @@ def _rust_statement_guards(node, recv: str, source_bytes: bytes) -> bool:
                 (c for c in inner.children if c.type == "token_tree"), None
             )
             if token_tree is not None and re.search(
-                rf"\b{re.escape(recv)}\s*\.\s*"
-                rf"(?:{'|'.join(_RUST_POSITIVE_CHECKS)})\s*\(",
-                _node_text(source_bytes, token_tree),
+                rf"{re.escape(recv)}\.(?:{'|'.join(_RUST_POSITIVE_CHECKS)})\(",
+                re.sub(r"\s+", "", _node_text(source_bytes, token_tree)),
             ):
                 return True
     return False
@@ -737,6 +743,29 @@ def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafety
                             ),
                         )
                     )
+        elif node.type == "macro_invocation":
+            # Macro bodies are opaque token trees — calls inside them
+            # (``println!("{}", r.unwrap())``) are not expression nodes, so
+            # scan the token text and judge dominance by the macro's own
+            # position in the tree.
+            for match in _RUST_UNWRAP_RE.finditer(
+                _node_text(source_bytes, node)
+            ):
+                recv = re.sub(r"\s+", "", match.group("recv"))
+                call = match.group("call")
+                if _rust_unwrap_is_guarded(node, recv, source_bytes):
+                    continue
+                name = _rust_enclosing_function_name(node, source_bytes)
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Rust function `{name}` can panic via "
+                            f"`{recv}.{call}()` without a contract that "
+                            "the value is Ok/Some"
+                        ),
+                    )
+                )
         stack.extend(reversed(node.children))
     return issues
 
@@ -854,6 +883,9 @@ _TS_HANDLED_PARENT_TYPES = frozenset(
         "lexical_declaration",
         "variable_declaration",
         "import_statement",
+        # Class field initializers store the promise like an assignment.
+        "public_field_definition",
+        "field_definition",
     }
 )
 # Parent node types that just wrap the call — whether the promise is floating
