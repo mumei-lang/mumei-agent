@@ -302,7 +302,13 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
 
 
 def _rust_expr_key(source_bytes: bytes, node) -> str:
-    """Whitespace-insensitive text for comparing receiver expressions."""
+    """Whitespace-insensitive text for comparing receiver expressions —
+    parenthesized wrappers peel to the inner expression."""
+    while node.type == "parenthesized_expression":
+        inner = next(iter(node.named_children), None)
+        if inner is None:
+            break
+        node = inner
     return re.sub(r"\s+", "", _node_text(source_bytes, node))
 
 
@@ -679,32 +685,93 @@ _RUST_REPAIR_METHODS = frozenset(
 _RUST_WRITE_METHODS = _RUST_REPAIR_METHODS | {"take"}
 
 
-def _rust_subtree_has_call(node, recv: str, methods, source_bytes: bytes) -> bool:
-    """True when an unconditionally-evaluated ``recv.<method>(…)`` call
-    appears inside ``node`` — same descent rules as
-    ``_rust_subtree_has_try``."""
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        if current.type == "call_expression":
-            parts = _rust_call_parts(current, source_bytes)
-            if (
-                parts is not None
-                and parts[0] == recv
-                and parts[1] in methods
-            ):
-                return True
-        stack.extend(_rust_unconditionally_evaluated_children(current))
-    return False
+def _rust_write_target_key(source_bytes: bytes, node) -> str:
+    """Receiver key written through an assignment LHS — dereference
+    (``*p``) and parenthesized wrappers peel to the underlying name."""
+    while node.type in {"unary_expression", "parenthesized_expression"}:
+        inner = next(iter(node.named_children), None)
+        if inner is None:
+            break
+        node = inner
+    return _rust_expr_key(source_bytes, node)
 
 
-def _rust_statement_repairs(node, recv: str, source_bytes: bytes) -> bool:
-    """True when the statement unconditionally leaves ``recv`` holding a
-    value variant — ``res = Some(..)``/``Ok(..)``, a ``let res = Some(..)``
-    shadowing, or an ``Option`` insert-style method call anywhere in the
-    statement's unconditionally-evaluated part (e.g. ``let v =
-    res.get_or_insert(5)``). Conditional repairs (``if … { res = Ok(..) }``)
-    are not read; they fall through to plain mutation handling."""
+def _rust_alias_target_key(value, alias_of: dict, recv: str, source_bytes: bytes):
+    """The receiver key a ``&mut``-binding ultimately writes through:
+    ``&mut res`` -> ``res``, ``&mut p``/``let q = p`` resolve through the
+    alias map, anything else returns ``None``."""
+    if value.type == "reference_expression":
+        key = _rust_expr_key(source_bytes, value)
+        if not key.startswith("&mut"):
+            return None
+        inner = key[len("&mut"):]
+        return alias_of.get(inner, inner if inner == recv else None)
+    if value.type == "identifier":
+        return alias_of.get(_node_text(source_bytes, value))
+    return None
+
+
+def _rust_collect_mut_aliases(scope, recv: str, source_bytes: bytes) -> set:
+    """Names bound to ``&mut recv`` (directly or copied from another
+    alias) inside ``scope`` — collected over the whole enclosing function
+    so aliases apply wherever they are in scope. Copies resolve through a
+    fixpoint pass; a name re-bound to a different target is dropped
+    (conservative — writes through it may not reach ``recv``)."""
+    binders = []
+
+    def walk(node):
+        if node.type == "function_item" and node.id != scope.id:
+            return
+        if node.type in {"let_declaration", "assignment_expression"}:
+            binders.append(node)
+        for child in node.named_children:
+            walk(child)
+
+    walk(scope)
+    alias_of: dict[str, str] = {}
+    conflicts: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in binders:
+            bound = None
+            value = None
+            if node.type == "let_declaration":
+                pattern = node.child_by_field_name("pattern")
+                value = node.child_by_field_name("value")
+                if pattern is not None and pattern.type == "identifier":
+                    bound = _node_text(source_bytes, pattern)
+            else:
+                left = node.child_by_field_name("left")
+                value = node.child_by_field_name("right")
+                if left is not None and left.type == "identifier":
+                    bound = _node_text(source_bytes, left)
+            if bound is None or bound in conflicts or value is None:
+                continue
+            target = _rust_alias_target_key(
+                value, alias_of, recv, source_bytes
+            )
+            if bound in alias_of and alias_of[bound] != target:
+                # The name is (re)bound to something that is not an alias
+                # of ``recv`` — stop trusting it as one.
+                del alias_of[bound]
+                conflicts.add(bound)
+                changed = True
+            elif bound not in alias_of and target is not None:
+                alias_of[bound] = target
+                changed = True
+    return set(alias_of)
+
+
+def _rust_statement_repairs(node, targets: set, recv: str, source_bytes: bytes) -> bool:
+    """True when the statement unconditionally leaves a tracked target
+    holding a value variant — ``res = Some(..)``/``Ok(..)``, writes through
+    ``&mut`` aliases (``*p = Some(..)``, ``p.insert(..)``), a
+    ``let res = Some(..)`` shadowing, or an ``Option`` insert-style method
+    call anywhere in the statement's unconditionally-evaluated part (e.g.
+    ``let v = res.get_or_insert(5)``). Conditional repairs
+    (``if … { res = Ok(..) }``) are not read; they fall through to plain
+    mutation handling."""
     inner = _rust_statement_inner(node)
     if inner is None:
         return False
@@ -714,7 +781,10 @@ def _rust_statement_repairs(node, recv: str, source_bytes: bytes) -> bool:
         return (
             left is not None
             and right is not None
-            and _rust_expr_key(source_bytes, left) == recv
+            and (
+                _rust_expr_key(source_bytes, left) in targets
+                or _rust_write_target_key(source_bytes, left) in targets
+            )
             and bool(_RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, right)))
         )
     if inner.type == "let_declaration":
@@ -728,19 +798,39 @@ def _rust_statement_repairs(node, recv: str, source_bytes: bytes) -> bool:
             and _RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, value))
         ):
             return True
-    return _rust_subtree_has_call(inner, recv, _RUST_REPAIR_METHODS, source_bytes)
+    stack = [inner]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            parts = _rust_call_parts(current, source_bytes)
+            if (
+                parts is not None
+                and parts[0] in targets
+                and parts[1] in _RUST_REPAIR_METHODS
+            ):
+                return True
+        stack.extend(_rust_unconditionally_evaluated_children(current))
+    return False
 
 
-def _rust_subtree_assigns(node, recv: str, source_bytes: bytes) -> bool:
-    """True when the subtree may write ``recv``: a plain/compound
-    assignment, or a ``let`` re-binding the name (shadowing). Nested ``fn``
-    items open a fresh scope and cannot assign the outer binding; closures
-    and async blocks are scanned conservatively since they may run."""
+def _rust_subtree_assigns(
+    node, recv: str, targets: set, aliases: set, source_bytes: bytes
+) -> bool:
+    """True when the subtree may write the receiver: a plain/compound
+    assignment (incl. ``*p`` derefs through ``&mut`` aliases), a ``let``
+    re-binding of ``recv`` (shadowing), a mutating method call
+    (``take``/insert-style), or a ``&mut`` borrow/alias handed to a callee.
+    Nested ``fn`` items open a fresh scope and cannot assign the outer
+    binding; closures and async blocks are scanned conservatively since
+    they may run."""
     if node.type == "function_item":
         return False
     if node.type in {"assignment_expression", "compound_assignment_expr"}:
         left = node.child_by_field_name("left")
-        if left is not None and _rust_expr_key(source_bytes, left) == recv:
+        if left is not None and (
+            _rust_expr_key(source_bytes, left) in targets
+            or _rust_write_target_key(source_bytes, left) in targets
+        ):
             return True
     if node.type == "let_declaration":
         pattern = node.child_by_field_name("pattern")
@@ -752,12 +842,12 @@ def _rust_subtree_assigns(node, recv: str, source_bytes: bytes) -> bool:
         parts = _rust_call_parts(node, source_bytes)
         if (
             parts is not None
-            and parts[0] == recv
+            and parts[0] in targets
             and parts[1] in _RUST_WRITE_METHODS
         ):
             return True
-        # ``f(&mut res, …)`` — any callee receiving a mutable borrow may
-        # write the receiver.
+        # ``f(&mut res, …)`` or ``f(p)`` with ``p`` a ``&mut`` alias — any
+        # callee receiving a mutable borrow may write the receiver.
         arguments = node.child_by_field_name("arguments")
         if arguments is not None:
             for arg in arguments.named_children:
@@ -765,10 +855,14 @@ def _rust_subtree_assigns(node, recv: str, source_bytes: bytes) -> bool:
                     source_bytes, arg
                 ).startswith("&mut") and _rust_iterable_base_key(
                     source_bytes, arg
-                ) == recv:
+                ) in targets:
+                    return True
+                if arg.type == "identifier" and (
+                    _node_text(source_bytes, arg) in aliases
+                ):
                     return True
     return any(
-        _rust_subtree_assigns(child, recv, source_bytes)
+        _rust_subtree_assigns(child, recv, targets, aliases, source_bytes)
         for child in node.named_children
     )
 
@@ -795,9 +889,18 @@ def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
     call — an enclosing ``if``/``while`` consequence, ``else`` of a negative
     check, ``match`` value arm, short-circuit ``&&``/``||`` right operand, or
     a preceding diverging guard (``let-else``, ``if ... { return }``,
-    ``assert!``, ``recv?``, exhaustive ``match``) in an enclosing block."""
+    ``assert!``, ``recv?``, exhaustive ``match``) in an enclosing block —
+    and no write to the receiver (direct or through a ``&mut`` alias) sits
+    between the guard and the call."""
     child = call_node
     node = call_node.parent
+    # ``let p = &mut res`` (or copies) anywhere in the enclosing function
+    # makes writes through ``p`` writes to ``recv``.
+    scope = call_node
+    while scope.parent is not None and scope.type != "function_item":
+        scope = scope.parent
+    targets = {recv} | _rust_collect_mut_aliases(scope, recv, source_bytes)
+    aliases = targets - {recv}
     while node is not None:
         if node.type == "binary_expression":
             # ``recv.is_ok() && recv.unwrap()`` — the right operand runs only
@@ -822,8 +925,12 @@ def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
             for sibling in node.named_children:
                 if sibling.id == child.id:
                     break
-                if _rust_subtree_assigns(sibling, recv, source_bytes):
-                    if _rust_statement_repairs(sibling, recv, source_bytes):
+                if _rust_subtree_assigns(
+                    sibling, recv, targets, aliases, source_bytes
+                ):
+                    if _rust_statement_repairs(
+                        sibling, targets, recv, source_bytes
+                    ):
                         # `res = Some(..)` re-establishes the invariant.
                         guarded = True
                     else:
