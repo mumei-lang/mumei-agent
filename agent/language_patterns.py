@@ -658,6 +658,121 @@ def _rust_statement_guards(node, recv: str, source_bytes: bytes) -> bool:
     return False
 
 
+def _rust_pattern_binds(pattern, recv: str, source_bytes: bytes) -> bool:
+    """True when a ``let`` pattern binds (or re-binds/shadows) ``recv`` —
+    plain identifiers and shorthand struct fields (`S { res }`) alike."""
+    if pattern.type in {"identifier", "shorthand_field_identifier"}:
+        return _node_text(source_bytes, pattern) == recv
+    return any(
+        _rust_pattern_binds(child, recv, source_bytes)
+        for child in pattern.named_children
+    )
+
+
+_RUST_VALUE_CTOR_RE = re.compile(r"^(?:Some|Ok)\s*\(")
+# ``Option`` methods that write a value variant — the receiver is provably
+# Some afterwards. ``take`` (or any ``&mut recv`` borrow) writes an unknown
+# variant and counts as a mutation, never a repair.
+_RUST_REPAIR_METHODS = frozenset(
+    {"insert", "get_or_insert", "get_or_insert_with", "replace"}
+)
+_RUST_WRITE_METHODS = _RUST_REPAIR_METHODS | {"take"}
+
+
+def _rust_subtree_has_call(node, recv: str, methods, source_bytes: bytes) -> bool:
+    """True when an unconditionally-evaluated ``recv.<method>(…)`` call
+    appears inside ``node`` — same descent rules as
+    ``_rust_subtree_has_try``."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            parts = _rust_call_parts(current, source_bytes)
+            if (
+                parts is not None
+                and parts[0] == recv
+                and parts[1] in methods
+            ):
+                return True
+        stack.extend(_rust_unconditionally_evaluated_children(current))
+    return False
+
+
+def _rust_statement_repairs(node, recv: str, source_bytes: bytes) -> bool:
+    """True when the statement unconditionally leaves ``recv`` holding a
+    value variant — ``res = Some(..)``/``Ok(..)``, a ``let res = Some(..)``
+    shadowing, or an ``Option`` insert-style method call anywhere in the
+    statement's unconditionally-evaluated part (e.g. ``let v =
+    res.get_or_insert(5)``). Conditional repairs (``if … { res = Ok(..) }``)
+    are not read; they fall through to plain mutation handling."""
+    inner = _rust_statement_inner(node)
+    if inner is None:
+        return False
+    if inner.type == "assignment_expression":
+        left = inner.child_by_field_name("left")
+        right = inner.child_by_field_name("right")
+        return (
+            left is not None
+            and right is not None
+            and _rust_expr_key(source_bytes, left) == recv
+            and bool(_RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, right)))
+        )
+    if inner.type == "let_declaration":
+        pattern = inner.child_by_field_name("pattern")
+        value = inner.child_by_field_name("value")
+        if (
+            pattern is not None
+            and value is not None
+            and pattern.type in {"identifier", "mutable_specifier"}
+            and _rust_pattern_binds(pattern, recv, source_bytes)
+            and _RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, value))
+        ):
+            return True
+    return _rust_subtree_has_call(inner, recv, _RUST_REPAIR_METHODS, source_bytes)
+
+
+def _rust_subtree_assigns(node, recv: str, source_bytes: bytes) -> bool:
+    """True when the subtree may write ``recv``: a plain/compound
+    assignment, or a ``let`` re-binding the name (shadowing). Nested ``fn``
+    items open a fresh scope and cannot assign the outer binding; closures
+    and async blocks are scanned conservatively since they may run."""
+    if node.type == "function_item":
+        return False
+    if node.type in {"assignment_expression", "compound_assignment_expr"}:
+        left = node.child_by_field_name("left")
+        if left is not None and _rust_expr_key(source_bytes, left) == recv:
+            return True
+    if node.type == "let_declaration":
+        pattern = node.child_by_field_name("pattern")
+        if pattern is not None and _rust_pattern_binds(
+            pattern, recv, source_bytes
+        ):
+            return True
+    if node.type == "call_expression":
+        parts = _rust_call_parts(node, source_bytes)
+        if (
+            parts is not None
+            and parts[0] == recv
+            and parts[1] in _RUST_WRITE_METHODS
+        ):
+            return True
+        # ``f(&mut res, …)`` — any callee receiving a mutable borrow may
+        # write the receiver.
+        arguments = node.child_by_field_name("arguments")
+        if arguments is not None:
+            for arg in arguments.named_children:
+                if arg.type == "reference_expression" and _rust_expr_key(
+                    source_bytes, arg
+                ).startswith("&mut") and _rust_iterable_base_key(
+                    source_bytes, arg
+                ) == recv:
+                    return True
+    return any(
+        _rust_subtree_assigns(child, recv, source_bytes)
+        for child in node.named_children
+    )
+
+
 def _rust_match_arm_guarded(arm, recv: str, source_bytes: bytes) -> bool:
     """True when a ``match`` arm's pattern binds the value variant of
     ``recv`` — the arm body only runs when ``recv`` is Ok/Some."""
@@ -702,11 +817,29 @@ def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
             if _rust_match_arm_guarded(node, recv, source_bytes):
                 return True
         elif node.type == "block":
+            guarded = False
+            mutated = False
             for sibling in node.named_children:
                 if sibling.id == child.id:
                     break
-                if _rust_statement_guards(sibling, recv, source_bytes):
-                    return True
+                if _rust_subtree_assigns(sibling, recv, source_bytes):
+                    if _rust_statement_repairs(sibling, recv, source_bytes):
+                        # `res = Some(..)` re-establishes the invariant.
+                        guarded = True
+                    else:
+                        # A write to ``recv`` stales any earlier guard —
+                        # only a guard after the latest write still applies.
+                        guarded = False
+                        mutated = True
+                elif _rust_statement_guards(sibling, recv, source_bytes):
+                    guarded = True
+            if guarded:
+                return True
+            if mutated:
+                # Guards established by enclosing constructs (``if``/``while``
+                # consequences, ``match`` arms, outer blocks) all predate the
+                # write, so none of them can still prove ``recv`` is safe.
+                return False
             owner = node.parent
             if owner is None:
                 return False
@@ -1070,8 +1203,12 @@ def _ts_function_name(fn_node, source_bytes: bytes) -> str | None:
 
 
 def _ts_collect_async_names(root, source_bytes: bytes) -> set[str]:
-    """Names of ``async`` functions/methods/arrows declared in the file."""
+    """Names of ``async`` functions/methods/arrows declared in the file,
+    plus same-file aliases: ``const s = send``/``const s = api.send``/
+    ``const s = api['send']`` and renamed destructuring
+    ``const { send: s } = api`` all re-export the async callee."""
     names: set[str] = set()
+    declarators = []
     stack = [root]
     while stack:
         node = stack.pop()
@@ -1080,7 +1217,60 @@ def _ts_collect_async_names(root, source_bytes: bytes) -> set[str]:
                 name = _ts_function_name(node, source_bytes)
                 if name:
                     names.add(name)
+        if node.type in {"variable_declarator", "assignment_expression"}:
+            declarators.append(node)
         stack.extend(node.children)
+
+    def value_alias(value) -> str | None:
+        """The name an expression refers to — identifier, member property,
+        or string subscript."""
+        if value.type == "identifier":
+            return _node_text(source_bytes, value)
+        if value.type == "member_expression":
+            prop = value.child_by_field_name("property")
+            if prop is not None:
+                return _node_text(source_bytes, prop)
+        if value.type == "subscript_expression":
+            index = value.child_by_field_name("index")
+            if index is not None and index.type == "string":
+                return _node_text(source_bytes, index).strip("'\"")
+        return None
+
+    # Fixpoint so chained aliases (`const s = send; const t = s`) resolve.
+    changed = True
+    while changed:
+        changed = False
+        for decl in declarators:
+            if decl.type == "variable_declarator":
+                lhs = decl.child_by_field_name("name")
+                rhs = decl.child_by_field_name("value")
+            else:
+                lhs = decl.child_by_field_name("left")
+                rhs = decl.child_by_field_name("right")
+            if lhs is None or rhs is None:
+                continue
+            if lhs.type == "identifier":
+                if value_alias(rhs) in names:
+                    bound = _node_text(source_bytes, lhs)
+                    if bound not in names:
+                        names.add(bound)
+                        changed = True
+            elif lhs.type == "object_pattern":
+                for part in lhs.named_children:
+                    if part.type not in {"pair", "pair_pattern"}:
+                        continue
+                    key = part.child_by_field_name("key")
+                    val = part.child_by_field_name("value")
+                    if (
+                        key is not None
+                        and val is not None
+                        and val.type == "identifier"
+                        and _node_text(source_bytes, key) in names
+                    ):
+                        bound = _node_text(source_bytes, val)
+                        if bound not in names:
+                            names.add(bound)
+                            changed = True
     return names
 
 
