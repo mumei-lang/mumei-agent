@@ -2,10 +2,10 @@
 
 ## 2026-09-21: V1-B-2 follow-up 2 — remaining-limit coverage (mutation + TS aliases)
 
-- `agent/language_patterns.py` — Rust: a write to the receiver between a guard and the call now invalidates the guard (`if res.is_some() { res = None; res.unwrap() }` and match-arm equivalents flag again). `_rust_subtree_assigns` covers `=`/compound assignment and `let` re-binding (shadowing); guards re-established after the write still count, and writes after the call are ignored.
+- `agent/language_patterns.py` — Rust: a write to the receiver between a guard and the call now invalidates the guard (`if res.is_some() { res = None; res.unwrap() }` and match-arm equivalents flag again). `_rust_subtree_assigns` covers `=`/compound assignment, `let` re-binding (incl. tuple/struct-shorthand shadowing), `Option` write methods (`take`/`insert`/`replace`/`get_or_insert*`), and `&mut recv` arguments. Writes that unconditionally restore a value variant (`res = Some(..)`/`Ok(..)`, `let res = Some(..)`, insert-style methods) count as fresh guards; guards re-established after the write still count, and writes after the call are ignored.
 - TypeScript: the `async` name set now propagates through same-file aliases — `const s = api.send`, `api['send']`, `s = api.send` assignments, `const { send: s } = api` renames, and chained aliases (fixpoint pass in `_ts_collect_async_names`) — so `s(1)` is flagged like `api.send(1)`.
 - Remaining limits (documented, deliberately out of scope): cross-file/import resolution, custom guard functions, writes through `&mut` aliases, and `#[allow]`-style opt-outs.
-- Regression gate: `uv run pytest tests/test_language_patterns.py -q` (125 cases incl. write-after-guard and alias cases); full suite green.
+- Regression gate: `uv run pytest tests/test_language_patterns.py -q` (139 cases incl. write-after-guard, repair-write, and alias cases); full suite green.
 
 ## 2026-09-21: V1-B-2 follow-up — tree-sitter scoped detection + advisory confidence
 

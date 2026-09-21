@@ -1259,3 +1259,89 @@ def test_typescript_alias_to_sync_member_is_quiet() -> None:
         "function h() { s(1); }\n"
     )
     assert language_pattern_issues(source, "typescript") == []
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        # `res.take()` leaves None behind.
+        "let v = res.take(); res.unwrap()",
+        # A `&mut` borrow handed to any callee may write the receiver.
+        "std::mem::replace(&mut res, None); res.unwrap()",
+        "std::mem::swap(&mut res, &mut other); res.unwrap()",
+    ],
+)
+def test_rust_mutating_call_after_guard_flags(write: str) -> None:
+    source = (
+        "fn f(mut res: Option<i32>, mut other: Option<i32>) -> i32 {\n"
+        f"    if res.is_some() {{ {write} }} else {{ 0 }}\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        # Unconditional writes of a value variant re-establish the guard.
+        "res = Some(2); res.unwrap()",
+        "let res = Some(2); res.unwrap()",
+        "res.insert(2); res.unwrap()",
+        "res.get_or_insert(2); res.unwrap()",
+        "res.get_or_insert_with(|| 2); res.unwrap()",
+        "res.replace(2); res.unwrap()",
+        "let v = res.get_or_insert(2); res.unwrap()",
+        # Write then re-establish.
+        "res = None; res = Some(2); res.unwrap()",
+    ],
+)
+def test_rust_repair_writes_act_as_guards(write: str) -> None:
+    source = (
+        "fn f(mut res: Option<i32>) -> i32 {\n"
+        f"    {write}\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_immutable_borrow_is_not_a_write() -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_some() { g(&res); res.unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_struct_shorthand_let_shadowing_flags() -> None:
+    """`let S { res } = s()` re-binds `res` — the earlier `is_some` guard
+    no longer applies to the unwrap."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_some() {\n"
+        "        let S { res } = s();\n"
+        "        res.unwrap()\n"
+        "    } else {\n"
+        "        0\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_rust_struct_renamed_field_keeps_guard() -> None:
+    """`let S { res: r2 } = s()` binds `r2`, not `res` — the outer
+    receiver's guard still holds."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_some() {\n"
+        "        let S { res: r2 } = s();\n"
+        "        res.unwrap()\n"
+        "    } else {\n"
+        "        0\n"
+        "    }\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []

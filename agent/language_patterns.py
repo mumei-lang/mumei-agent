@@ -659,13 +659,76 @@ def _rust_statement_guards(node, recv: str, source_bytes: bytes) -> bool:
 
 
 def _rust_pattern_binds(pattern, recv: str, source_bytes: bytes) -> bool:
-    """True when a ``let`` pattern binds (or re-binds/shadows) ``recv``."""
-    if pattern.type == "identifier":
+    """True when a ``let`` pattern binds (or re-binds/shadows) ``recv`` —
+    plain identifiers and shorthand struct fields (`S { res }`) alike."""
+    if pattern.type in {"identifier", "shorthand_field_identifier"}:
         return _node_text(source_bytes, pattern) == recv
     return any(
         _rust_pattern_binds(child, recv, source_bytes)
         for child in pattern.named_children
     )
+
+
+_RUST_VALUE_CTOR_RE = re.compile(r"^(?:Some|Ok)\s*\(")
+# ``Option`` methods that write a value variant — the receiver is provably
+# Some afterwards. ``take`` (or any ``&mut recv`` borrow) writes an unknown
+# variant and counts as a mutation, never a repair.
+_RUST_REPAIR_METHODS = frozenset(
+    {"insert", "get_or_insert", "get_or_insert_with", "replace"}
+)
+_RUST_WRITE_METHODS = _RUST_REPAIR_METHODS | {"take"}
+
+
+def _rust_subtree_has_call(node, recv: str, methods, source_bytes: bytes) -> bool:
+    """True when an unconditionally-evaluated ``recv.<method>(…)`` call
+    appears inside ``node`` — same descent rules as
+    ``_rust_subtree_has_try``."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            parts = _rust_call_parts(current, source_bytes)
+            if (
+                parts is not None
+                and parts[0] == recv
+                and parts[1] in methods
+            ):
+                return True
+        stack.extend(_rust_unconditionally_evaluated_children(current))
+    return False
+
+
+def _rust_statement_repairs(node, recv: str, source_bytes: bytes) -> bool:
+    """True when the statement unconditionally leaves ``recv`` holding a
+    value variant — ``res = Some(..)``/``Ok(..)``, a ``let res = Some(..)``
+    shadowing, or an ``Option`` insert-style method call anywhere in the
+    statement's unconditionally-evaluated part (e.g. ``let v =
+    res.get_or_insert(5)``). Conditional repairs (``if … { res = Ok(..) }``)
+    are not read; they fall through to plain mutation handling."""
+    inner = _rust_statement_inner(node)
+    if inner is None:
+        return False
+    if inner.type == "assignment_expression":
+        left = inner.child_by_field_name("left")
+        right = inner.child_by_field_name("right")
+        return (
+            left is not None
+            and right is not None
+            and _rust_expr_key(source_bytes, left) == recv
+            and bool(_RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, right)))
+        )
+    if inner.type == "let_declaration":
+        pattern = inner.child_by_field_name("pattern")
+        value = inner.child_by_field_name("value")
+        if (
+            pattern is not None
+            and value is not None
+            and pattern.type in {"identifier", "mutable_specifier"}
+            and _rust_pattern_binds(pattern, recv, source_bytes)
+            and _RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, value))
+        ):
+            return True
+    return _rust_subtree_has_call(inner, recv, _RUST_REPAIR_METHODS, source_bytes)
 
 
 def _rust_subtree_assigns(node, recv: str, source_bytes: bytes) -> bool:
@@ -685,6 +748,25 @@ def _rust_subtree_assigns(node, recv: str, source_bytes: bytes) -> bool:
             pattern, recv, source_bytes
         ):
             return True
+    if node.type == "call_expression":
+        parts = _rust_call_parts(node, source_bytes)
+        if (
+            parts is not None
+            and parts[0] == recv
+            and parts[1] in _RUST_WRITE_METHODS
+        ):
+            return True
+        # ``f(&mut res, …)`` — any callee receiving a mutable borrow may
+        # write the receiver.
+        arguments = node.child_by_field_name("arguments")
+        if arguments is not None:
+            for arg in arguments.named_children:
+                if arg.type == "reference_expression" and _rust_expr_key(
+                    source_bytes, arg
+                ).startswith("&mut") and _rust_iterable_base_key(
+                    source_bytes, arg
+                ) == recv:
+                    return True
     return any(
         _rust_subtree_assigns(child, recv, source_bytes)
         for child in node.named_children
@@ -741,10 +823,14 @@ def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
                 if sibling.id == child.id:
                     break
                 if _rust_subtree_assigns(sibling, recv, source_bytes):
-                    # A write to ``recv`` stale any earlier guard — only a
-                    # guard after the latest write still applies.
-                    guarded = False
-                    mutated = True
+                    if _rust_statement_repairs(sibling, recv, source_bytes):
+                        # `res = Some(..)` re-establishes the invariant.
+                        guarded = True
+                    else:
+                        # A write to ``recv`` stales any earlier guard —
+                        # only a guard after the latest write still applies.
+                        guarded = False
+                        mutated = True
                 elif _rust_statement_guards(sibling, recv, source_bytes):
                     guarded = True
             if guarded:
