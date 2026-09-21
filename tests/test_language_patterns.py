@@ -962,3 +962,120 @@ def test_advisory_confidence_flows_to_cross_validation_issue() -> None:
     )
     assert advisory.severity == "warning"
     assert advisory.confidence == "high"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        # `?` inside a conditional branch may not run — no guard.
+        "if c { let _x = res?; }",
+        # match arms are conditional on the pattern.
+        "match other { Some(v) => { let _x = res?; v }, None => 0 };",
+        # right operand of `&&` runs only when the left held.
+        "let _ = c && (res? > 0);",
+        # let-else bodies run only when the pattern fails.
+        "let Some(v) = other else { let _x = res?; return None };",
+        # `?` inside a closure returns from the closure, not `f`.
+        "let g = || { let _x = res?; Some(1) };",
+    ],
+)
+def test_rust_conditional_try_does_not_guard_unwrap(prefix: str) -> None:
+    source = (
+        "fn f(res: Option<i32>, other: Option<i32>, c: bool) -> Option<i32> {\n"
+        f"    {prefix}\n"
+        "    Some(res.unwrap())\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "let v = res?;",
+        "foo(res?);",
+        # left operand of `&&` always evaluates.
+        "let _ = (res?) > 0 && c;",
+        # the `if` condition evaluates unconditionally.
+        "if res?.is_none() { return None; }",
+        # the match scrutinee evaluates unconditionally.
+        "match res? { Some(v) => v, None => 0 };",
+    ],
+)
+def test_rust_unconditional_try_still_guards_unwrap(prefix: str) -> None:
+    source = (
+        "fn f(res: Option<i32>, other: Option<i32>, c: bool) -> Option<i32> {\n"
+        f"    {prefix}\n"
+        "    Some(res.unwrap())\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_unwrap_inside_let_else_branch_flags() -> None:
+    """The `else` arm runs precisely when the pattern failed — unwrapping
+    there is unsafe."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    let Some(v) = res else { res.unwrap() };\n"
+        "    v\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_rust_unwrap_inside_macro_invocation() -> None:
+    """Macro token trees are opaque to the node walk — the token text is
+    scanned and the macro's own scope decides guarding."""
+    flagged = 'fn f(r: Option<i32>) { println!("{}", r.unwrap()); }'
+    assert any(
+        "can panic via `r.unwrap()`" in i.message
+        for i in language_pattern_issues(flagged, "rust")
+    )
+    guarded = (
+        'fn f(r: Option<i32>) { if r.is_some() { println!("{}", r.unwrap()); } }'
+    )
+    assert language_pattern_issues(guarded, "rust") == []
+
+
+def test_rust_let_condition_on_empty_variant_guards_fallthrough() -> None:
+    """`if let Err/None = res { diverge }` — the fallthrough proves res
+    holds the value variant."""
+    for prefix in (
+        "if let Err(_) = res { return -1; }",
+        "if let None = res { return -1; }",
+    ):
+        source = f"fn f(res: Result<i32, E>) -> i32 {{\n    {prefix}\n    res.unwrap()\n}}\n"
+        assert language_pattern_issues(source, "rust") == [], prefix
+
+
+def test_rust_else_of_empty_variant_let_is_guarded() -> None:
+    """`else { res.unwrap() }` of `if let Err(_) = res` runs only when res
+    is Ok — while a fallthrough after a non-diverging consequence is not."""
+    guarded = (
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        "    if let Err(_) = res { -1 } else { res.unwrap() }\n"
+        "}\n"
+    )
+    assert language_pattern_issues(guarded, "rust") == []
+    unguarded = (
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        "    if let Err(_) = res { 0 } else { -1 };\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(unguarded, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_rust_empty_variant_match_arm_unwrap_flags() -> None:
+    """`Err(_) => res.unwrap()` — the arm runs only when res is Err."""
+    source = (
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        "    match res { Err(_) => res.unwrap(), Ok(v) => v }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)

@@ -351,14 +351,17 @@ def _rust_condition_polarity(condition, recv: str, source_bytes: bytes) -> str |
         return _rust_flip(_rust_condition_polarity(inner, recv, source_bytes))
     if condition.type == "let_condition":
         # ``if let Some(v) = recv``: the consequence runs only when the
-        # pattern matched, i.e. when recv held a value.
+        # pattern matched, i.e. when recv held a value. An ``Err``/``None``
+        # pattern is the mirror image: the else/fallthrough path proves
+        # recv holds the value variant.
         named = condition.named_children
-        if (
-            len(named) >= 2
-            and _rust_expr_key(source_bytes, named[-1]) == recv
-            and _rust_pattern_is_value_arm(named[0], source_bytes)
-        ):
-            return "then"
+        if len(named) >= 2 and _rust_expr_key(source_bytes, named[-1]) == recv:
+            if _rust_pattern_is_value_arm(named[0], source_bytes):
+                return "then"
+            if _RUST_EMPTY_PATTERN_RE.search(
+                _node_text(source_bytes, named[0])
+            ):
+                return "else"
         return None
     if condition.type == "let_chain":
         # ``if let Some(v) = recv && flag``: every conjunct holds on the then
@@ -542,11 +545,44 @@ def _rust_match_guards_fallthrough(match_node, recv: str, source_bytes: bytes) -
     return saw_arm
 
 
+def _rust_unconditionally_evaluated_children(node) -> list:
+    """Named children of ``node`` that evaluate unconditionally when the
+    node runs — used to decide whether a ``?`` inside a statement is a
+    guaranteed early return.
+
+    Conditional children are excluded: ``if``/``while``/``for`` bodies and
+    ``else`` arms, ``match`` arms, the right operand of ``&&``/``||``,
+    ``let`` else-blocks, ``loop`` bodies (statements after a ``break`` never
+    run), and function/closure bodies (their ``?`` returns from the nested
+    function)."""
+    if node.type in _RUST_FN_BOUNDARY_TYPES:
+        return []
+    if node.type in {"if_expression", "while_expression"}:
+        condition = node.child_by_field_name("condition")
+        return [condition] if condition is not None else []
+    if node.type == "for_expression":
+        value = node.child_by_field_name("value")
+        return [value] if value is not None else []
+    if node.type == "loop_expression":
+        return []
+    if node.type == "match_expression":
+        value = node.child_by_field_name("value")
+        return [value] if value is not None else []
+    if node.type == "let_declaration":
+        value = node.child_by_field_name("value")
+        return [value] if value is not None else []
+    if node.type == "binary_expression":
+        operator = node.child_by_field_name("operator")
+        if operator is not None and operator.type in {"&&", "||"}:
+            left = node.child_by_field_name("left")
+            return [left] if left is not None else []
+    return node.named_children
+
+
 def _rust_subtree_has_try(node, recv: str, source_bytes: bytes) -> bool:
-    """True when ``recv?`` (the try operator) appears under ``node`` — it
-    returns early on the empty variant, guarding the code below it.
-    Function-item/closure subtrees are skipped: a ``?`` inside them returns
-    from the nested function, not the enclosing one."""
+    """True when ``recv?`` (the try operator) runs unconditionally inside
+    ``node`` — it early-returns on the empty variant, guarding the code
+    below it."""
     stack = [node]
     while stack:
         current = stack.pop()
@@ -557,12 +593,7 @@ def _rust_subtree_has_try(node, recv: str, source_bytes: bytes) -> bool:
                 and _rust_expr_key(source_bytes, operand) == recv
             ):
                 return True
-            continue
-        stack.extend(
-            child
-            for child in current.children
-            if child.type not in _RUST_FN_BOUNDARY_TYPES
-        )
+        stack.extend(_rust_unconditionally_evaluated_children(current))
     return False
 
 
@@ -718,7 +749,7 @@ def _rust_enclosing_function_name(node, source_bytes: bytes) -> str:
                 return _node_text(source_bytes, name)
             break
         current = current.parent
-    return "<closure>"
+    return "<top-level>"
 
 
 def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafetyIssue]:
