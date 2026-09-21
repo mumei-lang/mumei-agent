@@ -4,7 +4,7 @@
 
 - `agent/language_patterns.py` — Rust: writes through local `&mut` aliases now invalidate guards the same as direct writes. `_rust_collect_mut_aliases` gathers `let p = &mut res` / `p = &mut res` / `let q = p` copies over the enclosing function (fixpoint pass), and `_rust_subtree_assigns` treats `*p = …`, `p.take()`/insert-style calls, `f(p)` / `f(&mut res)` arguments as writes. Repairs work through aliases too (`*p = Some(..)`, `p.insert(..)` re-guard `res`). Aliases of other receivers and plain immutable borrows (`g(res)`/`g(&res)`) are unaffected.
 - Remaining limits (documented, deliberately out of scope): cross-file/import resolution, custom guard functions, `#[allow]`-style opt-outs, and conditional repairs (`if res.is_none() { res = Some(0) }` still flags).
-- Regression gate: `uv run pytest tests/test_language_patterns.py -q` (147 cases incl. alias write/repair cases); full suite green.
+- Regression gate: `uv run pytest tests/test_language_patterns.py -q` (151 cases incl. alias write/repair and conflict-rebinding cases); full suite green.
 
 ## 2026-09-21: V1-B-2 follow-up 2 — remaining-limit coverage (mutation + TS aliases)
 
