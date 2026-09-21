@@ -1,8 +1,10 @@
-"""Regression tests for cross-repo harness contract vocabulary.
+"""Regression tests for cross-repo harness vocabulary and bridge constants.
 
 Covers docs, CLI help text, and MCP docstrings to ensure the
 ``audit -> migrate-suggest -> heal`` contract and eight fixed keys
-are described without aliases across all surfaces.
+are described without aliases across all surfaces. The bridge constants are
+checked with stdlib-only catalog and AST parsing so lightweight CI needs no
+``agent`` imports.
 
 The doc-only test runs in the lightweight ``contract-vocabulary`` CI job
 (pytest-only, no project deps).  Tests that import ``agent.*`` are skipped
@@ -11,11 +13,64 @@ when the package is not installed.
 from __future__ import annotations
 
 import re
+import ast
+import hashlib
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_bridge_catalog() -> dict:
+    import json
+
+    return json.loads(
+        (REPO_ROOT / "schema" / "bridge_lemma_catalog.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _bridge_hash(obligation_classes: dict[str, list[str]]) -> str:
+    canonical = "\n".join(
+        f"{obligation_class}:{lemma}"
+        for obligation_class in sorted(obligation_classes)
+        for lemma in sorted(obligation_classes[obligation_class])
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _extract_guard_trace_constants() -> dict[str, str]:
+    path = REPO_ROOT / "agent" / "strategies" / "foreign_code_strategy_helpers.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if (
+                isinstance(target, ast.Name)
+                and target.id
+                in {
+                    "_SOLIDITY_GUARD_TRACE_TRANSLATOR_VERSION",
+                    "_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH",
+                }
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                values[target.id] = node.value.value
+    return values
+
+
+def test_bridge_constants_match_catalog() -> None:
+    catalog = _load_bridge_catalog()
+    values = _extract_guard_trace_constants()
+    assert values["_SOLIDITY_GUARD_TRACE_TRANSLATOR_VERSION"] == catalog[
+        "translator_version"
+    ]
+    assert values["_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH"] == _bridge_hash(
+        catalog["obligation_classes"]
+    )
 DOCS_UNDER_CONTRACT = [
     REPO_ROOT / "README.md",
     REPO_ROOT / "docs" / "VERIFICATION_WORKFLOW_GUIDE.md",

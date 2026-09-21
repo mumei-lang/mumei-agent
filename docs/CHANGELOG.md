@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-21: Lean bridge contract catalog mirror
+
+- Added the generated `schema/bridge_lemma_catalog.json` mirror and a
+  stdlib-only AST/hash regression test for the Solidity guard-trace constants.
+
 ## 2026-09-19: V1-B-2 continuing improvement — language-pattern advisory registry
 
 - New `agent/language_patterns.py`: a declarative registry (`LANGUAGE_PATTERNS` of `LanguagePattern(name, languages, detect)`) for per-language "common problem" heuristics that return `ForeignSafetyIssue`s. Adding a pattern is one registry entry — no changes to dispatch or reporting code. Initial detectors: Python mutable default arguments (`items=[]`) and bare/`except`-swallow handlers (`except:` / `except Exception: pass`); Rust unguarded `unwrap()`/`expect()` (suppressed by `is_ok`/`is_some`/`is_err`/`is_none`, `if let`/`while let`, `let-else`, `match`, `?`, `unwrap_or`); Go `defer` inside loop bodies (resource accumulation until return); TypeScript/JavaScript floating promises (`async` callee invoked without `await`/`return`/`void`/`.then`/`.catch`); Solidity `tx.origin` auth, `selfdestruct`, and unchecked low-level `call`/`delegatecall`/`send`/`staticcall` results (call-expression receivers like `payable(addr)` included). Solidity mock contracts (`*Mock*` names, `/mocks/` paths) are suppressed like the existing contract advisories.
