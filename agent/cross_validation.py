@@ -1012,6 +1012,7 @@ def _language_advisory_issues(
             message=issue.message,
             location=issue.function_name,
             severity="error" if issue.counterexample else "warning",
+            confidence=issue.confidence,
         )
         for issue in foreign_issues
     ]

@@ -32,6 +32,10 @@ IssueKind = Literal[
 
 Severity = Literal["warning", "error"]
 ForeignCodeVerdict = Literal["verified", "refuted", "unverifiable"]
+# Certainty of an issue's own finding. "" for issues that don't grade
+# themselves; language-pattern advisories report "high" (verified against
+# the syntax tree / Python ast) or "medium" (text-heuristic fallback).
+IssueConfidence = Literal["", "high", "medium", "low"]
 
 @dataclass(frozen=True)
 class CrossValidationIssue:
@@ -44,6 +48,7 @@ class CrossValidationIssue:
     severity: Severity = "error"
     source_line: int = 0
     fix_suggestion: str = ""
+    confidence: IssueConfidence = ""
 
 @dataclass(frozen=True)
 class ContractParam:
