@@ -763,3 +763,189 @@ def test_python_except_specific_tuple_is_quiet() -> None:
     )
     issues = language_pattern_issues(source, "python")
     assert not any("swallow" in i.message for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# Tree-sitter scoped detection (proposal-2)
+# ---------------------------------------------------------------------------
+#
+# The Rust and TypeScript detectors decide guard dominance / handled-ness from
+# the syntax tree. These cases pin the behavior differences against the old
+# body-text scans, which treated a guard substring anywhere in the function
+# (sibling branches, nested closures, text after the call) as suppressing.
+
+
+def test_rust_sibling_branch_guard_does_not_suppress_unwrap() -> None:
+    """`if res.is_some() { ... } else { ... }; res.unwrap()` used to be
+    suppressed — the guard text sat in the same body but did not dominate
+    the call."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_some() { 1 } else { 0 };\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_rust_guard_after_call_does_not_suppress() -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    let x = res.unwrap();\n"
+        "    if res.is_some() { x } else { 0 }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_rust_guard_on_different_receiver_does_not_suppress() -> None:
+    source = (
+        "fn f(res: Option<i32>, other: Option<i32>) -> i32 {\n"
+        "    if other.is_some() { res.unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+def test_rust_outer_guard_does_not_reach_nested_closure() -> None:
+    """Guards never cross a function boundary — the closure captures `v`,
+    not `res`, and may outlive the guarded scope."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_some() {\n"
+        "        let g = |v: Option<i32>| { v.unwrap() };\n"
+        "        g(res)\n"
+        "    } else {\n"
+        "        0\n"
+        "    }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `v.unwrap()`" in i.message for i in issues)
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        # Right operand of `&&` only runs when the check held.
+        "if res.is_some() && res.unwrap() > 1 { 1 } else { 0 }",
+        # Value arm of `match` — the pattern binds the Some payload.
+        "match res { Some(v) => v + res.unwrap(), None => 0 }",
+        # `else` of a negative check.
+        "if res.is_none() { 0 } else { res.unwrap() }",
+        # Preceding `match` whose empty arm diverges.
+        "match res { Some(v) => v, None => return None };\n    Some(res.unwrap())",
+        # Preceding assert! on the same receiver.
+        "assert!(res.is_some());\n    Some(res.unwrap())",
+        # `?` early-returns on None before the unwrap runs.
+        "let v = res?;\n    Some(res.unwrap())",
+    ],
+)
+def test_rust_scoped_guards_still_suppress_unwrap(guard: str) -> None:
+    """Guards that dominate the call keep the advisory quiet."""
+    source = f"fn f(res: Option<i32>) -> Option<i32> {{\n    {guard}\n}}\n"
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_typescript_async_property_value_is_collected() -> None:
+    """`{ send: async (x) => x }` — the old regexes only collected
+    `const x = async`/`async function`/`async m(` shapes and missed
+    pair-bound async arrows."""
+    source = (
+        "const api = { send: async (x) => x };\n"
+        "function h() { api.send(1); }\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert any(
+        i.function_name == "h" and "`send()`" in i.message for i in issues
+    )
+
+
+def test_typescript_floating_call_inside_block_body_callback_flags() -> None:
+    """`p.then(() => { send(1) })` — the callback's block body drops the
+    promise; old masking hid the call inside the nested literal."""
+    source = (
+        "async function send(x) { return x }\n"
+        "function h() { p.then(() => { send(1); }); }\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    assert any(
+        i.function_name == "h" and "`send()`" in i.message for i in issues
+    )
+
+
+def test_typescript_await_inside_nested_callback_is_quiet() -> None:
+    source = (
+        "async function send(x) { return x }\n"
+        "function h() { [1].forEach(async () => { await send(1); }); }\n"
+    )
+    assert language_pattern_issues(source, "typescript") == []
+
+
+def test_confidence_marks_tree_sitter_and_ast_findings_high() -> None:
+    """Scope/AST-verified findings carry ``high`` confidence."""
+    issues = language_pattern_issues(
+        "fn f(res: Option<i32>) -> i32 {\n    res.unwrap()\n}\n", "rust"
+    )
+    assert issues and all(i.confidence == "high" for i in issues)
+    issues = language_pattern_issues(
+        "def bad(items=[]):\n    return items\n", "python"
+    )
+    assert issues and all(i.confidence == "high" for i in issues)
+
+
+def test_confidence_marks_text_heuristics_medium() -> None:
+    """Pure text scans (Go/Solidity) report ``medium``."""
+    go = language_pattern_issues(
+        "func f() {\n\tfor {\n\t\tdefer x()\n\t}\n}", "go"
+    )
+    assert go and all(i.confidence == "medium" for i in go)
+    sol = language_pattern_issues(
+        "contract C {\n  function f() public {\n    a.send(1);\n  }\n}",
+        "solidity",
+    )
+    assert sol and all(i.confidence == "medium" for i in sol)
+
+
+def test_tree_sitter_fallback_uses_text_scan_at_medium_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the grammar is unavailable the detectors fall back to the
+    body-text scans, marked ``medium``."""
+    from agent import tree_sitter_extract
+
+    monkeypatch.setattr(
+        tree_sitter_extract, "parse", lambda *args, **kwargs: (None, None)
+    )
+    unguarded = (
+        "fn f(res: Option<i32>) -> i32 {\n    res.unwrap()\n}\n"
+    )
+    issues = language_pattern_issues(unguarded, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+    assert all(i.confidence == "medium" for i in issues)
+    guarded = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_some() { res.unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    assert language_pattern_issues(guarded, "rust") == []
+    ts = "async function send(x) { return x }\nfunction h() { send(1); }\n"
+    issues = language_pattern_issues(ts, "typescript")
+    assert any("`send()`" in i.message for i in issues)
+    assert all(i.confidence == "medium" for i in issues)
+
+
+def test_advisory_confidence_flows_to_cross_validation_issue() -> None:
+    """warnings-only design is preserved; the issue exposes the detector's
+    confidence so consumers can grade advisories."""
+    from agent.cross_validation import _language_advisory_issues
+
+    issues = _language_advisory_issues(
+        "fn f(res: Option<i32>) -> i32 {\n    res.unwrap()\n}\n", "rust"
+    )
+    assert issues
+    assert all(i.severity == "warning" for i in issues)
+    assert all(i.confidence == "high" for i in issues)

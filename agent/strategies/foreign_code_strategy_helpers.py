@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import z3
 
@@ -107,12 +107,19 @@ class ForeignCodeSpec:
     postconditions: list[str] = field(default_factory=list)
     source_line: int = 0
 
+# How certain a ``ForeignSafetyIssue`` detector is in its own finding:
+# ``high`` for findings verified against the syntax tree (or Python's
+# ``ast``), ``medium`` for body-text/regex heuristics.
+ConfidenceLevel = Literal["high", "medium", "low"]
+
+
 @dataclass(frozen=True)
 class ForeignSafetyIssue:
     function_name: str
     message: str
     required_contracts: tuple[str, ...] = ()
     counterexample: dict[str, object] = field(default_factory=dict)
+    confidence: ConfidenceLevel = "high"
 
 
 @dataclass(frozen=True)
@@ -6695,6 +6702,7 @@ def _detect_solidity_contract_issues(
                             "(no `onlyOwner`-style modifier or `require(msg.sender == ...)`); "
                             "confirm this is intentionally permissionless"
                         ),
+                        confidence="medium",
                     )
                 )
     return issues

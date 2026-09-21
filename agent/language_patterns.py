@@ -6,6 +6,15 @@ Adding a pattern means writing one detector and appending one entry —
 no dispatch code to edit. All patterns are advisory: they carry no
 counterexample, so downstream surfaces report them as warnings rather than
 hard violations.
+
+Detectors receive a ``PatternContext`` carrying the tree-sitter parse of the
+whole source when the language's grammar is available. The Rust and
+TypeScript detectors use it for scope-aware decisions (a guard only counts
+when it dominates the call site; a call's "handled" status comes from its
+position in the syntax tree) instead of scanning body text — body-text scans
+let a guard in a sibling or outer branch suppress unrelated findings. When
+``ctx.tree`` is ``None`` (grammar missing or unparseable) they fall back to
+the previous text heuristics, marked ``confidence="medium"``.
 """
 from __future__ import annotations
 
@@ -14,6 +23,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
+from agent import tree_sitter_extract
 from agent.cross_validation_foreign import _strip_go_rust_literals_and_comments
 from agent.strategies.foreign_code_strategy_helpers import (
     ForeignSafetyIssue,
@@ -27,6 +37,25 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _solidity_function_blocks_with_attrs,
     _typescript_function_blocks,
 )
+
+
+@dataclass(frozen=True)
+class PatternContext:
+    """Syntactic context shared by all pattern detectors on one source.
+
+    ``tree``/``source_bytes`` are the tree-sitter parse of the whole source,
+    or ``None`` when the grammar is unavailable or the parse fails — in that
+    case detectors must use their text fallback paths. The context is built
+    once per ``language_pattern_issues`` call so detectors never re-parse.
+    """
+
+    language: str
+    tree: object | None = None
+    source_bytes: bytes | None = None
+
+
+def _node_text(source_bytes: bytes, node) -> str:
+    return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +112,9 @@ def _python_own_statements(function: ast.AST) -> Iterable[ast.AST]:
         stack.extend(ast.iter_child_nodes(child))
 
 
-def _python_mutable_default_issues(source: str) -> list[ForeignSafetyIssue]:
+def _python_mutable_default_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -131,7 +162,9 @@ def _python_mutable_default_issues(source: str) -> list[ForeignSafetyIssue]:
     return issues
 
 
-def _python_swallow_except_issues(source: str) -> list[ForeignSafetyIssue]:
+def _python_swallow_except_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -192,6 +225,18 @@ _RUST_UNWRAP_RE = re.compile(
 )
 _RUST_NESTED_FN_RE = re.compile(r"\bfn\s+[A-Za-z_]\w*")
 
+_RUST_UNWRAP_METHODS = frozenset({"unwrap", "expect"})
+_RUST_POSITIVE_CHECKS = frozenset({"is_some", "is_ok"})
+_RUST_NEGATIVE_CHECKS = frozenset({"is_err", "is_none"})
+_RUST_DIVERGING_MACROS = frozenset({"panic", "unreachable", "todo", "unimplemented"})
+_RUST_ASSERT_MACROS = frozenset({"assert", "debug_assert"})
+_RUST_FN_BOUNDARY_TYPES = frozenset({"function_item", "closure_expression"})
+# Patterns that select the value-carrying variant: inside a ``Some``/``Ok``
+# arm (or after a let-else on one) the receiver is safe to unwrap. ``None``/
+# ``Err`` arms run precisely when it is not.
+_RUST_VALUE_PATTERN_RE = re.compile(r"\b(?:Some|Ok)\b")
+_RUST_EMPTY_PATTERN_RE = re.compile(r"\b(?:None|Err)\b")
+
 
 def _mask_rust_nested_fns(body: str) -> str:
     """Blank out nested ``fn`` item spans — ``_rust_function_scopes`` returns
@@ -223,7 +268,13 @@ def _rust_unwrap_guarded(body: str, receiver: str) -> bool:
     )
 
 
-def _rust_unwrap_expect_issues(source: str) -> list[ForeignSafetyIssue]:
+def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
+    """Body-text scan used when the tree-sitter grammar is unavailable.
+
+    Any guard-looking text anywhere in the function body suppresses the
+    finding, including guards in sibling branches or after the call — the
+    known false-negative the scoped path exists to fix.
+    """
     issues: list[ForeignSafetyIssue] = []
     for name, body, _params in _rust_function_scopes(source):
         masked = _mask_rust_nested_fns(_strip_go_rust_literals_and_comments(body))
@@ -240,9 +291,462 @@ def _rust_unwrap_expect_issues(source: str) -> list[ForeignSafetyIssue]:
                         f"`{receiver}.{call}()` without a contract that the "
                         "value is Ok/Some"
                     ),
+                    confidence="medium",
                 )
             )
     return issues
+
+
+def _rust_expr_key(source_bytes: bytes, node) -> str:
+    """Whitespace-insensitive text for comparing receiver expressions."""
+    return re.sub(r"\s+", "", _node_text(source_bytes, node))
+
+
+def _rust_call_parts(node, source_bytes: bytes) -> tuple[str, str] | None:
+    """``(receiver_key, method_name)`` for a ``receiver.method(...)`` call."""
+    if node.type != "call_expression":
+        return None
+    function = node.child_by_field_name("function")
+    if function is None or function.type != "field_expression":
+        return None
+    value = function.child_by_field_name("value")
+    field = function.child_by_field_name("field")
+    if value is None or field is None:
+        return None
+    if field.type == "generic_function":
+        field = field.child_by_field_name("function") or next(
+            iter(field.named_children), None
+        )
+        if field is None:
+            return None
+    return _rust_expr_key(source_bytes, value), _node_text(source_bytes, field)
+
+
+def _rust_pattern_is_value_arm(pattern, source_bytes: bytes) -> bool:
+    """True when a match/let pattern selects the ``Some``/``Ok`` variant."""
+    text = _node_text(source_bytes, pattern)
+    if _RUST_EMPTY_PATTERN_RE.search(text):
+        return False
+    return bool(_RUST_VALUE_PATTERN_RE.search(text))
+
+
+def _rust_flip(polarity: str | None) -> str | None:
+    return {"then": "else", "else": "then"}.get(polarity)
+
+
+def _rust_condition_polarity(condition, recv: str, source_bytes: bytes) -> str | None:
+    """Which outcome of ``condition`` makes ``recv`` provably Ok/Some.
+
+    ``"then"`` when the condition being true implies it, ``"else"`` when the
+    condition being false implies it, ``None`` when neither can be shown.
+    """
+    while condition is not None and condition.type == "parenthesized_expression":
+        condition = next(iter(condition.named_children), None)
+    if condition is None:
+        return None
+    if condition.type == "unary_expression" and (
+        condition.children and condition.children[0].type == "!"
+    ):
+        inner = next(iter(condition.named_children), None)
+        return _rust_flip(_rust_condition_polarity(inner, recv, source_bytes))
+    if condition.type == "let_condition":
+        # ``if let Some(v) = recv``: the consequence runs only when the
+        # pattern matched, i.e. when recv held a value.
+        named = condition.named_children
+        if (
+            len(named) >= 2
+            and _rust_expr_key(source_bytes, named[-1]) == recv
+            and _rust_pattern_is_value_arm(named[0], source_bytes)
+        ):
+            return "then"
+        return None
+    if condition.type == "let_chain":
+        # ``if let Some(v) = recv && flag``: every conjunct holds on the then
+        # path, so a let-condition on recv guards the consequence. The else
+        # path may have failed on another conjunct — never guardable here.
+        for child in condition.named_children:
+            if _rust_condition_polarity(child, recv, source_bytes) == "then":
+                return "then"
+        return None
+    if condition.type == "binary_expression":
+        operator = condition.child_by_field_name("operator")
+        left = condition.child_by_field_name("left")
+        right = condition.child_by_field_name("right")
+        op = operator.type if operator is not None else ""
+        left_p = _rust_condition_polarity(left, recv, source_bytes)
+        right_p = _rust_condition_polarity(right, recv, source_bytes)
+        if op == "&&":
+            # then: both operands hold — either operand's guard applies.
+            if "then" in (left_p, right_p):
+                return "then"
+            # else: at least one failed — only safe when either failure
+            # alone still proves recv Ok/Some.
+            if left_p == "else" and right_p == "else":
+                return "else"
+            return None
+        if op == "||":
+            # else: both operands failed — either operand's guard applies.
+            if "else" in (left_p, right_p):
+                return "else"
+            if left_p == "then" and right_p == "then":
+                return "then"
+            return None
+        # Other operators (==, <, ...) fall through to the generic scan —
+        # the guard call inside them is not a dominance guard, matching the
+        # leniency of the text path.
+    # Generic scan: the first ``recv.<check>()`` in the condition decides.
+    stack = [condition]
+    while stack:
+        node = stack.pop()
+        parts = _rust_call_parts(node, source_bytes)
+        if parts is not None and parts[0] == recv:
+            if parts[1] in _RUST_POSITIVE_CHECKS:
+                return "then"
+            if parts[1] in _RUST_NEGATIVE_CHECKS:
+                return "else"
+        stack.extend(node.children)
+    return None
+
+
+def _rust_statement_inner(node):
+    """Peel ``expression_statement``/``empty_statement`` wrappers."""
+    while node is not None and node.type in {
+        "expression_statement",
+        "empty_statement",
+    }:
+        node = next(iter(node.named_children), None)
+    return node
+
+
+def _rust_is_diverging_macro(node, source_bytes: bytes) -> bool:
+    if node is None or node.type != "macro_invocation":
+        return False
+    macro = node.child_by_field_name("macro")
+    return (
+        macro is not None
+        and _node_text(source_bytes, macro) in _RUST_DIVERGING_MACROS
+    )
+
+
+def _rust_if_always_diverges(node, source_bytes: bytes) -> bool:
+    consequence = node.child_by_field_name("consequence")
+    if consequence is None or not _rust_block_diverges(
+        consequence, source_bytes
+    ):
+        return False
+    alternative = node.child_by_field_name("alternative")
+    if alternative is None:
+        return False
+    body = _rust_statement_inner(next(iter(alternative.named_children), None))
+    if body is None:
+        return False
+    if body.type == "if_expression":
+        return _rust_if_always_diverges(body, source_bytes)
+    return body.type == "block" and _rust_block_diverges(body, source_bytes)
+
+
+def _rust_statement_diverges(node, source_bytes: bytes) -> bool:
+    """True when a block-level statement always exits (return/break/
+    continue/panic!/unreachable!, or an if whose every arm diverges)."""
+    inner = _rust_statement_inner(node)
+    if inner is None:
+        return False
+    if inner.type in {
+        "return_expression",
+        "break_expression",
+        "continue_expression",
+    }:
+        return True
+    if _rust_is_diverging_macro(inner, source_bytes):
+        return True
+    if inner.type == "if_expression":
+        return _rust_if_always_diverges(inner, source_bytes)
+    return False
+
+
+def _rust_block_diverges(block, source_bytes: bytes) -> bool:
+    """True when a direct statement of ``block`` always exits control flow."""
+    for child in block.named_children:
+        if _rust_statement_diverges(child, source_bytes):
+            return True
+    return False
+
+
+def _rust_if_guards_fallthrough(if_node, recv: str, source_bytes: bytes) -> bool:
+    """True when every non-diverging exit of ``if_node`` leaves ``recv``
+    Ok/Some — e.g. ``if r.is_err() { return }`` or ``if let Some(v) = r {
+    ... } else { return }``."""
+    condition = if_node.child_by_field_name("condition")
+    consequence = if_node.child_by_field_name("consequence")
+    if condition is None or consequence is None:
+        return False
+    polarity = _rust_condition_polarity(condition, recv, source_bytes)
+    if polarity != "then" and not _rust_block_diverges(
+        consequence, source_bytes
+    ):
+        return False
+    alternative = if_node.child_by_field_name("alternative")
+    if alternative is None:
+        return polarity == "else"
+    body = _rust_statement_inner(next(iter(alternative.named_children), None))
+    if body is None:
+        return polarity == "else"
+    if body.type == "block":
+        return polarity == "else" or _rust_block_diverges(body, source_bytes)
+    if body.type == "if_expression":
+        # ``else if`` chains guard the fallthrough the same way.
+        return _rust_if_guards_fallthrough(body, recv, source_bytes)
+    return False
+
+
+def _rust_match_guards_fallthrough(match_node, recv: str, source_bytes: bytes) -> bool:
+    """True when a preceding ``match recv`` leaves ``recv`` Ok/Some on every
+    non-diverging arm — value arms (``Some``/``Ok``) keep it, diverging arms
+    (``None => return`` / ``Err(_) => panic!()``) never reach the code below."""
+    value = match_node.child_by_field_name("value")
+    if value is None or _rust_expr_key(source_bytes, value) != recv:
+        return False
+    body = match_node.child_by_field_name("body")
+    if body is None:
+        return False
+    saw_arm = False
+    for arm in body.named_children:
+        if arm.type != "match_arm":
+            continue
+        saw_arm = True
+        pattern = arm.child_by_field_name("pattern")
+        if pattern is not None and _rust_pattern_is_value_arm(
+            pattern, source_bytes
+        ):
+            continue
+        arm_value = arm.child_by_field_name("value")
+        if arm_value is None:
+            return False
+        if arm_value.type == "block":
+            if not _rust_block_diverges(arm_value, source_bytes):
+                return False
+        elif arm_value.type in {
+            "return_expression",
+            "break_expression",
+            "continue_expression",
+        } or _rust_is_diverging_macro(arm_value, source_bytes):
+            continue
+        else:
+            return False
+    return saw_arm
+
+
+def _rust_subtree_has_try(node, recv: str, source_bytes: bytes) -> bool:
+    """True when ``recv?`` (the try operator) appears under ``node`` — it
+    returns early on the empty variant, guarding the code below it."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "try_expression":
+            operand = next(iter(current.named_children), None)
+            if (
+                operand is not None
+                and _rust_expr_key(source_bytes, operand) == recv
+            ):
+                return True
+        stack.extend(current.children)
+    return False
+
+
+def _rust_statement_guards(node, recv: str, source_bytes: bytes) -> bool:
+    """True when a preceding sibling statement guarantees ``recv`` is
+    Ok/Some for everything after it in the same block."""
+    inner = _rust_statement_inner(node)
+    if inner is None:
+        return False
+    if inner.type == "let_declaration":
+        # ``let Some(v) = recv else { diverge };`` — the else must diverge
+        # by definition, so the fallthrough bound the value variant.
+        if inner.child_by_field_name("alternative") is not None:
+            pattern = inner.child_by_field_name("pattern")
+            value = inner.child_by_field_name("value")
+            if (
+                value is not None
+                and _rust_expr_key(source_bytes, value) == recv
+                and pattern is not None
+                and _rust_pattern_is_value_arm(pattern, source_bytes)
+            ):
+                return True
+        # ``let x = recv?;`` / ``foo(recv?);`` also early-return on empty.
+        if _rust_subtree_has_try(inner, recv, source_bytes):
+            return True
+    if inner.type == "try_expression":
+        operand = next(iter(inner.named_children), None)
+        if (
+            operand is not None
+            and _rust_expr_key(source_bytes, operand) == recv
+        ):
+            return True
+    if inner.type == "if_expression" and _rust_if_guards_fallthrough(
+        inner, recv, source_bytes
+    ):
+        return True
+    if inner.type == "match_expression" and _rust_match_guards_fallthrough(
+        inner, recv, source_bytes
+    ):
+        return True
+    if inner.type == "macro_invocation":
+        macro = inner.child_by_field_name("macro")
+        if (
+            macro is not None
+            and _node_text(source_bytes, macro) in _RUST_ASSERT_MACROS
+        ):
+            token_tree = next(
+                (c for c in inner.children if c.type == "token_tree"), None
+            )
+            if token_tree is not None and re.search(
+                rf"\b{re.escape(recv)}\s*\.\s*"
+                rf"(?:{'|'.join(_RUST_POSITIVE_CHECKS)})\s*\(",
+                _node_text(source_bytes, token_tree),
+            ):
+                return True
+    return False
+
+
+def _rust_match_arm_guarded(arm, recv: str, source_bytes: bytes) -> bool:
+    """True when a ``match`` arm's pattern binds the value variant of
+    ``recv`` — the arm body only runs when ``recv`` is Ok/Some."""
+    match_block = arm.parent
+    match_expr = match_block.parent if match_block is not None else None
+    if match_expr is None or match_expr.type != "match_expression":
+        return False
+    scrutinee = match_expr.child_by_field_name("value")
+    pattern = arm.child_by_field_name("pattern")
+    return (
+        scrutinee is not None
+        and _rust_expr_key(source_bytes, scrutinee) == recv
+        and pattern is not None
+        and _rust_pattern_is_value_arm(pattern, source_bytes)
+    )
+
+
+def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
+    """Scope-aware guard check: a guard counts only when it dominates the
+    call — an enclosing ``if``/``while`` consequence, ``else`` of a negative
+    check, ``match`` value arm, short-circuit ``&&``/``||`` right operand, or
+    a preceding diverging guard (``let-else``, ``if ... { return }``,
+    ``assert!``, ``recv?``, exhaustive ``match``) in an enclosing block."""
+    child = call_node
+    node = call_node.parent
+    while node is not None:
+        if node.type == "binary_expression":
+            # ``recv.is_ok() && recv.unwrap()`` — the right operand runs only
+            # when the left held.
+            operator = node.child_by_field_name("operator")
+            right = node.child_by_field_name("right")
+            if right is not None and right.id == child.id:
+                op = operator.type if operator is not None else ""
+                side = _rust_condition_polarity(
+                    node.child_by_field_name("left"), recv, source_bytes
+                )
+                if (op == "&&" and side == "then") or (
+                    op == "||" and side == "else"
+                ):
+                    return True
+        elif node.type == "match_arm":
+            if _rust_match_arm_guarded(node, recv, source_bytes):
+                return True
+        elif node.type == "block":
+            for sibling in node.named_children:
+                if sibling.id == child.id:
+                    break
+                if _rust_statement_guards(sibling, recv, source_bytes):
+                    return True
+            owner = node.parent
+            if owner is None:
+                return False
+            if owner.type in _RUST_FN_BOUNDARY_TYPES:
+                # Guards never cross a function boundary: a nested ``fn`` is
+                # hoisted and a closure may outlive the guarded scope.
+                return False
+            if owner.type == "else_clause":
+                if_expr = owner.parent
+                if (
+                    if_expr is not None
+                    and if_expr.type == "if_expression"
+                    and _rust_condition_polarity(
+                        if_expr.child_by_field_name("condition"),
+                        recv,
+                        source_bytes,
+                    )
+                    == "else"
+                ):
+                    return True
+            elif owner.type == "if_expression":
+                consequence = owner.child_by_field_name("consequence")
+                if (
+                    consequence is not None
+                    and consequence.id == node.id
+                    and _rust_condition_polarity(
+                        owner.child_by_field_name("condition"),
+                        recv,
+                        source_bytes,
+                    )
+                    == "then"
+                ):
+                    return True
+            elif owner.type in {"while_expression", "for_expression"}:
+                if _rust_condition_polarity(
+                    owner.child_by_field_name("condition"), recv, source_bytes
+                ) == "then":
+                    return True
+            # Any other owner (mod, impl, unsafe/async blocks, loops, ...)
+            # is transparent — keep climbing.
+        child = node
+        node = node.parent
+    return False
+
+
+def _rust_enclosing_function_name(node, source_bytes: bytes) -> str:
+    """Name of the nearest enclosing ``fn`` item for issue attribution."""
+    current = node.parent
+    while current is not None:
+        if current.type == "function_item":
+            name = current.child_by_field_name("name")
+            if name is not None:
+                return _node_text(source_bytes, name)
+            break
+        current = current.parent
+    return "<closure>"
+
+
+def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafetyIssue]:
+    source_bytes = ctx.source_bytes
+    issues: list[ForeignSafetyIssue] = []
+    stack = [ctx.tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == "call_expression":
+            parts = _rust_call_parts(node, source_bytes)
+            if parts is not None and parts[1] in _RUST_UNWRAP_METHODS:
+                recv, call = parts
+                if not _rust_unwrap_is_guarded(node, recv, source_bytes):
+                    name = _rust_enclosing_function_name(node, source_bytes)
+                    issues.append(
+                        ForeignSafetyIssue(
+                            function_name=name,
+                            message=(
+                                f"Rust function `{name}` can panic via "
+                                f"`{recv}.{call}()` without a contract that "
+                                "the value is Ok/Some"
+                            ),
+                        )
+                    )
+        stack.extend(reversed(node.children))
+    return issues
+
+
+def _rust_unwrap_expect_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    if ctx.tree is not None and ctx.source_bytes is not None:
+        return _rust_unwrap_expect_scoped_issues(ctx)
+    return _rust_unwrap_expect_text_issues(source)
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +756,9 @@ def _rust_unwrap_expect_issues(source: str) -> list[ForeignSafetyIssue]:
 _GO_FOR_HEADER_RE = re.compile(r"\bfor\b")
 
 
-def _go_defer_in_loop_issues(source: str) -> list[ForeignSafetyIssue]:
+def _go_defer_in_loop_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
     blocks = _go_function_blocks(source)
     issues: list[ForeignSafetyIssue] = []
     for name, body in blocks:
@@ -301,6 +807,7 @@ def _go_defer_in_loop_issues(source: str) -> list[ForeignSafetyIssue]:
                         "loop — deferred calls accumulate until the function "
                         "returns"
                     ),
+                    confidence="medium",
                 )
             )
     return issues
@@ -326,6 +833,52 @@ _TS_EXPR_ARROW_RE = re.compile(
     r"(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>(?!\s*\{)"
 )
 
+_TS_CHAIN_METHODS = frozenset({"then", "catch", "finally"})
+_TS_FUNCTION_TYPES = frozenset(
+    {"function_declaration", "generator_function_declaration", "method_definition"}
+)
+_TS_VALUE_FUNCTION_TYPES = frozenset({"arrow_function", "function_expression"})
+# Parent node types that consume the call's value — the promise is handed to
+# an awaiter/return slot/callee and is therefore not floating.
+_TS_HANDLED_PARENT_TYPES = frozenset(
+    {
+        "await_expression",
+        "return_statement",
+        "throw_statement",
+        "yield_expression",
+        "variable_declarator",
+        "assignment_expression",
+        "augmented_assignment_expression",
+        "arguments",
+        "new_expression",
+        "lexical_declaration",
+        "variable_declaration",
+        "import_statement",
+    }
+)
+# Parent node types that just wrap the call — whether the promise is floating
+# is decided by the context above them.
+_TS_TRANSPARENT_PARENT_TYPES = frozenset(
+    {
+        "parenthesized_expression",
+        "sequence_expression",
+        "binary_expression",
+        "ternary_expression",
+        "non_null_expression",
+        "as_expression",
+        "satisfies_expression",
+        "type_assertion",
+        "subscript_expression",
+        "array",
+        "object",
+        "pair",
+        "spread_element",
+        "template_string",
+        "update_expression",
+        "else_clause",
+    }
+)
+
 
 def _ts_call_close(text: str, open_paren: int) -> int:
     """Index of the ``)`` matching the ``(`` at ``open_paren``, or -1."""
@@ -340,7 +893,8 @@ def _ts_call_close(text: str, open_paren: int) -> int:
     return -1
 
 
-def _typescript_floating_promise_issues(source: str) -> list[ForeignSafetyIssue]:
+def _typescript_floating_promise_text_issues(source: str) -> list[ForeignSafetyIssue]:
+    """Prefix-regex scan used when the tree-sitter grammar is unavailable."""
     # Collect async names from the comment/string-stripped source — an
     # `async function f` mention inside a comment must not mark `f` async.
     stripped = _strip_go_rust_literals_and_comments(source)
@@ -381,10 +935,208 @@ def _typescript_floating_promise_issues(source: str) -> list[ForeignSafetyIssue]
                             f"`{callee}()` without awaiting it — a floating "
                             "promise can reject unobserved"
                         ),
+                        confidence="medium",
                     )
                 )
                 break
     return issues
+
+
+def _ts_bound_name(fn_node, source_bytes: bytes) -> str | None:
+    """The binding name of an arrow/function-expression, when bound."""
+    parent = fn_node.parent
+    if parent is None:
+        return None
+    if parent.type == "variable_declarator":
+        name = parent.child_by_field_name("name")
+        if name is not None and name.type == "identifier":
+            return _node_text(source_bytes, name)
+        return None
+    if parent.type == "pair":
+        key = parent.child_by_field_name("key")
+        if key is None:
+            return None
+        return _node_text(source_bytes, key).strip("'\"")
+    if parent.type == "assignment_expression":
+        left = parent.child_by_field_name("left")
+        if left is None:
+            return None
+        if left.type == "identifier":
+            return _node_text(source_bytes, left)
+        if left.type == "member_expression":
+            prop = left.child_by_field_name("property")
+            if prop is not None:
+                return _node_text(source_bytes, prop)
+        return None
+    if parent.type in {"public_field_definition", "field_definition"}:
+        name = parent.child_by_field_name("name") or parent.child_by_field_name(
+            "property"
+        )
+        if name is not None:
+            return _node_text(source_bytes, name)
+    return None
+
+
+def _ts_function_name(fn_node, source_bytes: bytes) -> str | None:
+    if fn_node.type in _TS_FUNCTION_TYPES:
+        name = fn_node.child_by_field_name("name")
+        return _node_text(source_bytes, name) if name is not None else None
+    return _ts_bound_name(fn_node, source_bytes)
+
+
+def _ts_collect_async_names(root, source_bytes: bytes) -> set[str]:
+    """Names of ``async`` functions/methods/arrows declared in the file."""
+    names: set[str] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type in _TS_FUNCTION_TYPES | _TS_VALUE_FUNCTION_TYPES:
+            if any(child.type == "async" for child in node.children):
+                name = _ts_function_name(node, source_bytes)
+                if name:
+                    names.add(name)
+        stack.extend(node.children)
+    return names
+
+
+def _ts_call_callee_name(call_node, source_bytes: bytes) -> str | None:
+    """The called function's name — ``send(...)`` or ``obj.send(...)``."""
+    function = call_node.child_by_field_name("function")
+    if function is None:
+        return None
+    if function.type == "identifier":
+        return _node_text(source_bytes, function)
+    if function.type == "member_expression":
+        prop = function.child_by_field_name("property")
+        if prop is not None:
+            return _node_text(source_bytes, prop)
+    return None
+
+
+def _ts_call_is_handled(call_node, source_bytes: bytes) -> bool:
+    """True when the call's result reaches a consumer: ``await``/``return``/
+    ``throw``/``yield``, an assignment or declarator, a call/new argument, a
+    ``.then/.catch/.finally`` chain, an expression-bodied arrow, or any
+    non-expression statement (``if`` conditions, ``for`` headers, exports).
+    ``False`` when it ends as an ``expression_statement`` — the floating
+    case."""
+    node = call_node
+    while True:
+        parent = node.parent
+        if parent is None:
+            return False
+        ptype = parent.type
+        if ptype == "expression_statement":
+            return False
+        if ptype in _TS_HANDLED_PARENT_TYPES:
+            return True
+        if ptype in _TS_TRANSPARENT_PARENT_TYPES:
+            node = parent
+            continue
+        if ptype == "unary_expression":
+            # ``void x`` discards deliberately; other unary operators
+            # (``!x``, ``typeof x``) keep the dropped-result semantics of
+            # their own parent context.
+            operator = parent.child_by_field_name("operator")
+            if (
+                operator is not None
+                and _node_text(source_bytes, operator) == "void"
+            ):
+                return True
+            node = parent
+            continue
+        if ptype == "member_expression":
+            obj = parent.child_by_field_name("object")
+            if obj is not None and obj.id == node.id:
+                prop = parent.child_by_field_name("property")
+                if (
+                    prop is not None
+                    and _node_text(source_bytes, prop) in _TS_CHAIN_METHODS
+                ):
+                    return True
+            node = parent
+            continue
+        if ptype == "call_expression":
+            func = parent.child_by_field_name("function")
+            if func is not None and func.id == node.id:
+                # The result is itself invoked (`send(1)()`); classify by the
+                # outer call's context.
+                node = parent
+                continue
+            # The call sits in the arguments — the promise is handed to the
+            # callee (covers Promise.all([...]) and friends).
+            return True
+        if ptype in {"arrow_function", "function_expression"}:
+            # An expression-bodied function returns the call's value to its
+            # own caller — not floating.
+            return True
+        if ptype == "program" or ptype.endswith("_statement"):
+            # Reaching a statement means the value is consumed by control
+            # flow (condition, initializer, export, ...).
+            return True
+        if ptype.endswith("_declaration"):
+            return True
+        node = parent
+
+
+def _ts_enclosing_function_name(node, source_bytes: bytes) -> str | None:
+    """Name of the nearest enclosing function for issue attribution.
+
+    Anonymous arrows/functions fall through to the next enclosing named
+    function so the advisory names a function the user can find.
+    """
+    current = node.parent
+    while current is not None:
+        if current.type in _TS_FUNCTION_TYPES:
+            return _ts_function_name(current, source_bytes)
+        if current.type in _TS_VALUE_FUNCTION_TYPES:
+            bound = _ts_bound_name(current, source_bytes)
+            if bound is not None:
+                return bound
+        current = current.parent
+    return None
+
+
+def _typescript_floating_promise_scoped_issues(
+    ctx: PatternContext,
+) -> list[ForeignSafetyIssue]:
+    source_bytes = ctx.source_bytes
+    root = ctx.tree.root_node
+    async_names = _ts_collect_async_names(root, source_bytes)
+    if not async_names:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "call_expression":
+            callee = _ts_call_callee_name(node, source_bytes)
+            if callee in async_names and not _ts_call_is_handled(
+                node, source_bytes
+            ):
+                name = _ts_enclosing_function_name(node, source_bytes)
+                if name is None or name == callee:
+                    continue
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"TypeScript function `{name}` calls async "
+                            f"`{callee}()` without awaiting it — a floating "
+                            "promise can reject unobserved"
+                        ),
+                    )
+                )
+        stack.extend(reversed(node.children))
+    return issues
+
+
+def _typescript_floating_promise_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    if ctx.tree is not None and ctx.source_bytes is not None:
+        return _typescript_floating_promise_scoped_issues(ctx)
+    return _typescript_floating_promise_text_issues(source)
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +1153,9 @@ _SOLIDITY_STATEMENT_GUARD_RE = re.compile(
 )
 
 
-def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
+def _solidity_pattern_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
     if _is_solidity_mock_source(source):
         return []
     issues: list[ForeignSafetyIssue] = []
@@ -417,6 +1171,7 @@ def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
                         "immediate caller, and is phishable; prefer "
                         "`msg.sender`"
                     ),
+                    confidence="medium",
                 )
             )
         if re.search(r"\bselfdestruct\s*\(", body):
@@ -429,6 +1184,7 @@ def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
                         "funds; confirm the authorization guard and removal "
                         "plan"
                     ),
+                    confidence="medium",
                 )
             )
         for match in _SOLIDITY_LOW_LEVEL_CALL_RE.finditer(body):
@@ -449,6 +1205,7 @@ def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
                         f"`{match.group('call')}` low-level call — the "
                         "returned success flag is ignored"
                     ),
+                    confidence="medium",
                 )
             )
     return issues
@@ -458,13 +1215,14 @@ def _solidity_pattern_issues(source: str) -> list[ForeignSafetyIssue]:
 # Registry
 # ---------------------------------------------------------------------------
 
-Detector = Callable[[str], list[ForeignSafetyIssue]]
+Detector = Callable[[str, PatternContext], list[ForeignSafetyIssue]]
 
 
 @dataclass(frozen=True)
 class LanguagePattern:
-    """One language-specific heuristic. ``detect`` takes raw source text and
-    returns advisory ``ForeignSafetyIssue`` objects."""
+    """One language-specific heuristic. ``detect`` takes the raw source text
+    and the shared ``PatternContext`` and returns advisory
+    ``ForeignSafetyIssue`` objects."""
 
     name: str
     languages: frozenset[str]
@@ -513,11 +1271,18 @@ def language_pattern_issues(
         and ("/mocks/" in source_file or "\\mocks\\" in source_file)
     ):
         return []
+    tree = None
+    source_bytes = None
+    if normalized in tree_sitter_extract.SUPPORTED_LANGUAGES:
+        tree, source_bytes = tree_sitter_extract.parse(source, normalized)
+    ctx = PatternContext(
+        language=normalized, tree=tree, source_bytes=source_bytes
+    )
     issues: list[ForeignSafetyIssue] = []
     seen: set[tuple[str, str]] = set()
     for pattern in LANGUAGE_PATTERNS:
         if normalized in pattern.languages:
-            for issue in pattern.detect(source):
+            for issue in pattern.detect(source, ctx):
                 key = (issue.function_name, issue.message)
                 if key not in seen:
                     seen.add(key)

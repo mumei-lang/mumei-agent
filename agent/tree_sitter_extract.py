@@ -307,6 +307,21 @@ def _parse(source: str, language: str):
     return tree, source_bytes
 
 
+def parse(source: str, language: str):
+    """Return ``(tree, source_bytes)`` for ``language`` or ``(None, None)``.
+
+    Raw-tree access for callers that need node-level scope analysis — guard
+    domination, expression context, enclosing-function attribution — which the
+    function/block boundary helpers above cannot express. Same fallback
+    contract as the rest of the module: ``(None, None)`` when the grammar is
+    unavailable or the parse fails, so callers keep their regex paths.
+    """
+    canonical = _normalize_language(language)
+    if canonical not in SUPPORTED_LANGUAGES:
+        return None, None
+    return _parse(source, canonical)
+
+
 def _extract(
     source: str, language: str, safe_identifier: Callable[[str], str]
 ) -> list[ExtractedFunction] | None:
