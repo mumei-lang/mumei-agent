@@ -1345,3 +1345,40 @@ def test_rust_struct_renamed_field_keeps_guard() -> None:
         "}\n"
     )
     assert language_pattern_issues(source, "rust") == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # `*p` writes through `let p = &mut res` invalidate the guard.
+        "let p = &mut res;\n    if res.is_some() { *p = None; res.unwrap() } else { 0 }",
+        # Mutating methods through the alias.
+        "let p = &mut res;\n    if res.is_some() { p.take(); res.unwrap() } else { 0 }",
+        # Aliases copied through `let q = p` resolve via the fixpoint pass.
+        "let p = &mut res;\n    let q = p;\n    if res.is_some() { *q = None; res.unwrap() } else { 0 }",
+        # Passing the &mut to a callee may write.
+        "let p = &mut res;\n    if res.is_some() { g(p); res.unwrap() } else { 0 }",
+    ],
+)
+def test_rust_mut_alias_write_invalidates_guard(body: str) -> None:
+    source = f"fn f(mut res: Option<i32>) -> i32 {{\n    {body}\n}}\n"
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A write through an alias that unconditionally restores Some
+        # re-establishes the guard.
+        "let p = &mut res;\n    *p = Some(3);\n    res.unwrap()",
+        "let p = &mut res;\n    p.insert(3);\n    res.unwrap()",
+        # Aliases of a different variable do not count.
+        "let p = &mut other;\n    if res.is_some() { *p = None; res.unwrap() } else { 0 }",
+        # A plain immutable borrow passed along is not a write.
+        "if res.is_some() { g(res); res.unwrap() } else { 0 }",
+    ],
+)
+def test_rust_mut_alias_nuance(body: str) -> None:
+    source = f"fn f(mut res: Option<i32>, mut other: Option<i32>) -> i32 {{\n    {body}\n}}\n"
+    assert language_pattern_issues(source, "rust") == []
