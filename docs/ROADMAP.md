@@ -2012,6 +2012,7 @@ uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chai
 （`verified` / `unverifiable` / `refuted`）のまま、新しい verdict 分類や alias は導入しない。
 
 **集計**: `verified` 515 / `unverifiable` 237 / `refuted` 6 / timeout 3576（≈82%）。
+内訳合計は 4334 で全ファイル表記（4331）と 3 件差がある — 元集計値どおり転記し、差分は監査ログ側の境界カウント由来と推定される。
 対象リポ側の確定的な不具合・脆弱性はゼロ（潜伏防御的ギャップ 1 件: tidb
 `pkg/expression/expropt/optional.go` の `Contains` 境界チェック欠落 — 実害なし・悪用不可のため起票しない）。
 
