@@ -2039,7 +2039,7 @@ uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chai
   `MUMEI_SPEC_CACHE_DIR`（または `AgentConfig.spec_cache_dir`）で有効化。
   write-then-rename の atomic write で中断耐性あり。再実行・部分再開で
   未変更ファイルの Ollama 推論をスキップ。
-- **B-2 大ファイルの関数分割並列抽出 → 合成 — ✅ Implemented**（`a68b09a2` +
+- **B-2 大ファイルの関数分割並列抽出 → 合成 — ✅ Implemented**（#586、`a68b09a2` +
   `3bb0a73d`）: `MUMEI_SPEC_SPLIT_CHARS` 指定で関数単位チャンクに分割し並列抽出、
   `_merge_forge_task_specs` で合成。per-chunk 失敗は寛容化（他チャンクを継続）。
 - **B-3 trivial-spec 検出 → 再プロンプト — ✅ Implemented**（`9022f31a` +
@@ -2049,7 +2049,7 @@ uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chai
   `157e4275` で unexported 関数の抑制を試行したが pinned test が非公開関数の
   param contract 報告を要求するため `7a803303` で意図的に revert（判断記録済み）。
   到達可能反例フィルタは `1de4e1dd`（reachable-counterexample callsite filter）で実装。
-- **B-5 兄弟メソッド guard 非対称ヒューリスティクス — ✅ Implemented**（`a68b09a2`）:
+- **B-5 兄弟メソッド guard 非対称ヒューリスティクス — ✅ Implemented**（#586、`a68b09a2`）:
   Go で一方は範囲チェック・他方は未チェックの兄弟関数を検出。
 - **B-6 定数 / import 解決の汎化 — ✅ Implemented**（#585、`157e4275`）:
   Go の cross-package `const` 解決（module-relative import path のガード付き）。
@@ -2063,5 +2063,5 @@ uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chai
   `agent/audit.py` に存在するが、Solidity access-control obligation が既定では
   `unknown` のまま残り bridge 有効化で `lean_verified` 化した件の運用 docs 明記と
   既定 ON の是非の評価が残る。
-- **ローカル LLM 選定の profile 化 — ✅ Implemented**（`a68b09a2`）:
+- **ローカル LLM 選定の profile 化 — ✅ Implemented**（#586、`a68b09a2`）:
   `MUMEI_LLM_PROFILE`（local-small / local-large preset）、`LLM_MODEL` 等の env は優先。
