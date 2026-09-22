@@ -2059,9 +2059,12 @@ uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chai
   `complex_generics`）を持つファイルの per-file timeout を拡大し、effective timeout を
   gate warning に出力（`ec04acc3`）。LLM レート制限時のスキップは
   `skipped_rate_limited_files` で報告。
-- **B-8 `--enable-lean-bridge` のドキュメント化 / 既定検討 — ⏸️ 未着手**: flag は
-  `agent/audit.py` に存在するが、Solidity access-control obligation が既定では
-  `unknown` のまま残り bridge 有効化で `lean_verified` 化した件の運用 docs 明記と
-  既定 ON の是非の評価が残る。
+- **B-8 `--enable-lean-bridge` のドキュメント化 / 既定検討 — ✅ Implemented**:
+  `docs/AUDIT_CONTRACT.md`（Solidity 節: guard-trace certificate の
+  access-control obligation は既定で `unknown`、bridge 有効化で `lean_verified`、
+  CLI-only・MCP 非対応）と `docs/LEAN_FALLBACK.md`（audit 経路と proliferate
+  fallback の区別）に明記。既定 ON は見送り — flag は `--mumei-lean-repo` 未設定で
+  no-op 化する設計で、audit はローカルの mumei-lean checkout / Lake toolchain なし
+  でも走れることが要件。既定 OFF + docs 明記が正しい結論と評価。
 - **ローカル LLM 選定の profile 化 — ✅ Implemented**（#586、`a68b09a2`）:
   `MUMEI_LLM_PROFILE`（local-small / local-large preset）、`LLM_MODEL` 等の env は優先。

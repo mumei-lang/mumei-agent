@@ -177,3 +177,19 @@ itself prints.
 
 The AI proof stage forwards these as hints in its prompt; absent keys are
 simply omitted, so older bundles remain valid.
+
+## Audit-side lean bridge (distinct path)
+
+`agent audit` exposes a separate, CLI-only bridge flag: `--enable-lean-bridge`
+together with `--mumei-lean-repo`. Unlike the proliferate fallback above — which
+escalates `unknown` atoms during forge/proliferate — the audit flag runs
+`run_lean_bridge_and_merge_proof_cert` on the Solidity guard-trace certificate
+the audit emits, so advisory access-control obligations that would otherwise stay
+`unknown` can come back `lean_verified` in the merged proof certificate.
+
+- The flag is a no-op when `--mumei-lean-repo` is unset, and is not exposed by
+  the MCP `scan_and_fix` tool today.
+- The audit path deliberately stays off by default: audits must remain runnable
+  in environments without a local mumei-lean checkout or a built Lake toolchain,
+  and Solidity files audited without the bridge still produce the advisory
+  reentrancy / CEI / access-control warnings.
