@@ -2031,7 +2031,7 @@ uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chai
 
 ### 是正バックログ — 実装状況（2026-09-22 同期）
 
-起票後のフォローアップセッションで B-1〜B-7 は実装・マージ済み。B-8 のみ未着手。
+起票後のフォローアップセッションで B-1〜B-8 は全て実装・マージ済み（B-8 は #605）。
 
 - **B-1 spec 抽出キャッシュ — ✅ Implemented**（#583 系、`9022f31a` + `54dab227`）:
   `extract_from_file` が `_spec_cache_key`（schema バージョン + モデル + 言語 +
