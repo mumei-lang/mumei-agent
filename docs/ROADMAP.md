@@ -2008,7 +2008,7 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
 対象 = zERC20 / helios / tfhe-rs / leanVM / eris-agent-simulator / dioxus /
 uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chain、
 全 4331 ファイル、`python -m agent audit` + Ollama `qwen2.5-coder:1.5b-2k`）の
-最終集計と、是正・改善バックログ。verdict 語彙は固定キー
+最終集計と、是正・改善バックログ。元集計メモは `reports/dogfood-main-audit-2026-09.md` に保存済み。verdict 語彙は固定キー
 （`verified` / `unverifiable` / `refuted`）のまま、新しい verdict 分類や alias は導入しない。
 
 **集計**: `verified` 515 / `unverifiable` 237 / `refuted` 6 / timeout 3576（≈82%）。
