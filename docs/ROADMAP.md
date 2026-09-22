@@ -2001,3 +2001,56 @@ canonical 上位ロードマップは mumei `docs/CROSS_PROJECT_ROADMAP.md` の
    そのまま引き継ぐ。
 
 **回帰ゲート**: `uv run pytest tests/test_scale_report.py tests/test_contract_vocabulary.py -q`
+
+## ドッグフーディング本監査（12リポ・4331ファイル）— 結果集計と是正バックログ
+
+2026-09 実施の外部 OSS 監査（監査セッション: dogfooding 検証 run、
+対象 = zERC20 / helios / tfhe-rs / leanVM / eris-agent-simulator / dioxus /
+uniswap-contracts / lighthouse / grin / tidb / bsc-genesis-contract / world-chain、
+全 4331 ファイル、`python -m agent audit` + Ollama `qwen2.5-coder:1.5b-2k`）の
+最終集計と、是正・改善バックログ。verdict 語彙は固定キー
+（`verified` / `unverifiable` / `refuted`）のまま、新しい verdict 分類や alias は導入しない。
+
+**集計**: `verified` 515 / `unverifiable` 237 / `refuted` 6 / timeout 3576（≈82%）。
+対象リポ側の確定的な不具合・脆弱性はゼロ（潜伏防御的ギャップ 1 件: tidb
+`pkg/expression/expropt/optional.go` の `Contains` 境界チェック欠落 — 実害なし・悪用不可のため起票しない）。
+
+**是正済み（マージ）**:
+
+- **#573**: encoding-gap（`spec_not_boolean` 等、clause が Z3 にエンコードされず
+  スキップ）を抱えたまま `verified` と報告される誤判定 → `unverifiable` 扱いに修正。
+- **#574**: Solidity — relative import 先の constant 未解決 + 固定長配列長の未モデル化で
+  `zeroHash[TREE_HEIGHT]` 偽陽性 `refuted`。推移的 import・alias・overload・
+  `../../` パストラバーサル等 9 件も堅牢化。
+- **#580**: Rust — `&mut [u32; 16]` 等の固定長配列パラメータ長と usize 非負制約の
+  未モデル化で不可能な反例を生成。len 束縛 + パラメータ型を index チェックに反映。
+- **#582**: Go — interface がパッケージスコープなのに同一ファイル宣言しか見ず
+  nil レシーバ誤検知。`fmt.Stringer` を既知 interface に追加しシグネチャ一致
+  （引数型+戻り値まで）で抑制判定を厳密化。
+
+### 是正バックログ（優先度順・未着手）
+
+- **B-1 spec 抽出キャッシュ（高・〜0.5 セッション）**: spec 抽出結果をファイル
+  ハッシュ鍵でキャッシュ。timeout 82% の主因は Ollama 推論であり、再実行・
+  部分再開で最大の効果。
+- **B-2 大ファイルの関数分割並列抽出 → 合成（中）**: 重いファイルを関数単位に
+  分割して並列抽出し合成する。B-1 と組み合わせて timeout 削減の主軸。
+- **B-3 trivial-spec 検出 → 再プロンプト（中）**: 小モデル由来の自明 requires /
+  ensures（「非 nil」等）しか出ないケースを検出して retry、または atom 毎の
+  minimum spec 品質ガイドをプロンプトに埋め込む。`unverifiable` の最大発生源を改善。
+- **B-4 呼出側契約 `refuted` のノイズ抑制（中）**: 公開 API / 未公開関数の区別
+  （unexported Go 関数・crate private fn は抑制度上げ）+ 呼出点の実引数レンジの
+  軽量解析で「到達可能な反例」のみ報告。
+- **B-5 兄弟メソッド guard 非対称ヒューリスティクス（低）**: tidb `optional.go`
+  型（`Get` は範囲チェック・`Contains` は未チェック）の専用検出。
+- **B-6 定数 / import 解決の汎化（中）**: Solidity/Rust で実績ある「別ファイル・
+  別モジュールの定数が配列長・境界を決める」解決を Go の `const` / パッケージ
+  横断 const にも拡張。Go 側 `refuted` 削減見込み。
+- **B-7 重いファイル推定 + スキップ / 延長オプション（低）**: 監査前の規模推定に
+  基づく timeout 延長・スキップ指定で完走時間を制御可能に（現行 per-file 300s 律速の緩和）。
+- **B-8 `--enable-lean-bridge` のドキュメント化 / 既定検討（低）**: Solidity の
+  access-control obligation は既定では `unknown` のまま — bridge 有効化で
+  `lean_verified` 化したことを運用 docs に明記し、既定 ON の是非を評価する。
+
+**推奨着手順**: B-1 → B-3 → B-4/B-6（品質系）→ B-2（規模系）。B-5/B-7/B-8 は小粒。
+ローカル LLM 選定の profile 化（7b 等、GPU 環境前提）は B-3 と併せて評価。
