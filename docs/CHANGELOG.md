@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-22: V1-B-2 follow-up 4 — Rust conditional repairs count as guards
+
+- `agent/language_patterns.py` — Rust: an `if` whose empty-variant branch unconditionally repairs the receiver now guards a later `unwrap()`/`expect()` — `if res.is_none() { res = Some(0) } res.unwrap()` no longer flags. `_rust_if_conditional_repair` pairs the existing condition polarity analysis with per-branch repair-effect scans (`_rust_block_repair_effect`): the empty path must end `repaired`, the value path must not end `invalidated`. Repairs through `&mut` aliases (`*p = Some(..)`) and insert-style methods (`res.insert(..)`) inside branches count; `else`/`else if` chains are followed, and writes under a nested condition still flag. A `let` inside a branch only shadows — it is never a repair — and a `let-else` whose diverging arm also repairs now counts as a guard too. Guard recognition inside the write-scan also uses it, so `res = None; if res.is_none() { res = Some(0) } res.unwrap()` stays clean while a conditional repair that only *might* run keeps flagging.
+- Remaining limits (documented, deliberately out of scope): cross-file/import resolution, custom guard functions, and `#[allow]`-style opt-outs.
+- Regression gate: `uv run pytest tests/test_language_patterns.py -q` (175 cases incl. conditional-repair guard/flag cases); full suite green.
+
 ## 2026-09-21: V1-B-2 follow-up 3 — `&mut` local alias tracking
 
 - `agent/language_patterns.py` — Rust: writes through local `&mut` aliases now invalidate guards the same as direct writes. `_rust_collect_mut_aliases` gathers `let p = &mut res` / `p = &mut res` / `let q = p` copies over the enclosing function (fixpoint pass), and `_rust_subtree_assigns` treats `*p = …`, `p.take()`/insert-style calls, `f(p)` / `f(&mut res)` arguments as writes. Repairs work through aliases too (`*p = Some(..)`, `p.insert(..)` re-guard `res`). Aliases of other receivers and plain immutable borrows (`g(res)`/`g(&res)`) are unaffected.

@@ -616,9 +616,17 @@ def _rust_subtree_has_try(node, recv: str, source_bytes: bytes) -> bool:
     return False
 
 
-def _rust_statement_guards(node, recv: str, source_bytes: bytes) -> bool:
+def _rust_statement_guards(
+    node, recv: str, source_bytes: bytes, targets: set | None = None, aliases: set | None = None
+) -> bool:
     """True when a preceding sibling statement guarantees ``recv`` is
-    Ok/Some for everything after it in the same block."""
+    Ok/Some for everything after it in the same block. ``targets``/``aliases``
+    carry the caller's receiver+``&mut``-alias set for conditional-repair
+    recognition; when omitted the rule sees direct writes to ``recv`` only."""
+    if targets is None:
+        targets = {recv}
+    if aliases is None:
+        aliases = targets - {recv}
     inner = _rust_statement_inner(node)
     if inner is None:
         return False
@@ -639,8 +647,9 @@ def _rust_statement_guards(node, recv: str, source_bytes: bytes) -> bool:
     # the statement early-returns on the empty variant.
     if _rust_subtree_has_try(inner, recv, source_bytes):
         return True
-    if inner.type == "if_expression" and _rust_if_guards_fallthrough(
-        inner, recv, source_bytes
+    if inner.type == "if_expression" and (
+        _rust_if_guards_fallthrough(inner, recv, source_bytes)
+        or _rust_if_conditional_repair(inner, recv, targets, aliases, source_bytes)
     ):
         return True
     if inner.type == "match_expression" and _rust_match_guards_fallthrough(
@@ -763,6 +772,126 @@ def _rust_collect_mut_aliases(scope, recv: str, source_bytes: bytes) -> set:
     return set(alias_of)
 
 
+def _rust_assignment_repairs(inner, targets: set, source_bytes: bytes) -> bool:
+    """True when an ``assignment_expression`` writes a value variant
+    (``res = Some(..)``/``Ok(..)``) onto a tracked target, including writes
+    through ``&mut`` aliases (``*p = Some(..)``)."""
+    if inner.type != "assignment_expression":
+        return False
+    left = inner.child_by_field_name("left")
+    right = inner.child_by_field_name("right")
+    return (
+        left is not None
+        and right is not None
+        and (
+            _rust_expr_key(source_bytes, left) in targets
+            or _rust_write_target_key(source_bytes, left) in targets
+        )
+        and bool(_RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, right)))
+    )
+
+
+def _rust_statement_repairs_existing(node, targets: set, source_bytes: bytes) -> bool:
+    """Like ``_rust_statement_repairs`` but only counts writes to the
+    existing binding — ``res = Some(..)`` or insert-style method calls.
+    ``let res = Some(..)`` is excluded on purpose: inside a conditional
+    branch it merely shadows ``recv`` for the block and does not repair the
+    outer binding."""
+    inner = _rust_statement_inner(node)
+    if inner is None:
+        return False
+    if _rust_assignment_repairs(inner, targets, source_bytes):
+        return True
+    stack = [inner]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            parts = _rust_call_parts(current, source_bytes)
+            if (
+                parts is not None
+                and parts[0] in targets
+                and parts[1] in _RUST_REPAIR_METHODS
+            ):
+                return True
+        stack.extend(_rust_unconditionally_evaluated_children(current))
+    return False
+
+
+def _rust_block_repair_effect(
+    block, recv: str, targets: set, aliases: set, source_bytes: bytes
+) -> str:
+    """How ``block``'s statements leave ``recv`` in order: ``"repaired"``
+    when the latest write restores a value variant, ``"invalidated"`` when
+    it may leave a non-value variant, ``"untouched"`` when nothing writes
+    ``recv``. Writes inside nested control flow count as invalidating — a
+    repair that only runs under an inner ``if`` is not unconditional."""
+    effect = "untouched"
+    for stmt in block.named_children:
+        if _rust_statement_repairs_existing(stmt, targets, source_bytes):
+            effect = "repaired"
+        elif _rust_subtree_assigns(stmt, recv, targets, aliases, source_bytes):
+            effect = "invalidated"
+    return effect
+
+
+def _rust_if_conditional_repair(
+    if_node, recv: str, targets: set, aliases: set, source_bytes: bytes
+) -> bool:
+    """True when ``if``'s empty-variant branch unconditionally repairs
+    ``recv`` to a value variant while the value-variant branch leaves it
+    alone — e.g. ``if res.is_none() { res = Some(0) }`` or
+    ``if let Err(_) = res { res = Ok(0) }`` before ``res.unwrap()``.
+    ``else if`` chains resolve through the nested ``if``; a nested ``if``
+    that neither repairs nor writes ``recv`` is ``untouched`` on its
+    branch's path."""
+    condition = if_node.child_by_field_name("condition")
+    consequence = if_node.child_by_field_name("consequence")
+    if condition is None or consequence is None:
+        return False
+    polarity = _rust_condition_polarity(condition, recv, source_bytes)
+    if polarity not in {"then", "else"}:
+        return False
+    if consequence.type == "block":
+        con_effect = _rust_block_repair_effect(
+            consequence, recv, targets, aliases, source_bytes
+        )
+    else:
+        con_effect = "invalidated"
+    alternative = if_node.child_by_field_name("alternative")
+    if alternative is None:
+        alt_effect = None
+    else:
+        body = _rust_statement_inner(
+            next(iter(alternative.named_children), None)
+        )
+        if body is None:
+            alt_effect = "untouched"
+        elif body.type == "block":
+            alt_effect = _rust_block_repair_effect(
+                body, recv, targets, aliases, source_bytes
+            )
+        elif body.type == "if_expression":
+            if _rust_if_conditional_repair(
+                body, recv, targets, aliases, source_bytes
+            ):
+                alt_effect = "repaired"
+            elif not _rust_subtree_assigns(
+                body, recv, targets, aliases, source_bytes
+            ):
+                alt_effect = "untouched"
+            else:
+                alt_effect = "invalidated"
+        else:
+            alt_effect = "invalidated"
+    if polarity == "else":
+        # Consequence = empty path → must repair; alternative = value path
+        # → must not invalidate (absent means the value variant survives).
+        return con_effect == "repaired" and alt_effect != "invalidated"
+    # Consequence = value path → must not invalidate; alternative = empty
+    # path → must repair.
+    return con_effect != "invalidated" and alt_effect == "repaired"
+
+
 def _rust_statement_repairs(node, targets: set, recv: str, source_bytes: bytes) -> bool:
     """True when the statement unconditionally leaves a tracked target
     holding a value variant — ``res = Some(..)``/``Ok(..)``, writes through
@@ -770,23 +899,13 @@ def _rust_statement_repairs(node, targets: set, recv: str, source_bytes: bytes) 
     ``let res = Some(..)`` shadowing, or an ``Option`` insert-style method
     call anywhere in the statement's unconditionally-evaluated part (e.g.
     ``let v = res.get_or_insert(5)``). Conditional repairs
-    (``if … { res = Ok(..) }``) are not read; they fall through to plain
-    mutation handling."""
+    (``if … { res = Ok(..) }``) are not read here; ``_rust_statement_guards``
+    recognizes them via ``_rust_if_conditional_repair``."""
     inner = _rust_statement_inner(node)
     if inner is None:
         return False
-    if inner.type == "assignment_expression":
-        left = inner.child_by_field_name("left")
-        right = inner.child_by_field_name("right")
-        return (
-            left is not None
-            and right is not None
-            and (
-                _rust_expr_key(source_bytes, left) in targets
-                or _rust_write_target_key(source_bytes, left) in targets
-            )
-            and bool(_RUST_VALUE_CTOR_RE.match(_node_text(source_bytes, right)))
-        )
+    if _rust_assignment_repairs(inner, targets, source_bytes):
+        return True
     if inner.type == "let_declaration":
         pattern = inner.child_by_field_name("pattern")
         value = inner.child_by_field_name("value")
@@ -930,15 +1049,20 @@ def _rust_unwrap_is_guarded(call_node, recv: str, source_bytes: bytes) -> bool:
                 ):
                     if _rust_statement_repairs(
                         sibling, targets, recv, source_bytes
+                    ) or _rust_statement_guards(
+                        sibling, recv, source_bytes, targets, aliases
                     ):
-                        # `res = Some(..)` re-establishes the invariant.
+                        # `res = Some(..)` or a conditional-repair `if`
+                        # re-establishes the invariant.
                         guarded = True
                     else:
                         # A write to ``recv`` stales any earlier guard —
                         # only a guard after the latest write still applies.
                         guarded = False
                         mutated = True
-                elif _rust_statement_guards(sibling, recv, source_bytes):
+                elif _rust_statement_guards(
+                    sibling, recv, source_bytes, targets, aliases
+                ):
                     guarded = True
             if guarded:
                 return True
