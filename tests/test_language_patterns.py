@@ -1305,6 +1305,76 @@ def test_rust_repair_writes_act_as_guards(write: str) -> None:
     assert language_pattern_issues(source, "rust") == []
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Empty-variant branch repairs unconditionally — unwrap is safe.
+        "if res.is_none() { res = Some(0) } res.unwrap()",
+        "if !res.is_some() { res = Some(0) } res.unwrap()",
+        "if let None = res { res = Some(0) } res.unwrap()",
+        # Value-variant branch holds already; the else repairs the rest.
+        "if res.is_some() { println!(\"have value\") } else { res = Some(0) } res.unwrap()",
+        "if let Some(v) = res { println!(\"{v}\") } else { res = Some(0) } res.unwrap()",
+        # Insert-style repair methods inside the empty-variant branch.
+        "if res.is_none() { res.insert(0); } res.unwrap()",
+        "if res.is_none() { res.get_or_insert(0); } res.unwrap()",
+        # Repair writes through a &mut alias inside the branch.
+        "let p = &mut res; if res.is_none() { *p = Some(0) } res.unwrap()",
+        # An else branch that never touches the receiver keeps the guard.
+        "if res.is_none() { res = Some(0) } else { println!(\"fine\") } res.unwrap()",
+        # An else-if chain on the value path that writes nothing is safe.
+        "if res.is_none() { res = Some(0) } else if flag { println!(\"v\") } res.unwrap()",
+        # The guard re-establishes after an earlier invalidating write.
+        "res = None; if res.is_none() { res = Some(0) } res.unwrap()",
+        # let-else whose diverging arm also repairs stays a guard.
+        "let Some(v) = res else { res = Some(0); return -1 }; res.unwrap() + v",
+    ],
+)
+def test_rust_conditional_repair_guards_unwrap(body: str) -> None:
+    source = f"fn f(mut res: Option<i32>, flag: bool) -> i32 {{\n    {body}\n}}\n"
+    assert language_pattern_issues(source, "rust") == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if res.is_err() { res = Ok(0) } res.unwrap()",
+        "if !res.is_ok() { res = Ok(0) } res.unwrap()",
+        "if let Err(_) = res { res = Ok(0) } res.unwrap()",
+        "if res.is_ok() { println!(\"have value\") } else { res = Ok(0) } res.unwrap()",
+        "if let Ok(v) = res { println!(\"{v}\") } else { res = Ok(0) } res.unwrap()",
+    ],
+)
+def test_rust_conditional_repair_guards_unwrap_result(body: str) -> None:
+    source = f"fn f(mut res: Result<i32, ()>, flag: bool) -> i32 {{\n    {body}\n}}\n"
+    assert language_pattern_issues(source, "rust") == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Repair only under a nested condition — may still be None.
+        "if res.is_none() { if flag { res = Some(0) } } res.unwrap()",
+        # Repair then re-invalidate inside the same branch.
+        "if res.is_none() { res = Some(0); res = None } res.unwrap()",
+        # The value-variant branch cannot leave the empty path safe.
+        "if res.is_some() { res = Some(0) } res.unwrap()",
+        # A `let` inside the branch shadows, never repairs the outer res.
+        "if res.is_none() { let res = Some(0); } res.unwrap()",
+        # An else branch that writes the empty variant invalidates.
+        "if res.is_none() { res = Some(0) } else { res = None } res.unwrap()",
+        # An else-if on the value path that may write None invalidates.
+        "if res.is_none() { res = Some(0) } else if flag { res = None } res.unwrap()",
+        # A take() inside the empty-variant branch leaves res empty.
+        "if res.is_none() { res.take(); } res.unwrap()",
+    ],
+)
+def test_rust_conditional_repair_still_flags_when_incomplete(body: str) -> None:
+    source = f"fn f(mut res: Option<i32>, flag: bool) -> i32 {{\n    {body}\n}}\n"
+    issues = language_pattern_issues(source, "rust")
+    assert any("can panic via `res.unwrap()`" in i.message for i in issues)
+
+
 def test_rust_immutable_borrow_is_not_a_write() -> None:
     source = (
         "fn f(res: Option<i32>) -> i32 {\n"
