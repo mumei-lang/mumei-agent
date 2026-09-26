@@ -752,3 +752,47 @@ func (s *S) bump() {
 """
     issues = _issues(source, "go")
     assert not any("`s.hits`" in i.message for i in issues)
+
+
+def test_ts_arrow_implicit_return_taints() -> None:
+    """``const helper = (req) => req.query.x`` — the bare expression is
+    the implicit return, so callers of ``helper`` are tainted."""
+    source = (
+        "const helper = (req) => req.query.x;\n"
+        "function handler(req) {\n"
+        "    const v = helper(req);\n"
+        "    db.query('SELECT * FROM t WHERE n=' + v);\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_ts_arrow_clean_body_not_tainted() -> None:
+    """A bare arrow body returning a constant does not taint callers."""
+    source = (
+        "const helper = (req) => 'x';\n"
+        "function handler(req) {\n"
+        "    const v = helper(req);\n"
+        "    db.query('SELECT * FROM t WHERE n=' + v);\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_return_inside_string_literal_ignored() -> None:
+    """A ``return`` appearing inside a triple-quoted string is not a real
+    return — ``helper`` actually returns a constant here."""
+    source = (
+        "def helper(request):\n"
+        '    doc = """\n'
+        "    return request.args\n"
+        '    """\n'
+        "    return 'x'\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)

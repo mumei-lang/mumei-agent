@@ -2781,18 +2781,33 @@ def _taint_replay_assigns(
     return out
 
 
-def _taint_return_channels(body: str) -> tuple[bool, bool]:
+def _taint_return_channels(
+    body: str, bare_expr_is_return: bool = False
+) -> tuple[bool, bool]:
     """Whether the function returns source-derived data, per channel.
     One propagation level: assigns replayed without tainted-callee
-    knowledge, so ``g() → return f()`` does not chain transitively."""
+    knowledge, so ``g() → return f()`` does not chain transitively.
+
+    The ``return`` scan runs on the interpolated view so a ``return``
+    appearing inside a string literal does not count. With
+    ``bare_expr_is_return`` (TypeScript arrow bodies like
+    ``const f = (r) => r.query.x`` — no braces, no ``return`` keyword),
+    the whole body is the implicit return expression."""
     tainted_sql: set[str] = set()
     tainted_dom: set[str] = set()
     for _pos, name, sql_dirty, dom_dirty in _taint_replay_assigns(body):
         (tainted_sql.add if sql_dirty else tainted_sql.discard)(name)
         (tainted_dom.add if dom_dirty else tainted_dom.discard)(name)
     ret_sql = ret_dom = False
-    for ret in re.finditer(r"(?m)^\s*return\s+(?P<expr>.+)", body):
-        expr = ret.group("expr").split(";", 1)[0]
+    exprs = [
+        ret.group("expr").split(";", 1)[0]
+        for ret in re.finditer(
+            r"(?m)^\s*return\s+(?P<expr>.+)", _taint_interpolated(body)
+        )
+    ]
+    if not exprs and bare_expr_is_return:
+        exprs = [body.split(";", 1)[0]]
+    for expr in exprs:
         sql_view = _taint_dirty_view(expr, _TAINT_SQL_SAFE_RE)
         dom_view = _taint_dirty_view(expr, _TAINT_DOM_SAFE_RE)
         if _TAINT_SOURCE_RE.search(sql_view) or any(
@@ -2960,8 +2975,13 @@ def _taint_lite_source_issues(
     # source-derived marks calls to it as tainted in every other body.
     fns_sql: set[str] = set()
     fns_dom: set[str] = set()
-    for name, body, _label in bodies:
-        ret_sql, ret_dom = _taint_return_channels(body)
+    for name, body, label in bodies:
+        # A bare TypeScript arrow body (``(r) => r.query.x`` — no braces)
+        # is itself the return expression; block bodies use ``return``.
+        bare_expr = label == "TypeScript" and not body.lstrip().startswith("{")
+        ret_sql, ret_dom = _taint_return_channels(
+            body, bare_expr_is_return=bare_expr
+        )
         if ret_sql:
             fns_sql.add(name)
         if ret_dom:
