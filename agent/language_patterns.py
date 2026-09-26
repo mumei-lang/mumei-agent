@@ -2472,7 +2472,7 @@ _GO_VAR_BLOCK_NAME_RE = re.compile(
 )
 _GO_MUTEX_FIELD_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*)\s+sync\.(?:RW)?Mutex")
 _GO_METHOD_DEF_RE = re.compile(
-    r"func\s*\(\s*(?P<r>[A-Za-z_]\w*)\s+\*?[A-Za-z_]\w*\s*\)\s*"
+    r"func\s*\(\s*(?P<r>[A-Za-z_]\w*)\s+\*?[A-Za-z_]\w*(?:\[[^\]]*\])?\s*\)\s*"
     r"(?P<name>[A-Za-z_]\w*)\s*\("
 )
 # ``name++``/``name--``/``name <op>=`` — the bare ``=`` must not be part of

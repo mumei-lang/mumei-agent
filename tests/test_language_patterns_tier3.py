@@ -422,3 +422,30 @@ func (b *B) bump() {
 }"""
     issues = _issues(source, "go")
     assert any("`b.hits`" in i.message for i in issues)
+
+
+def test_go_generic_receiver_method_flags() -> None:
+    """Methods on generic types use ``func (s *Server[T])`` receivers."""
+    source = """type Server[T any] struct {
+    mu   sync.Mutex
+    hits int
+}
+
+func (s *Server[T]) bump() {
+    s.hits++
+}"""
+    issues = _issues(source, "go")
+    assert any("`s.hits`" in i.message for i in issues)
+
+
+def test_go_method_writes_package_var_flags() -> None:
+    """Method bodies also write package-level state — the plain-function
+    block scanner does not see methods."""
+    source = _GO_COUNTER_FIXTURE % (
+        "type S struct{}\n\n"
+        "func (s *S) bump() {\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
