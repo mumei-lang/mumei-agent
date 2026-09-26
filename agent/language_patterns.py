@@ -2074,6 +2074,275 @@ def _typescript_safety_issues(
 
 
 # ---------------------------------------------------------------------------
+# Taint-lite — request-derived data reaching a sink without sanitization
+# ---------------------------------------------------------------------------
+
+_TAINT_SOURCE_RE = re.compile(
+    r"\b(?:req(?:uest)?\.(?:query|params|body|headers|cookies|get_json)|"
+    r"request\.(?:args|form|data|json|GET|POST|values|FILES)|"
+    r"input\s*\(|sys\.argv|os\.environ|"
+    r"\w+\.URL\.Query|\w*FormValue\s*\(|PostFormValue\s*\(|"
+    r"c\.(?:Query|Param|DefaultQuery)\s*\(|"
+    r"location\.(?:search|hash)|document\.(?:URL|cookie)|"
+    r"localStorage\b|URLSearchParams)\b"
+)
+_TAINT_SANITIZER_RE = re.compile(
+    r"\b(?:escape|bleach\.clean|html\.escape|shlex\.quote|quote|sanitize|"
+    r"DOMPurify\.sanitize|urlencode|encodeURIComponent|strconv\.Atoi)\b"
+)
+_TAINT_ASSIGN_RE = re.compile(
+    r"(?m)^\s*(?:var\s+|let\s+|const\s+)?(?P<name>[A-Za-z_]\w*)\s*"
+    r"(?::\s*[^=\n]+)?\s*:?=(?!=)\s*(?P<rhs>[^;\n]+)"
+)
+# SQL-ish sinks: only the FIRST argument is the query string — a parameter
+# tuple after the top-level comma is the safe parameterized form.
+_TAINT_QUERY_SINK_RE = re.compile(
+    r"\b(?:execute|executemany|query|raw|exec|queryRow|Query|Exec|ExecContext|"
+    r"QueryContext)\s*\("
+)
+# DOM/command sinks: taint anywhere in the statement is dangerous.
+_TAINT_DOM_SINK_RE = re.compile(
+    r"(?:\.innerHTML\s*=|\.outerHTML\s*=|\bdocument\.write\s*\()"
+)
+
+
+def _top_level_args(arg_text: str) -> list[str]:
+    """Split a call's argument list on top-level ``,`` (depth-aware)."""
+    args: list[str] = []
+    depth = 0
+    start = 0
+    end = len(arg_text)
+    for index, char in enumerate(arg_text):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                end = index
+                break
+            depth -= 1
+        elif char == "," and depth == 0:
+            args.append(arg_text[start:index])
+            start = index + 1
+    args.append(arg_text[start:end])
+    return args
+
+
+def _taint_lite_issues(
+    function_name: str, body: str, label: str
+) -> list[ForeignSafetyIssue]:
+    """Flag source-derived names reaching a query/DOM sink unsanitized."""
+    issues: list[ForeignSafetyIssue] = []
+
+    def interpolated(text: str) -> str:
+        """String literals reduce to their ``{…}``/``${…}`` interpolations
+        — a column named ``name`` in a SQL literal must not alias the
+        tainted variable ``name``, while ``f'...{name}'`` and
+        `` `...${id}` `` still expose it."""
+        return re.sub(
+            r"[fFbBrRw]*(['\"`])(.*?)\1",
+            lambda m: " ".join(
+                re.findall(r"\{([^}]*)\}", m.group(2))
+            ),
+            text,
+        )
+
+    tainted: set[str] = set()
+    for assign in _TAINT_ASSIGN_RE.finditer(body):
+        name, rhs = assign.group("name"), assign.group("rhs")
+        if _TAINT_SANITIZER_RE.search(rhs):
+            tainted.discard(name)
+        elif _TAINT_SOURCE_RE.search(interpolated(rhs)) or (
+            tainted
+            and re.search(
+                rf"\b(?:{'|'.join(map(re.escape, tainted))})\b",
+                interpolated(rhs),
+            )
+        ):
+            tainted.add(name)
+    if not tainted and not _TAINT_SOURCE_RE.search(interpolated(body)):
+        return issues
+
+    def tainted_text(text: str) -> str | None:
+        if _TAINT_SOURCE_RE.search(interpolated(text)):
+            return "a request-derived value"
+        for name in tainted:
+            if re.search(rf"\b{re.escape(name)}\b", interpolated(text)):
+                return f"`{name}` (request-derived)"
+        return None
+
+    for match in _TAINT_QUERY_SINK_RE.finditer(body):
+        # `QueryContext(ctx, sql)`-style sinks put the context first — the
+        # query string is the next argument.
+        callee = match.group(0).rstrip("(").rstrip()
+        arg_index = 1 if callee.endswith("Context") else 0
+        args = _top_level_args(body[match.end() :])
+        if len(args) <= arg_index:
+            continue
+        hit = tainted_text(args[arg_index])
+        if hit is not None:
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` passes {hit} "
+                        "as part of a query/command string — interpolate "
+                        "parameters instead of concatenating"
+                    ),
+                    confidence="medium",
+                )
+            )
+            break
+    for match in _TAINT_DOM_SINK_RE.finditer(body):
+        statement = body[match.start() :]
+        end = re.search(r"[;\n]", statement)
+        if end is not None:
+            statement = statement[: end.start()]
+        hit = tainted_text(statement)
+        if hit is not None:
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` writes {hit} "
+                        "to the DOM — XSS risk; escape or sanitize first"
+                    ),
+                    confidence="medium",
+                )
+            )
+            break
+    return issues
+
+
+def _python_function_source_segments(source: str) -> list[tuple[str, str]]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    segments: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            segment = ast.get_source_segment(source, node)
+            if segment is not None:
+                segments.append((node.name, segment))
+    return segments
+
+
+def _taint_lite_source_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    if ctx.language == "python":
+        for name, segment in _python_function_source_segments(source):
+            issues.extend(_taint_lite_issues(name, segment, "Python"))
+    elif ctx.language == "typescript":
+        for name, raw_body in _typescript_function_blocks(source):
+            body = _mask_nested_function_literals(raw_body, "typescript")
+            issues.extend(_taint_lite_issues(name, body, "TypeScript"))
+    elif ctx.language == "go":
+        for name, raw_body in _go_function_blocks(source):
+            body = _strip_go_rust_literals_and_comments(raw_body)
+            issues.extend(_taint_lite_issues(name, body, "Go"))
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Go — writes to shared state outside the mutex that guards it
+# ---------------------------------------------------------------------------
+
+_GO_PACKAGE_VAR_RE = re.compile(
+    r"(?m)^var\s+(?P<name>[A-Za-z_]\w*)\s+(?P<type>[^\n]+)"
+)
+_GO_MUTEX_FIELD_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*)\s+sync\.(?:RW)?Mutex")
+_GO_RECEIVER_RE_TEMPLATE = r"func\s*\(\s*(?P<r>[A-Za-z_]\w*)\s+\*?[A-Za-z_]\w*\s*\)\s*%s\s*\("
+
+
+def _go_shared_state_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    """Flag writes to package-level state / receiver fields when the file
+    declares a mutex but the writing function never takes one."""
+    stripped = _strip_go_rust_literals_and_comments(source)
+    mutex_names = {m.group("name") for m in _GO_MUTEX_FIELD_RE.finditer(stripped)}
+    if not mutex_names:
+        return []
+    shared_vars = {
+        m.group("name")
+        for m in _GO_PACKAGE_VAR_RE.finditer(stripped)
+        if not re.search(r"\b(?:sync|atomic)\.", m.group("type"))
+        and m.group("name") not in mutex_names
+    }
+    issues: list[ForeignSafetyIssue] = []
+    for name, raw_body in _go_function_blocks(source):
+        body = _strip_go_rust_literals_and_comments(raw_body)
+        lock_positions = [
+            m.start() for m in re.finditer(r"\b\w+\.Lock\s*\(", body)
+        ]
+
+        def unguarded_write(pos: int, locks=lock_positions) -> bool:
+            return not any(lock < pos for lock in locks)
+
+        def atomic_write(name_re: str, body=body) -> bool:
+            return re.search(
+                rf"\batomic\.\w+\s*\(\s*&{name_re}\b", body
+            ) is not None
+
+        for var in sorted(shared_vars):
+            write = re.search(
+                rf"\b{re.escape(var)}(?:\.\w+)?\s*(?:\+\+|--|[+\-*/%|&^]?=)",
+                body,
+            )
+            if (
+                write is not None
+                and unguarded_write(write.start())
+                and not atomic_write(re.escape(var))
+            ):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Go function `{name}` writes package-level "
+                            f"`{var}` without holding a mutex — this file "
+                            "declares `sync.(RW)Mutex` fields, so the write "
+                            "races with other callers"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+        receiver = re.search(
+            _GO_RECEIVER_RE_TEMPLATE % re.escape(name), source
+        )
+        if receiver is None:
+            continue
+        r = receiver.group("r")
+        for field_write in re.finditer(
+            rf"\b{re.escape(r)}\.(?P<field>[A-Za-z_]\w*)\s*"
+            rf"(?:\+\+|--|[+\-*/%|&^]?=)",
+            body,
+        ):
+            field = field_write.group("field")
+            if field in mutex_names:
+                continue
+            if unguarded_write(field_write.start()) and not atomic_write(
+                rf"{re.escape(r)}\.{re.escape(field)}"
+            ):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Go method `{name}` writes `{r}.{field}` "
+                            "without holding the receiver's mutex — this "
+                            "file declares `sync.(RW)Mutex` fields, so the "
+                            "write races with other callers"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -2116,6 +2385,14 @@ LANGUAGE_PATTERNS: tuple[LanguagePattern, ...] = (
     ),
     LanguagePattern(
         "go_defer_in_loop", frozenset({"go"}), _go_defer_in_loop_issues
+    ),
+    LanguagePattern(
+        "go_shared_state", frozenset({"go"}), _go_shared_state_issues
+    ),
+    LanguagePattern(
+        "taint_lite",
+        frozenset({"python", "typescript", "go"}),
+        _taint_lite_source_issues,
     ),
     # ``javascript``/``ts``/``tsx`` aliases normalize to "typescript".
     LanguagePattern(

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-22: Layer B advisories — taint-lite sinks + Go shared state (Tier 3-lite)
+
+- `agent/language_patterns.py` — two advisory groups (medium confidence, warnings-only):
+  - **`taint_lite`** (Python/TypeScript/Go): request-derived values (`request.*`, `req.query/params/body`, `req.URL.Query()`, `c.Query()/Param()`, `input()`, `sys.argv`, `os.environ`, `location.*`, `localStorage`, …) tracked through plain assignments until they reach a sink — `execute`/`query`/`Query`/`Exec`/`raw`/`exec`/`Context` variants evaluate only the SQL-string argument (parameterized second-argument forms are the safe idiom), while `.innerHTML`/`outerHTML`/`document.write` flag taint anywhere in the statement. String literals reduce to their `{…}`/`${…}` interpolations before matching, so a `name` column in SQL text cannot alias a tainted `name` variable while `f"…{name}…"` still exposes it; assignments through `escape`/`shlex.quote`/`DOMPurify.sanitize`/`strconv.Atoi`/… clear the taint.
+  - **`go_shared_state`**: only active in files that declare `sync.(RW)Mutex` fields (the locking discipline already exists) — a function writing a package-level `var` or a method writing `receiver.field` without a `.Lock()` before the write flags once per function. Atomic wrappers (`atomic.Add*` on `&var`), writes to the mutex field itself, read-only functions, and mutex-free files are skipped.
+- Known limits (advisory-lite scope): taint sources/sinks are a fixed common set; Go regex fallback misses methods with receivers (tree-sitter path covers them); the lock check is presence-based, not scope/aliasing-aware.
+- Regression gate: `uv run pytest tests/test_language_patterns_tier3.py -q` (19 cases); full suite green (2559 passed).
+
 ## 2026-09-22: Layer B advisories — new language_patterns (Tier 2)
 
 - `agent/language_patterns.py` — five new advisory groups (all `confidence="medium"`, warnings-only; advisory findings cannot invert `success`):
