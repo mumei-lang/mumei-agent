@@ -67,7 +67,10 @@ def _node_text(source_bytes: bytes, node) -> str:
 
 
 def _body_offset(
-    haystacks: tuple[str, ...], body: str, used_offsets: set[int]
+    haystacks: tuple[str, ...],
+    body: str,
+    used_offsets: set[int],
+    non_code: bytearray | None = None,
 ) -> int:
     """First offset of ``body`` not already claimed, or ``-1``.
 
@@ -77,7 +80,9 @@ def _body_offset(
     offset. Extractors do not always list functions in source order (named
     declarations before arrows/literals), so scanning every occurrence and
     skipping offsets already consumed keeps duplicate bodies attributed to
-    distinct locations.
+    distinct locations. ``non_code`` marks offsets inside string literals
+    or comments — a body whose text also appears inside a literal must not
+    steal that occurrence's location from the real body.
     """
     for text in haystacks:
         start = 0
@@ -85,7 +90,9 @@ def _body_offset(
             offset = text.find(body, start)
             if offset < 0:
                 break
-            if offset not in used_offsets:
+            if offset not in used_offsets and not (
+                non_code is not None and non_code[offset]
+            ):
                 used_offsets.add(offset)
                 return offset
             start = offset + 1
@@ -343,9 +350,12 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
     """
     issues: list[ForeignSafetyIssue] = []
     stripped_source = _strip_go_rust_literals_and_comments(source)
+    non_code = _non_code_states(source, "rust")
     used_offsets: set[int] = set()
     for name, body, _params in _rust_function_scopes(source):
-        offset = _body_offset((source, stripped_source), body, used_offsets)
+        offset = _body_offset(
+            (source, stripped_source), body, used_offsets, non_code
+        )
         masked = _mask_rust_nested_fns(_strip_go_rust_literals_and_comments(body))
         for match in _RUST_UNWRAP_RE.finditer(masked):
             receiver = match.group("recv")
@@ -1320,9 +1330,10 @@ def _go_defer_in_loop_issues(
 ) -> list[ForeignSafetyIssue]:
     blocks = _go_function_blocks(source)
     issues: list[ForeignSafetyIssue] = []
+    non_code = _non_code_states(source, "go")
     used_offsets: set[int] = set()
     for name, body in blocks:
-        offset = _body_offset((source,), body, used_offsets)
+        offset = _body_offset((source,), body, used_offsets, non_code)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "go")
         )
@@ -1476,11 +1487,12 @@ def _typescript_floating_promise_text_issues(source: str) -> list[ForeignSafetyI
         match.group("name") for match in _TS_EXPR_ARROW_RE.finditer(stripped)
     }
     issues: list[ForeignSafetyIssue] = []
+    non_code = _non_code_states(source, "typescript")
     used_offsets: set[int] = set()
     for name, body in _typescript_function_blocks(source):
         if name in expr_arrow_names:
             continue
-        offset = _body_offset((source,), body, used_offsets)
+        offset = _body_offset((source,), body, used_offsets, non_code)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "typescript")
         )
@@ -1794,8 +1806,9 @@ def _solidity_pattern_issues(
         return []
     issues: list[ForeignSafetyIssue] = []
     used_offsets: set[int] = set()
+    non_code = _non_code_states(source, "solidity")
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
-        offset = _body_offset((source,), raw_body, used_offsets)
+        offset = _body_offset((source,), raw_body, used_offsets, non_code)
         body = _strip_go_rust_literals_and_comments(raw_body)
         tx_origin = re.search(r"\btx\.origin\b", body)
         if tx_origin:
@@ -1862,42 +1875,145 @@ def _solidity_pattern_issues(
 _HASH_ALLOW_MARKER_RE = re.compile(r"#\s*mumei:allow\b")
 _SLASH_ALLOW_MARKER_RE = re.compile(r"//\s*mumei:allow\b")
 # A ``#[allow(mumei::*)]`` attribute also counts as a marker line and, when
-# it sits directly on a ``fn`` item (possibly under stacked attributes),
-# suppresses every finding inside that function — matching Rust attribute
-# scoping.
+# it sits directly on a ``fn`` item (possibly under stacked attributes or
+# doc comments), suppresses every finding inside that function — matching
+# Rust attribute scoping.
 _RUST_ALLOW_ATTR_RE = re.compile(r"#\s*\[\s*allow\s*\(\s*mumei::")
-_RUST_ATTR_LINE_RE = re.compile(r"^\s*#")
+_RUST_ATTR_LINE_RE = re.compile(r"^\s*(#|//|/\*)")
 _RUST_FN_DECL_RE = re.compile(r"\bfn\s+(\w+)")
-# Quote characters that open a string literal per language — a marker whose
-# prefix leaves a quote open lives inside string content, not a comment.
-# Rust checks only ``"``: ``'`` also opens lifetimes, so counting it would
-# misread ``fn f(x: &'a T) // mumei:allow`` as in-string.
-_MARKER_QUOTE_CHARS: dict[str, tuple[str, ...]] = {
+_RUST_RAW_STRING_RE = re.compile(r"r(#*)\"")
+
+# Per-language comment and string delimiters for the lexical-state scan —
+# enough fidelity to tell markers and declarations apart from literal
+# contents without a full lexer.
+_LINE_COMMENT_TOKEN = {
+    "python": "#",
+    "rust": "//",
+    "typescript": "//",
+    "go": "//",
+    "solidity": "//",
+}
+_BLOCK_COMMENT_LANGUAGES = frozenset({"rust", "typescript", "go", "solidity"})
+# Longest delimiters first so triple quotes win over single quotes.
+_STRING_DELIMITERS = {
+    "python": ('"""', "'''", '"', "'"),
     "rust": ('"',),
-    "python": ('"', "'"),
     "typescript": ('"', "'", "`"),
     "go": ('"', "'", "`"),
     "solidity": ('"', "'"),
 }
+# Delimiters whose literal may legally contain a raw newline; an unclosed
+# single-line string is a syntax slip and resets at the line boundary
+# instead of masking the rest of the file.
+_MULTILINE_DELIMITERS = {
+    "python": frozenset({'"""', "'''"}),
+    "rust": frozenset({'"'}),
+    "typescript": frozenset({"`"}),
+    "go": frozenset({"`"}),
+    "solidity": frozenset(),
+}
+_CODE, _STRING, _COMMENT = 0, 1, 2
 
 
-def _inside_string_literal(text: str, pos: int, quotes: tuple[str, ...]) -> bool:
-    """True when the character at ``pos`` is inside a string literal — an
-    odd count of unescaped quotes before it opens a literal."""
-    prefix = text[:pos]
-    for quote in quotes:
-        count = 0
-        index = 0
-        while index < len(prefix):
-            if prefix[index] == "\\":
-                index += 2
+def _non_code_states(source: str, language: str) -> bytearray:
+    """Per-offset lexical state: ``_CODE``/``_STRING``/``_COMMENT``.
+
+    One pass over ``source``. Rust ``'`` is never a delimiter (lifetimes);
+    ``r#\"...\"#`` raw strings close on ``\"`` plus their leading hashes and
+    take no ``\\`` escapes. Block comments nest (Rust's do).
+    """
+    states = bytearray(len(source))
+    line_comment = _LINE_COMMENT_TOKEN.get(language)
+    block_comments = language in _BLOCK_COMMENT_LANGUAGES
+    delimiters = _STRING_DELIMITERS.get(language, ('"', "'"))
+    multiline = _MULTILINE_DELIMITERS.get(language, frozenset({"\"", "'"}))
+    n = len(source)
+    i = 0
+    state = _CODE
+    block_depth = 0
+    close = ""
+    close_hashes = 0
+    raw = False
+    while i < n:
+        if state == _STRING:
+            if source[i] == "\n" and close not in multiline:
+                state = _CODE
                 continue
-            if prefix[index] == quote:
-                count += 1
-            index += 1
-        if count % 2:
-            return True
-    return False
+            if (
+                raw
+                and source[i] == '"'
+                and source.startswith("#" * close_hashes, i + 1)
+            ):
+                end = i + 1 + close_hashes
+                states[i:end] = b"\x01" * (end - i)
+                i = end
+                state = _CODE
+                continue
+            if not raw and source[i] == "\\":
+                states[i : i + 2] = b"\x01" * min(2, n - i)
+                i += 2
+                continue
+            if source.startswith(close, i):
+                states[i : i + len(close)] = b"\x01" * len(close)
+                i += len(close)
+                state = _CODE
+                continue
+            states[i] = _STRING
+            i += 1
+            continue
+        if state == _COMMENT:
+            if block_depth == 0 and source[i] == "\n":
+                state = _CODE
+                continue
+            states[i] = _COMMENT
+            if block_depth:
+                if source.startswith("/*", i):
+                    states[i + 1] = _COMMENT
+                    block_depth += 1
+                    i += 2
+                    continue
+                if source.startswith("*/", i):
+                    states[i + 1] = _COMMENT
+                    block_depth -= 1
+                    i += 2
+                    if not block_depth:
+                        state = _CODE
+                    continue
+            i += 1
+            continue
+        if line_comment and source.startswith(line_comment, i):
+            state = _COMMENT
+            continue
+        if block_comments and source.startswith("/*", i):
+            state = _COMMENT
+            block_depth = 1
+            continue
+        if language == "rust":
+            raw_match = _RUST_RAW_STRING_RE.match(source, i)
+            if raw_match is not None:
+                state = _STRING
+                raw = True
+                close = '"'
+                close_hashes = len(raw_match.group(1))
+                states[i : raw_match.end()] = (
+                    b"\x01" * (raw_match.end() - i)
+                )
+                i = raw_match.end()
+                continue
+        opened = False
+        for delim in delimiters:
+            if source.startswith(delim, i):
+                state = _STRING
+                raw = False
+                close_hashes = 0
+                close = delim
+                states[i : i + len(delim)] = b"\x01" * len(delim)
+                i += len(delim)
+                opened = True
+                break
+        if not opened:
+            i += 1
+    return states
 
 
 def _suppression_markers(
@@ -1908,41 +2024,58 @@ def _suppression_markers(
 
     ``allowed_fn_ranges`` entries are ``(decl_line, end_line, name)`` — the
     ``fn`` item a ``#[allow(mumei::*)]`` attribute decorates, bounded by the
-    next ``fn`` declaration so a same-named sibling is not suppressed.
+    next ``fn`` declaration at the same or shallower brace depth so nested
+    functions stay inside the parent's span while a same-named sibling is
+    not suppressed.
     """
     comment_re = (
         _HASH_ALLOW_MARKER_RE
         if language == "python"
         else _SLASH_ALLOW_MARKER_RE
     )
-    quotes = _MARKER_QUOTE_CHARS.get(language, ('"', "'"))
+    states = _non_code_states(source, language)
     marker_lines: set[int] = set()
     allowed_ranges: list[tuple[int, int, str]] = []
     lines = source.splitlines()
-    fn_decls = (
-        [
-            (index + 1, match.group(1))
-            for index, text in enumerate(lines)
-            if (match := _RUST_FN_DECL_RE.search(text)) is not None
-            and not _inside_string_literal(text, match.start(), quotes)
-        ]
-        if language == "rust"
-        else []
-    )
+    line_starts = [0]
+    for match in re.finditer("\n", source):
+        line_starts.append(match.end())
+    fn_decls: list[tuple[int, int, str, int]] = []
+    depth = 0
+    if language == "rust":
+        for index, text in enumerate(lines):
+            base = line_starts[index]
+            for match in _RUST_FN_DECL_RE.finditer(text):
+                pos = base + match.start()
+                if states[pos] != _CODE:
+                    continue
+                column = match.start()
+                inner = sum(
+                    (1 if char == "{" else -1)
+                    for col, char in enumerate(text[:column])
+                    if states[base + col] == _CODE and char in "{}"
+                )
+                fn_decls.append(
+                    (index + 1, pos, match.group(1), depth + inner)
+                )
+            for col, char in enumerate(text):
+                if states[base + col] == _CODE:
+                    depth += 1 if char == "{" else -1 if char == "}" else 0
     fn_name_counts: dict[str, int] = {}
-    for _line_no, fn_name in fn_decls:
+    for _line_no, _pos, fn_name, _depth in fn_decls:
         fn_name_counts[fn_name] = fn_name_counts.get(fn_name, 0) + 1
     for index, text in enumerate(lines):
         comment_match = comment_re.search(text)
-        if comment_match and not _inside_string_literal(
-            text, comment_match.start(), quotes
+        if (
+            comment_match
+            and states[line_starts[index] + comment_match.start()] != _STRING
         ):
             marker_lines.add(index + 1)
         attr_match = _RUST_ALLOW_ATTR_RE.search(text)
         if (
             language != "rust"
             or attr_match is None
-            or _inside_string_literal(text, attr_match.start(), quotes)
+            or states[line_starts[index] + attr_match.start()] != _CODE
         ):
             continue
         marker_lines.add(index + 1)
@@ -1951,17 +2084,27 @@ def _suppression_markers(
             not lines[cursor].strip() or _RUST_ATTR_LINE_RE.match(lines[cursor])
         ):
             cursor += 1
-        if cursor < len(lines):
-            fn_match = _RUST_FN_DECL_RE.search(lines[cursor])
-            if fn_match:
-                decl_line = cursor + 1
-                end_line = next(
-                    (line_no for line_no, _name in fn_decls if line_no > decl_line),
-                    len(lines) + 1,
-                )
-                allowed_ranges.append(
-                    (decl_line, end_line, fn_match.group(1))
-                )
+        if cursor >= len(lines):
+            continue
+        fn_match = _RUST_FN_DECL_RE.search(lines[cursor])
+        if fn_match is None:
+            continue
+        decl_pos = line_starts[cursor] + fn_match.start()
+        if states[decl_pos] != _CODE:
+            continue
+        decl_line = cursor + 1
+        decl_depth = next(
+            (decl[3] for decl in fn_decls if decl[1] == decl_pos), 0
+        )
+        end_line = next(
+            (
+                line_no
+                for line_no, off, _name, decl_d in fn_decls
+                if off > decl_pos and decl_d <= decl_depth
+            ),
+            len(lines) + 1,
+        )
+        allowed_ranges.append((decl_line, end_line, fn_match.group(1)))
     return marker_lines, allowed_ranges, fn_name_counts
 
 

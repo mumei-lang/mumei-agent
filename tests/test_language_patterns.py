@@ -1883,3 +1883,79 @@ def test_typescript_arrow_before_named_fn_keeps_lines_in_fallback(
     late = [i for i in issues if i.function_name == "late"]
     assert early and all(i.line == 3 for i in early)
     assert late and all(i.line == 6 for i in late)
+
+
+def test_rust_allow_marker_inside_multiline_string_does_not_suppress() -> None:
+    """A ``// mumei:allow`` line inside a multi-line Rust string literal is
+    string content — the finding on the next line must survive."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        '    let s = "line one\n'
+        "// mumei:allow\n"
+        '    line three";\n'
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+def test_python_allow_marker_inside_triple_quoted_string() -> None:
+    source = (
+        'doc = """\n'
+        "# mumei:allow\n"
+        '"""\n'
+        "def bad(items=[]):\n"
+        "    return items\n"
+    )
+    issues = language_pattern_issues(source, "python")
+    assert any("mutable default" in i.message for i in issues)
+
+
+def test_rust_allow_attr_covers_nested_fn_body() -> None:
+    """A nested ``fn`` declaration must not truncate the parent's
+    ``#[allow]`` span — later findings in the parent stay suppressed."""
+    source = (
+        "#[allow(mumei::unwrap)]\n"
+        "fn outer(res: Option<i32>) -> i32 {\n"
+        "    fn helper() {}\n"
+        "    res.unwrap()\n"
+        "}\n"
+        "fn sibling(res: Option<i32>) -> i32 {\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    matching = [i for i in issues if "res.unwrap()" in i.message]
+    assert len(matching) == 1
+    assert matching[0].line == 7
+
+
+def test_rust_commented_attr_does_not_scope_suppress() -> None:
+    """``// #[allow(mumei::unwrap)]`` is comment text, not an attribute —
+    it suppresses nothing beyond a plain marker line."""
+    source = (
+        "// #[allow(mumei::unwrap)]\n"
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    let _ = 1;\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+def test_rust_body_text_inside_string_keeps_real_line() -> None:
+    """When a function body also appears inside an earlier string literal,
+    the warning must point at the real body, not the literal copy."""
+    source = (
+        'const S: &str = "\n'
+        "    res.unwrap()\n"
+        '";\n'
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    matching = [i for i in issues if "res.unwrap()" in i.message]
+    assert matching and all(i.line == 5 for i in matching)
