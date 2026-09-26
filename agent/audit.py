@@ -129,6 +129,41 @@ AUDIT_CONTRACT_TERMS = {
     "contradiction_type": "stable spec contradiction classifier",
 }
 
+def _mm_code_lines(source: str) -> list[str]:
+    """``.mm`` lines with ``//`` comments and string-literal contents removed.
+
+    Mumei has line comments only (no block comments); ``"`` opens a string
+    that may span lines, so string state carries across the scan. A
+    ``trusted atom`` text inside a literal or comment is documentation, not
+    a real declaration — masking it keeps the advisory honest.
+    """
+    in_string = False
+    code_lines: list[str] = []
+    for line in source.splitlines():
+        out: list[str] = []
+        index = 0
+        while index < len(line):
+            char = line[index]
+            if in_string:
+                if char == "\\" and index + 1 < len(line):
+                    index += 2
+                    continue
+                if char == '"':
+                    in_string = False
+                index += 1
+                continue
+            if char == "/" and index + 1 < len(line) and line[index + 1] == "/":
+                break
+            if char == '"':
+                in_string = True
+                index += 1
+                continue
+            out.append(char)
+            index += 1
+        code_lines.append("".join(out))
+    return code_lines
+
+
 def _trusted_atom_entries(
     source: str, file_label: str
 ) -> list[dict[str, object]]:
@@ -140,7 +175,7 @@ def _trusted_atom_entries(
     ``success`` or ``files_with_issues``.
     """
     entries: list[dict[str, object]] = []
-    for lineno, line in enumerate(source.splitlines(), start=1):
+    for lineno, line in enumerate(_mm_code_lines(source), start=1):
         match = _TRUSTED_ATOM_RE.match(line)
         if match is None:
             continue
@@ -254,7 +289,7 @@ class AuditPipeline:
 
         try:
             source_code = source_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             result = AuditResult(
                 success=False,
                 source_file=source_label,
@@ -596,7 +631,7 @@ class AuditPipeline:
                 continue
             try:
                 mm_source = mm_path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 continue
             trusted_atoms.extend(
                 _trusted_atom_entries(

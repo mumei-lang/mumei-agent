@@ -66,19 +66,30 @@ def _node_text(source_bytes: bytes, node) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
 
-def _body_offset(haystacks: tuple[str, ...], body: str, cursor: int) -> tuple[int, int]:
-    """``(offset, next_cursor)`` locating ``body`` at or after ``cursor``.
+def _body_offset(
+    haystacks: tuple[str, ...], body: str, used_offsets: set[int]
+) -> int:
+    """First offset of ``body`` not already claimed, or ``-1``.
 
     Function bodies handed to the text fallbacks are exact slices of the raw
     source — or, for the Rust regex fallback, of the comment-stripped copy
     that shares its offsets — so a hit in either haystack is a source
-    offset. ``(-1, cursor)`` when the body cannot be located.
+    offset. Extractors do not always list functions in source order (named
+    declarations before arrows/literals), so scanning every occurrence and
+    skipping offsets already consumed keeps duplicate bodies attributed to
+    distinct locations.
     """
     for text in haystacks:
-        offset = text.find(body, cursor)
-        if offset >= 0:
-            return offset, offset + 1
-    return -1, cursor
+        start = 0
+        while True:
+            offset = text.find(body, start)
+            if offset < 0:
+                break
+            if offset not in used_offsets:
+                used_offsets.add(offset)
+                return offset
+            start = offset + 1
+    return -1
 
 
 def _issue_line(source: str, body_offset: int, offset_in_body: int) -> int:
@@ -332,9 +343,9 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
     """
     issues: list[ForeignSafetyIssue] = []
     stripped_source = _strip_go_rust_literals_and_comments(source)
-    cursor = 0
+    used_offsets: set[int] = set()
     for name, body, _params in _rust_function_scopes(source):
-        offset, cursor = _body_offset((source, stripped_source), body, cursor)
+        offset = _body_offset((source, stripped_source), body, used_offsets)
         masked = _mask_rust_nested_fns(_strip_go_rust_literals_and_comments(body))
         for match in _RUST_UNWRAP_RE.finditer(masked):
             receiver = match.group("recv")
@@ -1309,9 +1320,9 @@ def _go_defer_in_loop_issues(
 ) -> list[ForeignSafetyIssue]:
     blocks = _go_function_blocks(source)
     issues: list[ForeignSafetyIssue] = []
-    cursor = 0
+    used_offsets: set[int] = set()
     for name, body in blocks:
-        offset, cursor = _body_offset((source,), body, cursor)
+        offset = _body_offset((source,), body, used_offsets)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "go")
         )
@@ -1465,11 +1476,11 @@ def _typescript_floating_promise_text_issues(source: str) -> list[ForeignSafetyI
         match.group("name") for match in _TS_EXPR_ARROW_RE.finditer(stripped)
     }
     issues: list[ForeignSafetyIssue] = []
-    cursor = 0
+    used_offsets: set[int] = set()
     for name, body in _typescript_function_blocks(source):
         if name in expr_arrow_names:
             continue
-        offset, cursor = _body_offset((source,), body, cursor)
+        offset = _body_offset((source,), body, used_offsets)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "typescript")
         )
@@ -1782,9 +1793,9 @@ def _solidity_pattern_issues(
     if _is_solidity_mock_source(source):
         return []
     issues: list[ForeignSafetyIssue] = []
-    cursor = 0
+    used_offsets: set[int] = set()
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
-        offset, cursor = _body_offset((source,), raw_body, cursor)
+        offset = _body_offset((source,), raw_body, used_offsets)
         body = _strip_go_rust_literals_and_comments(raw_body)
         tx_origin = re.search(r"\btx\.origin\b", body)
         if tx_origin:
@@ -1857,24 +1868,82 @@ _SLASH_ALLOW_MARKER_RE = re.compile(r"//\s*mumei:allow\b")
 _RUST_ALLOW_ATTR_RE = re.compile(r"#\s*\[\s*allow\s*\(\s*mumei::")
 _RUST_ATTR_LINE_RE = re.compile(r"^\s*#")
 _RUST_FN_DECL_RE = re.compile(r"\bfn\s+(\w+)")
+# Quote characters that open a string literal per language — a marker whose
+# prefix leaves a quote open lives inside string content, not a comment.
+# Rust checks only ``"``: ``'`` also opens lifetimes, so counting it would
+# misread ``fn f(x: &'a T) // mumei:allow`` as in-string.
+_MARKER_QUOTE_CHARS: dict[str, tuple[str, ...]] = {
+    "rust": ('"',),
+    "python": ('"', "'"),
+    "typescript": ('"', "'", "`"),
+    "go": ('"', "'", "`"),
+    "solidity": ('"', "'"),
+}
+
+
+def _inside_string_literal(text: str, pos: int, quotes: tuple[str, ...]) -> bool:
+    """True when the character at ``pos`` is inside a string literal — an
+    odd count of unescaped quotes before it opens a literal."""
+    prefix = text[:pos]
+    for quote in quotes:
+        count = 0
+        index = 0
+        while index < len(prefix):
+            if prefix[index] == "\\":
+                index += 2
+                continue
+            if prefix[index] == quote:
+                count += 1
+            index += 1
+        if count % 2:
+            return True
+    return False
 
 
 def _suppression_markers(
     source: str, language: str
-) -> tuple[set[int], set[str]]:
-    """``(marker_lines, allowed_functions)`` for opt-out markers in ``source``."""
+) -> tuple[set[int], list[tuple[int, int, str]], dict[str, int]]:
+    """``(marker_lines, allowed_fn_ranges, fn_name_counts)`` for opt-out
+    markers in ``source``.
+
+    ``allowed_fn_ranges`` entries are ``(decl_line, end_line, name)`` — the
+    ``fn`` item a ``#[allow(mumei::*)]`` attribute decorates, bounded by the
+    next ``fn`` declaration so a same-named sibling is not suppressed.
+    """
     comment_re = (
         _HASH_ALLOW_MARKER_RE
         if language == "python"
         else _SLASH_ALLOW_MARKER_RE
     )
+    quotes = _MARKER_QUOTE_CHARS.get(language, ('"', "'"))
     marker_lines: set[int] = set()
-    allowed_functions: set[str] = set()
+    allowed_ranges: list[tuple[int, int, str]] = []
     lines = source.splitlines()
+    fn_decls = (
+        [
+            (index + 1, match.group(1))
+            for index, text in enumerate(lines)
+            if (match := _RUST_FN_DECL_RE.search(text)) is not None
+            and not _inside_string_literal(text, match.start(), quotes)
+        ]
+        if language == "rust"
+        else []
+    )
+    fn_name_counts: dict[str, int] = {}
+    for _line_no, fn_name in fn_decls:
+        fn_name_counts[fn_name] = fn_name_counts.get(fn_name, 0) + 1
     for index, text in enumerate(lines):
-        if comment_re.search(text):
+        comment_match = comment_re.search(text)
+        if comment_match and not _inside_string_literal(
+            text, comment_match.start(), quotes
+        ):
             marker_lines.add(index + 1)
-        if language != "rust" or not _RUST_ALLOW_ATTR_RE.search(text):
+        attr_match = _RUST_ALLOW_ATTR_RE.search(text)
+        if (
+            language != "rust"
+            or attr_match is None
+            or _inside_string_literal(text, attr_match.start(), quotes)
+        ):
             continue
         marker_lines.add(index + 1)
         cursor = index + 1
@@ -1885,8 +1954,15 @@ def _suppression_markers(
         if cursor < len(lines):
             fn_match = _RUST_FN_DECL_RE.search(lines[cursor])
             if fn_match:
-                allowed_functions.add(fn_match.group(1))
-    return marker_lines, allowed_functions
+                decl_line = cursor + 1
+                end_line = next(
+                    (line_no for line_no, _name in fn_decls if line_no > decl_line),
+                    len(lines) + 1,
+                )
+                allowed_ranges.append(
+                    (decl_line, end_line, fn_match.group(1))
+                )
+    return marker_lines, allowed_ranges, fn_name_counts
 
 
 def _suppress_pattern_issues(
@@ -1896,19 +1972,46 @@ def _suppress_pattern_issues(
     pattern gets the opt-out for free through this post-filter."""
     if not issues or "mumei:" not in source:
         return issues
-    marker_lines, allowed_functions = _suppression_markers(source, language)
-    if not marker_lines and not allowed_functions:
+    marker_lines, allowed_ranges, fn_name_counts = _suppression_markers(
+        source, language
+    )
+    if not marker_lines and not allowed_ranges:
         return issues
     return [
         issue
         for issue in issues
-        if issue.function_name not in allowed_functions
+        if not _allowed_by_attribute(issue, allowed_ranges, fn_name_counts)
         and (
             issue.line <= 0
-            or (issue.line not in marker_lines
-                and issue.line - 1 not in marker_lines)
+            or (
+                issue.line not in marker_lines
+                and issue.line - 1 not in marker_lines
+            )
         )
     ]
+
+
+def _allowed_by_attribute(
+    issue: ForeignSafetyIssue,
+    allowed_ranges: list[tuple[int, int, str]],
+    fn_name_counts: dict[str, int],
+) -> bool:
+    """True when ``issue`` sits inside an ``#[allow(mumei::*)]`` function.
+
+    Line-numbered findings must fall inside the decorated ``fn``'s
+    declaration-to-next-``fn`` span so a same-named sibling stays flagged;
+    an unlocatable finding is suppressed only when its function name is
+    unambiguous in the file.
+    """
+    if issue.line > 0:
+        return any(
+            issue.function_name == name and start <= issue.line < end
+            for start, end, name in allowed_ranges
+        )
+    return any(
+        issue.function_name == name and fn_name_counts.get(name, 0) == 1
+        for _start, _end, name in allowed_ranges
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1979,12 +2082,19 @@ def language_pattern_issues(
         language=normalized, tree=tree, source_bytes=source_bytes
     )
     issues: list[ForeignSafetyIssue] = []
-    seen: set[tuple[str, str]] = set()
     for pattern in LANGUAGE_PATTERNS:
         if normalized in pattern.languages:
-            for issue in pattern.detect(source, ctx):
-                key = (issue.function_name, issue.message)
-                if key not in seen:
-                    seen.add(key)
-                    issues.append(issue)
-    return _suppress_pattern_issues(issues, source, normalized)
+            issues.extend(pattern.detect(source, ctx))
+    # Suppress before deduping: two identical calls where only the first is
+    # marked collapse to one (function_name, message) pair — suppressing
+    # after dedup could drop the surviving marked copy and erase the
+    # unmarked call's warning entirely.
+    issues = _suppress_pattern_issues(issues, source, normalized)
+    seen: set[tuple[str, str]] = set()
+    deduped: list[ForeignSafetyIssue] = []
+    for issue in issues:
+        key = (issue.function_name, issue.message)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(issue)
+    return deduped

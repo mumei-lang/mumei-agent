@@ -223,7 +223,8 @@ def _scan_and_fix_role_lines(payload: dict[str, object], lang: Literal["en", "ja
         }
     audit_terms = (
         "`spec_health_issues`, `verification_violations`, `cross_validation_gaps`, "
-        "`next_steps`, `migration_hints`, `healed_files`, `heal_errors`"
+        "`next_steps`, `migration_hints`, `healed_files`, `heal_errors`, "
+        "`trusted_atoms`"
     )
     lines = [heading]
     audit_status = _component_status(payload.get("audit"), lang)
@@ -391,6 +392,7 @@ def _finding_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> lis
         "migration_hints",
         "healed_files",
         "heal_errors",
+        "trusted_atoms",
     ):
         values = _object_list(payload.get(key))
         if values:
@@ -479,9 +481,19 @@ def _fenced_block(text: str, language: str, *, indent: str = "") -> list[str]:
 
 def _item_line(value: object) -> str:
     if isinstance(value, dict):
-        kind = value.get("kind", value.get("status", value.get("priority", "item")))
+        kind = value.get(
+            "kind",
+            value.get(
+                "status",
+                value.get("priority", value.get("severity", "item")),
+            ),
+        )
         message = value.get("message", value.get("condition", value.get("evidence", value)))
         location = value.get("location", value.get("implementation_symbol", ""))
+        if not location and value.get("file"):
+            location = str(value["file"])
+            if isinstance(value.get("line"), int) and value["line"] > 0:
+                location = f"{location}:{value['line']}"
         prefix = f"**{kind}**"
         if location:
             prefix += f" `{location}`"

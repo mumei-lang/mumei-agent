@@ -1793,3 +1793,93 @@ def test_rust_composed_guards_in_text_fallback(
             "}\n"
         )
         assert language_pattern_issues(source, "rust") == [], guard
+
+
+# ---------------------------------------------------------------------------
+# Review hardening: marker edge cases, dedup order, fallback attribution
+# ---------------------------------------------------------------------------
+
+
+def test_rust_allow_attr_scoped_to_decorated_fn_only() -> None:
+    """``#[allow(mumei::*)]`` suppresses only the ``fn`` it decorates — a
+    same-named sibling keeps its findings."""
+    source = (
+        "mod inner {\n"
+        "    #[allow(mumei::unwrap)]\n"
+        "    fn dup(res: Option<i32>) -> i32 {\n"
+        "        res.unwrap()\n"
+        "    }\n"
+        "}\n"
+        "fn dup(res: Option<i32>) -> i32 {\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    matching = [i for i in issues if "res.unwrap()" in i.message]
+    assert len(matching) == 1
+    assert matching[0].line == 8
+
+
+def test_rust_allow_marker_inside_string_does_not_suppress() -> None:
+    """A marker spelled inside a string literal is content, not a comment."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        '    let s = "// mumei:allow";\n'
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+def test_python_allow_marker_inside_string_does_not_suppress() -> None:
+    source = (
+        's = "# mumei:allow"\n'
+        "def bad(items=[]):\n"
+        "    return items\n"
+    )
+    issues = language_pattern_issues(source, "python")
+    assert any("mutable default" in i.message for i in issues)
+
+
+def test_marked_call_does_not_hide_unmarked_twin() -> None:
+    """Suppression runs before dedup: marking one of two identical calls
+    still leaves the unmarked call reported."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    // mumei:allow\n"
+        "    res.unwrap();\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    matching = [i for i in issues if "res.unwrap()" in i.message]
+    assert len(matching) == 1
+    assert matching[0].line == 4
+
+
+def test_typescript_arrow_before_named_fn_keeps_lines_in_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The text fallback lists named functions before arrows even when the
+    arrow sits earlier in the file — bodies must still map back to their
+    real lines instead of collapsing to line 0."""
+    from agent import tree_sitter_extract
+
+    monkeypatch.setattr(
+        tree_sitter_extract, "parse", lambda *args, **kwargs: (None, None)
+    )
+    source = (
+        "async function send() {}\n"
+        "const early = () => {\n"
+        "  send()\n"
+        "};\n"
+        "function late() {\n"
+        "  send()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "typescript")
+    early = [i for i in issues if i.function_name == "early"]
+    late = [i for i in issues if i.function_name == "late"]
+    assert early and all(i.line == 3 for i in early)
+    assert late and all(i.line == 6 for i in late)

@@ -2399,3 +2399,89 @@ def test_audit_file_surfaces_trusted_atoms_on_mm_source(tmp_path: Path) -> None:
     assert [entry["atom"] for entry in result.trusted_atoms] == ["fast_path"]
     assert result.trusted_atoms[0]["severity"] == "warning"
     assert "trusted_atoms:" in result.report
+
+
+def test_audit_directory_skips_unreadable_mm_source(tmp_path: Path) -> None:
+    """A .mm file that is not valid UTF-8 must not abort the directory scan —
+    ``read_text`` raises ``UnicodeDecodeError``, not ``OSError``."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (src / "bad.mm").write_bytes(b"\xff\xfe trusted atom nope(x: i64) -> i64")
+    (src / "spec.mm").write_text(
+        "trusted atom fast_path(x: i64) -> i64 {\n    x\n}\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="add returns the sum",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src)
+
+    assert [entry["atom"] for entry in result.trusted_atoms] == ["fast_path"]
+
+
+def test_trusted_atoms_in_strings_or_comments_are_not_reported(
+    tmp_path: Path,
+) -> None:
+    """``trusted atom`` text inside a .mm comment or string literal is
+    documentation, not a declaration — only real declarations surface."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "spec.mm").write_text(
+        "// trusted atom commented(x: i64) -> i64\n"
+        'atom docs() -> i64 { return "trusted atom in_string() -> i64"; }\n'
+        "atom multi() -> i64 {\n"
+        '    let s = "\n'
+        "    trusted atom hidden(x: i64) -> i64\n"
+        '";\n'
+        "}\n"
+        "trusted atom real(x: i64) -> i64 {\n    x\n}\n",
+        encoding="utf-8",
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=MagicMock(),
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src)
+
+    assert [entry["atom"] for entry in result.trusted_atoms] == ["real"]
+
+
+def test_format_result_report_renders_trusted_atom_locations() -> None:
+    """The formatted finding list must keep file:line for trusted atoms."""
+    from agent.report_formatter_core import _finding_lines
+
+    lines = _finding_lines(
+        {
+            "trusted_atoms": [
+                {
+                    "file": "spec.mm",
+                    "atom": "fast_path",
+                    "line": 7,
+                    "severity": "warning",
+                    "message": "trusted atom `fast_path` skips Z3 verification",
+                }
+            ]
+        },
+        "en",
+    )
+    assert lines == [
+        "- `trusted_atoms`",
+        "  - **warning** `spec.mm:7`: trusted atom `fast_path` skips Z3 "
+        "verification",
+    ]
