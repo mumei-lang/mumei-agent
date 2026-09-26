@@ -72,6 +72,8 @@ from agent.audit_reporting import (
 from agent.code_to_spec import CodeToSpecExtractor, CodeToSpecResult, Language
 from agent.config import AgentConfig
 from agent.extract_spec import _collect_code_files
+from agent.extract_spec_helpers import _is_test_file
+from agent.gap_rules import _TRUSTED_ATOM_RE
 from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.llm_provider import LLMProvider
 from agent.mumei_client import create_mumei_client
@@ -111,6 +113,7 @@ AUDIT_SCHEMA_KEYS = [
     "migration_hints",
     "healed_files",
     "heal_errors",
+    "trusted_atoms",
 ]
 
 AUDIT_CONTRACT_TERMS = {
@@ -122,8 +125,40 @@ AUDIT_CONTRACT_TERMS = {
     "migration_hints": "generated .mm skeleton advice from migrate-suggest or audit --auto-migrate",
     "healed_files": "generated .mm skeletons accepted or rewritten by the self-healing loop",
     "heal_errors": "per-skeleton self-healing failures and diagnostics",
+    "trusted_atoms": "trusted atom declarations in .mm sources that bypass Z3 verification (advisory warnings)",
     "contradiction_type": "stable spec contradiction classifier",
 }
+
+def _trusted_atom_entries(
+    source: str, file_label: str
+) -> list[dict[str, object]]:
+    """Advisory findings for ``trusted atom`` declarations in a .mm source.
+
+    ``trusted`` atoms skip Z3 verification entirely, so a security audit
+    must surface each one — file, name, and line — instead of silently
+    passing over the escape hatch. Advisory only: entries never affect
+    ``success`` or ``files_with_issues``.
+    """
+    entries: list[dict[str, object]] = []
+    for lineno, line in enumerate(source.splitlines(), start=1):
+        match = _TRUSTED_ATOM_RE.match(line)
+        if match is None:
+            continue
+        name = match.group(1)
+        entries.append(
+            {
+                "file": file_label,
+                "atom": name,
+                "line": lineno,
+                "severity": "warning",
+                "message": (
+                    f"trusted atom `{name}` skips Z3 verification — "
+                    "its contracts are unproven"
+                ),
+            }
+        )
+    return entries
+
 
 class AuditPipeline:
     """Run code-to-spec, spec-health, foreign verification, and cross-validation."""
@@ -230,6 +265,15 @@ class AuditPipeline:
             )
             return _finalize_audit_result(result)
 
+        # .mm sources are not audit targets themselves, but any
+        # ``trusted atom`` they declare bypasses Z3 verification — surface
+        # the escape hatches as advisory findings on the result.
+        trusted_atoms = (
+            _trusted_atom_entries(source_code, source_label)
+            if source_path.suffix == ".mm"
+            else []
+        )
+
         if normalized_language and normalized_language not in SUPPORTED_AUDIT_LANGUAGES:
             result = AuditResult(
                 success=False,
@@ -241,6 +285,7 @@ class AuditPipeline:
                     "language must be one of: "
                     + ", ".join(SUPPORTED_AUDIT_LANGUAGES)
                 ],
+                trusted_atoms=trusted_atoms,
             )
             return _finalize_audit_result(result)
 
@@ -263,6 +308,7 @@ class AuditPipeline:
                 verification_status="unverifiable",
                 errors=errors,
                 skipped_rate_limited=_errors_indicate_rate_limit(extraction.errors),
+                trusted_atoms=trusted_atoms,
             )
             return _finalize_audit_result(result)
 
@@ -418,6 +464,7 @@ class AuditPipeline:
             errors=errors,
             proof_certificate=proof_certificate,
             lean_bridge=lean_bridge_result,
+            trusted_atoms=trusted_atoms,
         )
         if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
@@ -537,6 +584,27 @@ class AuditPipeline:
             normalized_language or None,
             include_tests=include_tests,
         )
+
+        # .mm files are not audit targets, but ``trusted atom`` declarations
+        # inside them bypass Z3 verification — surface each as an advisory.
+        trusted_atoms: list[dict] = []
+        for mm_path in sorted(
+            (path for path in source_path.rglob("*.mm") if path.is_file()),
+            key=lambda path: path.relative_to(source_path).as_posix(),
+        ):
+            if not include_tests and _is_test_file(mm_path, source_path):
+                continue
+            try:
+                mm_source = mm_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            trusted_atoms.extend(
+                _trusted_atom_entries(
+                    mm_source,
+                    _directory_file_label(source_label, str(mm_path)),
+                )
+            )
+
         if not code_files:
             errors.append(f"no supported source-code files found in directory: {source_label}")
 
@@ -583,6 +651,7 @@ class AuditPipeline:
                 for file_result in file_results
                 if file_result.skipped_rate_limited
             ],
+            trusted_atoms=trusted_atoms,
         )
         _aggregate_directory_fixed_keys(result)
         result.next_steps = _generate_directory_next_steps(result)
@@ -700,12 +769,14 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "mumei-agent audit --code-file <file-or-dir> --auto-migrate --auto-heal. "
         "The MCP scan_and_fix tool uses the same audit -> migrate-suggest -> heal flow. "
         "Fixed output keys: spec_health_issues, verification_violations, verification_status, "
-        "cross_validation_gaps, next_steps, migration_hints, healed_files, heal_errors."
+        "cross_validation_gaps, next_steps, migration_hints, healed_files, heal_errors, "
+        "trusted_atoms."
     )
     parser = parser or argparse.ArgumentParser(
         description=(
             "Audit existing code by extracting specs, verifying contracts, "
-            "emitting cross_validation_gaps, and optionally producing migration_hints."
+            "emitting cross_validation_gaps, optionally producing migration_hints, "
+            "and surfacing trusted_atoms escape hatches found in .mm sources."
         ),
         epilog=_epilog,
     )

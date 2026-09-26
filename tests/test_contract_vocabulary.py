@@ -84,6 +84,7 @@ NO_MM_KEYS = [
     "migration_hints",
     "healed_files",
     "heal_errors",
+    "trusted_atoms",
 ]
 FORBIDDEN_ALIASES = [
     "recommendations",

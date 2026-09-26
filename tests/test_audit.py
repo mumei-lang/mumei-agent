@@ -2282,3 +2282,120 @@ def test_audit_without_domain_hint_emits_no_domain_issues(
         issue.startswith("domain-completeness:")
         for issue in result.spec_health_issues
     )
+
+
+def test_audit_directory_surfaces_trusted_atoms(tmp_path: Path) -> None:
+    """``trusted atom`` declarations in .mm sources bypass Z3 verification —
+    the audit must surface them as advisory ``trusted_atoms`` findings."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (src / "spec.mm").write_text(
+        "atom checked(x: i64) -> i64\n"
+        "    ensures: result >= x\n"
+        "{\n    x\n}\n\n"
+        "trusted atom fast_path(x: i64) -> i64\n"
+        "    requires: x > 0\n"
+        "    ensures: result > 0\n"
+        "{\n    x\n}\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    # forge_task_spec=None lands the .py audit on the extraction-failure
+    # path; the .mm scan is independent of the per-file audit outcome.
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="add returns the sum",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src)
+
+    assert [
+        (entry["file"], entry["atom"], entry["line"], entry["severity"])
+        for entry in result.trusted_atoms
+    ] == [("spec.mm", "fast_path", 7, "warning")]
+    assert "trusted atom `fast_path` skips Z3 verification" in result.summary
+    assert any(
+        "trusted atom" in step["action"] for step in result.next_steps
+    )
+
+
+def test_audit_directory_trusted_atoms_do_not_flip_success(
+    tmp_path: Path,
+) -> None:
+    """Trusted atoms are advisory: a clean audit with trusted atoms keeps
+    ``success`` — the findings surface as warnings, not violations."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (src / "lib.mm").write_text(
+        "trusted atom fast_path(x: i64) -> i64 {\n    x\n}\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="add returns the sum",
+        forge_task_spec=None,
+        detected_language="python",
+        errors=[],
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_directory(src)
+
+    assert [entry["atom"] for entry in result.trusted_atoms] == ["fast_path"]
+    # success may still be False here if the stubbed extraction records an
+    # error — what matters is that trusted_atoms alone never add to errors,
+    # files_with_issues, or verification_violations.
+    assert result.files_with_issues <= len(result.file_results)
+    assert not any(
+        "trusted" in violation for violation in result.verification_violations
+    )
+
+
+def test_audit_file_surfaces_trusted_atoms_on_mm_source(tmp_path: Path) -> None:
+    """A single-file audit of a .mm source still reports trusted atoms even
+    though .mm is not an audit language."""
+    source = tmp_path / "spec.mm"
+    source.write_text(
+        "atom checked(x: i64) -> i64 {\n    x\n}\n\n"
+        "trusted atom fast_path(x: i64) -> i64 {\n    x\n}\n",
+        encoding="utf-8",
+    )
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=False,
+        natural_language_spec="",
+        forge_task_spec=None,
+        detected_language="",
+        errors=["unsupported"],
+    )
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=MagicMock(),
+        cross_validator=MagicMock(),
+        mumei_client=MagicMock(),
+    ).audit_file(source)
+
+    assert [entry["atom"] for entry in result.trusted_atoms] == ["fast_path"]
+    assert result.trusted_atoms[0]["severity"] == "warning"
+    assert "trusted_atoms:" in result.report

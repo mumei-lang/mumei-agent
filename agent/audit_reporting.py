@@ -541,6 +541,21 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
                 "command": "mumei-agent heal <mm_file>",
             }
         )
+    if result.trusted_atoms:
+        atoms = ", ".join(
+            _string_value(entry.get("atom"), "?")
+            for entry in result.trusted_atoms
+        )
+        steps.append(
+            {
+                "priority": "medium",
+                "action": (
+                    "trusted atom は Z3 検証をスキップするため個別にレビュー: "
+                    + atoms
+                ),
+                "command": "",
+            }
+        )
     if not steps and result.success:
         steps.append(
             {
@@ -598,6 +613,21 @@ def _generate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
                 continue
             seen.add(key)
             aggregated.append(step)
+    if result.trusted_atoms:
+        atoms = ", ".join(
+            _string_value(entry.get("atom"), "?")
+            for entry in result.trusted_atoms
+        )
+        aggregated.append(
+            {
+                "priority": "medium",
+                "action": (
+                    "trusted atom は Z3 検証をスキップするため個別にレビュー: "
+                    + atoms
+                ),
+                "command": "",
+            }
+        )
     actionable = [
         step for step in aggregated if _string_value(step.get("priority"), "") != "info"
     ]
@@ -656,6 +686,9 @@ def _aggregate_directory_fixed_keys(result: AuditDirectoryResult) -> None:
         healed.extend(file_result.healed_files)
         heal_errors.extend(f"{label}: {item}" for item in file_result.heal_errors)
         hints.extend(file_result.migration_hints)
+        # Trusted-atom entries already carry ``file``/``line`` labels — no
+        # re-prefixing needed.
+        result.trusted_atoms.extend(file_result.trusted_atoms)
     result.verification_status = _aggregate_directory_verification_status(result)
     result.spec_health_issues = spec_health
     result.verification_violations = violations
@@ -682,6 +715,11 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
         f"{result.files_with_issues} {_pluralize('file', result.files_with_issues)} "
         "with issues"
     )
+    if result.trusted_atoms:
+        lines.append("trusted_atoms:")
+        lines.extend(
+            f"  - {entry}" for entry in _trusted_atom_strings(result.trusted_atoms)
+        )
     if result.errors:
         lines.append(f"errors: {result.errors}")
     if result.next_steps:
@@ -729,6 +767,13 @@ def _build_report(result: AuditResult) -> str:
         lines.append("  []")
     lines.append(f"healed_files: {result.healed_files}")
     lines.append(f"heal_errors: {result.heal_errors}")
+    lines.append("trusted_atoms:")
+    if result.trusted_atoms:
+        lines.extend(
+            f"  - {entry}" for entry in _trusted_atom_strings(result.trusted_atoms)
+        )
+    else:
+        lines.append("  []")
     if next_steps:
         lines.append("next_steps:")
         for step in next_steps:
@@ -772,6 +817,11 @@ def _file_result_to_markdown(result: AuditResult) -> str:
                 ("❌", "verification_violations", result.verification_violations),
                 ("⚠️", "cross_validation_gaps", result.cross_validation_gaps),
                 ("❌", "errors", result.errors),
+                (
+                    "⚠️",
+                    "trusted_atoms",
+                    _trusted_atom_strings(result.trusted_atoms),
+                ),
             ]
         )
     )
@@ -824,11 +874,29 @@ def _directory_result_to_markdown(result: AuditDirectoryResult) -> str:
             f"{len(file_result.verification_violations)} | "
             f"{len(file_result.cross_validation_gaps)} |"
         )
+    if result.trusted_atoms:
+        lines.extend(
+            [
+                "",
+                "### Trusted atoms (skip Z3 verification)",
+                "",
+                *_markdown_bullet_lines(_trusted_atom_strings(result.trusted_atoms)),
+            ]
+        )
     if result.errors:
         lines.extend(["", "### Issues", "", *_markdown_bullet_lines(result.errors)])
     lines.extend(["", "### Next Steps", ""])
     lines.extend(_markdown_next_step_lines(result.next_steps))
     return "\n".join(lines)
+
+def _trusted_atom_strings(entries: list[dict]) -> list[str]:
+    """Render trusted-atom advisory entries as ``file:line — message`` lines."""
+    return [
+        f"{_string_value(entry.get('file'), '?')}:{entry.get('line', 0)} — "
+        f"{_string_value(entry.get('message'), '')}"
+        for entry in entries
+    ]
+
 
 def _markdown_issue_lines(issue_groups: list[tuple[str, str, list]]) -> list[str]:
     lines: list[str] = []

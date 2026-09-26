@@ -120,6 +120,8 @@ class ForeignSafetyIssue:
     required_contracts: tuple[str, ...] = ()
     counterexample: dict[str, object] = field(default_factory=dict)
     confidence: ConfidenceLevel = "high"
+    # 1-based source line of the offending construct; 0 when unknown.
+    line: int = 0
 
 
 @dataclass(frozen=True)

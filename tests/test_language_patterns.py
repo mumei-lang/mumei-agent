@@ -1492,3 +1492,304 @@ def test_rust_parenthesized_receiver_matches_guard() -> None:
         "}\n"
     )
     assert language_pattern_issues(source, "rust") == []
+
+
+# ---------------------------------------------------------------------------
+# Opt-out markers (`mumei:allow`)
+# ---------------------------------------------------------------------------
+
+
+def test_mumei_allow_suppresses_rust_unwrap_next_line() -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    // mumei:allow\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_mumei_allow_suppresses_same_line_marker() -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    res.unwrap() // mumei:allow\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_mumei_allow_marker_on_unrelated_line_does_not_suppress() -> None:
+    """The marker covers only its own line and the line below — a marker
+    further above the finding leaves it intact."""
+    source = (
+        "// mumei:allow\n"
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    let _ = 1;\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+def test_mumei_allow_marker_does_not_leak_across_functions() -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    // mumei:allow\n"
+        "    res.unwrap()\n"
+        "}\n"
+        "fn g(res: Option<i32>) -> i32 {\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert [i.function_name for i in issues] == ["g"]
+
+
+def test_mumei_allow_middle_line_between_marker_and_finding() -> None:
+    """A blank/comment line between the marker and the call still counts —
+    the rule is "the line immediately following the marker"."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    // mumei:allow\n"
+        "    // explanation\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+def test_rust_allow_attribute_suppresses_next_line() -> None:
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    #[allow(mumei::unwrap)]\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_allow_attribute_on_fn_suppresses_whole_function() -> None:
+    """``#[allow(mumei::*)]`` placed on a ``fn`` item suppresses every
+    finding inside it — mirroring Rust attribute scoping."""
+    source = (
+        "#[allow(mumei::unwrap)]\n"
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    let _x = res.unwrap();\n"
+        "    res.expect(\"gone\")\n"
+        "}\n"
+        "fn g(res: Option<i32>) -> i32 {\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert [i.function_name for i in issues] == ["g"]
+
+
+def test_mumei_allow_python_marker() -> None:
+    assert language_pattern_issues(
+        "def bad(items=[]):  # mumei:allow\n    return items\n", "python"
+    ) == []
+    assert language_pattern_issues(
+        "# mumei:allow\ndef bad(items=[]):\n    return items\n", "python"
+    ) == []
+
+
+def test_mumei_allow_python_marker_unrelated_line() -> None:
+    issues = language_pattern_issues(
+        "# mumei:allow\n\ndef bad(items=[]):\n    return items\n", "python"
+    )
+    assert any("mutable default" in i.message for i in issues)
+
+
+def test_mumei_allow_python_bare_except() -> None:
+    source = (
+        "def f():\n"
+        "    try:\n"
+        "        work()\n"
+        "    # mumei:allow\n"
+        "    except:\n"
+        "        pass\n"
+    )
+    assert language_pattern_issues(source, "python") == []
+
+
+def test_mumei_allow_go_marker() -> None:
+    source = (
+        "func f() {\n"
+        "\tfor {\n"
+        "\t\t// mumei:allow\n"
+        "\t\tdefer x()\n"
+        "\t}\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "go") == []
+
+
+def test_mumei_allow_typescript_marker() -> None:
+    source = (
+        "async function send() {}\n"
+        "function h() {\n"
+        "  // mumei:allow\n"
+        "  send()\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "typescript") == []
+
+
+def test_mumei_allow_solidity_marker() -> None:
+    source = (
+        "contract C {\n"
+        "  function f() public {\n"
+        "    // mumei:allow\n"
+        "    a.send(1);\n"
+        "  }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "solidity")
+    assert not any("low-level call" in i.message for i in issues)
+
+
+def test_mumei_allow_marker_works_in_text_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Line numbers are recovered from the text fallbacks too, so the
+    opt-out marker keeps working without the tree-sitter grammar."""
+    from agent import tree_sitter_extract
+
+    monkeypatch.setattr(
+        tree_sitter_extract, "parse", lambda *args, **kwargs: (None, None)
+    )
+    suppressed = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    // mumei:allow\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    assert language_pattern_issues(suppressed, "rust") == []
+    unrelated = (
+        "// mumei:allow\n"
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    let _ = 1;\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(unrelated, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# Composed standard-library guard checks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "res.is_ok_and(|v| v > 0)",
+        "res.is_some_and(|v| v > 0)",
+        # `!` flips the else-polarity: body runs when is_none_or is false
+        # — i.e. when res is Some and the predicate failed.
+        "!res.is_none_or(|v| v <= 0)",
+        "res.ok().is_some()",
+        "res.ok().is_some_and(|v| v > 0)",
+        "res.err().is_none()",
+    ],
+)
+def test_rust_composed_stdlib_checks_guard_unwrap(guard: str) -> None:
+    source = (
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        f"    if {guard} {{ res.unwrap() }} else {{ 0 }}\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_is_none_or_fallthrough_guard() -> None:
+    """``is_none_or`` false means ``Some`` — a diverging consequence leaves
+    the fallthrough provably Some."""
+    source = (
+        "fn f(res: Option<i32>) -> i32 {\n"
+        "    if res.is_none_or(|v| v <= 0) { return 0; }\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == []
+
+
+def test_rust_is_err_and_is_not_a_guard() -> None:
+    """``is_err_and`` true proves ``Err`` and false is inconclusive — it
+    never guards an unwrap."""
+    source = (
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        "    if res.is_err_and(|e| e.code() == 5) { res.unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+def test_rust_err_is_some_is_not_a_guard() -> None:
+    """``res.err().is_some()`` true means ``res`` is ``Err`` — the opposite
+    of a guard."""
+    source = (
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        "    if res.err().is_some() { res.unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+def test_rust_custom_guard_function_still_flagged() -> None:
+    """``guard(&res)``-style predicates are not resolved — even when the
+    helper is declared in the same file — and stay a documented limit."""
+    source = (
+        "fn guard(r: &Result<i32, E>) -> bool { r.is_ok() }\n"
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        "    if guard(&res) { res.unwrap() } else { 0 }\n"
+        "}\n"
+    )
+    issues = language_pattern_issues(source, "rust")
+    assert any("res.unwrap()" in i.message for i in issues)
+
+
+@pytest.mark.parametrize(
+    "cond",
+    [
+        "res.is_ok_and(|v| v > 0)",
+        "res.is_some_and(|v| v > 0)",
+        "res.ok().is_some()",
+        "res.err().is_none()",
+    ],
+)
+def test_rust_assert_composed_check_guards(cond: str) -> None:
+    source = (
+        "fn f(res: Result<i32, E>) -> i32 {\n"
+        f"    assert!({cond});\n"
+        "    res.unwrap()\n"
+        "}\n"
+    )
+    assert language_pattern_issues(source, "rust") == [], cond
+
+
+def test_rust_composed_guards_in_text_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent import tree_sitter_extract
+
+    monkeypatch.setattr(
+        tree_sitter_extract, "parse", lambda *args, **kwargs: (None, None)
+    )
+    for guard in (
+        "res.is_ok_and(|v| v > 0)",
+        "res.ok().is_some()",
+        "res.is_none_or(|_| false)",
+    ):
+        source = (
+            "fn f(res: Result<i32, E>) -> i32 {\n"
+            f"    if {guard} {{ res.unwrap() }} else {{ 0 }}\n"
+            "}\n"
+        )
+        assert language_pattern_issues(source, "rust") == [], guard

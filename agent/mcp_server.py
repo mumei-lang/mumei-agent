@@ -2006,7 +2006,8 @@ def scan_and_fix(
 
     Steps:
     1. audit: extract spec, check health, verify contracts, emit spec_health_issues,
-       verification_violations, verification_status, cross_validation_gaps, and next_steps
+       verification_violations, verification_status, cross_validation_gaps, next_steps,
+       and trusted_atoms advisories for `trusted atom` declarations in .mm sources
     2. migrate-suggest: generate migration_hints and .mm skeletons for functions with issues
     3. (optional) heal: run self-healing loop on each skeleton, recording healed_files
        and heal_errors

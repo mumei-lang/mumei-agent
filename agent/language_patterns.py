@@ -15,6 +15,14 @@ position in the syntax tree) instead of scanning body text — body-text scans
 let a guard in a sibling or outer branch suppress unrelated findings. When
 ``ctx.tree`` is ``None`` (grammar missing or unparseable) they fall back to
 the previous text heuristics, marked ``confidence="medium"``.
+
+Opt-out: a ``mumei:allow`` marker in the file's own comment syntax —
+``# mumei:allow`` for Python, ``// mumei:allow`` for Rust/Go/TypeScript/
+Solidity — suppresses a finding on the same line or the line immediately
+below it. Rust additionally honors ``#[allow(mumei::*)]`` attribute lines,
+which suppress the line below and, when placed on a ``fn`` item, every
+finding inside that function. Findings that carry no source line (call
+sites a text fallback cannot locate) are never suppressed.
 """
 from __future__ import annotations
 
@@ -56,6 +64,29 @@ class PatternContext:
 
 def _node_text(source_bytes: bytes, node) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
+
+
+def _body_offset(haystacks: tuple[str, ...], body: str, cursor: int) -> tuple[int, int]:
+    """``(offset, next_cursor)`` locating ``body`` at or after ``cursor``.
+
+    Function bodies handed to the text fallbacks are exact slices of the raw
+    source — or, for the Rust regex fallback, of the comment-stripped copy
+    that shares its offsets — so a hit in either haystack is a source
+    offset. ``(-1, cursor)`` when the body cannot be located.
+    """
+    for text in haystacks:
+        offset = text.find(body, cursor)
+        if offset >= 0:
+            return offset, offset + 1
+    return -1, cursor
+
+
+def _issue_line(source: str, body_offset: int, offset_in_body: int) -> int:
+    """1-based line of the construct ``offset_in_body`` chars into a function
+    body that starts at ``body_offset`` in ``source``; 0 when unlocated."""
+    if body_offset < 0 or offset_in_body < 0:
+        return 0
+    return source.count("\n", 0, body_offset + offset_in_body) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +188,7 @@ def _python_mutable_default_issues(
                         f"argument `{param_name}={default_text}` that is shared "
                         "across calls"
                     ),
+                    line=default.lineno,
                 )
             )
     return issues
@@ -186,6 +218,7 @@ def _python_swallow_except_issues(
                                 "`except:` that swallows all exceptions "
                                 "(including KeyboardInterrupt/SystemExit)"
                             ),
+                            line=handler.lineno,
                         )
                     )
                 elif (
@@ -201,6 +234,7 @@ def _python_swallow_except_issues(
                                 f"`{swallow_name}` and does nothing — "
                                 "the error is silently swallowed"
                             ),
+                            line=handler.lineno,
                         )
                     )
     return issues
@@ -226,8 +260,13 @@ _RUST_UNWRAP_RE = re.compile(
 _RUST_NESTED_FN_RE = re.compile(r"\bfn\s+[A-Za-z_]\w*")
 
 _RUST_UNWRAP_METHODS = frozenset({"unwrap", "expect"})
-_RUST_POSITIVE_CHECKS = frozenset({"is_some", "is_ok"})
-_RUST_NEGATIVE_CHECKS = frozenset({"is_err", "is_none"})
+# Standard-library predicates on the receiver: ``then``-polarity checks
+# prove the value variant when true (the composed ``*_and`` predicates keep
+# that polarity); ``else``-polarity checks prove it when false
+# (``is_none_or`` false means Some). ``is_err_and`` takes neither polarity —
+# true proves ``Err`` and false is inconclusive — so it is absent from both.
+_RUST_POSITIVE_CHECKS = frozenset({"is_some", "is_ok", "is_some_and", "is_ok_and"})
+_RUST_NEGATIVE_CHECKS = frozenset({"is_err", "is_none", "is_none_or"})
 _RUST_DIVERGING_MACROS = frozenset({"panic", "unreachable", "todo", "unimplemented"})
 _RUST_ASSERT_MACROS = frozenset({"assert", "debug_assert"})
 # ``async {}`` blocks are deferred like closures; ``unsafe``/``const``
@@ -263,7 +302,19 @@ def _rust_unwrap_guarded(body: str, receiver: str) -> bool:
     recv = re.escape(receiver)
     return bool(
         re.search(
-            rf"\b{recv}\s*\.\s*(?:is_ok|is_some|is_err|is_none)\s*\(", body
+            rf"\b{recv}\s*\.\s*"
+            rf"(?:is_ok|is_some|is_err|is_none|is_ok_and|is_some_and|is_none_or)\s*\(",
+            body,
+        )
+        # ``res.ok()``/``res.err()`` project the receiver into an Option;
+        # the composed checks on that projection keep a provable polarity.
+        or re.search(
+            rf"\b{recv}\s*\.\s*ok\s*\(\s*\)\s*\.\s*"
+            rf"(?:is_some|is_none|is_some_and|is_none_or)\s*\(",
+            body,
+        )
+        or re.search(
+            rf"\b{recv}\s*\.\s*err\s*\(\s*\)\s*\.\s*is_none\s*\(", body
         )
         or re.search(rf"\b(?:if|while)\s+let\b[^{{}};]*\b{recv}\b", body)
         or re.search(rf"\blet\b[^{{}};]*\b{recv}\b[^{{}};]*\belse\b", body)
@@ -280,7 +331,10 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
     known false-negative the scoped path exists to fix.
     """
     issues: list[ForeignSafetyIssue] = []
+    stripped_source = _strip_go_rust_literals_and_comments(source)
+    cursor = 0
     for name, body, _params in _rust_function_scopes(source):
+        offset, cursor = _body_offset((source, stripped_source), body, cursor)
         masked = _mask_rust_nested_fns(_strip_go_rust_literals_and_comments(body))
         for match in _RUST_UNWRAP_RE.finditer(masked):
             receiver = match.group("recv")
@@ -296,6 +350,7 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
                         "value is Ok/Some"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, match.start()),
                 )
             )
     return issues
@@ -339,6 +394,44 @@ def _rust_call_parts(node, source_bytes: bytes) -> tuple[str, str] | None:
         if field is None:
             return None
     return _rust_expr_key(source_bytes, value), _node_text(source_bytes, field)
+
+
+def _rust_check_polarity(
+    receiver_key: str, method: str, recv: str
+) -> str | None:
+    """Polarity of ``receiver_key.method(...)`` as a check on ``recv``:
+    ``"then"`` when the call being true proves ``recv`` Ok/Some,
+    ``"else"`` when it being false proves that, ``None`` otherwise.
+
+    Only standard-library method names resolve. ``res.ok()``/
+    ``res.err()`` project a ``Result`` into an ``Option`` — ``err()``
+    flips the value variant, and the composed ``*_and``/``*_or``
+    predicates keep a polarity only where unambiguous. Custom guard
+    functions (``guard(&res)``) and anything resolved through imports or
+    other files stay out of scope by design.
+    """
+    if receiver_key == recv:
+        if method in _RUST_POSITIVE_CHECKS:
+            return "then"
+        if method in _RUST_NEGATIVE_CHECKS:
+            return "else"
+        return None
+    if receiver_key == f"{recv}.ok()":
+        # res.ok() is Some exactly when res is Ok — same polarities apply
+        # to the plain and composed Option checks on the projection.
+        if method in {"is_some", "is_some_and"}:
+            return "then"
+        if method in {"is_none", "is_none_or"}:
+            return "else"
+        return None
+    if receiver_key == f"{recv}.err()":
+        # res.err() is Some exactly when res is Err — the flip: only the
+        # plain predicates are unambiguous on this projection.
+        if method == "is_none":
+            return "then"
+        if method == "is_some":
+            return "else"
+    return None
 
 
 def _rust_pattern_is_value_arm(pattern, source_bytes: bytes) -> bool:
@@ -416,16 +509,16 @@ def _rust_condition_polarity(condition, recv: str, source_bytes: bytes) -> str |
         # Other operators (==, <, ...) fall through to the generic scan —
         # the guard call inside them is not a dominance guard, matching the
         # leniency of the text path.
-    # Generic scan: the first ``recv.<check>()`` in the condition decides.
+    # Generic scan: the first decisive ``recv``-check in the condition
+    # decides; calls that are not provable checks on ``recv`` are skipped.
     stack = [condition]
     while stack:
         node = stack.pop()
         parts = _rust_call_parts(node, source_bytes)
-        if parts is not None and parts[0] == recv:
-            if parts[1] in _RUST_POSITIVE_CHECKS:
-                return "then"
-            if parts[1] in _RUST_NEGATIVE_CHECKS:
-                return "else"
+        if parts is not None:
+            polarity = _rust_check_polarity(parts[0], parts[1], recv)
+            if polarity is not None:
+                return polarity
         stack.extend(node.children)
     return None
 
@@ -666,7 +759,11 @@ def _rust_statement_guards(
                 (c for c in inner.children if c.type == "token_tree"), None
             )
             if token_tree is not None and re.search(
-                rf"{re.escape(recv)}\.(?:{'|'.join(_RUST_POSITIVE_CHECKS)})\(",
+                # Asserted-true must prove the value variant: the direct
+                # positive checks plus the ``ok()``/``err()`` projections.
+                rf"{re.escape(recv)}\.(?:{'|'.join(_RUST_POSITIVE_CHECKS)})\("
+                rf"|{re.escape(recv)}\.ok\(\)\.(?:is_some|is_some_and)\("
+                rf"|{re.escape(recv)}\.err\(\)\.is_none\(",
                 re.sub(r"\s+", "", _node_text(source_bytes, token_tree)),
             ):
                 return True
@@ -1158,6 +1255,7 @@ def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafety
                                 f"`{recv}.{call}()` without a contract that "
                                 "the value is Ok/Some"
                             ),
+                            line=node.start_point[0] + 1,
                         )
                     )
         elif node.type == "macro_invocation":
@@ -1165,9 +1263,8 @@ def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafety
             # (``println!("{}", r.unwrap())``) are not expression nodes, so
             # scan the token text and judge dominance by the macro's own
             # position in the tree.
-            for match in _RUST_UNWRAP_RE.finditer(
-                _node_text(source_bytes, node)
-            ):
+            token_text = _node_text(source_bytes, node)
+            for match in _RUST_UNWRAP_RE.finditer(token_text):
                 recv = re.sub(r"\s+", "", match.group("recv"))
                 call = match.group("call")
                 if _rust_unwrap_is_guarded(node, recv, source_bytes):
@@ -1180,6 +1277,11 @@ def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafety
                             f"Rust function `{name}` can panic via "
                             f"`{recv}.{call}()` without a contract that "
                             "the value is Ok/Some"
+                        ),
+                        line=(
+                            node.start_point[0]
+                            + 1
+                            + token_text[: match.start()].count("\n")
                         ),
                     )
                 )
@@ -1207,11 +1309,14 @@ def _go_defer_in_loop_issues(
 ) -> list[ForeignSafetyIssue]:
     blocks = _go_function_blocks(source)
     issues: list[ForeignSafetyIssue] = []
+    cursor = 0
     for name, body in blocks:
+        offset, cursor = _body_offset((source,), body, cursor)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "go")
         )
         deferred = None
+        deferred_offset = -1
         for match in _GO_FOR_HEADER_RE.finditer(masked):
             # The first `{` after `for` may belong to a composite literal in
             # the header (`for _, x := range []int{1,2} {`) — skip balanced
@@ -1230,6 +1335,7 @@ def _go_defer_in_loop_issues(
                 defer_match = re.search(r"\bdefer\s+(.+)", loop_body)
                 if defer_match:
                     deferred = defer_match.group(1).strip()
+                    deferred_offset = opening + 1 + defer_match.start()
                     break
                 if close >= len(masked):
                     break
@@ -1254,6 +1360,7 @@ def _go_defer_in_loop_issues(
                         "returns"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, deferred_offset),
                 )
             )
     return issues
@@ -1358,9 +1465,11 @@ def _typescript_floating_promise_text_issues(source: str) -> list[ForeignSafetyI
         match.group("name") for match in _TS_EXPR_ARROW_RE.finditer(stripped)
     }
     issues: list[ForeignSafetyIssue] = []
+    cursor = 0
     for name, body in _typescript_function_blocks(source):
         if name in expr_arrow_names:
             continue
+        offset, cursor = _body_offset((source,), body, cursor)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "typescript")
         )
@@ -1385,6 +1494,7 @@ def _typescript_floating_promise_text_issues(source: str) -> list[ForeignSafetyI
                             "promise can reject unobserved"
                         ),
                         confidence="medium",
+                        line=_issue_line(source, offset, match.start()),
                     )
                 )
                 break
@@ -1637,6 +1747,7 @@ def _typescript_floating_promise_scoped_issues(
                             f"`{callee}()` without awaiting it — a floating "
                             "promise can reject unobserved"
                         ),
+                        line=node.start_point[0] + 1,
                     )
                 )
         stack.extend(reversed(node.children))
@@ -1671,9 +1782,12 @@ def _solidity_pattern_issues(
     if _is_solidity_mock_source(source):
         return []
     issues: list[ForeignSafetyIssue] = []
+    cursor = 0
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
+        offset, cursor = _body_offset((source,), raw_body, cursor)
         body = _strip_go_rust_literals_and_comments(raw_body)
-        if re.search(r"\btx\.origin\b", body):
+        tx_origin = re.search(r"\btx\.origin\b", body)
+        if tx_origin:
             issues.append(
                 ForeignSafetyIssue(
                     function_name=name,
@@ -1684,9 +1798,11 @@ def _solidity_pattern_issues(
                         "`msg.sender`"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, tx_origin.start()),
                 )
             )
-        if re.search(r"\bselfdestruct\s*\(", body):
+        selfdestruct = re.search(r"\bselfdestruct\s*\(", body)
+        if selfdestruct:
             issues.append(
                 ForeignSafetyIssue(
                     function_name=name,
@@ -1697,6 +1813,7 @@ def _solidity_pattern_issues(
                         "plan"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, selfdestruct.start()),
                 )
             )
         for match in _SOLIDITY_LOW_LEVEL_CALL_RE.finditer(body):
@@ -1718,9 +1835,80 @@ def _solidity_pattern_issues(
                         "returned success flag is ignored"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, match.start()),
                 )
             )
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Opt-out markers
+# ---------------------------------------------------------------------------
+
+# ``mumei:allow`` in the file's own comment syntax — ``#`` for Python,
+# ``//`` for the C-family languages — suppresses a finding on the same line
+# or the line immediately below the marker.
+_HASH_ALLOW_MARKER_RE = re.compile(r"#\s*mumei:allow\b")
+_SLASH_ALLOW_MARKER_RE = re.compile(r"//\s*mumei:allow\b")
+# A ``#[allow(mumei::*)]`` attribute also counts as a marker line and, when
+# it sits directly on a ``fn`` item (possibly under stacked attributes),
+# suppresses every finding inside that function — matching Rust attribute
+# scoping.
+_RUST_ALLOW_ATTR_RE = re.compile(r"#\s*\[\s*allow\s*\(\s*mumei::")
+_RUST_ATTR_LINE_RE = re.compile(r"^\s*#")
+_RUST_FN_DECL_RE = re.compile(r"\bfn\s+(\w+)")
+
+
+def _suppression_markers(
+    source: str, language: str
+) -> tuple[set[int], set[str]]:
+    """``(marker_lines, allowed_functions)`` for opt-out markers in ``source``."""
+    comment_re = (
+        _HASH_ALLOW_MARKER_RE
+        if language == "python"
+        else _SLASH_ALLOW_MARKER_RE
+    )
+    marker_lines: set[int] = set()
+    allowed_functions: set[str] = set()
+    lines = source.splitlines()
+    for index, text in enumerate(lines):
+        if comment_re.search(text):
+            marker_lines.add(index + 1)
+        if language != "rust" or not _RUST_ALLOW_ATTR_RE.search(text):
+            continue
+        marker_lines.add(index + 1)
+        cursor = index + 1
+        while cursor < len(lines) and (
+            not lines[cursor].strip() or _RUST_ATTR_LINE_RE.match(lines[cursor])
+        ):
+            cursor += 1
+        if cursor < len(lines):
+            fn_match = _RUST_FN_DECL_RE.search(lines[cursor])
+            if fn_match:
+                allowed_functions.add(fn_match.group(1))
+    return marker_lines, allowed_functions
+
+
+def _suppress_pattern_issues(
+    issues: list[ForeignSafetyIssue], source: str, language: str
+) -> list[ForeignSafetyIssue]:
+    """Drop findings a ``mumei:allow`` marker covers — every registered
+    pattern gets the opt-out for free through this post-filter."""
+    if not issues or "mumei:" not in source:
+        return issues
+    marker_lines, allowed_functions = _suppression_markers(source, language)
+    if not marker_lines and not allowed_functions:
+        return issues
+    return [
+        issue
+        for issue in issues
+        if issue.function_name not in allowed_functions
+        and (
+            issue.line <= 0
+            or (issue.line not in marker_lines
+                and issue.line - 1 not in marker_lines)
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1799,4 +1987,4 @@ def language_pattern_issues(
                 if key not in seen:
                     seen.add(key)
                     issues.append(issue)
-    return issues
+    return _suppress_pattern_issues(issues, source, normalized)
