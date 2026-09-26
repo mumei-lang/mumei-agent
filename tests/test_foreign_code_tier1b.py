@@ -497,3 +497,116 @@ def test_go_if_init_err_check_not_bare() -> None:
     assert not _go_ignored_error_issues(
         "f", "if err := work(); err != nil { panic(err) }", {"work"}
     )
+
+
+def test_shift_signed_modulo_mask_flags() -> None:
+    """``x << (n % 64)`` on a signed ``n`` — Go/Rust ``%`` keeps the sign."""
+    issues = _shift_issues(
+        "x << (n % 64)", "Go", raw_param_types={"x": "uint64", "n": "int"}
+    )
+    assert len(issues) == 1
+
+
+def test_shift_unsigned_modulo_mask_ok() -> None:
+    issues = _shift_issues(
+        "x << (n % 64)", "Go", raw_param_types={"x": "uint64", "n": "uint64"}
+    )
+    assert not issues
+
+
+def test_shift_signed_modulo_mask_with_nonneg_guard() -> None:
+    """``if n < 0 { return }`` makes the signed ``%`` mask safe."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _shift_amount_issues,
+    )
+
+    issues = _shift_amount_issues(
+        "f",
+        " if n < 0 { return 0 } return x << (n % 64) ",
+        "Go",
+        raw_param_types={"x": "uint64", "n": "int"},
+    )
+    assert not issues
+
+
+def test_shift_seen_marks_after_guard() -> None:
+    """A guarded ``x << n`` must not suppress a later unguarded one."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _shift_amount_issues,
+    )
+
+    issues = _shift_amount_issues(
+        "f",
+        " if n < 64 { return x << n }; return x << n ",
+        "Go",
+        raw_param_types={"x": "uint64", "n": "uint64"},
+    )
+    assert len(issues) == 1
+
+
+def test_shift_conditional_mask_does_not_bound() -> None:
+    """``if flag { n &= 63 }`` only bounds ``n`` on the flag-true path."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _shift_amount_issues,
+    )
+
+    issues = _shift_amount_issues(
+        "f",
+        " if flag { n &= 63 }; return x << n ",
+        "Go",
+        raw_param_types={"x": "uint64", "n": "uint64"},
+    )
+    assert len(issues) == 1
+
+
+def test_shift_top_level_mask_bounds() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _shift_amount_issues,
+    )
+
+    issues = _shift_amount_issues(
+        "f",
+        " n &= 63; return x << n ",
+        "Go",
+        raw_param_types={"x": "uint64", "n": "uint64"},
+    )
+    assert not issues
+
+
+def test_shift_nested_conditional_exit_not_guard() -> None:
+    """``if n >= 64 { if flag { return } }`` — the return is conditional."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _shift_amount_issues,
+    )
+
+    issues = _shift_amount_issues(
+        "f",
+        " if (n >= 64) { if (flag) { return 0 } }; return x << n ",
+        "Go",
+        raw_param_types={"x": "uint64", "n": "uint64"},
+    )
+    assert len(issues) == 1
+
+
+def test_ts_intermediate_shift_flagged_from_body() -> None:
+    """A ``x << n`` assigned mid-body (not returned) is still checked."""
+    src = "function f(x: number, n: number): number { let y = x << n; return y + 1; }"
+    issues = _detect_safety_issues(src, "typescript")
+    shift = [i for i in issues if "shifts `" in i.message]
+    assert shift
+
+
+def test_sentinel_stale_guard_before_assign_flags() -> None:
+    """``if i < 0 { return }`` before ``i = strings.Index`` is stale."""
+    body = (
+        " i := 0\n if i < 0 { return 0 }\n"
+        ' i = strings.Index(s, "x")\n return s[i] '
+    )
+    issues = _sentinel_issues(body, "Go")
+    assert len(issues) == 1
+
+
+def test_sentinel_fresh_guard_after_assign_ok() -> None:
+    body = ' i := strings.Index(s, "x")\n if i < 0 { return 0 }\n return s[i] '
+    issues = _sentinel_issues(body, "Go")
+    assert not issues

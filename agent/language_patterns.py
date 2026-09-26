@@ -26,9 +26,12 @@ from typing import Callable, Iterable
 from agent import tree_sitter_extract
 from agent.cross_validation_foreign import _strip_go_rust_literals_and_comments
 from agent.strategies.foreign_code_strategy_helpers import (
+    _GUARD_HOLDS_MECHANISMS,
+    _GUARD_NEGATED_MECHANISMS,
     ForeignSafetyIssue,
     _balanced_brace_body,
     _go_function_blocks,
+    _guard_mechanism,
     _is_generated_source,
     _is_solidity_mock_source,
     _mask_nested_function_literals,
@@ -1805,9 +1808,13 @@ def _solidity_pattern_issues(
                     weak_rng = True
                     break
             if not weak_rng:
+                # ``%``-modulo must draw from ``block.*`` in the same
+                # statement — an unrelated modulo elsewhere in the body is
+                # not a weak-randomness draw.
                 weak_rng = bool(
                     re.search(
-                        r"(?:%[^%\n]*\bblock\.|\bblock\.[A-Za-z]+\s*%)", body
+                        r"(?:%[^%;\n]*\bblock\.|\bblock\.[A-Za-z]+\s*%)",
+                        body,
                     )
                 )
         if weak_rng:
@@ -1881,14 +1888,18 @@ def _solidity_pattern_issues(
             r"\baddress\s+(?:payable\s+)?(?P<name>[A-Za-z_]\w*)\b", params_text
         )
         for param in address_params:
-            # Per-param guard: ``require(param != address(0))`` anywhere in
-            # the body suppresses only *that* parameter.
-            if re.search(
+            # Per-param guard: a check must reject ``param == address(0)``
+            # and dominate the store — ``require(param != address(0))`` /
+            # ``assert`` / ``if (param == address(0)) { revert }`` before the
+            # store, or ``if (param != address(0)) { …store… }`` enclosing
+            # it. An unrelated check on another parameter, or one placed
+            # after/inside a conditional that doesn't cover the store,
+            # does not suppress the advisory.
+            param_guard = re.compile(
                 rf"\b{re.escape(param)}\b[^;{{}}]*\baddress\s*\(\s*0\s*\)"
-                rf"|\baddress\s*\(\s*0\s*\)[^;{{}}]*\b{re.escape(param)}\b",
-                body,
-            ):
-                continue
+                rf"|\baddress\s*\(\s*0\s*\)[^;{{}}]*\b{re.escape(param)}\b"
+            )
+            guard_checks = list(param_guard.finditer(body))
             for store in re.finditer(
                 rf"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*=\s*{re.escape(param)}\s*;",
                 body,
@@ -1904,6 +1915,54 @@ def _solidity_pattern_issues(
                     r"|mapping|memory|storage|calldata)\s*$",
                     stmt_prefix,
                 ):
+                    continue
+                def _protects(
+                    check: re.Match[str],
+                    _body: str = body,
+                    _store: re.Match[str] = store,
+                ) -> bool:
+                    mech = _guard_mechanism(_body, check, _store.start())
+                    if mech is None:
+                        # Solidity ``revert`` is not in the generic divergence
+                        # set — ``if (param == address(0)) { revert … }``
+                        # before the store rejects the zero case.
+                        if "==" not in check.group(0):
+                            return False
+                        open_paren = _body.rfind("(", 0, check.start())
+                        if (
+                            open_paren == -1
+                            or re.search(r"\bif\s*$", _body[:open_paren])
+                            is None
+                        ):
+                            return False
+                        close_paren = (
+                            open_paren + 1 + len(_paren_args(_body, open_paren))
+                        )
+                        after = _body[close_paren + 1 :]
+                        brace_rel = after.find("{")
+                        if brace_rel == -1 or not re.fullmatch(
+                            r"\s*", after[:brace_rel]
+                        ):
+                            return False
+                        blk = _balanced_brace_body(
+                            _body, close_paren + 1 + brace_rel
+                        )
+                        blk_end = close_paren + 2 + brace_rel + len(blk)
+                        return "revert" in blk and _store.start() >= blk_end
+                    if check.end() > _store.start():
+                        return False
+                    # ``param != address(0)`` must hold; ``param ==
+                    # address(0)`` must be the diverging branch's condition.
+                    nonzero_when_holds = "!=" in check.group(0)
+                    nonzero_when_negated = "==" in check.group(0)
+                    if nonzero_when_holds and mech in _GUARD_HOLDS_MECHANISMS:
+                        return True
+                    return (
+                        nonzero_when_negated
+                        and mech in _GUARD_NEGATED_MECHANISMS
+                    )
+
+                if any(_protects(check) for check in guard_checks):
                     continue
                 issues.append(
                     ForeignSafetyIssue(
@@ -2127,7 +2186,9 @@ def _python_mutation_during_iteration_issues(
                 return set()
         return set()
 
-    def mutates(name: str, node: ast.AST, key_names: set[str]) -> bool:
+    def mutates(
+        name: str, node: ast.AST, key_names: set[str], rebound: set[str]
+    ) -> bool:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -2153,11 +2214,14 @@ def _python_mutation_during_iteration_issues(
                 # place — the key set never changes, so iteration is safe.
                 # ``del d[k]`` still resizes the container mid-iteration,
                 # and ``d[v]`` where ``v`` is an iterated *value* inserts a
-                # new key — also a mid-iteration resize.
+                # new key — also a mid-iteration resize. A rebound key var
+                # (``for k in d: k = other; d[k] = v``) inserts the new key —
+                # same resize.
                 if (
                     value_update_ok
                     and isinstance(target.slice, ast.Name)
                     and target.slice.id in key_names
+                    and target.slice.id not in rebound
                 ):
                     continue
                 return True
@@ -2174,8 +2238,34 @@ def _python_mutation_during_iteration_issues(
             if name is None:
                 continue
             keys = key_vars(loop)
+
+            def _bound_names(t: ast.AST) -> Iterable[str]:
+                if isinstance(t, ast.Name):
+                    yield t.id
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    for e in t.elts:
+                        yield from _bound_names(e)
+                elif isinstance(t, ast.Starred):
+                    yield from _bound_names(t.value)
+
+            rebound = {
+                name_
+                for stmt in loop.body
+                for node in _python_own_nodes(stmt)
+                if isinstance(
+                    node,
+                    (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr),
+                )
+                for t in (
+                    node.targets
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                for name_ in _bound_names(t)
+            }
+            rebound &= keys
             if any(
-                mutates(name, node, keys)
+                mutates(name, node, keys, rebound)
                 for stmt in loop.body
                 if not isinstance(
                     stmt, (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -2203,7 +2293,7 @@ def _python_mutation_during_iteration_issues(
 
 _TS_NON_NULL_RE = re.compile(
     r"(?:(?P<name>[A-Za-z_]\w*)|(?P<call>[A-Za-z_]\w*\s*\([^()]*\))"
-    r"|(?P<idx>[A-Za-z_]\w*\s*\[[^\]]*\]))!(?!\s*=)"
+    r"|(?P<idx>[A-Za-z_]\w*\s*\[[^\]]*\]))!(?!=)"
 )
 _TS_FOR_OF_RE = re.compile(
     r"\bfor\s*\([^)]*\bof\s+(?P<arr>[A-Za-z_]\w*)[^)]*\)\s*\{"

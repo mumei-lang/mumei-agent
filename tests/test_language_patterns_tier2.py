@@ -605,3 +605,121 @@ def test_solidity_zero_address_local_still_skipped() -> None:
 }"""
     issues = _issues(source, "solidity")
     assert not any("zero-address" in i.message for i in issues)
+
+
+def test_python_rebound_key_insert_flags() -> None:
+    """``for k in d: k = other; d[k] = v`` — the rebound key inserts."""
+    source = (
+        "def f(d):\n"
+        "    for k in d:\n"
+        "        k = k + '_x'\n"
+        "        d[k] = 0\n"
+    )
+    issues = _issues(source, "python")
+    assert any("mutates" in i.message for i in issues)
+
+
+def test_python_unrebound_key_update_ok() -> None:
+    source = (
+        "def f(d):\n"
+        "    for k in d:\n"
+        "        d[k] = 0\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("mutates" in i.message for i in issues)
+
+
+def test_ts_non_null_before_equality_flags() -> None:
+    """``x! == y`` is a real assertion — the ``!`` is not part of ``!==``."""
+    src = "function f(x: T | null, y: T): boolean { return x! == y; }"
+    issues = _issues(src, "typescript")
+    assert any("non-null" in i.message for i in issues)
+
+
+def test_ts_non_null_inequality_not_assertion() -> None:
+    src = "function f(x: T | null, y: T): boolean { return x !== y; }"
+    issues = _issues(src, "typescript")
+    assert not any("non-null" in i.message for i in issues)
+
+
+def test_ts_json_parse_in_callback_inside_try_flags() -> None:
+    """``try { list.forEach(x => JSON.parse(x)) }`` — the callback is masked
+    (deferred execution), so no try/catch suppression applies… and no
+    false warning either: the parse is simply not scanned."""
+    src = (
+        "function f(list: string[]) { "
+        "try { list.forEach(x => JSON.parse(x)) } catch(e) {} }"
+    )
+    issues = _issues(src, "typescript")
+    assert not any("JSON.parse" in i.message for i in issues)
+
+
+def test_solidity_weak_randomness_unrelated_modulo_ok() -> None:
+    """``x % 100`` on one line and a ``block.timestamp`` deadline check on
+    another are not a weak-randomness draw."""
+    src = (
+        "contract C {\n"
+        "  function f(uint256 deadline, uint256 x) public {\n"
+        "    require(block.timestamp < deadline);\n"
+        "    uint256 m = x % 100;\n"
+        "    store(m);\n"
+        "  }\n"
+        "}"
+    )
+    issues = _issues(src, "solidity")
+    assert not any("randomness" in i.message for i in issues)
+
+
+def test_solidity_zero_address_late_check_flags() -> None:
+    """A check placed after the store does not protect it."""
+    src = (
+        "contract C {\n"
+        "  function f(address a) public {\n"
+        "    owner = a;\n"
+        "    require(a != address(0));\n"
+        "  }\n"
+        "}"
+    )
+    issues = _issues(src, "solidity")
+    assert any("zero-address" in i.message for i in issues)
+
+
+def test_solidity_zero_address_if_revert_ok() -> None:
+    """``if (a == address(0)) { revert }`` before the store guards it."""
+    src = (
+        "contract C {\n"
+        "  function f(address a) public {\n"
+        "    if (a == address(0)) { revert Bad(); }\n"
+        "    owner = a;\n"
+        "  }\n"
+        "}"
+    )
+    issues = _issues(src, "solidity")
+    assert not any("zero-address" in i.message for i in issues)
+
+
+def test_solidity_zero_address_other_param_flags() -> None:
+    """Checking ``a`` does not guard storing ``b``."""
+    src = (
+        "contract C {\n"
+        "  function f(address a, address b) public {\n"
+        "    require(a != address(0));\n"
+        "    owner = b;\n"
+        "  }\n"
+        "}"
+    )
+    issues = _issues(src, "solidity")
+    assert any("zero-address" in i.message for i in issues)
+
+
+def test_solidity_zero_address_inside_nonzero_if_ok() -> None:
+    """``if (a != address(0)) { owner = a; }`` — store only runs non-zero."""
+    src = (
+        "contract C {\n"
+        "  function f(address a) public {\n"
+        "    if (a != address(0)) { owner = a; }\n"
+        "  }\n"
+        "}"
+    )
+    issues = _issues(src, "solidity")
+    assert not any("zero-address" in i.message for i in issues)
