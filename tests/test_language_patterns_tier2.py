@@ -258,11 +258,25 @@ def test_python_list_remove_during_iteration_flags() -> None:
     assert any("mutates `items`" in i.message for i in issues)
 
 
-def test_python_dict_assign_during_items_iteration_flags() -> None:
+def test_python_dict_value_update_via_loop_var_skipped() -> None:
+    """``mapping[k] = 0`` under ``for k in mapping.items()`` rewrites values
+    in place — the key set never changes, so iteration stays safe."""
     source = (
         "def fix(mapping):\n"
         "    for k in mapping.items():\n"
         "        mapping[k] = 0\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("mutates `mapping`" in i.message for i in issues)
+
+
+def test_python_dict_assign_non_loop_key_flags() -> None:
+    """Inserting a NEW key (``mapping[k + 1]``) mid-iteration resizes the
+    dict and raises ``RuntimeError``."""
+    source = (
+        "def grow(mapping):\n"
+        "    for k in mapping.items():\n"
+        "        mapping[k + 1] = 0\n"
     )
     issues = _issues(source, "python")
     assert any("mutates `mapping`" in i.message for i in issues)
@@ -378,3 +392,112 @@ def test_javascript_aliases_to_typescript() -> None:
         "function run(code) {\n    return eval(code);\n}\n", "javascript"
     )
     assert any("`eval`" in i.message for i in issues)
+
+
+def test_solidity_weak_rng_block_not_in_keccak_skipped() -> None:
+    """``block.timestamp`` coexisting with an unrelated keccak256 call does
+    not make the draw weak-randomness."""
+    source = """contract C {
+    function pick(uint256 n) public returns (bytes32) {
+        uint256 t = block.timestamp;
+        return keccak256(abi.encodePacked(n));
+    }
+}"""
+    issues = _issues(source, "solidity")
+    assert not any("randomness" in i.message for i in issues)
+
+
+def test_solidity_weak_rng_block_inside_keccak_flags() -> None:
+    source = """contract C {
+    function pick() public returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(block.timestamp))) % 10;
+    }
+}"""
+    issues = _issues(source, "solidity")
+    assert any("randomness" in i.message for i in issues)
+
+
+def test_solidity_zero_address_per_param() -> None:
+    """A zero-address check on one param must not suppress the other."""
+    source = """contract C {
+    address owner;
+    address sink;
+    function configure(address a, address b) external {
+        require(a != address(0));
+        owner = a;
+        sink = b;
+    }
+}"""
+    issues = _issues(source, "solidity")
+    assert any("zero-address" in i.message and "`b`" in i.message for i in issues)
+
+
+def test_solidity_local_decl_lhs_not_a_store() -> None:
+    """``address owner = newOwner;`` declares a local — it is not a state
+    store requiring a zero-address check."""
+    source = """contract C {
+    function configure(address newOwner) external returns (address) {
+        address owner = newOwner;
+        return owner;
+    }
+}"""
+    issues = _issues(source, "solidity")
+    assert not any("zero-address" in i.message for i in issues)
+
+
+def test_python_dangerous_call_nested_def_attribution() -> None:
+    """A dangerous call inside a nested ``def`` is reported under the
+    nested function's name, not the enclosing one."""
+    source = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        return eval('1')\n"
+        "    return inner\n"
+    )
+    issues = _issues(source, "python")
+    assert any("function `inner`" in i.message for i in issues)
+    assert not any("function `outer`" in i.message for i in issues)
+
+
+def test_typescript_json_parse_inside_try_skipped() -> None:
+    source = (
+        "function f(s: string): number {\n"
+        "    try { return JSON.parse(s).n; } catch { return 0; }\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert not any("JSON.parse" in i.message for i in issues)
+
+
+def test_typescript_json_parse_outside_unrelated_try_flags() -> None:
+    """A try/catch elsewhere in the body no longer suppresses the finding."""
+    source = (
+        "function f(s: string, t: string): number {\n"
+        "    try { risky(); } catch {}\n"
+        "    return JSON.parse(s).n;\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("JSON.parse" in i.message for i in issues)
+
+
+def test_typescript_eval_inside_string_skipped() -> None:
+    source = (
+        "function f(): string {\n"
+        '    const note = "call eval( with care";\n'
+        "    return note;\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert not any("eval" in i.message for i in issues)
+
+
+def test_typescript_inner_html_inside_comment_skipped() -> None:
+    source = (
+        "function f(el: { innerHTML: string }): void {\n"
+        "    // el.innerHTML = payload would be unsafe\n"
+        "    return;\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert not any("innerHTML" in i.message for i in issues)
