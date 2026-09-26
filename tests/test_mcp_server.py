@@ -895,6 +895,7 @@ class TestScanAndFix:
             "migration_hints",
             "healed_files",
             "heal_errors",
+            "trusted_atoms",
         ]
         assert result["contract_terms"]["verification_violations"].startswith(
             "existing-code bugs or unsafe paths"
@@ -908,6 +909,7 @@ class TestScanAndFix:
             "migration_hints": "generated .mm skeleton advice from migrate-suggest or audit --auto-migrate",
             "healed_files": "generated .mm skeletons accepted or rewritten by the self-healing loop",
             "heal_errors": "per-skeleton self-healing failures and diagnostics",
+            "trusted_atoms": "trusted atom declarations in .mm sources that bypass Z3 verification (advisory warnings)",
             "contradiction_type": "stable spec contradiction classifier",
         }
         for key in result["audit_schema"]:

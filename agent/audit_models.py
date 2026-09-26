@@ -26,6 +26,9 @@ class AuditResult:
     migration_hints: list[dict] = field(default_factory=list)
     healed_files: list[str] = field(default_factory=list)
     heal_errors: list[str] = field(default_factory=list)
+    # ``trusted atom`` declarations found in .mm sources — advisory
+    # findings (severity ``warning``) since they bypass Z3 verification.
+    trusted_atoms: list[dict] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
     proof_certificate: dict[str, object] | None = None
     lean_bridge: dict[str, object] | None = None
@@ -54,6 +57,7 @@ class AuditDirectoryResult:
     migration_hints: list[dict] = field(default_factory=list)
     healed_files: list[str] = field(default_factory=list)
     heal_errors: list[str] = field(default_factory=list)
+    trusted_atoms: list[dict] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     skipped_rate_limited_files: list[str] = field(default_factory=list)

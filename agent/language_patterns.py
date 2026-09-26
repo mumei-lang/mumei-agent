@@ -15,6 +15,14 @@ position in the syntax tree) instead of scanning body text — body-text scans
 let a guard in a sibling or outer branch suppress unrelated findings. When
 ``ctx.tree`` is ``None`` (grammar missing or unparseable) they fall back to
 the previous text heuristics, marked ``confidence="medium"``.
+
+Opt-out: a ``mumei:allow`` marker in the file's own comment syntax —
+``# mumei:allow`` for Python, ``// mumei:allow`` for Rust/Go/TypeScript/
+Solidity — suppresses a finding on the same line or the line immediately
+below it. Rust additionally honors ``#[allow(mumei::*)]`` attribute lines,
+which suppress the line below and, when placed on a ``fn`` item, every
+finding inside that function. Findings that carry no source line (call
+sites a text fallback cannot locate) are never suppressed.
 """
 from __future__ import annotations
 
@@ -60,6 +68,47 @@ class PatternContext:
 
 def _node_text(source_bytes: bytes, node) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
+
+
+def _body_offset(
+    haystacks: tuple[str, ...],
+    body: str,
+    used_offsets: set[int],
+    non_code: bytearray | None = None,
+) -> int:
+    """First offset of ``body`` not already claimed, or ``-1``.
+
+    Function bodies handed to the text fallbacks are exact slices of the raw
+    source — or, for the Rust regex fallback, of the comment-stripped copy
+    that shares its offsets — so a hit in either haystack is a source
+    offset. Extractors do not always list functions in source order (named
+    declarations before arrows/literals), so scanning every occurrence and
+    skipping offsets already consumed keeps duplicate bodies attributed to
+    distinct locations. ``non_code`` marks offsets inside string literals
+    or comments — a body whose text also appears inside a literal must not
+    steal that occurrence's location from the real body.
+    """
+    for text in haystacks:
+        start = 0
+        while True:
+            offset = text.find(body, start)
+            if offset < 0:
+                break
+            if offset not in used_offsets and not (
+                non_code is not None and non_code[offset]
+            ):
+                used_offsets.add(offset)
+                return offset
+            start = offset + 1
+    return -1
+
+
+def _issue_line(source: str, body_offset: int, offset_in_body: int) -> int:
+    """1-based line of the construct ``offset_in_body`` chars into a function
+    body that starts at ``body_offset`` in ``source``; 0 when unlocated."""
+    if body_offset < 0 or offset_in_body < 0:
+        return 0
+    return source.count("\n", 0, body_offset + offset_in_body) + 1
 
 
 def _paren_args(text: str, open_paren: int) -> str:
@@ -275,6 +324,7 @@ def _python_mutable_default_issues(
                         f"argument `{param_name}={default_text}` that is shared "
                         "across calls"
                     ),
+                    line=default.lineno,
                 )
             )
     return issues
@@ -304,6 +354,7 @@ def _python_swallow_except_issues(
                                 "`except:` that swallows all exceptions "
                                 "(including KeyboardInterrupt/SystemExit)"
                             ),
+                            line=handler.lineno,
                         )
                     )
                 elif (
@@ -319,6 +370,7 @@ def _python_swallow_except_issues(
                                 f"`{swallow_name}` and does nothing — "
                                 "the error is silently swallowed"
                             ),
+                            line=handler.lineno,
                         )
                     )
     return issues
@@ -344,8 +396,13 @@ _RUST_UNWRAP_RE = re.compile(
 _RUST_NESTED_FN_RE = re.compile(r"\bfn\s+[A-Za-z_]\w*")
 
 _RUST_UNWRAP_METHODS = frozenset({"unwrap", "expect"})
-_RUST_POSITIVE_CHECKS = frozenset({"is_some", "is_ok"})
-_RUST_NEGATIVE_CHECKS = frozenset({"is_err", "is_none"})
+# Standard-library predicates on the receiver: ``then``-polarity checks
+# prove the value variant when true (the composed ``*_and`` predicates keep
+# that polarity); ``else``-polarity checks prove it when false
+# (``is_none_or`` false means Some). ``is_err_and`` takes neither polarity —
+# true proves ``Err`` and false is inconclusive — so it is absent from both.
+_RUST_POSITIVE_CHECKS = frozenset({"is_some", "is_ok", "is_some_and", "is_ok_and"})
+_RUST_NEGATIVE_CHECKS = frozenset({"is_err", "is_none", "is_none_or"})
 _RUST_DIVERGING_MACROS = frozenset({"panic", "unreachable", "todo", "unimplemented"})
 _RUST_ASSERT_MACROS = frozenset({"assert", "debug_assert"})
 # ``async {}`` blocks are deferred like closures; ``unsafe``/``const``
@@ -381,7 +438,19 @@ def _rust_unwrap_guarded(body: str, receiver: str) -> bool:
     recv = re.escape(receiver)
     return bool(
         re.search(
-            rf"\b{recv}\s*\.\s*(?:is_ok|is_some|is_err|is_none)\s*\(", body
+            rf"\b{recv}\s*\.\s*"
+            rf"(?:is_ok|is_some|is_err|is_none|is_ok_and|is_some_and|is_none_or)\s*\(",
+            body,
+        )
+        # ``res.ok()``/``res.err()`` project the receiver into an Option;
+        # the composed checks on that projection keep a provable polarity.
+        or re.search(
+            rf"\b{recv}\s*\.\s*ok\s*\(\s*\)\s*\.\s*"
+            rf"(?:is_some|is_none|is_some_and|is_none_or)\s*\(",
+            body,
+        )
+        or re.search(
+            rf"\b{recv}\s*\.\s*err\s*\(\s*\)\s*\.\s*is_none\s*\(", body
         )
         or re.search(rf"\b(?:if|while)\s+let\b[^{{}};]*\b{recv}\b", body)
         or re.search(rf"\blet\b[^{{}};]*\b{recv}\b[^{{}};]*\belse\b", body)
@@ -398,7 +467,13 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
     known false-negative the scoped path exists to fix.
     """
     issues: list[ForeignSafetyIssue] = []
+    stripped_source = _strip_go_rust_literals_and_comments(source)
+    non_code = _non_code_states(source, "rust")
+    used_offsets: set[int] = set()
     for name, body, _params in _rust_function_scopes(source):
+        offset = _body_offset(
+            (source, stripped_source), body, used_offsets, non_code
+        )
         masked = _mask_rust_nested_fns(_strip_go_rust_literals_and_comments(body))
         for match in _RUST_UNWRAP_RE.finditer(masked):
             receiver = match.group("recv")
@@ -414,6 +489,7 @@ def _rust_unwrap_expect_text_issues(source: str) -> list[ForeignSafetyIssue]:
                         "value is Ok/Some"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, match.start()),
                 )
             )
     return issues
@@ -457,6 +533,44 @@ def _rust_call_parts(node, source_bytes: bytes) -> tuple[str, str] | None:
         if field is None:
             return None
     return _rust_expr_key(source_bytes, value), _node_text(source_bytes, field)
+
+
+def _rust_check_polarity(
+    receiver_key: str, method: str, recv: str
+) -> str | None:
+    """Polarity of ``receiver_key.method(...)`` as a check on ``recv``:
+    ``"then"`` when the call being true proves ``recv`` Ok/Some,
+    ``"else"`` when it being false proves that, ``None`` otherwise.
+
+    Only standard-library method names resolve. ``res.ok()``/
+    ``res.err()`` project a ``Result`` into an ``Option`` — ``err()``
+    flips the value variant, and the composed ``*_and``/``*_or``
+    predicates keep a polarity only where unambiguous. Custom guard
+    functions (``guard(&res)``) and anything resolved through imports or
+    other files stay out of scope by design.
+    """
+    if receiver_key == recv:
+        if method in _RUST_POSITIVE_CHECKS:
+            return "then"
+        if method in _RUST_NEGATIVE_CHECKS:
+            return "else"
+        return None
+    if receiver_key == f"{recv}.ok()":
+        # res.ok() is Some exactly when res is Ok — same polarities apply
+        # to the plain and composed Option checks on the projection.
+        if method in {"is_some", "is_some_and"}:
+            return "then"
+        if method in {"is_none", "is_none_or"}:
+            return "else"
+        return None
+    if receiver_key == f"{recv}.err()":
+        # res.err() is Some exactly when res is Err — the flip: only the
+        # plain predicates are unambiguous on this projection.
+        if method == "is_none":
+            return "then"
+        if method == "is_some":
+            return "else"
+    return None
 
 
 def _rust_pattern_is_value_arm(pattern, source_bytes: bytes) -> bool:
@@ -534,16 +648,16 @@ def _rust_condition_polarity(condition, recv: str, source_bytes: bytes) -> str |
         # Other operators (==, <, ...) fall through to the generic scan —
         # the guard call inside them is not a dominance guard, matching the
         # leniency of the text path.
-    # Generic scan: the first ``recv.<check>()`` in the condition decides.
+    # Generic scan: the first decisive ``recv``-check in the condition
+    # decides; calls that are not provable checks on ``recv`` are skipped.
     stack = [condition]
     while stack:
         node = stack.pop()
         parts = _rust_call_parts(node, source_bytes)
-        if parts is not None and parts[0] == recv:
-            if parts[1] in _RUST_POSITIVE_CHECKS:
-                return "then"
-            if parts[1] in _RUST_NEGATIVE_CHECKS:
-                return "else"
+        if parts is not None:
+            polarity = _rust_check_polarity(parts[0], parts[1], recv)
+            if polarity is not None:
+                return polarity
         stack.extend(node.children)
     return None
 
@@ -784,7 +898,11 @@ def _rust_statement_guards(
                 (c for c in inner.children if c.type == "token_tree"), None
             )
             if token_tree is not None and re.search(
-                rf"{re.escape(recv)}\.(?:{'|'.join(_RUST_POSITIVE_CHECKS)})\(",
+                # Asserted-true must prove the value variant: the direct
+                # positive checks plus the ``ok()``/``err()`` projections.
+                rf"{re.escape(recv)}\.(?:{'|'.join(_RUST_POSITIVE_CHECKS)})\("
+                rf"|{re.escape(recv)}\.ok\(\)\.(?:is_some|is_some_and)\("
+                rf"|{re.escape(recv)}\.err\(\)\.is_none\(",
                 re.sub(r"\s+", "", _node_text(source_bytes, token_tree)),
             ):
                 return True
@@ -1276,6 +1394,7 @@ def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafety
                                 f"`{recv}.{call}()` without a contract that "
                                 "the value is Ok/Some"
                             ),
+                            line=node.start_point[0] + 1,
                         )
                     )
         elif node.type == "macro_invocation":
@@ -1283,9 +1402,8 @@ def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafety
             # (``println!("{}", r.unwrap())``) are not expression nodes, so
             # scan the token text and judge dominance by the macro's own
             # position in the tree.
-            for match in _RUST_UNWRAP_RE.finditer(
-                _node_text(source_bytes, node)
-            ):
+            token_text = _node_text(source_bytes, node)
+            for match in _RUST_UNWRAP_RE.finditer(token_text):
                 recv = re.sub(r"\s+", "", match.group("recv"))
                 call = match.group("call")
                 if _rust_unwrap_is_guarded(node, recv, source_bytes):
@@ -1298,6 +1416,11 @@ def _rust_unwrap_expect_scoped_issues(ctx: PatternContext) -> list[ForeignSafety
                             f"Rust function `{name}` can panic via "
                             f"`{recv}.{call}()` without a contract that "
                             "the value is Ok/Some"
+                        ),
+                        line=(
+                            node.start_point[0]
+                            + 1
+                            + token_text[: match.start()].count("\n")
                         ),
                     )
                 )
@@ -1325,11 +1448,15 @@ def _go_defer_in_loop_issues(
 ) -> list[ForeignSafetyIssue]:
     blocks = _go_function_blocks(source)
     issues: list[ForeignSafetyIssue] = []
+    non_code = _non_code_states(source, "go")
+    used_offsets: set[int] = set()
     for name, body in blocks:
+        offset = _body_offset((source,), body, used_offsets, non_code)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "go")
         )
         deferred = None
+        deferred_offset = -1
         for match in _GO_FOR_HEADER_RE.finditer(masked):
             # The first `{` after `for` may belong to a composite literal in
             # the header (`for _, x := range []int{1,2} {`) — skip balanced
@@ -1348,6 +1475,7 @@ def _go_defer_in_loop_issues(
                 defer_match = re.search(r"\bdefer\s+(.+)", loop_body)
                 if defer_match:
                     deferred = defer_match.group(1).strip()
+                    deferred_offset = opening + 1 + defer_match.start()
                     break
                 if close >= len(masked):
                     break
@@ -1372,6 +1500,7 @@ def _go_defer_in_loop_issues(
                         "returns"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, deferred_offset),
                 )
             )
     return issues
@@ -1476,9 +1605,12 @@ def _typescript_floating_promise_text_issues(source: str) -> list[ForeignSafetyI
         match.group("name") for match in _TS_EXPR_ARROW_RE.finditer(stripped)
     }
     issues: list[ForeignSafetyIssue] = []
+    non_code = _non_code_states(source, "typescript")
+    used_offsets: set[int] = set()
     for name, body in _typescript_function_blocks(source):
         if name in expr_arrow_names:
             continue
+        offset = _body_offset((source,), body, used_offsets, non_code)
         masked = _strip_go_rust_literals_and_comments(
             _mask_nested_function_literals(body, "typescript")
         )
@@ -1503,6 +1635,7 @@ def _typescript_floating_promise_text_issues(source: str) -> list[ForeignSafetyI
                             "promise can reject unobserved"
                         ),
                         confidence="medium",
+                        line=_issue_line(source, offset, match.start()),
                     )
                 )
                 break
@@ -1755,6 +1888,7 @@ def _typescript_floating_promise_scoped_issues(
                             f"`{callee}()` without awaiting it — a floating "
                             "promise can reject unobserved"
                         ),
+                        line=node.start_point[0] + 1,
                     )
                 )
         stack.extend(reversed(node.children))
@@ -1789,7 +1923,10 @@ def _solidity_pattern_issues(
     if _is_solidity_mock_source(source):
         return []
     issues: list[ForeignSafetyIssue] = []
+    used_offsets: set[int] = set()
+    non_code = _non_code_states(source, "solidity")
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
+        offset = _body_offset((source,), raw_body, used_offsets, non_code)
         body = _strip_go_rust_literals_and_comments(raw_body)
         # ``blockhash``/``block.*`` sources are miner-influenced or public —
         # a modulo or keccak256 draw over them is weak randomness. The
@@ -1830,7 +1967,8 @@ def _solidity_pattern_issues(
                     confidence="medium",
                 )
             )
-        if re.search(r"\btx\.origin\b", body):
+        tx_origin = re.search(r"\btx\.origin\b", body)
+        if tx_origin:
             issues.append(
                 ForeignSafetyIssue(
                     function_name=name,
@@ -1841,9 +1979,11 @@ def _solidity_pattern_issues(
                         "`msg.sender`"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, tx_origin.start()),
                 )
             )
-        if re.search(r"\bselfdestruct\s*\(", body):
+        selfdestruct = re.search(r"\bselfdestruct\s*\(", body)
+        if selfdestruct:
             issues.append(
                 ForeignSafetyIssue(
                     function_name=name,
@@ -1854,6 +1994,7 @@ def _solidity_pattern_issues(
                         "plan"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, selfdestruct.start()),
                 )
             )
         for match in _SOLIDITY_LOW_LEVEL_CALL_RE.finditer(body):
@@ -1875,6 +2016,7 @@ def _solidity_pattern_issues(
                         "returned success flag is ignored"
                     ),
                     confidence="medium",
+                    line=_issue_line(source, offset, match.start()),
                 )
             )
     # Zero-address guard: an externally callable function that stores an
@@ -2918,6 +3060,298 @@ def _go_shared_state_issues(
 
 
 # ---------------------------------------------------------------------------
+# Opt-out markers
+# ---------------------------------------------------------------------------
+
+# ``mumei:allow`` in the file's own comment syntax — ``#`` for Python,
+# ``//`` for the C-family languages — suppresses a finding on the same line
+# or the line immediately below the marker.
+_HASH_ALLOW_MARKER_RE = re.compile(r"#\s*mumei:allow\b")
+_SLASH_ALLOW_MARKER_RE = re.compile(r"//\s*mumei:allow\b")
+# A ``#[allow(mumei::*)]`` attribute also counts as a marker line and, when
+# it sits directly on a ``fn`` item (possibly under stacked attributes or
+# doc comments), suppresses every finding inside that function — matching
+# Rust attribute scoping.
+_RUST_ALLOW_ATTR_RE = re.compile(r"#\s*\[\s*allow\s*\(\s*mumei::")
+_RUST_ATTR_LINE_RE = re.compile(r"^\s*(#|//|/\*)")
+_RUST_FN_DECL_RE = re.compile(r"\bfn\s+(\w+)")
+_RUST_RAW_STRING_RE = re.compile(r"r(#*)\"")
+
+# Per-language comment and string delimiters for the lexical-state scan —
+# enough fidelity to tell markers and declarations apart from literal
+# contents without a full lexer.
+_LINE_COMMENT_TOKEN = {
+    "python": "#",
+    "rust": "//",
+    "typescript": "//",
+    "go": "//",
+    "solidity": "//",
+}
+_BLOCK_COMMENT_LANGUAGES = frozenset({"rust", "typescript", "go", "solidity"})
+# Longest delimiters first so triple quotes win over single quotes.
+_STRING_DELIMITERS = {
+    "python": ('"""', "'''", '"', "'"),
+    "rust": ('"',),
+    "typescript": ('"', "'", "`"),
+    "go": ('"', "'", "`"),
+    "solidity": ('"', "'"),
+}
+# Delimiters whose literal may legally contain a raw newline; an unclosed
+# single-line string is a syntax slip and resets at the line boundary
+# instead of masking the rest of the file.
+_MULTILINE_DELIMITERS = {
+    "python": frozenset({'"""', "'''"}),
+    "rust": frozenset({'"'}),
+    "typescript": frozenset({"`"}),
+    "go": frozenset({"`"}),
+    "solidity": frozenset(),
+}
+_CODE, _STRING, _COMMENT = 0, 1, 2
+
+
+def _non_code_states(source: str, language: str) -> bytearray:
+    """Per-offset lexical state: ``_CODE``/``_STRING``/``_COMMENT``.
+
+    One pass over ``source``. Rust ``'`` is never a delimiter (lifetimes);
+    ``r#\"...\"#`` raw strings close on ``\"`` plus their leading hashes and
+    take no ``\\`` escapes. Block comments nest (Rust's do).
+    """
+    states = bytearray(len(source))
+    line_comment = _LINE_COMMENT_TOKEN.get(language)
+    block_comments = language in _BLOCK_COMMENT_LANGUAGES
+    delimiters = _STRING_DELIMITERS.get(language, ('"', "'"))
+    multiline = _MULTILINE_DELIMITERS.get(language, frozenset({"\"", "'"}))
+    n = len(source)
+    i = 0
+    state = _CODE
+    block_depth = 0
+    close = ""
+    close_hashes = 0
+    raw = False
+    while i < n:
+        if state == _STRING:
+            if source[i] == "\n" and close not in multiline:
+                state = _CODE
+                continue
+            if (
+                raw
+                and source[i] == '"'
+                and source.startswith("#" * close_hashes, i + 1)
+            ):
+                end = i + 1 + close_hashes
+                states[i:end] = b"\x01" * (end - i)
+                i = end
+                state = _CODE
+                continue
+            if not raw and source[i] == "\\":
+                states[i : i + 2] = b"\x01" * min(2, n - i)
+                i += 2
+                continue
+            if source.startswith(close, i):
+                states[i : i + len(close)] = b"\x01" * len(close)
+                i += len(close)
+                state = _CODE
+                continue
+            states[i] = _STRING
+            i += 1
+            continue
+        if state == _COMMENT:
+            if block_depth == 0 and source[i] == "\n":
+                state = _CODE
+                continue
+            states[i] = _COMMENT
+            if block_depth:
+                if source.startswith("/*", i):
+                    states[i + 1] = _COMMENT
+                    block_depth += 1
+                    i += 2
+                    continue
+                if source.startswith("*/", i):
+                    states[i + 1] = _COMMENT
+                    block_depth -= 1
+                    i += 2
+                    if not block_depth:
+                        state = _CODE
+                    continue
+            i += 1
+            continue
+        if line_comment and source.startswith(line_comment, i):
+            state = _COMMENT
+            continue
+        if block_comments and source.startswith("/*", i):
+            state = _COMMENT
+            block_depth = 1
+            continue
+        if language == "rust":
+            raw_match = _RUST_RAW_STRING_RE.match(source, i)
+            if raw_match is not None:
+                state = _STRING
+                raw = True
+                close = '"'
+                close_hashes = len(raw_match.group(1))
+                states[i : raw_match.end()] = (
+                    b"\x01" * (raw_match.end() - i)
+                )
+                i = raw_match.end()
+                continue
+        opened = False
+        for delim in delimiters:
+            if source.startswith(delim, i):
+                state = _STRING
+                raw = False
+                close_hashes = 0
+                close = delim
+                states[i : i + len(delim)] = b"\x01" * len(delim)
+                i += len(delim)
+                opened = True
+                break
+        if not opened:
+            i += 1
+    return states
+
+
+def _suppression_markers(
+    source: str, language: str
+) -> tuple[set[int], list[tuple[int, int, str]], dict[str, int]]:
+    """``(marker_lines, allowed_fn_ranges, fn_name_counts)`` for opt-out
+    markers in ``source``.
+
+    ``allowed_fn_ranges`` entries are ``(decl_line, end_line, name)`` — the
+    ``fn`` item a ``#[allow(mumei::*)]`` attribute decorates, bounded by the
+    next ``fn`` declaration at the same or shallower brace depth so nested
+    functions stay inside the parent's span while a same-named sibling is
+    not suppressed.
+    """
+    comment_re = (
+        _HASH_ALLOW_MARKER_RE
+        if language == "python"
+        else _SLASH_ALLOW_MARKER_RE
+    )
+    states = _non_code_states(source, language)
+    marker_lines: set[int] = set()
+    allowed_ranges: list[tuple[int, int, str]] = []
+    lines = source.splitlines()
+    line_starts = [0]
+    for match in re.finditer("\n", source):
+        line_starts.append(match.end())
+    fn_decls: list[tuple[int, int, str, int]] = []
+    depth = 0
+    if language == "rust":
+        for index, text in enumerate(lines):
+            base = line_starts[index]
+            for match in _RUST_FN_DECL_RE.finditer(text):
+                pos = base + match.start()
+                if states[pos] != _CODE:
+                    continue
+                column = match.start()
+                inner = sum(
+                    (1 if char == "{" else -1)
+                    for col, char in enumerate(text[:column])
+                    if states[base + col] == _CODE and char in "{}"
+                )
+                fn_decls.append(
+                    (index + 1, pos, match.group(1), depth + inner)
+                )
+            for col, char in enumerate(text):
+                if states[base + col] == _CODE:
+                    depth += 1 if char == "{" else -1 if char == "}" else 0
+    fn_name_counts: dict[str, int] = {}
+    for _line_no, _pos, fn_name, _depth in fn_decls:
+        fn_name_counts[fn_name] = fn_name_counts.get(fn_name, 0) + 1
+    for index, text in enumerate(lines):
+        comment_match = comment_re.search(text)
+        if (
+            comment_match
+            and states[line_starts[index] + comment_match.start()] != _STRING
+        ):
+            marker_lines.add(index + 1)
+        attr_match = _RUST_ALLOW_ATTR_RE.search(text)
+        if (
+            language != "rust"
+            or attr_match is None
+            or states[line_starts[index] + attr_match.start()] != _CODE
+        ):
+            continue
+        marker_lines.add(index + 1)
+        cursor = index + 1
+        while cursor < len(lines) and (
+            not lines[cursor].strip() or _RUST_ATTR_LINE_RE.match(lines[cursor])
+        ):
+            cursor += 1
+        if cursor >= len(lines):
+            continue
+        fn_match = _RUST_FN_DECL_RE.search(lines[cursor])
+        if fn_match is None:
+            continue
+        decl_pos = line_starts[cursor] + fn_match.start()
+        if states[decl_pos] != _CODE:
+            continue
+        decl_line = cursor + 1
+        decl_depth = next(
+            (decl[3] for decl in fn_decls if decl[1] == decl_pos), 0
+        )
+        end_line = next(
+            (
+                line_no
+                for line_no, off, _name, decl_d in fn_decls
+                if off > decl_pos and decl_d <= decl_depth
+            ),
+            len(lines) + 1,
+        )
+        allowed_ranges.append((decl_line, end_line, fn_match.group(1)))
+    return marker_lines, allowed_ranges, fn_name_counts
+
+
+def _suppress_pattern_issues(
+    issues: list[ForeignSafetyIssue], source: str, language: str
+) -> list[ForeignSafetyIssue]:
+    """Drop findings a ``mumei:allow`` marker covers — every registered
+    pattern gets the opt-out for free through this post-filter."""
+    if not issues or "mumei:" not in source:
+        return issues
+    marker_lines, allowed_ranges, fn_name_counts = _suppression_markers(
+        source, language
+    )
+    if not marker_lines and not allowed_ranges:
+        return issues
+    return [
+        issue
+        for issue in issues
+        if not _allowed_by_attribute(issue, allowed_ranges, fn_name_counts)
+        and (
+            issue.line <= 0
+            or (
+                issue.line not in marker_lines
+                and issue.line - 1 not in marker_lines
+            )
+        )
+    ]
+
+
+def _allowed_by_attribute(
+    issue: ForeignSafetyIssue,
+    allowed_ranges: list[tuple[int, int, str]],
+    fn_name_counts: dict[str, int],
+) -> bool:
+    """True when ``issue`` sits inside an ``#[allow(mumei::*)]`` function.
+
+    Line-numbered findings must fall inside the decorated ``fn``'s
+    declaration-to-next-``fn`` span so a same-named sibling stays flagged;
+    an unlocatable finding is suppressed only when its function name is
+    unambiguous in the file.
+    """
+    if issue.line > 0:
+        return any(
+            issue.function_name == name and start <= issue.line < end
+            for start, end, name in allowed_ranges
+        )
+    return any(
+        issue.function_name == name and fn_name_counts.get(name, 0) == 1
+        for _start, _end, name in allowed_ranges
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -3011,12 +3445,19 @@ def language_pattern_issues(
         language=normalized, tree=tree, source_bytes=source_bytes
     )
     issues: list[ForeignSafetyIssue] = []
-    seen: set[tuple[str, str]] = set()
     for pattern in LANGUAGE_PATTERNS:
         if normalized in pattern.languages:
-            for issue in pattern.detect(source, ctx):
-                key = (issue.function_name, issue.message)
-                if key not in seen:
-                    seen.add(key)
-                    issues.append(issue)
-    return issues
+            issues.extend(pattern.detect(source, ctx))
+    # Suppress before deduping: two identical calls where only the first is
+    # marked collapse to one (function_name, message) pair — suppressing
+    # after dedup could drop the surviving marked copy and erase the
+    # unmarked call's warning entirely.
+    issues = _suppress_pattern_issues(issues, source, normalized)
+    seen: set[tuple[str, str]] = set()
+    deduped: list[ForeignSafetyIssue] = []
+    for issue in issues:
+        key = (issue.function_name, issue.message)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(issue)
+    return deduped

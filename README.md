@@ -50,7 +50,7 @@ Use `uv run mumei-agent --help` for the full command-line help. Configuration, p
 
 The stable audit keys are `spec_health_issues`, `verification_violations`,
 `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`,
-`healed_files`, and `heal_errors`.
+`healed_files`, `heal_errors`, and `trusted_atoms`.
 
 ```bash
 uv run mumei-agent audit --code-file src/example.py --auto-migrate --auto-heal
