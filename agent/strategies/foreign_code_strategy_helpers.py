@@ -3906,6 +3906,15 @@ def _detect_block_safety_issues(
                     else None
                 ),
             )
+        if label in {"TypeScript", "JavaScript"}:
+            # Intermediate ``x << n`` statements never appear in return
+            # expressions — scan the body for shift-amount issues too.
+            block_cast_sub_issues = _shift_amount_issues(
+                name,
+                _strip_go_rust_literals_and_comments(body),
+                label,
+                local_names=local_names,
+            )
         block_cast_sub_msgs = {i.message for i in block_cast_sub_issues}
         for expression in expressions:
             expr_issues = _issues_for_expression(
@@ -7403,6 +7412,24 @@ def _shift_amount_guarded(
     )
     if assigns:
         last = assigns[-1]
+        # A mask inside a conditional block (``if flag { n &= 63 }``) only
+        # bounds ``n`` on that path — it must be a top-level statement.
+        depth = 0
+        in_str: str | None = None
+        for ch in expression[: last.start()]:
+            if in_str:
+                if ch == in_str:
+                    in_str = None
+            elif ch in "\"'`":
+                in_str = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth = max(0, depth - 1)
+        if depth != 0:
+            assigns = []
+    if assigns:
+        last = assigns[-1]
         compound, rhs = last.group("compound"), last.group("rhs")
         mask = (
             re.match(r"\s*(\d+)\s*$", rhs)
@@ -7468,6 +7495,14 @@ def _shift_amount_issues(
     if label == "Python":
         return []  # arbitrary-precision ints never lose bits on shift
     known = known_constants or {}
+
+    def _unsigned_amount(name: str) -> bool:
+        types = raw_param_types if raw_param_types is not None else param_types
+        if types and name in types:
+            bits = _integer_type_bits(label, types[name])
+            return bits is not None and not bits[1]
+        return False
+
     issues: list[ForeignSafetyIssue] = []
     seen: set[tuple[str, str]] = set()
     for match in _SHIFT_AMOUNT_RE.finditer(expression):
@@ -7475,7 +7510,6 @@ def _shift_amount_issues(
         amount = match.group("amount")
         if base is None or amount is None or (base, amount) in seen:
             continue
-        seen.add((base, amount))
         if label in {"TypeScript", "JavaScript"}:
             # ECMAScript << and >> coerce to int32 and mask the count to 5 bits.
             width = 32
@@ -7506,13 +7540,26 @@ def _shift_amount_issues(
             continue
         if amount.startswith("("):
             # ``x << (n & 63)`` — a mask inside the parens bounds the amount;
-            # anything else stays advisory (no contract target).
+            # anything else stays advisory (no contract target). ``%`` keeps
+            # the left operand's sign in Go/Rust/ECMAScript, so a ``%`` mask
+            # only bounds a signed amount when ``amount >= 0`` is proven.
             inner = amount[1:-1]
             mask = re.search(r"(?P<op>[&%])\s*(?P<bound>\d+)", inner)
             if mask:
                 bound = int(mask.group("bound"))
-                # ``n & B`` yields ≤ B; ``n % B`` yields < B.
-                if bound < width if mask.group("op") == "&" else bound <= width:
+                masked_var = re.match(r"\s*([A-Za-z_]\w*)", inner)
+                nonneg_ok = mask.group("op") == "&" or (
+                    masked_var is not None
+                    and (
+                        _nonnegative_guarded(
+                            expression, masked_var.group(1), match.start()
+                        )
+                        or _unsigned_amount(masked_var.group(1))
+                    )
+                )
+                if bound < width if mask.group(
+                    "op"
+                ) == "&" else bound <= width and nonneg_ok:
                     continue
             cmp_inner = re.search(r"<\s*(\d+)", inner)
             if cmp_inner and int(cmp_inner.group(1)) <= width:
@@ -7573,6 +7620,9 @@ def _shift_amount_issues(
                 confidence="high" if amount_is_param else "medium",
             )
         )
+        # Dedupe only emitted issues — a guarded first occurrence must not
+        # suppress a later unguarded ``base << amount``.
+        seen.add((base, amount))
     return issues
 
 
@@ -7608,12 +7658,16 @@ _SENTINEL_NESTED_INDEX_RES: dict[str, re.Pattern[str]] = {
 }
 
 
-def _sentinel_guarded(body: str, var: str, use_pos: int, kind: str) -> bool:
+def _sentinel_guarded(
+    body: str, var: str, use_pos: int, kind: str, since: int = 0
+) -> bool:
     """Whether a check on ``var`` (a ``-1``/``undefined`` sentinel result)
     dominates the use at ``use_pos`` — the check must ``&&``-join the use,
     enclose it in its ``if`` body, sit inside ``require``/``assert``, or be
     an early-exit ``if`` on the *bad* direction. A comparison whose branch
-    closed before the use does not reach it."""
+    closed before the use does not reach it. ``since`` ignores checks that
+    precede the sentinel-producing assignment — ``if i < 0 { return }``
+    placed before ``i = s.find(…)`` protects a different value."""
     if kind == "minus1":
         safe_re = re.compile(
             rf"\b{re.escape(var)}\s*!=+\s*-\s*1\b"
@@ -7639,12 +7693,12 @@ def _sentinel_guarded(body: str, var: str, use_pos: int, kind: str) -> bool:
         )
     if any(
         _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
-        for m in safe_re.finditer(body, 0, use_pos)
+        for m in safe_re.finditer(body, since, use_pos)
     ):
         return True
     if any(
         _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
-        for m in bad_re.finditer(body, 0, use_pos)
+        for m in bad_re.finditer(body, since, use_pos)
     ):
         return True
     if kind == "undefined":
@@ -7656,12 +7710,12 @@ def _sentinel_guarded(body: str, var: str, use_pos: int, kind: str) -> bool:
         falsy = re.compile(rf"\bif\s*\(\s*!\s*{re.escape(var)}\b")
         if any(
             _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
-            for m in truthy.finditer(body, 0, use_pos)
+            for m in truthy.finditer(body, since, use_pos)
         ):
             return True
         if any(
             _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
-            for m in falsy.finditer(body, 0, use_pos)
+            for m in falsy.finditer(body, since, use_pos)
         ):
             return True
     return False
@@ -7681,7 +7735,9 @@ def _sentinel_index_issues(
                 rf"\[[^\]\n]*\b{re.escape(var)}\b[^\]\n]*\]"
             )
             for use in unsafe.finditer(body, match.end()):
-                if _sentinel_guarded(body, var, use.start(), "minus1"):
+                if _sentinel_guarded(
+                    body, var, use.start(), "minus1", since=match.end()
+                ):
                     continue
                 issues.append(
                     ForeignSafetyIssue(
@@ -7705,7 +7761,9 @@ def _sentinel_index_issues(
                 rf"|\b{re.escape(var)}\s*[+\-*/%]"
             )
             for use in unsafe.finditer(body, match.end()):
-                if _sentinel_guarded(body, var, use.start(), "undefined"):
+                if _sentinel_guarded(
+                    body, var, use.start(), "undefined", since=match.end()
+                ):
                     continue
                 issues.append(
                     ForeignSafetyIssue(
