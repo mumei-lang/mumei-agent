@@ -1738,67 +1738,67 @@ def _rust_unsigned_variables(source: str, body: str, function_name: str) -> set[
                 unsigned.add(param_match.group("name"))
 
     body_stripped = _strip_go_rust_literals_and_comments(body)
+    # Single source-ordered pass — a ``let`` binding may only reference
+    # earlier bindings, so forward order already resolves shadowing. A
+    # fixed-point loop over all declarations would never settle for
+    # alternating typed redeclarations (``let x: u8 = …; let x: i8 = …``
+    # adds then discards ``x`` on every pass).
+    for match in re.finditer(
+        r"let\s+(?:mut\s+)?(?P<name>\w+)\s*(?::\s*(?P<typ>[^;=]+))?\s*=\s*(?P<rhs>[^;]+);",
+        body_stripped,
+        re.DOTALL,
+    ):
+        name = match.group("name")
+        typ = (match.group("typ") or "").strip()
+        rhs = match.group("rhs").strip()
+        if typ:
+            raw_type = typ.removeprefix("&mut ").removeprefix("&")
+            if re.sub(r"\s+", "", raw_type).lower() in _RUST_UNSIGNED_TYPES:
+                unsigned.add(name)
+            else:
+                # A typed redeclaration (``let x: i8 = …``) shadows the
+                # earlier unsigned binding — the name no longer denotes
+                # an unsigned value.
+                unsigned.discard(name)
+            continue
+        provably_unsigned = (
+            # Atomic fetch ops return the previous unsigned value.
+            re.search(r"\.\s*fetch_[a-z]+\s*\(", rhs) is not None
+            # ``expr as uN`` casts to unsigned.
+            or re.search(r"\bas\s+u(?:8|16|32|64|128|size)\b", rhs)
+            is not None
+            # Typed unsigned literals (``5u8``).
+            or re.fullmatch(
+                r"\d+u(?:8|16|32|64|128|size)", rhs
+            )
+            is not None
+            # Another known-unsigned identifier.
+            or (
+                re.fullmatch(r"[A-Za-z_]\w*", rhs) is not None
+                and rhs in unsigned
+            )
+            # Arithmetic on a known-unsigned left operand keeps its
+            # type (``let x = x + 1`` where ``x: u64`` is still ``u64``).
+            or (
+                re.match(
+                    r"[A-Za-z_]\w*\s*(?:[+\-*/%&|^]|<<|>>)", rhs
+                )
+                is not None
+                and re.match(r"[A-Za-z_]\w*", rhs).group(0) in unsigned
+            )
+        )
+        if provably_unsigned:
+            unsigned.add(name)
+        else:
+            # Untyped redeclaration from an rhs that is not provably
+            # unsigned (e.g. ``let x = signed_call()``) shadows the
+            # earlier binding into an unknown-type value.
+            unsigned.discard(name)
+    # Closure parameters used in an addition with a known-unsigned operand.
+    # This loop only ever adds names, so it is monotone and terminates.
     changed = True
     while changed:
         changed = False
-        for match in re.finditer(
-            r"let\s+(?:mut\s+)?(?P<name>\w+)\s*(?::\s*(?P<typ>[^;=]+))?\s*=\s*(?P<rhs>[^;]+);",
-            body_stripped,
-            re.DOTALL,
-        ):
-            name = match.group("name")
-            typ = (match.group("typ") or "").strip()
-            rhs = match.group("rhs").strip()
-            if typ:
-                raw_type = typ.removeprefix("&mut ").removeprefix("&")
-                if re.sub(r"\s+", "", raw_type).lower() in _RUST_UNSIGNED_TYPES:
-                    if name not in unsigned:
-                        unsigned.add(name)
-                        changed = True
-                elif name in unsigned:
-                    # A typed redeclaration (``let x: i8 = …``) shadows the
-                    # earlier unsigned binding — the name no longer denotes
-                    # an unsigned value.
-                    unsigned.discard(name)
-                    changed = True
-                continue
-            provably_unsigned = (
-                # Atomic fetch ops return the previous unsigned value.
-                re.search(r"\.\s*fetch_[a-z]+\s*\(", rhs) is not None
-                # ``expr as uN`` casts to unsigned.
-                or re.search(r"\bas\s+u(?:8|16|32|64|128|size)\b", rhs)
-                is not None
-                # Typed unsigned literals (``5u8``).
-                or re.fullmatch(
-                    r"\d+u(?:8|16|32|64|128|size)", rhs
-                )
-                is not None
-                # Another known-unsigned identifier.
-                or (
-                    re.fullmatch(r"[A-Za-z_]\w*", rhs) is not None
-                    and rhs in unsigned
-                )
-                # Arithmetic on a known-unsigned left operand keeps its
-                # type (``let x = x + 1`` where ``x: u64`` is still ``u64``).
-                or (
-                    re.match(
-                        r"[A-Za-z_]\w*\s*(?:[+\-*/%&|^]|<<|>>)", rhs
-                    )
-                    is not None
-                    and re.match(r"[A-Za-z_]\w*", rhs).group(0) in unsigned
-                )
-            )
-            if provably_unsigned:
-                if name not in unsigned:
-                    unsigned.add(name)
-                    changed = True
-            elif name in unsigned:
-                # Untyped redeclaration from an rhs that is not provably
-                # unsigned (e.g. ``let x = signed_call()``) shadows the
-                # earlier binding into an unknown-type value.
-                unsigned.discard(name)
-                changed = True
-        # Closure parameters used in an addition with a known-unsigned operand.
         for match in re.finditer(
             r"\|\s*(?P<param>\w+)\s*\|\s*(?P<body>[^;\n]+)",
             body_stripped,
@@ -3850,8 +3850,7 @@ def _detect_block_safety_issues(
             redeclared = {
                 p
                 for p in param_names
-                if p in local_names
-                and re.search(
+                if re.search(
                     (
                         rf"\blet\s+(?:mut\s+)?{re.escape(p)}\b"
                         if label == "Rust"
@@ -3863,15 +3862,24 @@ def _detect_block_safety_issues(
                     body,
                 )
             }
-            cast_sub_local_names = local_names - (param_names - redeclared)
+            # ``local_names`` is only populated when per-function length data
+            # exists — a typed shadowing declaration must still suppress the
+            # stale parameter type even when ``local_names`` is empty.
+            cast_sub_local_names = (local_names | redeclared) - (
+                param_names - redeclared
+            )
             for p in redeclared:
                 block_param_types.pop(p, None)
                 block_raw_types.pop(p, None)
             block_cast_sub_issues = _cast_and_subtraction_issues(
                 name,
                 (
+                    # Masked (position-preserving) text — comments and
+                    # literals otherwise produce phantom cast/subtraction
+                    # matches. The same ``//``/``/* */``/string syntax makes
+                    # the Go/Rust stripper correct for Solidity too.
                     _strip_go_rust_literals_and_comments(body)
-                    if label == "Rust"
+                    if label in {"Rust", "Solidity"}
                     else body
                 ),
                 label,
@@ -3881,8 +3889,8 @@ def _detect_block_safety_issues(
                 raw_param_types=block_raw_types,
                 local_names=cast_sub_local_names,
                 solidity_default_checks=sub_default_checks,
-                subtraction_text=(
-                    _unchecked_block_bodies(body)
+                subtraction_regions=(
+                    _unchecked_block_spans(body)
                     if (
                         label == "Solidity"
                         and solidity_checked_arithmetic
@@ -6719,6 +6727,111 @@ def _has_top_level_or(text: str) -> bool:
     return False
 
 
+def _has_top_level_and(text: str) -> bool:
+    """Whether ``&&`` appears at paren depth 0 in ``text``."""
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "&" and depth == 0 and text[i : i + 2] == "&&":
+            return True
+        i += 1
+    return False
+
+
+def _has_top_level_ternary(text: str) -> bool:
+    """Whether ``?`` appears at paren depth 0 in ``text`` — a ternary
+    condition selects between branches, so a comparison inside it is not a
+    guaranteed conjunct."""
+    depth = 0
+    in_str: str | None = None
+    for ch in text:
+        if in_str:
+            if ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "?" and depth == 0:
+            return True
+    return False
+
+
+def _guard_condition(
+    expression: str, match: re.Match[str], brace_pos: int
+) -> tuple[str, int] | None:
+    """``(condition_text, absolute_start)`` of the ``if``/``while``
+    condition enclosing ``match``'s comparison, with one enclosing
+    ``( … )`` pair unwrapped — ``None`` when no condition keyword precedes
+    the block or the comparison sits nested inside the condition's parens
+    (e.g. ``if f(a >= b) {``), where it is not itself a guard conjunct."""
+    kw_end = None
+    for kw in re.finditer(r"\b(?:if|while)\b", expression[: match.start()]):
+        kw_end = kw.end()
+    if kw_end is None:
+        return None
+    region = expression[kw_end:brace_pos]
+    if region.lstrip().startswith("("):
+        open_paren = kw_end + (len(region) - len(region.lstrip()))
+        cond_start = open_paren + 1
+        cond = _paren_body(expression, open_paren)
+    else:
+        cond_start = kw_end
+        cond = region
+    rel = match.start() - cond_start
+    if rel < 0 or rel + (match.end() - match.start()) > len(cond):
+        return None
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < rel:
+        ch = cond[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    return cond, cond_start
+
+
+def _block_diverges(block: str) -> bool:
+    """Whether the block's top-level statements always diverge. A bare
+    ``if (c) return`` (no braces) is conditional, not guaranteed — the
+    divergence keyword must not be governed by an unbraced ``if``/``while``/
+    ``for``/``else`` in the same statement."""
+    top = _block_top_level_text(block)
+    for match in _GUARD_DIVERGENCE_RE.finditer(top):
+        prefix = top[: match.start()]
+        tail = prefix[prefix.rfind(";") + 1 :]
+        if not re.search(r"\b(?:if|else|while|for|elif)\b", tail):
+            return True
+    return False
+
+
 def _block_top_level_text(block: str) -> str:
     """Drop the contents of nested ``{ … }`` spans so only statements at the
     block's own depth remain — a divergence inside a nested conditional does
@@ -6800,27 +6913,74 @@ def _guard_mechanism(
                 return None
         return "asserted"
     between = expression[match.end() : use_pos]
-    if "||" in between:
+    brace_rel = between.find("{")
+    cond = cond_start = None
+    brace_pos = match.end() + brace_rel if brace_rel != -1 else -1
+    if brace_rel != -1:
+        gc = _guard_condition(expression, match, brace_pos)
+        if gc is not None:
+            cond, cond_start = gc
+            if _has_top_level_ternary(cond):
+                # ``if (a >= b ? x : y) { a - b }`` — the ternary condition
+                # is not a conjunctive guard.
+                cond = None
+
+    def _bare_position(rel_pos: int) -> bool:
+        """Whether a ``between`` offset is a real statement-level operator —
+        not inside the enclosing if/while condition and not inside parens."""
+        abs_pos = match.end() + rel_pos
+        if cond_start is not None and cond_start <= abs_pos < brace_pos:
+            return False
+        depth = 0
+        for ch in between[:rel_pos]:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+        return depth == 0
+
+    if any(_bare_position(m.start()) for m in re.finditer(r"\|\|", between)):
         return None
-    qpos = between.find("?")
-    cpos = between.rfind(":")
+    qpos = next(
+        (m.start() for m in re.finditer(r"\?", between) if _bare_position(m.start())),
+        -1,
+    )
+    cpos = next(
+        (
+            m.start()
+            for m in reversed(list(re.finditer(r":", between)))
+            if _bare_position(m.start())
+        ),
+        -1,
+    )
     if qpos != -1:
         return "ternary_true" if cpos == -1 or cpos < qpos else "ternary_false"
-    brace_rel = between.find("{")
     if brace_rel != -1:
         before_brace = between[:brace_rel]
         if ";" in before_brace or "}" in before_brace:
             return None
-        brace_pos = match.end() + brace_rel
         block = _balanced_brace_body(expression, brace_pos)
         block_end = brace_pos + len(block) + 1
         if use_pos < block_end:
+            if cond is None:
+                # ``if f(a >= b) { a - b }`` — the comparison is a call
+                # argument, not the guard conjunct.
+                return None
+            # A top-level ``||`` makes the comparison one disjunct — the
+            # block still runs when only the other disjunct holds.
+            if _has_top_level_or(cond):
+                return None
             return "inside"
         whole_condition = _GUARD_IF_RE.search(
             expression[: match.start()]
         ) and re.fullmatch(r"\s*\)?\s*", before_brace)
         if whole_condition:
-            if _GUARD_DIVERGENCE_RE.search(_block_top_level_text(block)):
+            if _block_diverges(block):
+                # ``if (a < b && flag) { return }`` leaves ``a >= b``
+                # unproven on the ``flag``-false exit path — a top-level
+                # ``&&`` in the exited-on condition is not guaranteed.
+                if cond is None or _has_top_level_and(cond):
+                    return None
                 return "early_exit"
             else_match = _GUARD_ELSE_RE.match(expression, block_end + 1)
             if else_match is not None:
@@ -6828,12 +6988,15 @@ def _guard_mechanism(
                     expression, else_match.end() - 1
                 )
                 else_end = else_match.end() + len(else_block)
-                if use_pos >= else_end and _GUARD_DIVERGENCE_RE.search(
-                    _block_top_level_text(else_block)
-                ):
+                if use_pos >= else_end and _block_diverges(else_block):
+                    if cond is None or _has_top_level_or(cond):
+                        return None
                     return "else_exit"
         return None
-    if "&&" in between:
+    # ``a >= b && a - b`` — the ``&&`` must join the use into the same
+    # expression; a ``;``/brace boundary means the ``&&`` belongs to a
+    # different statement (``a >= b && flag; a - b`` is unguarded).
+    if "&&" in between and not re.search(r"[;{}]", between):
         return "shortcircuit"
     return None
 
@@ -6894,7 +7057,7 @@ def _cast_and_subtraction_issues(
     raw_param_types: dict[str, str] | None = None,
     local_names: set[str] | None = None,
     solidity_default_checks: bool = False,
-    subtraction_text: str | None = None,
+    subtraction_regions: list[tuple[int, int]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Run the narrowing-cast and unsigned-subtraction checks over ``text``.
 
@@ -6902,9 +7065,10 @@ def _cast_and_subtraction_issues(
     enclosing statements (``if a >= b { … return a - b }``) are visible to
     ``_subtraction_guarded`` there, so callers reconcile per-expression
     results against the body-level result rather than reporting both.
-    ``subtraction_text`` overrides the text the subtraction check runs on —
-    Solidity callers scope it to ``unchecked { }`` regions, where ≥0.8
-    arithmetic actually wraps.
+    ``subtraction_regions`` restricts which ``a - b`` matches are reported
+    to spans inside ``unchecked { }`` regions (the only places ≥0.8 Solidity
+    arithmetic wraps) while keeping the full ``text`` — enclosing ``require``
+    guards stay visible to the dominance check.
     """
     issues = _narrowing_cast_issues(
         function_name,
@@ -6918,7 +7082,7 @@ def _cast_and_subtraction_issues(
     issues.extend(
         _unsigned_subtraction_issues(
             function_name,
-            subtraction_text if subtraction_text is not None else text,
+            text,
             label,
             known_constants=known_constants or {},
             unsigned_locals=unsigned_locals,
@@ -6926,6 +7090,7 @@ def _cast_and_subtraction_issues(
             raw_param_types=raw_param_types,
             local_names=local_names,
             solidity_default_checks=solidity_default_checks,
+            allowed_regions=subtraction_regions,
         )
     )
     return issues
@@ -6942,10 +7107,13 @@ def _unsigned_subtraction_issues(
     raw_param_types: dict[str, str] | None,
     local_names: set[str] | None,
     solidity_default_checks: bool,
+    allowed_regions: list[tuple[int, int]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Flag ``a - b`` on unsigned operands where ``a < b`` is possible — the
     i64 contract model treats subtraction as safe, but on ``uint``/``usize`` it
-    wraps (Go, Solidity <0.8) or panics (Rust debug)."""
+    wraps (Go, Solidity <0.8) or panics (Rust debug). ``allowed_regions``
+    restricts which matches are reported (Solidity ``unchecked { }`` spans)
+    without hiding the enclosing guards from ``_subtraction_guarded``."""
     if label not in {"Go", "Rust", "Solidity"}:
         return []
     if label == "Solidity" and solidity_default_checks:
@@ -6953,6 +7121,10 @@ def _unsigned_subtraction_issues(
     issues: list[ForeignSafetyIssue] = []
     seen: set[tuple[str, str]] = set()
     for match in _UNSIGNED_SUBTRACTION_RE.finditer(expression):
+        if allowed_regions is not None and not any(
+            start <= match.start() < end for start, end in allowed_regions
+        ):
+            continue
         left, right = match.group("left"), match.group("right")
         if left == right or (left, right) in seen:
             continue
@@ -8403,6 +8575,18 @@ def _unchecked_block_bodies(body: str) -> str:
         _balanced_brace_body(body, match.end() - 1)
         for match in _UNCHECKED_BLOCK_RE.finditer(body)
     )
+
+
+def _unchecked_block_spans(body: str) -> list[tuple[int, int]]:
+    """``(start, end)`` content spans of every ``unchecked { … }`` region —
+    positions are in ``body`` coordinates so they filter matches against
+    the full body text (guards outside the region stay visible)."""
+    spans: list[tuple[int, int]] = []
+    for match in _UNCHECKED_BLOCK_RE.finditer(body):
+        open_brace = match.end() - 1
+        start = open_brace + 1
+        spans.append((start, start + len(_balanced_brace_body(body, open_brace))))
+    return spans
 
 def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
     ts_blocks = tree_sitter_extract.function_blocks(source, "typescript", _safe_identifier)
