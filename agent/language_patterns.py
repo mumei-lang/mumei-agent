@@ -2535,15 +2535,8 @@ def _go_shared_state_issues(
             ):
                 shared_vars.add(m.group("name"))
     issues: list[ForeignSafetyIssue] = []
-    for name, raw_body in _go_function_blocks(source):
-        body = _strip_go_rust_literals_and_comments(raw_body)
 
-        def atomic_write(name_re: str, body=body) -> bool:
-            return re.search(
-                rf"\batomic\.\w+\s*\(\s*&{name_re}\b", body
-            ) is not None
-
-        flagged = False
+    def check_package_writes(name: str, body: str) -> None:
         for var in sorted(shared_vars):
             # ``var :=`` / ``var var`` inside the body declares a local
             # that shadows the package variable — writes are not shared.
@@ -2552,23 +2545,26 @@ def _go_shared_state_issues(
             ):
                 continue
             for write in _go_unguarded_writes(body, re.escape(var)):
-                if not atomic_write(re.escape(var)):
-                    issues.append(
-                        ForeignSafetyIssue(
-                            function_name=name,
-                            message=(
-                                f"Go function `{name}` writes package-level "
-                                f"`{var}` without holding a mutex — this file "
-                                "declares `sync.(RW)Mutex` fields, so the "
-                                "write races with other callers"
-                            ),
-                            confidence="medium",
-                        )
+                if re.search(
+                    rf"\batomic\.\w+\s*\(\s*&{re.escape(var)}\b", body
+                ):
+                    continue
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Go function `{name}` writes package-level "
+                            f"`{var}` without holding a mutex — this file "
+                            "declares `sync.(RW)Mutex` fields, so the "
+                            "write races with other callers"
+                        ),
+                        confidence="medium",
                     )
-                    flagged = True
-                    break
-            if flagged:
-                break
+                )
+                return
+
+    for name, raw_body in _go_function_blocks(source):
+        check_package_writes(name, _strip_go_rust_literals_and_comments(raw_body))
     # Methods are scanned per definition so same-named methods on
     # different receivers each check against their own receiver name.
     for method in _GO_METHOD_DEF_RE.finditer(source):
@@ -2582,6 +2578,7 @@ def _go_shared_state_issues(
         body = _strip_go_rust_literals_and_comments(
             _balanced_brace_body(source, brace)
         )
+        check_package_writes(name, body)
 
         def atomic_write(name_re: str, body=body) -> bool:
             return re.search(
