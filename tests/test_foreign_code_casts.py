@@ -94,14 +94,17 @@ def test_solidity_pre08_narrowing_flagged() -> None:
     assert issues[0].required_contracts == (f"x <= {2**128 - 1}",)
 
 
-def test_solidity_checked_arithmetic_skips_casts() -> None:
-    # Solidity >=0.8 explicit conversions revert — not a silent truncation.
-    assert not _cast_issues(
+def test_solidity_checked_arithmetic_still_flags_casts() -> None:
+    # Solidity >=0.8 default checks cover arithmetic operators only —
+    # explicit conversions truncate on every compiler version.
+    issues = _cast_issues(
         "uint128(x)",
         "Solidity",
         param_types={"x": "uint256"},
         solidity_default_checks=True,
     )
+    assert len(issues) == 1
+    assert issues[0].required_contracts == (f"x <= {2**128 - 1}",)
 
 
 def test_unsigned_subtraction_flags_two_unsigned_rust_params() -> None:
@@ -369,4 +372,108 @@ def test_cast_counterexample_respects_declared_source_range() -> None:
     assert len(issues) == 1
     assert issues[0].counterexample
     assert issues[0].counterexample["x"] >= 0
+
+
+def test_cast_negative_constant_emits_lower_bound_contract() -> None:
+    """``const N: i16 = -1; N as u8`` — the emitted contract must be the
+    bound the constant actually violates (``N >= 0``), not a vacuous
+    upper bound that already holds."""
+    issues = _cast_issues("N as u8", "Rust", known_constants={"N": -1})
+    assert len(issues) == 1
+    assert issues[0].required_contracts == ("N >= 0",)
+    assert issues[0].counterexample == {"N": -1}
+
+
+def test_solidity_checked_subtraction_outside_unchecked_not_flagged() -> None:
+    """A ``a - b`` outside ``unchecked { }`` still reverts under ≥0.8 — the
+    presence of an unrelated unchecked block must not flag it."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = (
+        "pragma solidity ^0.8.20;\n"
+        "contract C {\n"
+        "  function f(uint256 a, uint256 b) public returns (uint256) {\n"
+        "    unchecked { uint256 z = a + b; }\n"
+        "    return a - b;\n"
+        "  }\n"
+        "}\n"
+    )
+    assert not any(
+        "can underflow" in i.message for i in _detect_safety_issues(src, "solidity")
+    )
+
+
+def test_solidity_shadowed_param_cast_not_flagged() -> None:
+    """A param redeclared as a narrower local is a shadowed binding — the
+    stale param type (``uint256``) must not produce a spurious cast flag."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = (
+        "pragma solidity ^0.8.20;\n"
+        "contract C {\n"
+        "  function f(uint256 a) public pure returns (uint128) {\n"
+        "    uint8 a = 5;\n"
+        "    return uint128(a);\n"
+        "  }\n"
+        "}\n"
+    )
+    assert not any(
+        "can truncate `a`" in i.message
+        for i in _detect_safety_issues(src, "solidity")
+    )
+
+
+def test_unsigned_subtraction_early_exit_on_safe_direction_not_guarded() -> None:
+    """``if a >= b { return } a - b`` exits on the SAFE direction — the code
+    reaching the subtraction has ``a < b`` and must still flag."""
+    issues = _sub_issues(
+        "if a >= b { return 0 } a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert len(issues) == 1
+
+
+def test_unsigned_subtraction_early_exit_on_bad_direction_guarded() -> None:
+    """``if a < b { return } a - b`` exits on the BAD direction — only
+    ``a >= b`` reaches the subtraction."""
+    assert not _sub_issues(
+        "if a < b { return 0 } a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_unsigned_subtraction_assert_require_guarded() -> None:
+    """``require(a >= b, …)``/``assert!(a >= b)`` abort on the bad direction."""
+    assert not _sub_issues(
+        'require(a >= b, "order"); a - b',
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert not _sub_issues(
+        "assert!(a >= b); a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_unsigned_subtraction_guard_inside_if_body() -> None:
+    """``if a >= b { a - b }`` — the subtraction runs under the condition."""
+    assert not _sub_issues(
+        "if a >= b { a - b } else { 0 }",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_unsigned_subtraction_guard_closed_block_does_not_reach() -> None:
+    """``if a >= b { x = 1 } a - b`` — a guard whose block closes without
+    diverging and without containing the use does not protect it."""
+    issues = _sub_issues(
+        "if a >= b { x = 1 } a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert len(issues) == 1
 

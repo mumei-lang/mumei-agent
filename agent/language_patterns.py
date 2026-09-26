@@ -59,6 +59,70 @@ def _node_text(source_bytes: bytes, node) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
 
+def _paren_args(text: str, open_paren: int) -> str:
+    """Return the contents of the parenthesized span starting at
+    ``text[open_paren] == "("`` (nested parens counted)."""
+    depth = 0
+    for i in range(open_paren, len(text)):
+        char = text[i]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren + 1 : i]
+    return text[open_paren + 1 :]
+
+
+def _strip_ts_literals_and_comments(text: str) -> str:
+    """Mask TS/JS ``'…'``/``"…"``/template-literal contents (delimiters kept,
+    positions preserved) and blank ``//``/``/* … */`` comments so advisory
+    patterns can't match inside literals."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                end = len(text)
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = len(text) if end == -1 else end + 2
+            out.append(
+                "".join("\n" if c == "\n" else " " for c in text[i:end])
+            )
+            i = end
+            continue
+        char = text[i]
+        if char in "\"'`":
+            j = i + 1
+            while j < len(text):
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == char:
+                    break
+                j += 1
+            if j >= len(text):
+                out.append(
+                    char
+                    + "".join(
+                        "\n" if c == "\n" else " " for c in text[i + 1 :]
+                    )
+                )
+                break
+            inner = "".join("\n" if c == "\n" else " " for c in text[i + 1 : j])
+            out.append(char + inner + text[j])
+            i = j + 1
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
 # ---------------------------------------------------------------------------
 # Python
 # ---------------------------------------------------------------------------
@@ -1675,19 +1739,28 @@ def _solidity_pattern_issues(
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
         body = _strip_go_rust_literals_and_comments(raw_body)
         # ``blockhash``/``block.*`` sources are miner-influenced or public —
-        # a modulo or keccak256 draw over them is weak randomness.
-        if re.search(r"\bblockhash\s*\(", body) or (
-            re.search(
-                r"\bblock\.(?:timestamp|number|prevrandao|difficulty|coinbase)\b",
-                body,
-            )
-            and (
-                re.search(r"\bkeccak256\s*\(", body)
-                or re.search(
-                    r"(?:%[^%]*\bblock\.|\bblock\.[A-Za-z]+\s*%)", body
+        # a modulo or keccak256 draw over them is weak randomness. The
+        # ``block.*`` reference must feed the draw itself (inside the
+        # keccak256 argument list or under a modulo), not merely coexist
+        # in the body.
+        weak_rng = bool(re.search(r"\bblockhash\s*\(", body))
+        block_ref = re.search(
+            r"\bblock\.(?:timestamp|number|prevrandao|difficulty|coinbase)\b",
+            body,
+        )
+        if not weak_rng and block_ref is not None:
+            for kmatch in re.finditer(r"\bkeccak256\s*\(", body):
+                args = _paren_args(body, kmatch.end() - 1)
+                if re.search(r"\bblock\.", args):
+                    weak_rng = True
+                    break
+            if not weak_rng:
+                weak_rng = bool(
+                    re.search(
+                        r"(?:%[^%\n]*\bblock\.|\bblock\.[A-Za-z]+\s*%)", body
+                    )
                 )
-            )
-        ):
+        if weak_rng:
             issues.append(
                 ForeignSafetyIssue(
                     function_name=name,
@@ -1754,13 +1827,33 @@ def _solidity_pattern_issues(
         if not re.search(r"\b(?:public|external)\b", attrs):
             continue
         body = _strip_go_rust_literals_and_comments(raw_body)
-        if "address(0)" in body:
-            continue
         address_params = re.findall(
             r"\baddress\s+(?:payable\s+)?(?P<name>[A-Za-z_]\w*)\b", params_text
         )
         for param in address_params:
-            if re.search(rf"\w+\s*=\s*{re.escape(param)}\s*;", body):
+            # Per-param guard: ``require(param != address(0))`` anywhere in
+            # the body suppresses only *that* parameter.
+            if re.search(
+                rf"\b{re.escape(param)}\b[^;{{}}]*\baddress\s*\(\s*0\s*\)"
+                rf"|\baddress\s*\(\s*0\s*\)[^;{{}}]*\b{re.escape(param)}\b",
+                body,
+            ):
+                continue
+            for store in re.finditer(
+                rf"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*=\s*{re.escape(param)}\s*;",
+                body,
+            ):
+                # ``address owner = newOwner;`` declares a local rather than
+                # storing state — a Solidity type keyword ends the
+                # statement's prefix.
+                before = body[max(0, store.start() - 60) : store.start()]
+                stmt_prefix = re.split(r"[;{}()]", before)[-1]
+                if re.search(
+                    r"\b(?:u?int\d*|address|bool|bytes\d*|string|var|mapping)"
+                    r"\s*$",
+                    stmt_prefix,
+                ):
+                    continue
                 issues.append(
                     ForeignSafetyIssue(
                         function_name=name,
@@ -1890,7 +1983,7 @@ def _python_dangerous_call_issues(
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for node in ast.walk(fn):
+        for node in _python_own_nodes(fn):
             if isinstance(node, ast.Call):
                 description = describe(node)
                 if description is not None:
@@ -1905,6 +1998,22 @@ def _python_dangerous_call_issues(
                         )
                     )
     return issues
+
+
+def _python_own_nodes(node: ast.AST):
+    """Yield ``node`` and its subtree without descending into nested
+    ``def``/``lambda`` bodies — nested definitions get their own top-level
+    visit via the outer ``ast.walk`` and must not be attributed to the
+    enclosing scope."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if current is not node and isinstance(
+            current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        ):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
 
 
 def _python_mutation_during_iteration_issues(
@@ -1931,7 +2040,15 @@ def _python_mutation_during_iteration_issues(
             return it.func.value.id
         return None
 
-    def mutates(name: str, node: ast.AST) -> bool:
+    def loop_vars(loop) -> set[str]:
+        target = loop.target
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return {e.id for e in target.elts if isinstance(e, ast.Name)}
+        return set()
+
+    def mutates(name: str, node: ast.AST, loop_names: set[str]) -> bool:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -1940,30 +2057,47 @@ def _python_mutation_during_iteration_issues(
             and node.func.attr in _PY_ITER_MUTATING_METHODS
         ):
             return True
+        value_update_ok = not isinstance(node, ast.Delete)
         if isinstance(node, (ast.Delete, ast.Assign)):
             targets = node.targets
         elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
             targets = [node.target]
         else:
             return False
-        return any(
-            isinstance(t, ast.Subscript)
-            and isinstance(t.value, ast.Name)
-            and t.value.id == name
-            for t in targets
-        )
+        for target in targets:
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == name
+            ):
+                # ``d[k] = v`` under ``for k in d`` rewrites the value in
+                # place — the key set never changes, so iteration is safe.
+                # ``del d[k]`` still resizes the container mid-iteration.
+                if (
+                    value_update_ok
+                    and isinstance(target.slice, ast.Name)
+                    and target.slice.id in loop_names
+                ):
+                    continue
+                return True
+        return False
 
     issues: list[ForeignSafetyIssue] = []
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for loop in ast.walk(fn):
+        for loop in _python_own_nodes(fn):
             if not isinstance(loop, (ast.For, ast.AsyncFor)):
                 continue
             name = iterated_name(loop)
             if name is None:
                 continue
-            if any(mutates(name, node) for stmt in loop.body for node in ast.walk(stmt)):
+            names = loop_vars(loop)
+            if any(
+                mutates(name, node, names)
+                for stmt in loop.body
+                for node in _python_own_nodes(stmt)
+            ):
                 issues.append(
                     ForeignSafetyIssue(
                         function_name=fn.name,
@@ -2000,7 +2134,9 @@ def _typescript_safety_issues(
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     for name, raw_body in _typescript_function_blocks(source):
-        body = _mask_nested_function_literals(raw_body, "typescript")
+        body = _mask_nested_function_literals(
+            _strip_ts_literals_and_comments(raw_body), "typescript"
+        )
         asserted = {
             (m.group("name") or m.group("call") or m.group("idx"))
             for m in _TS_NON_NULL_RE.finditer(body)
@@ -2018,19 +2154,28 @@ def _typescript_safety_issues(
                     confidence="medium",
                 )
             )
-        if re.search(r"\bJSON\.parse\s*\(", body) and not re.search(
-            r"\b(?:try|catch)\b", body
-        ):
-            issues.append(
-                ForeignSafetyIssue(
-                    function_name=name,
-                    message=(
-                        f"TypeScript function `{name}` calls `JSON.parse` "
-                        "without a try/catch — malformed input throws"
-                    ),
-                    confidence="medium",
+        json_parse = list(re.finditer(r"\bJSON\.parse\s*\(", body))
+        for parse in json_parse:
+            in_try = False
+            for try_match in re.finditer(r"\btry\s*\{", body):
+                if try_match.end() - 1 > parse.start():
+                    break
+                block = _balanced_brace_body(body, try_match.end() - 1)
+                if parse.start() < try_match.end() + len(block):
+                    in_try = True
+                    break
+            if not in_try:
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"TypeScript function `{name}` calls `JSON.parse` "
+                            "without a try/catch — malformed input throws"
+                        ),
+                        confidence="medium",
+                    )
                 )
-            )
+                break
         if re.search(r"\beval\s*\(", body):
             issues.append(
                 ForeignSafetyIssue(
