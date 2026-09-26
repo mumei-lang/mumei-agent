@@ -34,15 +34,19 @@ from typing import Callable, Iterable
 from agent import tree_sitter_extract
 from agent.cross_validation_foreign import _strip_go_rust_literals_and_comments
 from agent.strategies.foreign_code_strategy_helpers import (
+    _GUARD_HOLDS_MECHANISMS,
+    _GUARD_NEGATED_MECHANISMS,
     ForeignSafetyIssue,
     _balanced_brace_body,
     _go_function_blocks,
+    _guard_mechanism,
     _is_generated_source,
     _is_solidity_mock_source,
     _mask_nested_function_literals,
     _normalize_language,
     _rust_function_scopes,
     _solidity_function_blocks_with_attrs,
+    _solidity_function_scopes,
     _typescript_function_blocks,
 )
 
@@ -105,6 +109,120 @@ def _issue_line(source: str, body_offset: int, offset_in_body: int) -> int:
     if body_offset < 0 or offset_in_body < 0:
         return 0
     return source.count("\n", 0, body_offset + offset_in_body) + 1
+
+
+def _paren_args(text: str, open_paren: int) -> str:
+    """Return the contents of the parenthesized span starting at
+    ``text[open_paren] == "("`` (nested parens counted)."""
+    depth = 0
+    for i in range(open_paren, len(text)):
+        char = text[i]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren + 1 : i]
+    return text[open_paren + 1 :]
+
+
+def _strip_ts_literals_and_comments(text: str) -> str:
+    """Mask TS/JS ``'…'``/``"…"``/template-literal contents (delimiters kept,
+    positions preserved) and blank ``//``/``/* … */`` comments so advisory
+    patterns can't match inside literals."""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            if end == -1:
+                end = len(text)
+            out.append(" " * (end - i))
+            i = end
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = len(text) if end == -1 else end + 2
+            out.append(
+                "".join("\n" if c == "\n" else " " for c in text[i:end])
+            )
+            i = end
+            continue
+        char = text[i]
+        if char == "`":
+            # Template literal: blank the literal text but keep ``${…}``
+            # interpolations — they are code and can carry patterns like
+            # ``x!``/``eval(`` (with their own literals recursively masked).
+            inner_parts: list[str] = []
+            j = i + 1
+            while j < len(text):
+                if text[j] == "\\":
+                    inner_parts.extend(
+                        "\n" if c == "\n" else " "
+                        for c in text[j : j + 2]
+                    )
+                    j += 2
+                    continue
+                if text[j] == "`":
+                    break
+                if text[j] == "$" and j + 1 < len(text) and text[j + 1] == "{":
+                    depth = 1
+                    k = j + 2
+                    in_str: str | None = None
+                    while k < len(text):
+                        ch = text[k]
+                        if in_str:
+                            if ch == "\\":
+                                k += 1
+                            elif ch == in_str:
+                                in_str = None
+                        elif ch in "\"'`":
+                            in_str = ch
+                        elif ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        k += 1
+                    interp = text[j + 2 : k]
+                    inner_parts.append(
+                        "${" + _strip_ts_literals_and_comments(interp) + "}"
+                    )
+                    j = k + 1
+                    continue
+                inner_parts.append("\n" if text[j] == "\n" else " ")
+                j += 1
+            if j >= len(text):
+                out.append("`" + "".join(inner_parts))
+                break
+            out.append("`" + "".join(inner_parts) + "`")
+            i = j + 1
+            continue
+        if char in "\"'":
+            j = i + 1
+            while j < len(text):
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == char:
+                    break
+                j += 1
+            if j >= len(text):
+                out.append(
+                    char
+                    + "".join(
+                        "\n" if c == "\n" else " " for c in text[i + 1 :]
+                    )
+                )
+                break
+            inner = "".join("\n" if c == "\n" else " " for c in text[i + 1 : j])
+            out.append(char + inner + text[j])
+            i = j + 1
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -1810,6 +1928,45 @@ def _solidity_pattern_issues(
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
         offset = _body_offset((source,), raw_body, used_offsets, non_code)
         body = _strip_go_rust_literals_and_comments(raw_body)
+        # ``blockhash``/``block.*`` sources are miner-influenced or public —
+        # a modulo or keccak256 draw over them is weak randomness. The
+        # ``block.*`` reference must feed the draw itself (inside the
+        # keccak256 argument list or under a modulo), not merely coexist
+        # in the body.
+        weak_rng = bool(re.search(r"\bblockhash\s*\(", body))
+        block_ref = re.search(
+            r"\bblock\.(?:timestamp|number|prevrandao|difficulty|coinbase)\b",
+            body,
+        )
+        if not weak_rng and block_ref is not None:
+            for kmatch in re.finditer(r"\bkeccak256\s*\(", body):
+                args = _paren_args(body, kmatch.end() - 1)
+                if re.search(r"\bblock\.", args):
+                    weak_rng = True
+                    break
+            if not weak_rng:
+                # ``%``-modulo must draw from ``block.*`` in the same
+                # statement — an unrelated modulo elsewhere in the body is
+                # not a weak-randomness draw.
+                weak_rng = bool(
+                    re.search(
+                        r"(?:%[^%;\n]*\bblock\.|\bblock\.[A-Za-z]+\s*%)",
+                        body,
+                    )
+                )
+        if weak_rng:
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"Solidity function `{name}` derives randomness from "
+                        "`block.*`/`blockhash` — these values are public and "
+                        "partly miner-influenced; use a VRF oracle for "
+                        "unpredictable draws"
+                    ),
+                    confidence="medium",
+                )
+            )
         tx_origin = re.search(r"\btx\.origin\b", body)
         if tx_origin:
             issues.append(
@@ -1862,6 +2019,1043 @@ def _solidity_pattern_issues(
                     line=_issue_line(source, offset, match.start()),
                 )
             )
+    # Zero-address guard: an externally callable function that stores an
+    # ``address`` parameter into state without any ``address(0)`` check can
+    # brick the contract (burn address ownership/fee sinks).
+    for name, raw_body, params_text, attrs in _solidity_function_scopes(source):
+        if not re.search(r"\b(?:public|external)\b", attrs):
+            continue
+        body = _strip_go_rust_literals_and_comments(raw_body)
+        address_params = re.findall(
+            r"\baddress\s+(?:payable\s+)?(?P<name>[A-Za-z_]\w*)\b", params_text
+        )
+        for param in address_params:
+            # Per-param guard: a check must reject ``param == address(0)``
+            # and dominate the store — ``require(param != address(0))`` /
+            # ``assert`` / ``if (param == address(0)) { revert }`` before the
+            # store, or ``if (param != address(0)) { …store… }`` enclosing
+            # it. An unrelated check on another parameter, or one placed
+            # after/inside a conditional that doesn't cover the store,
+            # does not suppress the advisory.
+            param_guard = re.compile(
+                rf"\b{re.escape(param)}\b[^;{{}}]*\baddress\s*\(\s*0\s*\)"
+                rf"|\baddress\s*\(\s*0\s*\)[^;{{}}]*\b{re.escape(param)}\b"
+            )
+            guard_checks = list(param_guard.finditer(body))
+            for store in re.finditer(
+                rf"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*=\s*{re.escape(param)}\s*;",
+                body,
+            ):
+                # ``address owner = newOwner;`` declares a local rather than
+                # storing state — a Solidity type keyword (including
+                # ``address payable`` and data-location keywords) ends the
+                # statement's prefix.
+                before = body[max(0, store.start() - 60) : store.start()]
+                stmt_prefix = re.split(r"[;{}()]", before)[-1]
+                if re.search(
+                    r"\b(?:u?int\d*|address|payable|bool|bytes\d*|string|var"
+                    r"|mapping|memory|storage|calldata)\s*$",
+                    stmt_prefix,
+                ):
+                    continue
+                def _protects(
+                    check: re.Match[str],
+                    _body: str = body,
+                    _store: re.Match[str] = store,
+                ) -> bool:
+                    mech = _guard_mechanism(_body, check, _store.start())
+                    if mech is None:
+                        # Solidity ``revert`` is not in the generic divergence
+                        # set — ``if (param == address(0)) { revert … }``
+                        # before the store rejects the zero case.
+                        if "==" not in check.group(0):
+                            return False
+                        open_paren = _body.rfind("(", 0, check.start())
+                        if (
+                            open_paren == -1
+                            or re.search(r"\bif\s*$", _body[:open_paren])
+                            is None
+                        ):
+                            return False
+                        close_paren = (
+                            open_paren + 1 + len(_paren_args(_body, open_paren))
+                        )
+                        after = _body[close_paren + 1 :]
+                        brace_rel = after.find("{")
+                        if brace_rel == -1 or not re.fullmatch(
+                            r"\s*", after[:brace_rel]
+                        ):
+                            return False
+                        blk = _balanced_brace_body(
+                            _body, close_paren + 1 + brace_rel
+                        )
+                        blk_end = close_paren + 2 + brace_rel + len(blk)
+                        return "revert" in blk and _store.start() >= blk_end
+                    if check.end() > _store.start():
+                        return False
+                    # ``param != address(0)`` must hold; ``param ==
+                    # address(0)`` must be the diverging branch's condition.
+                    nonzero_when_holds = "!=" in check.group(0)
+                    nonzero_when_negated = "==" in check.group(0)
+                    if nonzero_when_holds and mech in _GUARD_HOLDS_MECHANISMS:
+                        return True
+                    return (
+                        nonzero_when_negated
+                        and mech in _GUARD_NEGATED_MECHANISMS
+                    )
+
+                if any(_protects(check) for check in guard_checks):
+                    continue
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Solidity function `{name}` stores `address` "
+                            f"parameter `{param}` without a zero-address "
+                            "`require(param != address(0))` check"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Rust — escape hatches advisories
+# ---------------------------------------------------------------------------
+
+
+def _rust_escape_hatch_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for name, raw_body, _params in _rust_function_scopes(source):
+        body = _mask_rust_nested_fns(
+            _strip_go_rust_literals_and_comments(raw_body)
+        )
+        flags: list[str] = []
+        if re.search(r"\bunsafe\s*\{", body):
+            flags.append(
+                "an `unsafe` block — borrow/type guarantees are suspended; "
+                "the enclosing safety invariant needs a manual argument"
+            )
+        if re.search(r"\bmem::forget\s*\(", body):
+            flags.append(
+                "`mem::forget` — the value's Drop obligations leak; confirm "
+                "no resource is abandoned"
+            )
+        if re.search(r"\bmem::transmute|transmute\s*<", body):
+            flags.append(
+                "`mem::transmute` — bypasses the type system entirely"
+            )
+        for flag in flags:
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=f"Rust function `{name}` contains {flag}",
+                    confidence="medium",
+                )
+            )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Python — dangerous calls + mutation during iteration
+# ---------------------------------------------------------------------------
+
+_PY_UNSAFE_NAME_CALLS = frozenset({"eval", "exec"})
+_PY_UNSAFE_METHODS = {
+    ("pickle", "load"): "`pickle.load` deserializes arbitrary objects — "
+    "only load trusted payloads",
+    ("pickle", "loads"): "`pickle.loads` deserializes arbitrary objects — "
+    "only load trusted payloads",
+    ("os", "system"): "`os.system` runs a shell string — injection risk; "
+    "prefer subprocess with an argument list",
+    ("os", "popen"): "`os.popen` runs a shell string — injection risk; "
+    "prefer subprocess with an argument list",
+    ("marshal", "load"): "`marshal.load` deserializes code objects — "
+    "only load trusted payloads",
+    ("marshal", "loads"): "`marshal.loads` deserializes code objects — "
+    "only load trusted payloads",
+}
+_PY_SUBPROCESS_CALLS = frozenset(
+    {"run", "call", "Popen", "check_output", "check_call", "getoutput"}
+)
+_PY_ITER_MUTATING_METHODS = frozenset(
+    {"append", "extend", "insert", "remove", "pop", "clear", "discard", "update"}
+)
+
+
+def _python_dangerous_call_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    def describe(node: ast.Call) -> str | None:
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _PY_UNSAFE_NAME_CALLS:
+            return (
+                f"`{func.id}` evaluates caller-supplied text as code — "
+                "prefer a parser or an allowlisted dispatch"
+            )
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            base, attr = func.value.id, func.attr
+            if (base, attr) in _PY_UNSAFE_METHODS:
+                return _PY_UNSAFE_METHODS[(base, attr)]
+            if base == "subprocess" and attr in _PY_SUBPROCESS_CALLS:
+                shell = any(
+                    kw.arg == "shell"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                    for kw in node.keywords
+                )
+                if shell or attr == "getoutput":
+                    return (
+                        f"`subprocess.{attr}` with `shell=True` interpolates "
+                        "through a shell — injection risk; pass an argument "
+                        "list with `shell=False`"
+                    )
+            if (
+                base == "yaml"
+                and attr == "load"
+                and not any(kw.arg == "Loader" for kw in node.keywords)
+            ):
+                return (
+                    "`yaml.load` without a `Loader=` uses the unsafe "
+                    "default and deserializes arbitrary objects — use "
+                    "`yaml.safe_load`"
+                )
+        return None
+
+    issues: list[ForeignSafetyIssue] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in _python_own_nodes(fn):
+            if isinstance(node, ast.Call):
+                description = describe(node)
+                if description is not None:
+                    issues.append(
+                        ForeignSafetyIssue(
+                            function_name=fn.name,
+                            message=(
+                                f"Python function `{fn.name}` calls "
+                                f"{description}"
+                            ),
+                            confidence="medium",
+                        )
+                    )
+    return issues
+
+
+def _python_own_nodes(node: ast.AST):
+    """Yield ``node`` and its subtree without descending into nested
+    ``def``/``lambda`` bodies — nested definitions get their own top-level
+    visit via the outer ``ast.walk`` and must not be attributed to the
+    enclosing scope."""
+    yield node
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(
+            current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        ):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _python_mutation_during_iteration_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    """Mutating the iterated collection inside a ``for`` — skips elements
+    silently (lists) or raises ``RuntimeError`` (dicts/sets)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    def iterated_name(loop) -> str | None:
+        it = loop.iter
+        if isinstance(it, ast.Name):
+            return it.id
+        # ``for k in d.items()`` / ``d.keys()`` / ``d.values()``
+        if (
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Attribute)
+            and it.func.attr in {"items", "keys", "values"}
+            and isinstance(it.func.value, ast.Name)
+        ):
+            return it.func.value.id
+        return None
+
+    def key_vars(loop) -> set[str]:
+        """Loop target names that hold iterated *keys* — ``for k in d``,
+        ``for k in d.keys()``, and the first tuple element of
+        ``for k, v in d.items()``. ``d.values()`` targets and the second
+        ``items()`` element hold *values* — ``d[v]`` inserts a new key and
+        breaks the iteration."""
+        it = loop.iter
+        target = loop.target
+        target_names = (
+            {e.id for e in ast.walk(target) if isinstance(e, ast.Name)}
+            if isinstance(target, (ast.Name, ast.Tuple, ast.List))
+            else set()
+        )
+        if isinstance(it, ast.Name):
+            # ``for k in d`` — k iterates keys.
+            return target_names
+        if (
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Attribute)
+            and isinstance(it.func.value, ast.Name)
+        ):
+            if it.func.attr == "keys":
+                return target_names
+            if it.func.attr == "values":
+                return set()
+            if it.func.attr == "items":
+                if isinstance(target, (ast.Tuple, ast.List)) and target.elts:
+                    return {
+                        e.id
+                        for e in ast.walk(target.elts[0])
+                        if isinstance(e, ast.Name)
+                    }
+                return set()
+        return set()
+
+    def mutates(
+        name: str, node: ast.AST, key_names: set[str], rebound: set[str]
+    ) -> bool:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+            and node.func.attr in _PY_ITER_MUTATING_METHODS
+        ):
+            return True
+        value_update_ok = not isinstance(node, ast.Delete)
+        if isinstance(node, (ast.Delete, ast.Assign)):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            return False
+        for target in targets:
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == name
+            ):
+                # ``d[k] = v`` under ``for k in d`` rewrites the value in
+                # place — the key set never changes, so iteration is safe.
+                # ``del d[k]`` still resizes the container mid-iteration,
+                # and ``d[v]`` where ``v`` is an iterated *value* inserts a
+                # new key — also a mid-iteration resize. A rebound key var
+                # (``for k in d: k = other; d[k] = v``) inserts the new key —
+                # same resize.
+                if (
+                    value_update_ok
+                    and isinstance(target.slice, ast.Name)
+                    and target.slice.id in key_names
+                    and target.slice.id not in rebound
+                ):
+                    continue
+                return True
+        return False
+
+    issues: list[ForeignSafetyIssue] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for loop in _python_own_nodes(fn):
+            if not isinstance(loop, (ast.For, ast.AsyncFor)):
+                continue
+            name = iterated_name(loop)
+            if name is None:
+                continue
+            keys = key_vars(loop)
+
+            def _bound_names(t: ast.AST) -> Iterable[str]:
+                if isinstance(t, ast.Name):
+                    yield t.id
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    for e in t.elts:
+                        yield from _bound_names(e)
+                elif isinstance(t, ast.Starred):
+                    yield from _bound_names(t.value)
+
+            rebound = {
+                name_
+                for stmt in loop.body
+                for node in _python_own_nodes(stmt)
+                if isinstance(
+                    node,
+                    (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr),
+                )
+                for t in (
+                    node.targets
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                for name_ in _bound_names(t)
+            }
+            rebound &= keys
+            if any(
+                mutates(name, node, keys, rebound)
+                for stmt in loop.body
+                if not isinstance(
+                    stmt, (ast.FunctionDef, ast.AsyncFunctionDef)
+                )
+                for node in _python_own_nodes(stmt)
+            ):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=fn.name,
+                        message=(
+                            f"Python function `{fn.name}` mutates `{name}` "
+                            "inside a loop iterating it — list element removal "
+                            "skips items; dict/set mutation raises RuntimeError"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# TypeScript — non-null assertions, JSON.parse, eval, innerHTML, mutation
+# ---------------------------------------------------------------------------
+
+_TS_NON_NULL_RE = re.compile(
+    r"(?:(?P<name>[A-Za-z_]\w*)|(?P<call>[A-Za-z_]\w*\s*\([^()]*\))"
+    r"|(?P<idx>[A-Za-z_]\w*\s*\[[^\]]*\]))!(?!=)"
+)
+_TS_FOR_OF_RE = re.compile(
+    r"\bfor\s*\([^)]*\bof\s+(?P<arr>[A-Za-z_]\w*)[^)]*\)\s*\{"
+)
+_TS_ITER_MUTATE_RE = (
+    r"\.(?:push|splice|pop|shift|unshift|fill|sort|reverse)\s*\(|\s*\[[^\]]*\]\s*="
+)
+
+
+def _typescript_safety_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for name, raw_body in _typescript_function_blocks(source):
+        body = _mask_nested_function_literals(
+            _strip_ts_literals_and_comments(raw_body), "typescript"
+        )
+        asserted = {
+            (m.group("name") or m.group("call") or m.group("idx"))
+            for m in _TS_NON_NULL_RE.finditer(body)
+        }
+        if asserted:
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"TypeScript function `{name}` uses non-null "
+                        f"assertion(s) `{'`/`'.join(sorted(asserted))}!` — "
+                        "the compile-time claim is unchecked at runtime; "
+                        "prefer an explicit guard"
+                    ),
+                    confidence="medium",
+                )
+            )
+        json_parse = list(re.finditer(r"\bJSON\.parse\s*\(", body))
+        for parse in json_parse:
+            in_try = False
+            for try_match in re.finditer(r"\btry\s*\{", body):
+                if try_match.end() - 1 > parse.start():
+                    break
+                block = _balanced_brace_body(body, try_match.end() - 1)
+                if parse.start() < try_match.end() + len(block):
+                    # ``try { … } finally { … }`` without a ``catch`` still
+                    # throws — only a ``catch`` clause suppresses the throw.
+                    block_end = try_match.end() + len(block) + 1
+                    if re.match(r"\s*catch\b", body[block_end:]):
+                        in_try = True
+                        break
+            if not in_try:
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"TypeScript function `{name}` calls `JSON.parse` "
+                            "without a try/catch — malformed input throws"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+        if re.search(r"\beval\s*\(", body):
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"TypeScript function `{name}` calls `eval` — "
+                        "attacker-influenceable text runs as code"
+                    ),
+                    confidence="medium",
+                )
+            )
+        if re.search(r"\.innerHTML\s*=", body):
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"TypeScript function `{name}` assigns to "
+                        "`innerHTML` — unsanitized markup enables DOM XSS; "
+                        "prefer `textContent` or a sanitizer"
+                    ),
+                    confidence="medium",
+                )
+            )
+        for match in _TS_FOR_OF_RE.finditer(body):
+            loop_body = _balanced_brace_body(body, match.end() - 1)
+            arr = match.group("arr")
+            if re.search(rf"\b{re.escape(arr)}{_TS_ITER_MUTATE_RE}", loop_body):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"TypeScript function `{name}` mutates `{arr}` "
+                            "inside a `for … of` loop over it — element "
+                            "addition/removal shifts the iteration"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Taint-lite — request-derived data reaching a sink without sanitization
+# ---------------------------------------------------------------------------
+
+_TAINT_SOURCE_RE = re.compile(
+    r"\breq(?:uest)?\.(?:query|params|body|headers|cookies|get_json)\b"
+    r"|\brequest\.(?:args|form|data|json|GET|POST|values|FILES)\b"
+    r"|\binput\s*\(|\bsys\.argv\b|\bos\.environ\b"
+    r"|\w+\.URL\.Query\b|\w*FormValue\s*\(|\bPostFormValue\s*\("
+    r"|\bc\.(?:Query|Param|DefaultQuery)\s*\("
+    r"|\blocation\.(?:search|hash)\b|\bdocument\.(?:URL|cookie)\b"
+    r"|\blocalStorage\b|\bURLSearchParams\b"
+)
+# Sanitizers are channel-specific: HTML/URL escapers do NOT make a value
+# safe for SQL, and numeric coercions do NOT make it safe for the DOM.
+_TAINT_SQL_SAFE_RE = re.compile(
+    r"\b(?:int|float|parseInt|parseFloat|Number|"
+    r"strconv\.(?:Atoi|ParseInt|ParseFloat|ParseUint))\s*\("
+)
+_TAINT_DOM_SAFE_RE = re.compile(
+    r"\b(?:escape|bleach\.clean|html\.escape|sanitize|DOMPurify\.sanitize|"
+    r"urlencode|encodeURIComponent|quote)\s*\("
+)
+_TAINT_ASSIGN_RE = re.compile(
+    r"(?m)^\s*(?:var\s+|let\s+|const\s+)?(?P<name>[A-Za-z_]\w*)\s*"
+    r"(?::\s*[^=\n]+)?\s*:?=(?!=)\s*(?P<rhs>[^;\n]+)"
+)
+# SQL-ish sinks: only the FIRST argument is the query string — a parameter
+# tuple after the top-level comma is the safe parameterized form.
+_TAINT_QUERY_SINK_RE = re.compile(
+    r"\b(?:execute|executemany|query|raw|exec|QueryRow|QueryRowContext|"
+    r"queryRow|Query|Exec|ExecContext|QueryContext)\s*\("
+)
+# DOM/command sinks: taint anywhere in the statement is dangerous.
+_TAINT_DOM_SINK_RE = re.compile(
+    r"(?:\.innerHTML\s*=|\.outerHTML\s*=|\bdocument\.write\s*\()"
+)
+
+
+def _top_level_args(arg_text: str) -> list[str]:
+    """Split a call's argument list on top-level ``,`` — depth-aware and
+    string-aware, so commas inside ``f'SELECT a, b …'`` don't split."""
+    args: list[str] = []
+    depth = 0
+    start = 0
+    end = len(arg_text)
+    index = 0
+    quote: str | None = None
+    while index < end:
+        char = arg_text[index]
+        if quote is not None:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                end = index
+                break
+            depth -= 1
+        elif char == "," and depth == 0:
+            args.append(arg_text[start:index])
+            start = index + 1
+        index += 1
+    args.append(arg_text[start:end])
+    return args
+
+
+def _strip_python_comments(text: str) -> str:
+    """Mask ``#`` comments (position-preserving) — a comment mentioning a
+    request source must not mark the line's value as tainted."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    quote: str | None = None
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if text.startswith(quote, i):
+                out.append(quote)
+                i += len(quote)
+                quote = None
+                continue
+            out.append(ch)
+            if ch == "\\" and len(quote) == 1 and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        if text.startswith("'''", i) or text.startswith('"""', i):
+            quote = text[i : i + 3]
+            out.append(quote)
+            i += 3
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "#":
+            j = text.find("\n", i)
+            if j == -1:
+                out.append(" " * (n - i))
+                break
+            out.append(" " * (j - i))
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _taint_lite_issues(
+    function_name: str, body: str, label: str
+) -> list[ForeignSafetyIssue]:
+    """Flag source-derived names reaching a query/DOM sink unsanitized."""
+    issues: list[ForeignSafetyIssue] = []
+
+    def interpolated(text: str) -> str:
+        """String literals reduce to their ``{…}``/``${…}`` interpolations
+        — a column named ``name`` in a SQL literal must not alias the
+        tainted variable ``name``. Only f-strings and template literals
+        interpolate; in a plain ``'SELECT {name}'`` the braces are
+        literal text."""
+
+        def expand(m: re.Match[str]) -> str:
+            prefix, quote, inner = m.group(1), m.group(2), m.group(3)
+            if "f" not in prefix.lower() and not quote.endswith("`"):
+                return " "
+            parts = re.findall(r"\{([^}]*)\}", inner)
+            if quote.endswith("`"):
+                # Only ``${…}`` interpolates in template literals — a
+                # literal ``{name}`` (e.g. a JSON fragment) stays inert.
+                parts = [
+                    part
+                    for part, pos in zip(
+                        parts,
+                        (m2.start() for m2 in re.finditer(r"\{[^}]*\}", inner)),
+                    )
+                    if inner[pos - 1 : pos] == "$"
+                ]
+            return " ".join(parts)
+
+        return re.sub(
+            r"([fFbBrRw]*)(\"\"\"|'''|['\"`])(.*?)\2",
+            expand,
+            text,
+            flags=re.DOTALL,
+        )
+
+    def blank_calls(text: str, fn_re: re.Pattern[str]) -> str:
+        """Blank ``fn(...)`` call spans so their arguments don't count as
+        tainted — ``int(x)`` coerces for SQL, ``escape(x)`` for the DOM."""
+        out = text
+        for call in re.finditer(fn_re, text):
+            args = _paren_args(text, call.end() - 1)
+            span_end = call.end() + len(args) + 1
+            out = out[: call.start()] + " " * (span_end - call.start()) + out[span_end:]
+        return out
+
+    def assign_rhs(assign: re.Match[str]) -> str:
+        """Extend the single-line ``rhs`` capture through unclosed
+        brackets / triple-quoted strings / template literals so multiline
+        interpolated queries keep their variable references."""
+        start, end = assign.start("rhs"), assign.end("rhs")
+
+        def unclosed(text: str) -> bool:
+            return (
+                text.count("(") > text.count(")")
+                or text.count("[") > text.count("]")
+                or text.count("{") > text.count("}")
+                or text.count('"""') % 2 == 1
+                or text.count("'''") % 2 == 1
+                or text.count("`") % 2 == 1
+                # ``q = 'SELECT ' + \`` continues on the next line —
+                # keep pulling lines while the last one ends in ``\``.
+                or text.rstrip("\n").rstrip().endswith("\\")
+            )
+
+        while unclosed(body[start:end]):
+            nl = body.find("\n", end)
+            if nl == -1:
+                break
+            end = nl + 1
+        rhs = body[start:end]
+        return rhs.split(";", 1)[0]
+
+    # Track taint per output channel: ``sql`` clears on numeric coercion,
+    # ``dom`` clears on HTML/URL escaping — neither clears the other.
+    tainted_sql: set[str] = set()
+    tainted_dom: set[str] = set()
+
+    def dirty_view(text: str, safe_re: re.Pattern[str]) -> str:
+        return interpolated(blank_calls(text, safe_re))
+
+    def dirty_names(text: str, tainted: set[str]) -> str | None:
+        if _TAINT_SOURCE_RE.search(text):
+            return "a request-derived value"
+        for name in tainted:
+            if re.search(rf"\b{re.escape(name)}\b", text):
+                return f"`{name}` (request-derived)"
+        return None
+
+    events = sorted(
+        [
+            *((m.start(), "assign", m) for m in _TAINT_ASSIGN_RE.finditer(body)),
+            *((m.start(), "query", m) for m in _TAINT_QUERY_SINK_RE.finditer(body)),
+            *((m.start(), "dom", m) for m in _TAINT_DOM_SINK_RE.finditer(body)),
+        ],
+        key=lambda event: event[0],
+    )
+    for _pos, kind, match in events:
+        if kind == "assign":
+            name = match.group("name")
+            rhs = assign_rhs(match)
+            sql_view = dirty_view(rhs, _TAINT_SQL_SAFE_RE)
+            dom_view = dirty_view(rhs, _TAINT_DOM_SAFE_RE)
+            if (
+                _TAINT_SOURCE_RE.search(sql_view)
+                or any(
+                    re.search(rf"\b{re.escape(t)}\b", sql_view)
+                    for t in tainted_sql
+                )
+            ):
+                tainted_sql.add(name)
+            else:
+                tainted_sql.discard(name)
+            if (
+                _TAINT_SOURCE_RE.search(dom_view)
+                or any(
+                    re.search(rf"\b{re.escape(t)}\b", dom_view)
+                    for t in tainted_dom
+                )
+            ):
+                tainted_dom.add(name)
+            else:
+                tainted_dom.discard(name)
+        elif kind == "query":
+            # `QueryContext(ctx, sql)`-style sinks put the context first —
+            # the query string is the next argument.
+            callee = match.group(0).rstrip("(").rstrip()
+            arg_index = 1 if callee.endswith("Context") else 0
+            args = _top_level_args(body[match.end() :])
+            if len(args) <= arg_index:
+                continue
+            hit = dirty_names(
+                dirty_view(args[arg_index], _TAINT_SQL_SAFE_RE), tainted_sql
+            )
+            if hit is not None:
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(
+                            f"{label} function `{function_name}` passes {hit} "
+                            "as part of a query/command string — interpolate "
+                            "parameters instead of concatenating"
+                        ),
+                        confidence="medium",
+                    )
+                )
+        else:  # dom
+            # ``el.innerHTML =`` / trailing operators continue on the next
+            # line — keep pulling lines until the statement terminates.
+            statement_lines: list[str] = []
+            for line in body[match.start() :].split("\n"):
+                statement_lines.append(line.split(";", 1)[0])
+                tail = statement_lines[-1].rstrip()
+                if ";" in line or not re.search(
+                    r"[+\-*%|&?:,=<>!.(\\]$", tail
+                ):
+                    break
+            statement = "\n".join(statement_lines)
+            hit = dirty_names(
+                dirty_view(statement, _TAINT_DOM_SAFE_RE), tainted_dom
+            )
+            if hit is not None:
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(
+                            f"{label} function `{function_name}` writes {hit} "
+                            "to the DOM — XSS risk; escape or sanitize first"
+                        ),
+                        confidence="medium",
+                    )
+                )
+    return issues
+
+
+def _python_function_source_segments(source: str) -> list[tuple[str, str]]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    segments: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            segment = ast.get_source_segment(source, node)
+            if segment is not None:
+                segments.append((node.name, segment))
+    return segments
+
+
+def _taint_lite_source_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    if ctx.language == "python":
+        for name, segment in _python_function_source_segments(source):
+            issues.extend(
+                _taint_lite_issues(
+                    name, _strip_python_comments(segment), "Python"
+                )
+            )
+    elif ctx.language == "typescript":
+        for name, raw_body in _typescript_function_blocks(source):
+            body = _mask_nested_function_literals(raw_body, "typescript")
+            issues.extend(_taint_lite_issues(name, body, "TypeScript"))
+    elif ctx.language == "go":
+        for name, raw_body in _go_function_blocks(source):
+            body = _strip_go_rust_literals_and_comments(raw_body)
+            issues.extend(_taint_lite_issues(name, body, "Go"))
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Go — writes to shared state outside the mutex that guards it
+# ---------------------------------------------------------------------------
+
+_GO_PACKAGE_VAR_RE = re.compile(
+    r"(?m)^var\s+(?P<name>[A-Za-z_]\w*)\s+(?P<type>[^\n]+)"
+)
+_GO_VAR_BLOCK_RE = re.compile(r"(?m)^var\s*\((?P<body>[^)]*)")
+_GO_VAR_BLOCK_NAME_RE = re.compile(
+    r"(?m)^\s*(?P<name>[A-Za-z_]\w*)\s+(?P<type>[^\n]+)"
+)
+_GO_MUTEX_FIELD_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*)\s+sync\.(?:RW)?Mutex")
+_GO_METHOD_DEF_RE = re.compile(
+    r"func\s*\(\s*(?P<r>[A-Za-z_]\w*)\s+\*?[A-Za-z_]\w*(?:\[[^\]]*\])?\s*\)\s*"
+    r"(?P<name>[A-Za-z_]\w*)\s*\("
+)
+# ``name++``/``name--``/``name <op>=`` — the bare ``=`` must not be part of
+# ``==``/``<=``/``>=``/``!=``, and ``:=`` declares a local (shadowing is
+# checked separately).
+_GO_WRITE_RE_TEMPLATE = (
+    r"(?<![\w.])NAME(?:\.\w+)?\s*(?:\+\+|--|[+\-*/%|&^]=|=(?![=<>]))"
+)
+_GO_LOCK_EVENT_RE = re.compile(
+    r"\b(?P<recv>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\."
+    r"(?P<kind>Lock|Unlock|RLock|RUnlock)\s*\("
+)
+
+
+def _go_unguarded_writes(
+    body: str, name_re: str, mutex_names: set[str]
+):
+    """Yield writes to ``name_re`` outside any ``Lock()…Unlock()`` window —
+    the last lock event *on a declared mutex* before each write decides
+    whether it is held. ``RLock`` is shared and never protects a write."""
+    events: list[tuple[int, str]] = []
+    depth = 0
+    depths: dict[int, int] = {}
+    for i, ch in enumerate(body):
+        depths[i] = depth
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(depth - 1, 0)
+    for m in _GO_LOCK_EVENT_RE.finditer(body):
+        if m.group("recv").rsplit(".", 1)[-1] not in mutex_names:
+            # ``other.Lock()`` guards a different mutex — it does not
+            # protect this write.
+            continue
+        if depths.get(m.start(), 0) != 0:
+            # A lock taken inside a conditional/loop body does not
+            # provably hold at a top-level write — skip the event.
+            continue
+        kind = m.group("kind")
+        # ``defer mu.Unlock()``/``defer s.mu.Unlock()`` release at function
+        # end — keep the lock held for every statement after the Lock.
+        before = body[max(0, m.start() - 16) : m.start()]
+        if kind in ("Unlock", "RUnlock") and re.search(
+            r"\bdefer\s+(?:\w+\.)*$", before
+        ):
+            events.append((len(body) + 1, kind))
+        else:
+            events.append((m.start(), kind))
+    # Deferred unlocks were moved to the end — restore position order so the
+    # "last event before the write" scan can break early correctly.
+    events.sort(key=lambda event: event[0])
+    write_re = re.compile(_GO_WRITE_RE_TEMPLATE.replace("NAME", name_re))
+    for write in write_re.finditer(body):
+        held = False
+        for pos, kind in events:
+            if pos >= write.start():
+                break
+            held = kind == "Lock"
+        if not held:
+            yield write
+
+
+def _go_shared_state_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    """Flag writes to package-level state / receiver fields when the file
+    declares a mutex but the writing function never takes one."""
+    stripped = _strip_go_rust_literals_and_comments(source)
+    mutex_names = {m.group("name") for m in _GO_MUTEX_FIELD_RE.finditer(stripped)}
+    if not mutex_names:
+        return []
+    shared_vars = {
+        m.group("name")
+        for m in _GO_PACKAGE_VAR_RE.finditer(stripped)
+        if not re.search(r"\b(?:sync|atomic)\.", m.group("type"))
+        and m.group("name") not in mutex_names
+    }
+    for block in _GO_VAR_BLOCK_RE.finditer(stripped):
+        for m in _GO_VAR_BLOCK_NAME_RE.finditer(block.group("body")):
+            if (
+                not re.search(r"\b(?:sync|atomic)\.", m.group("type"))
+                and m.group("name") not in mutex_names
+            ):
+                shared_vars.add(m.group("name"))
+    issues: list[ForeignSafetyIssue] = []
+
+    def check_package_writes(name: str, body: str) -> None:
+        for var in sorted(shared_vars):
+            # ``var :=`` / ``var var`` inside the body declares a local
+            # that shadows the package variable — only within the braces
+            # enclosing the declaration, and only after it.
+            decl = re.search(
+                rf"\b{re.escape(var)}\s*:=|\bvar\s+{re.escape(var)}\b", body
+            )
+            decl_pos = decl.start() if decl is not None else len(body)
+            shadow_end = len(body)
+            if decl is not None:
+                # Innermost ``{``…``}`` containing the declaration is the
+                # local's scope — a ``:=`` inside ``if cond { … }`` does
+                # not shadow package-level writes after the block.
+                best_end = len(body)
+                stack: list[int] = []
+                for i, ch in enumerate(body):
+                    if ch == "{":
+                        stack.append(i)
+                    elif ch == "}" and stack:
+                        if stack[-1] < decl.start() < i:
+                            best_end = min(best_end, i)
+                        stack.pop()
+                if stack:
+                    best_end = min(best_end, len(body))
+                shadow_end = best_end
+            for write in _go_unguarded_writes(
+                body, re.escape(var), mutex_names
+            ):
+                if write.start() >= decl_pos and write.start() <= shadow_end:
+                    continue
+                # An ``atomic.*(&var, …)`` call elsewhere does not protect
+                # an ordinary ``var++`` — mixed access still races.
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Go function `{name}` writes package-level "
+                            f"`{var}` without holding a mutex — this file "
+                            "declares `sync.(RW)Mutex` fields — possible "
+                            "data race with other callers"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                return
+
+    for name, raw_body in _go_function_blocks(source):
+        check_package_writes(name, _strip_go_rust_literals_and_comments(raw_body))
+    # Methods are scanned per definition so same-named methods on
+    # different receivers each check against their own receiver name.
+    for method in _GO_METHOD_DEF_RE.finditer(source):
+        name, r = method.group("name"), method.group("r")
+        args_end = method.end() - 1
+        args_close = args_end + len(_paren_args(source, args_end)) + 1
+        nl = source.find("\n", args_close)
+        brace = source.find("{", args_close)
+        if brace == -1 or (nl != -1 and nl < brace):
+            continue
+        body = _strip_go_rust_literals_and_comments(
+            _balanced_brace_body(source, brace)
+        )
+        check_package_writes(name, body)
+
+        for field_write in _go_unguarded_writes(
+            body, re.escape(r), mutex_names
+        ):
+            field = re.match(
+                rf"{re.escape(r)}\.([A-Za-z_]\w*)", field_write.group(0)
+            )
+            if field is None or field.group(1) in mutex_names:
+                continue
+            # An ``atomic.*(&r.field, …)`` call elsewhere does not protect
+            # an ordinary ``r.field++`` — mixed access still races.
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"Go method `{name}` writes "
+                        f"`{r}.{field.group(1)}` without holding the "
+                        "receiver's mutex — this file declares "
+                        "`sync.(RW)Mutex` fields — possible data race "
+                        "with other callers"
+                    ),
+                    confidence="medium",
+                )
+            )
+            break
     return issues
 
 
@@ -2186,13 +3380,39 @@ LANGUAGE_PATTERNS: tuple[LanguagePattern, ...] = (
         "rust_unwrap_expect", frozenset({"rust"}), _rust_unwrap_expect_issues
     ),
     LanguagePattern(
+        "rust_escape_hatch", frozenset({"rust"}), _rust_escape_hatch_issues
+    ),
+    LanguagePattern(
+        "python_dangerous_call",
+        frozenset({"python"}),
+        _python_dangerous_call_issues,
+    ),
+    LanguagePattern(
+        "python_mutation_during_iteration",
+        frozenset({"python"}),
+        _python_mutation_during_iteration_issues,
+    ),
+    LanguagePattern(
         "go_defer_in_loop", frozenset({"go"}), _go_defer_in_loop_issues
+    ),
+    LanguagePattern(
+        "go_shared_state", frozenset({"go"}), _go_shared_state_issues
+    ),
+    LanguagePattern(
+        "taint_lite",
+        frozenset({"python", "typescript", "go"}),
+        _taint_lite_source_issues,
     ),
     # ``javascript``/``ts``/``tsx`` aliases normalize to "typescript".
     LanguagePattern(
         "typescript_floating_promise",
         frozenset({"typescript"}),
         _typescript_floating_promise_issues,
+    ),
+    LanguagePattern(
+        "typescript_safety",
+        frozenset({"typescript"}),
+        _typescript_safety_issues,
     ),
     LanguagePattern(
         "solidity_pattern", frozenset({"solidity"}), _solidity_pattern_issues
