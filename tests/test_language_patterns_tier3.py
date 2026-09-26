@@ -46,12 +46,26 @@ def test_python_parameterized_execute_skipped() -> None:
     assert not any("query/command" in i.message for i in issues)
 
 
-def test_python_sanitized_value_skipped() -> None:
+def test_python_html_escape_does_not_sanitize_sql() -> None:
+    """``escape()`` is an HTML sanitizer — it does not parameterize SQL, so
+    the concatenated query must still flag."""
     source = (
         "def find(request, cur):\n"
         "    name = request.args.get('name')\n"
         "    name = escape(name)\n"
         "    cur.execute('SELECT * FROM users WHERE name = ' + name)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_python_numeric_coercion_sanitizes_sql() -> None:
+    """``int(name)`` makes the value numeric — safe to embed in SQL."""
+    source = (
+        "def find(request, cur):\n"
+        "    name = request.args.get('name')\n"
+        "    name = int(name)\n"
+        "    cur.execute('SELECT * FROM users WHERE id = ' + str(name))\n"
     )
     issues = _issues(source, "python")
     assert not any("query/command" in i.message for i in issues)
@@ -227,3 +241,184 @@ def test_go_shared_var_read_only_skipped() -> None:
     )
     issues = _issues(source, "go")
     assert not any("package-level" in i.message for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# Review-followup regressions (mumei-agent#612)
+# ---------------------------------------------------------------------------
+
+
+def test_python_input_call_source_flags() -> None:
+    """``input()`` is a call-shaped source — the trailing word boundary
+    after ``(`` must not keep it from matching."""
+    source = (
+        "def find(cur):\n"
+        "    name = input('name: ')\n"
+        "    cur.execute('SELECT * FROM users WHERE name = ' + name)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_go_formvalue_call_source_flags() -> None:
+    source = """func find(db *sql.DB, req *http.Request) {
+    id := req.FormValue("id")
+    db.QueryRow("SELECT * FROM t WHERE id = " + id)
+}"""
+    issues = _issues(source, "go")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_go_queryrow_sink_flags() -> None:
+    source = """func find(db *sql.DB, req *http.Request) {
+    id := req.URL.Query().Get("id")
+    db.QueryRow("SELECT * FROM t WHERE id = " + id)
+}"""
+    issues = _issues(source, "go")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_python_sanitize_after_sink_still_flags() -> None:
+    """A sanitizer applied after the query does not protect the earlier
+    sink — sinks are evaluated in statement order."""
+    source = (
+        "def find(request, cur):\n"
+        "    name = request.args.get('name')\n"
+        "    cur.execute('SELECT * FROM users WHERE name = ' + name)\n"
+        "    name = html.escape(name)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_python_partial_sanitizer_does_not_clear_taint() -> None:
+    """``escape()`` wrapping an unrelated literal must not clear the whole
+    assignment's taint."""
+    source = (
+        "def find(request, cur):\n"
+        "    name = request.args.get('name')\n"
+        "    q = 'SELECT ' + name + escape('fixed')\n"
+        "    cur.execute(q)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_python_multiline_fstring_taint_flags() -> None:
+    """Interpolated names inside multi-line f-strings still count."""
+    source = (
+        "def find(request, cur):\n"
+        "    name = request.args.get('name')\n"
+        '    q = f"""\n'
+        "        SELECT * FROM users\n"
+        "        WHERE name = {name}\n"
+        '    """\n'
+        "    cur.execute(q)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_typescript_multiline_template_taint_flags() -> None:
+    source = (
+        "function find(db: any, req: any) {\n"
+        "    const id = req.params.id;\n"
+        "    const q = `SELECT *\n"
+        "        FROM t WHERE id = ${id}`;\n"
+        "    return db.query(q);\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_typescript_escaped_dom_write_skipped() -> None:
+    """``DOMPurify.sanitize`` is a DOM-channel sanitizer (the Tier-2
+    ``innerHTML`` advisory may still fire — only taint-lite must not)."""
+    source = (
+        "function render(req: any, el: Element) {\n"
+        "    const name = DOMPurify.sanitize(req.query.name);\n"
+        "    el.innerHTML = name;\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert not any("writes" in i.message and "to the DOM" in i.message for i in issues)
+
+
+def test_go_var_block_shared_state_flags() -> None:
+    """Grouped ``var ( … )`` declarations count as package state."""
+    source = """var (
+    mu      sync.Mutex
+    counter int
+)
+
+func bump() {
+    counter++
+}"""
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_comparison_not_a_write_skipped() -> None:
+    """``counter == 0`` is a comparison, not a write."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func check() int {\n"
+        "    if counter == 0 {\n"
+        "        return 1\n"
+        "    }\n"
+        "    return counter\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert not any("package-level" in i.message for i in issues)
+
+
+def test_go_local_shadow_write_skipped() -> None:
+    """``counter := 0`` declares a local — later ``counter++`` writes the
+    local, not the package variable."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump() {\n    counter := 0\n    counter++\n}"
+    )
+    issues = _issues(source, "go")
+    assert not any("package-level" in i.message for i in issues)
+
+
+def test_go_write_after_explicit_unlock_flags() -> None:
+    """An explicit ``mu.Unlock()`` (not deferred) ends the lock window —
+    writes after it race."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump() {\n"
+        "    mu.Lock()\n"
+        "    counter++\n"
+        "    mu.Unlock()\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_same_named_methods_per_receiver() -> None:
+    """Two methods named ``bump`` on different receivers each check
+    against their own receiver name."""
+    source = """type A struct {
+    mu   sync.Mutex
+    hits int
+}
+
+type B struct {
+    mu   sync.Mutex
+    hits int
+}
+
+func (a *A) bump() {
+    a.mu.Lock()
+    a.hits++
+    a.mu.Unlock()
+}
+
+func (b *B) bump() {
+    b.hits++
+}"""
+    issues = _issues(source, "go")
+    assert any("`b.hits`" in i.message for i in issues)

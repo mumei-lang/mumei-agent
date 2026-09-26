@@ -2223,17 +2223,23 @@ def _typescript_safety_issues(
 # ---------------------------------------------------------------------------
 
 _TAINT_SOURCE_RE = re.compile(
-    r"\b(?:req(?:uest)?\.(?:query|params|body|headers|cookies|get_json)|"
-    r"request\.(?:args|form|data|json|GET|POST|values|FILES)|"
-    r"input\s*\(|sys\.argv|os\.environ|"
-    r"\w+\.URL\.Query|\w*FormValue\s*\(|PostFormValue\s*\(|"
-    r"c\.(?:Query|Param|DefaultQuery)\s*\(|"
-    r"location\.(?:search|hash)|document\.(?:URL|cookie)|"
-    r"localStorage\b|URLSearchParams)\b"
+    r"\breq(?:uest)?\.(?:query|params|body|headers|cookies|get_json)\b"
+    r"|\brequest\.(?:args|form|data|json|GET|POST|values|FILES)\b"
+    r"|\binput\s*\(|\bsys\.argv\b|\bos\.environ\b"
+    r"|\w+\.URL\.Query\b|\w*FormValue\s*\(|\bPostFormValue\s*\("
+    r"|\bc\.(?:Query|Param|DefaultQuery)\s*\("
+    r"|\blocation\.(?:search|hash)\b|\bdocument\.(?:URL|cookie)\b"
+    r"|\blocalStorage\b|\bURLSearchParams\b"
 )
-_TAINT_SANITIZER_RE = re.compile(
-    r"\b(?:escape|bleach\.clean|html\.escape|shlex\.quote|quote|sanitize|"
-    r"DOMPurify\.sanitize|urlencode|encodeURIComponent|strconv\.Atoi)\b"
+# Sanitizers are channel-specific: HTML/URL escapers do NOT make a value
+# safe for SQL, and numeric coercions do NOT make it safe for the DOM.
+_TAINT_SQL_SAFE_RE = re.compile(
+    r"\b(?:int|float|parseInt|parseFloat|Number|"
+    r"strconv\.(?:Atoi|ParseInt|ParseFloat|ParseUint))\s*\("
+)
+_TAINT_DOM_SAFE_RE = re.compile(
+    r"\b(?:escape|bleach\.clean|html\.escape|sanitize|DOMPurify\.sanitize|"
+    r"urlencode|encodeURIComponent|quote)\s*\("
 )
 _TAINT_ASSIGN_RE = re.compile(
     r"(?m)^\s*(?:var\s+|let\s+|const\s+)?(?P<name>[A-Za-z_]\w*)\s*"
@@ -2242,8 +2248,8 @@ _TAINT_ASSIGN_RE = re.compile(
 # SQL-ish sinks: only the FIRST argument is the query string — a parameter
 # tuple after the top-level comma is the safe parameterized form.
 _TAINT_QUERY_SINK_RE = re.compile(
-    r"\b(?:execute|executemany|query|raw|exec|queryRow|Query|Exec|ExecContext|"
-    r"QueryContext)\s*\("
+    r"\b(?:execute|executemany|query|raw|exec|QueryRow|QueryRowContext|"
+    r"queryRow|Query|Exec|ExecContext|QueryContext)\s*\("
 )
 # DOM/command sinks: taint anywhere in the statement is dangerous.
 _TAINT_DOM_SINK_RE = re.compile(
@@ -2289,72 +2295,135 @@ def _taint_lite_issues(
                 re.findall(r"\{([^}]*)\}", m.group(2))
             ),
             text,
+            flags=re.DOTALL,
         )
 
-    tainted: set[str] = set()
-    for assign in _TAINT_ASSIGN_RE.finditer(body):
-        name, rhs = assign.group("name"), assign.group("rhs")
-        if _TAINT_SANITIZER_RE.search(rhs):
-            tainted.discard(name)
-        elif _TAINT_SOURCE_RE.search(interpolated(rhs)) or (
-            tainted
-            and re.search(
-                rf"\b(?:{'|'.join(map(re.escape, tainted))})\b",
-                interpolated(rhs),
-            )
-        ):
-            tainted.add(name)
-    if not tainted and not _TAINT_SOURCE_RE.search(interpolated(body)):
-        return issues
+    def blank_calls(text: str, fn_re: re.Pattern[str]) -> str:
+        """Blank ``fn(...)`` call spans so their arguments don't count as
+        tainted — ``int(x)`` coerces for SQL, ``escape(x)`` for the DOM."""
+        out = text
+        for call in re.finditer(fn_re, text):
+            args = _paren_args(text, call.end() - 1)
+            span_end = call.end() + len(args) + 1
+            out = out[: call.start()] + " " * (span_end - call.start()) + out[span_end:]
+        return out
 
-    def tainted_text(text: str) -> str | None:
-        if _TAINT_SOURCE_RE.search(interpolated(text)):
+    def assign_rhs(assign: re.Match[str]) -> str:
+        """Extend the single-line ``rhs`` capture through unclosed
+        brackets / triple-quoted strings / template literals so multiline
+        interpolated queries keep their variable references."""
+        start, end = assign.start("rhs"), assign.end("rhs")
+
+        def unclosed(text: str) -> bool:
+            return (
+                text.count("(") > text.count(")")
+                or text.count("[") > text.count("]")
+                or text.count("{") > text.count("}")
+                or text.count('"""') % 2 == 1
+                or text.count("'''") % 2 == 1
+                or text.count("`") % 2 == 1
+            )
+
+        while unclosed(body[start:end]):
+            nl = body.find("\n", end)
+            if nl == -1:
+                break
+            end = nl + 1
+        rhs = body[start:end]
+        return rhs.split(";", 1)[0]
+
+    # Track taint per output channel: ``sql`` clears on numeric coercion,
+    # ``dom`` clears on HTML/URL escaping — neither clears the other.
+    tainted_sql: set[str] = set()
+    tainted_dom: set[str] = set()
+
+    def dirty_view(text: str, safe_re: re.Pattern[str]) -> str:
+        return interpolated(blank_calls(text, safe_re))
+
+    def dirty_names(text: str, tainted: set[str]) -> str | None:
+        if _TAINT_SOURCE_RE.search(text):
             return "a request-derived value"
         for name in tainted:
-            if re.search(rf"\b{re.escape(name)}\b", interpolated(text)):
+            if re.search(rf"\b{re.escape(name)}\b", text):
                 return f"`{name}` (request-derived)"
         return None
 
-    for match in _TAINT_QUERY_SINK_RE.finditer(body):
-        # `QueryContext(ctx, sql)`-style sinks put the context first — the
-        # query string is the next argument.
-        callee = match.group(0).rstrip("(").rstrip()
-        arg_index = 1 if callee.endswith("Context") else 0
-        args = _top_level_args(body[match.end() :])
-        if len(args) <= arg_index:
-            continue
-        hit = tainted_text(args[arg_index])
-        if hit is not None:
-            issues.append(
-                ForeignSafetyIssue(
-                    function_name=function_name,
-                    message=(
-                        f"{label} function `{function_name}` passes {hit} "
-                        "as part of a query/command string — interpolate "
-                        "parameters instead of concatenating"
-                    ),
-                    confidence="medium",
+    events = sorted(
+        [
+            *((m.start(), "assign", m) for m in _TAINT_ASSIGN_RE.finditer(body)),
+            *((m.start(), "query", m) for m in _TAINT_QUERY_SINK_RE.finditer(body)),
+            *((m.start(), "dom", m) for m in _TAINT_DOM_SINK_RE.finditer(body)),
+        ],
+        key=lambda event: event[0],
+    )
+    for _pos, kind, match in events:
+        if kind == "assign":
+            name = match.group("name")
+            rhs = assign_rhs(match)
+            sql_view = dirty_view(rhs, _TAINT_SQL_SAFE_RE)
+            dom_view = dirty_view(rhs, _TAINT_DOM_SAFE_RE)
+            if (
+                _TAINT_SOURCE_RE.search(sql_view)
+                or any(
+                    re.search(rf"\b{re.escape(t)}\b", sql_view)
+                    for t in tainted_sql
                 )
-            )
-            break
-    for match in _TAINT_DOM_SINK_RE.finditer(body):
-        statement = body[match.start() :]
-        end = re.search(r"[;\n]", statement)
-        if end is not None:
-            statement = statement[: end.start()]
-        hit = tainted_text(statement)
-        if hit is not None:
-            issues.append(
-                ForeignSafetyIssue(
-                    function_name=function_name,
-                    message=(
-                        f"{label} function `{function_name}` writes {hit} "
-                        "to the DOM — XSS risk; escape or sanitize first"
-                    ),
-                    confidence="medium",
+            ):
+                tainted_sql.add(name)
+            else:
+                tainted_sql.discard(name)
+            if (
+                _TAINT_SOURCE_RE.search(dom_view)
+                or any(
+                    re.search(rf"\b{re.escape(t)}\b", dom_view)
+                    for t in tainted_dom
                 )
+            ):
+                tainted_dom.add(name)
+            else:
+                tainted_dom.discard(name)
+        elif kind == "query":
+            # `QueryContext(ctx, sql)`-style sinks put the context first —
+            # the query string is the next argument.
+            callee = match.group(0).rstrip("(").rstrip()
+            arg_index = 1 if callee.endswith("Context") else 0
+            args = _top_level_args(body[match.end() :])
+            if len(args) <= arg_index:
+                continue
+            hit = dirty_names(
+                dirty_view(args[arg_index], _TAINT_SQL_SAFE_RE), tainted_sql
             )
-            break
+            if hit is not None:
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(
+                            f"{label} function `{function_name}` passes {hit} "
+                            "as part of a query/command string — interpolate "
+                            "parameters instead of concatenating"
+                        ),
+                        confidence="medium",
+                    )
+                )
+        else:  # dom
+            statement = body[match.start() :]
+            end = re.search(r"[;\n]", statement)
+            if end is not None:
+                statement = statement[: end.start()]
+            hit = dirty_names(
+                dirty_view(statement, _TAINT_DOM_SAFE_RE), tainted_dom
+            )
+            if hit is not None:
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(
+                            f"{label} function `{function_name}` writes {hit} "
+                            "to the DOM — XSS risk; escape or sanitize first"
+                        ),
+                        confidence="medium",
+                    )
+                )
     return issues
 
 
@@ -2397,8 +2466,50 @@ def _taint_lite_source_issues(
 _GO_PACKAGE_VAR_RE = re.compile(
     r"(?m)^var\s+(?P<name>[A-Za-z_]\w*)\s+(?P<type>[^\n]+)"
 )
+_GO_VAR_BLOCK_RE = re.compile(r"(?m)^var\s*\((?P<body>[^)]*)")
+_GO_VAR_BLOCK_NAME_RE = re.compile(
+    r"(?m)^\s*(?P<name>[A-Za-z_]\w*)\s+(?P<type>[^\n]+)"
+)
 _GO_MUTEX_FIELD_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*)\s+sync\.(?:RW)?Mutex")
-_GO_RECEIVER_RE_TEMPLATE = r"func\s*\(\s*(?P<r>[A-Za-z_]\w*)\s+\*?[A-Za-z_]\w*\s*\)\s*%s\s*\("
+_GO_METHOD_DEF_RE = re.compile(
+    r"func\s*\(\s*(?P<r>[A-Za-z_]\w*)\s+\*?[A-Za-z_]\w*\s*\)\s*"
+    r"(?P<name>[A-Za-z_]\w*)\s*\("
+)
+# ``name++``/``name--``/``name <op>=`` — the bare ``=`` must not be part of
+# ``==``/``<=``/``>=``/``!=``, and ``:=`` declares a local (shadowing is
+# checked separately).
+_GO_WRITE_RE_TEMPLATE = (
+    r"\bNAME(?:\.\w+)?\s*(?:\+\+|--|[+\-*/%|&^]=|=(?![=<>]))"
+)
+_GO_LOCK_EVENT_RE = re.compile(
+    r"\b\w+\.(?P<kind>Lock|Unlock|RLock|RUnlock)\s*\("
+)
+
+
+def _go_unguarded_writes(body: str, name_re: str):
+    """Yield writes to ``name_re`` outside any ``Lock()…Unlock()`` window —
+    the last lock event before each write decides whether it is held."""
+    events: list[tuple[int, str]] = []
+    for m in _GO_LOCK_EVENT_RE.finditer(body):
+        kind = m.group("kind")
+        # ``defer mu.Unlock()``/``defer s.mu.Unlock()`` release at function
+        # end — keep the lock held for every statement after the Lock.
+        before = body[max(0, m.start() - 16) : m.start()]
+        if kind in ("Unlock", "RUnlock") and re.search(
+            r"\bdefer\s+(?:\w+\.)*$", before
+        ):
+            events.append((len(body) + 1, kind))
+        else:
+            events.append((m.start(), kind))
+    write_re = re.compile(_GO_WRITE_RE_TEMPLATE.replace("NAME", name_re))
+    for write in write_re.finditer(body):
+        held = False
+        for pos, kind in events:
+            if pos >= write.start():
+                break
+            held = kind in ("Lock", "RLock")
+        if not held:
+            yield write
 
 
 def _go_shared_state_issues(
@@ -2416,69 +2527,85 @@ def _go_shared_state_issues(
         if not re.search(r"\b(?:sync|atomic)\.", m.group("type"))
         and m.group("name") not in mutex_names
     }
+    for block in _GO_VAR_BLOCK_RE.finditer(stripped):
+        for m in _GO_VAR_BLOCK_NAME_RE.finditer(block.group("body")):
+            if (
+                not re.search(r"\b(?:sync|atomic)\.", m.group("type"))
+                and m.group("name") not in mutex_names
+            ):
+                shared_vars.add(m.group("name"))
     issues: list[ForeignSafetyIssue] = []
     for name, raw_body in _go_function_blocks(source):
         body = _strip_go_rust_literals_and_comments(raw_body)
-        lock_positions = [
-            m.start() for m in re.finditer(r"\b\w+\.Lock\s*\(", body)
-        ]
-
-        def unguarded_write(pos: int, locks=lock_positions) -> bool:
-            return not any(lock < pos for lock in locks)
 
         def atomic_write(name_re: str, body=body) -> bool:
             return re.search(
                 rf"\batomic\.\w+\s*\(\s*&{name_re}\b", body
             ) is not None
 
+        flagged = False
         for var in sorted(shared_vars):
-            write = re.search(
-                rf"\b{re.escape(var)}(?:\.\w+)?\s*(?:\+\+|--|[+\-*/%|&^]?=)",
-                body,
-            )
-            if (
-                write is not None
-                and unguarded_write(write.start())
-                and not atomic_write(re.escape(var))
+            # ``var :=`` / ``var var`` inside the body declares a local
+            # that shadows the package variable — writes are not shared.
+            if re.search(
+                rf"\b{re.escape(var)}\s*:=|\bvar\s+{re.escape(var)}\b", body
             ):
-                issues.append(
-                    ForeignSafetyIssue(
-                        function_name=name,
-                        message=(
-                            f"Go function `{name}` writes package-level "
-                            f"`{var}` without holding a mutex — this file "
-                            "declares `sync.(RW)Mutex` fields, so the write "
-                            "races with other callers"
-                        ),
-                        confidence="medium",
-                    )
-                )
-                break
-        receiver = re.search(
-            _GO_RECEIVER_RE_TEMPLATE % re.escape(name), source
-        )
-        if receiver is None:
-            continue
-        r = receiver.group("r")
-        for field_write in re.finditer(
-            rf"\b{re.escape(r)}\.(?P<field>[A-Za-z_]\w*)\s*"
-            rf"(?:\+\+|--|[+\-*/%|&^]?=)",
-            body,
-        ):
-            field = field_write.group("field")
-            if field in mutex_names:
                 continue
-            if unguarded_write(field_write.start()) and not atomic_write(
-                rf"{re.escape(r)}\.{re.escape(field)}"
+            for write in _go_unguarded_writes(body, re.escape(var)):
+                if not atomic_write(re.escape(var)):
+                    issues.append(
+                        ForeignSafetyIssue(
+                            function_name=name,
+                            message=(
+                                f"Go function `{name}` writes package-level "
+                                f"`{var}` without holding a mutex — this file "
+                                "declares `sync.(RW)Mutex` fields, so the "
+                                "write races with other callers"
+                            ),
+                            confidence="medium",
+                        )
+                    )
+                    flagged = True
+                    break
+            if flagged:
+                break
+    # Methods are scanned per definition so same-named methods on
+    # different receivers each check against their own receiver name.
+    for method in _GO_METHOD_DEF_RE.finditer(source):
+        name, r = method.group("name"), method.group("r")
+        args_end = method.end() - 1
+        args_close = args_end + len(_paren_args(source, args_end)) + 1
+        nl = source.find("\n", args_close)
+        brace = source.find("{", args_close)
+        if brace == -1 or (nl != -1 and nl < brace):
+            continue
+        body = _strip_go_rust_literals_and_comments(
+            _balanced_brace_body(source, brace)
+        )
+
+        def atomic_write(name_re: str, body=body) -> bool:
+            return re.search(
+                rf"\batomic\.\w+\s*\(\s*&{name_re}\b", body
+            ) is not None
+
+        for field_write in _go_unguarded_writes(body, re.escape(r)):
+            field = re.match(
+                rf"{re.escape(r)}\.([A-Za-z_]\w*)", field_write.group(0)
+            )
+            if field is None or field.group(1) in mutex_names:
+                continue
+            if not atomic_write(
+                rf"{re.escape(r)}\.{re.escape(field.group(1))}"
             ):
                 issues.append(
                     ForeignSafetyIssue(
                         function_name=name,
                         message=(
-                            f"Go method `{name}` writes `{r}.{field}` "
-                            "without holding the receiver's mutex — this "
-                            "file declares `sync.(RW)Mutex` fields, so the "
-                            "write races with other callers"
+                            f"Go method `{name}` writes "
+                            f"`{r}.{field.group(1)}` without holding the "
+                            "receiver's mutex — this file declares "
+                            "`sync.(RW)Mutex` fields, so the write races "
+                            "with other callers"
                         ),
                         confidence="medium",
                     )
