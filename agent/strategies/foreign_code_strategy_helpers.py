@@ -6626,25 +6626,84 @@ def _narrowing_cast_issues(
     return issues
 
 
+_GUARD_DIVERGENCE_RE = re.compile(
+    r"\b(?:return|panic|break|continue|throw)\b"
+)
+_GUARD_ASSERT_RE = re.compile(
+    r"(?:require|assert|debug_assert)(?:!)?\s*\(?\s*$"
+)
+_GUARD_IF_RE = re.compile(r"\bif\s*\(?\s*$")
+
+# Mechanisms a comparison before a use can protect it through — the check
+# decides which direction of the comparison (safe vs bad) each mechanism
+# keeps.
+_GUARD_HOLDS_MECHANISMS = {"inside", "shortcircuit", "asserted", "ternary_true"}
+_GUARD_NEGATED_MECHANISMS = {"early_exit", "ternary_false"}
+
+
+def _guard_mechanism(
+    expression: str, match: re.Match[str], use_pos: int
+) -> str | None:
+    """How a comparison ``match`` relates to a use at ``use_pos``:
+
+    - ``asserted`` — inside ``require(...)``/``assert(...)``/``assert!(...)``;
+      execution past it implies the condition held.
+    - ``ternary_true``/``ternary_false`` — the comparison is a ternary
+      condition and the use sits in that branch.
+    - ``inside`` — the comparison is the condition of a block containing
+      the use.
+    - ``early_exit`` — the comparison is the whole condition of an ``if``
+      block that closed before the use and diverges (return/panic/break/
+      continue/throw) — the use runs under the *negated* condition.
+    - ``shortcircuit`` — an ``&&`` separates the comparison and the use.
+    - ``None`` — the comparison does not dominate the use.
+    """
+    if _GUARD_ASSERT_RE.search(expression[: match.start()]):
+        return "asserted"
+    between = expression[match.end() : use_pos]
+    if "||" in between:
+        return None
+    qpos = between.find("?")
+    cpos = between.rfind(":")
+    if qpos != -1:
+        return "ternary_true" if cpos == -1 or cpos < qpos else "ternary_false"
+    brace_rel = between.find("{")
+    if brace_rel != -1:
+        before_brace = between[:brace_rel]
+        if ";" in before_brace or "}" in before_brace:
+            return None
+        brace_pos = match.end() + brace_rel
+        block = _balanced_brace_body(expression, brace_pos)
+        block_end = brace_pos + len(block) + 1
+        if use_pos < block_end:
+            return "inside"
+        if (
+            _GUARD_IF_RE.search(expression[: match.start()])
+            and re.fullmatch(r"\s*\)?\s*", before_brace)
+            and _GUARD_DIVERGENCE_RE.search(block)
+        ):
+            return "early_exit"
+        return None
+    if "&&" in between:
+        return "shortcircuit"
+    return None
+
+
 def _subtraction_guarded(
     expression: str, left: str, right: str, sub_pos: int
 ) -> bool:
     """Whether a ``left - right`` subtraction at ``sub_pos`` is guarded.
 
-    Two suppression shapes, both approximate:
-
-    - A comparison proving ``left >= right`` that *dominates* the
-      subtraction: it must appear before ``sub_pos`` with no ``||`` or ``:``
-      between them. ``&&`` and ``?`` are safe separators (the right operand
-      / true branch runs only when the condition holds); under ``||`` or
-      ``:`` the subtraction runs when the condition is *false*, so the
-      comparison guards the opposite direction — e.g. ``a >= b || a - b``
-      still underflows.
-    - Ternary false branch: in ``cond ? t : f`` a subtraction inside ``f``
-      runs only under ``not cond``, so a condition proving ``left <= right``
-      (``left <= right``, ``left < right``, ``right >= left``, ``right >
-      left`` — no ``==``) suppresses it. ``a >= b ? a - b : b - a`` and
-      ``a <= b ? x : a - b`` are both safe idioms this covers.
+    A comparison proving ``left >= right`` (``a >= b``, ``a > b``, ``a == b``,
+    ``b <= a``, ``b < a``, ``b == a``) guards the subtraction when it
+    *dominates* it — the use is inside its block, ``&&``-joined to it, in
+    the true branch of its ternary, or wrapped in ``require``/``assert``.
+    A comparison proving ``left <= right`` strictly (no ``==``) guards via
+    the negated mechanisms — an early-exit ``if`` or a ternary false branch:
+    ``if a < b { return } a - b`` is safe because only ``a >= b`` reaches
+    the subtraction. ``a >= b || a - b`` and ``if a >= b { return } a - b``
+    are *not* guarded — the former runs the subtraction under the negated
+    condition and the latter exits on the safe direction.
     """
     proves_ge = (
         rf"\b{re.escape(left)}\s*(?:>=?|==)\s*{re.escape(right)}\b"
@@ -6653,17 +6712,20 @@ def _subtraction_guarded(
     for match in re.finditer(proves_ge, expression):
         if match.end() > sub_pos:
             break
-        between = expression[match.end() : sub_pos]
-        if "||" not in between and ":" not in between:
+        if _guard_mechanism(expression, match, sub_pos) in (
+            _GUARD_HOLDS_MECHANISMS
+        ):
             return True
-    qpos = expression.find("?")
-    cpos = expression.rfind(":")
-    if 0 <= qpos < cpos < sub_pos:
-        proves_le_strict = (
-            rf"\b{re.escape(left)}\s*<=?\s*{re.escape(right)}\b"
-            rf"|\b{re.escape(right)}\s*>=?\s*{re.escape(left)}\b"
-        )
-        if re.search(proves_le_strict, expression[:qpos]):
+    proves_le = (
+        rf"\b{re.escape(left)}\s*<=?\s*{re.escape(right)}\b"
+        rf"|\b{re.escape(right)}\s*>=?\s*{re.escape(left)}\b"
+    )
+    for match in re.finditer(proves_le, expression):
+        if match.end() > sub_pos:
+            break
+        if _guard_mechanism(expression, match, sub_pos) in (
+            _GUARD_NEGATED_MECHANISMS
+        ):
             return True
     return False
 
