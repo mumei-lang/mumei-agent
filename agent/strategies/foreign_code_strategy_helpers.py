@@ -6256,6 +6256,235 @@ def _solidity_overflow_safety_issue(
     )
 
 
+# Integer type bit-widths per language label: type name → (bits, signed).
+# Used to decide whether a cast/conversion narrows or sign-flips, and whether a
+# subtraction operand is unsigned (where `a - b` can silently underflow).
+_INTEGER_TYPE_BITS: dict[str, dict[str, tuple[int, bool]]] = {
+    "Rust": {
+        "u8": (8, False), "u16": (16, False), "u32": (32, False), "u64": (64, False),
+        "u128": (128, False), "usize": (64, False),
+        "i8": (8, True), "i16": (16, True), "i32": (32, True), "i64": (64, True),
+        "i128": (128, True), "isize": (64, True),
+    },
+    "Go": {
+        "uint8": (8, False), "uint16": (16, False), "uint32": (32, False),
+        "uint64": (64, False), "uint": (64, False), "uintptr": (64, False),
+        "byte": (8, False), "rune": (32, True),
+        "int8": (8, True), "int16": (16, True), "int32": (32, True),
+        "int64": (64, True), "int": (64, True),
+    },
+    "Solidity": {
+        "uint": (256, False), "int": (256, True), "address": (160, False),
+        **{f"uint{b}": (b, False) for b in range(8, 257, 8)},
+        **{f"int{b}": (b, True) for b in range(8, 257, 8)},
+    },
+}
+
+_RUST_CAST_RE = re.compile(
+    r"\b(?P<operand>[A-Za-z_]\w*)\s+as\s+(?P<ty>u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize)\b"
+)
+_GO_CONVERSION_RE = re.compile(
+    r"\b(?P<ty>u?int(?:8|16|32|64)?|uintptr|byte)\s*\(\s*(?P<operand>[A-Za-z_]\w*)\s*\)"
+)
+_SOLIDITY_CONVERSION_RE = re.compile(
+    r"\b(?P<ty>u?int(?:8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?)\s*\(\s*(?P<operand>[A-Za-z_]\w*)\s*\)"
+)
+_UNSIGNED_SUBTRACTION_RE = re.compile(
+    r"\b(?P<left>[A-Za-z_]\w*)\s*-\s*(?P<right>[A-Za-z_]\w*)\b"
+)
+
+
+def _integer_type_bits(label: str, raw_type: str) -> tuple[int, bool] | None:
+    """Resolve a declared parameter type to ``(bits, signed)`` for the label."""
+    table = _INTEGER_TYPE_BITS.get(label)
+    if table is None:
+        return None
+    cleaned = raw_type.strip()
+    cleaned = re.sub(r"^(?:&|mut\s+|mut\b\s*|const\s+)+", "", cleaned)
+    cleaned = cleaned.split()[0].strip("*,") if cleaned.split() else cleaned
+    return table.get(cleaned)
+
+
+def _cast_out_of_range_counterexample(
+    operand: str, bits: int, signed: bool
+) -> dict[str, int]:
+    value = z3.Int(operand)
+    solver = z3.Solver()
+    if signed:
+        lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+    else:
+        lo, hi = 0, 2 ** bits - 1
+    solver.add(z3.Or(value < lo, value > hi))
+    if solver.check() == z3.sat:
+        return {operand: solver.model().eval(value, model_completion=True).as_long()}
+    return {operand: hi + 1}
+
+
+def _narrowing_cast_issues(
+    function_name: str,
+    expression: str,
+    label: str,
+    *,
+    known_constants: dict[str, int],
+    param_types: dict[str, str] | None,
+    local_names: set[str] | None,
+    solidity_default_checks: bool,
+) -> list[ForeignSafetyIssue]:
+    """Flag integer casts that can truncate or sign-flip a provably wider or
+    differently-signed operand — Rust ``x as u8``, Go ``uint8(x)``,
+    Solidity ``uint128(x)`` (pre-0.8 only; 0.8+ explicit conversions revert).
+
+    The operand must be a plain identifier with a known declared type:
+    untyped locals and member expressions cannot carry a contract anyway, so
+    they are skipped rather than guessed at."""
+    if label == "Solidity" and solidity_default_checks:
+        return []
+    if label == "Rust":
+        sites = [
+            (m.group("operand"), m.group("ty"))
+            for m in _RUST_CAST_RE.finditer(expression)
+        ]
+    elif label == "Go":
+        sites = [
+            (m.group("operand"), m.group("ty"))
+            for m in _GO_CONVERSION_RE.finditer(expression)
+        ]
+    elif label == "Solidity":
+        sites = [
+            (m.group("operand"), m.group("ty"))
+            for m in _SOLIDITY_CONVERSION_RE.finditer(expression)
+        ]
+    else:
+        return []
+    table = _INTEGER_TYPE_BITS.get(label, {})
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for operand, target in sites:
+        if (operand, target) in seen:
+            continue
+        seen.add((operand, target))
+        if local_names and operand in local_names:
+            continue
+        target_bits_signed = table.get(target)
+        if target_bits_signed is None:
+            continue
+        tbits, tsigned = target_bits_signed
+        lo = -(2 ** (tbits - 1)) if tsigned else 0
+        hi = 2 ** (tbits - 1) - 1 if tsigned else 2 ** tbits - 1
+        if known_constants and operand in known_constants:
+            value = known_constants[operand]
+            if lo <= value <= hi:
+                continue
+            sbits, ssigned = None, False  # definite out-of-range cast
+        else:
+            source_bits_signed = (
+                _integer_type_bits(label, param_types[operand])
+                if param_types and operand in param_types
+                else None
+            )
+            if source_bits_signed is None:
+                # Operand type unknown — untyped locals and member
+                # expressions cannot carry a contract; skip.
+                continue
+            sbits, ssigned = source_bits_signed
+            safe_widening = (ssigned == tsigned and tbits >= sbits) or (
+                not ssigned and tsigned and tbits > sbits
+            )
+            if safe_widening:
+                continue
+        contracts: list[str] = []
+        if ssigned:
+            contracts.append(f"{operand} >= {lo}")
+        contracts.append(f"{operand} <= {hi}")
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` can truncate `{operand}` "
+                    f"in cast to `{target}` without a range contract "
+                    f"({operand} outside {lo}..={hi} wraps)"
+                ),
+                required_contracts=tuple(contracts),
+                counterexample=_cast_out_of_range_counterexample(operand, tbits, tsigned),
+            )
+        )
+    return issues
+
+
+def _unsigned_subtraction_issues(
+    function_name: str,
+    expression: str,
+    label: str,
+    *,
+    known_constants: dict[str, int],
+    unsigned_locals: set[str] | None,
+    param_types: dict[str, str] | None,
+    local_names: set[str] | None,
+    solidity_default_checks: bool,
+) -> list[ForeignSafetyIssue]:
+    """Flag ``a - b`` on unsigned operands where ``a < b`` is possible — the
+    i64 contract model treats subtraction as safe, but on ``uint``/``usize`` it
+    wraps (Go, Solidity <0.8) or panics (Rust debug)."""
+    if label not in {"Go", "Rust", "Solidity"}:
+        return []
+    if label == "Solidity" and solidity_default_checks:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _UNSIGNED_SUBTRACTION_RE.finditer(expression):
+        left, right = match.group("left"), match.group("right")
+        if (left, right) in seen:
+            continue
+        seen.add((left, right))
+
+        def _unsigned(name: str) -> bool:
+            if unsigned_locals and name in unsigned_locals:
+                return True
+            if param_types and name in param_types:
+                bits = _integer_type_bits(label, param_types[name])
+                return bits is not None and not bits[1]
+            return False
+
+        if not (_unsigned(left) and _unsigned(right)):
+            continue
+        if local_names and (left in local_names or right in local_names):
+            continue
+        known = known_constants or {}
+        if left in known and right in known and known[left] >= known[right]:
+            continue
+        if right in known and known[right] == 0:
+            continue
+        # An ordering/equality comparison between the pair — in either
+        # direction — is treated as a guard. This is approximate: it covers
+        # idioms like ``a >= b ? a - b : b - a`` where the comparison and the
+        # subtraction sit in different ternary branches, matching the other
+        # heuristic guards in this module.
+        if re.search(
+            rf"\b{re.escape(left)}\s*(?:[<>]=?|==)\s*{re.escape(right)}\b"
+            rf"|\b{re.escape(right)}\s*(?:[<>]=?|==)\s*{re.escape(left)}\b",
+            expression,
+        ):
+            continue
+        counterexample = {left: 0, right: 1}
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` can underflow "
+                    f"`{left} - {right}` on unsigned operands without a "
+                    f"`{left} >= {right}` contract (Z3 counterexample: "
+                    + ", ".join(
+                        f"{key}={value}" for key, value in counterexample.items()
+                    )
+                    + ")"
+                ),
+                required_contracts=(f"{left} >= {right}",),
+                counterexample=counterexample,
+            )
+        )
+    return issues
+
+
 def _issues_for_expression(
     function_name: str,
     expression: str,
@@ -6290,7 +6519,7 @@ def _issues_for_expression(
         else None
     )
     if findings is not None:
-        return _issues_from_findings(
+        issues = _issues_from_findings(
             function_name,
             expression,
             findings,
@@ -6313,6 +6542,30 @@ def _issues_for_expression(
             source=source,
             params_text=params_text,
         )
+        issues.extend(
+            _narrowing_cast_issues(
+                function_name,
+                expression,
+                label,
+                known_constants=known_constants,
+                param_types=param_types,
+                local_names=local_names,
+                solidity_default_checks=solidity_default_checks,
+            )
+        )
+        issues.extend(
+            _unsigned_subtraction_issues(
+                function_name,
+                expression,
+                label,
+                known_constants=known_constants,
+                unsigned_locals=unsigned_locals,
+                param_types=param_types,
+                local_names=local_names,
+                solidity_default_checks=solidity_default_checks,
+            )
+        )
+        return issues
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
         expression = _strip_go_rust_literals_and_comments(expression)
@@ -6395,6 +6648,29 @@ def _issues_for_expression(
     if label == "Solidity":
         for left, right in _addition_pairs_regex(expression):
             issues.append(_solidity_overflow_safety_issue(function_name, left, right, label))
+    issues.extend(
+        _narrowing_cast_issues(
+            function_name,
+            expression,
+            label,
+            known_constants=known_constants,
+            param_types=param_types,
+            local_names=local_names,
+            solidity_default_checks=solidity_default_checks,
+        )
+    )
+    issues.extend(
+        _unsigned_subtraction_issues(
+            function_name,
+            expression,
+            label,
+            known_constants=known_constants,
+            unsigned_locals=unsigned_locals,
+            param_types=param_types,
+            local_names=local_names,
+            solidity_default_checks=solidity_default_checks,
+        )
+    )
     return issues
 
 
