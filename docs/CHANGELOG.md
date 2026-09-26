@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-26: V1-B-2 follow-up 6 — intermediate Tier-3: one-level return taint, receiver mutexes, more sinks/sanitizers
+
+- `agent/language_patterns.py` — intermediate expansion of the Tier-3-lite checks (still intra-file and warnings-only):
+  - **Intra-file one-level taint propagation through function returns** (`taint_lite`): a first pass replays each function body's top-of-line assignments and return expressions — a function whose `return` is source-derived registers in a per-channel tainted-callee set, and calls to it taint the assignment target in every other body (`v := helper(r)` then `db.Query("…" + v)` flags). Exactly one level — `g → f → source` does not chain — because transitive closure needs the interprocedural call graph the analyzer deliberately lacks (see `docs/ROADMAP.md` analysis-infrastructure note).
+  - **Mutex receiver association** (`go_shared_state`): method-body field writes are guarded by lock events on the *same* receiver — `other.mu.Lock()` no longer suppresses a write to `s.hits`, while bare `mu.Lock()` (package-level) still does.
+  - **New sinks and sanitizers**: `exec.Command`/`exec.CommandContext` evaluate every untrusted argv element (Context variants skip `ctx`), `strconv.Itoa` clears the SQL channel, and `url.QueryEscape`/`url.PathEscape`/`template.HTMLEscapeString` clear the DOM channel.
+- `docs/ROADMAP.md` — records the current analysis-infrastructure state (tree-sitter single-file + regex fallback + Python `ast`; no symbol/type/alias resolution, no call graph, no cross-file resolution) and the three future options — stack-graphs/SCIP, CodeQL/Semgrep integration, P17 bespoke — to revisit when needed.
+- Regression gate: `uv run pytest tests/test_language_patterns_tier3.py -q` (56 cases); full suite green.
+
 ## 2026-09-26: V1-B-2 follow-up 5 — `mumei:allow` opt-outs, composed Rust guards, trusted-atom surfacing
 
 - `agent/language_patterns.py` — pattern findings now honor suppression markers in the file's own comment syntax: `# mumei:allow` (Python) / `// mumei:allow` (Rust/Go/TypeScript/Solidity) on the same line or the line immediately above suppresses the finding, and `#[allow(mumei::*)]` attribute lines do the same — plus, on a `fn` item, suppress every finding inside it (matching Rust attribute scoping). Implemented centrally: detectors stamp `ForeignSafetyIssue.line` (new field, 1-based; `0` = unknown = never suppressed) and `language_pattern_issues` post-filters via `_suppress_pattern_issues`, so every current and future pattern gets the opt-out for free — including text-fallback paths, whose line numbers are recovered by locating the raw function-body slices inside the source.

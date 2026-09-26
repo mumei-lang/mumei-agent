@@ -646,3 +646,109 @@ def test_python_comment_source_not_tainted() -> None:
     )
     issues = _issues(source, "python")
     assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_return_taint_one_level_flags() -> None:
+    """A helper whose ``return`` is source-derived taints its callers'
+    assignment targets (intra-file, one level)."""
+    source = (
+        "def helper(request):\n"
+        "    return request.args['x']\n"
+        "\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_py_return_taint_clean_helper_skipped() -> None:
+    """A helper returning a constant does not taint its callers."""
+    source = (
+        "def helper(request):\n"
+        "    return 'x'\n"
+        "\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_return_taint_single_level_only() -> None:
+    """``g -> f -> source`` does not chain — one propagation level only."""
+    source = (
+        "def h0(request):\n"
+        "    return request.args['x']\n"
+        "def h1(request):\n"
+        "    return h0(request)\n"
+        "def handler(request):\n"
+        "    v = h1(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_go_exec_command_argv_taint_flags() -> None:
+    """``exec.Command(\"sh\", \"-c\", v)`` — untrusted argv flags, not just
+    the program name argument."""
+    source = (
+        'package x\nimport "os/exec"\n'
+        "func f(r *http.Request) {\n"
+        '    n := r.URL.Query().Get("x")\n'
+        '    exec.Command("sh", "-c", n)\n'
+        "}\n"
+    )
+    issues = _issues(source, "go")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_go_strconv_itoa_sanitizes_sql() -> None:
+    """``strconv.Itoa`` coerces to numeric — the SQL channel clears."""
+    source = (
+        'package x\nimport "strconv"\n'
+        "func f(r *http.Request) {\n"
+        '    n, _ := strconv.Atoi(r.URL.Query().Get("x"))\n'
+        '    db.Query("SELECT * FROM t WHERE n=" + strconv.Itoa(n))\n'
+        "}\n"
+    )
+    issues = _issues(source, "go")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_go_other_receiver_mutex_not_guarding() -> None:
+    """``other.mu.Lock()`` protects ``other``'s fields, not ``s.hits``."""
+    source = """type A struct {
+    mu sync.Mutex
+}
+type S struct {
+    mu   sync.Mutex
+    hits int
+}
+func (s *S) bump(other *A) {
+    other.mu.Lock()
+    s.hits++
+    other.mu.Unlock()
+}
+"""
+    issues = _issues(source, "go")
+    assert any("`s.hits`" in i.message for i in issues)
+
+
+def test_go_own_receiver_mutex_guards() -> None:
+    """``s.mu.Lock()`` still guards ``s.hits`` writes."""
+    source = """type S struct {
+    mu   sync.Mutex
+    hits int
+}
+func (s *S) bump() {
+    s.mu.Lock()
+    s.hits++
+    s.mu.Unlock()
+}
+"""
+    issues = _issues(source, "go")
+    assert not any("`s.hits`" in i.message for i in issues)
