@@ -386,3 +386,114 @@ def test_python_find_colon_non_diverging_not_guarded() -> None:
 def test_python_find_assert_guarded() -> None:
     body = 'i = s.find("x")\nassert i != -1\nreturn arr[i]'
     assert not _sentinel_issues(body, "Python")
+
+
+def test_shift_nested_conditional_return_not_divergence() -> None:
+    """``if (n >= 64) { if (c) { return; } }`` — the nested return does not
+    make the outer if-block diverge, so the shift is still unguarded."""
+    issues = _shift_issues(
+        "if n >= 64 { if c { return } } x << n",
+        "Go",
+        param_types={"x": "uint64", "n": "uint64"},
+    )
+    assert len(issues) == 1
+
+
+def test_shift_mask_without_assign_back_not_guarded() -> None:
+    """``y := n & 63`` bounds ``y``, not ``n`` — ``x << n`` is still
+    unguarded because the mask was never assigned back to ``n``."""
+    issues = _shift_issues(
+        "y := n & 63; x << n",
+        "Go",
+        param_types={"x": "uint64", "n": "uint64"},
+    )
+    assert len(issues) == 1
+
+
+def test_shift_mask_assigned_back_guarded() -> None:
+    """``n = n & 63`` reassigns the masked value — ``x << n`` is bounded."""
+    assert not _shift_issues(
+        "n = n & 63; x << n",
+        "Go",
+        param_types={"x": "uint64", "n": "uint64"},
+    )
+
+
+def test_shift_later_unmasked_reassign_unguarded() -> None:
+    """``n = n & 63; n = n + 5`` — the last assignment is not mask-bounded."""
+    issues = _shift_issues(
+        "n = n & 63; n = n + 5; x << n",
+        "Go",
+        param_types={"x": "uint64", "n": "uint64"},
+    )
+    assert len(issues) == 1
+
+
+def test_shift_signed_amount_needs_lower_bound() -> None:
+    """``if n < 64 { x << n }`` on a signed ``n`` — ``n = -1`` still panics;
+    the check must also prove ``n >= 0``."""
+    issues = _shift_issues(
+        "if n < 64 { x << n }",
+        "Go",
+        param_types={"x": "uint64", "n": "int64"},
+    )
+    assert len(issues) == 1
+
+
+def test_shift_signed_amount_both_bounds_guarded() -> None:
+    """``if n < 64 && n >= 0 { x << n }`` — signed amount fully bounded."""
+    assert not _shift_issues(
+        "if n < 64 && n >= 0 { x << n }",
+        "Go",
+        param_types={"x": "uint64", "n": "int64"},
+    )
+
+
+def test_shift_signed_amount_neg_exit_plus_upper_exit_guarded() -> None:
+    """``if n < 0 { return } if n >= 64 { return } x << n`` — both bad
+    directions exit, leaving ``0 <= n < 64``."""
+    assert not _shift_issues(
+        "if n < 0 { return } if n >= 64 { return } x << n",
+        "Go",
+        param_types={"x": "uint64", "n": "int64"},
+    )
+
+
+def test_shift_signed_amount_modulo_mask_not_guarded() -> None:
+    """``n = n % 64`` bounds a signed ``n`` to ``(-63, 63)`` — the negative
+    range still panics, so it is not a guard."""
+    issues = _shift_issues(
+        "n = n % 64; x << n",
+        "Go",
+        param_types={"x": "uint64", "n": "int64"},
+    )
+    assert len(issues) == 1
+
+
+def test_python_find_nested_return_not_divergence() -> None:
+    """``if i == -1:\\n    if c:\\n        return`` — the nested conditional
+    return does not guard the use below the outer if."""
+    body = 'i = s.find("x")\nif i == -1:\n    if c:\n        return\nreturn arr[i]'
+    issues = _sentinel_issues(body, "Python")
+    assert len(issues) == 1
+
+
+def test_go_bare_call_after_semicolon_flags() -> None:
+    """``g(); work()`` — the second call is still a bare statement."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _go_ignored_error_issues,
+    )
+
+    issues = _go_ignored_error_issues("f", "g(); work()", {"work"})
+    assert len(issues) == 1
+
+
+def test_go_if_init_err_check_not_bare() -> None:
+    """``if err := work(); err != nil { }`` binds and checks the error."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _go_ignored_error_issues,
+    )
+
+    assert not _go_ignored_error_issues(
+        "f", "if err := work(); err != nil { panic(err) }", {"work"}
+    )
