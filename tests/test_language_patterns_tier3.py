@@ -796,3 +796,104 @@ def test_py_return_inside_string_literal_ignored() -> None:
     )
     issues = _issues(source, "python")
     assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_dead_code_after_return_does_not_untaint() -> None:
+    """``x = int(x)`` after ``return x`` is dead code — it must not
+    clear the taint the return carried."""
+    source = (
+        "def helper(request):\n"
+        "    x = request.args['a']\n"
+        "    return x\n"
+        "    x = int(x)\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_dead_code_after_return_does_not_taint() -> None:
+    """A tainted assignment after ``return x`` must not mark the
+    function as returning tainted data."""
+    source = (
+        "def helper(request):\n"
+        "    x = 'safe'\n"
+        "    return x\n"
+        "    x = request.args['a']\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_multiline_return_tracked() -> None:
+    """``return (\\n    expr\\n)`` — the wrapped lines still carry taint."""
+    source = (
+        "def helper(request):\n"
+        "    return (\n"
+        "        request.args['a']\n"
+        "    )\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_nested_def_return_not_outers() -> None:
+    """A nested ``def``'s ``return`` belongs to the nested function."""
+    source = (
+        "def outer(request):\n"
+        "    def inner():\n"
+        "        return request.args['a']\n"
+        "    return 'x'\n"
+        "def handler(request):\n"
+        "    v = outer(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_ts_void_function_not_implicit_return() -> None:
+    """A ``function``-declared void body is not a bare arrow expression —
+    ``logger`` returns nothing, so callers of it stay clean."""
+    source = (
+        "function logger(req) {\n"
+        "    console.log(req.query.x);\n"
+        "}\n"
+        "function handler(req) {\n"
+        "    const v = logger(req);\n"
+        "    db.query('SELECT * FROM t WHERE n=' + v);\n"
+        "}\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "typescript"))
+
+
+def test_py_unrelated_dotted_callee_not_tainted() -> None:
+    """``settings.get()`` must not inherit ``R.get``'s return taint —
+    dotted callees match only exact names or ``self.``/``this.``."""
+    source = (
+        "class R:\n"
+        "    def get(self):\n"
+        "        return self.request.args['a']\n"
+        "def handler(request, settings):\n"
+        "    v = settings.get('k')\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_self_receiver_call_propagates() -> None:
+    """``self.helper()`` does propagate — the ``self.`` receiver is the
+    same-file method being registered."""
+    source = (
+        "class H:\n"
+        "    def helper(self):\n"
+        "        return self.request.args['a']\n"
+        "    def handler(self):\n"
+        "        v = self.helper()\n"
+        "        db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))

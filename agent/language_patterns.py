@@ -2578,11 +2578,19 @@ _TAINT_CALL_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(")
 
 def _taint_call_tainted(view: str, tainted_fns: frozenset[str]) -> bool:
     """``view`` calls a function flagged as returning tainted data
-    (intra-file, one propagation level — no call-graph)."""
-    return any(
-        m.group("name").rsplit(".", 1)[-1] in tainted_fns
-        for m in _TAINT_CALL_RE.finditer(view)
-    )
+    (intra-file, one propagation level — no call-graph). The callee
+    must match exactly or ride on a ``self.``/``this.`` receiver —
+    ``settings.get()`` must not inherit ``reader.get()``'s taint."""
+    for m in _TAINT_CALL_RE.finditer(view):
+        callee = m.group("name")
+        if callee in tainted_fns:
+            return True
+        if (
+            callee.startswith(("self.", "this."))
+            and callee.split(".", 1)[1] in tainted_fns
+        ):
+            return True
+    return False
 # DOM/command sinks: taint anywhere in the statement is dangerous.
 _TAINT_DOM_SINK_RE = re.compile(
     r"(?:\.innerHTML\s*=|\.outerHTML\s*=|\bdocument\.write\s*\()"
@@ -2715,6 +2723,79 @@ def _taint_dirty_view(text: str, safe_re: re.Pattern[str]) -> str:
     return _taint_interpolated(_taint_blank_calls(text, safe_re))
 
 
+_TAINT_LITERAL_RE = re.compile(
+    r"([fFbBrRw]*)(\"\"\"|'''|['\"`])(.*?)\2", re.DOTALL
+)
+
+
+def _taint_mask_literals(text: str) -> str:
+    """Position-preserving blank of string-literal spans — used to find
+    ``return``/assignment keywords so a keyword inside a literal (a
+    docstring, a JSON fragment) does not count. Interpolation regions
+    (``{…}`` in f-strings, ``${…}`` in template literals) stay readable;
+    newlines are preserved so positions and line anchors hold."""
+    out = list(text)
+    for m in _TAINT_LITERAL_RE.finditer(text):
+        prefix, quote, inner = m.group(1), m.group(2), m.group(3)
+        keep: list[tuple[int, int]] = []
+        inner_start = m.start() + len(prefix) + len(quote)
+        if "f" in prefix.lower():
+            keep = [
+                (inner_start + mm.start(), inner_start + mm.end())
+                for mm in re.finditer(r"\{[^}]*\}", inner)
+            ]
+        elif quote.endswith("`"):
+            keep = [
+                (inner_start + mm.start(), inner_start + mm.end())
+                for mm in re.finditer(r"\$\{[^}]*\}", inner)
+            ]
+        i = m.start()
+        end = m.end()
+        regions = sorted(keep)
+        ri = 0
+        while i < end:
+            if text[i] == "\n":
+                i += 1
+                continue
+            while ri < len(regions) and i >= regions[ri][1]:
+                ri += 1
+            if ri < len(regions) and regions[ri][0] <= i < regions[ri][1]:
+                i += 1
+                continue
+            out[i] = " "
+            i += 1
+    return "".join(out)
+
+
+def _mask_python_nested_defs(body: str) -> str:
+    """Blank nested ``def`` blocks (position-preserving) so their
+    ``return``/assignments don't count as the outer function's. The
+    segment's own first ``def`` line is kept; deeper defs are blanked
+    through their indented bodies."""
+    lines = body.splitlines(keepends=True)
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i < len(lines):
+        i += 1  # the segment's own ``def`` header
+    while i < len(lines):
+        m = re.match(r"^(\s*)(?:async\s+)?def\s", lines[i])
+        if m is None:
+            i += 1
+            continue
+        indent = len(m.group(1))
+        j = i + 1
+        while j < len(lines):
+            ln = lines[j]
+            if ln.strip() and len(ln) - len(ln.lstrip()) <= indent:
+                break
+            j += 1
+        for k in range(i, j):
+            lines[k] = "".join(" " if c != "\n" else "\n" for c in lines[k])
+        i = j
+    return "".join(lines)
+
+
 def _taint_assign_rhs(body: str, assign: re.Match[str]) -> str:
     """Extend the single-line ``rhs`` capture through unclosed
     brackets / triple-quoted strings / template literals so multiline
@@ -2754,7 +2835,10 @@ def _taint_replay_assigns(
     out: list[tuple[int, str, bool, bool]] = []
     tainted_sql: set[str] = set()
     tainted_dom: set[str] = set()
-    for match in _TAINT_ASSIGN_RE.finditer(body):
+    # Detect assignments on the literal-masked view so a ``name = …``
+    # inside a string literal does not count; rhs is read from the raw
+    # body (positions are identical — the mask preserves length).
+    for match in _TAINT_ASSIGN_RE.finditer(_taint_mask_literals(body)):
         name = match.group("name")
         rhs = _taint_assign_rhs(body, match)
         sql_view = _taint_dirty_view(rhs, _TAINT_SQL_SAFE_RE)
@@ -2788,36 +2872,59 @@ def _taint_return_channels(
     One propagation level: assigns replayed without tainted-callee
     knowledge, so ``g() → return f()`` does not chain transitively.
 
-    The ``return`` scan runs on the interpolated view so a ``return``
-    appearing inside a string literal does not count. With
-    ``bare_expr_is_return`` (TypeScript arrow bodies like
-    ``const f = (r) => r.query.x`` — no braces, no ``return`` keyword),
-    the whole body is the implicit return expression."""
+    Each ``return`` is evaluated against the taint state at *its own*
+    position — a ``return x`` is not affected by assignments that follow
+    it. The scan runs on the literal-masked view so a ``return`` inside
+    a string literal (a docstring, a JSON fragment) does not count, and
+    the expression extends through unclosed brackets so a multiline
+    ``return (`` keeps its later lines. With ``bare_expr_is_return``
+    (single-expression TypeScript arrow bodies like
+    ``const f = (r) => r.query.x`` — no ``return`` keyword), the whole
+    body is the implicit return expression."""
+    assigns = _taint_replay_assigns(body)
+    masked = _taint_mask_literals(body)
+    rets: list[tuple[int, str]] = []
+    for ret in re.finditer(r"(?m)^\s*return\b[ \t]*(?P<expr>.*)", masked):
+        expr = ret.group("expr")
+        end = ret.end("expr")
+        while expr.count("(") > expr.count(")") or expr.count("[") > expr.count("]"):
+            nl = masked.find("\n", end)
+            if nl == -1:
+                break
+            expr += masked[end : nl + 1]
+            end = nl + 1
+        expr = expr.split(";", 1)[0].strip()
+        if expr:
+            rets.append((ret.start(), expr))
+    if not rets and bare_expr_is_return:
+        rets = [(0, body.split(";", 1)[0])]
+
     tainted_sql: set[str] = set()
     tainted_dom: set[str] = set()
-    for _pos, name, sql_dirty, dom_dirty in _taint_replay_assigns(body):
-        (tainted_sql.add if sql_dirty else tainted_sql.discard)(name)
-        (tainted_dom.add if dom_dirty else tainted_dom.discard)(name)
     ret_sql = ret_dom = False
-    exprs = [
-        ret.group("expr").split(";", 1)[0]
-        for ret in re.finditer(
-            r"(?m)^\s*return\s+(?P<expr>.+)", _taint_interpolated(body)
-        )
-    ]
-    if not exprs and bare_expr_is_return:
-        exprs = [body.split(";", 1)[0]]
-    for expr in exprs:
-        sql_view = _taint_dirty_view(expr, _TAINT_SQL_SAFE_RE)
-        dom_view = _taint_dirty_view(expr, _TAINT_DOM_SAFE_RE)
-        if _TAINT_SOURCE_RE.search(sql_view) or any(
-            re.search(rf"\b{re.escape(t)}\b", sql_view) for t in tainted_sql
-        ):
-            ret_sql = True
-        if _TAINT_SOURCE_RE.search(dom_view) or any(
-            re.search(rf"\b{re.escape(t)}\b", dom_view) for t in tainted_dom
-        ):
-            ret_dom = True
+    events = sorted(
+        [
+            *((pos, "assign", (name, s, d)) for pos, name, s, d in assigns),
+            *((pos, "return", expr) for pos, expr in rets),
+        ],
+        key=lambda event: event[0],
+    )
+    for _pos, kind, item in events:
+        if kind == "assign":
+            name, sql_dirty, dom_dirty = item
+            (tainted_sql.add if sql_dirty else tainted_sql.discard)(name)
+            (tainted_dom.add if dom_dirty else tainted_dom.discard)(name)
+        else:
+            sql_view = _taint_dirty_view(item, _TAINT_SQL_SAFE_RE)
+            dom_view = _taint_dirty_view(item, _TAINT_DOM_SAFE_RE)
+            if _TAINT_SOURCE_RE.search(sql_view) or any(
+                re.search(rf"\b{re.escape(t)}\b", sql_view) for t in tainted_sql
+            ):
+                ret_sql = True
+            if _TAINT_SOURCE_RE.search(dom_view) or any(
+                re.search(rf"\b{re.escape(t)}\b", dom_view) for t in tainted_dom
+            ):
+                ret_dom = True
     return ret_sql, ret_dom
 
 
@@ -2951,7 +3058,13 @@ def _taint_lite_source_issues(
     if ctx.language == "python":
         for name, segment in _python_function_source_segments(source):
             bodies.append(
-                (name, _strip_python_comments(segment), "Python")
+                (
+                    name,
+                    _mask_python_nested_defs(
+                        _strip_python_comments(segment)
+                    ),
+                    "Python",
+                )
             )
     elif ctx.language == "typescript":
         for name, raw_body in _typescript_function_blocks(source):
@@ -2976,9 +3089,15 @@ def _taint_lite_source_issues(
     fns_sql: set[str] = set()
     fns_dom: set[str] = set()
     for name, body, label in bodies:
-        # A bare TypeScript arrow body (``(r) => r.query.x`` — no braces)
-        # is itself the return expression; block bodies use ``return``.
-        bare_expr = label == "TypeScript" and not body.lstrip().startswith("{")
+        # A bare TypeScript arrow body (``(r) => r.query.x`` — a single
+        # expression with no braces, ``;``, or newline) is itself the
+        # return expression; block/void bodies use ``return``.
+        bare_expr = (
+            label == "TypeScript"
+            and not body.lstrip().startswith("{")
+            and ";" not in body
+            and "\n" not in body.strip()
+        )
         ret_sql, ret_dom = _taint_return_channels(
             body, bare_expr_is_return=bare_expr
         )
