@@ -97,7 +97,57 @@ def _strip_ts_literals_and_comments(text: str) -> str:
             i = end
             continue
         char = text[i]
-        if char in "\"'`":
+        if char == "`":
+            # Template literal: blank the literal text but keep ``${…}``
+            # interpolations — they are code and can carry patterns like
+            # ``x!``/``eval(`` (with their own literals recursively masked).
+            inner_parts: list[str] = []
+            j = i + 1
+            while j < len(text):
+                if text[j] == "\\":
+                    inner_parts.extend(
+                        "\n" if c == "\n" else " "
+                        for c in text[j : j + 2]
+                    )
+                    j += 2
+                    continue
+                if text[j] == "`":
+                    break
+                if text[j] == "$" and j + 1 < len(text) and text[j + 1] == "{":
+                    depth = 1
+                    k = j + 2
+                    in_str: str | None = None
+                    while k < len(text):
+                        ch = text[k]
+                        if in_str:
+                            if ch == "\\":
+                                k += 1
+                            elif ch == in_str:
+                                in_str = None
+                        elif ch in "\"'`":
+                            in_str = ch
+                        elif ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        k += 1
+                    interp = text[j + 2 : k]
+                    inner_parts.append(
+                        "${" + _strip_ts_literals_and_comments(interp) + "}"
+                    )
+                    j = k + 1
+                    continue
+                inner_parts.append("\n" if text[j] == "\n" else " ")
+                j += 1
+            if j >= len(text):
+                out.append("`" + "".join(inner_parts))
+                break
+            out.append("`" + "".join(inner_parts) + "`")
+            i = j + 1
+            continue
+        if char in "\"'":
             j = i + 1
             while j < len(text):
                 if text[j] == "\\":
@@ -1844,13 +1894,14 @@ def _solidity_pattern_issues(
                 body,
             ):
                 # ``address owner = newOwner;`` declares a local rather than
-                # storing state — a Solidity type keyword ends the
+                # storing state — a Solidity type keyword (including
+                # ``address payable`` and data-location keywords) ends the
                 # statement's prefix.
                 before = body[max(0, store.start() - 60) : store.start()]
                 stmt_prefix = re.split(r"[;{}()]", before)[-1]
                 if re.search(
-                    r"\b(?:u?int\d*|address|bool|bytes\d*|string|var|mapping)"
-                    r"\s*$",
+                    r"\b(?:u?int\d*|address|payable|bool|bytes\d*|string|var"
+                    r"|mapping|memory|storage|calldata)\s*$",
                     stmt_prefix,
                 ):
                     continue
@@ -2005,11 +2056,12 @@ def _python_own_nodes(node: ast.AST):
     ``def``/``lambda`` bodies — nested definitions get their own top-level
     visit via the outer ``ast.walk`` and must not be attributed to the
     enclosing scope."""
-    stack = [node]
+    yield node
+    stack = list(ast.iter_child_nodes(node))
     while stack:
         current = stack.pop()
         yield current
-        if current is not node and isinstance(
+        if isinstance(
             current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
         ):
             continue
@@ -2040,15 +2092,42 @@ def _python_mutation_during_iteration_issues(
             return it.func.value.id
         return None
 
-    def loop_vars(loop) -> set[str]:
+    def key_vars(loop) -> set[str]:
+        """Loop target names that hold iterated *keys* — ``for k in d``,
+        ``for k in d.keys()``, and the first tuple element of
+        ``for k, v in d.items()``. ``d.values()`` targets and the second
+        ``items()`` element hold *values* — ``d[v]`` inserts a new key and
+        breaks the iteration."""
+        it = loop.iter
         target = loop.target
-        if isinstance(target, ast.Name):
-            return {target.id}
-        if isinstance(target, (ast.Tuple, ast.List)):
-            return {e.id for e in target.elts if isinstance(e, ast.Name)}
+        target_names = (
+            {e.id for e in ast.walk(target) if isinstance(e, ast.Name)}
+            if isinstance(target, (ast.Name, ast.Tuple, ast.List))
+            else set()
+        )
+        if isinstance(it, ast.Name):
+            # ``for k in d`` — k iterates keys.
+            return target_names
+        if (
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Attribute)
+            and isinstance(it.func.value, ast.Name)
+        ):
+            if it.func.attr == "keys":
+                return target_names
+            if it.func.attr == "values":
+                return set()
+            if it.func.attr == "items":
+                if isinstance(target, (ast.Tuple, ast.List)) and target.elts:
+                    return {
+                        e.id
+                        for e in ast.walk(target.elts[0])
+                        if isinstance(e, ast.Name)
+                    }
+                return set()
         return set()
 
-    def mutates(name: str, node: ast.AST, loop_names: set[str]) -> bool:
+    def mutates(name: str, node: ast.AST, key_names: set[str]) -> bool:
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -2072,11 +2151,13 @@ def _python_mutation_during_iteration_issues(
             ):
                 # ``d[k] = v`` under ``for k in d`` rewrites the value in
                 # place — the key set never changes, so iteration is safe.
-                # ``del d[k]`` still resizes the container mid-iteration.
+                # ``del d[k]`` still resizes the container mid-iteration,
+                # and ``d[v]`` where ``v`` is an iterated *value* inserts a
+                # new key — also a mid-iteration resize.
                 if (
                     value_update_ok
                     and isinstance(target.slice, ast.Name)
-                    and target.slice.id in loop_names
+                    and target.slice.id in key_names
                 ):
                     continue
                 return True
@@ -2092,10 +2173,13 @@ def _python_mutation_during_iteration_issues(
             name = iterated_name(loop)
             if name is None:
                 continue
-            names = loop_vars(loop)
+            keys = key_vars(loop)
             if any(
-                mutates(name, node, names)
+                mutates(name, node, keys)
                 for stmt in loop.body
+                if not isinstance(
+                    stmt, (ast.FunctionDef, ast.AsyncFunctionDef)
+                )
                 for node in _python_own_nodes(stmt)
             ):
                 issues.append(
@@ -2162,8 +2246,12 @@ def _typescript_safety_issues(
                     break
                 block = _balanced_brace_body(body, try_match.end() - 1)
                 if parse.start() < try_match.end() + len(block):
-                    in_try = True
-                    break
+                    # ``try { … } finally { … }`` without a ``catch`` still
+                    # throws — only a ``catch`` clause suppresses the throw.
+                    block_end = try_match.end() + len(block) + 1
+                    if re.match(r"\s*catch\b", body[block_end:]):
+                        in_try = True
+                        break
             if not in_try:
                 issues.append(
                     ForeignSafetyIssue(
