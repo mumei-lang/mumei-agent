@@ -703,7 +703,7 @@ def test_go_exec_command_argv_taint_flags() -> None:
         "}\n"
     )
     issues = _issues(source, "go")
-    assert any("query/command" in i.message for i in issues)
+    assert any("argv" in i.message for i in issues)
 
 
 def test_go_strconv_itoa_sanitizes_sql() -> None:
@@ -897,3 +897,83 @@ def test_py_self_receiver_call_propagates() -> None:
         "        db.execute('SELECT * FROM t WHERE n=' + v)\n"
     )
     assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+# ---------------------------------------------------------------------------
+# Devin Review round 2 regressions
+# ---------------------------------------------------------------------------
+
+
+def test_py_assign_after_taint_no_newline_bleed() -> None:
+    """``value = 'safe'`` on the next line must not re-taint via the
+    assign regex bleeding past the literal-masked line — ``value``
+    stays clean, so the helper is not flagged."""
+    source = (
+        "def helper(request):\n"
+        "    x = request.args['a']\n"
+        "    value = 'safe'\n"
+        "    y = x\n"
+        "    return value\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_direct_tainted_call_in_sink_flags() -> None:
+    """``db.execute('..' + helper(request))`` — the tainted callee is a
+    sink argument itself, no intermediate assign needed."""
+    source = (
+        "def helper(request):\n"
+        "    return request.args['a']\n"
+        "def handler(request):\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + helper(request))\n"
+    )
+    issues = _issues(source, "python")
+    assert any("returns request-derived data" in i.message for i in issues)
+
+
+def test_py_cross_class_same_name_method_clean() -> None:
+    """``H.get`` returning a constant must not be poisoned by ``R.get``
+    returning tainted data — qualified ``Cls.method`` registration."""
+    source = (
+        "class R:\n"
+        "    def get(self):\n"
+        "        return self.request.args['a']\n"
+        "class H:\n"
+        "    def get(self):\n"
+        "        return 'clean'\n"
+        "    def handler(self):\n"
+        "        v = self.get()\n"
+        "        db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_nested_local_call_one_level_flags() -> None:
+    """``inner`` nested inside ``handler`` resolves to ``handler.inner``
+    — a same-scope call at one propagation level still taints."""
+    source = (
+        "def handler(request):\n"
+        "    def inner():\n"
+        "        return request.args['a']\n"
+        "    v = inner()\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_go_exec_command_message_mentions_argv() -> None:
+    """The ``exec.Command`` message names argv injection, not a generic
+    'query string' — argv elements carry the command line under sh -c."""
+    source = (
+        "package x\n"
+        'import "os/exec"\n'
+        "func f(r *http.Request) {\n"
+        '    n := r.URL.Query().Get("x")\n'
+        '    exec.Command("echo", n)\n'
+        "}\n"
+    )
+    issues = _issues(source, "go")
+    assert any("argv" in i.message and "exec.Command" in i.message for i in issues)

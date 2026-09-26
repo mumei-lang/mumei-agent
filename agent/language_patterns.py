@@ -2563,8 +2563,16 @@ _TAINT_DOM_SAFE_RE = re.compile(
     r"url\.QueryEscape|url\.PathEscape|template\.HTMLEscapeString)\s*\("
 )
 _TAINT_ASSIGN_RE = re.compile(
-    r"(?m)^\s*(?:var\s+|let\s+|const\s+)?(?P<name>[A-Za-z_]\w*)\s*"
-    r"(?::\s*[^=\n]+)?\s*:?=(?!=)\s*(?P<rhs>[^;\n]+)"
+    # ``[ \t]*`` (not ``\s*``) keeps the match on one line — after
+    # literal masking an ``x = <blanked-literal>`` line ends in spaces,
+    # and ``\s*`` would swallow the newline and capture the NEXT line
+    # as this assignment's rhs. The rhs group intentionally starts
+    # right at ``=`` (no ``[ \t]*`` before it): a blanked literal is
+    # indistinguishable from whitespace, and eating it would shift
+    # ``start("rhs")`` past ``f"""``/````` so ``_taint_assign_rhs``
+    # could not extend through the multiline literal.
+    r"(?m)^\s*(?:var\s+|let\s+|const\s+)?(?P<name>[A-Za-z_]\w*)[ \t]*"
+    r"(?::[ \t]*[^=\n]+)?[ \t]*:?=(?!=)(?P<rhs>[^;\n]*)"
 )
 # SQL-ish sinks: only the FIRST argument is the query string — a parameter
 # tuple after the top-level comma is the safe parameterized form.
@@ -2576,21 +2584,39 @@ _TAINT_QUERY_SINK_RE = re.compile(
 _TAINT_CALL_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(")
 
 
-def _taint_call_tainted(view: str, tainted_fns: frozenset[str]) -> bool:
-    """``view`` calls a function flagged as returning tainted data
-    (intra-file, one propagation level — no call-graph). The callee
-    must match exactly or ride on a ``self.``/``this.`` receiver —
-    ``settings.get()`` must not inherit ``reader.get()``'s taint."""
+def _taint_call_name(
+    view: str, tainted_fns: frozenset[str], caller_name: str = ""
+) -> str | None:
+    """The callee in ``view`` flagged as returning tainted data
+    (intra-file, one propagation level — no call-graph), or None.
+
+    Matching is name-aware, not receiver-blind: a dotted callee must
+    equal a registered name exactly (``settings.get()`` does not
+    inherit ``R.get``'s taint), a ``self.``/``this.`` callee resolves
+    against the caller's *enclosing* name (``R.handler`` → ``R.get``),
+    and a bare callee matches Python-style scoping — module level,
+    a child of the caller (``outer`` calling ``inner()`` →
+    ``outer.inner``), or a sibling nested in the same enclosing scope."""
+    parent = caller_name.rpartition(".")[0] + "." if "." in caller_name else ""
     for m in _TAINT_CALL_RE.finditer(view):
         callee = m.group("name")
         if callee in tainted_fns:
-            return True
-        if (
-            callee.startswith(("self.", "this."))
-            and callee.split(".", 1)[1] in tainted_fns
-        ):
-            return True
-    return False
+            return callee
+        if callee.startswith(("self.", "this.")):
+            if parent + callee.split(".", 1)[1] in tainted_fns:
+                return callee
+        elif "." not in callee:
+            if caller_name and caller_name + "." + callee in tainted_fns:
+                return callee
+            if parent and parent + callee in tainted_fns:
+                return callee
+    return None
+
+
+def _taint_call_tainted(
+    view: str, tainted_fns: frozenset[str], caller_name: str = ""
+) -> bool:
+    return _taint_call_name(view, tainted_fns, caller_name) is not None
 # DOM/command sinks: taint anywhere in the statement is dangerous.
 _TAINT_DOM_SINK_RE = re.compile(
     r"(?:\.innerHTML\s*=|\.outerHTML\s*=|\bdocument\.write\s*\()"
@@ -2828,6 +2854,7 @@ def _taint_replay_assigns(
     body: str,
     tainted_fns_sql: frozenset[str] = frozenset(),
     tainted_fns_dom: frozenset[str] = frozenset(),
+    caller_name: str = "",
 ) -> list[tuple[int, str, bool, bool]]:
     """Position-ordered ``(pos, name, sql_dirty, dom_dirty)`` for each
     top-of-line assignment — used both by the sink checker and by the
@@ -2845,7 +2872,7 @@ def _taint_replay_assigns(
         dom_view = _taint_dirty_view(rhs, _TAINT_DOM_SAFE_RE)
         sql_dirty = bool(
             _TAINT_SOURCE_RE.search(sql_view)
-            or _taint_call_tainted(sql_view, tainted_fns_sql)
+            or _taint_call_tainted(sql_view, tainted_fns_sql, caller_name)
             or any(
                 re.search(rf"\b{re.escape(t)}\b", sql_view)
                 for t in tainted_sql
@@ -2853,7 +2880,7 @@ def _taint_replay_assigns(
         )
         dom_dirty = bool(
             _TAINT_SOURCE_RE.search(dom_view)
-            or _taint_call_tainted(dom_view, tainted_fns_dom)
+            or _taint_call_tainted(dom_view, tainted_fns_dom, caller_name)
             or any(
                 re.search(rf"\b{re.escape(t)}\b", dom_view)
                 for t in tainted_dom
@@ -2866,11 +2893,18 @@ def _taint_replay_assigns(
 
 
 def _taint_return_channels(
-    body: str, bare_expr_is_return: bool = False
+    body: str,
+    bare_expr_is_return: bool = False,
+    caller_name: str = "",
 ) -> tuple[bool, bool]:
     """Whether the function returns source-derived data, per channel.
     One propagation level: assigns replayed without tainted-callee
     knowledge, so ``g() → return f()`` does not chain transitively.
+
+    Known limit (advisory scope): assignments replay in *source order*,
+    not per execution path — a tainted assignment on one conditional
+    branch still marks the name tainted for a later ``return`` on
+    another branch.
 
     Each ``return`` is evaluated against the taint state at *its own*
     position — a ``return x`` is not affected by assignments that follow
@@ -2881,7 +2915,7 @@ def _taint_return_channels(
     (single-expression TypeScript arrow bodies like
     ``const f = (r) => r.query.x`` — no ``return`` keyword), the whole
     body is the implicit return expression."""
-    assigns = _taint_replay_assigns(body)
+    assigns = _taint_replay_assigns(body, caller_name=caller_name)
     masked = _taint_mask_literals(body)
     rets: list[tuple[int, str]] = []
     for ret in re.finditer(r"(?m)^\s*return\b[ \t]*(?P<expr>.*)", masked):
@@ -2934,6 +2968,7 @@ def _taint_lite_issues(
     label: str,
     tainted_fns_sql: frozenset[str] = frozenset(),
     tainted_fns_dom: frozenset[str] = frozenset(),
+    caller_name: str = "",
 ) -> list[ForeignSafetyIssue]:
     """Flag source-derived names reaching a query/DOM sink unsanitized."""
     issues: list[ForeignSafetyIssue] = []
@@ -2954,7 +2989,9 @@ def _taint_lite_issues(
                 return f"`{name}` (request-derived)"
         return None
 
-    assigns = _taint_replay_assigns(body, tainted_fns_sql, tainted_fns_dom)
+    assigns = _taint_replay_assigns(
+        body, tainted_fns_sql, tainted_fns_dom, caller_name
+    )
     events = sorted(
         [
             *((pos, "assign", (name, s, d)) for pos, name, s, d in assigns),
@@ -2995,14 +3032,44 @@ def _taint_lite_issues(
                 ),
                 None,
             )
+            if hit is None:
+                # A tainted-callee call reaching the sink unassigned —
+                # ``db.query("…" + helper(req))`` — flags by callee name.
+                callee_hit = next(
+                    (
+                        callee
+                        for a in sink_args
+                        if (
+                            callee := _taint_call_name(
+                                dirty_view(a, _TAINT_SQL_SAFE_RE),
+                                tainted_fns_sql,
+                                caller_name,
+                            )
+                        )
+                        is not None
+                    ),
+                    None,
+                )
+                if callee_hit is not None:
+                    hit = f"`{callee_hit}()` (returns request-derived data)"
             if hit is not None:
+                if "exec.Command" in callee:
+                    detail = (
+                        f"to `{callee}` argv — argument-injection risk "
+                        "(a tainted element may carry a command line under "
+                        "sh -c or a dangerous flag like --upload-pack)"
+                    )
+                else:
+                    detail = (
+                        "as part of a query/command string — interpolate "
+                        "parameters instead of concatenating"
+                    )
                 issues.append(
                     ForeignSafetyIssue(
                         function_name=function_name,
                         message=(
-                            f"{label} function `{function_name}` passes {hit} "
-                            "as part of a query/command string — interpolate "
-                            "parameters instead of concatenating"
+                            f"{label} function `{function_name}` passes "
+                            f"{hit} {detail}"
                         ),
                         confidence="medium",
                     )
@@ -3022,6 +3089,14 @@ def _taint_lite_issues(
             hit = dirty_names(
                 dirty_view(statement, _TAINT_DOM_SAFE_RE), tainted_dom
             )
+            if hit is None:
+                callee_hit = _taint_call_name(
+                    dirty_view(statement, _TAINT_DOM_SAFE_RE),
+                    tainted_fns_dom,
+                    caller_name,
+                )
+                if callee_hit is not None:
+                    hit = f"`{callee_hit}()` (returns request-derived data)"
             if hit is not None:
                 issues.append(
                     ForeignSafetyIssue(
@@ -3042,11 +3117,20 @@ def _python_function_source_segments(source: str) -> list[tuple[str, str]]:
     except SyntaxError:
         return []
     segments: list[tuple[str, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            segment = ast.get_source_segment(source, node)
-            if segment is not None:
-                segments.append((node.name, segment))
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                segment = ast.get_source_segment(source, child)
+                if segment is not None:
+                    segments.append((prefix + child.name, segment))
+                visit(child, prefix + child.name + ".")
+            elif isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
     return segments
 
 
@@ -3113,6 +3197,7 @@ def _taint_lite_source_issues(
                 label,
                 tainted_fns_sql=frozenset(fns_sql),
                 tainted_fns_dom=frozenset(fns_dom),
+                caller_name=name,
             )
         )
     return issues
