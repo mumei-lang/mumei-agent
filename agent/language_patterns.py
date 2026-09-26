@@ -2468,6 +2468,51 @@ def _top_level_args(arg_text: str) -> list[str]:
     return args
 
 
+def _strip_python_comments(text: str) -> str:
+    """Mask ``#`` comments (position-preserving) — a comment mentioning a
+    request source must not mark the line's value as tainted."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    quote: str | None = None
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if text.startswith(quote, i):
+                out.append(quote)
+                i += len(quote)
+                quote = None
+                continue
+            out.append(ch)
+            if ch == "\\" and len(quote) == 1 and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        if text.startswith("'''", i) or text.startswith('"""', i):
+            quote = text[i : i + 3]
+            out.append(quote)
+            i += 3
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "#":
+            j = text.find("\n", i)
+            if j == -1:
+                out.append(" " * (n - i))
+                break
+            out.append(" " * (j - i))
+            i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _taint_lite_issues(
     function_name: str, body: str, label: str
 ) -> list[ForeignSafetyIssue]:
@@ -2665,7 +2710,11 @@ def _taint_lite_source_issues(
     issues: list[ForeignSafetyIssue] = []
     if ctx.language == "python":
         for name, segment in _python_function_source_segments(source):
-            issues.extend(_taint_lite_issues(name, segment, "Python"))
+            issues.extend(
+                _taint_lite_issues(
+                    name, _strip_python_comments(segment), "Python"
+                )
+            )
     elif ctx.language == "typescript":
         for name, raw_body in _typescript_function_blocks(source):
             body = _mask_nested_function_literals(raw_body, "typescript")
@@ -2712,10 +2761,22 @@ def _go_unguarded_writes(
     the last lock event *on a declared mutex* before each write decides
     whether it is held. ``RLock`` is shared and never protects a write."""
     events: list[tuple[int, str]] = []
+    depth = 0
+    depths: dict[int, int] = {}
+    for i, ch in enumerate(body):
+        depths[i] = depth
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(depth - 1, 0)
     for m in _GO_LOCK_EVENT_RE.finditer(body):
         if m.group("recv").rsplit(".", 1)[-1] not in mutex_names:
             # ``other.Lock()`` guards a different mutex — it does not
             # protect this write.
+            continue
+        if depths.get(m.start(), 0) != 0:
+            # A lock taken inside a conditional/loop body does not
+            # provably hold at a top-level write — skip the event.
             continue
         kind = m.group("kind")
         # ``defer mu.Unlock()``/``defer s.mu.Unlock()`` release at function
@@ -2768,17 +2829,33 @@ def _go_shared_state_issues(
     def check_package_writes(name: str, body: str) -> None:
         for var in sorted(shared_vars):
             # ``var :=`` / ``var var`` inside the body declares a local
-            # that shadows the package variable — but only *after* the
-            # declaration position; earlier writes still hit the package
-            # variable.
+            # that shadows the package variable — only within the braces
+            # enclosing the declaration, and only after it.
             decl = re.search(
                 rf"\b{re.escape(var)}\s*:=|\bvar\s+{re.escape(var)}\b", body
             )
             decl_pos = decl.start() if decl is not None else len(body)
+            shadow_end = len(body)
+            if decl is not None:
+                # Innermost ``{``…``}`` containing the declaration is the
+                # local's scope — a ``:=`` inside ``if cond { … }`` does
+                # not shadow package-level writes after the block.
+                best_end = len(body)
+                stack: list[int] = []
+                for i, ch in enumerate(body):
+                    if ch == "{":
+                        stack.append(i)
+                    elif ch == "}" and stack:
+                        if stack[-1] < decl.start() < i:
+                            best_end = min(best_end, i)
+                        stack.pop()
+                if stack:
+                    best_end = min(best_end, len(body))
+                shadow_end = best_end
             for write in _go_unguarded_writes(
                 body, re.escape(var), mutex_names
             ):
-                if write.start() >= decl_pos:
+                if write.start() >= decl_pos and write.start() <= shadow_end:
                     continue
                 # An ``atomic.*(&var, …)`` call elsewhere does not protect
                 # an ordinary ``var++`` — mixed access still races.
@@ -2788,8 +2865,8 @@ def _go_shared_state_issues(
                         message=(
                             f"Go function `{name}` writes package-level "
                             f"`{var}` without holding a mutex — this file "
-                            "declares `sync.(RW)Mutex` fields, so the "
-                            "write races with other callers"
+                            "declares `sync.(RW)Mutex` fields — possible "
+                            "data race with other callers"
                         ),
                         confidence="medium",
                     )
@@ -2830,7 +2907,7 @@ def _go_shared_state_issues(
                         f"Go method `{name}` writes "
                         f"`{r}.{field.group(1)}` without holding the "
                         "receiver's mutex — this file declares "
-                        "`sync.(RW)Mutex` fields, so the write races "
+                        "`sync.(RW)Mutex` fields — possible data race "
                         "with other callers"
                     ),
                     confidence="medium",

@@ -602,3 +602,47 @@ func h(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 """
     issues = _issues(source, "go")
     assert any("query/command" in i.message for i in issues)
+
+
+def test_go_conditional_lock_does_not_guard() -> None:
+    """``mu.Lock()`` inside an ``if`` does not provably hold at the
+    top-level write — the conditional lock is skipped."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump(ok bool) {\n"
+        "    if ok {\n"
+        "        mu.Lock()\n"
+        "    }\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_block_local_shadow_flags_outer_write() -> None:
+    """``counter := 0`` inside a block only shadows writes in that
+    block — a package-level write after the block still flags."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump(ok bool) {\n"
+        "    if ok {\n"
+        "        counter := 0\n"
+        "        counter++\n"
+        "    }\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_python_comment_source_not_tainted() -> None:
+    """A ``#`` comment mentioning ``request.args`` must not taint the
+    line's value."""
+    source = (
+        "def handler(request):\n"
+        "    n = 5  # ignores request.args\n"
+        "    q = 'SELECT * FROM t WHERE n=' + str(n)\n"
+        "    db.execute(q)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)
