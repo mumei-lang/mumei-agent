@@ -6626,25 +6626,125 @@ def _narrowing_cast_issues(
     return issues
 
 
+_GUARD_DIVERGENCE_RE = re.compile(
+    r"\b(?:return|panic|break|continue|throw|raise)\b"
+)
+_GUARD_ASSERT_RE = re.compile(
+    r"(?:require|assert|debug_assert)(?:!)?\s*\(?\s*$"
+)
+_GUARD_IF_RE = re.compile(r"\bif\s*\(?\s*$")
+
+# Mechanisms a comparison before a use can protect it through — the check
+# decides which direction of the comparison (safe vs bad) each mechanism
+# keeps.
+_GUARD_HOLDS_MECHANISMS = {"inside", "shortcircuit", "asserted", "ternary_true"}
+_GUARD_NEGATED_MECHANISMS = {"early_exit", "ternary_false"}
+
+
+def _guard_mechanism(
+    expression: str, match: re.Match[str], use_pos: int
+) -> str | None:
+    """How a comparison ``match`` relates to a use at ``use_pos``:
+
+    - ``asserted`` — inside ``require(...)``/``assert(...)``/``assert!(...)``;
+      execution past it implies the condition held.
+    - ``ternary_true``/``ternary_false`` — the comparison is a ternary
+      condition and the use sits in that branch.
+    - ``inside`` — the comparison is the condition of a block containing
+      the use.
+    - ``early_exit`` — the comparison is the whole condition of an ``if``
+      block that closed before the use and diverges (return/panic/break/
+      continue/throw) — the use runs under the *negated* condition.
+    - ``shortcircuit`` — an ``&&`` separates the comparison and the use.
+    - ``None`` — the comparison does not dominate the use.
+    """
+    if _GUARD_ASSERT_RE.search(expression[: match.start()]):
+        return "asserted"
+    between = expression[match.end() : use_pos]
+    if "||" in between:
+        return None
+    qpos = between.find("?")
+    cpos = between.rfind(":")
+    if qpos != -1:
+        return "ternary_true" if cpos == -1 or cpos < qpos else "ternary_false"
+    brace_rel = between.find("{")
+    if brace_rel != -1:
+        before_brace = between[:brace_rel]
+        if ";" in before_brace or "}" in before_brace:
+            return None
+        brace_pos = match.end() + brace_rel
+        block = _balanced_brace_body(expression, brace_pos)
+        block_end = brace_pos + len(block) + 1
+        if use_pos < block_end:
+            return "inside"
+        # The comparison must be the whole condition of an ``if`` whose
+        # block diverges — compound conditions (``if x && a < b``) don't
+        # pin down the negation at the use.
+        if_match = _GUARD_IF_RE.search(expression[: match.start()]) or (
+            match.group(0).lstrip().startswith("if")
+        )
+        if (
+            if_match
+            and re.fullmatch(r"\s*\)?\s*", before_brace)
+            and _GUARD_DIVERGENCE_RE.search(block)
+        ):
+            return "early_exit"
+        return None
+    # Python-style ``if cond:`` — the guarded block is the indented run
+    # following the colon, not a brace pair.
+    colon_rel = between.find(":")
+    if colon_rel != -1 and "\n" in between[colon_rel:]:
+        indent_match = re.match(r"\n([ \t]+)", between[colon_rel + 1 :])
+        if indent_match and _GUARD_IF_RE.search(expression[: match.start()]):
+            indent = indent_match.group(1)
+            block_start = match.end() + colon_rel + 1 + indent_match.start(1)
+            block_lines: list[str] = []
+            block_end = block_start
+            for line in expression[block_start:].splitlines(keepends=True):
+                if line.startswith(indent) or line.strip() == "":
+                    block_lines.append(line)
+                    block_end += len(line)
+                else:
+                    break
+            if use_pos < block_end:
+                return "inside"
+            if any(
+                _GUARD_DIVERGENCE_RE.search(line) for line in block_lines
+            ):
+                return "early_exit"
+            return None
+    # Brace-less single-statement early exit: ``if (i < 0) return -1;`` /
+    # Python ``if i < 0: return -1`` — anything after the diverging
+    # statement's terminator runs under the negated condition.
+    if (
+        _GUARD_IF_RE.search(expression[: match.start()])
+        or match.group(0).lstrip().startswith("if")
+    ) and re.match(
+        r"\s*\)?\s*:?\s*"
+        r"(?:return|throw|break|continue|panic|raise)\b[^;{}\n]*(?:;|\n|$)",
+        between,
+    ):
+        return "early_exit"
+    if "&&" in between:
+        return "shortcircuit"
+    return None
+
+
 def _subtraction_guarded(
     expression: str, left: str, right: str, sub_pos: int
 ) -> bool:
     """Whether a ``left - right`` subtraction at ``sub_pos`` is guarded.
 
-    Two suppression shapes, both approximate:
-
-    - A comparison proving ``left >= right`` that *dominates* the
-      subtraction: it must appear before ``sub_pos`` with no ``||`` or ``:``
-      between them. ``&&`` and ``?`` are safe separators (the right operand
-      / true branch runs only when the condition holds); under ``||`` or
-      ``:`` the subtraction runs when the condition is *false*, so the
-      comparison guards the opposite direction — e.g. ``a >= b || a - b``
-      still underflows.
-    - Ternary false branch: in ``cond ? t : f`` a subtraction inside ``f``
-      runs only under ``not cond``, so a condition proving ``left <= right``
-      (``left <= right``, ``left < right``, ``right >= left``, ``right >
-      left`` — no ``==``) suppresses it. ``a >= b ? a - b : b - a`` and
-      ``a <= b ? x : a - b`` are both safe idioms this covers.
+    A comparison proving ``left >= right`` (``a >= b``, ``a > b``, ``a == b``,
+    ``b <= a``, ``b < a``, ``b == a``) guards the subtraction when it
+    *dominates* it — the use is inside its block, ``&&``-joined to it, in
+    the true branch of its ternary, or wrapped in ``require``/``assert``.
+    A comparison proving ``left <= right`` strictly (no ``==``) guards via
+    the negated mechanisms — an early-exit ``if`` or a ternary false branch:
+    ``if a < b { return } a - b`` is safe because only ``a >= b`` reaches
+    the subtraction. ``a >= b || a - b`` and ``if a >= b { return } a - b``
+    are *not* guarded — the former runs the subtraction under the negated
+    condition and the latter exits on the safe direction.
     """
     proves_ge = (
         rf"\b{re.escape(left)}\s*(?:>=?|==)\s*{re.escape(right)}\b"
@@ -6653,17 +6753,20 @@ def _subtraction_guarded(
     for match in re.finditer(proves_ge, expression):
         if match.end() > sub_pos:
             break
-        between = expression[match.end() : sub_pos]
-        if "||" not in between and ":" not in between:
+        if _guard_mechanism(expression, match, sub_pos) in (
+            _GUARD_HOLDS_MECHANISMS
+        ):
             return True
-    qpos = expression.find("?")
-    cpos = expression.rfind(":")
-    if 0 <= qpos < cpos < sub_pos:
-        proves_le_strict = (
-            rf"\b{re.escape(left)}\s*<=?\s*{re.escape(right)}\b"
-            rf"|\b{re.escape(right)}\s*>=?\s*{re.escape(left)}\b"
-        )
-        if re.search(proves_le_strict, expression[:qpos]):
+    proves_le = (
+        rf"\b{re.escape(left)}\s*<=?\s*{re.escape(right)}\b"
+        rf"|\b{re.escape(right)}\s*>=?\s*{re.escape(left)}\b"
+    )
+    for match in re.finditer(proves_le, expression):
+        if match.end() > sub_pos:
+            break
+        if _guard_mechanism(expression, match, sub_pos) in (
+            _GUARD_NEGATED_MECHANISMS
+        ):
             return True
     return False
 
@@ -6817,7 +6920,8 @@ def _unsigned_subtraction_issues(
 # the operand's bit width — a debug panic in Rust, a silent 5-bit mask in
 # ECMAScript, a defined-but-likely-wrong zero in Go/Solidity.
 _SHIFT_AMOUNT_RE = re.compile(
-    r"\b(?P<base>[A-Za-z_]\w*)\s*(?:<<|>>)=?\s*(?P<amount>[A-Za-z_]\w*|\d+)"
+    r"\b(?P<base>[A-Za-z_]\w*)\s*(?:<<|>>)=?\s*"
+    r"(?P<amount>[A-Za-z_]\w*|\d+|\([^()]*\))"
 )
 
 
@@ -6826,10 +6930,13 @@ def _shift_amount_guarded(
 ) -> bool:
     """True when ``amount`` is provably ``< width`` at the shift position.
 
-    ``n & 63``/``n % 64`` mask idioms and ``n < W``/``n <= W-1`` comparisons
-    that appear *before* the shift guard it — a ``||`` or ``:`` between the
-    comparison and the shift means the shift evaluates under the negated
-    condition (same rule as ``_subtraction_guarded``).
+    ``n & (W-1)``/``n % W`` masks bound the value outright. A ``n < W`` or
+    ``n <= W-1`` comparison guards the shift only when it dominates it —
+    inside the condition's block, ``&&``-joined, ternary true branch, or
+    ``require``/``assert``-wrapped (``_guard_mechanism``, same rule as
+    ``_subtraction_guarded``). The negated mechanisms guard a ``n >= W`` /
+    ``n > W-1`` comparison instead: ``if n >= 64 { return } x << n`` is
+    safe, while ``if n < 64 { return } x << n`` still panics.
     """
     prefix = expression[:shift_pos]
     for match in re.finditer(rf"\b{re.escape(amount)}\s*&\s*(\d+)", prefix):
@@ -6838,18 +6945,29 @@ def _shift_amount_guarded(
     for match in re.finditer(rf"\b{re.escape(amount)}\s*%\s*(\d+)", prefix):
         if int(match.group(1)) <= width:
             return True
-    for match in re.finditer(rf"\b{re.escape(amount)}\s*<\s*(\d+)", prefix):
-        if int(match.group(1)) > width:
+    for match in re.finditer(
+        rf"\b{re.escape(amount)}\s*(?P<op><=|<)\s*(?P<bound>\d+)", prefix
+    ):
+        bound = int(match.group("bound"))
+        if bound > width if match.group("op") == "<" else bound >= width:
             continue
-        if "||" in prefix[match.end() :] or ":" in prefix[match.end() :]:
+        if _guard_mechanism(expression, match, shift_pos) in (
+            _GUARD_HOLDS_MECHANISMS
+        ):
+            return True
+    # Bad-direction comparisons protect the shift only through the negated
+    # mechanisms — an early-exit ``if`` or a ternary false branch leaves
+    # ``amount < bound`` for the code that continues.
+    for match in re.finditer(
+        rf"\b{re.escape(amount)}\s*(?P<op>>=|>)\s*(?P<bound>\d+)", prefix
+    ):
+        bound = int(match.group("bound"))
+        if bound > width if match.group("op") == ">=" else bound >= width:
             continue
-        return True
-    for match in re.finditer(rf"\b{re.escape(amount)}\s*<=\s*(\d+)", prefix):
-        if int(match.group(1)) >= width:
-            continue
-        if "||" in prefix[match.end() :] or ":" in prefix[match.end() :]:
-            continue
-        return True
+        if _guard_mechanism(expression, match, shift_pos) in (
+            _GUARD_NEGATED_MECHANISMS
+        ):
+            return True
     return False
 
 
@@ -6904,6 +7022,31 @@ def _shift_amount_issues(
                     )
                 )
             continue
+        if amount.startswith("("):
+            # ``x << (n & 63)`` — a mask inside the parens bounds the amount;
+            # anything else stays advisory (no contract target).
+            inner = amount[1:-1]
+            mask = re.search(r"(?P<op>[&%])\s*(?P<bound>\d+)", inner)
+            if mask:
+                bound = int(mask.group("bound"))
+                # ``n & B`` yields ≤ B; ``n % B`` yields < B.
+                if bound < width if mask.group("op") == "&" else bound <= width:
+                    continue
+            cmp_inner = re.search(r"<\s*(\d+)", inner)
+            if cmp_inner and int(cmp_inner.group(1)) <= width:
+                continue
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` shifts `{base}` by "
+                        f"`{amount}` — the parenthesized amount is not proven "
+                        f"below the {width}-bit width"
+                    ),
+                    confidence="medium",
+                )
+            )
+            continue
         if amount in known and 0 <= known[amount] < width:
             continue
         if _shift_amount_guarded(expression, amount, width, match.start("amount")):
@@ -6913,18 +7056,27 @@ def _shift_amount_issues(
         )
         if local_names and amount in local_names:
             amount_is_param = False
+        contracts: list[str] = []
+        amount_type = (raw_param_types or {}).get(amount) or (
+            param_types or {}
+        ).get(amount)
+        if amount_type:
+            amount_bits = _integer_type_bits(label, amount_type)
+            if amount_bits is not None and amount_bits[1]:
+                # Signed counts satisfy ``n < W`` while negative — still a
+                # panic in Go and Rust.
+                contracts.append(f"{amount} >= 0")
+        contracts.append(f"{amount} < {width}")
         issues.append(
             ForeignSafetyIssue(
                 function_name=function_name,
                 message=(
                     f"{label} function `{function_name}` shifts `{base}` by "
-                    f"`{amount}` without proving `{amount} < {width}` — a shift "
-                    "count at or above the operand width panics (Rust debug) or "
-                    "silently mis-computes"
+                    f"`{amount}` without proving `0 <= {amount} < {width}` — "
+                    "a shift count at or above the operand width panics "
+                    "(Rust debug) or silently mis-computes"
                 ),
-                required_contracts=(
-                    (f"{amount} < {width}",) if amount_is_param else ()
-                ),
+                required_contracts=tuple(contracts) if amount_is_param else (),
                 counterexample={base: 1, amount: width},
                 confidence="high" if amount_is_param else "medium",
             )
@@ -6964,6 +7116,65 @@ _SENTINEL_NESTED_INDEX_RES: dict[str, re.Pattern[str]] = {
 }
 
 
+def _sentinel_guarded(body: str, var: str, use_pos: int, kind: str) -> bool:
+    """Whether a check on ``var`` (a ``-1``/``undefined`` sentinel result)
+    dominates the use at ``use_pos`` — the check must ``&&``-join the use,
+    enclose it in its ``if`` body, sit inside ``require``/``assert``, or be
+    an early-exit ``if`` on the *bad* direction. A comparison whose branch
+    closed before the use does not reach it."""
+    if kind == "minus1":
+        safe_re = re.compile(
+            rf"\b{re.escape(var)}\s*!=+\s*-\s*1\b"
+            rf"|\b-\s*1\s*!=+\s*{re.escape(var)}\b"
+            rf"|\b{re.escape(var)}\s*>=\s*0\b"
+            rf"|\b{re.escape(var)}\s*>\s*(?:0|-\s*1)\b"
+        )
+        bad_re = re.compile(
+            rf"\b{re.escape(var)}\s*={{2,3}}\s*-\s*1\b"
+            rf"|\b-\s*1\s*={{2,3}}\s*{re.escape(var)}\b"
+            rf"|\b{re.escape(var)}\s*<\s*0\b"
+            rf"|\b{re.escape(var)}\s*<=\s*0\b"
+            rf"|\b{re.escape(var)}\s*<=\s*-\s*1\b"
+        )
+    else:
+        safe_re = re.compile(
+            rf"\b{re.escape(var)}\s*!=+\s*(?:undefined|null)\b"
+            rf"|\b(?:undefined|null)\s*!=+\s*{re.escape(var)}\b"
+        )
+        bad_re = re.compile(
+            rf"\b{re.escape(var)}\s*={{2,3}}\s*(?:undefined|null)\b"
+            rf"|\b(?:undefined|null)\s*={{2,3}}\s*{re.escape(var)}\b"
+        )
+    if any(
+        _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+        for m in safe_re.finditer(body, 0, use_pos)
+    ):
+        return True
+    if any(
+        _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+        for m in bad_re.finditer(body, 0, use_pos)
+    ):
+        return True
+    if kind == "undefined":
+        # Truthiness guards: ``if (el) { … use … }`` / ``assert el`` hold the
+        # value; ``if (!el) { return }`` removes the falsy case.
+        truthy = re.compile(
+            rf"\bif\s*\(\s*{re.escape(var)}\b|\bassert\s+{re.escape(var)}\b"
+        )
+        falsy = re.compile(rf"\bif\s*\(\s*!\s*{re.escape(var)}\b")
+        if any(
+            _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+            for m in truthy.finditer(body, 0, use_pos)
+        ):
+            return True
+        if any(
+            _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+            for m in falsy.finditer(body, 0, use_pos)
+        ):
+            return True
+    return False
+
+
 def _sentinel_index_issues(
     function_name: str, body: str, label: str
 ) -> list[ForeignSafetyIssue]:
@@ -6974,14 +7185,11 @@ def _sentinel_index_issues(
     if minus1_assign is not None:
         for match in minus1_assign.finditer(body):
             var = match.group("var")
-            guard = re.compile(
-                rf"\b{re.escape(var)}\s*(?:===|!==|==|!=|<=|>=|<|>)\s*-?\d+"
-            )
             unsafe = re.compile(
                 rf"\[[^\]\n]*\b{re.escape(var)}\b[^\]\n]*\]"
             )
             for use in unsafe.finditer(body, match.end()):
-                if guard.search(body, match.end(), use.start()):
+                if _sentinel_guarded(body, var, use.start(), "minus1"):
                     continue
                 issues.append(
                     ForeignSafetyIssue(
@@ -7000,18 +7208,12 @@ def _sentinel_index_issues(
     if undefined_assign is not None:
         for match in undefined_assign.finditer(body):
             var = match.group("var")
-            guard = re.compile(
-                rf"\b{re.escape(var)}\s*(?:===|!==|==|!=)\s*(?:undefined|null)"
-                rf"|\b(?:undefined|null)\s*(?:===|!==|==|!=)\s*{re.escape(var)}\b"
-                rf"|\bif\s*\(\s*!?{re.escape(var)}\b"
-                rf"|\bassert\s+{re.escape(var)}\b"
-            )
             unsafe = re.compile(
                 rf"\b{re.escape(var)}\s*\.|\b{re.escape(var)}\s*\["
                 rf"|\b{re.escape(var)}\s*[+\-*/%]"
             )
             for use in unsafe.finditer(body, match.end()):
-                if guard.search(body, match.end(), use.start()):
+                if _sentinel_guarded(body, var, use.start(), "undefined"):
                     continue
                 issues.append(
                     ForeignSafetyIssue(

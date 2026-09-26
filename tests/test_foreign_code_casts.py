@@ -422,3 +422,58 @@ def test_solidity_shadowed_param_cast_not_flagged() -> None:
         for i in _detect_safety_issues(src, "solidity")
     )
 
+
+def test_unsigned_subtraction_early_exit_on_safe_direction_not_guarded() -> None:
+    """``if a >= b { return } a - b`` exits on the SAFE direction — the code
+    reaching the subtraction has ``a < b`` and must still flag."""
+    issues = _sub_issues(
+        "if a >= b { return 0 } a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert len(issues) == 1
+
+
+def test_unsigned_subtraction_early_exit_on_bad_direction_guarded() -> None:
+    """``if a < b { return } a - b`` exits on the BAD direction — only
+    ``a >= b`` reaches the subtraction."""
+    assert not _sub_issues(
+        "if a < b { return 0 } a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_unsigned_subtraction_assert_require_guarded() -> None:
+    """``require(a >= b, …)``/``assert!(a >= b)`` abort on the bad direction."""
+    assert not _sub_issues(
+        'require(a >= b, "order"); a - b',
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert not _sub_issues(
+        "assert!(a >= b); a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_unsigned_subtraction_guard_inside_if_body() -> None:
+    """``if a >= b { a - b }`` — the subtraction runs under the condition."""
+    assert not _sub_issues(
+        "if a >= b { a - b } else { 0 }",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_unsigned_subtraction_guard_closed_block_does_not_reach() -> None:
+    """``if a >= b { x = 1 } a - b`` — a guard whose block closes without
+    diverging and without containing the use does not protect it."""
+    issues = _sub_issues(
+        "if a >= b { x = 1 } a - b",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert len(issues) == 1
+
