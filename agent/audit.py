@@ -623,21 +623,21 @@ class AuditPipeline:
         # .mm files are not audit targets, but ``trusted atom`` declarations
         # inside them bypass Z3 verification — surface each as an advisory.
         trusted_atoms: list[dict] = []
+        unreadable_mm: list[str] = []
         for mm_path in sorted(
             (path for path in source_path.rglob("*.mm") if path.is_file()),
             key=lambda path: path.relative_to(source_path).as_posix(),
         ):
             if not include_tests and _is_test_file(mm_path, source_path):
                 continue
+            mm_label = _directory_file_label(source_label, str(mm_path))
             try:
                 mm_source = mm_path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
+                unreadable_mm.append(mm_label)
                 continue
             trusted_atoms.extend(
-                _trusted_atom_entries(
-                    mm_source,
-                    _directory_file_label(source_label, str(mm_path)),
-                )
+                _trusted_atom_entries(mm_source, mm_label)
             )
 
         if not code_files:
@@ -690,6 +690,26 @@ class AuditPipeline:
         )
         _aggregate_directory_fixed_keys(result)
         result.next_steps = _generate_directory_next_steps(result)
+        if unreadable_mm:
+            # An unreadable .mm source leaves a silent hole in the
+            # trusted-atom scan — surface it on the human-review
+            # entrypoint instead of passing over it.
+            result.next_steps = [
+                step
+                for step in result.next_steps
+                if step.get("priority") != "info"
+            ]
+            result.next_steps.append(
+                {
+                    "priority": "medium",
+                    "action": (
+                        "unreadable .mm sources skipped by the "
+                        "trusted-atom scan — review them manually: "
+                        + ", ".join(unreadable_mm)
+                    ),
+                    "command": "",
+                }
+            )
         result.summary = _build_directory_report(result)
         return result
 

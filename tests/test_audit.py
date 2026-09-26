@@ -2431,6 +2431,13 @@ def test_audit_directory_skips_unreadable_mm_source(tmp_path: Path) -> None:
     ).audit_directory(src)
 
     assert [entry["atom"] for entry in result.trusted_atoms] == ["fast_path"]
+    # The skipped file leaves a hole in the trusted-atom scan — it must
+    # reach the human-review entrypoint, not vanish silently.
+    assert any(
+        "unreadable .mm" in step["action"] and "bad.mm" in step["action"]
+        for step in result.next_steps
+    )
+    assert not any(step["priority"] == "info" for step in result.next_steps)
 
 
 def test_trusted_atoms_in_strings_or_comments_are_not_reported(
