@@ -464,3 +464,141 @@ def test_go_deferred_unlock_event_ordering() -> None:
     )
     issues = _issues(source, "go")
     assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_write_under_undeclared_lock_flags() -> None:
+    """``other.Lock()`` where ``other`` is not a declared mutex does not
+    protect the package variable."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump() {\n"
+        "    other.Lock()\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_write_under_read_lock_flags() -> None:
+    """``mu.RLock()`` is a shared read lock — a write under it still races."""
+    source = (
+        "var mu sync.RWMutex\n"
+        "var counter int\n"
+        "\n"
+        "func bump() {\n"
+        "    mu.RLock()\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_atomic_call_does_not_cover_plain_write() -> None:
+    """``atomic.AddInt64(&counter, 1)`` elsewhere leaves ``counter++``
+    unguarded — mixed atomic/plain access still races."""
+    source = (
+        "var mu sync.Mutex\n"
+        "var counter int64\n"
+        "\n"
+        "func bump() {\n"
+        "    atomic.AddInt64(&counter, 1)\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_write_before_later_shadow_flags() -> None:
+    """A ``counter := 0`` declared *after* ``counter++`` does not mask the
+    earlier package-level write."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump() {\n"
+        "    counter++\n"
+        "    if ok {\n"
+        "        counter := 0\n"
+        "        _ = counter\n"
+        "    }\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_field_of_param_not_package_write() -> None:
+    """``v.counter++`` writes a param's field, not the package ``counter``."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump(v struct{ counter int }) {\n"
+        "    v.counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert not any("package-level `counter`" in i.message for i in issues)
+
+
+def test_python_sql_comma_inside_literal_keeps_interpolation() -> None:
+    """A comma inside the f-string literal must not split the sink args —
+    ``{id}`` after the comma is still detected."""
+    source = (
+        "def find(request, cur):\n"
+        "    uid = request.args.get('id')\n"
+        "    cur.execute(f'SELECT a, b FROM t WHERE id={uid}')\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_python_literal_braces_do_not_alias_tainted_name() -> None:
+    """In a plain (non-f) string, ``{name}`` is literal text — it must not
+    re-taint the query through the tainted ``name`` variable."""
+    source = (
+        "def find(request, cur):\n"
+        "    name = request.args.get('name')\n"
+        "    q = 'SELECT {name}'\n"
+        "    cur.execute(q)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_python_backslash_continuation_keeps_taint() -> None:
+    """``q = 'SELECT ' + \\`` continues on the next line — the tainted name
+    on that line still reaches the sink."""
+    source = (
+        "def find(request, cur):\n"
+        "    name = request.args.get('name')\n"
+        "    q = 'SELECT ' + \\\n"
+        "        name\n"
+        "    cur.execute(q)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_typescript_dom_write_multiline_rhs_flags() -> None:
+    """``el.innerHTML =`` with the tainted value on the next line."""
+    source = (
+        "function render(req) {\n"
+        "    const name = req.query.name;\n"
+        "    el.innerHTML =\n"
+        "        name;\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("DOM" in i.message for i in issues)
+
+
+def test_go_sprintf_taint_flow_flags() -> None:
+    """``fmt.Sprintf`` keeps its variable arguments visible even though the
+    format literal is masked."""
+    source = """package main
+import ("fmt"; "net/http"; "database/sql")
+func h(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+    name := r.FormValue("name")
+    q := fmt.Sprintf("SELECT * FROM t WHERE n='%s'", name)
+    db.Exec(q)
+}
+"""
+    issues = _issues(source, "go")
+    assert any("query/command" in i.message for i in issues)

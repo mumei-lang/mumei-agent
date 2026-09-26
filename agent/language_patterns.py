@@ -2346,13 +2346,24 @@ _TAINT_DOM_SINK_RE = re.compile(
 
 
 def _top_level_args(arg_text: str) -> list[str]:
-    """Split a call's argument list on top-level ``,`` (depth-aware)."""
+    """Split a call's argument list on top-level ``,`` — depth-aware and
+    string-aware, so commas inside ``f'SELECT a, b …'`` don't split."""
     args: list[str] = []
     depth = 0
     start = 0
     end = len(arg_text)
-    for index, char in enumerate(arg_text):
-        if char in "([{":
+    index = 0
+    quote: str | None = None
+    while index < end:
+        char = arg_text[index]
+        if quote is not None:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char in "([{":
             depth += 1
         elif char in ")]}":
             if depth == 0:
@@ -2362,6 +2373,7 @@ def _top_level_args(arg_text: str) -> list[str]:
         elif char == "," and depth == 0:
             args.append(arg_text[start:index])
             start = index + 1
+        index += 1
     args.append(arg_text[start:end])
     return args
 
@@ -2375,13 +2387,31 @@ def _taint_lite_issues(
     def interpolated(text: str) -> str:
         """String literals reduce to their ``{…}``/``${…}`` interpolations
         — a column named ``name`` in a SQL literal must not alias the
-        tainted variable ``name``, while ``f'...{name}'`` and
-        `` `...${id}` `` still expose it."""
+        tainted variable ``name``. Only f-strings and template literals
+        interpolate; in a plain ``'SELECT {name}'`` the braces are
+        literal text."""
+
+        def expand(m: re.Match[str]) -> str:
+            prefix, quote, inner = m.group(1), m.group(2), m.group(3)
+            if "f" not in prefix.lower() and not quote.endswith("`"):
+                return " "
+            parts = re.findall(r"\{([^}]*)\}", inner)
+            if quote.endswith("`"):
+                # Only ``${…}`` interpolates in template literals — a
+                # literal ``{name}`` (e.g. a JSON fragment) stays inert.
+                parts = [
+                    part
+                    for part, pos in zip(
+                        parts,
+                        (m2.start() for m2 in re.finditer(r"\{[^}]*\}", inner)),
+                    )
+                    if inner[pos - 1 : pos] == "$"
+                ]
+            return " ".join(parts)
+
         return re.sub(
-            r"[fFbBrRw]*(['\"`])(.*?)\1",
-            lambda m: " ".join(
-                re.findall(r"\{([^}]*)\}", m.group(2))
-            ),
+            r"([fFbBrRw]*)(\"\"\"|'''|['\"`])(.*?)\2",
+            expand,
             text,
             flags=re.DOTALL,
         )
@@ -2410,6 +2440,9 @@ def _taint_lite_issues(
                 or text.count('"""') % 2 == 1
                 or text.count("'''") % 2 == 1
                 or text.count("`") % 2 == 1
+                # ``q = 'SELECT ' + \`` continues on the next line —
+                # keep pulling lines while the last one ends in ``\``.
+                or text.rstrip("\n").rstrip().endswith("\\")
             )
 
         while unclosed(body[start:end]):
@@ -2494,10 +2527,17 @@ def _taint_lite_issues(
                     )
                 )
         else:  # dom
-            statement = body[match.start() :]
-            end = re.search(r"[;\n]", statement)
-            if end is not None:
-                statement = statement[: end.start()]
+            # ``el.innerHTML =`` / trailing operators continue on the next
+            # line — keep pulling lines until the statement terminates.
+            statement_lines: list[str] = []
+            for line in body[match.start() :].split("\n"):
+                statement_lines.append(line.split(";", 1)[0])
+                tail = statement_lines[-1].rstrip()
+                if ";" in line or not re.search(
+                    r"[+\-*%|&?:,=<>!.(\\]$", tail
+                ):
+                    break
+            statement = "\n".join(statement_lines)
             hit = dirty_names(
                 dirty_view(statement, _TAINT_DOM_SAFE_RE), tainted_dom
             )
@@ -2567,18 +2607,26 @@ _GO_METHOD_DEF_RE = re.compile(
 # ``==``/``<=``/``>=``/``!=``, and ``:=`` declares a local (shadowing is
 # checked separately).
 _GO_WRITE_RE_TEMPLATE = (
-    r"\bNAME(?:\.\w+)?\s*(?:\+\+|--|[+\-*/%|&^]=|=(?![=<>]))"
+    r"(?<![\w.])NAME(?:\.\w+)?\s*(?:\+\+|--|[+\-*/%|&^]=|=(?![=<>]))"
 )
 _GO_LOCK_EVENT_RE = re.compile(
-    r"\b\w+\.(?P<kind>Lock|Unlock|RLock|RUnlock)\s*\("
+    r"\b(?P<recv>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\."
+    r"(?P<kind>Lock|Unlock|RLock|RUnlock)\s*\("
 )
 
 
-def _go_unguarded_writes(body: str, name_re: str):
+def _go_unguarded_writes(
+    body: str, name_re: str, mutex_names: set[str]
+):
     """Yield writes to ``name_re`` outside any ``Lock()…Unlock()`` window —
-    the last lock event before each write decides whether it is held."""
+    the last lock event *on a declared mutex* before each write decides
+    whether it is held. ``RLock`` is shared and never protects a write."""
     events: list[tuple[int, str]] = []
     for m in _GO_LOCK_EVENT_RE.finditer(body):
+        if m.group("recv").rsplit(".", 1)[-1] not in mutex_names:
+            # ``other.Lock()`` guards a different mutex — it does not
+            # protect this write.
+            continue
         kind = m.group("kind")
         # ``defer mu.Unlock()``/``defer s.mu.Unlock()`` release at function
         # end — keep the lock held for every statement after the Lock.
@@ -2598,7 +2646,7 @@ def _go_unguarded_writes(body: str, name_re: str):
         for pos, kind in events:
             if pos >= write.start():
                 break
-            held = kind in ("Lock", "RLock")
+            held = kind == "Lock"
         if not held:
             yield write
 
@@ -2630,16 +2678,20 @@ def _go_shared_state_issues(
     def check_package_writes(name: str, body: str) -> None:
         for var in sorted(shared_vars):
             # ``var :=`` / ``var var`` inside the body declares a local
-            # that shadows the package variable — writes are not shared.
-            if re.search(
+            # that shadows the package variable — but only *after* the
+            # declaration position; earlier writes still hit the package
+            # variable.
+            decl = re.search(
                 rf"\b{re.escape(var)}\s*:=|\bvar\s+{re.escape(var)}\b", body
+            )
+            decl_pos = decl.start() if decl is not None else len(body)
+            for write in _go_unguarded_writes(
+                body, re.escape(var), mutex_names
             ):
-                continue
-            for write in _go_unguarded_writes(body, re.escape(var)):
-                if re.search(
-                    rf"\batomic\.\w+\s*\(\s*&{re.escape(var)}\b", body
-                ):
+                if write.start() >= decl_pos:
                     continue
+                # An ``atomic.*(&var, …)`` call elsewhere does not protect
+                # an ordinary ``var++`` — mixed access still races.
                 issues.append(
                     ForeignSafetyIssue(
                         function_name=name,
@@ -2671,34 +2723,30 @@ def _go_shared_state_issues(
         )
         check_package_writes(name, body)
 
-        def atomic_write(name_re: str, body=body) -> bool:
-            return re.search(
-                rf"\batomic\.\w+\s*\(\s*&{name_re}\b", body
-            ) is not None
-
-        for field_write in _go_unguarded_writes(body, re.escape(r)):
+        for field_write in _go_unguarded_writes(
+            body, re.escape(r), mutex_names
+        ):
             field = re.match(
                 rf"{re.escape(r)}\.([A-Za-z_]\w*)", field_write.group(0)
             )
             if field is None or field.group(1) in mutex_names:
                 continue
-            if not atomic_write(
-                rf"{re.escape(r)}\.{re.escape(field.group(1))}"
-            ):
-                issues.append(
-                    ForeignSafetyIssue(
-                        function_name=name,
-                        message=(
-                            f"Go method `{name}` writes "
-                            f"`{r}.{field.group(1)}` without holding the "
-                            "receiver's mutex — this file declares "
-                            "`sync.(RW)Mutex` fields, so the write races "
-                            "with other callers"
-                        ),
-                        confidence="medium",
-                    )
+            # An ``atomic.*(&r.field, …)`` call elsewhere does not protect
+            # an ordinary ``r.field++`` — mixed access still races.
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"Go method `{name}` writes "
+                        f"`{r}.{field.group(1)}` without holding the "
+                        "receiver's mutex — this file declares "
+                        "`sync.(RW)Mutex` fields, so the write races "
+                        "with other callers"
+                    ),
+                    confidence="medium",
                 )
-                break
+            )
+            break
     return issues
 
 
