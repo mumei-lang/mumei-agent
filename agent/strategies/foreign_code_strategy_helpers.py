@@ -3771,6 +3771,13 @@ def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
             except ValueError:
                 continue
             issues.extend(_issues_for_expression(_safe_identifier(node.name), text, "Python"))
+        body_text = ast.get_source_segment(source, node)
+        if body_text:
+            issues.extend(
+                _sentinel_index_issues(
+                    _safe_identifier(node.name), body_text, "Python"
+                )
+            )
     return issues
 
 def _detect_block_safety_issues(
@@ -3899,6 +3906,15 @@ def _detect_block_safety_issues(
                     else None
                 ),
             )
+        if label in {"TypeScript", "JavaScript"}:
+            # Intermediate ``x << n`` statements never appear in return
+            # expressions — scan the body for shift-amount issues too.
+            block_cast_sub_issues = _shift_amount_issues(
+                name,
+                _strip_go_rust_literals_and_comments(body),
+                label,
+                local_names=local_names,
+            )
         block_cast_sub_msgs = {i.message for i in block_cast_sub_issues}
         for expression in expressions:
             expr_issues = _issues_for_expression(
@@ -3932,14 +3948,16 @@ def _detect_block_safety_issues(
                     if "can overflow" not in issue.message
                 ]
             issues.extend(expr_issues)
-        # Casts/subtractions in non-return statements are caught only by the
-        # body-level scan — merge it in, deduped by message.
+        # Casts/subtractions/shifts in non-return statements are caught only
+        # by the body-level scan — merge it in, deduped by message.
         existing_msgs = {issue.message for issue in issues}
         issues.extend(
             issue
             for issue in block_cast_sub_issues
             if issue.message not in existing_msgs
         )
+        if label == "TypeScript":
+            issues.extend(_sentinel_index_issues(name, body, label))
     return issues
 
 _GO_BUILTIN_TYPES = {
@@ -5032,6 +5050,13 @@ def _detect_go_safety_issues(
         go_float_arrays = _go_float_array_names(original_source or source)
         package_name = re.search(r"^\s*package\s+(\w+)", source, re.MULTILINE)
         package_name = package_name.group(1) if package_name else ""
+        # Same-file callees whose last return value is an ``error`` — used by
+        # the ignored-error check below.
+        error_returns = {
+            fn.raw_name or fn.name
+            for fn in functions
+            if re.search(r"\berror\b\s*\)?\s*$", (fn.return_type or "").strip())
+        }
         for fn in functions:
             if not fn.has_body or _is_go_test_name(fn.raw_name or fn.name):
                 continue
@@ -5263,6 +5288,8 @@ def _detect_go_safety_issues(
             issues.extend(
                 issue for issue in body_cast_sub if issue.message not in existing_msgs
             )
+            issues.extend(_sentinel_index_issues(fn.name, body, "Go"))
+            issues.extend(_go_ignored_error_issues(fn.name, body, error_returns))
         issues = [
             issue
             for issue in issues
@@ -5300,6 +5327,11 @@ def _detect_go_safety_issues(
     go_float_arrays = _go_float_array_names(original_source or source)
     # Regex fallback cannot reliably distinguish methods from top-level
     # functions, so callback suppression is skipped in that path.
+    error_returns = {
+        name
+        for name, _p, return_type, _b in go_decls
+        if re.search(r"\berror\b\s*\)?\s*$", (return_type or "").strip())
+    }
     for name, params_text, _return_type, body in go_decls:
         go_map_names = file_map_names | _go_local_map_names(body, file_map_names) | _go_map_receiver_names(params_text, map_type_names)
         guaranteed_nonzero = (
@@ -5441,6 +5473,10 @@ def _detect_go_safety_issues(
         existing_msgs = {issue.message for issue in issues}
         issues.extend(
             issue for issue in body_cast_sub if issue.message not in existing_msgs
+        )
+        issues.extend(_sentinel_index_issues(_safe_identifier(name), body, "Go"))
+        issues.extend(
+            _go_ignored_error_issues(_safe_identifier(name), body, error_returns)
         )
     issues = [
         issue
@@ -6642,7 +6678,7 @@ def _narrowing_cast_issues(
 
 
 _GUARD_DIVERGENCE_RE = re.compile(
-    r"\b(?:return|panic|break|continue|throw)\b"
+    r"\b(?:return|panic|break|continue|throw|raise)\b"
 )
 _GUARD_ASSERT_RE = re.compile(
     r"(?:require|assert|debug_assert)(?:!)?\s*\(?\s*$"
@@ -6751,6 +6787,40 @@ def _has_top_level_and(text: str) -> bool:
     return False
 
 
+def _has_top_level_word_op(text: str, word: str) -> bool:
+    """Whether a Python-style keyword operator (``or``/``and``) appears at
+    paren depth 0 in ``text``."""
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    n = len(word)
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif (
+            depth == 0
+            and text.startswith(word, i)
+            and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))
+            and (
+                i + n >= len(text)
+                or not (text[i + n].isalnum() or text[i + n] == "_")
+            )
+        ):
+            return True
+        i += 1
+    return False
+
+
 def _has_top_level_ternary(text: str) -> bool:
     """Whether ``?`` appears at paren depth 0 in ``text`` — a ternary
     condition selects between branches, so a comparison inside it is not a
@@ -6781,8 +6851,9 @@ def _guard_condition(
     the block or the comparison sits nested inside the condition's parens
     (e.g. ``if f(a >= b) {``), where it is not itself a guard conjunct."""
     kw_end = None
-    for kw in re.finditer(r"\b(?:if|while)\b", expression[: match.start()]):
-        kw_end = kw.end()
+    for kw in re.finditer(r"\b(?:if|elif|while)\b", expression[: match.end()]):
+        if kw.start() <= match.start():
+            kw_end = kw.end()
     if kw_end is None:
         return None
     region = expression[kw_end:brace_pos]
@@ -6793,8 +6864,10 @@ def _guard_condition(
     else:
         cond_start = kw_end
         cond = region
-    rel = match.start() - cond_start
-    if rel < 0 or rel + (match.end() - match.start()) > len(cond):
+    # The match may itself contain the ``if (`` prefix (``if (!x)`` checks)
+    # — the comparison must merely *reach into* the condition at depth 0.
+    rel = max(match.start() - cond_start, 0)
+    if match.end() <= cond_start or rel >= len(cond):
         return None
     depth = 0
     in_str: str | None = None
@@ -6971,8 +7044,12 @@ def _guard_mechanism(
             if _has_top_level_or(cond):
                 return None
             return "inside"
-        whole_condition = _GUARD_IF_RE.search(
-            expression[: match.start()]
+        # The comparison must be the whole condition of an ``if`` whose
+        # block diverges — compound conditions (``if x && a < b``) don't
+        # pin down the negation at the use.
+        whole_condition = (
+            _GUARD_IF_RE.search(expression[: match.start()])
+            or match.group(0).lstrip().startswith("if")
         ) and re.fullmatch(r"\s*\)?\s*", before_brace)
         if whole_condition:
             if _block_diverges(block):
@@ -6993,6 +7070,73 @@ def _guard_mechanism(
                         return None
                     return "else_exit"
         return None
+    # Python-style ``if cond:`` — the guarded block is the indented run
+    # following the colon, not a brace pair.
+    colon_rel = between.find(":")
+    if colon_rel != -1 and "\n" in between[colon_rel:]:
+        indent_match = re.match(r"\n([ \t]+)", between[colon_rel + 1 :])
+        if indent_match and (
+            _GUARD_IF_RE.search(expression[: match.start()])
+            or match.group(0).lstrip().startswith("if")
+        ):
+            colon_abs = match.end() + colon_rel
+            gc = _guard_condition(expression, match, colon_abs)
+            py_cond = gc[0] if gc is not None else None
+            indent = indent_match.group(1)
+            block_start = match.end() + colon_rel + 1 + indent_match.start(1)
+            block_lines: list[str] = []
+            block_end = block_start
+            for line in expression[block_start:].splitlines(keepends=True):
+                if line.startswith(indent) or line.strip() == "":
+                    block_lines.append(line)
+                    block_end += len(line)
+                else:
+                    break
+            if use_pos < block_end:
+                # ``if flag or a >= b: a - b`` — the comparison is one
+                # disjunct, not a guaranteed conjunct. ``if f(a >= b):``
+                # nests the comparison inside a call — not a guard either.
+                if py_cond is None or _has_top_level_word_op(py_cond, "or"):
+                    return None
+                return "inside"
+            # Only statements at the block's own indent level make it
+            # diverge — a ``return`` inside a nested ``if`` does not.
+            if any(
+                _GUARD_DIVERGENCE_RE.search(line)
+                for line in block_lines
+                if len(line) > len(indent)
+                and line[len(indent)] not in " \t"
+            ):
+                # ``if a < b and flag: return`` leaves ``a >= b`` unproven
+                # on the flag-false path.
+                if py_cond is not None and _has_top_level_word_op(py_cond, "and"):
+                    return None
+                return "early_exit"
+            return None
+    # Brace-less single-statement early exit: ``if (i < 0) return -1;`` /
+    # Python ``if i < 0: return -1`` — anything after the diverging
+    # statement's terminator runs under the negated condition, unless a
+    # ``}`` closes an enclosing block first (the exit was conditional on
+    # entering that outer block).
+    if _GUARD_IF_RE.search(expression[: match.start()]) or match.group(
+        0
+    ).lstrip().startswith("if"):
+        divergence_match = re.match(
+            r"\s*\)?\s*:?\s*"
+            r"(?:return|throw|break|continue|panic|raise)\b[^;{}\n]*(?:;|\n|$)",
+            between,
+        )
+        if divergence_match and "}" not in between[divergence_match.end() :]:
+            dive_end = match.end() + divergence_match.start()
+            gc = _guard_condition(expression, match, dive_end)
+            if gc is not None:
+                unbraced_cond = gc[0]
+                if (
+                    _has_top_level_and(unbraced_cond)
+                    or _has_top_level_word_op(unbraced_cond, "and")
+                ):
+                    return None
+            return "early_exit"
     # ``a >= b && a - b`` — the ``&&`` must join the use into the same
     # expression; a ``;``/brace boundary means the ``&&`` belongs to a
     # different statement (``a >= b && flag; a - b`` is unguarded).
@@ -7043,7 +7187,11 @@ def _subtraction_guarded(
 
 
 def _is_cast_or_subtraction_issue(issue: ForeignSafetyIssue) -> bool:
-    return "can truncate" in issue.message or "can underflow" in issue.message
+    return (
+        "can truncate" in issue.message
+        or "can underflow" in issue.message
+        or "shifts `" in issue.message
+    )
 
 
 def _cast_and_subtraction_issues(
@@ -7059,7 +7207,8 @@ def _cast_and_subtraction_issues(
     solidity_default_checks: bool = False,
     subtraction_regions: list[tuple[int, int]] | None = None,
 ) -> list[ForeignSafetyIssue]:
-    """Run the narrowing-cast and unsigned-subtraction checks over ``text``.
+    """Run the narrowing-cast, unsigned-subtraction, and shift-amount checks
+    over ``text``.
 
     ``text`` may be a whole (literal-stripped) function body — guards in
     enclosing statements (``if a >= b { … return a - b }``) are visible to
@@ -7091,6 +7240,17 @@ def _cast_and_subtraction_issues(
             local_names=local_names,
             solidity_default_checks=solidity_default_checks,
             allowed_regions=subtraction_regions,
+        )
+    )
+    issues.extend(
+        _shift_amount_issues(
+            function_name,
+            text,
+            label,
+            known_constants=known_constants or {},
+            param_types=param_types,
+            raw_param_types=raw_param_types,
+            local_names=local_names,
         )
     )
     return issues
@@ -7182,6 +7342,529 @@ def _unsigned_subtraction_issues(
     return issues
 
 
+# ``x << n`` / ``x >> n`` (and the compound-assign forms) where ``n`` may reach
+# the operand's bit width — a debug panic in Rust, a silent 5-bit mask in
+# ECMAScript, a defined-but-likely-wrong zero in Go/Solidity.
+_SHIFT_AMOUNT_RE = re.compile(
+    r"\b(?P<base>[A-Za-z_]\w*)\s*(?:<<|>>)=?\s*"
+    r"(?P<amount>[A-Za-z_]\w*|\d+|\([^()]*\))"
+)
+
+
+def _nonnegative_guarded(expression: str, name: str, use_pos: int) -> bool:
+    """Whether ``name >= 0`` is provable at ``use_pos`` — either a
+    ``name >= 0``/``name > -1`` comparison dominating the use (holds
+    mechanisms) or a ``name < 0``/``name <= -1`` early exit / ternary
+    false branch leaving ``name >= 0`` behind."""
+    holds_re = re.compile(
+        rf"\b{re.escape(name)}\s*>=\s*0\b"
+        rf"|\b{re.escape(name)}\s*>\s*-\s*1\b"
+        rf"|\b0\s*<=\s*{re.escape(name)}\b"
+        rf"|\b-\s*1\s*<\s*{re.escape(name)}\b"
+    )
+    if any(
+        _guard_mechanism(expression, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+        for m in holds_re.finditer(expression, 0, use_pos)
+    ):
+        return True
+    exits_re = re.compile(
+        rf"\b{re.escape(name)}\s*<\s*0\b"
+        rf"|\b{re.escape(name)}\s*<=\s*-\s*1\b"
+        rf"|\b0\s*>\s*{re.escape(name)}\b"
+        rf"|\b-\s*1\s*>=\s*{re.escape(name)}\b"
+    )
+    return any(
+        _guard_mechanism(expression, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+        for m in exits_re.finditer(expression, 0, use_pos)
+    )
+
+
+def _shift_amount_guarded(
+    expression: str,
+    amount: str,
+    width: int,
+    shift_pos: int,
+    *,
+    signed_amount: bool = False,
+) -> bool:
+    """True when ``amount`` is provably ``0 <= amount < width`` at the shift
+    position.
+
+    A mask only bounds ``amount`` when its result is assigned back to it
+    (``n &= 63``, ``n = n & 63``, ``n := n % 64``) — computing ``n & 63``
+    elsewhere leaves ``n`` unchanged. ``&``-masks also prove non-negativity
+    on signed values; ``%``-masks do not (Go/Rust ``%`` keeps the lhs sign).
+    A ``n < W`` or ``n <= W-1`` comparison guards the shift only when it
+    dominates it — inside the condition's block, ``&&``-joined, ternary true
+    branch, or ``require``/``assert``-wrapped (``_guard_mechanism``, same
+    rule as ``_subtraction_guarded``) — and, for signed amounts, only when
+    ``amount >= 0`` is likewise proven. The negated mechanisms guard a
+    ``n >= W`` / ``n > W-1`` comparison instead: ``if n >= 64 { return }
+    x << n`` is safe, while ``if n < 64 { return } x << n`` still panics.
+    """
+    prefix = expression[:shift_pos]
+    assigns = list(
+        re.finditer(
+            rf"\b{re.escape(amount)}\s*(?:(?P<compound>[&%])=|=(?!=)|:=)"
+            rf"\s*(?P<rhs>[^;{{}}\n]*)",
+            prefix,
+        )
+    )
+    if assigns:
+        last = assigns[-1]
+        # A mask inside a conditional block (``if flag { n &= 63 }``) only
+        # bounds ``n`` on that path — it must be a top-level statement.
+        depth = 0
+        in_str: str | None = None
+        for ch in expression[: last.start()]:
+            if in_str:
+                if ch == in_str:
+                    in_str = None
+            elif ch in "\"'`":
+                in_str = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth = max(0, depth - 1)
+        if depth != 0:
+            assigns = []
+    if assigns:
+        last = assigns[-1]
+        compound, rhs = last.group("compound"), last.group("rhs")
+        mask = (
+            re.match(r"\s*(\d+)\s*$", rhs)
+            if compound
+            else re.search(r"([&%])\s*(\d+)\s*$", rhs)
+        )
+        if mask:
+            if compound:
+                op, bound_text = compound, mask.group(1)
+            else:
+                op, bound_text = mask.group(1), mask.group(2)
+            bounded = int(bound_text) < width if op == "&" else int(
+                bound_text
+            ) <= width
+            nonneg = op == "&" or not signed_amount
+            if bounded and nonneg:
+                return True
+    comparisons_guard = (
+        _nonnegative_guarded(expression, amount, shift_pos)
+        if signed_amount
+        else True
+    )
+    if not comparisons_guard:
+        return False
+    for match in re.finditer(
+        rf"\b{re.escape(amount)}\s*(?P<op><=|<)\s*(?P<bound>\d+)", prefix
+    ):
+        bound = int(match.group("bound"))
+        if bound > width if match.group("op") == "<" else bound >= width:
+            continue
+        if _guard_mechanism(expression, match, shift_pos) in (
+            _GUARD_HOLDS_MECHANISMS
+        ):
+            return True
+    # Bad-direction comparisons protect the shift only through the negated
+    # mechanisms — an early-exit ``if`` or a ternary false branch leaves
+    # ``amount < bound`` for the code that continues.
+    for match in re.finditer(
+        rf"\b{re.escape(amount)}\s*(?P<op>>=|>)\s*(?P<bound>\d+)", prefix
+    ):
+        bound = int(match.group("bound"))
+        if bound > width if match.group("op") == ">=" else bound >= width:
+            continue
+        if _guard_mechanism(expression, match, shift_pos) in (
+            _GUARD_NEGATED_MECHANISMS
+        ):
+            return True
+    return False
+
+
+def _shift_amount_issues(
+    function_name: str,
+    expression: str,
+    label: str,
+    *,
+    known_constants: dict[str, int] | None = None,
+    param_types: dict[str, str] | None = None,
+    raw_param_types: dict[str, str] | None = None,
+    local_names: set[str] | None = None,
+) -> list[ForeignSafetyIssue]:
+    """Flag ``x << n``/``x >> n`` where ``n`` is not provably below the bit
+    width of ``x``'s declared type."""
+    if label == "Python":
+        return []  # arbitrary-precision ints never lose bits on shift
+    known = known_constants or {}
+
+    def _unsigned_amount(name: str) -> bool:
+        types = raw_param_types if raw_param_types is not None else param_types
+        if types and name in types:
+            bits = _integer_type_bits(label, types[name])
+            return bits is not None and not bits[1]
+        return False
+
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _SHIFT_AMOUNT_RE.finditer(expression):
+        base = match.group("base")
+        amount = match.group("amount")
+        if base is None or amount is None or (base, amount) in seen:
+            continue
+        if label in {"TypeScript", "JavaScript"}:
+            # ECMAScript << and >> coerce to int32 and mask the count to 5 bits.
+            width = 32
+        else:
+            types = (
+                raw_param_types if raw_param_types is not None else param_types
+            )
+            if not types or base not in types:
+                continue
+            bits = _integer_type_bits(label, types[base])
+            if bits is None:
+                continue
+            width = bits[0]
+        if amount.isdigit():
+            if int(amount) >= width:
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(
+                            f"{label} function `{function_name}` shifts `{base}` "
+                            f"by the literal {amount} — at or above the operand's "
+                            f"{width}-bit width this is a panic (Rust) or a "
+                            "silently wrong result"
+                        ),
+                        counterexample={base: 1},
+                    )
+                )
+            continue
+        if amount.startswith("("):
+            # ``x << (n & 63)`` — a mask inside the parens bounds the amount;
+            # anything else stays advisory (no contract target). ``%`` keeps
+            # the left operand's sign in Go/Rust/ECMAScript, so a ``%`` mask
+            # only bounds a signed amount when ``amount >= 0`` is proven.
+            inner = amount[1:-1]
+            mask = re.search(r"(?P<op>[&%])\s*(?P<bound>\d+)", inner)
+            if mask:
+                bound = int(mask.group("bound"))
+                masked_var = re.match(r"\s*([A-Za-z_]\w*)", inner)
+                nonneg_ok = mask.group("op") == "&" or (
+                    masked_var is not None
+                    and (
+                        _nonnegative_guarded(
+                            expression, masked_var.group(1), match.start()
+                        )
+                        or _unsigned_amount(masked_var.group(1))
+                    )
+                )
+                if bound < width if mask.group(
+                    "op"
+                ) == "&" else bound <= width and nonneg_ok:
+                    continue
+            cmp_inner = re.search(r"<\s*(\d+)", inner)
+            if cmp_inner and int(cmp_inner.group(1)) <= width:
+                continue
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` shifts `{base}` by "
+                        f"`{amount}` — the parenthesized amount is not proven "
+                        f"below the {width}-bit width"
+                    ),
+                    confidence="medium",
+                )
+            )
+            continue
+        if amount in known and 0 <= known[amount] < width:
+            continue
+        amount_is_param = amount in (raw_param_types or {}) or amount in (
+            param_types or {}
+        )
+        if local_names and amount in local_names:
+            amount_is_param = False
+        amount_type = (raw_param_types or {}).get(amount) or (
+            param_types or {}
+        ).get(amount)
+        amount_signed = False
+        if amount_type:
+            amount_bits = _integer_type_bits(label, amount_type)
+            amount_signed = amount_bits is not None and amount_bits[1]
+        if _shift_amount_guarded(
+            expression,
+            amount,
+            width,
+            match.start("amount"),
+            signed_amount=amount_signed,
+        ):
+            continue
+        contracts: list[str] = []
+        if amount_type:
+            amount_bits = _integer_type_bits(label, amount_type)
+            if amount_bits is not None and amount_bits[1]:
+                # Signed counts satisfy ``n < W`` while negative — still a
+                # panic in Go and Rust.
+                contracts.append(f"{amount} >= 0")
+        contracts.append(f"{amount} < {width}")
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` shifts `{base}` by "
+                    f"`{amount}` without proving `0 <= {amount} < {width}` — "
+                    "a shift count at or above the operand width panics "
+                    "(Rust debug) or silently mis-computes"
+                ),
+                required_contracts=tuple(contracts) if amount_is_param else (),
+                counterexample={base: 1, amount: width},
+                confidence="high" if amount_is_param else "medium",
+            )
+        )
+        # Dedupe only emitted issues — a guarded first occurrence must not
+        # suppress a later unguarded ``base << amount``.
+        seen.add((base, amount))
+    return issues
+
+
+# ``i = s.indexOf(x)`` / ``strings.Index`` / ``s.find`` return a -1-style
+# sentinel (or ``undefined`` for ``Array.find``) on a miss; using the result as
+# an index or dereferencing it without a check is a latent bug.
+_SENTINEL_MINUS1_ASSIGNS: dict[str, re.Pattern[str]] = {
+    "TypeScript": re.compile(
+        r"\b(?:let|const|var)\s+(?P<var>[A-Za-z_]\w*)\s*=\s*[\w.]+"
+        r"\.(?:indexOf|lastIndexOf|findIndex)\s*\("
+    ),
+    "Go": re.compile(
+        r"\b(?P<var>[A-Za-z_]\w*)\s*:?=\s*(?P<call>(?:strings|bytes)\.Index\w*)\s*\("
+    ),
+    "Python": re.compile(
+        r"\b(?P<var>[A-Za-z_]\w*)\s*=\s*[\w.]+\.find\s*\("
+    ),
+}
+_SENTINEL_UNDEFINED_ASSIGNS: dict[str, re.Pattern[str]] = {
+    "TypeScript": re.compile(
+        r"\b(?:let|const|var)\s+(?P<var>[A-Za-z_]\w*)\s*=\s*[\w.]+"
+        r"\.find\s*\("
+    ),
+}
+# Nested use of a sentinel-returning call inside an index expression:
+# ``arr[s.indexOf(x)]``, ``s[strings.Index(s, sub)]``, ``t[s.find(x)]``.
+_SENTINEL_NESTED_INDEX_RES: dict[str, re.Pattern[str]] = {
+    "TypeScript": re.compile(
+        r"\[[^\]\n]*\.(?:indexOf|lastIndexOf|findIndex)\s*\("
+    ),
+    "Go": re.compile(r"\[[^\]\n]*(?:strings|bytes)\.Index\w*\s*\("),
+    "Python": re.compile(r"\[[^\]\n]*\.find\s*\("),
+}
+
+
+def _sentinel_guarded(
+    body: str, var: str, use_pos: int, kind: str, since: int = 0
+) -> bool:
+    """Whether a check on ``var`` (a ``-1``/``undefined`` sentinel result)
+    dominates the use at ``use_pos`` — the check must ``&&``-join the use,
+    enclose it in its ``if`` body, sit inside ``require``/``assert``, or be
+    an early-exit ``if`` on the *bad* direction. A comparison whose branch
+    closed before the use does not reach it. ``since`` ignores checks that
+    precede the sentinel-producing assignment — ``if i < 0 { return }``
+    placed before ``i = s.find(…)`` protects a different value."""
+    if kind == "minus1":
+        safe_re = re.compile(
+            rf"\b{re.escape(var)}\s*!=+\s*-\s*1\b"
+            rf"|\b-\s*1\s*!=+\s*{re.escape(var)}\b"
+            rf"|\b{re.escape(var)}\s*>=\s*0\b"
+            rf"|\b{re.escape(var)}\s*>\s*(?:0|-\s*1)\b"
+        )
+        bad_re = re.compile(
+            rf"\b{re.escape(var)}\s*={{2,3}}\s*-\s*1\b"
+            rf"|\b-\s*1\s*={{2,3}}\s*{re.escape(var)}\b"
+            rf"|\b{re.escape(var)}\s*<\s*0\b"
+            rf"|\b{re.escape(var)}\s*<=\s*0\b"
+            rf"|\b{re.escape(var)}\s*<=\s*-\s*1\b"
+        )
+    else:
+        safe_re = re.compile(
+            rf"\b{re.escape(var)}\s*!=+\s*(?:undefined|null)\b"
+            rf"|\b(?:undefined|null)\s*!=+\s*{re.escape(var)}\b"
+        )
+        bad_re = re.compile(
+            rf"\b{re.escape(var)}\s*={{2,3}}\s*(?:undefined|null)\b"
+            rf"|\b(?:undefined|null)\s*={{2,3}}\s*{re.escape(var)}\b"
+        )
+    if any(
+        _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+        for m in safe_re.finditer(body, since, use_pos)
+    ):
+        return True
+    if any(
+        _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+        for m in bad_re.finditer(body, since, use_pos)
+    ):
+        return True
+    if kind == "undefined":
+        # Truthiness guards: ``if (el) { … use … }`` / ``assert el`` hold the
+        # value; ``if (!el) { return }`` removes the falsy case.
+        truthy = re.compile(
+            rf"\bif\s*\(\s*{re.escape(var)}\b|\bassert\s+{re.escape(var)}\b"
+        )
+        falsy = re.compile(rf"\bif\s*\(\s*!\s*{re.escape(var)}\b")
+        if any(
+            _guard_mechanism(body, m, use_pos) in _GUARD_HOLDS_MECHANISMS
+            for m in truthy.finditer(body, since, use_pos)
+        ):
+            return True
+        if any(
+            _guard_mechanism(body, m, use_pos) in _GUARD_NEGATED_MECHANISMS
+            for m in falsy.finditer(body, since, use_pos)
+        ):
+            return True
+    return False
+
+
+def _sentinel_index_issues(
+    function_name: str, body: str, label: str
+) -> list[ForeignSafetyIssue]:
+    """Flag sentinel results (``-1``/``undefined``) used as indices or
+    dereferenced without a miss check."""
+    issues: list[ForeignSafetyIssue] = []
+    minus1_assign = _SENTINEL_MINUS1_ASSIGNS.get(label)
+    if minus1_assign is not None:
+        for match in minus1_assign.finditer(body):
+            var = match.group("var")
+            unsafe = re.compile(
+                rf"\[[^\]\n]*\b{re.escape(var)}\b[^\]\n]*\]"
+            )
+            for use in unsafe.finditer(body, match.end()):
+                if _sentinel_guarded(
+                    body, var, use.start(), "minus1", since=match.end()
+                ):
+                    continue
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(
+                            f"{label} function `{function_name}` uses `{var}` "
+                            "(from a sentinel-returning search like `indexOf`/"
+                            "`strings.Index`/`find`) as an index without a "
+                            f"`{var} != -1`-style check — a miss yields `-1`"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    undefined_assign = _SENTINEL_UNDEFINED_ASSIGNS.get(label)
+    if undefined_assign is not None:
+        for match in undefined_assign.finditer(body):
+            var = match.group("var")
+            unsafe = re.compile(
+                rf"\b{re.escape(var)}\s*\.|\b{re.escape(var)}\s*\["
+                rf"|\b{re.escape(var)}\s*[+\-*/%]"
+            )
+            for use in unsafe.finditer(body, match.end()):
+                if _sentinel_guarded(
+                    body, var, use.start(), "undefined", since=match.end()
+                ):
+                    continue
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(
+                            f"{label} function `{function_name}` uses "
+                            f"`{var}` (from `.find(...)`) without an "
+                            "`undefined`/`null` check — `find` returns "
+                            "`undefined` when no element matches"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    nested = _SENTINEL_NESTED_INDEX_RES.get(label)
+    if nested is not None:
+        for match in nested.finditer(body):
+            call = re.search(
+                r"\.(?:indexOf|lastIndexOf|findIndex|find)\s*\(|(?:strings|bytes)\.Index\w*",
+                match.group(0),
+            )
+            callee = call.group(0) if call else "search"
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` indexes with the "
+                        f"result of `{callee}(…)` inline — a miss yields a "
+                        "sentinel (`-1`) used directly as an index"
+                    ),
+                    confidence="medium",
+                )
+            )
+    return issues
+
+
+# ``x, _ := f()`` / bare ``f(...)`` where the callee's same-file signature ends
+# in ``error`` — the error position is discarded or never bound.
+_GO_CALL_ASSIGN_RE = re.compile(
+    r"\b(?P<vars>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:?=\s*"
+    r"(?P<call>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\("
+)
+_GO_BARE_CALL_RE = re.compile(
+    r"^\s*(?:go\s+)?(?P<call>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\([^;{}]*\)\s*$"
+)
+
+
+def _go_ignored_error_issues(
+    function_name: str, body: str, error_returns: set[str]
+) -> list[ForeignSafetyIssue]:
+    """Flag Go call sites that drop a callee's trailing ``error`` return."""
+    if not error_returns:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[str] = set()
+    for match in _GO_CALL_ASSIGN_RE.finditer(body):
+        vars_ = [v.strip() for v in match.group("vars").split(",")]
+        callee = match.group("call").rsplit(".", 1)[-1]
+        if callee not in error_returns or vars_[-1] != "_":
+            continue
+        key = f"discard:{callee}"
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"Go function `{function_name}` discards the error return "
+                    f"of `{match.group('call')}` (`{match.group('vars')} := …`) "
+                    "— bind it to `err` and check it"
+                ),
+                confidence="medium",
+            )
+        )
+    # Split on ``;`` too — ``g(); work()`` runs two bare calls on one line.
+    for stmt in re.split(r"[;\n]", body):
+        match = _GO_BARE_CALL_RE.match(stmt)
+        if match is None:
+            continue
+        callee = match.group("call").rsplit(".", 1)[-1]
+        if callee not in error_returns:
+            continue
+        key = f"bare:{callee}"
+        if key in seen:
+            continue
+        seen.add(key)
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"Go function `{function_name}` ignores the error return "
+                    f"of `{match.group('call')}` (bare call statement) — "
+                    "assign the result and check `err`"
+                ),
+                confidence="medium",
+            )
+        )
+    return issues
+
+
 def _issues_for_expression(
     function_name: str,
     expression: str,
@@ -7262,6 +7945,17 @@ def _issues_for_expression(
                 raw_param_types=raw_param_types,
                 local_names=local_names,
                 solidity_default_checks=solidity_default_checks,
+            )
+        )
+        issues.extend(
+            _shift_amount_issues(
+                function_name,
+                expression,
+                label,
+                known_constants=known_constants,
+                param_types=param_types,
+                raw_param_types=raw_param_types,
+                local_names=local_names,
             )
         )
         return issues
@@ -7369,6 +8063,17 @@ def _issues_for_expression(
             raw_param_types=raw_param_types,
             local_names=local_names,
             solidity_default_checks=solidity_default_checks,
+        )
+    )
+    issues.extend(
+        _shift_amount_issues(
+            function_name,
+            expression,
+            label,
+            known_constants=known_constants,
+            param_types=param_types,
+            raw_param_types=raw_param_types,
+            local_names=local_names,
         )
     )
     return issues
