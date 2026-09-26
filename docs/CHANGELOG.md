@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-22: Layer B advisories — new language_patterns (Tier 2)
+
+- `agent/language_patterns.py` — five new advisory groups (all `confidence="medium"`, warnings-only; advisory findings cannot invert `success`):
+  - **Solidity** (inside `solidity_pattern`): weak randomness — `blockhash(...)` or `block.timestamp`/`number`/`prevrandao`/`difficulty`/`coinbase` feeding a `keccak256` hash or a `%` draw; missing zero-address guard — a `public`/`external` function storing an `address`/`address payable` parameter into state with no `address(0)` check anywhere in the body.
+  - **Rust** (`rust_escape_hatch`): `unsafe {}` blocks, `mem::forget`, `mem::transmute` — points where the borrow/type guarantees are suspended and the safety invariant is manual.
+  - **Python** (`python_dangerous_call`, AST-based): `eval`/`exec`, `pickle.load`/`loads`, `marshal.load`/`loads`, `os.system`/`os.popen`, `subprocess.*` with `shell=True` (or `getoutput`), `yaml.load` without a `Loader=` argument.
+  - **Python** (`python_mutation_during_iteration`): mutating the iterated collection inside its own `for` — `items.remove(x)`, `del d[k]`, `d[k] = v` — which skips elements (lists) or raises `RuntimeError` (dicts/sets). Iterating a copy (`for x in list(items)`) is recognised as safe.
+  - **TypeScript** (`typescript_safety`; JavaScript aliases to it): non-null assertions `x!`/`f()!`/`a[i]!` (excluding `!=`/`!==`), `JSON.parse` with no `try`/`catch` in the body, `eval(`, `.innerHTML =` assignments, and mutating the `for … of` array (push/splice/subscript-write) inside the loop.
+- Regression gate: `uv run pytest tests/test_language_patterns_tier2.py -q` (38 cases); full suite green. The `test_rust_inline_blocks_stay_transparent_to_guards` fixture now trips the `unsafe {}` advisory by design — its assertion is scoped to the unwrap/panic findings it actually exercises.
+
 ## 2026-09-22: Layer B checks — shift bounds + sentinel -1/undefined + Go ignored errors
 
 - `agent/strategies/foreign_code_strategy_helpers.py` — three more check classes on top of the Tier1-A body-level scan:

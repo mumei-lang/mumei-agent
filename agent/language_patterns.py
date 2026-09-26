@@ -35,6 +35,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _normalize_language,
     _rust_function_scopes,
     _solidity_function_blocks_with_attrs,
+    _solidity_function_scopes,
     _typescript_function_blocks,
 )
 
@@ -1673,6 +1674,32 @@ def _solidity_pattern_issues(
     issues: list[ForeignSafetyIssue] = []
     for name, _attrs, raw_body in _solidity_function_blocks_with_attrs(source):
         body = _strip_go_rust_literals_and_comments(raw_body)
+        # ``blockhash``/``block.*`` sources are miner-influenced or public —
+        # a modulo or keccak256 draw over them is weak randomness.
+        if re.search(r"\bblockhash\s*\(", body) or (
+            re.search(
+                r"\bblock\.(?:timestamp|number|prevrandao|difficulty|coinbase)\b",
+                body,
+            )
+            and (
+                re.search(r"\bkeccak256\s*\(", body)
+                or re.search(
+                    r"(?:%[^%]*\bblock\.|\bblock\.[A-Za-z]+\s*%)", body
+                )
+            )
+        ):
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"Solidity function `{name}` derives randomness from "
+                        "`block.*`/`blockhash` — these values are public and "
+                        "partly miner-influenced; use a VRF oracle for "
+                        "unpredictable draws"
+                    ),
+                    confidence="medium",
+                )
+            )
         if re.search(r"\btx\.origin\b", body):
             issues.append(
                 ForeignSafetyIssue(
@@ -1720,6 +1747,329 @@ def _solidity_pattern_issues(
                     confidence="medium",
                 )
             )
+    # Zero-address guard: an externally callable function that stores an
+    # ``address`` parameter into state without any ``address(0)`` check can
+    # brick the contract (burn address ownership/fee sinks).
+    for name, raw_body, params_text, attrs in _solidity_function_scopes(source):
+        if not re.search(r"\b(?:public|external)\b", attrs):
+            continue
+        body = _strip_go_rust_literals_and_comments(raw_body)
+        if "address(0)" in body:
+            continue
+        address_params = re.findall(
+            r"\baddress\s+(?:payable\s+)?(?P<name>[A-Za-z_]\w*)\b", params_text
+        )
+        for param in address_params:
+            if re.search(rf"\w+\s*=\s*{re.escape(param)}\s*;", body):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"Solidity function `{name}` stores `address` "
+                            f"parameter `{param}` without a zero-address "
+                            "`require(param != address(0))` check"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Rust — escape hatches advisories
+# ---------------------------------------------------------------------------
+
+
+def _rust_escape_hatch_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for name, raw_body, _params in _rust_function_scopes(source):
+        body = _mask_rust_nested_fns(
+            _strip_go_rust_literals_and_comments(raw_body)
+        )
+        flags: list[str] = []
+        if re.search(r"\bunsafe\s*\{", body):
+            flags.append(
+                "an `unsafe` block — borrow/type guarantees are suspended; "
+                "the enclosing safety invariant needs a manual argument"
+            )
+        if re.search(r"\bmem::forget\s*\(", body):
+            flags.append(
+                "`mem::forget` — the value's Drop obligations leak; confirm "
+                "no resource is abandoned"
+            )
+        if re.search(r"\bmem::transmute|transmute\s*<", body):
+            flags.append(
+                "`mem::transmute` — bypasses the type system entirely"
+            )
+        for flag in flags:
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=f"Rust function `{name}` contains {flag}",
+                    confidence="medium",
+                )
+            )
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Python — dangerous calls + mutation during iteration
+# ---------------------------------------------------------------------------
+
+_PY_UNSAFE_NAME_CALLS = frozenset({"eval", "exec"})
+_PY_UNSAFE_METHODS = {
+    ("pickle", "load"): "`pickle.load` deserializes arbitrary objects — "
+    "only load trusted payloads",
+    ("pickle", "loads"): "`pickle.loads` deserializes arbitrary objects — "
+    "only load trusted payloads",
+    ("os", "system"): "`os.system` runs a shell string — injection risk; "
+    "prefer subprocess with an argument list",
+    ("os", "popen"): "`os.popen` runs a shell string — injection risk; "
+    "prefer subprocess with an argument list",
+    ("marshal", "load"): "`marshal.load` deserializes code objects — "
+    "only load trusted payloads",
+    ("marshal", "loads"): "`marshal.loads` deserializes code objects — "
+    "only load trusted payloads",
+}
+_PY_SUBPROCESS_CALLS = frozenset(
+    {"run", "call", "Popen", "check_output", "check_call", "getoutput"}
+)
+_PY_ITER_MUTATING_METHODS = frozenset(
+    {"append", "extend", "insert", "remove", "pop", "clear", "discard", "update"}
+)
+
+
+def _python_dangerous_call_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    def describe(node: ast.Call) -> str | None:
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _PY_UNSAFE_NAME_CALLS:
+            return (
+                f"`{func.id}` evaluates caller-supplied text as code — "
+                "prefer a parser or an allowlisted dispatch"
+            )
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            base, attr = func.value.id, func.attr
+            if (base, attr) in _PY_UNSAFE_METHODS:
+                return _PY_UNSAFE_METHODS[(base, attr)]
+            if base == "subprocess" and attr in _PY_SUBPROCESS_CALLS:
+                shell = any(
+                    kw.arg == "shell"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                    for kw in node.keywords
+                )
+                if shell or attr == "getoutput":
+                    return (
+                        f"`subprocess.{attr}` with `shell=True` interpolates "
+                        "through a shell — injection risk; pass an argument "
+                        "list with `shell=False`"
+                    )
+            if (
+                base == "yaml"
+                and attr == "load"
+                and not any(kw.arg == "Loader" for kw in node.keywords)
+            ):
+                return (
+                    "`yaml.load` without a `Loader=` uses the unsafe "
+                    "default and deserializes arbitrary objects — use "
+                    "`yaml.safe_load`"
+                )
+        return None
+
+    issues: list[ForeignSafetyIssue] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                description = describe(node)
+                if description is not None:
+                    issues.append(
+                        ForeignSafetyIssue(
+                            function_name=fn.name,
+                            message=(
+                                f"Python function `{fn.name}` calls "
+                                f"{description}"
+                            ),
+                            confidence="medium",
+                        )
+                    )
+    return issues
+
+
+def _python_mutation_during_iteration_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    """Mutating the iterated collection inside a ``for`` — skips elements
+    silently (lists) or raises ``RuntimeError`` (dicts/sets)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    def iterated_name(loop) -> str | None:
+        it = loop.iter
+        if isinstance(it, ast.Name):
+            return it.id
+        # ``for k in d.items()`` / ``d.keys()`` / ``d.values()``
+        if (
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Attribute)
+            and it.func.attr in {"items", "keys", "values"}
+            and isinstance(it.func.value, ast.Name)
+        ):
+            return it.func.value.id
+        return None
+
+    def mutates(name: str, node: ast.AST) -> bool:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+            and node.func.attr in _PY_ITER_MUTATING_METHODS
+        ):
+            return True
+        if isinstance(node, (ast.Delete, ast.Assign)):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            return False
+        return any(
+            isinstance(t, ast.Subscript)
+            and isinstance(t.value, ast.Name)
+            and t.value.id == name
+            for t in targets
+        )
+
+    issues: list[ForeignSafetyIssue] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for loop in ast.walk(fn):
+            if not isinstance(loop, (ast.For, ast.AsyncFor)):
+                continue
+            name = iterated_name(loop)
+            if name is None:
+                continue
+            if any(mutates(name, node) for stmt in loop.body for node in ast.walk(stmt)):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=fn.name,
+                        message=(
+                            f"Python function `{fn.name}` mutates `{name}` "
+                            "inside a loop iterating it — list element removal "
+                            "skips items; dict/set mutation raises RuntimeError"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# TypeScript — non-null assertions, JSON.parse, eval, innerHTML, mutation
+# ---------------------------------------------------------------------------
+
+_TS_NON_NULL_RE = re.compile(
+    r"(?:(?P<name>[A-Za-z_]\w*)|(?P<call>[A-Za-z_]\w*\s*\([^()]*\))"
+    r"|(?P<idx>[A-Za-z_]\w*\s*\[[^\]]*\]))!(?!\s*=)"
+)
+_TS_FOR_OF_RE = re.compile(
+    r"\bfor\s*\([^)]*\bof\s+(?P<arr>[A-Za-z_]\w*)[^)]*\)\s*\{"
+)
+_TS_ITER_MUTATE_RE = (
+    r"\.(?:push|splice|pop|shift|unshift|fill|sort|reverse)\s*\(|\s*\[[^\]]*\]\s*="
+)
+
+
+def _typescript_safety_issues(
+    source: str, ctx: PatternContext
+) -> list[ForeignSafetyIssue]:
+    issues: list[ForeignSafetyIssue] = []
+    for name, raw_body in _typescript_function_blocks(source):
+        body = _mask_nested_function_literals(raw_body, "typescript")
+        asserted = {
+            (m.group("name") or m.group("call") or m.group("idx"))
+            for m in _TS_NON_NULL_RE.finditer(body)
+        }
+        if asserted:
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"TypeScript function `{name}` uses non-null "
+                        f"assertion(s) `{'`/`'.join(sorted(asserted))}!` — "
+                        "the compile-time claim is unchecked at runtime; "
+                        "prefer an explicit guard"
+                    ),
+                    confidence="medium",
+                )
+            )
+        if re.search(r"\bJSON\.parse\s*\(", body) and not re.search(
+            r"\b(?:try|catch)\b", body
+        ):
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"TypeScript function `{name}` calls `JSON.parse` "
+                        "without a try/catch — malformed input throws"
+                    ),
+                    confidence="medium",
+                )
+            )
+        if re.search(r"\beval\s*\(", body):
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"TypeScript function `{name}` calls `eval` — "
+                        "attacker-influenceable text runs as code"
+                    ),
+                    confidence="medium",
+                )
+            )
+        if re.search(r"\.innerHTML\s*=", body):
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=name,
+                    message=(
+                        f"TypeScript function `{name}` assigns to "
+                        "`innerHTML` — unsanitized markup enables DOM XSS; "
+                        "prefer `textContent` or a sanitizer"
+                    ),
+                    confidence="medium",
+                )
+            )
+        for match in _TS_FOR_OF_RE.finditer(body):
+            loop_body = _balanced_brace_body(body, match.end() - 1)
+            arr = match.group("arr")
+            if re.search(rf"\b{re.escape(arr)}{_TS_ITER_MUTATE_RE}", loop_body):
+                issues.append(
+                    ForeignSafetyIssue(
+                        function_name=name,
+                        message=(
+                            f"TypeScript function `{name}` mutates `{arr}` "
+                            "inside a `for … of` loop over it — element "
+                            "addition/removal shifts the iteration"
+                        ),
+                        confidence="medium",
+                    )
+                )
+                break
     return issues
 
 
@@ -1752,6 +2102,19 @@ LANGUAGE_PATTERNS: tuple[LanguagePattern, ...] = (
         "rust_unwrap_expect", frozenset({"rust"}), _rust_unwrap_expect_issues
     ),
     LanguagePattern(
+        "rust_escape_hatch", frozenset({"rust"}), _rust_escape_hatch_issues
+    ),
+    LanguagePattern(
+        "python_dangerous_call",
+        frozenset({"python"}),
+        _python_dangerous_call_issues,
+    ),
+    LanguagePattern(
+        "python_mutation_during_iteration",
+        frozenset({"python"}),
+        _python_mutation_during_iteration_issues,
+    ),
+    LanguagePattern(
         "go_defer_in_loop", frozenset({"go"}), _go_defer_in_loop_issues
     ),
     # ``javascript``/``ts``/``tsx`` aliases normalize to "typescript".
@@ -1759,6 +2122,11 @@ LANGUAGE_PATTERNS: tuple[LanguagePattern, ...] = (
         "typescript_floating_promise",
         frozenset({"typescript"}),
         _typescript_floating_promise_issues,
+    ),
+    LanguagePattern(
+        "typescript_safety",
+        frozenset({"typescript"}),
+        _typescript_safety_issues,
     ),
     LanguagePattern(
         "solidity_pattern", frozenset({"solidity"}), _solidity_pattern_issues
