@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from agent.strategies.foreign_code_strategy_helpers import _issues_for_expression
 
 
@@ -136,12 +134,24 @@ def test_unsigned_subtraction_guarded_by_comparison_not_flagged() -> None:
 
 
 def test_unsigned_subtraction_local_names_skipped() -> None:
-    assert not _sub_issues(
+    """Locals whose unsignedness is body-derived (``unsigned_locals``) are
+    still flagged — underflow is a real bug regardless of contract ability.
+    Only *unproven* locals are skipped."""
+    issues = _sub_issues(
         "a - b",
         "Rust",
         param_types={"a": "usize"},
         unsigned_locals={"a", "b"},
         local_names={"a"},
+    )
+    assert len(issues) == 1
+    # A name in local_names but NOT in unsigned_locals is a shadowed param —
+    # its param_types entry describes the wrong binding, so it must be skipped.
+    assert not _sub_issues(
+        "a - b",
+        "Rust",
+        param_types={"a": "usize", "b": "usize"},
+        local_names={"a", "b"},
     )
 
 
@@ -189,3 +199,69 @@ def test_solidity_checked_arithmetic_skips_subtraction() -> None:
 def test_python_not_affected() -> None:
     assert not _cast_issues("x", "Python")
     assert not _sub_issues("a - b", "Python")
+
+
+def test_solidity_detect_safety_issues_wires_param_types() -> None:
+    """``_detect_safety_issues`` must route declared param types so cast and
+    underflow checks fire on real sources (not only direct calls)."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = (
+        "pragma solidity ^0.7.6;\n"
+        "contract C {\n"
+        "  function f(uint256 a, uint256 b) public pure returns (uint256) {\n"
+        "    return a - b;\n"
+        "  }\n"
+        "  function g(uint256 x) public pure returns (uint128) {\n"
+        "    return uint128(x);\n"
+        "  }\n"
+        "}\n"
+    )
+    issues = _detect_safety_issues(src, "solidity")
+    assert any("can underflow `a - b`" in i.message for i in issues)
+    assert any("can truncate `x` in cast to `uint128`" in i.message for i in issues)
+
+
+def test_go_rune_conversion_flags_wider_param() -> None:
+    issues = _cast_issues("rune(n)", "Go", param_types={"n": "int64"})
+    assert len(issues) == 1
+    assert "n <= 2147483647" in issues[0].required_contracts
+
+
+def test_signed_to_same_width_unsigned_no_vacuous_upper_bound() -> None:
+    issues = _cast_issues("x as u64", "Rust", param_types={"x": "i64"})
+    assert len(issues) == 1
+    assert issues[0].required_contracts == ("x >= 0",)
+
+
+def test_unsigned_subtraction_shadowed_param_not_flagged() -> None:
+    """A local shadowing a param name must not inherit the param's type."""
+    assert not _sub_issues(
+        "a - b",
+        "Rust",
+        param_types={"a": "usize", "b": "usize"},
+        local_names={"a"},
+    )
+
+
+def test_unsigned_subtraction_left_less_than_right_guard_not_suppressed() -> None:
+    """``a <= b`` proves underflow, not safety — must still flag."""
+    issues = _sub_issues(
+        "a <= b ? a - b : 0",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert len(issues) == 1
+
+
+def test_unsigned_subtraction_self_skipped() -> None:
+    """``a - a`` is always 0 — never underflows."""
+    assert not _sub_issues("a - a", "Rust", param_types={"a": "usize"})
+
+
+def test_unsigned_subtraction_compound_assign_flagged() -> None:
+    issues = _sub_issues(
+        "a -= b", "Rust", param_types={"a": "u64", "b": "u64"}
+    )
+    assert len(issues) == 1
+    assert issues[0].required_contracts == ("a >= b",)

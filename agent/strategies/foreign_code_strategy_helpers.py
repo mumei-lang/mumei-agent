@@ -376,7 +376,7 @@ def _solidity_type(type_name: str) -> str:
         return "i64"
     return _mumei_type(normalized)
 
-def _solidity_params(params_text: str) -> dict[str, str]:
+def _solidity_params(params_text: str, *, normalize: bool = True) -> dict[str, str]:
     params: dict[str, str] = {}
     modifiers = {"memory", "calldata", "storage", "payable", "indexed"}
     for index, raw in enumerate(_split_params(params_text)):
@@ -390,7 +390,9 @@ def _solidity_params(params_text: str) -> dict[str, str]:
             type_text, name_text = tokens[0], f"arg{index}"
         else:
             continue
-        params[_safe_identifier(name_text)] = _solidity_type(type_text)
+        params[_safe_identifier(name_text)] = (
+            _solidity_type(type_text) if normalize else type_text
+        )
     return params
 
 _BYTE_LIKE_TYPE_RE = re.compile(
@@ -613,6 +615,14 @@ def _detect_safety_issues(
             per_function_locals=_solidity_function_local_identifiers(
                 solidity_scopes
             ),
+            per_function_param_types={
+                block_idx: _solidity_params(params)
+                for block_idx, (_name, _body, params, _attrs) in enumerate(solidity_scopes)
+            },
+            per_function_raw_param_types={
+                block_idx: _solidity_params(params, normalize=False)
+                for block_idx, (_name, _body, params, _attrs) in enumerate(solidity_scopes)
+            },
         )
         issues.extend(_detect_solidity_contract_issues(source, source_file=source_file))
         return issues
@@ -3736,6 +3746,7 @@ def _detect_block_safety_issues(
     per_function_lengths: dict[int, dict[str, int]] | None = None,
     per_function_locals: dict[int, set[str]] | None = None,
     per_function_param_types: dict[int, dict[str, str]] | None = None,
+    per_function_raw_param_types: dict[int, dict[str, str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     fallback = label == "TypeScript"
@@ -3790,6 +3801,7 @@ def _detect_block_safety_issues(
                 dereference_values=dereference_values,
                 known_constants=function_constants,
                 param_types=(per_function_param_types or {}).get(block_idx),
+                raw_param_types=(per_function_raw_param_types or {}).get(block_idx),
                 mapping_names=mapping_names,
                 guaranteed_nonzero=per_function_nonzero,
                 guarded_indices=per_function_guarded_indices,
@@ -6284,13 +6296,15 @@ _RUST_CAST_RE = re.compile(
     r"\b(?P<operand>[A-Za-z_]\w*)\s+as\s+(?P<ty>u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize)\b"
 )
 _GO_CONVERSION_RE = re.compile(
-    r"\b(?P<ty>u?int(?:8|16|32|64)?|uintptr|byte)\s*\(\s*(?P<operand>[A-Za-z_]\w*)\s*\)"
+    r"\b(?P<ty>u?int(?:8|16|32|64)?|uintptr|byte|rune)\s*\(\s*(?P<operand>[A-Za-z_]\w*)\s*\)"
 )
 _SOLIDITY_CONVERSION_RE = re.compile(
     r"\b(?P<ty>u?int(?:8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?)\s*\(\s*(?P<operand>[A-Za-z_]\w*)\s*\)"
 )
 _UNSIGNED_SUBTRACTION_RE = re.compile(
-    r"\b(?P<left>[A-Za-z_]\w*)\s*-\s*(?P<right>[A-Za-z_]\w*)\b"
+    # ``a - b`` and the compound-assignment form ``a -= b`` — both compute
+    # ``a - b`` and underflow identically on unsigned operands.
+    r"\b(?P<left>[A-Za-z_]\w*)\s*-=?\s*(?P<right>[A-Za-z_]\w*)\b"
 )
 
 
@@ -6327,6 +6341,7 @@ def _narrowing_cast_issues(
     *,
     known_constants: dict[str, int],
     param_types: dict[str, str] | None,
+    raw_param_types: dict[str, str] | None,
     local_names: set[str] | None,
     solidity_default_checks: bool,
 ) -> list[ForeignSafetyIssue]:
@@ -6377,9 +6392,13 @@ def _narrowing_cast_issues(
                 continue
             sbits, ssigned = None, False  # definite out-of-range cast
         else:
+            # ``param_types`` for Solidity carries mumei-normalized types
+            # (``u64``), which lose the declared width — casts need the raw
+            # Solidity type from ``raw_param_types`` when available.
+            types = raw_param_types if raw_param_types is not None else param_types
             source_bits_signed = (
-                _integer_type_bits(label, param_types[operand])
-                if param_types and operand in param_types
+                _integer_type_bits(label, types[operand])
+                if types and operand in types
                 else None
             )
             if source_bits_signed is None:
@@ -6395,7 +6414,10 @@ def _narrowing_cast_issues(
         contracts: list[str] = []
         if ssigned:
             contracts.append(f"{operand} >= {lo}")
-        contracts.append(f"{operand} <= {hi}")
+        # The upper bound is vacuous for a signed source whose maximum cannot
+        # exceed the target's (e.g. ``i64 as u64`` — i64::MAX < u64::MAX).
+        if not (ssigned and sbits is not None and 2 ** (sbits - 1) - 1 <= hi):
+            contracts.append(f"{operand} <= {hi}")
         issues.append(
             ForeignSafetyIssue(
                 function_name=function_name,
@@ -6411,6 +6433,42 @@ def _narrowing_cast_issues(
     return issues
 
 
+def _subtraction_guarded(
+    expression: str, left: str, right: str, sub_pos: int
+) -> bool:
+    """Whether a ``left - right`` subtraction at ``sub_pos`` is guarded.
+
+    Two suppression shapes, both approximate:
+
+    - A comparison proving ``left >= right`` anywhere in the expression
+      (``left >= right``, ``left > right``, ``left == right``, ``right <=
+      left``, ``right < left``, ``right == left``) — covers hoisted
+      conditions merged into one expression and ternary conditions guarding
+      the true branch.
+    - Ternary false branch: in ``cond ? t : f`` a subtraction inside ``f``
+      runs only under ``not cond``, so a condition proving ``left <= right``
+      (``left <= right``, ``left < right``, ``right >= left``, ``right >
+      left`` — no ``==``) suppresses it. ``a >= b ? a - b : b - a`` and
+      ``a <= b ? x : a - b`` are both safe idioms this covers.
+    """
+    proves_ge = (
+        rf"\b{re.escape(left)}\s*(?:>=?|==)\s*{re.escape(right)}\b"
+        rf"|\b{re.escape(right)}\s*(?:<=?|==)\s*{re.escape(left)}\b"
+    )
+    if re.search(proves_ge, expression):
+        return True
+    qpos = expression.find("?")
+    cpos = expression.rfind(":")
+    if 0 <= qpos < cpos < sub_pos:
+        proves_le_strict = (
+            rf"\b{re.escape(left)}\s*<=?\s*{re.escape(right)}\b"
+            rf"|\b{re.escape(right)}\s*>=?\s*{re.escape(left)}\b"
+        )
+        if re.search(proves_le_strict, expression[:qpos]):
+            return True
+    return False
+
+
 def _unsigned_subtraction_issues(
     function_name: str,
     expression: str,
@@ -6419,6 +6477,7 @@ def _unsigned_subtraction_issues(
     known_constants: dict[str, int],
     unsigned_locals: set[str] | None,
     param_types: dict[str, str] | None,
+    raw_param_types: dict[str, str] | None,
     local_names: set[str] | None,
     solidity_default_checks: bool,
 ) -> list[ForeignSafetyIssue]:
@@ -6433,37 +6492,39 @@ def _unsigned_subtraction_issues(
     seen: set[tuple[str, str]] = set()
     for match in _UNSIGNED_SUBTRACTION_RE.finditer(expression):
         left, right = match.group("left"), match.group("right")
-        if (left, right) in seen:
+        if left == right or (left, right) in seen:
             continue
         seen.add((left, right))
 
         def _unsigned(name: str) -> bool:
             if unsigned_locals and name in unsigned_locals:
                 return True
-            if param_types and name in param_types:
-                bits = _integer_type_bits(label, param_types[name])
+            # Solidity ``param_types`` are mumei-normalized (``u64``); the raw
+            # declared type (``uint256``) is required for the width lookup.
+            types = raw_param_types if raw_param_types is not None else param_types
+            if types and name in types:
+                bits = _integer_type_bits(label, types[name])
                 return bits is not None and not bits[1]
             return False
 
         if not (_unsigned(left) and _unsigned(right)):
             continue
-        if local_names and (left in local_names or right in local_names):
+        # A name that is both a local and a parameter was shadowed by the
+        # local — its param_types entry describes the wrong binding, so the
+        # unsignedness proof is unsound. Locals proven unsigned via
+        # unsigned_locals are exempt: their unsignedness is body-derived.
+        if local_names and any(
+            name in local_names
+            and not (unsigned_locals and name in unsigned_locals)
+            for name in (left, right)
+        ):
             continue
         known = known_constants or {}
         if left in known and right in known and known[left] >= known[right]:
             continue
         if right in known and known[right] == 0:
             continue
-        # An ordering/equality comparison between the pair — in either
-        # direction — is treated as a guard. This is approximate: it covers
-        # idioms like ``a >= b ? a - b : b - a`` where the comparison and the
-        # subtraction sit in different ternary branches, matching the other
-        # heuristic guards in this module.
-        if re.search(
-            rf"\b{re.escape(left)}\s*(?:[<>]=?|==)\s*{re.escape(right)}\b"
-            rf"|\b{re.escape(right)}\s*(?:[<>]=?|==)\s*{re.escape(left)}\b",
-            expression,
-        ):
+        if _subtraction_guarded(expression, left, right, match.start()):
             continue
         counterexample = {left: 0, right: 1}
         issues.append(
@@ -6494,6 +6555,7 @@ def _issues_for_expression(
     known_constants: dict[str, int] | None = None,
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
+    raw_param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     guaranteed_nonzero: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
@@ -6549,6 +6611,7 @@ def _issues_for_expression(
                 label,
                 known_constants=known_constants,
                 param_types=param_types,
+                raw_param_types=raw_param_types,
                 local_names=local_names,
                 solidity_default_checks=solidity_default_checks,
             )
@@ -6561,6 +6624,7 @@ def _issues_for_expression(
                 known_constants=known_constants,
                 unsigned_locals=unsigned_locals,
                 param_types=param_types,
+                raw_param_types=raw_param_types,
                 local_names=local_names,
                 solidity_default_checks=solidity_default_checks,
             )
@@ -6655,6 +6719,7 @@ def _issues_for_expression(
             label,
             known_constants=known_constants,
             param_types=param_types,
+            raw_param_types=raw_param_types,
             local_names=local_names,
             solidity_default_checks=solidity_default_checks,
         )
@@ -6667,6 +6732,7 @@ def _issues_for_expression(
             known_constants=known_constants,
             unsigned_locals=unsigned_locals,
             param_types=param_types,
+            raw_param_types=raw_param_types,
             local_names=local_names,
             solidity_default_checks=solidity_default_checks,
         )
