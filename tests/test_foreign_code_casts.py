@@ -265,3 +265,108 @@ def test_unsigned_subtraction_compound_assign_flagged() -> None:
     )
     assert len(issues) == 1
     assert issues[0].required_contracts == ("a >= b",)
+
+
+def test_unsigned_subtraction_or_short_circuit_not_guarded() -> None:
+    """``a >= b || a - b`` evaluates the subtraction only when ``a < b`` —
+    the comparison does not guard the right-hand side."""
+    issues = _sub_issues(
+        "a >= b || a - b > 0",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+    assert len(issues) == 1
+
+
+def test_unsigned_subtraction_and_guard_suppresses() -> None:
+    """``a >= b && a - b`` evaluates the subtraction only when ``a >= b``."""
+    assert not _sub_issues(
+        "a >= b && a - b > 0",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_unsigned_subtraction_ternary_both_branches_guarded() -> None:
+    """``a >= b ? a - b : b - a`` — both operands guarded by the condition."""
+    assert not _sub_issues(
+        "a >= b ? a - b : b - a",
+        "Rust",
+        param_types={"a": "u64", "b": "u64"},
+    )
+
+
+def test_detect_safety_issues_rust_raw_param_types() -> None:
+    """Rust param types must reach the cast check in *declared* width form —
+    the normalized ``u64`` map would misjudge same-width/narrowing casts."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    # u8 -> u8 is same-width: no flag. If the normalized ``u64`` map were
+    # consulted this would report a spurious u64 -> u8 truncation.
+    assert not any(
+        "can truncate" in i.message
+        for i in _detect_safety_issues("fn f(x: u8) -> u8 { x as u8 }", "rust")
+    )
+    # u8 -> u32 is widening: no flag.
+    assert not any(
+        "can truncate" in i.message
+        for i in _detect_safety_issues("fn f(x: u8) -> u32 { x as u32 }", "rust")
+    )
+    # u64 -> u8 narrows: flag.
+    assert any(
+        "can truncate" in i.message
+        for i in _detect_safety_issues("fn f(x: u64) -> u8 { x as u8 }", "rust")
+    )
+
+
+def test_detect_safety_issues_rust_non_return_subtraction() -> None:
+    """Subtractions in non-return statements are scanned too."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    assert any(
+        "can underflow `a - b`" in i.message
+        for i in _detect_safety_issues(
+            "fn f(a: usize, b: usize) -> usize { let c = a - b; c }", "rust"
+        )
+    )
+
+
+def test_detect_safety_issues_rust_if_guard_suppresses() -> None:
+    """An enclosing ``if a >= b`` suppresses the mid-body subtraction."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    assert not any(
+        "can underflow" in i.message
+        for i in _detect_safety_issues(
+            "fn f(a: usize, b: usize) -> usize { if a >= b { return a - b; } 0 }",
+            "rust",
+        )
+    )
+
+
+def test_solidity_unchecked_block_flags_under_checked_pragma() -> None:
+    """``unchecked { … }`` reverts arithmetic to wrapping — flag it."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = (
+        "pragma solidity ^0.8.20;\n"
+        "contract C {\n"
+        "  function f(uint256 a, uint256 b) public returns (uint256) {\n"
+        "    unchecked { return a - b; }\n"
+        "  }\n"
+        "}\n"
+    )
+    assert any(
+        "can underflow `a - b`" in i.message
+        for i in _detect_safety_issues(src, "solidity")
+    )
+
+
+def test_cast_counterexample_respects_declared_source_range() -> None:
+    """The Z3 counterexample must stay inside the operand's declared range —
+    ``u64 -> i8`` must not print an impossible negative witness."""
+    issues = _cast_issues("x as i8", "Rust", param_types={"x": "u64"})
+    assert len(issues) == 1
+    assert issues[0].counterexample
+    assert issues[0].counterexample["x"] >= 0
+

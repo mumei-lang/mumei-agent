@@ -3903,9 +3903,13 @@ func (sb *SymbolBuilder) setUintXX(arch *Arch, off int64, v uint64, wid int64) i
 }
 '''
     issues = _detect_safety_issues(source, 'go')
+    # Scoped to nil-safety findings: ``setUintXX`` contains a deliberate
+    # ``uint16(v)`` truncation (``wid`` selects the stored width), which the
+    # narrowing-cast check legitimately reports as a range-contract gap.
     assert not any(
         i.function_name
         in {"SubSym", "CreateSymForUpdate", "AddUint16", "AddUintXX", "setUintXX"}
+        and "nil" in i.message
         for i in issues
     )
 

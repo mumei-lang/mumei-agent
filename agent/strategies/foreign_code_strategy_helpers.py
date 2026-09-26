@@ -529,11 +529,16 @@ def _detect_safety_issues(
             if name not in duplicate_constants
         }
         per_function_types: dict[int, dict[str, str]] = {}
+        per_function_raw_types: dict[int, dict[str, str]] = {}
         per_function_lengths: dict[int, dict[str, int]] = {}
         for block_idx, (block_name, block_body, params_text) in enumerate(scopes):
-            param_types, param_lengths = _rust_param_info(params_text, rust_constants)
+            param_types, param_lengths, raw_types = _rust_param_info(
+                params_text, rust_constants
+            )
             if param_types:
                 per_function_types[block_idx] = param_types
+            if raw_types:
+                per_function_raw_types[block_idx] = raw_types
             scoped_lengths = {
                 key: value
                 for key, value in param_lengths.items()
@@ -551,6 +556,7 @@ def _detect_safety_issues(
             known_constants=rust_constants,
             per_function_lengths=per_function_lengths,
             per_function_param_types=per_function_types,
+            per_function_raw_param_types=per_function_raw_types,
         )
         # Suppress false positives for ``(param - N) as usize`` indexing into
         # ``const`` arrays (e.g. ``LAST_DAYS[(month - 1) as usize]``).  The tool
@@ -3780,6 +3786,7 @@ def _detect_block_safety_issues(
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
         function_constants = known_constants
+        local_names: set[str] = set()
         if per_function_lengths or per_function_locals:
             merged = dict(known_constants or {})
             local_names = (per_function_locals or {}).get(block_idx) or set()
@@ -3793,6 +3800,36 @@ def _detect_block_safety_issues(
             if scoped_lengths:
                 merged.update(scoped_lengths)
             function_constants = merged
+        # Inside ``unchecked { … }`` Solidity arithmetic wraps — treat the
+        # function as unchecked for the new checks (same convention as the
+        # overflow suppression below).
+        cast_solidity_checks = solidity_checked_arithmetic and not function_has_unchecked
+        block_cast_sub_issues: list[ForeignSafetyIssue] = []
+        if label in {"Rust", "Solidity"}:
+            # ``per_function_locals`` includes declared parameter names — a
+            # param appearing there is its own declaration, not a shadowing
+            # local — so strip the params before the shadowing check.
+            block_param_types = (per_function_param_types or {}).get(block_idx)
+            block_raw_types = (per_function_raw_param_types or {}).get(block_idx)
+            cast_sub_local_names = local_names - set(
+                block_param_types or {}
+            ) - set(block_raw_types or {})
+            block_cast_sub_issues = _cast_and_subtraction_issues(
+                name,
+                (
+                    _strip_go_rust_literals_and_comments(body)
+                    if label == "Rust"
+                    else body
+                ),
+                label,
+                known_constants=function_constants or {},
+                unsigned_locals=per_function_unsigned_vars,
+                param_types=block_param_types,
+                raw_param_types=block_raw_types,
+                local_names=cast_sub_local_names,
+                solidity_default_checks=cast_solidity_checks,
+            )
+        block_cast_sub_msgs = {i.message for i in block_cast_sub_issues}
         for expression in expressions:
             expr_issues = _issues_for_expression(
                 name,
@@ -3809,6 +3846,15 @@ def _detect_block_safety_issues(
                 unsigned_locals=per_function_unsigned_vars,
                 solidity_default_checks=solidity_checked_arithmetic,
             )
+            # The body-level scan is authoritative for the cast/subtraction
+            # checks — it sees guards in enclosing statements that a bare
+            # return expression does not.
+            expr_issues = [
+                issue
+                for issue in expr_issues
+                if not _is_cast_or_subtraction_issue(issue)
+                or issue.message in block_cast_sub_msgs
+            ]
             if solidity_checked_arithmetic and not function_has_unchecked:
                 expr_issues = [
                     issue
@@ -3816,6 +3862,14 @@ def _detect_block_safety_issues(
                     if "can overflow" not in issue.message
                 ]
             issues.extend(expr_issues)
+        # Casts/subtractions in non-return statements are caught only by the
+        # body-level scan — merge it in, deduped by message.
+        existing_msgs = {issue.message for issue in issues}
+        issues.extend(
+            issue
+            for issue in block_cast_sub_issues
+            if issue.message not in existing_msgs
+        )
     return issues
 
 _GO_BUILTIN_TYPES = {
@@ -5113,6 +5167,30 @@ def _detect_go_safety_issues(
                 issues.extend(expr_issues)
             if flow is not None:
                 issues.extend(_dataflow_safety_issues(fn.name, flow))
+            # Body-level scan for casts/subtractions outside return
+            # expressions, reconciled against the per-expression results
+            # (the wider context sees ``if`` guards).
+            body_cast_sub = _cast_and_subtraction_issues(
+                fn.name,
+                body,
+                "Go",
+                known_constants=known_constants or {},
+                unsigned_locals=unsigned_vars,
+                param_types=param_types,
+                local_names=local_names,
+            )
+            body_msgs = {i.message for i in body_cast_sub}
+            issues = [
+                issue
+                for issue in issues
+                if issue.function_name != fn.name
+                or not _is_cast_or_subtraction_issue(issue)
+                or issue.message in body_msgs
+            ]
+            existing_msgs = {issue.message for issue in issues}
+            issues.extend(
+                issue for issue in body_cast_sub if issue.message not in existing_msgs
+            )
         issues = [
             issue
             for issue in issues
@@ -5267,6 +5345,31 @@ def _detect_go_safety_issues(
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                 ]
             issues.extend(expr_issues)
+        # Body-level scan for casts/subtractions outside return expressions,
+        # reconciled against the per-expression results (the wider context
+        # sees ``if`` guards in enclosing statements).
+        body_cast_sub = _cast_and_subtraction_issues(
+            _safe_identifier(name),
+            body,
+            "Go",
+            known_constants=known_constants or {},
+            unsigned_locals=unsigned_vars,
+            param_types=param_types,
+            local_names=local_names,
+        )
+        body_msgs = {i.message for i in body_cast_sub}
+        safe_name = _safe_identifier(name)
+        issues = [
+            issue
+            for issue in issues
+            if issue.function_name != safe_name
+            or not _is_cast_or_subtraction_issue(issue)
+            or issue.message in body_msgs
+        ]
+        existing_msgs = {issue.message for issue in issues}
+        issues.extend(
+            issue for issue in body_cast_sub if issue.message not in existing_msgs
+        )
     issues = [
         issue
         for issue in issues
@@ -6320,10 +6423,19 @@ def _integer_type_bits(label: str, raw_type: str) -> tuple[int, bool] | None:
 
 
 def _cast_out_of_range_counterexample(
-    operand: str, bits: int, signed: bool
+    operand: str,
+    bits: int,
+    signed: bool,
+    source_bits_signed: tuple[int, bool] | None = None,
 ) -> dict[str, int]:
     value = z3.Int(operand)
     solver = z3.Solver()
+    if source_bits_signed is not None:
+        sbits, ssigned = source_bits_signed
+        solver.add(
+            value >= (-(2 ** (sbits - 1)) if ssigned else 0),
+            value <= (2 ** (sbits - 1) - 1 if ssigned else 2 ** sbits - 1),
+        )
     if signed:
         lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
     else:
@@ -6418,6 +6530,16 @@ def _narrowing_cast_issues(
         # exceed the target's (e.g. ``i64 as u64`` — i64::MAX < u64::MAX).
         if not (ssigned and sbits is not None and 2 ** (sbits - 1) - 1 <= hi):
             contracts.append(f"{operand} <= {hi}")
+        if sbits is None and known_constants and operand in known_constants:
+            # The operand is a declared constant — its value is the witness.
+            counterexample = {operand: known_constants[operand]}
+        else:
+            counterexample = _cast_out_of_range_counterexample(
+                operand,
+                tbits,
+                tsigned,
+                None if sbits is None else (sbits, ssigned),
+            )
         issues.append(
             ForeignSafetyIssue(
                 function_name=function_name,
@@ -6427,7 +6549,7 @@ def _narrowing_cast_issues(
                     f"({operand} outside {lo}..={hi} wraps)"
                 ),
                 required_contracts=tuple(contracts),
-                counterexample=_cast_out_of_range_counterexample(operand, tbits, tsigned),
+                counterexample=counterexample,
             )
         )
     return issues
@@ -6440,11 +6562,13 @@ def _subtraction_guarded(
 
     Two suppression shapes, both approximate:
 
-    - A comparison proving ``left >= right`` anywhere in the expression
-      (``left >= right``, ``left > right``, ``left == right``, ``right <=
-      left``, ``right < left``, ``right == left``) — covers hoisted
-      conditions merged into one expression and ternary conditions guarding
-      the true branch.
+    - A comparison proving ``left >= right`` that *dominates* the
+      subtraction: it must appear before ``sub_pos`` with no ``||`` or ``:``
+      between them. ``&&`` and ``?`` are safe separators (the right operand
+      / true branch runs only when the condition holds); under ``||`` or
+      ``:`` the subtraction runs when the condition is *false*, so the
+      comparison guards the opposite direction — e.g. ``a >= b || a - b``
+      still underflows.
     - Ternary false branch: in ``cond ? t : f`` a subtraction inside ``f``
       runs only under ``not cond``, so a condition proving ``left <= right``
       (``left <= right``, ``left < right``, ``right >= left``, ``right >
@@ -6455,8 +6579,12 @@ def _subtraction_guarded(
         rf"\b{re.escape(left)}\s*(?:>=?|==)\s*{re.escape(right)}\b"
         rf"|\b{re.escape(right)}\s*(?:<=?|==)\s*{re.escape(left)}\b"
     )
-    if re.search(proves_ge, expression):
-        return True
+    for match in re.finditer(proves_ge, expression):
+        if match.end() > sub_pos:
+            break
+        between = expression[match.end() : sub_pos]
+        if "||" not in between and ":" not in between:
+            return True
     qpos = expression.find("?")
     cpos = expression.rfind(":")
     if 0 <= qpos < cpos < sub_pos:
@@ -6467,6 +6595,55 @@ def _subtraction_guarded(
         if re.search(proves_le_strict, expression[:qpos]):
             return True
     return False
+
+
+def _is_cast_or_subtraction_issue(issue: ForeignSafetyIssue) -> bool:
+    return "can truncate" in issue.message or "can underflow" in issue.message
+
+
+def _cast_and_subtraction_issues(
+    function_name: str,
+    text: str,
+    label: str,
+    *,
+    known_constants: dict[str, int] | None = None,
+    unsigned_locals: set[str] | None = None,
+    param_types: dict[str, str] | None = None,
+    raw_param_types: dict[str, str] | None = None,
+    local_names: set[str] | None = None,
+    solidity_default_checks: bool = False,
+) -> list[ForeignSafetyIssue]:
+    """Run the narrowing-cast and unsigned-subtraction checks over ``text``.
+
+    ``text`` may be a whole (literal-stripped) function body — guards in
+    enclosing statements (``if a >= b { … return a - b }``) are visible to
+    ``_subtraction_guarded`` there, so callers reconcile per-expression
+    results against the body-level result rather than reporting both.
+    """
+    issues = _narrowing_cast_issues(
+        function_name,
+        text,
+        label,
+        known_constants=known_constants or {},
+        param_types=param_types,
+        raw_param_types=raw_param_types,
+        local_names=local_names,
+        solidity_default_checks=solidity_default_checks,
+    )
+    issues.extend(
+        _unsigned_subtraction_issues(
+            function_name,
+            text,
+            label,
+            known_constants=known_constants or {},
+            unsigned_locals=unsigned_locals,
+            param_types=param_types,
+            raw_param_types=raw_param_types,
+            local_names=local_names,
+            solidity_default_checks=solidity_default_checks,
+        )
+    )
+    return issues
 
 
 def _unsigned_subtraction_issues(
@@ -7833,11 +8010,14 @@ _RUST_FIXED_ARRAY_PARAM_RE = re.compile(
 
 def _rust_param_info(
     params_text: str, constants: dict[str, int] | None
-) -> tuple[dict[str, str], dict[str, int]]:
+) -> tuple[dict[str, str], dict[str, int], dict[str, str]]:
     """Return parameter types and fixed-array lengths for one Rust declaration.
 
     ``v: &mut [u32; 16]`` contributes ``len(v) = 16`` so ``v[i]`` is checked
-    against the real bound instead of a free ``len_v``.
+    against the real bound instead of a free ``len_v``. The third return value
+    is the *raw* (un-normalized) type map — the mumei-normalized ``types`` map
+    collapses ``u8``/``u32``/``usize`` to ``u64`` and loses the widths the
+    narrowing-cast check needs.
     """
     raw_types: dict[str, str] = {}
     for index, raw in enumerate(_split_params(params_text)):
@@ -7861,7 +8041,7 @@ def _rust_param_info(
             value = (constants or {}).get(token)
         if value is not None:
             lengths[f"len({pname})"] = value
-    return types, lengths
+    return types, lengths, raw_types
 
 
 def _rust_local_usize_cast_offsets(body: str) -> dict[str, tuple[str, int]]:
