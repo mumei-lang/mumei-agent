@@ -283,3 +283,106 @@ def test_detect_safety_issues_py_find_wiring() -> None:
     src = 'def f(s):\n    i = s.find("x")\n    return s[i]\n'
     issues = _detect_safety_issues(src, "python")
     assert any("sentinel" in i.message for i in issues)
+
+
+def test_shift_early_exit_on_safe_bound_not_guarded() -> None:
+    """``if n < 64 { return } x << n`` exits on the SAFE direction — only
+    ``n >= 64`` reaches the shift, so it must still flag."""
+    issues = _shift_issues(
+        "if n < 64 { return 0 } x << n",
+        "Rust",
+        raw_param_types={"x": "u64", "n": "u64"},
+    )
+    assert len(issues) == 1
+
+
+def test_shift_early_exit_on_bad_bound_guarded() -> None:
+    """``if n >= 64 { return } x << n`` exits on the BAD direction — only
+    ``n < 64`` reaches the shift."""
+    assert not _shift_issues(
+        "if n >= 64 { return 0 } x << n",
+        "Rust",
+        raw_param_types={"x": "u64", "n": "u64"},
+    )
+
+
+def test_shift_signed_amount_adds_lower_bound_contract() -> None:
+    """A signed shift count needs ``n >= 0`` in addition to ``n < W`` —
+    ``n < 64`` is satisfied by ``n == -1``, still a panic."""
+    issues = _shift_issues(
+        "x << n", "Rust", raw_param_types={"x": "u64", "n": "i32"}
+    )
+    assert len(issues) == 1
+    assert issues[0].required_contracts == ("n >= 0", "n < 64")
+
+
+def test_shift_unsigned_amount_upper_bound_only() -> None:
+    issues = _shift_issues(
+        "x << n", "Rust", raw_param_types={"x": "u64", "n": "u64"}
+    )
+    assert issues[0].required_contracts == ("n < 64",)
+
+
+def test_shift_parenthesized_mask_skipped() -> None:
+    assert not _shift_issues(
+        "x << (n & 63)", "Rust", raw_param_types={"x": "u64", "n": "u64"}
+    )
+    assert not _shift_issues(
+        "x << (n % 64)", "Rust", raw_param_types={"x": "u64", "n": "u64"}
+    )
+
+
+def test_shift_parenthesized_unproven_amount_advisory() -> None:
+    issues = _shift_issues(
+        "x << (n + 1)", "Rust", raw_param_types={"x": "u64", "n": "u64"}
+    )
+    assert len(issues) == 1
+    assert issues[0].confidence == "medium"
+
+
+def test_ts_indexof_closed_guard_block_does_not_reach_use() -> None:
+    """``if (i !== -1) { … } arr[i]`` — the check's block closed before the
+    use; it does not dominate it."""
+    body = 'const i = s.indexOf("x"); if (i !== -1) { let y = i; } return arr[i];'
+    issues = _sentinel_issues(body, "TypeScript")
+    assert len(issues) == 1
+
+
+def test_ts_indexof_early_exit_on_sentinel_guarded() -> None:
+    body = 'const i = s.indexOf("x"); if (i === -1) { return 0; } return arr[i];'
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_indexof_shortcircuit_guarded() -> None:
+    body = 'const i = s.indexOf("x"); return i !== -1 ? arr[i] : 0;'
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_falsy_early_exit_guarded() -> None:
+    body = "const el = xs.find(x => x > 0); if (!el) { return 0; } return el.value;"
+    assert not _sentinel_issues(body, "TypeScript")
+
+
+def test_ts_find_closed_neq_block_not_guarded() -> None:
+    body = (
+        "const el = xs.find(x => x > 0); "
+        "if (el !== undefined) { let y = el; } return el.value;"
+    )
+    issues = _sentinel_issues(body, "TypeScript")
+    assert len(issues) == 1
+
+
+def test_python_find_colon_early_exit_guarded() -> None:
+    body = 'i = s.find("x")\nif i < 0:\n    return -1\nreturn arr[i]'
+    assert not _sentinel_issues(body, "Python")
+
+
+def test_python_find_colon_non_diverging_not_guarded() -> None:
+    body = 'i = s.find("x")\nif i < 0:\n    x = 1\nreturn arr[i]'
+    issues = _sentinel_issues(body, "Python")
+    assert len(issues) == 1
+
+
+def test_python_find_assert_guarded() -> None:
+    body = 'i = s.find("x")\nassert i != -1\nreturn arr[i]'
+    assert not _sentinel_issues(body, "Python")
