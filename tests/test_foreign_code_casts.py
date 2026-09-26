@@ -477,3 +477,131 @@ def test_unsigned_subtraction_guard_closed_block_does_not_reach() -> None:
     )
     assert len(issues) == 1
 
+
+
+def test_unsigned_subtraction_disjunctive_require_not_guarded() -> None:
+    """``require(a >= b || flag)`` does not guarantee ``a >= b`` — the
+    disjunction means the subtraction after it can still underflow."""
+    issues = _sub_issues(
+        'require(a >= b || flag); a - b;',
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+    assert len(issues) == 1
+
+
+def test_unsigned_subtraction_conjunctive_require_guarded() -> None:
+    """``require(a >= b && flag)`` does guarantee ``a >= b``."""
+    assert not _sub_issues(
+        "require(a >= b && flag); a - b;",
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+
+
+def test_unsigned_subtraction_require_message_arg_guarded() -> None:
+    """``require(a >= b, "msg")`` — a second top-level arg is a revert
+    message, not a disjunction."""
+    assert not _sub_issues(
+        'require(a >= b, "underflow"); a - b;',
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+
+
+def test_unsigned_subtraction_inside_require_args_not_guarded() -> None:
+    """A subtraction evaluated inside the require call's own arguments is
+    not protected by that require."""
+    issues = _sub_issues(
+        "require(a - b >= 0 || recoverable); f(a - b);",
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+    assert len(issues) >= 1
+
+
+def test_unsigned_subtraction_nested_conditional_return_not_divergence() -> None:
+    """``if (a < b) { if (c) { return; } }`` — the return is inside a nested
+    conditional, so the outer block does not always diverge."""
+    issues = _sub_issues(
+        "if (a < b) { if (c) { return; } } a - b;",
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+    assert len(issues) == 1
+
+
+def test_unsigned_subtraction_top_level_early_exit_guarded() -> None:
+    """``if (a < b) { return; }`` — the early exit at the block's top level
+    guarantees ``a >= b`` afterwards."""
+    assert not _sub_issues(
+        "if (a < b) { return; } a - b;",
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+
+
+def test_unsigned_subtraction_else_divergence_guarded() -> None:
+    """``if (a >= b) { x++; } else { return; }`` — the else arm diverges so
+    the subtraction runs only when ``a >= b``."""
+    assert not _sub_issues(
+        "if (a >= b) { x++; } else { return; } a - b;",
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+
+
+def test_unsigned_subtraction_later_unguarded_use_flagged() -> None:
+    """A guarded first ``a - b`` must not suppress a second unguarded one."""
+    issues = _sub_issues(
+        "if (a >= b) { return a - b; } x = a - b;",
+        "Solidity",
+        param_types={"a": "uint256", "b": "uint256"},
+    )
+    assert len(issues) == 1
+
+
+def test_rust_signed_typed_let_shadows_unsigned_param() -> None:
+    """``let x: i8`` redeclares an unsigned ``x: u64`` parameter — the local
+    is signed so ``x - y`` must not be treated as unsigned underflow."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _rust_unsigned_variables,
+    )
+
+    src = "fn f(x: u64, y: u64) -> u64 { let x: i8 = 3; x - y }"
+    assert "x" not in _rust_unsigned_variables(src, src, "f")
+    assert "y" in _rust_unsigned_variables(src, src, "f")
+
+
+def test_rust_unprovable_let_shadows_unsigned_param() -> None:
+    """``let x = signed_call()`` shadows ``x: u64`` into an unknown type."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _rust_unsigned_variables,
+    )
+
+    src = "fn f(x: u64) -> u64 { let x = signed_call(); x }"
+    assert "x" not in _rust_unsigned_variables(src, src, "f")
+
+
+def test_rust_unsigned_arithmetic_rebinding_keeps_type() -> None:
+    """``let x = x + 1`` on a ``u64`` parameter keeps ``x`` unsigned."""
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _rust_unsigned_variables,
+    )
+
+    src = "fn f(x: u64) -> u64 { let x = x + 1; x }"
+    assert "x" in _rust_unsigned_variables(src, src, "f")
+
+
+def test_go_same_named_methods_keep_their_findings() -> None:
+    """Same-named methods on different receivers must not drop each other's
+    findings during per-function reconciliation."""
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    src = (
+        "func (a *A) Name() uint64 { var x uint64 = 1; var y uint64 = 2; return x - y }\n"
+        "func (b *B) Name() uint64 { var p uint64 = 1; var q uint64 = 2; return p - q }\n"
+    )
+    issues = _detect_safety_issues(src, "go")
+    underflows = [i for i in issues if "can underflow" in i.message]
+    assert len(underflows) == 2, [i.message for i in issues]

@@ -1747,24 +1747,56 @@ def _rust_unsigned_variables(source: str, body: str, function_name: str) -> set[
             re.DOTALL,
         ):
             name = match.group("name")
-            if name in unsigned:
-                continue
             typ = (match.group("typ") or "").strip()
+            rhs = match.group("rhs").strip()
             if typ:
                 raw_type = typ.removeprefix("&mut ").removeprefix("&")
                 if re.sub(r"\s+", "", raw_type).lower() in _RUST_UNSIGNED_TYPES:
+                    if name not in unsigned:
+                        unsigned.add(name)
+                        changed = True
+                elif name in unsigned:
+                    # A typed redeclaration (``let x: i8 = …``) shadows the
+                    # earlier unsigned binding — the name no longer denotes
+                    # an unsigned value.
+                    unsigned.discard(name)
+                    changed = True
+                continue
+            provably_unsigned = (
+                # Atomic fetch ops return the previous unsigned value.
+                re.search(r"\.\s*fetch_[a-z]+\s*\(", rhs) is not None
+                # ``expr as uN`` casts to unsigned.
+                or re.search(r"\bas\s+u(?:8|16|32|64|128|size)\b", rhs)
+                is not None
+                # Typed unsigned literals (``5u8``).
+                or re.fullmatch(
+                    r"\d+u(?:8|16|32|64|128|size)", rhs
+                )
+                is not None
+                # Another known-unsigned identifier.
+                or (
+                    re.fullmatch(r"[A-Za-z_]\w*", rhs) is not None
+                    and rhs in unsigned
+                )
+                # Arithmetic on a known-unsigned left operand keeps its
+                # type (``let x = x + 1`` where ``x: u64`` is still ``u64``).
+                or (
+                    re.match(
+                        r"[A-Za-z_]\w*\s*(?:[+\-*/%&|^]|<<|>>)", rhs
+                    )
+                    is not None
+                    and re.match(r"[A-Za-z_]\w*", rhs).group(0) in unsigned
+                )
+            )
+            if provably_unsigned:
+                if name not in unsigned:
                     unsigned.add(name)
                     changed = True
-                    continue
-            rhs = match.group("rhs").strip()
-            # Assigned from an atomic fetch operation (returns the previous unsigned value).
-            if re.search(r"\.\s*fetch_[a-z]+\s*\(", rhs):
-                unsigned.add(name)
-                changed = True
-                continue
-            # Assigned from another known-unsigned identifier.
-            if re.fullmatch(r"[A-Za-z_]\w*", rhs) and rhs in unsigned:
-                unsigned.add(name)
+            elif name in unsigned:
+                # Untyped redeclaration from an rhs that is not provably
+                # unsigned (e.g. ``let x = signed_call()``) shadows the
+                # earlier binding into an unknown-type value.
+                unsigned.discard(name)
                 changed = True
         # Closure parameters used in an addition with a known-unsigned operand.
         for match in re.finditer(
@@ -4997,6 +5029,7 @@ def _detect_go_safety_issues(
                 continue
             if _is_go_punycode_adapt(original_source or source, fn.raw_name or fn.name):
                 continue
+            fn_issues_start = len(issues)
             header = source[fn.start_char : fn.body_start_char]
             if re.search(r"\]\s*\(", header):
                 # Generic functions such as ``add[T number](x, y T) T`` cannot be
@@ -5210,11 +5243,12 @@ def _detect_go_safety_issues(
                 local_names=local_names,
             )
             body_msgs = {i.message for i in body_cast_sub}
-            issues = [
+            # Reconcile only THIS function's issues — same-named methods on
+            # different receivers must not drop each other's findings.
+            issues[fn_issues_start:] = [
                 issue
-                for issue in issues
-                if issue.function_name != fn.name
-                or not _is_cast_or_subtraction_issue(issue)
+                for issue in issues[fn_issues_start:]
+                if not _is_cast_or_subtraction_issue(issue)
                 or issue.message in body_msgs
             ]
             existing_msgs = {issue.message for issue in issues}
@@ -6606,11 +6640,122 @@ _GUARD_ASSERT_RE = re.compile(
     r"(?:require|assert|debug_assert)(?:!)?\s*\(?\s*$"
 )
 _GUARD_IF_RE = re.compile(r"\bif\s*\(?\s*$")
+_GUARD_ELSE_RE = re.compile(r"\s*else\s*\{")
+
+
+def _paren_body(source: str, open_paren: int) -> str:
+    """Return the contents of the ``( … )`` span opening at ``open_paren``."""
+    depth = 0
+    in_str: str | None = None
+    i = open_paren
+    while i < len(source):
+        ch = source[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return source[open_paren + 1 : i]
+        i += 1
+    return source[open_paren + 1 :]
+
+
+def _split_top_level_args(text: str) -> list[str]:
+    """Split ``text`` on commas at paren/bracket/brace depth 0."""
+    parts: list[str] = []
+    depth = 0
+    in_str: str | None = None
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+        i += 1
+    parts.append(text[start:])
+    return parts
+
+
+def _has_top_level_or(text: str) -> bool:
+    """Whether ``||`` appears at paren depth 0 in ``text``."""
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "|" and depth == 0 and text[i : i + 2] == "||":
+            return True
+        i += 1
+    return False
+
+
+def _block_top_level_text(block: str) -> str:
+    """Drop the contents of nested ``{ … }`` spans so only statements at the
+    block's own depth remain — a divergence inside a nested conditional does
+    not make the enclosing block diverge."""
+    out: list[str] = []
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < len(block):
+        ch = block[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
 
 # Mechanisms a comparison before a use can protect it through — the check
 # decides which direction of the comparison (safe vs bad) each mechanism
 # keeps.
-_GUARD_HOLDS_MECHANISMS = {"inside", "shortcircuit", "asserted", "ternary_true"}
+_GUARD_HOLDS_MECHANISMS = {
+    "inside",
+    "shortcircuit",
+    "asserted",
+    "ternary_true",
+    "else_exit",
+}
 _GUARD_NEGATED_MECHANISMS = {"early_exit", "ternary_false"}
 
 
@@ -6628,10 +6773,31 @@ def _guard_mechanism(
     - ``early_exit`` — the comparison is the whole condition of an ``if``
       block that closed before the use and diverges (return/panic/break/
       continue/throw) — the use runs under the *negated* condition.
+    - ``else_exit`` — the comparison is the whole condition of an ``if``
+      whose ``else`` block diverges — the use runs under the *held*
+      condition.
     - ``shortcircuit`` — an ``&&`` separates the comparison and the use.
     - ``None`` — the comparison does not dominate the use.
     """
-    if _GUARD_ASSERT_RE.search(expression[: match.start()]):
+    assert_match = _GUARD_ASSERT_RE.search(expression[: match.start()])
+    if assert_match:
+        paren_rel = expression[assert_match.start() : assert_match.end()].rfind("(")
+        open_paren = (
+            assert_match.start() + paren_rel if paren_rel != -1 else -1
+        )
+        if open_paren != -1:
+            args = _paren_body(expression, open_paren)
+            args_end = open_paren + 1 + len(args)
+            if use_pos <= args_end:
+                # The use sits inside the assert call itself — it evaluates
+                # before the assertion can protect it.
+                return None
+            first_arg = _split_top_level_args(args)[0]
+            if _has_top_level_or(first_arg):
+                # ``require(a >= b || flag)`` does not guarantee the
+                # comparison — only a disjunction-free first argument (or a
+                # top-level ``&&`` conjunction) does.
+                return None
         return "asserted"
     between = expression[match.end() : use_pos]
     if "||" in between:
@@ -6650,12 +6816,22 @@ def _guard_mechanism(
         block_end = brace_pos + len(block) + 1
         if use_pos < block_end:
             return "inside"
-        if (
-            _GUARD_IF_RE.search(expression[: match.start()])
-            and re.fullmatch(r"\s*\)?\s*", before_brace)
-            and _GUARD_DIVERGENCE_RE.search(block)
-        ):
-            return "early_exit"
+        whole_condition = _GUARD_IF_RE.search(
+            expression[: match.start()]
+        ) and re.fullmatch(r"\s*\)?\s*", before_brace)
+        if whole_condition:
+            if _GUARD_DIVERGENCE_RE.search(_block_top_level_text(block)):
+                return "early_exit"
+            else_match = _GUARD_ELSE_RE.match(expression, block_end + 1)
+            if else_match is not None:
+                else_block = _balanced_brace_body(
+                    expression, else_match.end() - 1
+                )
+                else_end = else_match.end() + len(else_block)
+                if use_pos >= else_end and _GUARD_DIVERGENCE_RE.search(
+                    _block_top_level_text(else_block)
+                ):
+                    return "else_exit"
         return None
     if "&&" in between:
         return "shortcircuit"
@@ -6780,7 +6956,6 @@ def _unsigned_subtraction_issues(
         left, right = match.group("left"), match.group("right")
         if left == right or (left, right) in seen:
             continue
-        seen.add((left, right))
 
         def _unsigned(name: str) -> bool:
             if unsigned_locals and name in unsigned_locals:
@@ -6812,6 +6987,9 @@ def _unsigned_subtraction_issues(
             continue
         if _subtraction_guarded(expression, left, right, match.start()):
             continue
+        # Dedupe only emitted issues — a guarded first occurrence must not
+        # suppress a later unguarded ``left - right``.
+        seen.add((left, right))
         counterexample = {left: 0, right: 1}
         issues.append(
             ForeignSafetyIssue(
