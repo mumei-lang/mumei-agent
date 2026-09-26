@@ -3800,20 +3800,41 @@ def _detect_block_safety_issues(
             if scoped_lengths:
                 merged.update(scoped_lengths)
             function_constants = merged
-        # Inside ``unchecked { … }`` Solidity arithmetic wraps — treat the
-        # function as unchecked for the new checks (same convention as the
+        # ``unchecked { … }`` regions are where ≥0.8 Solidity arithmetic
+        # actually wraps — scope the subtraction check to them instead of
+        # treating the whole function as unchecked (same convention as the
         # overflow suppression below).
-        cast_solidity_checks = solidity_checked_arithmetic and not function_has_unchecked
+        sub_default_checks = solidity_checked_arithmetic and not function_has_unchecked
         block_cast_sub_issues: list[ForeignSafetyIssue] = []
         if label in {"Rust", "Solidity"}:
             # ``per_function_locals`` includes declared parameter names — a
             # param appearing there is its own declaration, not a shadowing
-            # local — so strip the params before the shadowing check.
-            block_param_types = (per_function_param_types or {}).get(block_idx)
-            block_raw_types = (per_function_raw_param_types or {}).get(block_idx)
-            cast_sub_local_names = local_names - set(
-                block_param_types or {}
-            ) - set(block_raw_types or {})
+            # local — so strip the params before the shadowing check. A param
+            # name redeclared as a typed local inside the body IS a shadow:
+            # keep it in ``local_names`` and drop the stale param type.
+            block_param_types = dict((per_function_param_types or {}).get(block_idx) or {})
+            block_raw_types = dict((per_function_raw_param_types or {}).get(block_idx) or {})
+            param_names = set(block_param_types) | set(block_raw_types)
+            redeclared = {
+                p
+                for p in param_names
+                if p in local_names
+                and re.search(
+                    (
+                        rf"\blet\s+(?:mut\s+)?{re.escape(p)}\b"
+                        if label == "Rust"
+                        else (
+                            rf"\b(?:u?int\d*|address(?:\s+payable)?|bool|bytes\d*|string|var)"
+                            rf"\s+(?:storage\s+|memory\s+|calldata\s+)?{re.escape(p)}\b"
+                        )
+                    ),
+                    body,
+                )
+            }
+            cast_sub_local_names = local_names - (param_names - redeclared)
+            for p in redeclared:
+                block_param_types.pop(p, None)
+                block_raw_types.pop(p, None)
             block_cast_sub_issues = _cast_and_subtraction_issues(
                 name,
                 (
@@ -3827,7 +3848,16 @@ def _detect_block_safety_issues(
                 param_types=block_param_types,
                 raw_param_types=block_raw_types,
                 local_names=cast_sub_local_names,
-                solidity_default_checks=cast_solidity_checks,
+                solidity_default_checks=sub_default_checks,
+                subtraction_text=(
+                    _unchecked_block_bodies(body)
+                    if (
+                        label == "Solidity"
+                        and solidity_checked_arithmetic
+                        and function_has_unchecked
+                    )
+                    else None
+                ),
             )
         block_cast_sub_msgs = {i.message for i in block_cast_sub_issues}
         for expression in expressions:
@@ -6455,17 +6485,18 @@ def _narrowing_cast_issues(
     param_types: dict[str, str] | None,
     raw_param_types: dict[str, str] | None,
     local_names: set[str] | None,
-    solidity_default_checks: bool,
 ) -> list[ForeignSafetyIssue]:
     """Flag integer casts that can truncate or sign-flip a provably wider or
     differently-signed operand — Rust ``x as u8``, Go ``uint8(x)``,
-    Solidity ``uint128(x)`` (pre-0.8 only; 0.8+ explicit conversions revert).
+    Solidity ``uint128(x)``.
+
+    Solidity's ≥0.8 default checks apply to arithmetic operators only —
+    explicit conversion functions truncate on every compiler version, so
+    casts are checked unconditionally.
 
     The operand must be a plain identifier with a known declared type:
     untyped locals and member expressions cannot carry a contract anyway, so
     they are skipped rather than guessed at."""
-    if label == "Solidity" and solidity_default_checks:
-        return []
     if label == "Rust":
         sites = [
             (m.group("operand"), m.group("ty"))
@@ -6502,27 +6533,44 @@ def _narrowing_cast_issues(
             value = known_constants[operand]
             if lo <= value <= hi:
                 continue
-            sbits, ssigned = None, False  # definite out-of-range cast
-        else:
-            # ``param_types`` for Solidity carries mumei-normalized types
-            # (``u64``), which lose the declared width — casts need the raw
-            # Solidity type from ``raw_param_types`` when available.
-            types = raw_param_types if raw_param_types is not None else param_types
-            source_bits_signed = (
-                _integer_type_bits(label, types[operand])
-                if types and operand in types
-                else None
+            # Definite out-of-range cast — the constant's value is the
+            # witness, and the contract is whichever bound it violates.
+            contracts = [
+                *([f"{operand} >= {lo}"] if value < lo else []),
+                *([f"{operand} <= {hi}"] if value > hi else []),
+            ]
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` can truncate `{operand}` "
+                        f"in cast to `{target}` without a range contract "
+                        f"({operand} outside {lo}..={hi} wraps)"
+                    ),
+                    required_contracts=tuple(contracts),
+                    counterexample={operand: value},
+                )
             )
-            if source_bits_signed is None:
-                # Operand type unknown — untyped locals and member
-                # expressions cannot carry a contract; skip.
-                continue
-            sbits, ssigned = source_bits_signed
-            safe_widening = (ssigned == tsigned and tbits >= sbits) or (
-                not ssigned and tsigned and tbits > sbits
-            )
-            if safe_widening:
-                continue
+            continue
+        # ``param_types`` for Solidity carries mumei-normalized types
+        # (``u64``), which lose the declared width — casts need the raw
+        # Solidity type from ``raw_param_types`` when available.
+        types = raw_param_types if raw_param_types is not None else param_types
+        source_bits_signed = (
+            _integer_type_bits(label, types[operand])
+            if types and operand in types
+            else None
+        )
+        if source_bits_signed is None:
+            # Operand type unknown — untyped locals and member
+            # expressions cannot carry a contract; skip.
+            continue
+        sbits, ssigned = source_bits_signed
+        safe_widening = (ssigned == tsigned and tbits >= sbits) or (
+            not ssigned and tsigned and tbits > sbits
+        )
+        if safe_widening:
+            continue
         contracts: list[str] = []
         if ssigned:
             contracts.append(f"{operand} >= {lo}")
@@ -6530,16 +6578,12 @@ def _narrowing_cast_issues(
         # exceed the target's (e.g. ``i64 as u64`` — i64::MAX < u64::MAX).
         if not (ssigned and sbits is not None and 2 ** (sbits - 1) - 1 <= hi):
             contracts.append(f"{operand} <= {hi}")
-        if sbits is None and known_constants and operand in known_constants:
-            # The operand is a declared constant — its value is the witness.
-            counterexample = {operand: known_constants[operand]}
-        else:
-            counterexample = _cast_out_of_range_counterexample(
-                operand,
-                tbits,
-                tsigned,
-                None if sbits is None else (sbits, ssigned),
-            )
+        counterexample = _cast_out_of_range_counterexample(
+            operand,
+            tbits,
+            tsigned,
+            (sbits, ssigned),
+        )
         issues.append(
             ForeignSafetyIssue(
                 function_name=function_name,
@@ -6612,6 +6656,7 @@ def _cast_and_subtraction_issues(
     raw_param_types: dict[str, str] | None = None,
     local_names: set[str] | None = None,
     solidity_default_checks: bool = False,
+    subtraction_text: str | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Run the narrowing-cast and unsigned-subtraction checks over ``text``.
 
@@ -6619,6 +6664,9 @@ def _cast_and_subtraction_issues(
     enclosing statements (``if a >= b { … return a - b }``) are visible to
     ``_subtraction_guarded`` there, so callers reconcile per-expression
     results against the body-level result rather than reporting both.
+    ``subtraction_text`` overrides the text the subtraction check runs on —
+    Solidity callers scope it to ``unchecked { }`` regions, where ≥0.8
+    arithmetic actually wraps.
     """
     issues = _narrowing_cast_issues(
         function_name,
@@ -6628,12 +6676,11 @@ def _cast_and_subtraction_issues(
         param_types=param_types,
         raw_param_types=raw_param_types,
         local_names=local_names,
-        solidity_default_checks=solidity_default_checks,
     )
     issues.extend(
         _unsigned_subtraction_issues(
             function_name,
-            text,
+            subtraction_text if subtraction_text is not None else text,
             label,
             known_constants=known_constants or {},
             unsigned_locals=unsigned_locals,
@@ -6790,7 +6837,6 @@ def _issues_for_expression(
                 param_types=param_types,
                 raw_param_types=raw_param_types,
                 local_names=local_names,
-                solidity_default_checks=solidity_default_checks,
             )
         )
         issues.extend(
@@ -6898,7 +6944,6 @@ def _issues_for_expression(
             param_types=param_types,
             raw_param_types=raw_param_types,
             local_names=local_names,
-            solidity_default_checks=solidity_default_checks,
         )
     )
     issues.extend(
@@ -8106,6 +8151,18 @@ def _balanced_brace_body(source: str, opening_brace: int) -> str:
             if depth == 0:
                 return source[opening_brace + 1 : index]
     return source[opening_brace + 1 :]
+
+
+_UNCHECKED_BLOCK_RE = re.compile(r"\bunchecked\s*\{")
+
+
+def _unchecked_block_bodies(body: str) -> str:
+    """Concatenate the contents of every ``unchecked { … }`` region — the
+    only places ≥0.8 Solidity arithmetic actually wraps."""
+    return "\n".join(
+        _balanced_brace_body(body, match.end() - 1)
+        for match in _UNCHECKED_BLOCK_RE.finditer(body)
+    )
 
 def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
     ts_blocks = tree_sitter_extract.function_blocks(source, "typescript", _safe_identifier)
