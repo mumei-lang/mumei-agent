@@ -258,16 +258,17 @@ def test_python_list_remove_during_iteration_flags() -> None:
     assert any("mutates `items`" in i.message for i in issues)
 
 
-def test_python_dict_value_update_via_loop_var_skipped() -> None:
-    """``mapping[k] = 0`` under ``for k in mapping.items()`` rewrites values
-    in place — the key set never changes, so iteration stays safe."""
+def test_python_dict_value_update_via_loop_var_flags() -> None:
+    """``mapping[k] = 0`` under ``for k in mapping.items()`` — ``k`` binds to
+    the whole ``(key, value)`` tuple, so ``mapping[k]`` inserts a new tuple
+    key and resizes the dict mid-iteration."""
     source = (
         "def fix(mapping):\n"
         "    for k in mapping.items():\n"
         "        mapping[k] = 0\n"
     )
     issues = _issues(source, "python")
-    assert not any("mutates `mapping`" in i.message for i in issues)
+    assert any("mutates `mapping`" in i.message for i in issues)
 
 
 def test_python_dict_assign_non_loop_key_flags() -> None:
@@ -501,3 +502,106 @@ def test_typescript_inner_html_inside_comment_skipped() -> None:
     )
     issues = _issues(source, "typescript")
     assert not any("innerHTML" in i.message for i in issues)
+
+
+def test_python_mutation_during_iteration_nested_def_not_flagged() -> None:
+    """A mutation inside a nested ``def`` inside the loop is not the
+    enclosing loop's mutation."""
+    source = (
+        "def f(d):\n"
+        "    for k in d:\n"
+        "        def helper():\n"
+        "            d.pop()\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("mutates" in i.message for i in issues)
+
+
+def test_python_items_value_used_as_key_flags() -> None:
+    """``d[v] = …`` where ``v`` is the iterated *value* inserts a new key."""
+    source = (
+        "def f(d):\n"
+        "    for k, v in d.items():\n"
+        "        d[v] = 0\n"
+    )
+    issues = _issues(source, "python")
+    assert any("mutates" in i.message for i in issues)
+
+
+def test_python_items_key_overwrite_still_skipped() -> None:
+    """``d[k] = …`` under ``for k, v in d.items()`` updates in place."""
+    source = (
+        "def f(d):\n"
+        "    for k, v in d.items():\n"
+        "        d[k] = 0\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("mutates" in i.message for i in issues)
+
+
+def test_python_values_iter_used_as_key_flags() -> None:
+    """``for v in d.values()`` — ``v`` holds values, so ``d[v]`` inserts."""
+    source = (
+        "def f(d):\n"
+        "    for v in d.values():\n"
+        "        d[v] = 0\n"
+    )
+    issues = _issues(source, "python")
+    assert any("mutates" in i.message for i in issues)
+
+
+def test_typescript_non_null_inside_template_flags() -> None:
+    """``${…}`` interpolations are code — ``x!`` inside a template flags."""
+    source = (
+        "function f(x: { y: number } | null): string {\n"
+        "    return `y=${x!.y}`;\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("non-null" in i.message for i in issues)
+
+
+def test_typescript_eval_inside_template_flags() -> None:
+    source = (
+        "function f(s: string): string {\n"
+        "    return `r=${eval(s)}`;\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("eval" in i.message for i in issues)
+
+
+def test_typescript_json_parse_try_finally_only_flags() -> None:
+    """``try { … } finally { … }`` without ``catch`` still throws."""
+    source = (
+        "function f(s: string): number {\n"
+        "    try { return JSON.parse(s).n; } finally { cleanup(); }\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("JSON.parse" in i.message for i in issues)
+
+
+def test_solidity_zero_address_address_payable_local_skipped() -> None:
+    """``address payable x = p`` declares a local, same as ``address x = p``
+    — the store suppression must see through the ``payable`` modifier."""
+    source = """contract C {
+    function setOwner(address payable newOwner) public {
+        address payable owner = newOwner;
+        require(owner != address(0));
+    }
+}"""
+    issues = _issues(source, "solidity")
+    assert not any("zero-address" in i.message for i in issues)
+
+
+def test_solidity_zero_address_local_still_skipped() -> None:
+    """``address owner = newOwner`` (a local store) remains suppressed."""
+    source = """contract C {
+    function setOwner(address newOwner) public {
+        address owner = newOwner;
+        require(owner != address(0));
+    }
+}"""
+    issues = _issues(source, "solidity")
+    assert not any("zero-address" in i.message for i in issues)
