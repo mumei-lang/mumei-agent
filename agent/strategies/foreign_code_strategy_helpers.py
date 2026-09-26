@@ -376,7 +376,7 @@ def _solidity_type(type_name: str) -> str:
         return "i64"
     return _mumei_type(normalized)
 
-def _solidity_params(params_text: str) -> dict[str, str]:
+def _solidity_params(params_text: str, *, normalize: bool = True) -> dict[str, str]:
     params: dict[str, str] = {}
     modifiers = {"memory", "calldata", "storage", "payable", "indexed"}
     for index, raw in enumerate(_split_params(params_text)):
@@ -390,7 +390,9 @@ def _solidity_params(params_text: str) -> dict[str, str]:
             type_text, name_text = tokens[0], f"arg{index}"
         else:
             continue
-        params[_safe_identifier(name_text)] = _solidity_type(type_text)
+        params[_safe_identifier(name_text)] = (
+            _solidity_type(type_text) if normalize else type_text
+        )
     return params
 
 _BYTE_LIKE_TYPE_RE = re.compile(
@@ -527,11 +529,16 @@ def _detect_safety_issues(
             if name not in duplicate_constants
         }
         per_function_types: dict[int, dict[str, str]] = {}
+        per_function_raw_types: dict[int, dict[str, str]] = {}
         per_function_lengths: dict[int, dict[str, int]] = {}
         for block_idx, (block_name, block_body, params_text) in enumerate(scopes):
-            param_types, param_lengths = _rust_param_info(params_text, rust_constants)
+            param_types, param_lengths, raw_types = _rust_param_info(
+                params_text, rust_constants
+            )
             if param_types:
                 per_function_types[block_idx] = param_types
+            if raw_types:
+                per_function_raw_types[block_idx] = raw_types
             scoped_lengths = {
                 key: value
                 for key, value in param_lengths.items()
@@ -549,6 +556,7 @@ def _detect_safety_issues(
             known_constants=rust_constants,
             per_function_lengths=per_function_lengths,
             per_function_param_types=per_function_types,
+            per_function_raw_param_types=per_function_raw_types,
         )
         # Suppress false positives for ``(param - N) as usize`` indexing into
         # ``const`` arrays (e.g. ``LAST_DAYS[(month - 1) as usize]``).  The tool
@@ -613,6 +621,14 @@ def _detect_safety_issues(
             per_function_locals=_solidity_function_local_identifiers(
                 solidity_scopes
             ),
+            per_function_param_types={
+                block_idx: _solidity_params(params)
+                for block_idx, (_name, _body, params, _attrs) in enumerate(solidity_scopes)
+            },
+            per_function_raw_param_types={
+                block_idx: _solidity_params(params, normalize=False)
+                for block_idx, (_name, _body, params, _attrs) in enumerate(solidity_scopes)
+            },
         )
         issues.extend(_detect_solidity_contract_issues(source, source_file=source_file))
         return issues
@@ -1722,35 +1738,67 @@ def _rust_unsigned_variables(source: str, body: str, function_name: str) -> set[
                 unsigned.add(param_match.group("name"))
 
     body_stripped = _strip_go_rust_literals_and_comments(body)
+    # Single source-ordered pass — a ``let`` binding may only reference
+    # earlier bindings, so forward order already resolves shadowing. A
+    # fixed-point loop over all declarations would never settle for
+    # alternating typed redeclarations (``let x: u8 = …; let x: i8 = …``
+    # adds then discards ``x`` on every pass).
+    for match in re.finditer(
+        r"let\s+(?:mut\s+)?(?P<name>\w+)\s*(?::\s*(?P<typ>[^;=]+))?\s*=\s*(?P<rhs>[^;]+);",
+        body_stripped,
+        re.DOTALL,
+    ):
+        name = match.group("name")
+        typ = (match.group("typ") or "").strip()
+        rhs = match.group("rhs").strip()
+        if typ:
+            raw_type = typ.removeprefix("&mut ").removeprefix("&")
+            if re.sub(r"\s+", "", raw_type).lower() in _RUST_UNSIGNED_TYPES:
+                unsigned.add(name)
+            else:
+                # A typed redeclaration (``let x: i8 = …``) shadows the
+                # earlier unsigned binding — the name no longer denotes
+                # an unsigned value.
+                unsigned.discard(name)
+            continue
+        provably_unsigned = (
+            # Atomic fetch ops return the previous unsigned value.
+            re.search(r"\.\s*fetch_[a-z]+\s*\(", rhs) is not None
+            # ``expr as uN`` casts to unsigned.
+            or re.search(r"\bas\s+u(?:8|16|32|64|128|size)\b", rhs)
+            is not None
+            # Typed unsigned literals (``5u8``).
+            or re.fullmatch(
+                r"\d+u(?:8|16|32|64|128|size)", rhs
+            )
+            is not None
+            # Another known-unsigned identifier.
+            or (
+                re.fullmatch(r"[A-Za-z_]\w*", rhs) is not None
+                and rhs in unsigned
+            )
+            # Arithmetic on a known-unsigned left operand keeps its
+            # type (``let x = x + 1`` where ``x: u64`` is still ``u64``).
+            or (
+                re.match(
+                    r"[A-Za-z_]\w*\s*(?:[+\-*/%&|^]|<<|>>)", rhs
+                )
+                is not None
+                and re.match(r"[A-Za-z_]\w*", rhs).group(0) in unsigned
+            )
+        )
+        if provably_unsigned:
+            unsigned.add(name)
+        else:
+            # Untyped redeclaration from an rhs that is not provably
+            # unsigned (e.g. ``let x = signed_call()``) shadows the
+            # earlier binding into an unknown-type value.
+            unsigned.discard(name)
+    # Closure parameters used in an addition with a known-unsigned operand.
+    # This loop only ever adds names, so it is monotone and terminates.
     changed = True
     while changed:
         changed = False
-        for match in re.finditer(
-            r"let\s+(?:mut\s+)?(?P<name>\w+)\s*(?::\s*(?P<typ>[^;=]+))?\s*=\s*(?P<rhs>[^;]+);",
-            body_stripped,
-            re.DOTALL,
-        ):
-            name = match.group("name")
-            if name in unsigned:
-                continue
-            typ = (match.group("typ") or "").strip()
-            if typ:
-                raw_type = typ.removeprefix("&mut ").removeprefix("&")
-                if re.sub(r"\s+", "", raw_type).lower() in _RUST_UNSIGNED_TYPES:
-                    unsigned.add(name)
-                    changed = True
-                    continue
-            rhs = match.group("rhs").strip()
-            # Assigned from an atomic fetch operation (returns the previous unsigned value).
-            if re.search(r"\.\s*fetch_[a-z]+\s*\(", rhs):
-                unsigned.add(name)
-                changed = True
-                continue
-            # Assigned from another known-unsigned identifier.
-            if re.fullmatch(r"[A-Za-z_]\w*", rhs) and rhs in unsigned:
-                unsigned.add(name)
-                changed = True
-        # Closure parameters used in an addition with a known-unsigned operand.
         for match in re.finditer(
             r"\|\s*(?P<param>\w+)\s*\|\s*(?P<body>[^;\n]+)",
             body_stripped,
@@ -3736,6 +3784,7 @@ def _detect_block_safety_issues(
     per_function_lengths: dict[int, dict[str, int]] | None = None,
     per_function_locals: dict[int, set[str]] | None = None,
     per_function_param_types: dict[int, dict[str, str]] | None = None,
+    per_function_raw_param_types: dict[int, dict[str, str]] | None = None,
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
     fallback = label == "TypeScript"
@@ -3769,6 +3818,7 @@ def _detect_block_safety_issues(
             solidity_checked_arithmetic and re.search(r"\bunchecked\b", body) is not None
         )
         function_constants = known_constants
+        local_names: set[str] = set()
         if per_function_lengths or per_function_locals:
             merged = dict(known_constants or {})
             local_names = (per_function_locals or {}).get(block_idx) or set()
@@ -3782,6 +3832,74 @@ def _detect_block_safety_issues(
             if scoped_lengths:
                 merged.update(scoped_lengths)
             function_constants = merged
+        # ``unchecked { … }`` regions are where ≥0.8 Solidity arithmetic
+        # actually wraps — scope the subtraction check to them instead of
+        # treating the whole function as unchecked (same convention as the
+        # overflow suppression below).
+        sub_default_checks = solidity_checked_arithmetic and not function_has_unchecked
+        block_cast_sub_issues: list[ForeignSafetyIssue] = []
+        if label in {"Rust", "Solidity"}:
+            # ``per_function_locals`` includes declared parameter names — a
+            # param appearing there is its own declaration, not a shadowing
+            # local — so strip the params before the shadowing check. A param
+            # name redeclared as a typed local inside the body IS a shadow:
+            # keep it in ``local_names`` and drop the stale param type.
+            block_param_types = dict((per_function_param_types or {}).get(block_idx) or {})
+            block_raw_types = dict((per_function_raw_param_types or {}).get(block_idx) or {})
+            param_names = set(block_param_types) | set(block_raw_types)
+            redeclared = {
+                p
+                for p in param_names
+                if re.search(
+                    (
+                        rf"\blet\s+(?:mut\s+)?{re.escape(p)}\b"
+                        if label == "Rust"
+                        else (
+                            rf"\b(?:u?int\d*|address(?:\s+payable)?|bool|bytes\d*|string|var)"
+                            rf"\s+(?:storage\s+|memory\s+|calldata\s+)?{re.escape(p)}\b"
+                        )
+                    ),
+                    body,
+                )
+            }
+            # ``local_names`` is only populated when per-function length data
+            # exists — a typed shadowing declaration must still suppress the
+            # stale parameter type even when ``local_names`` is empty.
+            cast_sub_local_names = (local_names | redeclared) - (
+                param_names - redeclared
+            )
+            for p in redeclared:
+                block_param_types.pop(p, None)
+                block_raw_types.pop(p, None)
+            block_cast_sub_issues = _cast_and_subtraction_issues(
+                name,
+                (
+                    # Masked (position-preserving) text — comments and
+                    # literals otherwise produce phantom cast/subtraction
+                    # matches. The same ``//``/``/* */``/string syntax makes
+                    # the Go/Rust stripper correct for Solidity too.
+                    _strip_go_rust_literals_and_comments(body)
+                    if label in {"Rust", "Solidity"}
+                    else body
+                ),
+                label,
+                known_constants=function_constants or {},
+                unsigned_locals=per_function_unsigned_vars,
+                param_types=block_param_types,
+                raw_param_types=block_raw_types,
+                local_names=cast_sub_local_names,
+                solidity_default_checks=sub_default_checks,
+                subtraction_regions=(
+                    _unchecked_block_spans(body)
+                    if (
+                        label == "Solidity"
+                        and solidity_checked_arithmetic
+                        and function_has_unchecked
+                    )
+                    else None
+                ),
+            )
+        block_cast_sub_msgs = {i.message for i in block_cast_sub_issues}
         for expression in expressions:
             expr_issues = _issues_for_expression(
                 name,
@@ -3790,6 +3908,7 @@ def _detect_block_safety_issues(
                 dereference_values=dereference_values,
                 known_constants=function_constants,
                 param_types=(per_function_param_types or {}).get(block_idx),
+                raw_param_types=(per_function_raw_param_types or {}).get(block_idx),
                 mapping_names=mapping_names,
                 guaranteed_nonzero=per_function_nonzero,
                 guarded_indices=per_function_guarded_indices,
@@ -3797,6 +3916,15 @@ def _detect_block_safety_issues(
                 unsigned_locals=per_function_unsigned_vars,
                 solidity_default_checks=solidity_checked_arithmetic,
             )
+            # The body-level scan is authoritative for the cast/subtraction
+            # checks — it sees guards in enclosing statements that a bare
+            # return expression does not.
+            expr_issues = [
+                issue
+                for issue in expr_issues
+                if not _is_cast_or_subtraction_issue(issue)
+                or issue.message in block_cast_sub_msgs
+            ]
             if solidity_checked_arithmetic and not function_has_unchecked:
                 expr_issues = [
                     issue
@@ -3804,6 +3932,14 @@ def _detect_block_safety_issues(
                     if "can overflow" not in issue.message
                 ]
             issues.extend(expr_issues)
+        # Casts/subtractions in non-return statements are caught only by the
+        # body-level scan — merge it in, deduped by message.
+        existing_msgs = {issue.message for issue in issues}
+        issues.extend(
+            issue
+            for issue in block_cast_sub_issues
+            if issue.message not in existing_msgs
+        )
     return issues
 
 _GO_BUILTIN_TYPES = {
@@ -4901,6 +5037,7 @@ def _detect_go_safety_issues(
                 continue
             if _is_go_punycode_adapt(original_source or source, fn.raw_name or fn.name):
                 continue
+            fn_issues_start = len(issues)
             header = source[fn.start_char : fn.body_start_char]
             if re.search(r"\]\s*\(", header):
                 # Generic functions such as ``add[T number](x, y T) T`` cannot be
@@ -5101,6 +5238,31 @@ def _detect_go_safety_issues(
                 issues.extend(expr_issues)
             if flow is not None:
                 issues.extend(_dataflow_safety_issues(fn.name, flow))
+            # Body-level scan for casts/subtractions outside return
+            # expressions, reconciled against the per-expression results
+            # (the wider context sees ``if`` guards).
+            body_cast_sub = _cast_and_subtraction_issues(
+                fn.name,
+                body,
+                "Go",
+                known_constants=known_constants or {},
+                unsigned_locals=unsigned_vars,
+                param_types=param_types,
+                local_names=local_names,
+            )
+            body_msgs = {i.message for i in body_cast_sub}
+            # Reconcile only THIS function's issues — same-named methods on
+            # different receivers must not drop each other's findings.
+            issues[fn_issues_start:] = [
+                issue
+                for issue in issues[fn_issues_start:]
+                if not _is_cast_or_subtraction_issue(issue)
+                or issue.message in body_msgs
+            ]
+            existing_msgs = {issue.message for issue in issues}
+            issues.extend(
+                issue for issue in body_cast_sub if issue.message not in existing_msgs
+            )
         issues = [
             issue
             for issue in issues
@@ -5255,6 +5417,31 @@ def _detect_go_safety_issues(
                     issue for issue in expr_issues if not _is_sort_interface_index_issue(issue)
                 ]
             issues.extend(expr_issues)
+        # Body-level scan for casts/subtractions outside return expressions,
+        # reconciled against the per-expression results (the wider context
+        # sees ``if`` guards in enclosing statements).
+        body_cast_sub = _cast_and_subtraction_issues(
+            _safe_identifier(name),
+            body,
+            "Go",
+            known_constants=known_constants or {},
+            unsigned_locals=unsigned_vars,
+            param_types=param_types,
+            local_names=local_names,
+        )
+        body_msgs = {i.message for i in body_cast_sub}
+        safe_name = _safe_identifier(name)
+        issues = [
+            issue
+            for issue in issues
+            if issue.function_name != safe_name
+            or not _is_cast_or_subtraction_issue(issue)
+            or issue.message in body_msgs
+        ]
+        existing_msgs = {issue.message for issue in issues}
+        issues.extend(
+            issue for issue in body_cast_sub if issue.message not in existing_msgs
+        )
     issues = [
         issue
         for issue in issues
@@ -6256,6 +6443,745 @@ def _solidity_overflow_safety_issue(
     )
 
 
+# Integer type bit-widths per language label: type name → (bits, signed).
+# Used to decide whether a cast/conversion narrows or sign-flips, and whether a
+# subtraction operand is unsigned (where `a - b` can silently underflow).
+_INTEGER_TYPE_BITS: dict[str, dict[str, tuple[int, bool]]] = {
+    "Rust": {
+        "u8": (8, False), "u16": (16, False), "u32": (32, False), "u64": (64, False),
+        "u128": (128, False), "usize": (64, False),
+        "i8": (8, True), "i16": (16, True), "i32": (32, True), "i64": (64, True),
+        "i128": (128, True), "isize": (64, True),
+    },
+    "Go": {
+        "uint8": (8, False), "uint16": (16, False), "uint32": (32, False),
+        "uint64": (64, False), "uint": (64, False), "uintptr": (64, False),
+        "byte": (8, False), "rune": (32, True),
+        "int8": (8, True), "int16": (16, True), "int32": (32, True),
+        "int64": (64, True), "int": (64, True),
+    },
+    "Solidity": {
+        "uint": (256, False), "int": (256, True), "address": (160, False),
+        **{f"uint{b}": (b, False) for b in range(8, 257, 8)},
+        **{f"int{b}": (b, True) for b in range(8, 257, 8)},
+    },
+}
+
+_RUST_CAST_RE = re.compile(
+    r"\b(?P<operand>[A-Za-z_]\w*)\s+as\s+(?P<ty>u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize)\b"
+)
+_GO_CONVERSION_RE = re.compile(
+    r"\b(?P<ty>u?int(?:8|16|32|64)?|uintptr|byte|rune)\s*\(\s*(?P<operand>[A-Za-z_]\w*)\s*\)"
+)
+_SOLIDITY_CONVERSION_RE = re.compile(
+    r"\b(?P<ty>u?int(?:8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?)\s*\(\s*(?P<operand>[A-Za-z_]\w*)\s*\)"
+)
+_UNSIGNED_SUBTRACTION_RE = re.compile(
+    # ``a - b`` and the compound-assignment form ``a -= b`` — both compute
+    # ``a - b`` and underflow identically on unsigned operands.
+    r"\b(?P<left>[A-Za-z_]\w*)\s*-=?\s*(?P<right>[A-Za-z_]\w*)\b"
+)
+
+
+def _integer_type_bits(label: str, raw_type: str) -> tuple[int, bool] | None:
+    """Resolve a declared parameter type to ``(bits, signed)`` for the label."""
+    table = _INTEGER_TYPE_BITS.get(label)
+    if table is None:
+        return None
+    cleaned = raw_type.strip()
+    cleaned = re.sub(r"^(?:&|mut\s+|mut\b\s*|const\s+)+", "", cleaned)
+    cleaned = cleaned.split()[0].strip("*,") if cleaned.split() else cleaned
+    return table.get(cleaned)
+
+
+def _cast_out_of_range_counterexample(
+    operand: str,
+    bits: int,
+    signed: bool,
+    source_bits_signed: tuple[int, bool] | None = None,
+) -> dict[str, int]:
+    value = z3.Int(operand)
+    solver = z3.Solver()
+    if source_bits_signed is not None:
+        sbits, ssigned = source_bits_signed
+        solver.add(
+            value >= (-(2 ** (sbits - 1)) if ssigned else 0),
+            value <= (2 ** (sbits - 1) - 1 if ssigned else 2 ** sbits - 1),
+        )
+    if signed:
+        lo, hi = -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
+    else:
+        lo, hi = 0, 2 ** bits - 1
+    solver.add(z3.Or(value < lo, value > hi))
+    if solver.check() == z3.sat:
+        return {operand: solver.model().eval(value, model_completion=True).as_long()}
+    return {operand: hi + 1}
+
+
+def _narrowing_cast_issues(
+    function_name: str,
+    expression: str,
+    label: str,
+    *,
+    known_constants: dict[str, int],
+    param_types: dict[str, str] | None,
+    raw_param_types: dict[str, str] | None,
+    local_names: set[str] | None,
+) -> list[ForeignSafetyIssue]:
+    """Flag integer casts that can truncate or sign-flip a provably wider or
+    differently-signed operand — Rust ``x as u8``, Go ``uint8(x)``,
+    Solidity ``uint128(x)``.
+
+    Solidity's ≥0.8 default checks apply to arithmetic operators only —
+    explicit conversion functions truncate on every compiler version, so
+    casts are checked unconditionally.
+
+    The operand must be a plain identifier with a known declared type:
+    untyped locals and member expressions cannot carry a contract anyway, so
+    they are skipped rather than guessed at."""
+    if label == "Rust":
+        sites = [
+            (m.group("operand"), m.group("ty"))
+            for m in _RUST_CAST_RE.finditer(expression)
+        ]
+    elif label == "Go":
+        sites = [
+            (m.group("operand"), m.group("ty"))
+            for m in _GO_CONVERSION_RE.finditer(expression)
+        ]
+    elif label == "Solidity":
+        sites = [
+            (m.group("operand"), m.group("ty"))
+            for m in _SOLIDITY_CONVERSION_RE.finditer(expression)
+        ]
+    else:
+        return []
+    table = _INTEGER_TYPE_BITS.get(label, {})
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for operand, target in sites:
+        if (operand, target) in seen:
+            continue
+        seen.add((operand, target))
+        if local_names and operand in local_names:
+            continue
+        target_bits_signed = table.get(target)
+        if target_bits_signed is None:
+            continue
+        tbits, tsigned = target_bits_signed
+        lo = -(2 ** (tbits - 1)) if tsigned else 0
+        hi = 2 ** (tbits - 1) - 1 if tsigned else 2 ** tbits - 1
+        if known_constants and operand in known_constants:
+            value = known_constants[operand]
+            if lo <= value <= hi:
+                continue
+            # Definite out-of-range cast — the constant's value is the
+            # witness, and the contract is whichever bound it violates.
+            contracts = [
+                *([f"{operand} >= {lo}"] if value < lo else []),
+                *([f"{operand} <= {hi}"] if value > hi else []),
+            ]
+            issues.append(
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"{label} function `{function_name}` can truncate `{operand}` "
+                        f"in cast to `{target}` without a range contract "
+                        f"({operand} outside {lo}..={hi} wraps)"
+                    ),
+                    required_contracts=tuple(contracts),
+                    counterexample={operand: value},
+                )
+            )
+            continue
+        # ``param_types`` for Solidity carries mumei-normalized types
+        # (``u64``), which lose the declared width — casts need the raw
+        # Solidity type from ``raw_param_types`` when available.
+        types = raw_param_types if raw_param_types is not None else param_types
+        source_bits_signed = (
+            _integer_type_bits(label, types[operand])
+            if types and operand in types
+            else None
+        )
+        if source_bits_signed is None:
+            # Operand type unknown — untyped locals and member
+            # expressions cannot carry a contract; skip.
+            continue
+        sbits, ssigned = source_bits_signed
+        safe_widening = (ssigned == tsigned and tbits >= sbits) or (
+            not ssigned and tsigned and tbits > sbits
+        )
+        if safe_widening:
+            continue
+        contracts: list[str] = []
+        if ssigned:
+            contracts.append(f"{operand} >= {lo}")
+        # The upper bound is vacuous for a signed source whose maximum cannot
+        # exceed the target's (e.g. ``i64 as u64`` — i64::MAX < u64::MAX).
+        if not (ssigned and sbits is not None and 2 ** (sbits - 1) - 1 <= hi):
+            contracts.append(f"{operand} <= {hi}")
+        counterexample = _cast_out_of_range_counterexample(
+            operand,
+            tbits,
+            tsigned,
+            (sbits, ssigned),
+        )
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` can truncate `{operand}` "
+                    f"in cast to `{target}` without a range contract "
+                    f"({operand} outside {lo}..={hi} wraps)"
+                ),
+                required_contracts=tuple(contracts),
+                counterexample=counterexample,
+            )
+        )
+    return issues
+
+
+_GUARD_DIVERGENCE_RE = re.compile(
+    r"\b(?:return|panic|break|continue|throw)\b"
+)
+_GUARD_ASSERT_RE = re.compile(
+    r"(?:require|assert|debug_assert)(?:!)?\s*\(?\s*$"
+)
+_GUARD_IF_RE = re.compile(r"\bif\s*\(?\s*$")
+_GUARD_ELSE_RE = re.compile(r"\s*else\s*\{")
+
+
+def _paren_body(source: str, open_paren: int) -> str:
+    """Return the contents of the ``( … )`` span opening at ``open_paren``."""
+    depth = 0
+    in_str: str | None = None
+    i = open_paren
+    while i < len(source):
+        ch = source[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return source[open_paren + 1 : i]
+        i += 1
+    return source[open_paren + 1 :]
+
+
+def _split_top_level_args(text: str) -> list[str]:
+    """Split ``text`` on commas at paren/bracket/brace depth 0."""
+    parts: list[str] = []
+    depth = 0
+    in_str: str | None = None
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+        i += 1
+    parts.append(text[start:])
+    return parts
+
+
+def _has_top_level_or(text: str) -> bool:
+    """Whether ``||`` appears at paren depth 0 in ``text``."""
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "|" and depth == 0 and text[i : i + 2] == "||":
+            return True
+        i += 1
+    return False
+
+
+def _has_top_level_and(text: str) -> bool:
+    """Whether ``&&`` appears at paren depth 0 in ``text``."""
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == "&" and depth == 0 and text[i : i + 2] == "&&":
+            return True
+        i += 1
+    return False
+
+
+def _has_top_level_ternary(text: str) -> bool:
+    """Whether ``?`` appears at paren depth 0 in ``text`` — a ternary
+    condition selects between branches, so a comparison inside it is not a
+    guaranteed conjunct."""
+    depth = 0
+    in_str: str | None = None
+    for ch in text:
+        if in_str:
+            if ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "?" and depth == 0:
+            return True
+    return False
+
+
+def _guard_condition(
+    expression: str, match: re.Match[str], brace_pos: int
+) -> tuple[str, int] | None:
+    """``(condition_text, absolute_start)`` of the ``if``/``while``
+    condition enclosing ``match``'s comparison, with one enclosing
+    ``( … )`` pair unwrapped — ``None`` when no condition keyword precedes
+    the block or the comparison sits nested inside the condition's parens
+    (e.g. ``if f(a >= b) {``), where it is not itself a guard conjunct."""
+    kw_end = None
+    for kw in re.finditer(r"\b(?:if|while)\b", expression[: match.start()]):
+        kw_end = kw.end()
+    if kw_end is None:
+        return None
+    region = expression[kw_end:brace_pos]
+    if region.lstrip().startswith("("):
+        open_paren = kw_end + (len(region) - len(region.lstrip()))
+        cond_start = open_paren + 1
+        cond = _paren_body(expression, open_paren)
+    else:
+        cond_start = kw_end
+        cond = region
+    rel = match.start() - cond_start
+    if rel < 0 or rel + (match.end() - match.start()) > len(cond):
+        return None
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < rel:
+        ch = cond[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    return cond, cond_start
+
+
+def _block_diverges(block: str) -> bool:
+    """Whether the block's top-level statements always diverge. A bare
+    ``if (c) return`` (no braces) is conditional, not guaranteed — the
+    divergence keyword must not be governed by an unbraced ``if``/``while``/
+    ``for``/``else`` in the same statement."""
+    top = _block_top_level_text(block)
+    for match in _GUARD_DIVERGENCE_RE.finditer(top):
+        prefix = top[: match.start()]
+        tail = prefix[prefix.rfind(";") + 1 :]
+        if not re.search(r"\b(?:if|else|while|for|elif)\b", tail):
+            return True
+    return False
+
+
+def _block_top_level_text(block: str) -> str:
+    """Drop the contents of nested ``{ … }`` spans so only statements at the
+    block's own depth remain — a divergence inside a nested conditional does
+    not make the enclosing block diverge."""
+    out: list[str] = []
+    depth = 0
+    in_str: str | None = None
+    i = 0
+    while i < len(block):
+        ch = block[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == in_str:
+                in_str = None
+        elif ch in "\"'`":
+            in_str = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+# Mechanisms a comparison before a use can protect it through — the check
+# decides which direction of the comparison (safe vs bad) each mechanism
+# keeps.
+_GUARD_HOLDS_MECHANISMS = {
+    "inside",
+    "shortcircuit",
+    "asserted",
+    "ternary_true",
+    "else_exit",
+}
+_GUARD_NEGATED_MECHANISMS = {"early_exit", "ternary_false"}
+
+
+def _guard_mechanism(
+    expression: str, match: re.Match[str], use_pos: int
+) -> str | None:
+    """How a comparison ``match`` relates to a use at ``use_pos``:
+
+    - ``asserted`` — inside ``require(...)``/``assert(...)``/``assert!(...)``;
+      execution past it implies the condition held.
+    - ``ternary_true``/``ternary_false`` — the comparison is a ternary
+      condition and the use sits in that branch.
+    - ``inside`` — the comparison is the condition of a block containing
+      the use.
+    - ``early_exit`` — the comparison is the whole condition of an ``if``
+      block that closed before the use and diverges (return/panic/break/
+      continue/throw) — the use runs under the *negated* condition.
+    - ``else_exit`` — the comparison is the whole condition of an ``if``
+      whose ``else`` block diverges — the use runs under the *held*
+      condition.
+    - ``shortcircuit`` — an ``&&`` separates the comparison and the use.
+    - ``None`` — the comparison does not dominate the use.
+    """
+    assert_match = _GUARD_ASSERT_RE.search(expression[: match.start()])
+    if assert_match:
+        paren_rel = expression[assert_match.start() : assert_match.end()].rfind("(")
+        open_paren = (
+            assert_match.start() + paren_rel if paren_rel != -1 else -1
+        )
+        if open_paren != -1:
+            args = _paren_body(expression, open_paren)
+            args_end = open_paren + 1 + len(args)
+            if use_pos <= args_end:
+                # The use sits inside the assert call itself — it evaluates
+                # before the assertion can protect it.
+                return None
+            first_arg = _split_top_level_args(args)[0]
+            if _has_top_level_or(first_arg):
+                # ``require(a >= b || flag)`` does not guarantee the
+                # comparison — only a disjunction-free first argument (or a
+                # top-level ``&&`` conjunction) does.
+                return None
+        return "asserted"
+    between = expression[match.end() : use_pos]
+    brace_rel = between.find("{")
+    cond = cond_start = None
+    brace_pos = match.end() + brace_rel if brace_rel != -1 else -1
+    if brace_rel != -1:
+        gc = _guard_condition(expression, match, brace_pos)
+        if gc is not None:
+            cond, cond_start = gc
+            if _has_top_level_ternary(cond):
+                # ``if (a >= b ? x : y) { a - b }`` — the ternary condition
+                # is not a conjunctive guard.
+                cond = None
+
+    def _bare_position(rel_pos: int) -> bool:
+        """Whether a ``between`` offset is a real statement-level operator —
+        not inside the enclosing if/while condition and not inside parens."""
+        abs_pos = match.end() + rel_pos
+        if cond_start is not None and cond_start <= abs_pos < brace_pos:
+            return False
+        depth = 0
+        for ch in between[:rel_pos]:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+        return depth == 0
+
+    if any(_bare_position(m.start()) for m in re.finditer(r"\|\|", between)):
+        return None
+    qpos = next(
+        (m.start() for m in re.finditer(r"\?", between) if _bare_position(m.start())),
+        -1,
+    )
+    cpos = next(
+        (
+            m.start()
+            for m in reversed(list(re.finditer(r":", between)))
+            if _bare_position(m.start())
+        ),
+        -1,
+    )
+    if qpos != -1:
+        return "ternary_true" if cpos == -1 or cpos < qpos else "ternary_false"
+    if brace_rel != -1:
+        before_brace = between[:brace_rel]
+        if ";" in before_brace or "}" in before_brace:
+            return None
+        block = _balanced_brace_body(expression, brace_pos)
+        block_end = brace_pos + len(block) + 1
+        if use_pos < block_end:
+            if cond is None:
+                # ``if f(a >= b) { a - b }`` — the comparison is a call
+                # argument, not the guard conjunct.
+                return None
+            # A top-level ``||`` makes the comparison one disjunct — the
+            # block still runs when only the other disjunct holds.
+            if _has_top_level_or(cond):
+                return None
+            return "inside"
+        whole_condition = _GUARD_IF_RE.search(
+            expression[: match.start()]
+        ) and re.fullmatch(r"\s*\)?\s*", before_brace)
+        if whole_condition:
+            if _block_diverges(block):
+                # ``if (a < b && flag) { return }`` leaves ``a >= b``
+                # unproven on the ``flag``-false exit path — a top-level
+                # ``&&`` in the exited-on condition is not guaranteed.
+                if cond is None or _has_top_level_and(cond):
+                    return None
+                return "early_exit"
+            else_match = _GUARD_ELSE_RE.match(expression, block_end + 1)
+            if else_match is not None:
+                else_block = _balanced_brace_body(
+                    expression, else_match.end() - 1
+                )
+                else_end = else_match.end() + len(else_block)
+                if use_pos >= else_end and _block_diverges(else_block):
+                    if cond is None or _has_top_level_or(cond):
+                        return None
+                    return "else_exit"
+        return None
+    # ``a >= b && a - b`` — the ``&&`` must join the use into the same
+    # expression; a ``;``/brace boundary means the ``&&`` belongs to a
+    # different statement (``a >= b && flag; a - b`` is unguarded).
+    if "&&" in between and not re.search(r"[;{}]", between):
+        return "shortcircuit"
+    return None
+
+
+def _subtraction_guarded(
+    expression: str, left: str, right: str, sub_pos: int
+) -> bool:
+    """Whether a ``left - right`` subtraction at ``sub_pos`` is guarded.
+
+    A comparison proving ``left >= right`` (``a >= b``, ``a > b``, ``a == b``,
+    ``b <= a``, ``b < a``, ``b == a``) guards the subtraction when it
+    *dominates* it — the use is inside its block, ``&&``-joined to it, in
+    the true branch of its ternary, or wrapped in ``require``/``assert``.
+    A comparison proving ``left <= right`` strictly (no ``==``) guards via
+    the negated mechanisms — an early-exit ``if`` or a ternary false branch:
+    ``if a < b { return } a - b`` is safe because only ``a >= b`` reaches
+    the subtraction. ``a >= b || a - b`` and ``if a >= b { return } a - b``
+    are *not* guarded — the former runs the subtraction under the negated
+    condition and the latter exits on the safe direction.
+    """
+    proves_ge = (
+        rf"\b{re.escape(left)}\s*(?:>=?|==)\s*{re.escape(right)}\b"
+        rf"|\b{re.escape(right)}\s*(?:<=?|==)\s*{re.escape(left)}\b"
+    )
+    for match in re.finditer(proves_ge, expression):
+        if match.end() > sub_pos:
+            break
+        if _guard_mechanism(expression, match, sub_pos) in (
+            _GUARD_HOLDS_MECHANISMS
+        ):
+            return True
+    proves_le = (
+        rf"\b{re.escape(left)}\s*<=?\s*{re.escape(right)}\b"
+        rf"|\b{re.escape(right)}\s*>=?\s*{re.escape(left)}\b"
+    )
+    for match in re.finditer(proves_le, expression):
+        if match.end() > sub_pos:
+            break
+        if _guard_mechanism(expression, match, sub_pos) in (
+            _GUARD_NEGATED_MECHANISMS
+        ):
+            return True
+    return False
+
+
+def _is_cast_or_subtraction_issue(issue: ForeignSafetyIssue) -> bool:
+    return "can truncate" in issue.message or "can underflow" in issue.message
+
+
+def _cast_and_subtraction_issues(
+    function_name: str,
+    text: str,
+    label: str,
+    *,
+    known_constants: dict[str, int] | None = None,
+    unsigned_locals: set[str] | None = None,
+    param_types: dict[str, str] | None = None,
+    raw_param_types: dict[str, str] | None = None,
+    local_names: set[str] | None = None,
+    solidity_default_checks: bool = False,
+    subtraction_regions: list[tuple[int, int]] | None = None,
+) -> list[ForeignSafetyIssue]:
+    """Run the narrowing-cast and unsigned-subtraction checks over ``text``.
+
+    ``text`` may be a whole (literal-stripped) function body — guards in
+    enclosing statements (``if a >= b { … return a - b }``) are visible to
+    ``_subtraction_guarded`` there, so callers reconcile per-expression
+    results against the body-level result rather than reporting both.
+    ``subtraction_regions`` restricts which ``a - b`` matches are reported
+    to spans inside ``unchecked { }`` regions (the only places ≥0.8 Solidity
+    arithmetic wraps) while keeping the full ``text`` — enclosing ``require``
+    guards stay visible to the dominance check.
+    """
+    issues = _narrowing_cast_issues(
+        function_name,
+        text,
+        label,
+        known_constants=known_constants or {},
+        param_types=param_types,
+        raw_param_types=raw_param_types,
+        local_names=local_names,
+    )
+    issues.extend(
+        _unsigned_subtraction_issues(
+            function_name,
+            text,
+            label,
+            known_constants=known_constants or {},
+            unsigned_locals=unsigned_locals,
+            param_types=param_types,
+            raw_param_types=raw_param_types,
+            local_names=local_names,
+            solidity_default_checks=solidity_default_checks,
+            allowed_regions=subtraction_regions,
+        )
+    )
+    return issues
+
+
+def _unsigned_subtraction_issues(
+    function_name: str,
+    expression: str,
+    label: str,
+    *,
+    known_constants: dict[str, int],
+    unsigned_locals: set[str] | None,
+    param_types: dict[str, str] | None,
+    raw_param_types: dict[str, str] | None,
+    local_names: set[str] | None,
+    solidity_default_checks: bool,
+    allowed_regions: list[tuple[int, int]] | None = None,
+) -> list[ForeignSafetyIssue]:
+    """Flag ``a - b`` on unsigned operands where ``a < b`` is possible — the
+    i64 contract model treats subtraction as safe, but on ``uint``/``usize`` it
+    wraps (Go, Solidity <0.8) or panics (Rust debug). ``allowed_regions``
+    restricts which matches are reported (Solidity ``unchecked { }`` spans)
+    without hiding the enclosing guards from ``_subtraction_guarded``."""
+    if label not in {"Go", "Rust", "Solidity"}:
+        return []
+    if label == "Solidity" and solidity_default_checks:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _UNSIGNED_SUBTRACTION_RE.finditer(expression):
+        if allowed_regions is not None and not any(
+            start <= match.start() < end for start, end in allowed_regions
+        ):
+            continue
+        left, right = match.group("left"), match.group("right")
+        if left == right or (left, right) in seen:
+            continue
+
+        def _unsigned(name: str) -> bool:
+            if unsigned_locals and name in unsigned_locals:
+                return True
+            # Solidity ``param_types`` are mumei-normalized (``u64``); the raw
+            # declared type (``uint256``) is required for the width lookup.
+            types = raw_param_types if raw_param_types is not None else param_types
+            if types and name in types:
+                bits = _integer_type_bits(label, types[name])
+                return bits is not None and not bits[1]
+            return False
+
+        if not (_unsigned(left) and _unsigned(right)):
+            continue
+        # A name that is both a local and a parameter was shadowed by the
+        # local — its param_types entry describes the wrong binding, so the
+        # unsignedness proof is unsound. Locals proven unsigned via
+        # unsigned_locals are exempt: their unsignedness is body-derived.
+        if local_names and any(
+            name in local_names
+            and not (unsigned_locals and name in unsigned_locals)
+            for name in (left, right)
+        ):
+            continue
+        known = known_constants or {}
+        if left in known and right in known and known[left] >= known[right]:
+            continue
+        if right in known and known[right] == 0:
+            continue
+        if _subtraction_guarded(expression, left, right, match.start()):
+            continue
+        # Dedupe only emitted issues — a guarded first occurrence must not
+        # suppress a later unguarded ``left - right``.
+        seen.add((left, right))
+        counterexample = {left: 0, right: 1}
+        issues.append(
+            ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"{label} function `{function_name}` can underflow "
+                    f"`{left} - {right}` on unsigned operands without a "
+                    f"`{left} >= {right}` contract (Z3 counterexample: "
+                    + ", ".join(
+                        f"{key}={value}" for key, value in counterexample.items()
+                    )
+                    + ")"
+                ),
+                required_contracts=(f"{left} >= {right}",),
+                counterexample=counterexample,
+            )
+        )
+    return issues
+
+
 def _issues_for_expression(
     function_name: str,
     expression: str,
@@ -6265,6 +7191,7 @@ def _issues_for_expression(
     known_constants: dict[str, int] | None = None,
     local_names: set[str] | None = None,
     param_types: dict[str, str] | None = None,
+    raw_param_types: dict[str, str] | None = None,
     mapping_names: set[str] | None = None,
     guaranteed_nonzero: set[str] | None = None,
     parallel_slicing: set[tuple[str, str]] | None = None,
@@ -6290,7 +7217,7 @@ def _issues_for_expression(
         else None
     )
     if findings is not None:
-        return _issues_from_findings(
+        issues = _issues_from_findings(
             function_name,
             expression,
             findings,
@@ -6313,6 +7240,31 @@ def _issues_for_expression(
             source=source,
             params_text=params_text,
         )
+        issues.extend(
+            _narrowing_cast_issues(
+                function_name,
+                expression,
+                label,
+                known_constants=known_constants,
+                param_types=param_types,
+                raw_param_types=raw_param_types,
+                local_names=local_names,
+            )
+        )
+        issues.extend(
+            _unsigned_subtraction_issues(
+                function_name,
+                expression,
+                label,
+                known_constants=known_constants,
+                unsigned_locals=unsigned_locals,
+                param_types=param_types,
+                raw_param_types=raw_param_types,
+                local_names=local_names,
+                solidity_default_checks=solidity_default_checks,
+            )
+        )
+        return issues
     # tree-sitter unavailable / unparseable: fall back to the regex heuristics.
     if label in {"Go", "Rust"}:
         expression = _strip_go_rust_literals_and_comments(expression)
@@ -6395,6 +7347,30 @@ def _issues_for_expression(
     if label == "Solidity":
         for left, right in _addition_pairs_regex(expression):
             issues.append(_solidity_overflow_safety_issue(function_name, left, right, label))
+    issues.extend(
+        _narrowing_cast_issues(
+            function_name,
+            expression,
+            label,
+            known_constants=known_constants,
+            param_types=param_types,
+            raw_param_types=raw_param_types,
+            local_names=local_names,
+        )
+    )
+    issues.extend(
+        _unsigned_subtraction_issues(
+            function_name,
+            expression,
+            label,
+            known_constants=known_constants,
+            unsigned_locals=unsigned_locals,
+            param_types=param_types,
+            raw_param_types=raw_param_types,
+            local_names=local_names,
+            solidity_default_checks=solidity_default_checks,
+        )
+    )
     return issues
 
 
@@ -7491,11 +8467,14 @@ _RUST_FIXED_ARRAY_PARAM_RE = re.compile(
 
 def _rust_param_info(
     params_text: str, constants: dict[str, int] | None
-) -> tuple[dict[str, str], dict[str, int]]:
+) -> tuple[dict[str, str], dict[str, int], dict[str, str]]:
     """Return parameter types and fixed-array lengths for one Rust declaration.
 
     ``v: &mut [u32; 16]`` contributes ``len(v) = 16`` so ``v[i]`` is checked
-    against the real bound instead of a free ``len_v``.
+    against the real bound instead of a free ``len_v``. The third return value
+    is the *raw* (un-normalized) type map — the mumei-normalized ``types`` map
+    collapses ``u8``/``u32``/``usize`` to ``u64`` and loses the widths the
+    narrowing-cast check needs.
     """
     raw_types: dict[str, str] = {}
     for index, raw in enumerate(_split_params(params_text)):
@@ -7519,7 +8498,7 @@ def _rust_param_info(
             value = (constants or {}).get(token)
         if value is not None:
             lengths[f"len({pname})"] = value
-    return types, lengths
+    return types, lengths, raw_types
 
 
 def _rust_local_usize_cast_offsets(body: str) -> dict[str, tuple[str, int]]:
@@ -7584,6 +8563,30 @@ def _balanced_brace_body(source: str, opening_brace: int) -> str:
             if depth == 0:
                 return source[opening_brace + 1 : index]
     return source[opening_brace + 1 :]
+
+
+_UNCHECKED_BLOCK_RE = re.compile(r"\bunchecked\s*\{")
+
+
+def _unchecked_block_bodies(body: str) -> str:
+    """Concatenate the contents of every ``unchecked { … }`` region — the
+    only places ≥0.8 Solidity arithmetic actually wraps."""
+    return "\n".join(
+        _balanced_brace_body(body, match.end() - 1)
+        for match in _UNCHECKED_BLOCK_RE.finditer(body)
+    )
+
+
+def _unchecked_block_spans(body: str) -> list[tuple[int, int]]:
+    """``(start, end)`` content spans of every ``unchecked { … }`` region —
+    positions are in ``body`` coordinates so they filter matches against
+    the full body text (guards outside the region stay visible)."""
+    spans: list[tuple[int, int]] = []
+    for match in _UNCHECKED_BLOCK_RE.finditer(body):
+        open_brace = match.end() - 1
+        start = open_brace + 1
+        spans.append((start, start + len(_balanced_brace_body(body, open_brace))))
+    return spans
 
 def _typescript_function_blocks(source: str) -> list[tuple[str, str]]:
     ts_blocks = tree_sitter_extract.function_blocks(source, "typescript", _safe_identifier)
