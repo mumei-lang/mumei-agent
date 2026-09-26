@@ -2555,22 +2555,68 @@ _TAINT_SOURCE_RE = re.compile(
 # safe for SQL, and numeric coercions do NOT make it safe for the DOM.
 _TAINT_SQL_SAFE_RE = re.compile(
     r"\b(?:int|float|parseInt|parseFloat|Number|"
-    r"strconv\.(?:Atoi|ParseInt|ParseFloat|ParseUint))\s*\("
+    r"strconv\.(?:Atoi|Itoa|ParseInt|ParseFloat|ParseUint))\s*\("
 )
 _TAINT_DOM_SAFE_RE = re.compile(
     r"\b(?:escape|bleach\.clean|html\.escape|sanitize|DOMPurify\.sanitize|"
-    r"urlencode|encodeURIComponent|quote)\s*\("
+    r"urlencode|encodeURIComponent|quote|"
+    r"url\.QueryEscape|url\.PathEscape|template\.HTMLEscapeString)\s*\("
 )
 _TAINT_ASSIGN_RE = re.compile(
-    r"(?m)^\s*(?:var\s+|let\s+|const\s+)?(?P<name>[A-Za-z_]\w*)\s*"
-    r"(?::\s*[^=\n]+)?\s*:?=(?!=)\s*(?P<rhs>[^;\n]+)"
+    # ``[ \t]*`` (not ``\s*``) keeps the match on one line — after
+    # literal masking an ``x = <blanked-literal>`` line ends in spaces,
+    # and ``\s*`` would swallow the newline and capture the NEXT line
+    # as this assignment's rhs. The rhs group intentionally starts
+    # right at ``=`` (no ``[ \t]*`` before it): a blanked literal is
+    # indistinguishable from whitespace, and eating it would shift
+    # ``start("rhs")`` past ``f"""``/````` so ``_taint_assign_rhs``
+    # could not extend through the multiline literal.
+    r"(?m)^\s*(?:var\s+|let\s+|const\s+)?(?P<name>[A-Za-z_]\w*)[ \t]*"
+    r"(?::[ \t]*[^=\n]+)?[ \t]*:?=(?!=)(?P<rhs>[^;\n]*)"
 )
 # SQL-ish sinks: only the FIRST argument is the query string — a parameter
 # tuple after the top-level comma is the safe parameterized form.
 _TAINT_QUERY_SINK_RE = re.compile(
     r"\b(?:execute|executemany|query|raw|exec|QueryRow|QueryRowContext|"
     r"queryRow|Query|Exec|ExecContext|QueryContext)\s*\("
+    r"|\bexec\.Command(?:Context)?\s*\("
 )
+_TAINT_CALL_RE = re.compile(r"\b(?P<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(")
+
+
+def _taint_call_name(
+    view: str, tainted_fns: frozenset[str], caller_name: str = ""
+) -> str | None:
+    """The callee in ``view`` flagged as returning tainted data
+    (intra-file, one propagation level — no call-graph), or None.
+
+    Matching is name-aware, not receiver-blind: a dotted callee must
+    equal a registered name exactly (``settings.get()`` does not
+    inherit ``R.get``'s taint), a ``self.``/``this.`` callee resolves
+    against the caller's *enclosing* name (``R.handler`` → ``R.get``),
+    and a bare callee matches Python-style scoping — module level,
+    a child of the caller (``outer`` calling ``inner()`` →
+    ``outer.inner``), or a sibling nested in the same enclosing scope."""
+    parent = caller_name.rpartition(".")[0] + "." if "." in caller_name else ""
+    for m in _TAINT_CALL_RE.finditer(view):
+        callee = m.group("name")
+        if callee in tainted_fns:
+            return callee
+        if callee.startswith(("self.", "this.")):
+            if parent + callee.split(".", 1)[1] in tainted_fns:
+                return callee
+        elif "." not in callee:
+            if caller_name and caller_name + "." + callee in tainted_fns:
+                return callee
+            if parent and parent + callee in tainted_fns:
+                return callee
+    return None
+
+
+def _taint_call_tainted(
+    view: str, tainted_fns: frozenset[str], caller_name: str = ""
+) -> bool:
+    return _taint_call_name(view, tainted_fns, caller_name) is not None
 # DOM/command sinks: taint anywhere in the statement is dangerous.
 _TAINT_DOM_SINK_RE = re.compile(
     r"(?:\.innerHTML\s*=|\.outerHTML\s*=|\bdocument\.write\s*\()"
@@ -2655,80 +2701,277 @@ def _strip_python_comments(text: str) -> str:
     return "".join(out)
 
 
+def _taint_interpolated(text: str) -> str:
+    """String literals reduce to their ``{…}``/``${…}`` interpolations
+    — a column named ``name`` in a SQL literal must not alias the
+    tainted variable ``name``. Only f-strings and template literals
+    interpolate; in a plain ``'SELECT {name}'`` the braces are
+    literal text."""
+
+    def expand(m: re.Match[str]) -> str:
+        prefix, quote, inner = m.group(1), m.group(2), m.group(3)
+        if "f" not in prefix.lower() and not quote.endswith("`"):
+            return " "
+        parts = re.findall(r"\{([^}]*)\}", inner)
+        if quote.endswith("`"):
+            # Only ``${…}`` interpolates in template literals — a
+            # literal ``{name}`` (e.g. a JSON fragment) stays inert.
+            parts = [
+                part
+                for part, pos in zip(
+                    parts,
+                    (m2.start() for m2 in re.finditer(r"\{[^}]*\}", inner)),
+                )
+                if inner[pos - 1 : pos] == "$"
+            ]
+        return " ".join(parts)
+
+    return re.sub(
+        r"([fFbBrRw]*)(\"\"\"|'''|['\"`])(.*?)\2",
+        expand,
+        text,
+        flags=re.DOTALL,
+    )
+
+
+def _taint_blank_calls(text: str, fn_re: re.Pattern[str]) -> str:
+    """Blank ``fn(...)`` call spans so their arguments don't count as
+    tainted — ``int(x)`` coerces for SQL, ``escape(x)`` for the DOM."""
+    out = text
+    for call in re.finditer(fn_re, text):
+        args = _paren_args(text, call.end() - 1)
+        span_end = call.end() + len(args) + 1
+        out = out[: call.start()] + " " * (span_end - call.start()) + out[span_end:]
+    return out
+
+
+def _taint_dirty_view(text: str, safe_re: re.Pattern[str]) -> str:
+    return _taint_interpolated(_taint_blank_calls(text, safe_re))
+
+
+_TAINT_LITERAL_RE = re.compile(
+    r"([fFbBrRw]*)(\"\"\"|'''|['\"`])(.*?)\2", re.DOTALL
+)
+
+
+def _taint_mask_literals(text: str) -> str:
+    """Position-preserving blank of string-literal spans — used to find
+    ``return``/assignment keywords so a keyword inside a literal (a
+    docstring, a JSON fragment) does not count. Interpolation regions
+    (``{…}`` in f-strings, ``${…}`` in template literals) stay readable;
+    newlines are preserved so positions and line anchors hold."""
+    out = list(text)
+    for m in _TAINT_LITERAL_RE.finditer(text):
+        prefix, quote, inner = m.group(1), m.group(2), m.group(3)
+        keep: list[tuple[int, int]] = []
+        inner_start = m.start() + len(prefix) + len(quote)
+        if "f" in prefix.lower():
+            keep = [
+                (inner_start + mm.start(), inner_start + mm.end())
+                for mm in re.finditer(r"\{[^}]*\}", inner)
+            ]
+        elif quote.endswith("`"):
+            keep = [
+                (inner_start + mm.start(), inner_start + mm.end())
+                for mm in re.finditer(r"\$\{[^}]*\}", inner)
+            ]
+        i = m.start()
+        end = m.end()
+        regions = sorted(keep)
+        ri = 0
+        while i < end:
+            if text[i] == "\n":
+                i += 1
+                continue
+            while ri < len(regions) and i >= regions[ri][1]:
+                ri += 1
+            if ri < len(regions) and regions[ri][0] <= i < regions[ri][1]:
+                i += 1
+                continue
+            out[i] = " "
+            i += 1
+    return "".join(out)
+
+
+def _mask_python_nested_defs(body: str) -> str:
+    """Blank nested ``def`` blocks (position-preserving) so their
+    ``return``/assignments don't count as the outer function's. The
+    segment's own first ``def`` line is kept; deeper defs are blanked
+    through their indented bodies."""
+    lines = body.splitlines(keepends=True)
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i < len(lines):
+        i += 1  # the segment's own ``def`` header
+    while i < len(lines):
+        m = re.match(r"^(\s*)(?:async\s+)?def\s", lines[i])
+        if m is None:
+            i += 1
+            continue
+        indent = len(m.group(1))
+        j = i + 1
+        while j < len(lines):
+            ln = lines[j]
+            if ln.strip() and len(ln) - len(ln.lstrip()) <= indent:
+                break
+            j += 1
+        for k in range(i, j):
+            lines[k] = "".join(" " if c != "\n" else "\n" for c in lines[k])
+        i = j
+    return "".join(lines)
+
+
+def _taint_assign_rhs(body: str, assign: re.Match[str]) -> str:
+    """Extend the single-line ``rhs`` capture through unclosed
+    brackets / triple-quoted strings / template literals so multiline
+    interpolated queries keep their variable references."""
+    start, end = assign.start("rhs"), assign.end("rhs")
+
+    def unclosed(text: str) -> bool:
+        return (
+            text.count("(") > text.count(")")
+            or text.count("[") > text.count("]")
+            or text.count("{") > text.count("}")
+            or text.count('"""') % 2 == 1
+            or text.count("'''") % 2 == 1
+            or text.count("`") % 2 == 1
+            # ``q = 'SELECT ' + \`` continues on the next line —
+            # keep pulling lines while the last one ends in ``\``.
+            or text.rstrip("\n").rstrip().endswith("\\")
+        )
+
+    while unclosed(body[start:end]):
+        nl = body.find("\n", end)
+        if nl == -1:
+            break
+        end = nl + 1
+    rhs = body[start:end]
+    return rhs.split(";", 1)[0]
+
+
+def _taint_replay_assigns(
+    body: str,
+    tainted_fns_sql: frozenset[str] = frozenset(),
+    tainted_fns_dom: frozenset[str] = frozenset(),
+    caller_name: str = "",
+) -> list[tuple[int, str, bool, bool]]:
+    """Position-ordered ``(pos, name, sql_dirty, dom_dirty)`` for each
+    top-of-line assignment — used both by the sink checker and by the
+    intra-file return-taint pass."""
+    out: list[tuple[int, str, bool, bool]] = []
+    tainted_sql: set[str] = set()
+    tainted_dom: set[str] = set()
+    # Detect assignments on the literal-masked view so a ``name = …``
+    # inside a string literal does not count; rhs is read from the raw
+    # body (positions are identical — the mask preserves length).
+    for match in _TAINT_ASSIGN_RE.finditer(_taint_mask_literals(body)):
+        name = match.group("name")
+        rhs = _taint_assign_rhs(body, match)
+        sql_view = _taint_dirty_view(rhs, _TAINT_SQL_SAFE_RE)
+        dom_view = _taint_dirty_view(rhs, _TAINT_DOM_SAFE_RE)
+        sql_dirty = bool(
+            _TAINT_SOURCE_RE.search(sql_view)
+            or _taint_call_tainted(sql_view, tainted_fns_sql, caller_name)
+            or any(
+                re.search(rf"\b{re.escape(t)}\b", sql_view)
+                for t in tainted_sql
+            )
+        )
+        dom_dirty = bool(
+            _TAINT_SOURCE_RE.search(dom_view)
+            or _taint_call_tainted(dom_view, tainted_fns_dom, caller_name)
+            or any(
+                re.search(rf"\b{re.escape(t)}\b", dom_view)
+                for t in tainted_dom
+            )
+        )
+        (tainted_sql.add if sql_dirty else tainted_sql.discard)(name)
+        (tainted_dom.add if dom_dirty else tainted_dom.discard)(name)
+        out.append((match.start(), name, sql_dirty, dom_dirty))
+    return out
+
+
+def _taint_return_channels(
+    body: str,
+    bare_expr_is_return: bool = False,
+    caller_name: str = "",
+) -> tuple[bool, bool]:
+    """Whether the function returns source-derived data, per channel.
+    One propagation level: assigns replayed without tainted-callee
+    knowledge, so ``g() → return f()`` does not chain transitively.
+
+    Known limit (advisory scope): assignments replay in *source order*,
+    not per execution path — a tainted assignment on one conditional
+    branch still marks the name tainted for a later ``return`` on
+    another branch.
+
+    Each ``return`` is evaluated against the taint state at *its own*
+    position — a ``return x`` is not affected by assignments that follow
+    it. The scan runs on the literal-masked view so a ``return`` inside
+    a string literal (a docstring, a JSON fragment) does not count, and
+    the expression extends through unclosed brackets so a multiline
+    ``return (`` keeps its later lines. With ``bare_expr_is_return``
+    (single-expression TypeScript arrow bodies like
+    ``const f = (r) => r.query.x`` — no ``return`` keyword), the whole
+    body is the implicit return expression."""
+    assigns = _taint_replay_assigns(body, caller_name=caller_name)
+    masked = _taint_mask_literals(body)
+    rets: list[tuple[int, str]] = []
+    for ret in re.finditer(r"(?m)^\s*return\b[ \t]*(?P<expr>.*)", masked):
+        expr = ret.group("expr")
+        end = ret.end("expr")
+        while expr.count("(") > expr.count(")") or expr.count("[") > expr.count("]"):
+            nl = masked.find("\n", end)
+            if nl == -1:
+                break
+            expr += masked[end : nl + 1]
+            end = nl + 1
+        expr = expr.split(";", 1)[0].strip()
+        if expr:
+            rets.append((ret.start(), expr))
+    if not rets and bare_expr_is_return:
+        rets = [(0, body.split(";", 1)[0])]
+
+    tainted_sql: set[str] = set()
+    tainted_dom: set[str] = set()
+    ret_sql = ret_dom = False
+    events = sorted(
+        [
+            *((pos, "assign", (name, s, d)) for pos, name, s, d in assigns),
+            *((pos, "return", expr) for pos, expr in rets),
+        ],
+        key=lambda event: event[0],
+    )
+    for _pos, kind, item in events:
+        if kind == "assign":
+            name, sql_dirty, dom_dirty = item
+            (tainted_sql.add if sql_dirty else tainted_sql.discard)(name)
+            (tainted_dom.add if dom_dirty else tainted_dom.discard)(name)
+        else:
+            sql_view = _taint_dirty_view(item, _TAINT_SQL_SAFE_RE)
+            dom_view = _taint_dirty_view(item, _TAINT_DOM_SAFE_RE)
+            if _TAINT_SOURCE_RE.search(sql_view) or any(
+                re.search(rf"\b{re.escape(t)}\b", sql_view) for t in tainted_sql
+            ):
+                ret_sql = True
+            if _TAINT_SOURCE_RE.search(dom_view) or any(
+                re.search(rf"\b{re.escape(t)}\b", dom_view) for t in tainted_dom
+            ):
+                ret_dom = True
+    return ret_sql, ret_dom
+
+
 def _taint_lite_issues(
-    function_name: str, body: str, label: str
+    function_name: str,
+    body: str,
+    label: str,
+    tainted_fns_sql: frozenset[str] = frozenset(),
+    tainted_fns_dom: frozenset[str] = frozenset(),
+    caller_name: str = "",
 ) -> list[ForeignSafetyIssue]:
     """Flag source-derived names reaching a query/DOM sink unsanitized."""
     issues: list[ForeignSafetyIssue] = []
-
-    def interpolated(text: str) -> str:
-        """String literals reduce to their ``{…}``/``${…}`` interpolations
-        — a column named ``name`` in a SQL literal must not alias the
-        tainted variable ``name``. Only f-strings and template literals
-        interpolate; in a plain ``'SELECT {name}'`` the braces are
-        literal text."""
-
-        def expand(m: re.Match[str]) -> str:
-            prefix, quote, inner = m.group(1), m.group(2), m.group(3)
-            if "f" not in prefix.lower() and not quote.endswith("`"):
-                return " "
-            parts = re.findall(r"\{([^}]*)\}", inner)
-            if quote.endswith("`"):
-                # Only ``${…}`` interpolates in template literals — a
-                # literal ``{name}`` (e.g. a JSON fragment) stays inert.
-                parts = [
-                    part
-                    for part, pos in zip(
-                        parts,
-                        (m2.start() for m2 in re.finditer(r"\{[^}]*\}", inner)),
-                    )
-                    if inner[pos - 1 : pos] == "$"
-                ]
-            return " ".join(parts)
-
-        return re.sub(
-            r"([fFbBrRw]*)(\"\"\"|'''|['\"`])(.*?)\2",
-            expand,
-            text,
-            flags=re.DOTALL,
-        )
-
-    def blank_calls(text: str, fn_re: re.Pattern[str]) -> str:
-        """Blank ``fn(...)`` call spans so their arguments don't count as
-        tainted — ``int(x)`` coerces for SQL, ``escape(x)`` for the DOM."""
-        out = text
-        for call in re.finditer(fn_re, text):
-            args = _paren_args(text, call.end() - 1)
-            span_end = call.end() + len(args) + 1
-            out = out[: call.start()] + " " * (span_end - call.start()) + out[span_end:]
-        return out
-
-    def assign_rhs(assign: re.Match[str]) -> str:
-        """Extend the single-line ``rhs`` capture through unclosed
-        brackets / triple-quoted strings / template literals so multiline
-        interpolated queries keep their variable references."""
-        start, end = assign.start("rhs"), assign.end("rhs")
-
-        def unclosed(text: str) -> bool:
-            return (
-                text.count("(") > text.count(")")
-                or text.count("[") > text.count("]")
-                or text.count("{") > text.count("}")
-                or text.count('"""') % 2 == 1
-                or text.count("'''") % 2 == 1
-                or text.count("`") % 2 == 1
-                # ``q = 'SELECT ' + \`` continues on the next line —
-                # keep pulling lines while the last one ends in ``\``.
-                or text.rstrip("\n").rstrip().endswith("\\")
-            )
-
-        while unclosed(body[start:end]):
-            nl = body.find("\n", end)
-            if nl == -1:
-                break
-            end = nl + 1
-        rhs = body[start:end]
-        return rhs.split(";", 1)[0]
 
     # Track taint per output channel: ``sql`` clears on numeric coercion,
     # ``dom`` clears on HTML/URL escaping — neither clears the other.
@@ -2736,7 +2979,7 @@ def _taint_lite_issues(
     tainted_dom: set[str] = set()
 
     def dirty_view(text: str, safe_re: re.Pattern[str]) -> str:
-        return interpolated(blank_calls(text, safe_re))
+        return _taint_dirty_view(text, safe_re)
 
     def dirty_names(text: str, tainted: set[str]) -> str | None:
         if _TAINT_SOURCE_RE.search(text):
@@ -2746,9 +2989,12 @@ def _taint_lite_issues(
                 return f"`{name}` (request-derived)"
         return None
 
+    assigns = _taint_replay_assigns(
+        body, tainted_fns_sql, tainted_fns_dom, caller_name
+    )
     events = sorted(
         [
-            *((m.start(), "assign", m) for m in _TAINT_ASSIGN_RE.finditer(body)),
+            *((pos, "assign", (name, s, d)) for pos, name, s, d in assigns),
             *((m.start(), "query", m) for m in _TAINT_QUERY_SINK_RE.finditer(body)),
             *((m.start(), "dom", m) for m in _TAINT_DOM_SINK_RE.finditer(body)),
         ],
@@ -2756,49 +3002,74 @@ def _taint_lite_issues(
     )
     for _pos, kind, match in events:
         if kind == "assign":
-            name = match.group("name")
-            rhs = assign_rhs(match)
-            sql_view = dirty_view(rhs, _TAINT_SQL_SAFE_RE)
-            dom_view = dirty_view(rhs, _TAINT_DOM_SAFE_RE)
-            if (
-                _TAINT_SOURCE_RE.search(sql_view)
-                or any(
-                    re.search(rf"\b{re.escape(t)}\b", sql_view)
-                    for t in tainted_sql
-                )
-            ):
-                tainted_sql.add(name)
-            else:
-                tainted_sql.discard(name)
-            if (
-                _TAINT_SOURCE_RE.search(dom_view)
-                or any(
-                    re.search(rf"\b{re.escape(t)}\b", dom_view)
-                    for t in tainted_dom
-                )
-            ):
-                tainted_dom.add(name)
-            else:
-                tainted_dom.discard(name)
+            name, sql_dirty, dom_dirty = match
+            (tainted_sql.add if sql_dirty else tainted_sql.discard)(name)
+            (tainted_dom.add if dom_dirty else tainted_dom.discard)(name)
         elif kind == "query":
             # `QueryContext(ctx, sql)`-style sinks put the context first —
-            # the query string is the next argument.
+            # the query string is the next argument. ``exec.Command``-style
+            # sinks take the program first and untrusted argv after — any
+            # argument may carry the command, so scan them all.
             callee = match.group(0).rstrip("(").rstrip()
-            arg_index = 1 if callee.endswith("Context") else 0
             args = _top_level_args(body[match.end() :])
-            if len(args) <= arg_index:
-                continue
-            hit = dirty_names(
-                dirty_view(args[arg_index], _TAINT_SQL_SAFE_RE), tainted_sql
+            if "exec.Command" in callee:
+                sink_args = args[1:] if callee.endswith("Context") else args
+            else:
+                arg_index = 1 if callee.endswith("Context") else 0
+                sink_args = (
+                    [args[arg_index]] if len(args) > arg_index else []
+                )
+            hit = next(
+                (
+                    hit
+                    for a in sink_args
+                    if (
+                        hit := dirty_names(
+                            dirty_view(a, _TAINT_SQL_SAFE_RE), tainted_sql
+                        )
+                    )
+                    is not None
+                ),
+                None,
             )
+            if hit is None:
+                # A tainted-callee call reaching the sink unassigned —
+                # ``db.query("…" + helper(req))`` — flags by callee name.
+                callee_hit = next(
+                    (
+                        callee
+                        for a in sink_args
+                        if (
+                            callee := _taint_call_name(
+                                dirty_view(a, _TAINT_SQL_SAFE_RE),
+                                tainted_fns_sql,
+                                caller_name,
+                            )
+                        )
+                        is not None
+                    ),
+                    None,
+                )
+                if callee_hit is not None:
+                    hit = f"`{callee_hit}()` (returns request-derived data)"
             if hit is not None:
+                if "exec.Command" in callee:
+                    detail = (
+                        f"to `{callee}` argv — argument-injection risk "
+                        "(a tainted element may carry a command line under "
+                        "sh -c or a dangerous flag like --upload-pack)"
+                    )
+                else:
+                    detail = (
+                        "as part of a query/command string — interpolate "
+                        "parameters instead of concatenating"
+                    )
                 issues.append(
                     ForeignSafetyIssue(
                         function_name=function_name,
                         message=(
-                            f"{label} function `{function_name}` passes {hit} "
-                            "as part of a query/command string — interpolate "
-                            "parameters instead of concatenating"
+                            f"{label} function `{function_name}` passes "
+                            f"{hit} {detail}"
                         ),
                         confidence="medium",
                     )
@@ -2818,6 +3089,14 @@ def _taint_lite_issues(
             hit = dirty_names(
                 dirty_view(statement, _TAINT_DOM_SAFE_RE), tainted_dom
             )
+            if hit is None:
+                callee_hit = _taint_call_name(
+                    dirty_view(statement, _TAINT_DOM_SAFE_RE),
+                    tainted_fns_dom,
+                    caller_name,
+                )
+                if callee_hit is not None:
+                    hit = f"`{callee_hit}()` (returns request-derived data)"
             if hit is not None:
                 issues.append(
                     ForeignSafetyIssue(
@@ -2838,11 +3117,20 @@ def _python_function_source_segments(source: str) -> list[tuple[str, str]]:
     except SyntaxError:
         return []
     segments: list[tuple[str, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            segment = ast.get_source_segment(source, node)
-            if segment is not None:
-                segments.append((node.name, segment))
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                segment = ast.get_source_segment(source, child)
+                if segment is not None:
+                    segments.append((prefix + child.name, segment))
+                visit(child, prefix + child.name + ".")
+            elif isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".")
+            else:
+                visit(child, prefix)
+
+    visit(tree, "")
     return segments
 
 
@@ -2850,21 +3138,68 @@ def _taint_lite_source_issues(
     source: str, ctx: PatternContext
 ) -> list[ForeignSafetyIssue]:
     issues: list[ForeignSafetyIssue] = []
+    bodies: list[tuple[str, str, str]] = []
     if ctx.language == "python":
         for name, segment in _python_function_source_segments(source):
-            issues.extend(
-                _taint_lite_issues(
-                    name, _strip_python_comments(segment), "Python"
+            bodies.append(
+                (
+                    name,
+                    _mask_python_nested_defs(
+                        _strip_python_comments(segment)
+                    ),
+                    "Python",
                 )
             )
     elif ctx.language == "typescript":
         for name, raw_body in _typescript_function_blocks(source):
-            body = _mask_nested_function_literals(raw_body, "typescript")
-            issues.extend(_taint_lite_issues(name, body, "TypeScript"))
+            bodies.append(
+                (
+                    name,
+                    _mask_nested_function_literals(raw_body, "typescript"),
+                    "TypeScript",
+                )
+            )
     elif ctx.language == "go":
         for name, raw_body in _go_function_blocks(source):
-            body = _strip_go_rust_literals_and_comments(raw_body)
-            issues.extend(_taint_lite_issues(name, body, "Go"))
+            bodies.append(
+                (
+                    name,
+                    _strip_go_rust_literals_and_comments(raw_body),
+                    "Go",
+                )
+            )
+    # Intra-file one-level propagation: a function whose ``return`` is
+    # source-derived marks calls to it as tainted in every other body.
+    fns_sql: set[str] = set()
+    fns_dom: set[str] = set()
+    for name, body, label in bodies:
+        # A bare TypeScript arrow body (``(r) => r.query.x`` — a single
+        # expression with no braces, ``;``, or newline) is itself the
+        # return expression; block/void bodies use ``return``.
+        bare_expr = (
+            label == "TypeScript"
+            and not body.lstrip().startswith("{")
+            and ";" not in body
+            and "\n" not in body.strip()
+        )
+        ret_sql, ret_dom = _taint_return_channels(
+            body, bare_expr_is_return=bare_expr
+        )
+        if ret_sql:
+            fns_sql.add(name)
+        if ret_dom:
+            fns_dom.add(name)
+    for name, body, label in bodies:
+        issues.extend(
+            _taint_lite_issues(
+                name,
+                body,
+                label,
+                tainted_fns_sql=frozenset(fns_sql),
+                tainted_fns_dom=frozenset(fns_dom),
+                caller_name=name,
+            )
+        )
     return issues
 
 
@@ -2897,11 +3232,18 @@ _GO_LOCK_EVENT_RE = re.compile(
 
 
 def _go_unguarded_writes(
-    body: str, name_re: str, mutex_names: set[str]
+    body: str,
+    name_re: str,
+    mutex_names: set[str],
+    lock_recv: str | None = None,
 ):
     """Yield writes to ``name_re`` outside any ``Lock()…Unlock()`` window —
     the last lock event *on a declared mutex* before each write decides
-    whether it is held. ``RLock`` is shared and never protects a write."""
+    whether it is held. ``RLock`` is shared and never protects a write.
+
+    ``lock_recv`` scopes the association to a receiver: a write to
+    ``s.field`` is guarded by ``s.mu.Lock()`` or a bare package-level
+    ``mu.Lock()``, but not by ``other.mu.Lock()``."""
     events: list[tuple[int, str]] = []
     depth = 0
     depths: dict[int, int] = {}
@@ -2912,9 +3254,18 @@ def _go_unguarded_writes(
         elif ch == "}":
             depth = max(depth - 1, 0)
     for m in _GO_LOCK_EVENT_RE.finditer(body):
-        if m.group("recv").rsplit(".", 1)[-1] not in mutex_names:
+        recv = m.group("recv")
+        if recv.rsplit(".", 1)[-1] not in mutex_names:
             # ``other.Lock()`` guards a different mutex — it does not
             # protect this write.
+            continue
+        if (
+            lock_recv is not None
+            and "." in recv
+            and recv.rsplit(".", 1)[0] != lock_recv
+        ):
+            # ``other.mu.Lock()`` protects ``other``'s fields, not
+            # this receiver's.
             continue
         if depths.get(m.start(), 0) != 0:
             # A lock taken inside a conditional/loop body does not
@@ -3033,7 +3384,7 @@ def _go_shared_state_issues(
         check_package_writes(name, body)
 
         for field_write in _go_unguarded_writes(
-            body, re.escape(r), mutex_names
+            body, re.escape(r), mutex_names, lock_recv=r
         ):
             field = re.match(
                 rf"{re.escape(r)}\.([A-Za-z_]\w*)", field_write.group(0)

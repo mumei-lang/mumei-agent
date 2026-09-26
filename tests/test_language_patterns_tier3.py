@@ -646,3 +646,334 @@ def test_python_comment_source_not_tainted() -> None:
     )
     issues = _issues(source, "python")
     assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_return_taint_one_level_flags() -> None:
+    """A helper whose ``return`` is source-derived taints its callers'
+    assignment targets (intra-file, one level)."""
+    source = (
+        "def helper(request):\n"
+        "    return request.args['x']\n"
+        "\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_py_return_taint_clean_helper_skipped() -> None:
+    """A helper returning a constant does not taint its callers."""
+    source = (
+        "def helper(request):\n"
+        "    return 'x'\n"
+        "\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_return_taint_single_level_only() -> None:
+    """``g -> f -> source`` does not chain — one propagation level only."""
+    source = (
+        "def h0(request):\n"
+        "    return request.args['x']\n"
+        "def h1(request):\n"
+        "    return h0(request)\n"
+        "def handler(request):\n"
+        "    v = h1(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_go_exec_command_argv_taint_flags() -> None:
+    """``exec.Command(\"sh\", \"-c\", v)`` — untrusted argv flags, not just
+    the program name argument."""
+    source = (
+        'package x\nimport "os/exec"\n'
+        "func f(r *http.Request) {\n"
+        '    n := r.URL.Query().Get("x")\n'
+        '    exec.Command("sh", "-c", n)\n'
+        "}\n"
+    )
+    issues = _issues(source, "go")
+    assert any("argv" in i.message for i in issues)
+
+
+def test_go_strconv_itoa_sanitizes_sql() -> None:
+    """``strconv.Itoa`` coerces to numeric — the SQL channel clears."""
+    source = (
+        'package x\nimport "strconv"\n'
+        "func f(r *http.Request) {\n"
+        '    n, _ := strconv.Atoi(r.URL.Query().Get("x"))\n'
+        '    db.Query("SELECT * FROM t WHERE n=" + strconv.Itoa(n))\n'
+        "}\n"
+    )
+    issues = _issues(source, "go")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_go_other_receiver_mutex_not_guarding() -> None:
+    """``other.mu.Lock()`` protects ``other``'s fields, not ``s.hits``."""
+    source = """type A struct {
+    mu sync.Mutex
+}
+type S struct {
+    mu   sync.Mutex
+    hits int
+}
+func (s *S) bump(other *A) {
+    other.mu.Lock()
+    s.hits++
+    other.mu.Unlock()
+}
+"""
+    issues = _issues(source, "go")
+    assert any("`s.hits`" in i.message for i in issues)
+
+
+def test_go_own_receiver_mutex_guards() -> None:
+    """``s.mu.Lock()`` still guards ``s.hits`` writes."""
+    source = """type S struct {
+    mu   sync.Mutex
+    hits int
+}
+func (s *S) bump() {
+    s.mu.Lock()
+    s.hits++
+    s.mu.Unlock()
+}
+"""
+    issues = _issues(source, "go")
+    assert not any("`s.hits`" in i.message for i in issues)
+
+
+def test_ts_arrow_implicit_return_taints() -> None:
+    """``const helper = (req) => req.query.x`` — the bare expression is
+    the implicit return, so callers of ``helper`` are tainted."""
+    source = (
+        "const helper = (req) => req.query.x;\n"
+        "function handler(req) {\n"
+        "    const v = helper(req);\n"
+        "    db.query('SELECT * FROM t WHERE n=' + v);\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert any("query/command" in i.message for i in issues)
+
+
+def test_ts_arrow_clean_body_not_tainted() -> None:
+    """A bare arrow body returning a constant does not taint callers."""
+    source = (
+        "const helper = (req) => 'x';\n"
+        "function handler(req) {\n"
+        "    const v = helper(req);\n"
+        "    db.query('SELECT * FROM t WHERE n=' + v);\n"
+        "}\n"
+    )
+    issues = _issues(source, "typescript")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_return_inside_string_literal_ignored() -> None:
+    """A ``return`` appearing inside a triple-quoted string is not a real
+    return — ``helper`` actually returns a constant here."""
+    source = (
+        "def helper(request):\n"
+        '    doc = """\n'
+        "    return request.args\n"
+        '    """\n'
+        "    return 'x'\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    issues = _issues(source, "python")
+    assert not any("query/command" in i.message for i in issues)
+
+
+def test_py_dead_code_after_return_does_not_untaint() -> None:
+    """``x = int(x)`` after ``return x`` is dead code — it must not
+    clear the taint the return carried."""
+    source = (
+        "def helper(request):\n"
+        "    x = request.args['a']\n"
+        "    return x\n"
+        "    x = int(x)\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_dead_code_after_return_does_not_taint() -> None:
+    """A tainted assignment after ``return x`` must not mark the
+    function as returning tainted data."""
+    source = (
+        "def helper(request):\n"
+        "    x = 'safe'\n"
+        "    return x\n"
+        "    x = request.args['a']\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_multiline_return_tracked() -> None:
+    """``return (\\n    expr\\n)`` — the wrapped lines still carry taint."""
+    source = (
+        "def helper(request):\n"
+        "    return (\n"
+        "        request.args['a']\n"
+        "    )\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_nested_def_return_not_outers() -> None:
+    """A nested ``def``'s ``return`` belongs to the nested function."""
+    source = (
+        "def outer(request):\n"
+        "    def inner():\n"
+        "        return request.args['a']\n"
+        "    return 'x'\n"
+        "def handler(request):\n"
+        "    v = outer(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_ts_void_function_not_implicit_return() -> None:
+    """A ``function``-declared void body is not a bare arrow expression —
+    ``logger`` returns nothing, so callers of it stay clean."""
+    source = (
+        "function logger(req) {\n"
+        "    console.log(req.query.x);\n"
+        "}\n"
+        "function handler(req) {\n"
+        "    const v = logger(req);\n"
+        "    db.query('SELECT * FROM t WHERE n=' + v);\n"
+        "}\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "typescript"))
+
+
+def test_py_unrelated_dotted_callee_not_tainted() -> None:
+    """``settings.get()`` must not inherit ``R.get``'s return taint —
+    dotted callees match only exact names or ``self.``/``this.``."""
+    source = (
+        "class R:\n"
+        "    def get(self):\n"
+        "        return self.request.args['a']\n"
+        "def handler(request, settings):\n"
+        "    v = settings.get('k')\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_self_receiver_call_propagates() -> None:
+    """``self.helper()`` does propagate — the ``self.`` receiver is the
+    same-file method being registered."""
+    source = (
+        "class H:\n"
+        "    def helper(self):\n"
+        "        return self.request.args['a']\n"
+        "    def handler(self):\n"
+        "        v = self.helper()\n"
+        "        db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+# ---------------------------------------------------------------------------
+# Devin Review round 2 regressions
+# ---------------------------------------------------------------------------
+
+
+def test_py_assign_after_taint_no_newline_bleed() -> None:
+    """``value = 'safe'`` on the next line must not re-taint via the
+    assign regex bleeding past the literal-masked line — ``value``
+    stays clean, so the helper is not flagged."""
+    source = (
+        "def helper(request):\n"
+        "    x = request.args['a']\n"
+        "    value = 'safe'\n"
+        "    y = x\n"
+        "    return value\n"
+        "def handler(request):\n"
+        "    v = helper(request)\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_direct_tainted_call_in_sink_flags() -> None:
+    """``db.execute('..' + helper(request))`` — the tainted callee is a
+    sink argument itself, no intermediate assign needed."""
+    source = (
+        "def helper(request):\n"
+        "    return request.args['a']\n"
+        "def handler(request):\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + helper(request))\n"
+    )
+    issues = _issues(source, "python")
+    assert any("returns request-derived data" in i.message for i in issues)
+
+
+def test_py_cross_class_same_name_method_clean() -> None:
+    """``H.get`` returning a constant must not be poisoned by ``R.get``
+    returning tainted data — qualified ``Cls.method`` registration."""
+    source = (
+        "class R:\n"
+        "    def get(self):\n"
+        "        return self.request.args['a']\n"
+        "class H:\n"
+        "    def get(self):\n"
+        "        return 'clean'\n"
+        "    def handler(self):\n"
+        "        v = self.get()\n"
+        "        db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert not any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_py_nested_local_call_one_level_flags() -> None:
+    """``inner`` nested inside ``handler`` resolves to ``handler.inner``
+    — a same-scope call at one propagation level still taints."""
+    source = (
+        "def handler(request):\n"
+        "    def inner():\n"
+        "        return request.args['a']\n"
+        "    v = inner()\n"
+        "    db.execute('SELECT * FROM t WHERE n=' + v)\n"
+    )
+    assert any("query/command" in i.message for i in _issues(source, "python"))
+
+
+def test_go_exec_command_message_mentions_argv() -> None:
+    """The ``exec.Command`` message names argv injection, not a generic
+    'query string' — argv elements carry the command line under sh -c."""
+    source = (
+        "package x\n"
+        'import "os/exec"\n'
+        "func f(r *http.Request) {\n"
+        '    n := r.URL.Query().Get("x")\n'
+        '    exec.Command("echo", n)\n'
+        "}\n"
+    )
+    issues = _issues(source, "go")
+    assert any("argv" in i.message and "exec.Command" in i.message for i in issues)

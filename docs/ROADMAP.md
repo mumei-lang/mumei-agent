@@ -1756,6 +1756,18 @@ Phase 1 の残り — ✅ **完了**: 直接 `client.chat.completions.create` �
 - [mumei-lang/mumei `docs/ROADMAP.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/ROADMAP.md) — Compiler strategic roadmap
 - [mumei-lang/mumei `docs/REPORT_SCHEMA.md`](https://github.com/mumei-lang/mumei/blob/develop/docs/REPORT_SCHEMA.md) — report.json schema (consumed by agent)
 
+## 外部コード解析基盤（Layer B / language_patterns）の現状と将来選択肢 — 備考
+
+**現状**: tree-sitter（単一ファイル・構文レベルのみ）+ 正規表現フォールバック + Python のみ `ast` モジュールの3層。シンボルテーブル・型解決・alias / call-graph 解析は存在しない。そのため完全な taint 追跡や race/競合検出（P17 残課題: 同期プリミティブ保護下の共有可変状態への干渉推論）は現基盤では信頼度が下がり、現在は縮小版（`taint_lite` は同一ファイル内の代入追跡のみ、`go_shared_state` は宣言 mutex の存在ベース）として実装済み。
+
+**将来の選択肢（必要になった段階で判断）**:
+
+1. tree-sitter stack-graphs / SCIP・LSIF によるシンボル解決層の追加 — 自前実装で正確だが基盤構築コスト大。
+2. CodeQL / Semgrep 連携 — 解析を外部エンジンに委譲し mumei-agent が結果を取り込む。工数対効果で最も現実的。
+3. P17 の独自実装（干渉推論）— rely-guarantee / separation-logic 級の研究寄り項目。スコープを絞れば可能だが優先度は需要次第。
+
+層B の対応言語拡張（C/C++/Java）も同じく「必要な段階で判断」の次タスク候補として残置する。
+
 ## P-Deferred-A: heal コマンドの複数ファイル対応 — ✅ Implemented
 
 ### 実装完了サマリ
