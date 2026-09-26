@@ -449,3 +449,18 @@ def test_go_method_writes_package_var_flags() -> None:
     )
     issues = _issues(source, "go")
     assert any("package-level `counter`" in i.message for i in issues)
+
+
+def test_go_deferred_unlock_event_ordering() -> None:
+    """A deferred ``mu.Unlock()`` is evaluated at function end — a real
+    ``mu.Unlock()`` later in source must still release the write."""
+    source = _GO_COUNTER_FIXTURE % (
+        "func bump() {\n"
+        "    mu.Lock()\n"
+        "    defer mu.Unlock()\n"
+        "    mu.Unlock()\n"
+        "    counter++\n"
+        "}"
+    )
+    issues = _issues(source, "go")
+    assert any("package-level `counter`" in i.message for i in issues)

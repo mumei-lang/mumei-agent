@@ -2501,6 +2501,9 @@ def _go_unguarded_writes(body: str, name_re: str):
             events.append((len(body) + 1, kind))
         else:
             events.append((m.start(), kind))
+    # Deferred unlocks were moved to the end — restore position order so the
+    # "last event before the write" scan can break early correctly.
+    events.sort(key=lambda event: event[0])
     write_re = re.compile(_GO_WRITE_RE_TEMPLATE.replace("NAME", name_re))
     for write in write_re.finditer(body):
         held = False
