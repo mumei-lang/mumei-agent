@@ -100,6 +100,12 @@ Generate verified `.mm` code from a JSON specification with `uv run mumei-agent 
 | `health` | Show provider and binary health | `uv run mumei-agent health` |
 | `mcp-server` | Run the FastMCP server | `uv run mumei-agent mcp-server` |
 
+Pass `--clause-labels` to label existing `requires` clauses from issues whose JSON includes `required_contracts`; auto-detected issues do not carry these labels yet. This option needs a Mumei build with clause-label support (newer than 0.6.20).
+
+```sh
+uv run mumei-agent migrate-suggest --code-file src/divide.py --language python --issues-json '[{"kind":"postcondition_violated","location":"safe_divide","message":"divisor must be nonzero","required_contracts":["b != 0"]}]' --clause-labels
+```
+
 ## MCP Server
 
 `uv run mumei-agent mcp-server` exposes forge, heal, audit, health, and verification tools over stdio for Claude Code, Devin, Codex, and other MCP clients. The exported-tools table, `.mcp.json`, proof-friendly guidance, and fallback diagnostics are in [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md).

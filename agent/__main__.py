@@ -340,7 +340,7 @@ def main() -> None:
         parser.add_argument(
             "--clause-labels",
             action="store_true",
-            help="Emit requires clause labels; needs a mumei build with clause-label support (newer than 0.6.20)",
+            help="Emit requires clause labels from issues that carry required_contracts (pass them via --issues-json); needs a mumei build with clause-label support (newer than 0.6.20)",
         )
         args = parser.parse_args(argv[1:])
 
