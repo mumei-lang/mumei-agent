@@ -9,6 +9,7 @@ from typing import Iterable
 from agent.strategies.foreign_code_strategy import (
     ForeignCodeExtractor,
     ForeignCodeSpec,
+    _clean_contracts,
     to_mumei_atom,
 )
 
@@ -27,13 +28,21 @@ def suggest_migration(
     source_code: str,
     language: str,
     issues: list[dict],
+    *,
+    clause_labels: bool = False,
 ) -> MigrationHint:
     """Generate a .mm migration skeleton for a function with issues."""
     specs = ForeignCodeExtractor().extract(source_code, language)
     spec = _find_spec(function_name, specs)
     relevant_issues = _issues_for_function(function_name, issues)
     priority = _priority_for_issues(relevant_issues)
-    skeleton = _trusted_atom_to_atom(to_mumei_atom(spec))
+    if clause_labels:
+        requires_labels = _requires_labels_for_spec(spec, relevant_issues)
+        skeleton = _trusted_atom_to_atom(
+            to_mumei_atom(spec, requires_labels=requires_labels)
+        )
+    else:
+        skeleton = _trusted_atom_to_atom(to_mumei_atom(spec))
     reason = _reason_for_issues(relevant_issues)
     return MigrationHint(
         function_name=spec.function_name,
@@ -51,6 +60,8 @@ def suggest_migration_for_file(
     code_file: str,
     language: str,
     validation_result: dict,
+    *,
+    clause_labels: bool = False,
 ) -> list[MigrationHint]:
     """Generate migration hints for all functions with issues in a file."""
     source_path = Path(code_file).expanduser().resolve()
@@ -59,7 +70,13 @@ def suggest_migration_for_file(
     issues = _issue_dicts(validation_result.get("issues", []))
     function_names = _function_names_with_issues(specs, issues)
     return [
-        suggest_migration(name, source_code, language, issues)
+        suggest_migration(
+            name,
+            source_code,
+            language,
+            issues,
+            clause_labels=clause_labels,
+        )
         for name in function_names
     ]
 
@@ -80,6 +97,29 @@ def _find_spec(function_name: str, specs: list[ForeignCodeSpec]) -> ForeignCodeS
 
 def _trusted_atom_to_atom(skeleton: str) -> str:
     return skeleton.replace("trusted atom ", "atom ", 1)
+
+
+def _requires_labels_for_spec(
+    spec: ForeignCodeSpec,
+    issues: list[dict],
+) -> dict[str, str]:
+    preconditions = set(_clean_contracts(spec.preconditions))
+    labels: dict[str, str] = {}
+    for issue in issues:
+        required_contracts = issue.get("required_contracts")
+        if not isinstance(required_contracts, list) or any(
+            not isinstance(contract, str) for contract in required_contracts
+        ):
+            continue
+        label = issue.get("message")
+        if not isinstance(label, str) or not label.strip():
+            label = issue.get("kind")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        for contract in _clean_contracts(required_contracts):
+            if contract in preconditions:
+                labels.setdefault(contract, label)
+    return labels
 
 
 def _priority_for_issues(issues: list[dict]) -> str:

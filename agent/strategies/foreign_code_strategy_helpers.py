@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Mapping
 
 import z3
 
@@ -164,7 +164,10 @@ def _clause_references_undeclared_helper(clause: str, declared: set[str]) -> boo
     return False
 
 
-def to_mumei_atom(spec: ForeignCodeSpec) -> str:
+def to_mumei_atom(
+    spec: ForeignCodeSpec,
+    requires_labels: Mapping[str, str] | None = None,
+) -> str:
     """Convert a foreign-code contract into Mumei atom syntax."""
     params = ", ".join(
         f"{_safe_identifier(name)}: {_mumei_type(type_name)}"
@@ -177,6 +180,26 @@ def to_mumei_atom(spec: ForeignCodeSpec) -> str:
         # Named string types (e.g. backendplugin.Target) return string literals.
         return_type = "string"
     requires = _join_contracts(spec.preconditions)
+    if requires_labels:
+        cleaned_preconditions = _clean_contracts(spec.preconditions)
+        if cleaned_preconditions:
+            requires_lines = []
+            for clause in cleaned_preconditions:
+                label = requires_labels.get(clause)
+                if isinstance(label, str):
+                    normalized_label = re.sub(r"\s+", " ", label).strip()
+                    escaped_label = (
+                        normalized_label.replace("\\", "\\\\").replace('"', '\\"')
+                    )
+                    requires_lines.append(
+                        f'    requires "{escaped_label}": {clause};'
+                    )
+                else:
+                    requires_lines.append(f"    requires: {clause};")
+        else:
+            requires_lines = ["    requires: true;"]
+    else:
+        requires_lines = [f"    requires: {requires};"]
     declared = {
         _safe_identifier(spec.function_name),
         *(_safe_identifier(name) for name in spec.params),
@@ -191,7 +214,7 @@ def to_mumei_atom(spec: ForeignCodeSpec) -> str:
     return "\n".join(
         [
             f"trusted atom {_safe_identifier(spec.function_name)}({params}) -> {return_type} {{",
-            f"    requires: {requires};",
+            *requires_lines,
             f"    ensures: {ensures};",
             "    body: {",
             f"        {default_value}",
@@ -335,8 +358,11 @@ def _strip_contract_marker(line: str, marker: str) -> str:
     value = value.lstrip(":").strip().rstrip(".")
     return value or "true"
 
+def _clean_contracts(contracts: Iterable[str]) -> list[str]:
+    return [contract.strip().rstrip(";") for contract in contracts if contract.strip()]
+
 def _join_contracts(contracts: list[str]) -> str:
-    cleaned = [contract.strip().rstrip(";") for contract in contracts if contract.strip()]
+    cleaned = _clean_contracts(contracts)
     return " && ".join(cleaned) if cleaned else "true"
 
 def _python_type_name(type_name: str) -> str:

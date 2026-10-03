@@ -337,6 +337,11 @@ def main() -> None:
         )
         parser.add_argument("--issues-json", default="[]", help="JSON issues array.")
         parser.add_argument("--output", help="Optional output directory for .mm skeletons.")
+        parser.add_argument(
+            "--clause-labels",
+            action="store_true",
+            help="Emit requires clause labels; needs a mumei build with clause-label support (newer than 0.6.20)",
+        )
         args = parser.parse_args(argv[1:])
 
         code_path = Path(args.code_file).expanduser().resolve()
@@ -359,7 +364,12 @@ def main() -> None:
                 run_mumei=False,
             )
             validation_result = asdict(validation)
-        hints = suggest_migration_for_file(str(code_path), args.language, validation_result)
+        hints = suggest_migration_for_file(
+            str(code_path),
+            args.language,
+            validation_result,
+            clause_labels=args.clause_labels,
+        )
         if args.output:
             output_dir = Path(args.output).expanduser().resolve()
             output_dir.mkdir(parents=True, exist_ok=True)

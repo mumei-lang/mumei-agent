@@ -30,6 +30,7 @@ from agent.strategies.foreign_code_strategy_helpers import (
     _clean_go_doc,
     _clean_jsdoc,
     _clean_rust_doc,
+    _clean_contracts,
     _contract_lines,
     _contracts_cover_issue,
     _default_literal,
