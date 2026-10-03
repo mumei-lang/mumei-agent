@@ -9,7 +9,10 @@ from typing import Literal, Sequence
 
 from agent.audit_models import AuditDirectoryResult, AuditResult
 from agent.cross_validation_models import ForeignCodeVerdict
-from agent.prompts.report_formatter import format_counterexample
+from agent.prompts.report_formatter import (
+    format_counterexample,
+    format_violated_ensures_clause,
+)
 from agent.report_formatter import format_result_report
 from agent.spec_ambiguity import SpecAmbiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport
@@ -250,6 +253,9 @@ def _verification_issue_strings(result: dict[str, object]) -> list[str]:
         failed = report.get("failed")
         if status or failed is not None:
             issues.append(f"mumei verify failed: status={status or 'unknown'}, failed={failed}")
+        clause_issue = format_violated_ensures_clause(report)
+        if clause_issue:
+            issues.append(clause_issue)
         issues.extend(_diagnostic_strings(report))
         stderr = _string_value(verification.get("stderr"), "").strip()
         if stderr:

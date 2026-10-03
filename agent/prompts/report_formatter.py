@@ -1,6 +1,8 @@
 """Common formatting helpers for report.json structured fields."""
 from __future__ import annotations
 
+import json
+
 from agent.prompts.report_formatter_core import (
     _extract_constraint_set,
     _safe_dict,
@@ -59,6 +61,19 @@ def format_counterexample(report: dict) -> str:
         return ""
     pairs = ", ".join(f"{k}={v}" for k, v in ce.items())
     return f"Z3 Counter-example: {pairs}"
+
+
+def format_violated_ensures_clause(report: object) -> str:
+    """Format the optional failed ensures clause and label from a verify report."""
+    if not isinstance(report, dict):
+        return ""
+    clause = report.get("failed_clause")
+    if not isinstance(clause, str):
+        return ""
+    label = report.get("failed_clause_label")
+    if isinstance(label, str):
+        return f"Violated ensures clause {json.dumps(label)}: {clause}"
+    return f"Violated ensures clause: {clause}"
 
 
 def format_violated_constraints(report: dict) -> str:
@@ -323,6 +338,12 @@ def format_actionable_fix_hint(report: dict) -> str:
                 "The `ensures` clause is not satisfied by the function body's return value. "
                 "Fix the body or adjust `ensures`."
             )
+        clause_hint = format_violated_ensures_clause(report)
+        if clause_hint:
+            lines.append(clause_hint)
+        outcome_hint = _format_ensures_outcome_hint(report)
+        if outcome_hint:
+            lines.append(outcome_hint)
 
     # --- temporal_effect_violated ---
     elif failure_type == "temporal_effect_violated":
@@ -400,6 +421,28 @@ def format_actionable_fix_hint(report: dict) -> str:
             lines.append("Verification failed. Review the error log and fix the code.")
 
     return "\n".join(lines)
+
+
+def _format_ensures_outcome_hint(report: dict) -> str:
+    failed_clause = report.get("failed_clause")
+    outcomes = report.get("ensures_outcomes")
+    if not isinstance(failed_clause, str) or not isinstance(outcomes, list):
+        return ""
+    for entry in outcomes:
+        if not isinstance(entry, dict) or entry.get("clause") != failed_clause:
+            continue
+        outcome = entry.get("outcome")
+        if outcome == "always_false":
+            return (
+                "This clause is false for every input that satisfies requires — "
+                "the specification or the body is likely wrong."
+            )
+        if outcome == "fails_on_some_inputs":
+            return (
+                "This clause holds for some inputs but not all — look for a "
+                "missing case in the body or a missing requires."
+            )
+    return ""
 
 
 def format_for_initial_generate(spec: dict) -> str:

@@ -919,6 +919,34 @@ def test_verification_issue_strings_keeps_real_failure() -> None:
     assert any("status=refuted" in issue for issue in issues)
 
 
+def test_verification_issue_strings_includes_failed_ensures_clause() -> None:
+    result = {
+        "success": False,
+        "errors": ["mumei verify failed"],
+        "verification": {
+            "success": False,
+            "report": {
+                "status": "refuted",
+                "failed": ["calc_mem_size_64"],
+                "failed_clause": "result > x",
+                "failed_clause_label": 'result "must grow"',
+            },
+        },
+    }
+
+    issues = _verification_issue_strings(result)
+
+    failure_index = next(
+        index for index, issue in enumerate(issues) if "status=refuted" in issue
+    )
+    clause_index = next(
+        index
+        for index, issue in enumerate(issues)
+        if issue == 'Violated ensures clause "result \\"must grow\\"": result > x'
+    )
+    assert clause_index > failure_index
+
+
 def test_verification_issue_strings_keeps_top_level_counterexample() -> None:
     """A top-level (safety-check) counterexample is a genuine failure even
     when the verify report status is `trusted`, so it must not be suppressed
