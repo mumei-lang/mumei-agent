@@ -21,6 +21,7 @@ Time-series summary of proliferate LLM benchmark runs. The generation table is k
 | 2026-09-28 | qwen3.5:4b | 0.333 | 368.7 | 788.356 |
 | 2026-10-05 | qwen3.5:4b | 0.667 | 229.7 | 388.138 |
 | 2026-10-12 | qwen3.5:4b | 0.333 | 266.7 | 404.619 |
+| 2026-10-19 | qwen3.5:4b | 0.333 | 359.7 | 933.799 |
 
 ## SV-COMP Style Benchmarks
 
