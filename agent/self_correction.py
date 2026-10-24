@@ -180,6 +180,7 @@ class StructuredFeedbackSelfCorrectionLoop:
         token_cost = 0
         final_error: str | None = None
         loop_result: SelfCorrectionLoopResult | None = None
+        last_charter_failure = False
 
         def stop_if_charter_tampered() -> list[str]:
             if self.guard is None:
@@ -235,6 +236,7 @@ class StructuredFeedbackSelfCorrectionLoop:
             report = _report_dict(result.get("report"))
             current_feedback = _structured_feedback(report) or current_feedback
             success = bool(result.get("success")) and _reconstruction_loss_empty(report, current_feedback)
+            last_charter_failure = False
             tampered_paths: list[str] = []
             if success and self.guard is not None:
                 outcome = self.guard.check(self.mumei_client, str(path))
@@ -256,6 +258,7 @@ class StructuredFeedbackSelfCorrectionLoop:
                         "charter_report": outcome.report,
                         "structured_feedback": current_feedback,
                     }
+                    last_charter_failure = True
                     result = dict(result)
                     result["success"] = False
                     result["stderr"] = outcome.summary
@@ -357,6 +360,7 @@ class StructuredFeedbackSelfCorrectionLoop:
                 )
                 break
             path.write_text(fixed, encoding="utf-8")
+            last_charter_failure = False
             tampered_paths = stop_if_charter_tampered()
             if tampered_paths:
                 iterations[-1].stop_reason = "charter_tampered"
@@ -384,6 +388,15 @@ class StructuredFeedbackSelfCorrectionLoop:
                 "max_retries_reached",
                 final_error,
             )
+        if (
+            self.guard is not None
+            and original_source is not None
+            and not loop_result.converged
+            and loop_result.stop_reason != "charter_tampered"
+            and last_charter_failure
+        ):
+            path.write_bytes(original_source)
+            print(f"Final candidate failed charter check; source restored from {path}")
         try:
             _loop_span.set_attribute("mumei.loop.final_success", loop_result.converged)  # type: ignore[union-attr]
             _loop_span.set_attribute("mumei.loop.stop_reason", loop_result.stop_reason or "unknown")  # type: ignore[union-attr]
@@ -452,6 +465,13 @@ def build_self_correct_parser(
         help="Path to structured feedback JSON, or an inline JSON object.",
     )
     parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument(
+        "--charter-lock",
+        type=str,
+        default=None,
+        metavar="LOCK_JSON",
+        help="Use this charter lock instead of discovering one from the source tree.",
+    )
     parser.add_argument("--metadata-output", help="Write self-correction metadata JSON")
     parser.add_argument(
         "--proof-cert-out",
@@ -474,11 +494,27 @@ def main_self_correct(
     if not source:
         raise SystemExit("--source or source_file is required")
     config = AgentConfig()
+    charter_guard = None
+    if config.enable_charter_guard:
+        lock_arg = (
+            getattr(args, "charter_lock", None)
+            if getattr(args, "charter_lock", None) is not None
+            else config.charter_lock_path
+        )
+        try:
+            charter_guard = CharterGuard.discover(source, lock_arg)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            raise SystemExit(2) from exc
+        if charter_guard is not None and charter_guard.is_charter_file(source):
+            print("refusing to heal a pinned charter file")
+            raise SystemExit(2)
     if args.feedback:
         result = run_self_correction_loop(
             source_path=source,
             structured_feedback=args.feedback,
             config=config,
+            guard=charter_guard,
         )
         payload = result.to_dict()
     else:
@@ -488,7 +524,7 @@ def main_self_correct(
             convergence_threshold=float(config.self_correction_convergence_threshold),
         )
         llm_client = fix_strategy.ConfiguredLossVectorFixClient(config, mumei_client)
-        result = loop.run(Path(source), mumei_client, llm_client)
+        result = loop.run(Path(source), mumei_client, llm_client, guard=charter_guard)
         payload = result.to_dict()
     if args.metadata_output:
         Path(args.metadata_output).write_text(

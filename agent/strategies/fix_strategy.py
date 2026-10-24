@@ -11,6 +11,7 @@ from pathlib import Path
 
 from openai import OpenAI
 from agent.budget_policy import BudgetPolicy, evaluate_budget
+from agent.charter_guard import CharterGuard
 from agent.config import AgentConfig
 from agent.llm_provider import LLMProvider, complete_response
 from agent.metrics import Metrics
@@ -91,15 +92,111 @@ class SelfCorrectionLoop:
         self.max_iterations = max(1, min(max_iterations, 10))
         self.convergence_threshold = convergence_threshold
 
-    def run(self, code_file: Path, mumei_client, llm_client) -> SelfCorrectionResult:
+    def run(
+        self,
+        code_file: Path,
+        mumei_client,
+        llm_client,
+        *,
+        guard: CharterGuard | None = None,
+    ) -> SelfCorrectionResult:
         path = Path(code_file)
+        source_existed = path.exists()
+        original_source = path.read_bytes() if guard is not None and source_existed else None
         history: list[dict[str, object]] = []
         last_loss_vector: dict | None = None
         repair_attempts = 0
+        last_charter_failure = False
+
+        def restore_source() -> None:
+            if original_source is not None:
+                path.write_bytes(original_source)
+            elif guard is not None and not source_existed:
+                path.unlink(missing_ok=True)
+
+        def stop_if_charter_tampered() -> bool:
+            if guard is None:
+                return False
+            changed_paths = guard.tampered()
+            if not changed_paths:
+                return False
+            restore_source()
+            print(
+                "Charter files or lock changed during self-correction: "
+                + ", ".join(changed_paths)
+            )
+            print(f"Source restored from {path}")
+            return True
+
+        def finish(result: SelfCorrectionResult) -> SelfCorrectionResult:
+            if (
+                guard is not None
+                and not result.success
+                and result.stop_reason != "charter_tampered"
+                and last_charter_failure
+            ):
+                restore_source()
+                print(f"Final candidate failed charter check; source restored from {path}")
+            return result
 
         for iteration in range(1, self.max_iterations + 1):
+            if stop_if_charter_tampered():
+                return finish(SelfCorrectionResult(
+                    success=False,
+                    iterations=iteration - 1,
+                    stop_reason="charter_tampered",
+                    loss_vector=last_loss_vector,
+                    history=history,
+                    repair_attempts=repair_attempts,
+                ))
             verify_result = mumei_client.verify(str(path))
             all_verified = self._all_verified(verify_result)
+            last_charter_failure = False
+            if all_verified and guard is not None:
+                outcome = guard.check(mumei_client, str(path))
+                if stop_if_charter_tampered():
+                    return finish(SelfCorrectionResult(
+                        success=False,
+                        iterations=iteration,
+                        stop_reason="charter_tampered",
+                        loss_vector=last_loss_vector,
+                        history=history,
+                        repair_attempts=repair_attempts,
+                    ))
+                if not outcome.passed:
+                    last_charter_failure = True
+                    all_verified = False
+                    charter_feedback = {
+                        "status": "verification_failed",
+                        "error_type": "charter_violation",
+                        "location": None,
+                        "reconstruction_loss": {
+                            "loss_set_size": 1,
+                            "is_zero_loss": False,
+                            "loss_vector": [
+                                {
+                                    "violated_property": "pinned charter",
+                                    "counter_example": None,
+                                }
+                            ],
+                        },
+                        "feedback_instruction": outcome.summary,
+                    }
+                    verify_result = dict(verify_result)
+                    verify_result.update({
+                        "all_verified": False,
+                        "success": False,
+                        "stderr": outcome.summary,
+                        "loss_vector": charter_feedback,
+                        "report": {
+                            "status": "charter_failed",
+                            "failure_type": "charter_violation",
+                            "reason": outcome.summary,
+                            "charter_report": outcome.report,
+                            "loss_vector": charter_feedback,
+                            "structured_feedback": charter_feedback,
+                        },
+                    })
             loss_vector = self._loss_vector(verify_result)
             last_loss_vector = loss_vector
             history.append(
@@ -110,43 +207,53 @@ class SelfCorrectionLoop:
                 }
             )
             if all_verified:
-                return SelfCorrectionResult(
+                return finish(SelfCorrectionResult(
                     success=True,
                     iterations=iteration,
                     stop_reason="all_verified",
                     loss_vector=loss_vector,
                     history=history,
                     repair_attempts=repair_attempts,
-                )
+                ))
             if loss_vector is None:
-                return SelfCorrectionResult(
+                return finish(SelfCorrectionResult(
                     success=False,
                     iterations=iteration,
                     stop_reason="loss_vector_missing",
                     history=history,
                     repair_attempts=repair_attempts,
-                )
+                ))
             fix = llm_client.fix_with_loss_vector(path, loss_vector)
             if not fix:
-                return SelfCorrectionResult(
+                return finish(SelfCorrectionResult(
                     success=False,
                     iterations=iteration,
                     stop_reason="no_fix_produced",
                     loss_vector=loss_vector,
                     history=history,
                     repair_attempts=repair_attempts,
-                )
+                ))
             path.write_text(fix, encoding="utf-8")
             repair_attempts += 1
+            last_charter_failure = False
+            if stop_if_charter_tampered():
+                return finish(SelfCorrectionResult(
+                    success=False,
+                    iterations=iteration,
+                    stop_reason="charter_tampered",
+                    loss_vector=last_loss_vector,
+                    history=history,
+                    repair_attempts=repair_attempts,
+                ))
 
-        return SelfCorrectionResult(
+        return finish(SelfCorrectionResult(
             success=False,
             iterations=self.max_iterations,
             stop_reason="max_iterations",
             loss_vector=last_loss_vector,
             history=history,
             repair_attempts=repair_attempts,
-        )
+        ))
 
     @staticmethod
     def _all_verified(verify_result: dict) -> bool:

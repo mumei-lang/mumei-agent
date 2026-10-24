@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from agent import telemetry
 from agent.budget_policy import BudgetPolicy, classify_action_class, compute_policy_fingerprint, evaluate_budget
+from agent.charter_guard import CharterGuard
 from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient, create_mumei_client
@@ -78,6 +79,7 @@ class SelfCorrectionStrategy:
         min_success_rate: float = 0.25,
         budget_policy: BudgetPolicy | None = None,
         metrics: Metrics | None = None,
+        guard: CharterGuard | None = None,
     ) -> None:
         self.client = client
         self.model = model
@@ -91,6 +93,7 @@ class SelfCorrectionStrategy:
             max_tokens=max_tokens,
         )
         self.metrics = metrics or Metrics()
+        self.guard = guard
 
     def run(
         self,
@@ -121,6 +124,37 @@ class SelfCorrectionStrategy:
         generate_fn: GenerateFn | None = None,
     ) -> SelfCorrectionResult:
         path = Path(source_path)
+        source_existed = path.exists()
+        original_source = path.read_bytes() if self.guard is not None and source_existed else None
+
+        def restore_source() -> None:
+            if original_source is not None:
+                path.write_bytes(original_source)
+            elif self.guard is not None and not source_existed:
+                path.unlink(missing_ok=True)
+
+        def stop_if_charter_tampered() -> bool:
+            if self.guard is None:
+                return False
+            changed_paths = self.guard.tampered()
+            if not changed_paths:
+                return False
+            restore_source()
+            print(
+                "Charter files or lock changed during self-correction strategy: "
+                + ", ".join(changed_paths)
+            )
+            print(f"Source restored from {path}")
+            return True
+
+        if stop_if_charter_tampered():
+            return SelfCorrectionResult(
+                converged=False,
+                repair_attempts=0,
+                consecutive_successes=0,
+                total_tokens=0,
+                stop_reason="charter_tampered",
+            )
         if spec is not None and not path.exists():
             generator = generate_fn or self._default_generate
             generated, _verified = generator(
@@ -132,6 +166,14 @@ class SelfCorrectionStrategy:
             )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(generated, encoding="utf-8")
+            if stop_if_charter_tampered():
+                return SelfCorrectionResult(
+                    converged=False,
+                    repair_attempts=0,
+                    consecutive_successes=0,
+                    total_tokens=0,
+                    stop_reason="charter_tampered",
+                )
 
         history = RetryHistory()
         iterations: list[SelfCorrectionIteration] = []
@@ -139,13 +181,90 @@ class SelfCorrectionStrategy:
         total_tokens = 0
         final_error: str | None = None
         loop_result: SelfCorrectionResult | None = None
+        last_charter_failure = False
 
         for iteration in range(1, self.max_repairs + self.required_successes + 1):
+            if stop_if_charter_tampered():
+                if iterations:
+                    iterations[-1].stop_reason = "charter_tampered"
+                loop_result = SelfCorrectionResult(
+                    converged=False,
+                    repair_attempts=len(history.attempts),
+                    consecutive_successes=consecutive_successes,
+                    total_tokens=total_tokens,
+                    iterations=iterations,
+                    stop_reason="charter_tampered",
+                    final_error="charter_tampered",
+                )
+                break
             result = self.mumei_client.verify(str(path))
             report = dict(result.get("report") or {})
             verification_result = self._verification_result(result, report)
             loss_empty = self._reconstruction_loss_empty(report)
             success = verification_result in {Z3CheckResult.UNSAT.value, Z3CheckResult.LEAN_VERIFIED.value} and loss_empty
+            last_charter_failure = False
+            if success and self.guard is not None:
+                outcome = self.guard.check(self.mumei_client, str(path))
+                if stop_if_charter_tampered():
+                    iterations.append(
+                        SelfCorrectionIteration(
+                            iteration=iteration,
+                            verification_result=verification_result,
+                            success=False,
+                            consecutive_successes=0,
+                            repair_attempts=len(history.attempts),
+                            reconstruction_loss_empty=loss_empty,
+                            counterexample=self._counterexample(report),
+                            stop_reason="charter_tampered",
+                        )
+                    )
+                    loop_result = SelfCorrectionResult(
+                        converged=False,
+                        repair_attempts=len(history.attempts),
+                        consecutive_successes=consecutive_successes,
+                        total_tokens=total_tokens,
+                        iterations=iterations,
+                        final_error="charter_tampered",
+                        stop_reason="charter_tampered",
+                    )
+                    break
+                if outcome.passed:
+                    last_charter_failure = False
+                else:
+                    last_charter_failure = True
+                    success = False
+                    verification_result = "charter_violation"
+                    loss_empty = False
+                    charter_feedback = {
+                        "status": "verification_failed",
+                        "error_type": "charter_violation",
+                        "location": None,
+                        "reconstruction_loss": {
+                            "loss_set_size": 1,
+                            "is_zero_loss": False,
+                            "loss_vector": [
+                                {
+                                    "violated_property": "pinned charter",
+                                    "counter_example": None,
+                                }
+                            ],
+                        },
+                        "feedback_instruction": outcome.summary,
+                    }
+                    report.update({
+                        "status": "charter_failed",
+                        "failure_type": "charter_violation",
+                        "reason": outcome.summary,
+                        "charter_report": outcome.report,
+                        "loss_vector": charter_feedback,
+                        "structured_feedback": charter_feedback,
+                    })
+                    result = dict(result)
+                    result["success"] = False
+                    result["stderr"] = outcome.summary
+                    result["report"] = report
+            elif not success:
+                last_charter_failure = False
             consecutive_successes = consecutive_successes + 1 if success else 0
 
             iterations.append(
@@ -233,6 +352,8 @@ class SelfCorrectionStrategy:
                 break
 
             path.write_text(fixed, encoding="utf-8")
+            tampered = stop_if_charter_tampered()
+            last_charter_failure = False
             history.add(
                 RetryAttempt(
                     attempt_number=len(history.attempts) + 1,
@@ -250,6 +371,18 @@ class SelfCorrectionStrategy:
             )
             iterations[-1].tokens_used = tokens
             iterations[-1].action_class = decision.action_class
+            if tampered:
+                iterations[-1].stop_reason = "charter_tampered"
+                loop_result = SelfCorrectionResult(
+                    converged=False,
+                    repair_attempts=len(history.attempts),
+                    consecutive_successes=consecutive_successes,
+                    total_tokens=total_tokens,
+                    iterations=iterations,
+                    final_error="charter_tampered",
+                    stop_reason="charter_tampered",
+                )
+                break
 
         if loop_result is None:
             loop_result = SelfCorrectionResult(
@@ -261,6 +394,15 @@ class SelfCorrectionStrategy:
                 final_error=final_error,
                 stop_reason=iterations[-1].stop_reason if iterations else "not_started",
             )
+        if (
+            self.guard is not None
+            and (original_source is not None or not source_existed)
+            and not loop_result.converged
+            and loop_result.stop_reason != "charter_tampered"
+            and last_charter_failure
+        ):
+            restore_source()
+            print(f"Final candidate failed charter check; source restored from {path}")
         try:
             _loop_span.set_attribute("mumei.loop.final_success", loop_result.converged)  # type: ignore[union-attr]
             _loop_span.set_attribute("mumei.loop.stop_reason", loop_result.stop_reason or "unknown")  # type: ignore[union-attr]

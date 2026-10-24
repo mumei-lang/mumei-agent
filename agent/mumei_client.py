@@ -294,13 +294,35 @@ class MumeiClient:
         cwd: str | Path | None = None,
     ) -> dict:
         """Run the pinned-charter check from the project directory."""
+        original_cwd = Path.cwd()
         root = (
             Path(cwd).expanduser().resolve()
             if cwd is not None
             else Path(lock_path).expanduser().resolve().parent
         )
+        command_prefix = list(self._cmd_prefix)
+        if command_prefix:
+            binary = command_prefix[0]
+            binary_path = Path(binary).expanduser()
+            if (
+                not Path(binary).is_absolute()
+                and (os.sep in binary or (os.altsep is not None and os.altsep in binary))
+            ):
+                command_prefix[0] = str((original_cwd / binary_path).resolve())
+            if (
+                Path(command_prefix[0]).name == "cargo"
+                and "run" in command_prefix
+                and "--manifest-path" not in command_prefix
+            ):
+                cargo_manifest = original_cwd / "Cargo.toml"
+                if cargo_manifest.is_file():
+                    run_index = command_prefix.index("run")
+                    command_prefix[run_index + 1:run_index + 1] = [
+                        "--manifest-path",
+                        str(cargo_manifest.resolve()),
+                    ]
         cmd = [
-            *self._cmd_prefix,
+            *command_prefix,
             "charter",
             "check",
             source_path,

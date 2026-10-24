@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.charter_guard import CharterGuard
 from agent.config import AgentConfig
 from agent.self_correction import StructuredFeedbackSelfCorrectionLoop
 from agent.strategies.fix_strategy import SelfCorrectionLoop
@@ -150,6 +151,108 @@ def test_loss_vector_self_correction_loop_gracefully_stops_without_loss_vector(
     assert result.iterations == 1
     assert result.stop_reason == "loss_vector_missing"
     assert len(llm.calls) == 0
+
+
+def _guarded_project(root: Path) -> tuple[Path, CharterGuard]:
+    source = root / "app.mm"
+    source.write_text("original source", encoding="utf-8")
+    charter = root / "app.charter.mm"
+    charter.write_text("pinned charter", encoding="utf-8")
+    lock = root / "charter.lock"
+    lock.write_text(
+        json.dumps(
+            {
+                "schema": "mumei.charter-lock/v1",
+                "charters": [{"path": charter.name}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    guard = CharterGuard.discover(str(source), str(lock))
+    assert guard is not None
+    return source, guard
+
+
+def _charter_check(passed: bool) -> dict:
+    return {
+        "exit_code": 0 if passed else 1,
+        "report": {"status": "pass" if passed else "fail", "atoms": []},
+        "stdout": "",
+        "stderr": "",
+    }
+
+
+def test_loss_vector_loop_retries_charter_failure_with_feedback(tmp_path: Path) -> None:
+    source, guard = _guarded_project(tmp_path)
+
+    class Client:
+        def __init__(self) -> None:
+            self.checks = [_charter_check(False), _charter_check(True)]
+
+        def verify(self, _source: str) -> dict:
+            return all_verified_result()
+
+        def charter_check(
+            self, _source: str, _lock: str, cwd: Path | None = None
+        ) -> dict:
+            return self.checks.pop(0)
+
+    llm = FakeLossVectorLLM(["repaired"])
+    result = SelfCorrectionLoop(max_iterations=2).run(
+        source,
+        Client(),
+        llm,
+        guard=guard,
+    )
+
+    assert result.success
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["loss_vector"]["error_type"] == "charter_violation"
+    assert "charter" in llm.calls[0]["loss_vector"]["feedback_instruction"]
+
+
+def test_loss_vector_loop_restores_final_charter_failure(tmp_path: Path) -> None:
+    source, guard = _guarded_project(tmp_path)
+    original_source = source.read_bytes()
+
+    class Client:
+        def __init__(self) -> None:
+            self.checks = [_charter_check(False), _charter_check(False)]
+
+        def verify(self, _source: str) -> dict:
+            return all_verified_result()
+
+        def charter_check(
+            self, _source: str, _lock: str, cwd: Path | None = None
+        ) -> dict:
+            return self.checks.pop(0)
+
+    result = SelfCorrectionLoop(max_iterations=2).run(
+        source,
+        Client(),
+        FakeLossVectorLLM(["first candidate", ""]),
+        guard=guard,
+    )
+
+    assert not result.success
+    assert source.read_bytes() == original_source
+
+
+def test_loss_vector_loop_keeps_final_verification_failure_candidate(
+    tmp_path: Path,
+) -> None:
+    source, guard = _guarded_project(tmp_path)
+    llm = FakeLossVectorLLM(["verification-failed candidate"])
+
+    result = SelfCorrectionLoop(max_iterations=1).run(
+        source,
+        FakeMumeiClient([loss_vector_result()]),
+        llm,
+        guard=guard,
+    )
+
+    assert not result.success
+    assert source.read_text(encoding="utf-8") == "verification-failed candidate"
 
 
 def test_self_correction_loop_converges_after_two_successes(tmp_path: Path) -> None:

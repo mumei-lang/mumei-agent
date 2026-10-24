@@ -198,3 +198,73 @@ def test_no_lock_does_not_call_charter_check(
 
     _configure(monkeypatch, tmp_path, Passing(), [str(source)])
     self_healing.main()
+
+
+def test_final_charter_failure_restores_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source, _charter, _lock = _make_project(tmp_path)
+    original_source = source.read_bytes()
+
+    class Client:
+        def verify(self, _source: str) -> dict:
+            return {"success": True, "report": {}, "stdout": "", "stderr": ""}
+
+        def charter_check(
+            self, _source: str, _lock: str, cwd: Path | None = None
+        ) -> dict:
+            return {
+                "exit_code": 1,
+                "report": {
+                    "status": "fail",
+                    "atoms": [{"name": "app", "status": "post_weakened"}],
+                },
+                "stdout": "",
+                "stderr": "",
+            }
+
+    _configure(
+        monkeypatch,
+        tmp_path,
+        Client(),
+        [str(source), "--max-retries", "1"],
+    )
+    monkeypatch.setenv("ENABLE_SELF_CORRECTION", "false")
+    monkeypatch.setattr(self_healing, "get_fix", lambda *_args, **_kwargs: "bad candidate")
+
+    with pytest.raises(SystemExit) as exc:
+        self_healing.main()
+
+    assert exc.value.code == 1
+    assert source.read_bytes() == original_source
+
+
+def test_final_verification_failure_keeps_classic_heal_restoration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source, _charter, _lock = _make_project(tmp_path)
+    original_source = source.read_bytes()
+
+    class Client:
+        def verify(self, _source: str) -> dict:
+            return {
+                "success": False,
+                "report": {"failure_type": "postcondition_violated"},
+                "stdout": "",
+                "stderr": "verification failed",
+            }
+
+    _configure(
+        monkeypatch,
+        tmp_path,
+        Client(),
+        [str(source), "--max-retries", "1"],
+    )
+    monkeypatch.setenv("ENABLE_SELF_CORRECTION", "false")
+    monkeypatch.setattr(self_healing, "get_fix", lambda *_args, **_kwargs: "bad candidate")
+
+    with pytest.raises(SystemExit) as exc:
+        self_healing.main()
+
+    assert exc.value.code == 1
+    assert source.read_bytes() == original_source

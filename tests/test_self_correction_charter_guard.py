@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from agent import self_correction
 from agent.charter_guard import CharterGuard
 from agent.self_correction import StructuredFeedbackSelfCorrectionLoop
 
@@ -154,3 +157,164 @@ def test_tampering_stops_self_correction_and_restores_source(tmp_path: Path) -> 
     assert not result.converged
     assert result.stop_reason == "charter_tampered"
     assert source.read_bytes() == original_source
+
+
+def test_final_charter_failure_restores_original_source(tmp_path: Path) -> None:
+    source, _charter, guard = _guarded_source(tmp_path)
+    original_source = source.read_bytes()
+    client = FakeClient(
+        [passed_result(), passed_result()],
+        [
+            {
+                "exit_code": 1,
+                "report": {
+                    "status": "fail",
+                    "atoms": [{"name": "app", "status": "post_weakened"}],
+                },
+                "stdout": "",
+                "stderr": "",
+            },
+            {
+                "exit_code": 1,
+                "report": {
+                    "status": "fail",
+                    "atoms": [{"name": "app", "status": "post_weakened"}],
+                },
+                "stdout": "",
+                "stderr": "",
+            },
+        ],
+    )
+    loop = StructuredFeedbackSelfCorrectionLoop(
+        SimpleNamespace(),
+        "model",
+        client,
+        max_retries=1,
+        convergence_threshold=1,
+        repair_fn=lambda *_args: "charter-invalid candidate",  # type: ignore[arg-type]
+        guard=guard,
+    )
+
+    result = loop.run(source, {"status": "verification_passed"})
+
+    assert not result.converged
+    assert source.read_bytes() == original_source
+
+
+def test_final_verification_failure_keeps_candidate_source(tmp_path: Path) -> None:
+    source, _charter, guard = _guarded_source(tmp_path)
+    client = FakeClient([failed_result(), failed_result()], [])
+    loop = StructuredFeedbackSelfCorrectionLoop(
+        SimpleNamespace(),
+        "model",
+        client,
+        max_retries=1,
+        convergence_threshold=1,
+        repair_fn=lambda *_args: "verification-failed candidate",  # type: ignore[arg-type]
+        guard=guard,
+    )
+
+    result = loop.run(source, failed_result()["report"]["structured_feedback"])
+
+    assert not result.converged
+    assert source.read_text(encoding="utf-8") == "verification-failed candidate"
+
+
+@pytest.mark.parametrize("feedback_mode", [False, True])
+def test_self_correct_cli_passes_guard_to_both_modes(
+    feedback_mode: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source, _charter, guard = _guarded_source(tmp_path)
+    captured_guards: list[CharterGuard | None] = []
+
+    class Result:
+        def to_dict(self) -> dict:
+            return {"success": True}
+
+    arguments = [str(source), "--charter-lock", str(guard.lock_path)]
+    if feedback_mode:
+        arguments.extend(["--feedback", '{"status":"verification_passed"}'])
+    args = self_correction.build_self_correct_parser().parse_args(arguments)
+    monkeypatch.setenv("ENABLE_CHARTER_GUARD", "true")
+    monkeypatch.setenv("CHARTER_LOCK_PATH", str(tmp_path / "unused.lock"))
+    monkeypatch.setattr(self_correction, "create_mumei_client", lambda _bin: object())
+
+    if feedback_mode:
+        def fake_run_loop(**kwargs: object) -> Result:
+            captured_guards.append(kwargs.get("guard"))  # type: ignore[arg-type]
+            return Result()
+
+        monkeypatch.setattr(self_correction, "run_self_correction_loop", fake_run_loop)
+    else:
+        class FakeLoop:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+            def run(self, *_args: object, guard: CharterGuard | None = None) -> Result:
+                captured_guards.append(guard)
+                return Result()
+
+        monkeypatch.setattr(self_correction.fix_strategy, "SelfCorrectionLoop", FakeLoop)
+
+    self_correction.main_self_correct(args)
+
+    assert captured_guards == [guard]
+
+
+def test_self_correct_cli_discovers_configured_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source, _charter, guard = _guarded_source(tmp_path)
+    captured_guards: list[CharterGuard | None] = []
+
+    class Result:
+        def to_dict(self) -> dict:
+            return {"success": True}
+
+    def fake_run_loop(**kwargs: object) -> Result:
+        captured_guards.append(kwargs.get("guard"))  # type: ignore[arg-type]
+        return Result()
+
+    args = self_correction.build_self_correct_parser().parse_args(
+        [str(source), "--feedback", '{"status":"verification_passed"}']
+    )
+    monkeypatch.setenv("ENABLE_CHARTER_GUARD", "true")
+    monkeypatch.setenv("CHARTER_LOCK_PATH", str(guard.lock_path))
+    monkeypatch.setattr(self_correction, "run_self_correction_loop", fake_run_loop)
+
+    self_correction.main_self_correct(args)
+
+    assert captured_guards == [guard]
+
+
+def test_self_correct_cli_refuses_pinned_charter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _source, charter, guard = _guarded_source(tmp_path)
+    args = self_correction.build_self_correct_parser().parse_args(
+        [str(charter), "--charter-lock", str(guard.lock_path)]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        self_correction.main_self_correct(args)
+
+    assert exc.value.code == 2
+    assert "refusing to heal a pinned charter file" in capsys.readouterr().out
+
+
+def test_self_correct_cli_rejects_bad_lock(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "app.mm"
+    source.write_text("source", encoding="utf-8")
+    lock = tmp_path / "bad.lock"
+    lock.write_text("{", encoding="utf-8")
+    args = self_correction.build_self_correct_parser().parse_args(
+        [str(source), "--charter-lock", str(lock)]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        self_correction.main_self_correct(args)
+
+    assert exc.value.code == 2
+    assert "could not parse charter lock" in capsys.readouterr().out
