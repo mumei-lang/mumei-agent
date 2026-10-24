@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from agent.mumei_client import MumeiClient
+from agent.mcp_client import MumeiMCPClient
 
 
 def test_verify_command_default():
@@ -17,6 +18,49 @@ def test_verify_command_default():
         assert call_args == ["mumei", "verify", "--json", "test.mm"]
         assert result["success"] is True
         assert result["report"]["status"] == "success"
+
+
+def test_charter_check_command_uses_lock_directory_as_cwd(tmp_path):
+    client = MumeiClient()
+    lock = tmp_path / "charter.lock"
+    source = tmp_path / "src" / "app.mm"
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"status":"pass","atoms":[]}',
+            stderr="",
+        )
+        result = client.charter_check(str(source), str(lock))
+        assert mock_run.call_args.args[0] == [
+            "mumei",
+            "charter",
+            "check",
+            str(source),
+            "--lock",
+            str(lock.resolve()),
+            "--json",
+        ]
+        assert mock_run.call_args.kwargs["cwd"] == tmp_path
+        assert result == {
+            "exit_code": 0,
+            "report": {"status": "pass", "atoms": []},
+            "stdout": '{"status":"pass","atoms":[]}',
+            "stderr": "",
+        }
+
+
+def test_mcp_client_forwards_charter_check_to_cli_fallback():
+    fallback = MagicMock()
+    fallback.charter_check.return_value = {
+        "exit_code": 0,
+        "report": {"status": "pass"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+    client = MumeiMCPClient(fallback_client=fallback)
+    result = client.charter_check("source.mm", "charter.lock")
+    fallback.charter_check.assert_called_once_with("source.mm", "charter.lock")
+    assert result["report"]["status"] == "pass"
 
 
 def test_verify_command_with_report_dir():

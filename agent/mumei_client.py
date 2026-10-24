@@ -110,6 +110,7 @@ class MumeiClient:
         span_name: str,
         source_path: str,
         command_label: str,
+        cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
         extra_attributes: dict[str, Any] | None = None,
     ) -> subprocess.CompletedProcess[str]:
@@ -125,6 +126,8 @@ class MumeiClient:
             run_kwargs: dict[str, Any] = {"capture_output": True, "text": True}
             if run_env is not None:
                 run_kwargs["env"] = run_env
+            if cwd is not None:
+                run_kwargs["cwd"] = cwd
             result = subprocess.run(cmd, **run_kwargs)
             duration_s = time.monotonic() - t0
             span.set_attribute("mumei.exit_code", result.returncode)
@@ -280,6 +283,39 @@ class MumeiClient:
         )
         return {
             "success": result.returncode == 0,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
+    def charter_check(self, source_path: str, lock_path: str) -> dict:
+        """Run the pinned-charter check from the lock's project directory."""
+        root = Path(lock_path).expanduser().resolve().parent
+        cmd = [
+            *self._cmd_prefix,
+            "charter",
+            "check",
+            source_path,
+            "--lock",
+            str(Path(lock_path).expanduser().resolve()),
+            "--json",
+        ]
+        result = self._run_command(
+            cmd,
+            span_name="mumei.charter.check",
+            source_path=source_path,
+            command_label="charter-check",
+            cwd=root,
+        )
+        report = None
+        try:
+            parsed = json.loads(result.stdout)
+            if isinstance(parsed, dict):
+                report = parsed
+        except json.JSONDecodeError:
+            pass
+        return {
+            "exit_code": result.returncode,
+            "report": report,
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
