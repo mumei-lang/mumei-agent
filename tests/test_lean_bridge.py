@@ -677,6 +677,14 @@ class TestRunLeanBridgeSubprocess:
 # ---------------------------------------------------------------------------
 
 
+def _merged_all_verified(atoms: list[dict]) -> bool:
+    upgraded = lean_bridge.merge_lean_cert_into_proof_cert(
+        {"atoms": atoms, "all_verified": False},
+        {"atoms": []},
+    )
+    return upgraded["all_verified"]
+
+
 class TestMergeLeanCert:
     def test_marks_proven_atom_as_lean_verified(self) -> None:
         original = {
@@ -760,6 +768,52 @@ class TestMergeLeanCert:
         module = upgraded["modules"]["std/foo.mm"]
         assert module["atoms"][0]["z3_check_result"] == "lean_verified"
         assert module["all_verified"] is True
+
+    def test_all_verified_counts_trusted_with_unsat_atoms(self) -> None:
+        assert _merged_all_verified(
+            [
+                {"name": "trusted", "z3_check_result": "skipped", "status": "trusted"},
+                {"name": "legacy", "z3_check_result": "unsat", "status": "verified"},
+            ]
+        )
+
+    def test_all_verified_rejects_unknown_with_trusted_atoms(self) -> None:
+        assert not _merged_all_verified(
+            [
+                {"name": "trusted", "z3_check_result": "skipped", "status": "trusted"},
+                {"name": "unknown", "z3_check_result": "unknown", "status": "unknown"},
+            ]
+        )
+
+    def test_all_verified_accepts_only_trusted_atoms(self) -> None:
+        assert _merged_all_verified(
+            [{"name": "trusted", "z3_check_result": "skipped", "status": "trusted"}]
+        )
+
+    def test_all_verified_accepts_legacy_unsat_verified_atoms(self) -> None:
+        assert _merged_all_verified(
+            [{"name": "legacy", "z3_check_result": "unsat", "status": "verified"}]
+        )
+
+    def test_all_verified_rejects_verified_status_with_skipped_z3_result(self) -> None:
+        assert not _merged_all_verified(
+            [{"name": "skipped", "z3_check_result": "skipped", "status": "verified"}]
+        )
+
+    def test_all_verified_counts_trusted_atoms_in_nested_modules(self) -> None:
+        original = {
+            "modules": {
+                "std/foo.mm": {
+                    "atoms": [
+                        {"name": "trusted", "z3_check_result": "skipped", "status": "trusted"},
+                        {"name": "legacy", "z3_check_result": "unsat", "status": "verified"},
+                    ],
+                    "all_verified": False,
+                }
+            }
+        }
+        upgraded = lean_bridge.merge_lean_cert_into_proof_cert(original, {"atoms": []})
+        assert upgraded["modules"]["std/foo.mm"]["all_verified"] is True
 
     def test_escalation_bundle_candidates_are_upgraded(self) -> None:
         original = {
