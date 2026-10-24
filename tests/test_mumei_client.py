@@ -99,6 +99,26 @@ def test_charter_check_preserves_existing_cargo_manifest_path(monkeypatch, tmp_p
         assert command.count("--manifest-path") == 1
 
 
+def test_charter_check_preserves_inline_cargo_manifest_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    client = MumeiClient("cargo run --manifest-path=/existing/Cargo.toml --")
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(tmp_path / "charter.lock"), cwd=tmp_path)
+        command = mock_run.call_args.args[0]
+        assert command[:4] == [
+            "cargo",
+            "run",
+            "--manifest-path=/existing/Cargo.toml",
+            "--",
+        ]
+        assert sum(
+            argument == "--manifest-path" or argument.startswith("--manifest-path=")
+            for argument in command
+        ) == 1
+
+
 def test_charter_check_keeps_plain_binary_prefix_unchanged(tmp_path):
     client = MumeiClient("mumei")
     with patch("agent.mumei_client.subprocess.run") as mock_run:

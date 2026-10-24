@@ -312,7 +312,11 @@ class MumeiClient:
             if (
                 Path(command_prefix[0]).name == "cargo"
                 and "run" in command_prefix
-                and "--manifest-path" not in command_prefix
+                and not any(
+                    argument == "--manifest-path"
+                    or argument.startswith("--manifest-path=")
+                    for argument in command_prefix
+                )
             ):
                 cargo_manifest = original_cwd / "Cargo.toml"
                 if cargo_manifest.is_file():

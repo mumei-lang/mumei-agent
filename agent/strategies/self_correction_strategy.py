@@ -11,7 +11,7 @@ from openai import OpenAI
 
 from agent import telemetry
 from agent.budget_policy import BudgetPolicy, classify_action_class, compute_policy_fingerprint, evaluate_budget
-from agent.charter_guard import CharterGuard
+from agent.charter_guard import CharterGuard, discover_guard_or_exit
 from agent.config import AgentConfig
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient, create_mumei_client
@@ -533,6 +533,13 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--max-repairs", type=int, default=10)
     parser.add_argument("--required-successes", type=int, default=None)
     parser.add_argument("--max-tokens", type=int, default=10000)
+    parser.add_argument(
+        "--charter-lock",
+        type=str,
+        default=None,
+        metavar="LOCK_JSON",
+        help="Use this charter lock instead of discovering one from the source tree.",
+    )
     return parser
 
 
@@ -540,6 +547,16 @@ def main(args: argparse.Namespace | None = None) -> SelfCorrectionResult:
     if args is None:
         args = build_parser().parse_args()
     config = AgentConfig()
+    lock_arg = (
+        getattr(args, "charter_lock", None)
+        if getattr(args, "charter_lock", None) is not None
+        else config.charter_lock_path
+    )
+    guard = discover_guard_or_exit(
+        args.source_file,
+        lock_arg,
+        enabled=config.enable_charter_guard,
+    )
     required_successes = (
         args.required_successes
         if args.required_successes is not None
@@ -552,6 +569,7 @@ def main(args: argparse.Namespace | None = None) -> SelfCorrectionResult:
         max_repairs=args.max_repairs or config.self_correction_max_attempts,
         required_successes=required_successes,
         max_tokens=args.max_tokens,
+        guard=guard,
     )
     spec = None
     if args.spec_file:

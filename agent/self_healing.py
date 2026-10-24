@@ -23,7 +23,7 @@ from agent.budget_policy import (
     load_budget_policy,
 )
 from agent.budget_metrics import aggregate_metrics
-from agent.charter_guard import CharterGuard
+from agent.charter_guard import discover_guard_or_exit
 from agent.config import AgentConfig
 from agent.meta_architect import MetaArchitect
 from agent.metrics import Metrics
@@ -301,21 +301,16 @@ def main() -> None:
     config = AgentConfig()
     if args.strategy is not None:
         config.strategy = args.strategy
-    charter_guard = None
-    if config.enable_charter_guard and args.generate is None:
-        lock_arg = (
-            args.charter_lock
-            if args.charter_lock is not None
-            else config.charter_lock_path
-        )
-        try:
-            charter_guard = CharterGuard.discover(source_file, lock_arg)
-        except ValueError as exc:
-            print(f"Error: {exc}")
-            sys.exit(2)
-        if charter_guard is not None and charter_guard.is_charter_file(source_file):
-            print("refusing to heal a pinned charter file")
-            sys.exit(2)
+    lock_arg = (
+        args.charter_lock
+        if args.charter_lock is not None
+        else config.charter_lock_path
+    )
+    charter_guard = discover_guard_or_exit(
+        source_file,
+        lock_arg,
+        enabled=config.enable_charter_guard and args.generate is None,
+    )
     client = config.create_client()
     # Use the factory so ``USE_MCP_CLIENT=true`` transparently routes
     # verification through the mumei MCP server when it's reachable,

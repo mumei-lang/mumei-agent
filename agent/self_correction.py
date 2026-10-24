@@ -12,7 +12,7 @@ from typing import Callable
 from openai import OpenAI
 
 from agent import telemetry
-from agent.charter_guard import CharterGuard
+from agent.charter_guard import CharterGuard, discover_guard_or_exit
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.strategies import fix_strategy
@@ -494,21 +494,16 @@ def main_self_correct(
     if not source:
         raise SystemExit("--source or source_file is required")
     config = AgentConfig()
-    charter_guard = None
-    if config.enable_charter_guard:
-        lock_arg = (
-            getattr(args, "charter_lock", None)
-            if getattr(args, "charter_lock", None) is not None
-            else config.charter_lock_path
-        )
-        try:
-            charter_guard = CharterGuard.discover(source, lock_arg)
-        except ValueError as exc:
-            print(f"Error: {exc}")
-            raise SystemExit(2) from exc
-        if charter_guard is not None and charter_guard.is_charter_file(source):
-            print("refusing to heal a pinned charter file")
-            raise SystemExit(2)
+    lock_arg = (
+        getattr(args, "charter_lock", None)
+        if getattr(args, "charter_lock", None) is not None
+        else config.charter_lock_path
+    )
+    charter_guard = discover_guard_or_exit(
+        source,
+        lock_arg,
+        enabled=config.enable_charter_guard,
+    )
     if args.feedback:
         result = run_self_correction_loop(
             source_path=source,

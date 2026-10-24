@@ -178,3 +178,22 @@ class CharterGuard:
             if output:
                 summary = f"{summary}: {output}"
         return CharterOutcome(False, summary, report)
+
+
+def discover_guard_or_exit(
+    source_file: str,
+    lock_arg: str | None = None,
+    *,
+    enabled: bool = True,
+) -> CharterGuard | None:
+    if not enabled:
+        return None
+    try:
+        guard = CharterGuard.discover(source_file, lock_arg)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        raise SystemExit(2) from exc
+    if guard is not None and guard.is_charter_file(source_file):
+        print("refusing to heal a pinned charter file")
+        raise SystemExit(2)
+    return guard
