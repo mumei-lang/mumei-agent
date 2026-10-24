@@ -339,11 +339,14 @@ def _upgrade_atoms_by_name(
         if isinstance(atoms, list):
             payload["all_verified"] = all(
                 isinstance(atom, dict)
-                and atom.get("z3_check_result")
-                in {
-                    Z3CheckResult.UNSAT.value,
-                    Z3CheckResult.LEAN_VERIFIED.value,
-                }
+                and (
+                    atom.get("status") == VerificationStatus.TRUSTED.value
+                    or atom.get("z3_check_result")
+                    in {
+                        Z3CheckResult.UNSAT.value,
+                        Z3CheckResult.LEAN_VERIFIED.value,
+                    }
+                )
                 for atom in atoms
             )
         modules = payload.get("modules")
