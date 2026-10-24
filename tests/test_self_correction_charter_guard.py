@@ -67,7 +67,9 @@ class FakeClient:
     def verify(self, _source: str) -> dict:
         return self.verifies.pop(0)
 
-    def charter_check(self, _source: str, _lock: str) -> dict:
+    def charter_check(
+        self, _source: str, _lock: str, cwd: Path | None = None
+    ) -> dict:
         return self.checks.pop(0)
 
 

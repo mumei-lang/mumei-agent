@@ -20,7 +20,7 @@ def test_verify_command_default():
         assert result["report"]["status"] == "success"
 
 
-def test_charter_check_command_uses_lock_directory_as_cwd(tmp_path):
+def test_charter_check_defaults_cwd_to_lock_directory(tmp_path):
     client = MumeiClient()
     lock = tmp_path / "charter.lock"
     source = tmp_path / "src" / "app.mm"
@@ -49,7 +49,17 @@ def test_charter_check_command_uses_lock_directory_as_cwd(tmp_path):
         }
 
 
-def test_mcp_client_forwards_charter_check_to_cli_fallback():
+def test_charter_check_accepts_project_root_cwd(tmp_path):
+    client = MumeiClient()
+    lock = tmp_path / "locks" / "charter.lock"
+    project_root = tmp_path / "project"
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(lock), cwd=project_root)
+        assert mock_run.call_args.kwargs["cwd"] == project_root.resolve()
+
+
+def test_mcp_client_forwards_charter_check_to_cli_fallback(tmp_path):
     fallback = MagicMock()
     fallback.charter_check.return_value = {
         "exit_code": 0,
@@ -58,8 +68,10 @@ def test_mcp_client_forwards_charter_check_to_cli_fallback():
         "stderr": "",
     }
     client = MumeiMCPClient(fallback_client=fallback)
-    result = client.charter_check("source.mm", "charter.lock")
-    fallback.charter_check.assert_called_once_with("source.mm", "charter.lock")
+    result = client.charter_check("source.mm", "charter.lock", cwd=tmp_path)
+    fallback.charter_check.assert_called_once_with(
+        "source.mm", "charter.lock", cwd=tmp_path
+    )
     assert result["report"]["status"] == "pass"
 
 

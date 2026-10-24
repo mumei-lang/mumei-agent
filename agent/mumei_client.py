@@ -287,9 +287,18 @@ class MumeiClient:
             "stderr": result.stderr,
         }
 
-    def charter_check(self, source_path: str, lock_path: str) -> dict:
-        """Run the pinned-charter check from the lock's project directory."""
-        root = Path(lock_path).expanduser().resolve().parent
+    def charter_check(
+        self,
+        source_path: str,
+        lock_path: str,
+        cwd: str | Path | None = None,
+    ) -> dict:
+        """Run the pinned-charter check from the project directory."""
+        root = (
+            Path(cwd).expanduser().resolve()
+            if cwd is not None
+            else Path(lock_path).expanduser().resolve().parent
+        )
         cmd = [
             *self._cmd_prefix,
             "charter",

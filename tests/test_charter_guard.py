@@ -46,14 +46,88 @@ def test_discover_uses_manifest_lock_path(tmp_path: Path) -> None:
     source = tmp_path / "src" / "app.mm"
     source.parent.mkdir()
     source.write_text("implementation", encoding="utf-8")
-    (tmp_path / "mumei.toml").write_text('[charter]\nlock = "locks/pin.json"\n', encoding="utf-8")
+    (tmp_path / "mumei.toml").write_text(
+        '[charter]\nlock = "locks/charter.lock"\n', encoding="utf-8"
+    )
     lock_dir = tmp_path / "locks"
-    lock = _make_lock(lock_dir)
-    selected_lock = lock_dir / "pin.json"
-    selected_lock.write_bytes(lock.read_bytes())
+    lock_dir.mkdir()
+    charter = tmp_path / "specs" / "core.charter.mm"
+    charter.parent.mkdir()
+    charter.write_text("trusted atom f() -> i64 body: 0;\n", encoding="utf-8")
+    selected_lock = lock_dir / "charter.lock"
+    selected_lock.write_text(
+        json.dumps(
+            {
+                "schema": "mumei.charter-lock/v1",
+                "charters": [{"path": "specs/core.charter.mm", "sha256": "ignored"}],
+            }
+        ),
+        encoding="utf-8",
+    )
     guard = CharterGuard.discover(str(source))
     assert guard is not None
     assert guard.lock_path == selected_lock.resolve()
+    assert guard.root == tmp_path.resolve()
+    assert str(charter.resolve()) in guard.snapshot
+
+    class FakeClient:
+        def charter_check(
+            self,
+            source_path: str,
+            lock_path: str,
+            cwd: Path | None = None,
+        ) -> dict:
+            assert cwd == tmp_path.resolve()
+            return {
+                "exit_code": 0,
+                "report": {"status": "pass"},
+                "stdout": "",
+                "stderr": "",
+            }
+
+    assert guard.check(FakeClient(), str(source)).passed
+    charter.write_text("changed charter", encoding="utf-8")
+    assert guard.tampered() == [str(charter.resolve())]
+
+
+def test_explicit_lock_uses_manifest_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "src" / "app.mm"
+    source.parent.mkdir(parents=True)
+    source.write_text("implementation", encoding="utf-8")
+    (project / "mumei.toml").write_text("[charter]\n", encoding="utf-8")
+    lock_dir = project / "locks"
+    lock_dir.mkdir()
+    charter = project / "specs" / "core.charter.mm"
+    charter.parent.mkdir()
+    charter.write_text("pinned", encoding="utf-8")
+    lock = lock_dir / "custom.lock"
+    lock.write_text(
+        json.dumps(
+            {
+                "schema": "mumei.charter-lock/v1",
+                "charters": [{"path": "specs/core.charter.mm", "sha256": "ignored"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    guard = CharterGuard.discover(str(source), str(lock))
+    assert guard is not None
+    assert guard.root == project.resolve()
+    assert str(charter.resolve()) in guard.snapshot
+
+
+def test_explicit_lock_without_manifest_uses_lock_parent(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    lock_dir = project / "locks"
+    lock = _make_lock(lock_dir)
+    source = project / "src" / "app.mm"
+    source.parent.mkdir(parents=True)
+    source.write_text("implementation", encoding="utf-8")
+
+    guard = CharterGuard.discover(str(source), str(lock))
+    assert guard is not None
     assert guard.root == lock_dir.resolve()
 
 
@@ -170,7 +244,9 @@ def test_check_outcomes(
     assert guard is not None
 
     class FakeClient:
-        def charter_check(self, source_path: str, lock_path: str) -> dict:
+        def charter_check(
+            self, source_path: str, lock_path: str, cwd: Path | None = None
+        ) -> dict:
             assert Path(source_path).is_absolute()
             assert Path(lock_path) == lock.resolve()
             return result

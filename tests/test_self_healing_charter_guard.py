@@ -57,7 +57,9 @@ def test_success_requires_charter_pass(monkeypatch: pytest.MonkeyPatch, tmp_path
         def verify(self, _source: str) -> dict:
             return {"success": True, "report": {}, "stdout": "", "stderr": ""}
 
-        def charter_check(self, _source: str, _lock: str) -> dict:
+        def charter_check(
+            self, _source: str, _lock: str, cwd: Path | None = None
+        ) -> dict:
             return {
                 "exit_code": 0,
                 "report": {"status": "pass", "atoms": []},
@@ -84,7 +86,9 @@ def test_charter_failure_is_sent_to_fixer_then_can_recover(
             self.verify_calls += 1
             return {"success": True, "report": {}, "stdout": "", "stderr": ""}
 
-        def charter_check(self, _source: str, _lock: str) -> dict:
+        def charter_check(
+            self, _source: str, _lock: str, cwd: Path | None = None
+        ) -> dict:
             self.check_calls += 1
             if self.check_calls == 1:
                 return {
@@ -135,7 +139,9 @@ def test_charter_tamper_restores_source_and_stops(
         def verify(self, _source: str) -> dict:
             return {"success": True, "report": {}, "stdout": "", "stderr": ""}
 
-        def charter_check(self, _source: str, _lock: str) -> dict:
+        def charter_check(
+            self, _source: str, _lock: str, cwd: Path | None = None
+        ) -> dict:
             return {
                 "exit_code": 1,
                 "report": {"status": "fail", "atoms": []},

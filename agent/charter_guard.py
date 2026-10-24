@@ -30,14 +30,6 @@ class CharterGuard:
         source_file: str,
         lock_arg: str | None = None,
     ) -> CharterGuard | None:
-        if lock_arg is not None:
-            lock_path = Path(lock_arg).expanduser()
-            if not lock_path.is_absolute():
-                lock_path = Path.cwd() / lock_path
-            if not lock_path.is_file():
-                raise ValueError(f"charter lock does not exist: {lock_path}")
-            return cls._from_lock(lock_path)
-
         source_dir = Path(source_file).expanduser().resolve().parent
         directories: list[Path] = []
         directory = source_dir
@@ -51,6 +43,15 @@ class CharterGuard:
             if directory.parent == directory:
                 break
             directory = directory.parent
+
+        if lock_arg is not None:
+            lock_path = Path(lock_arg).expanduser()
+            if not lock_path.is_absolute():
+                lock_path = Path.cwd() / lock_path
+            if not lock_path.is_file():
+                raise ValueError(f"charter lock does not exist: {lock_path}")
+            root = manifest_path.parent if manifest_path is not None else lock_path.parent
+            return cls._from_lock(lock_path, root)
 
         if manifest_path is not None:
             try:
@@ -71,7 +72,7 @@ class CharterGuard:
                 lock_path = manifest_path.parent / "charter.lock"
             if not lock_path.is_file():
                 return None
-            return cls._from_lock(lock_path)
+            return cls._from_lock(lock_path, manifest_path.parent)
 
         lock_path = next(
             (path / "charter.lock" for path in directories if (path / "charter.lock").is_file()),
@@ -79,12 +80,12 @@ class CharterGuard:
         )
         if lock_path is None:
             return None
-        return cls._from_lock(lock_path)
+        return cls._from_lock(lock_path, lock_path.parent)
 
     @classmethod
-    def _from_lock(cls, lock_path: Path) -> CharterGuard:
+    def _from_lock(cls, lock_path: Path, root: Path | None = None) -> CharterGuard:
         lock_path = lock_path.resolve()
-        root = lock_path.parent
+        root = root.resolve() if root is not None else lock_path.parent
         try:
             lock_bytes = lock_path.read_bytes()
             lock = json.loads(lock_bytes)
@@ -134,6 +135,7 @@ class CharterGuard:
             result = mumei_client.charter_check(
                 str(Path(source_file).expanduser().resolve()),
                 str(self.lock_path),
+                cwd=self.root,
             )
         except Exception as exc:
             return CharterOutcome(
