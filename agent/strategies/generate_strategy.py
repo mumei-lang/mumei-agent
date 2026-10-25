@@ -484,6 +484,7 @@ def _generate_multi_atom_inner(
                     atom_names, metrics, spec=spec_for_json,
                     enable_spec_code_mapping=bool(enable_spec_code_mapping),
                     prompt_report_truncate_chars=prompt_report_truncate_chars,
+                    cross_file_context=cross_file_context,
                 )
                 continue
 
@@ -572,6 +573,7 @@ def _generate_multi_atom_inner(
                 failing, metrics, spec=spec_for_json,
                 enable_spec_code_mapping=bool(enable_spec_code_mapping),
                 prompt_report_truncate_chars=prompt_report_truncate_chars,
+                cross_file_context=cross_file_context,
             )
             if thought_process is not None:
                 try:
@@ -666,6 +668,7 @@ def _attempt_multi_atom_fix(
     spec: dict | None = None,
     enable_spec_code_mapping: bool = True,
     prompt_report_truncate_chars: int | None = None,
+    cross_file_context: str | None = None,
 ) -> str:
     """Attempt to fix specific failing atoms in a multi-atom module."""
     failing_str = ", ".join(failing_atoms)
@@ -684,6 +687,8 @@ def _attempt_multi_atom_fix(
         f"Keep all other atoms unchanged. "
         f"Return the COMPLETE .mm file with all atoms."
     )
+    if cross_file_context:
+        fix_prompt += f"\n\n{cross_file_context}"
 
     fix_content = complete_text(
         client,
@@ -953,6 +958,7 @@ def _generate_code_inner(
                     prev_report=prev_report, spec=spec_for_json,
                     enable_spec_code_mapping=bool(enable_spec_code_mapping),
                     prompt_report_truncate_chars=prompt_report_truncate_chars,
+                    cross_file_context=cross_file_context,
                 )
                 continue
 
@@ -1038,6 +1044,7 @@ def _generate_code_inner(
                 prev_report=prev_report, spec=spec_for_json,
                 enable_spec_code_mapping=bool(enable_spec_code_mapping),
                 prompt_report_truncate_chars=prompt_report_truncate_chars,
+                cross_file_context=cross_file_context,
             )
             if thought_process is not None:
                 try:
@@ -1316,6 +1323,7 @@ def _attempt_fix(
     spec: dict | None = None,
     enable_spec_code_mapping: bool = True,
     prompt_report_truncate_chars: int | None = None,
+    cross_file_context: str | None = None,
 ) -> str:
     """Attempt to fix generated code using the LLM."""
     fix_prompt = _build_retry_prompt(
@@ -1323,6 +1331,8 @@ def _attempt_fix(
         inferred_context=inferred_context, prev_report=prev_report,
         prompt_report_truncate_chars=prompt_report_truncate_chars,
     )
+    if cross_file_context:
+        fix_prompt += f"\n\n{cross_file_context}"
 
     fix_content = complete_text(
         client,

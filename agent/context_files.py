@@ -30,7 +30,7 @@ def load_context_files(context_files: object, repo_dir: Path) -> str:
             continue
         try:
             content = full_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             _logger.warning("Failed to read context_file %s: %s", rel_path, exc)
             continue
         sections.append(
