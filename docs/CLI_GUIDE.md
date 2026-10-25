@@ -246,6 +246,37 @@ uv run python -m agent harvest-tests tests/python/test_math.py
 
 The observation is an `example` for target `add`, arguments `{"left": 2, "right": 3}`, and result `5`.
 
+### Check observations against contracts
+
+`observe-tests` runs the harvested observations through `mumei observe`.
+Choose an existing `.mm` module with `--mm`, or pass an extracted forge spec
+with `--spec` (the harvest arguments are aligned to its parameter order):
+
+```bash
+uv run python -m agent observe-tests --mm contracts.mm tests/python/
+uv run python -m agent observe-tests --spec extracted.json tests/python/ \
+  --language python --output observation-report.json
+```
+
+The report is printed as JSON unless `--output` is supplied; a verdict summary
+is printed to stderr. Exit status `1` means an example/relation contradicts an
+atom's ensures or a rejected input is admitted by requires. Outside-requires,
+explained rejections, inconclusive checks, and unsupported observations do not
+fail the run. An invalid input or unavailable/incompatible `mumei observe`
+returns status `4`.
+
+`extract-spec --from-tests` uses the same observations as extraction context
+and retries specs that contradict examples or admit rejected inputs. Missing
+atoms are retry feedback but do not block the final extraction attempt:
+
+```bash
+uv run mumei-agent extract-spec \
+  --text "add returns the sum of two integers" \
+  --from-tests tests/python/ --from-tests-language python \
+  --observations-output observation-report.json \
+  --output extracted.json
+```
+
 ```rust
 // tests/rust/math.rs
 fn add(left: i64, right: i64) -> i64 {

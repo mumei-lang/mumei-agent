@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -572,6 +573,8 @@ class CodeToSpecExtractor:
         domain_hint: str = "",
         mumei_client: MumeiClient | None = None,
         max_retries: int = 3,
+        spec_checker: Callable[[dict], tuple[list[str], list[str]]] | None = None,
+        extra_context: str = "",
     ) -> CodeToSpecResult:
         """Extract a natural language spec from source code and build a forge spec."""
         if not self.config.enable_code_to_spec:
@@ -681,12 +684,13 @@ class CodeToSpecExtractor:
             )
 
         cache_dir = self.config.spec_cache_dir
+        cache_enabled = spec_checker is None and not extra_context
         cache_key = (
             _spec_cache_key(code, detected_language, self.config.model, domain_hint)
-            if cache_dir
+            if cache_dir and cache_enabled
             else ""
         )
-        if cache_dir:
+        if cache_dir and cache_enabled:
             cached = _read_spec_cache(cache_dir, cache_key)
             if cached is not None:
                 cached_spec, cached_forge_spec = cached
@@ -734,6 +738,8 @@ class CodeToSpecExtractor:
                                 domain_hint=final_domain_hint,
                                 mumei_client=mumei_client,
                                 max_retries=max_retries,
+                                spec_checker=spec_checker,
+                                extra_context=extra_context,
                             )
                             if nl
                             else None
@@ -780,6 +786,8 @@ class CodeToSpecExtractor:
                     domain_hint=final_domain_hint,
                     mumei_client=mumei_client,
                     max_retries=max_retries,
+                    spec_checker=spec_checker,
+                    extra_context=extra_context,
                 )
             if forge_task_spec and not deterministic.errors:
                 forge_task_spec = _align_llm_spec_with_source(
@@ -788,7 +796,7 @@ class CodeToSpecExtractor:
                     code_path,
                     warnings,
                 )
-            if cache_dir:
+            if cache_dir and cache_enabled:
                 _write_spec_cache(
                     cache_dir, cache_key, natural_language_spec, forge_task_spec
                 )

@@ -574,6 +574,102 @@ def test_extract_spec_records_metrics() -> None:
     assert metrics.extraction_success_rate == 0.5
 
 
+def test_extract_spec_retries_observation_contradiction_then_accepts_clean_spec() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC), json.dumps(VALID_SPEC))
+    checker = MagicMock(
+        side_effect=[(["observed result contradicts ensures"], []), ([], [])]
+    )
+
+    result = extract_spec(
+        client,
+        "m",
+        "safe transfer requires a positive amount",
+        max_retries=2,
+        spec_checker=checker,
+    )
+
+    assert result == VALID_SPEC
+    assert checker.call_count == 2
+    retry_prompt = client.chat.completions.create.call_args_list[1].kwargs["messages"][1][
+        "content"
+    ]
+    assert "observed result contradicts ensures" in retry_prompt
+
+
+def test_extract_spec_raises_for_persistent_observation_contradiction() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC), json.dumps(VALID_SPEC))
+    checker = MagicMock(
+        side_effect=[
+            (["first observation conflict"], []),
+            (["persistent observation conflict"], []),
+        ]
+    )
+
+    try:
+        extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=2,
+            spec_checker=checker,
+        )
+    except ValueError as exc:
+        assert "persistent observation conflict" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("persistent observations must block final extraction")
+    assert checker.call_count == 2
+
+
+def test_extract_spec_missing_atom_feedback_does_not_block_final_attempt() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC), json.dumps(VALID_SPEC))
+    checker = MagicMock(side_effect=[([], ["missing atom"]), ([], ["missing atom"])])
+
+    result = extract_spec(
+        client,
+        "m",
+        "safe transfer requires a positive amount",
+        max_retries=2,
+        spec_checker=checker,
+    )
+
+    assert result == VALID_SPEC
+    assert checker.call_count == 2
+    retry_prompt = client.chat.completions.create.call_args_list[1].kwargs["messages"][1][
+        "content"
+    ]
+    assert "missing atom" in retry_prompt
+
+
+def test_extract_spec_appends_extra_context_to_prompt() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC))
+    context = "# Observed test behavior\nadd(2, 3) == 5"
+
+    extract_spec(
+        client,
+        "m",
+        "safe transfer requires a positive amount",
+        max_retries=1,
+        extra_context=context,
+    )
+
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert prompt.endswith(context)
+
+
+def test_extract_spec_without_checker_or_context_keeps_base_prompt() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC))
+    natural_language = "safe transfer requires a positive amount"
+    with patch("agent.spec_extractor._load_existing_catalog", return_value=""):
+        extract_spec(client, "m", natural_language, max_retries=1)
+
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert prompt == build_extraction_prompt(
+        natural_language,
+        domain_hint="",
+        existing_catalog="",
+    )
+
+
 def test_extract_spec_does_not_record_keyword_validation_failure_as_success() -> None:
     copied_example = dict(VALID_SPEC, task_id="nl-safe-add")
     copied_example["atoms"] = [

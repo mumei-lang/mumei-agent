@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 
 from openai import OpenAI
 
@@ -53,6 +54,8 @@ def extract_spec(
     metrics: Metrics | None = None,
     detect_ambiguity: bool = False,
     config: AgentConfig | None = None,
+    spec_checker: Callable[[dict], tuple[list[str], list[str]]] | None = None,
+    extra_context: str = "",
 ) -> dict:
     """Extract a forge task spec from natural language.
 
@@ -91,6 +94,8 @@ def extract_spec(
         domain_hint=domain_hint,
         existing_catalog=existing_catalog,
     )
+    if extra_context:
+        base_prompt += "\n\n" + extra_context
     feedback = ""
     attempts = max(1, max_retries)
     last_errors: list[str] = []
@@ -134,6 +139,13 @@ def extract_spec(
             # A spec that survives all retries is still useful as-is; only
             # demand non-trivial clauses while a re-prompt is affordable.
             validation_errors = _trivial_spec_errors(spec)
+        if not validation_errors and spec_checker is not None:
+            blocking_errors, soft_errors = spec_checker(spec)
+            observation_errors = blocking_errors + (
+                soft_errors if attempt < attempts else []
+            )
+            if observation_errors:
+                validation_errors = observation_errors
         if not validation_errors:
             if metrics is not None:
                 metrics.record_extraction_success()

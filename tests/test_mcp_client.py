@@ -136,6 +136,33 @@ def test_controls_check_forwards_to_cli_fallback():
     )
 
 
+def test_observe_check_forwards_to_cli_fallback():
+    fallback = MagicMock()
+    fallback.observe_check.return_value = {
+        "returncode": 1,
+        "report": {"schema": "mumei.observation-check/v1"},
+        "stderr": "",
+    }
+    client = MumeiMCPClient(fallback_client=fallback)
+
+    result = client.observe_check(
+        "/tmp/contract.mm",
+        "/tmp/harvest.json",
+        atom="Type::method",
+    )
+
+    assert result == {
+        "returncode": 1,
+        "report": {"schema": "mumei.observation-check/v1"},
+        "stderr": "",
+    }
+    fallback.observe_check.assert_called_once_with(
+        "/tmp/contract.mm",
+        "/tmp/harvest.json",
+        atom="Type::method",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool wrappers
 # ---------------------------------------------------------------------------

@@ -291,6 +291,51 @@ def test_verify_command_cargo_run():
         ]
 
 
+def test_observe_check_builds_json_command_and_parses_report():
+    client = MumeiClient("mumei")
+    report = {"schema": "mumei.observation-check/v1", "results": []}
+    completed = MagicMock(returncode=1, stdout=json.dumps(report), stderr="")
+    with patch.object(client, "_run_command", return_value=completed) as run:
+        result = client.observe_check("contract.mm", "harvest.json", atom="f")
+
+    assert run.call_args.args[0] == [
+        "mumei",
+        "observe",
+        "contract.mm",
+        "harvest.json",
+        "--json",
+        "--atom",
+        "f",
+    ]
+    assert run.call_args.kwargs["span_name"] == "mumei.observe.check"
+    assert run.call_args.kwargs["command_label"] == "observe-check"
+    assert result == {"returncode": 1, "report": report, "stderr": ""}
+
+
+def test_observe_check_adds_manifest_for_cargo_run(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    client = MumeiClient("cargo run --")
+    with patch.object(
+        client,
+        "_run_command",
+        return_value=MagicMock(returncode=0, stdout="{}", stderr=""),
+    ) as run:
+        client.observe_check("source.mm", "observations.json")
+
+    assert run.call_args.args[0] == [
+        "cargo",
+        "run",
+        "--manifest-path",
+        str((tmp_path / "Cargo.toml").resolve()),
+        "--",
+        "observe",
+        "source.mm",
+        "observations.json",
+        "--json",
+    ]
+
+
 def test_build_command():
     """Test that build constructs correct command."""
     client = MumeiClient()

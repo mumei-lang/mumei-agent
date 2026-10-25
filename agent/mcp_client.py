@@ -416,6 +416,19 @@ class MumeiMCPClient:
             span.set_attribute("mumei.mcp", True)
             return self._fallback.controls_check(path, atom=atom)
 
+    def observe_check(
+        self,
+        path: str,
+        harvest_path: str,
+        atom: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the observation check through the mumei CLI."""
+        with self._tracer.start_as_current_span("mumei.mcp.observe.check") as span:
+            span.set_attribute("mumei.command", "observe-check")
+            span.set_attribute("mumei.source_path", path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.observe_check(path, harvest_path, atom=atom)
+
     def infer_effects(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
         with self._tracer.start_as_current_span("mumei.mcp.infer_effects") as span:
