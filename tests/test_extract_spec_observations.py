@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -271,6 +272,126 @@ def test_extract_spec_generate_rechecks_refined_spec_after_outputs(
     assert "ensures forbids it" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("verdict", "expected_exit"),
+    [("consistent", 0), ("contradicts_ensures", 1)],
+)
+def test_extract_spec_generate_checks_normalized_single_atom(
+    verdict: str,
+    expected_exit: int,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    single_atom_spec = {
+        "name": "add",
+        "params": [
+            {"name": "a", "type": "i64"},
+            {"name": "b", "type": "i64"},
+        ],
+        "return_type": "i64",
+        "requires": "true",
+        "ensures": "result == a + b",
+    }
+    output_path = tmp_path / "spec.json"
+    generated_path = tmp_path / "generated.mm"
+    args = build_parser().parse_args(
+        [
+            "--text",
+            "Add two integers.",
+            "--from-tests",
+            str(tmp_path / "tests"),
+            "--generate",
+            "--generate-output",
+            str(generated_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+    mumei = FakeMumei(["consistent", verdict])
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=_config()),
+        patch("agent.extract_spec.create_mumei_client", return_value=mumei),
+        patch("agent.extract_spec.harvest_tests", return_value=HARVEST),
+        patch(
+            "agent.extract_spec.extract_spec",
+            side_effect=lambda *pos, **kwargs: _call_checker_from_fake_extractor(
+                SPEC, kwargs
+            ),
+        ),
+        patch(
+            "agent.strategies.spec_refinement.run_refinement_loop",
+            return_value=("generated code", True, single_atom_spec),
+        ),
+    ):
+        try:
+            main(args)
+        except SystemExit as exc:
+            assert exc.code == expected_exit
+        else:
+            assert expected_exit == 0
+
+    assert len(mumei.calls) == 2
+    assert "trusted atom add(a: i64, b: i64) -> i64" in mumei.calls[1][0]
+    assert json.loads(output_path.read_text(encoding="utf-8")) == single_atom_spec
+    assert generated_path.read_text(encoding="utf-8") == "generated code"
+    stderr = capsys.readouterr().err
+    assert ("ensures forbids it" in stderr) == (verdict == "contradicts_ensures")
+
+
+@pytest.mark.parametrize(
+    ("verified", "expected_exit"),
+    [(True, 0), (False, 1)],
+)
+def test_extract_spec_generate_without_from_tests_matches_develop_output(
+    verified: bool,
+    expected_exit: int,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    output_path = tmp_path / "spec.json"
+    generated_path = tmp_path / "generated.mm"
+    args = build_parser().parse_args(
+        [
+            "--text",
+            "Add two integers.",
+            "--generate",
+            "--generate-output",
+            str(generated_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=_config()),
+        patch("agent.extract_spec.create_mumei_client", return_value=MagicMock()),
+        patch("agent.extract_spec.extract_spec", return_value=SPEC),
+        patch(
+            "agent.strategies.spec_refinement.run_refinement_loop",
+            return_value=("generated code", verified, SPEC),
+        ),
+    ):
+        if expected_exit:
+            with pytest.raises(SystemExit) as exc:
+                main(args)
+            assert exc.value.code == expected_exit
+        else:
+            main(args)
+
+    captured = capsys.readouterr()
+    expected_stdout = f"Extracted spec written to {output_path}\n"
+    expected_stderr = "Extraction metrics: attempts=0, successes=0\n"
+    if verified:
+        expected_stdout += f"Generated verified code written to {generated_path}\n"
+    else:
+        expected_stderr += (
+            f"Warning: Generated code written to {generated_path} "
+            "but verification failed — output is NOT verified.\n"
+        )
+    assert captured.out == expected_stdout
+    assert captured.err == expected_stderr
+    assert generated_path.read_text(encoding="utf-8") == "generated code"
+
+
 def test_extract_spec_without_from_tests_keeps_existing_output_bytes(
     tmp_path: Path,
     capsys,
@@ -334,6 +455,58 @@ def test_extract_spec_code_file_threads_observation_checker(
     ]
     assert len(mumei.calls) == 1
     assert "Code language: python" in capsys.readouterr().err
+
+
+def test_extract_spec_rechecks_in_place_mutation_after_code_extraction(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    source = tmp_path / "lib.py"
+    source.write_text("def add(a, b): return a + b\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        [
+            "--code-file",
+            str(source),
+            "--from-tests",
+            str(tmp_path / "tests"),
+            "--output",
+            str(tmp_path / "spec.json"),
+        ]
+    )
+    mumei = FakeMumei(["consistent", "contradicts_ensures"])
+
+    def extract_and_align(*_args, **kwargs):
+        spec = copy.deepcopy(SPEC)
+        kwargs["spec_checker"](spec)
+        spec["atoms"][0]["ensures"] = "result == 0"
+        return MagicMock(
+            success=True,
+            natural_language_spec="add returns the sum",
+            forge_task_spec=spec,
+            detected_language="python",
+            warnings=[],
+            errors=[],
+        )
+
+    fake_extractor = MagicMock()
+    fake_extractor.extract_from_file.side_effect = extract_and_align
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=_config()),
+        patch("agent.extract_spec.create_mumei_client", return_value=mumei),
+        patch("agent.extract_spec.harvest_tests", return_value=HARVEST),
+        patch("agent.code_to_spec.CodeToSpecExtractor", return_value=fake_extractor),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            main(args)
+
+    assert exc.value.code == 1
+    assert len(mumei.calls) == 2
+    assert "ensures: result == a + b;" in mumei.calls[0][0]
+    assert "ensures: result == 0;" in mumei.calls[1][0]
+    assert json.loads((tmp_path / "spec.json").read_text(encoding="utf-8"))["atoms"][
+        0
+    ]["ensures"] == "result == 0"
+    assert "ensures forbids it" in capsys.readouterr().err
 
 
 def test_directory_merge_alone_receives_observation_checker(tmp_path: Path) -> None:

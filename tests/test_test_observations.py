@@ -72,6 +72,22 @@ def test_spec_to_observe_module_keeps_real_signatures_and_trust() -> None:
     assert "ensures: result == left + right;" in module
 
 
+def test_spec_to_observe_module_accepts_normalized_single_atom() -> None:
+    module = spec_to_observe_module(
+        {
+            "name": "add",
+            "params": [
+                {"name": "right", "type": "i64"},
+                {"name": "left", "type": "i64"},
+            ],
+            "requires": "true",
+            "ensures": "result == right + left",
+        }
+    )
+
+    assert "trusted atom add(right: i64, left: i64) -> i64" in module
+
+
 @pytest.mark.parametrize(
     ("result", "message"),
     [
@@ -250,6 +266,37 @@ def test_observation_feedback_covers_blocking_verdicts_in_stable_order() -> None
     ]
     assert observation_feedback(report, spec) == expected
     assert observation_feedback(report, spec) == expected
+
+
+def test_observation_feedback_uses_normalized_single_atom_parameter_order() -> None:
+    report = {
+        "results": [
+            {
+                "kind": "example",
+                "target": "add",
+                "test": "test_add",
+                "file": "test_add.py",
+                "line": 2,
+                "args": {"left": 2, "right": 3},
+                "result": 4,
+                "verdict": "contradicts_ensures",
+            }
+        ]
+    }
+    spec = {
+        "name": "add",
+        "params": [
+            {"name": "right", "type": "i64"},
+            {"name": "left", "type": "i64"},
+        ],
+        "requires": "true",
+        "ensures": "result == right + left",
+    }
+
+    assert observation_feedback(report, spec) == [
+        "test test_add (test_add.py:2) observed add(3, 2) == 4, "
+        "but atom add's ensures forbids it"
+    ]
 
 
 def test_observation_summary_counts_every_verdict() -> None:

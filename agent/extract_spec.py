@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -355,6 +356,7 @@ def main(args=None):
     observation_state: dict[str, Any] = {
         "report": None,
         "last_spec": None,
+        "blocking": [],
     }
     spec_checker = None
     extra_context = ""
@@ -368,18 +370,17 @@ def main(args=None):
                 mumei,
             )
             observation_state["report"] = report
-            observation_state["last_spec"] = spec
-            return observation_feedback_parts(report, spec)
+            observation_state["last_spec"] = copy.deepcopy(spec)
+            blocking, soft = observation_feedback_parts(report, spec)
+            observation_state["blocking"] = blocking
+            return blocking, soft
 
     def check_final_spec_if_needed(spec: dict) -> list[str]:
         if spec_checker is None:
             return []
-        blocking, _soft = (
-            spec_checker(spec)
-            if observation_state["last_spec"] != spec
-            else ([], [])
-        )
-        return blocking
+        if observation_state["last_spec"] == spec:
+            return observation_state["blocking"]
+        return spec_checker(spec)[0]
 
     def emit_observation_report() -> None:
         report = observation_state["report"]

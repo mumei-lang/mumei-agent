@@ -27,9 +27,25 @@ class ObservationCheckError(ValueError):
     """Raised when mumei cannot produce a valid observation-check report."""
 
 
+def _spec_atoms(spec: dict) -> list[Any]:
+    atoms = spec.get("atoms")
+    if isinstance(atoms, list):
+        return atoms
+    if (
+        "atoms" not in spec
+        and spec.get("name")
+        and ("requires" in spec or "ensures" in spec)
+        and ("inputs" in spec or "params" in spec)
+    ):
+        return [spec]
+    return []
+
+
 def spec_to_observe_module(spec: dict) -> str:
     """Render trusted atoms with the extracted spec's real signatures."""
-    return _spec_to_contradiction_check_module(spec)
+    normalized = dict(spec)
+    normalized["atoms"] = _spec_atoms(spec)
+    return _spec_to_contradiction_check_module(normalized)
 
 
 def _language_for_observation(observation: dict[str, Any]) -> str | None:
@@ -147,7 +163,7 @@ def _format_call(result: dict[str, Any], spec: dict) -> str:
                 for param in atom.get("inputs", atom.get("params", []))
                 if isinstance(param, dict) and param.get("name")
             ]
-            for atom in spec.get("atoms", [])
+            for atom in _spec_atoms(spec)
             if isinstance(atom, dict)
         }
         names = params_by_name.get(target, [])

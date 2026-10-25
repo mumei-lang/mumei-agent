@@ -1,6 +1,7 @@
 """Tests for source-code to natural-language spec extraction."""
 from __future__ import annotations
 
+import json
 import typing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -148,6 +149,64 @@ def test_extract_from_file_uses_spec_cache(tmp_path: Path) -> None:
     assert second.forge_task_spec == forge_spec
     assert client.chat.completions.create.call_count == 1
     assert any("served from cache" in w for w in second.warnings)
+
+
+def test_extract_from_file_uses_context_instead_of_warm_cache(tmp_path: Path) -> None:
+    source = tmp_path / "simple_add.rs"
+    source.write_text("pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n", encoding="utf-8")
+    forge_spec = {
+        "task_id": "code-simple-add",
+        "target_file": "std/math/simple_add.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "simple_add",
+                "description": "Add two signed integers",
+                "inputs": [{"name": "a", "type": "i64"}, {"name": "b", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "a + b <= i64::MAX",
+                "ensures": "result == a + b",
+                "effects": [],
+            }
+        ],
+    }
+    natural_language = "Adds two integers and returns their sum."
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [
+        _make_response(natural_language),
+        _make_response(json.dumps(forge_spec)),
+        _make_response(natural_language),
+        _make_response(json.dumps(forge_spec)),
+    ]
+    cache_dir = tmp_path / "spec-cache"
+    config = AgentConfig(
+        api_key="test", model="test-model", spec_cache_dir=str(cache_dir)
+    )
+    config.create_client = MagicMock(return_value=client)
+    extractor = CodeToSpecExtractor(config)
+
+    first = extractor.extract_from_file(source, max_retries=1)
+    checker = MagicMock(return_value=([], []))
+    context = "# Observed test behavior\nsimple_add(2, 3) == 5"
+    contextual = extractor.extract_from_file(
+        source,
+        max_retries=1,
+        spec_checker=checker,
+        extra_context=context,
+    )
+    plain_again = extractor.extract_from_file(source, max_retries=1)
+
+    assert first.success is True
+    assert contextual.success is True
+    assert checker.call_count == 1
+    assert client.chat.completions.create.call_count == 4
+    context_prompt = client.chat.completions.create.call_args_list[3].kwargs[
+        "messages"
+    ][1]["content"]
+    assert context_prompt.endswith(context)
+    assert plain_again.success is True
+    assert any("served from cache" in warning for warning in plain_again.warnings)
+    assert client.chat.completions.create.call_count == 4
 
 
 def test_extract_from_file_cache_key_tracks_content(tmp_path: Path) -> None:

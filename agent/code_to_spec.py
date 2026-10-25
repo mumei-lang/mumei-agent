@@ -684,12 +684,13 @@ class CodeToSpecExtractor:
             )
 
         cache_dir = self.config.spec_cache_dir
+        cache_enabled = spec_checker is None and not extra_context
         cache_key = (
             _spec_cache_key(code, detected_language, self.config.model, domain_hint)
-            if cache_dir
+            if cache_dir and cache_enabled
             else ""
         )
-        if cache_dir:
+        if cache_dir and cache_enabled:
             cached = _read_spec_cache(cache_dir, cache_key)
             if cached is not None:
                 cached_spec, cached_forge_spec = cached
@@ -795,7 +796,7 @@ class CodeToSpecExtractor:
                     code_path,
                     warnings,
                 )
-            if cache_dir:
+            if cache_dir and cache_enabled:
                 _write_spec_cache(
                     cache_dir, cache_key, natural_language_spec, forge_task_spec
                 )
