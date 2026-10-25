@@ -275,15 +275,21 @@ uv run python -m agent observe-tests --spec extracted.json tests/python/ \
 ```
 
 The report is printed as JSON unless `--output` is supplied; a verdict summary
-is printed to stderr. Exit status `1` means an example/relation contradicts an
-atom's ensures or a rejected input is admitted by requires. Outside-requires,
-explained rejections, inconclusive checks, and unsupported observations do not
-fail the run. An invalid input or unavailable/incompatible `mumei observe`
-returns status `4`.
+and any warnings are printed to stderr. Property observations can be
+`entailed`, `not_entailed`, `contradicts_ensures`, `domain_exceeds_requires`,
+`outside_requires`, `inconclusive`, or `not_checked`. `not_checked` can mean
+that the installed `mumei` build does not support property observations.
+Only `contradicts_ensures` and `requires_admits_rejected` produce exit status
+`1`; outside-requires, explained rejections, inconclusive checks, unsupported
+observations, and other warnings do not fail the run. An invalid input or
+unavailable/incompatible `mumei observe` returns status `4`.
 
 `extract-spec --from-tests` uses the same observations as extraction context
-and retries specs that contradict examples or admit rejected inputs. Missing
-atoms are retry feedback but do not block the final extraction attempt:
+and retries specs that contradict examples, admit rejected inputs, or fail to
+guarantee a property predicate. Property contradictions block extraction;
+`not_entailed` is retry feedback while retries remain and a warning on the
+final attempt, while `domain_exceeds_requires` is a warning. Missing atoms are
+retry feedback but do not block the final extraction attempt:
 
 ```bash
 uv run mumei-agent extract-spec \
@@ -291,6 +297,13 @@ uv run mumei-agent extract-spec \
   --from-tests tests/python/ --from-tests-language python \
   --observations-output observation-report.json \
   --output extracted.json
+```
+
+Property context is quantified over the generated variables and their ranges,
+with the test assumptions made explicit, for example:
+
+```text
+for all x in [0, 100], y: i64, b: bool, assuming (x != 5): f(a=x, b=3) satisfies (result >= x)
 ```
 
 ```rust

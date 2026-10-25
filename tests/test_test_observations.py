@@ -304,8 +304,11 @@ def test_observation_summary_counts_every_verdict() -> None:
         "results": [
             {"verdict": "consistent"},
             {"verdict": "contradicts_ensures"},
+            {"verdict": "domain_exceeds_requires"},
+            {"verdict": "entailed"},
             {"verdict": "inconclusive"},
             {"verdict": "not_checked"},
+            {"verdict": "not_entailed"},
             {"verdict": "outside_requires"},
             {"verdict": "rejection_explained"},
             {"verdict": "requires_admits_rejected"},
@@ -314,7 +317,8 @@ def test_observation_summary_counts_every_verdict() -> None:
 
     assert observation_summary(report) == (
         "Observation checks: consistent=1, contradicts_ensures=1, "
-        "inconclusive=1, not_checked=1, outside_requires=1, "
+        "domain_exceeds_requires=1, entailed=1, inconclusive=1, "
+        "not_checked=1, not_entailed=1, outside_requires=1, "
         "rejection_explained=1, requires_admits_rejected=1"
     )
 

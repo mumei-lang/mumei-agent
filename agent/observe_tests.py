@@ -14,6 +14,7 @@ from agent.test_observations import (
     align_harvest_to_spec,
     check_observations,
     observation_summary,
+    observation_warnings,
     spec_to_observe_module,
 )
 
@@ -50,6 +51,7 @@ def main(args: argparse.Namespace | None = None) -> int:
         return 4
 
     try:
+        spec = {}
         if args.mm:
             module_path_or_source: str | Path = Path(args.mm)
             aligned = harvest
@@ -69,6 +71,8 @@ def main(args: argparse.Namespace | None = None) -> int:
         return 4
 
     print(observation_summary(report), file=sys.stderr)
+    for warning in observation_warnings(report, spec if args.spec else {}, aligned):
+        print(f"Warning: {warning}", file=sys.stderr)
     output = json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
     if args.output:
         try:

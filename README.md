@@ -113,7 +113,9 @@ uv run mumei-agent migrate-suggest --code-file src/divide.py --language python -
 predicates, and expected failures from Python and Rust source. It supports
 Hypothesis `@given` strategies and Rust `proptest!` ranges without importing or
 running tests. See the [CLI guide](docs/CLI_GUIDE.md#test-harvest) for the
-`mumei.test-harvest/v1` observation schema and supported forms.
+`mumei.test-harvest/v1` observation schema and supported forms. Property
+observations can also be checked with `observe-tests` or
+`extract-spec --from-tests`.
 
 ```bash
 uv run mumei-agent harvest-tests tests/ --target add --output observations.json
