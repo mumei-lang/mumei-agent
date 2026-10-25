@@ -840,24 +840,37 @@ def test_python_raise_inside_with_is_conditional_but_top_level_raise_is_unreacha
 
 
 @pytest.mark.parametrize(
-    ("imports", "statement"),
+    ("imports", "statement", "reason"),
     [
-        ("import pytest\n", "pytest.fail('stop')"),
-        ("from pytest import fail as stop\n", "stop('stop')"),
-        ("import pytest\n", "pytest.skip('stop')"),
-        ("import pytest\n", "pytest.exit('stop')"),
-        ("import sys\n", "sys.exit(0)"),
-        ("from os import _exit as stop\n", "stop(0)"),
-        ("import unittest\n", "raise unittest.SkipTest('stop')"),
-        ("from unittest import SkipTest\n", "raise SkipTest('stop')"),
+        ("import pytest\n", "pytest.fail('stop')", "unreachable_assertion"),
         (
-            "import pytest\n",
-            "with open(__file__):\n    pytest.fail('stop')",
+            "from pytest import fail as stop\n",
+            "stop('stop')",
+            "unreachable_assertion",
+        ),
+        ("import pytest\n", "pytest.skip('stop')", "unreachable_assertion"),
+        ("import pytest\n", "pytest.exit('stop')", "unreachable_assertion"),
+        ("import sys\n", "sys.exit(0)", "unreachable_assertion"),
+        ("from os import _exit as stop\n", "stop(0)", "unreachable_assertion"),
+        (
+            "import unittest\n",
+            "raise unittest.SkipTest('stop')",
+            "unreachable_assertion",
+        ),
+        (
+            "from unittest import SkipTest\n",
+            "raise SkipTest('stop')",
+            "unreachable_assertion",
+        ),
+        (
+            "import contextlib\nimport pytest\n",
+            "with contextlib.suppress(BaseException):\n    pytest.fail('stop')",
+            "conditional_assertion",
         ),
     ],
 )
-def test_python_terminating_calls_make_later_assertions_unreachable(
-    tmp_path: Path, imports: str, statement: str
+def test_python_terminating_calls_classify_later_assertions(
+    tmp_path: Path, imports: str, statement: str, reason: str
 ) -> None:
     source = _write(
         tmp_path / "test_terminating.py",
@@ -871,7 +884,7 @@ def test_python_terminating_calls_make_later_assertions_unreachable(
     report = _report(source)
 
     assert report["observations"] == []
-    assert report["skipped"][0]["reason"] == "unreachable_assertion"
+    assert report["skipped"][0]["reason"] == reason
 
 
 @pytest.mark.parametrize("call", ["self.fail('stop')", "self.skipTest('stop')"])
@@ -1179,6 +1192,30 @@ def test_rust_question_mark_makes_later_assertions_conditional(
     assert [item["reason"] for item in conditional] == ["conditional_assertion"]
 
 
+def test_rust_async_blocks_do_not_contribute_assertions_or_exits(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_async_block.rs",
+        "fn f(value: i64) -> i64 { value }\n"
+        "#[test]\n"
+        "fn test_async_block() {\n"
+        "    let _future = async {\n"
+        "        assert_eq!(f(1), 1);\n"
+        "        panic!(\"not executed here\");\n"
+        "        let _ = Err::<(), String>(\"not executed here\")?;\n"
+        "        assert_eq!(f(3), 3);\n"
+        "    };\n"
+        "    assert_eq!(f(2), 2);\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert [item["args"] for item in report["observations"]] == [{"value": 2}]
+    assert report["skipped"] == []
+
+
 def test_should_panic_conditional_call_remains_ambiguous(tmp_path: Path) -> None:
     source = _write(
         tmp_path / "should_panic.rs",
@@ -1483,7 +1520,18 @@ def test_rust_nested_helper_scopes_are_not_harvested(tmp_path: Path) -> None:
     assert report["skipped"] == []
 
 
-@pytest.mark.parametrize("write", ["value = 2", "value += 1"])
+@pytest.mark.parametrize(
+    "write",
+    [
+        "value = 2",
+        "value += 1",
+        "def value(): pass",
+        "class value: pass",
+        "import replacement as value",
+        "for value in (): pass",
+        "with open(__file__) as value: pass",
+    ],
+)
 def test_python_nested_nonlocal_writes_invalidate_literal_bindings(
     tmp_path: Path, write: str
 ) -> None:
@@ -1530,7 +1578,19 @@ def test_python_nested_local_writes_do_not_shadow_outer_bindings_or_roots(
     ]
 
 
-def test_python_nested_global_write_invalidates_import_root(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "write",
+    [
+        "def root(): pass",
+        "class root: pass",
+        "import replacement as root",
+        "for root in (): pass",
+        "with open(__file__) as root: pass",
+    ],
+)
+def test_python_nested_global_bindings_invalidate_import_root(
+    tmp_path: Path, write: str
+) -> None:
     _write(tmp_path / "lib.py", "def f(value):\n    return value + 1\n")
     source = _write(
         tmp_path / "test_nested_global.py",
@@ -1538,7 +1598,7 @@ def test_python_nested_global_write_invalidates_import_root(tmp_path: Path) -> N
         "def test_nested_global():\n"
         "    def helper():\n"
         "        global root\n"
-        "        root = object()\n"
+        f"        {write}\n"
         "    assert root.f(1) == 2\n",
     )
 

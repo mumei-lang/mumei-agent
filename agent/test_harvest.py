@@ -140,6 +140,51 @@ def _python_target_name(
     return None
 
 
+def _python_nested_write_names(
+    scope_nodes: tuple[ast.AST, ...], declared_names: set[str]
+) -> Iterable[str]:
+    scope_root = scope_nodes[0] if scope_nodes else None
+    for scope_node in scope_nodes:
+        if isinstance(scope_node, ast.Name) and isinstance(
+            scope_node.ctx, (ast.Store, ast.Del)
+        ):
+            yield scope_node.id
+        elif (
+            scope_node is not scope_root
+            and isinstance(
+                scope_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            )
+            and scope_node.name in declared_names
+        ):
+            yield scope_node.name
+        elif isinstance(scope_node, ast.Import):
+            yield from (
+                alias.asname or alias.name.split(".", 1)[0]
+                for alias in scope_node.names
+            )
+        elif isinstance(scope_node, ast.ImportFrom):
+            yield from (
+                alias.asname or alias.name
+                for alias in scope_node.names
+                if alias.name != "*"
+            )
+        elif isinstance(scope_node, ast.ExceptHandler) and scope_node.name:
+            yield scope_node.name
+        elif isinstance(scope_node, ast.MatchAs) and scope_node.name:
+            yield scope_node.name
+
+
+def _python_scope_write_nodes(node: ast.AST) -> Iterable[ast.AST]:
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(
+            child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        ):
+            yield child
+        else:
+            yield from _python_scope_write_nodes(child)
+
+
 def _python_test_writes(test_node: ast.AST) -> set[str]:
     writes: set[str] = set()
     scope_types = (
@@ -163,7 +208,7 @@ def _python_test_writes(test_node: ast.AST) -> set[str]:
     def nested_writes(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, scope_types):
-                scope_nodes = tuple(_python_scope_nodes(child))
+                scope_nodes = tuple(_python_scope_write_nodes(child))
                 declared_names = {
                     name
                     for scope_node in scope_nodes
@@ -171,11 +216,11 @@ def _python_test_writes(test_node: ast.AST) -> set[str]:
                     for name in scope_node.names
                 }
                 writes.update(
-                    scope_node.id
-                    for scope_node in scope_nodes
-                    if isinstance(scope_node, ast.Name)
-                    and isinstance(scope_node.ctx, (ast.Store, ast.Del))
-                    and scope_node.id in declared_names
+                    name
+                    for name in _python_nested_write_names(
+                        scope_nodes, declared_names
+                    )
+                    if name in declared_names
                 )
             nested_writes(child)
 
@@ -1091,7 +1136,7 @@ def _rust_macro_arguments(
 def _rust_scope_nodes(node: Any) -> Iterable[Any]:
     yield node
     for child in node.children:
-        if child.type in {"function_item", "closure_expression"}:
+        if child.type in {"function_item", "closure_expression", "async_block"}:
             continue
         yield from _rust_scope_nodes(child)
 
@@ -1496,7 +1541,7 @@ def _python_store_counts(test_node: ast.AST) -> Counter[str]:
     def nested_scopes(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, scope_types):
-                scope_nodes = tuple(_python_scope_nodes(child))
+                scope_nodes = tuple(_python_scope_write_nodes(child))
                 declared_names = {
                     name
                     for scope_node in scope_nodes
@@ -1504,11 +1549,11 @@ def _python_store_counts(test_node: ast.AST) -> Counter[str]:
                     for name in scope_node.names
                 }
                 store_counts.update(
-                    name_node.id
-                    for name_node in scope_nodes
-                    if isinstance(name_node, ast.Name)
-                    and isinstance(name_node.ctx, (ast.Store, ast.Del))
-                    and name_node.id in declared_names
+                    name
+                    for name in _python_nested_write_names(
+                        scope_nodes, declared_names
+                    )
+                    if name in declared_names
                 )
             nested_scopes(child)
 
@@ -1809,7 +1854,9 @@ def _python_statement_nodes(
             ):
                 active.append(statement.value)
                 if _python_statement_terminates(statement, test):
-                    exit_reason = "unreachable_assertion"
+                    exit_reason = (
+                        "conditional_assertion" if in_with else "unreachable_assertion"
+                    )
         return exit_reason
 
     collect(test.node.body)
@@ -2253,7 +2300,7 @@ def _process_rust_test(
     }
 
     def assertion_macros(node: Any) -> list[Any]:
-        if node.type in {"function_item", "closure_expression"}:
+        if node.type in {"function_item", "closure_expression", "async_block"}:
             return []
         return [
             candidate for candidate in _rust_scope_nodes(node)

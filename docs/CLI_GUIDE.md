@@ -204,9 +204,11 @@ Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and 
   "sources": ["tests/test_math.py"],
   "targets": {
     "add": {
-      "params": ["left", "right"],
-      "file": "tests/test_math.py",
-      "line": 1
+      "python": {
+        "params": ["left", "right"],
+        "file": "tests/test_math.py",
+        "line": 1
+      }
     }
   },
   "observations": [
