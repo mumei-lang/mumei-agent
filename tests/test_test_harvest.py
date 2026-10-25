@@ -127,7 +127,7 @@ def test_python_relations_expand_chained_comparisons_and_substitute_bindings(
         tmp_path,
         "lower = -2\n"
         "assert lower <= module.add(3, 4) < 10",
-        prelude="class module:\n    pass\n",
+        prelude="import module\n",
     )
 
     report = _report(source)
@@ -351,10 +351,9 @@ def test_python_classmethod_receiver_is_not_an_explicit_argument(
         "    assert Math.increment(2) == 3\n",
     )
 
-    observation = _report(source)["observations"][0]
-
-    assert observation["target"] == "increment"
-    assert observation["args"] == {"value": 2}
+    report = _report(source)
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "no_target_call"
 
 
 def test_rust_should_panic_collects_literal_bindings_and_nested_test_module(
@@ -551,6 +550,7 @@ def test_python_module_attribute_calls_resolve_by_last_component(
 ) -> None:
     source = _write(
         tmp_path / "test_module.py",
+        "import module\n"
         "def add(left, right):\n    return left + right\n"
         "def test_module():\n"
         "    assert module.add(2, 3) == 5\n",
@@ -743,6 +743,206 @@ def test_same_name_definitions_resolve_locally_and_report_ambiguity(
         {"left": 2, "right": 3},
         [7],
     ]
+
+
+def test_python_only_harvests_direct_assertions_and_unconditional_with(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_direct.py",
+        "def f(x): return x\n"
+        "def test_direct():\n"
+        "    if False:\n        assert f(1) == 1\n"
+        "    for _ in ():\n        assert f(2) == 2\n"
+        "    while False:\n        assert f(3) == 3\n"
+        "    try:\n        assert f(4) == 4\n"
+        "    except AssertionError:\n        assert f(5) == 5\n"
+        "    with open(__file__):\n        assert f(6) == 6\n",
+    )
+    report = _report(source)
+    assert [item["args"] for item in report["observations"]] == [{"x": 6}]
+    assert [item["reason"] for item in report["skipped"]] == [
+        "conditional_assertion"
+    ] * 5
+    assert all({"file", "line", "test"} <= item.keys() for item in report["skipped"])
+
+
+def test_python_assertions_after_return_and_raise_are_unreachable(tmp_path: Path) -> None:
+    source = _write(
+        tmp_path / "test_unreachable.py",
+        "def f(x): return x\n"
+        "def test_return():\n    return\n    assert f(1) == 1\n"
+        "def test_raise():\n    raise RuntimeError()\n    assert f(2) == 2\n",
+    )
+    report = _report(source)
+    assert report["observations"] == []
+    assert [item["reason"] for item in report["skipped"]] == [
+        "unreachable_assertion",
+        "unreachable_assertion",
+    ]
+
+
+@pytest.mark.parametrize(
+    "decorator",
+    [
+        "@pytest.mark.skip",
+        "@pytest.mark.skipif(True, reason='skip')",
+        "@pytest.mark.xfail",
+        "@skip",
+        "@skipif(True)",
+        "@xfail",
+        "@unittest.skip",
+        "@unittest.skipIf(True, 'skip')",
+        "@unittest.skipUnless(False, 'skip')",
+        "@unittest.expectedFailure",
+        "@skip_test",
+        "@skip_if(True)",
+        "@skip_unless(False)",
+        "@expected_failure",
+    ],
+)
+def test_python_skip_decorators_produce_one_not_run_skip(
+    tmp_path: Path, decorator: str
+) -> None:
+    bare = decorator.startswith("@skip") or decorator.startswith("@xfail") or decorator.startswith("@expected")
+    imports = (
+        "from pytest.mark import skip, skipif, xfail\n"
+        "from unittest import skip as skip_test, skipIf as skip_if, "
+        "skipUnless as skip_unless, expectedFailure as expected_failure\n"
+        if bare
+        else "import pytest\nimport unittest\n"
+    )
+    source = _write(
+        tmp_path / "test_skipped.py",
+        imports
+        + "def f(x): return x\n"
+        + decorator
+        + "\ndef test_skipped():\n    assert f(1) == 1\n",
+    )
+    report = _report(source)
+    assert report["observations"] == []
+    assert report["totals"]["tests"] == 1
+    assert len(report["skipped"]) == 1
+    assert report["skipped"][0]["reason"] == "test_not_run"
+    assert report["skipped"][0]["line"] == len(imports.splitlines()) + 3
+
+
+def test_python_class_skip_and_import_bound_attribute_calls(tmp_path: Path) -> None:
+    _write(tmp_path / "lib.py", "def f(x): return x\n")
+    source = _write(
+        tmp_path / "test_attrs.py",
+        "import lib as imported\n"
+        "from package import lib as package_lib\n"
+        "import unittest\n"
+        "@unittest.skip('skip class')\n"
+        "class TestSkipped(unittest.TestCase):\n"
+        "    def test_skip(self): assert imported.f(1) == 1\n"
+        "def test_self_attr(self): assert self.f(1) == 1\n"
+        "def test_object_attr(): assert obj.f(1) == 1\n"
+        "def test_method_target(): assert c.g(1) == 1\n"
+        "def test_module_attr(): assert imported.f(2) == 2\n"
+        "def test_alias_attr(): assert package_lib.f(3) == 3\n",
+    )
+    report = harvest_tests([tmp_path], None, None)
+    assert [item["test"] for item in report["observations"]] == [
+        "test_module_attr",
+        "test_alias_attr",
+    ]
+    assert [item["reason"] for item in report["skipped"]].count("test_not_run") == 1
+    assert all(item["reason"] == "no_target_call" for item in report["skipped"] if item["test"] in {"test_self_attr", "test_object_attr", "test_method_target"})
+    filtered = harvest_tests([source], None, {"f"})
+    assert any(item["test"] == "test_self_attr" and item["reason"] == "no_target_call" for item in filtered["skipped"])
+
+
+def test_rust_direct_conditional_unreachable_and_ignored_assertions(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "rust.rs",
+        "fn f(x: i64) -> i64 { x }\n"
+        "#[cfg(test)] mod tests { use super::*;\n"
+        "#[test] fn test_control() { if false { assert_eq!(f(1), 1); } "
+        "match 1 { _ => { assert_eq!(f(2), 2); } } "
+        "loop { assert_eq!(f(3), 3); break; } "
+        "while false { assert_eq!(f(4), 4); } "
+        "for _ in 0..1 { assert_eq!(f(5), 5); } "
+        "{ assert_eq!(f(6), 6); } assert_eq!(f(7), 7); }\n"
+        "#[test] fn test_unreachable() { panic!(\"stop\"); assert_eq!(f(8), 8); }\n"
+        "#[test] #[ignore] fn test_ignored() { assert_eq!(f(9), 9); }\n"
+        "}",
+    )
+    report = _report(source)
+    assert [item["args"] for item in report["observations"]] == [{"x": 7}]
+    assert [item["reason"] for item in report["skipped"]].count("conditional_assertion") == 6
+    assert any(item["reason"] == "unreachable_assertion" for item in report["skipped"])
+    assert sum(item["reason"] == "test_not_run" for item in report["skipped"]) == 1
+
+
+@pytest.mark.parametrize("terminal", ["return;", "panic!(\"x\");", "unreachable!();", "todo!();", "unimplemented!();"])
+def test_rust_assertions_after_terminal_are_unreachable(
+    tmp_path: Path, terminal: str
+) -> None:
+    source = _rust_file(
+        tmp_path,
+        f"{terminal} assert_eq!(add(1, 2), 3);",
+    )
+    report = _report(source)
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "unreachable_assertion"
+
+
+def test_should_panic_conditional_call_remains_ambiguous(tmp_path: Path) -> None:
+    source = _write(
+        tmp_path / "should_panic.rs",
+        "fn fail(x: i64) { let _ = x; }\n#[cfg(test)] mod tests { use super::*;\n"
+        "#[test] #[should_panic] fn test_reject() { if true { fail(1); } }\n}",
+    )
+    report = _report(source)
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "ambiguous_rejects"
+
+
+def test_rust_return_in_closure_does_not_hide_following_assertion(
+    tmp_path: Path,
+) -> None:
+    source = _rust_file(
+        tmp_path,
+        "let closure = || { return; }; assert_eq!(add(1, 2), 3);",
+    )
+    report = _report(source)
+    assert [item["kind"] for item in report["observations"]] == ["example"]
+
+
+@pytest.mark.parametrize("language", ["python", "rust"])
+def test_integer_literals_obey_i64_range(tmp_path: Path, language: str) -> None:
+    if language == "python":
+        cases = [
+            ("assert add(9223372036854775807, 0) == 9223372036854775807", True),
+            ("assert add(-9223372036854775808, 0) == -9223372036854775808", True),
+            ("assert add(9223372036854775808, 0) == 0", False),
+            ("assert add(999999999999999999999999999999999999999999999999, 0) == 0", False),
+            ("assert add(-9223372036854775809, 0) == 0", False),
+            ("assert add(1, 0) < 9223372036854775808", False),
+        ]
+    else:
+        cases = [
+            ("assert_eq!(add(9223372036854775807i64, 0), 9223372036854775807i64);", True),
+            ("assert_eq!(add(-9223372036854775808i64, 0), -9223372036854775808i64);", True),
+            ("assert_eq!(add(9223372036854775808i64, 0), 0);", False),
+            ("assert_eq!(add(999999999999999999999999999999999999999, 0), 0);", False),
+            ("assert_eq!(add(-9223372036854775809i64, 0), 0);", False),
+            ("assert!(add(1, 0) < 9223372036854775808);", False),
+        ]
+    accepted = []
+    for index, (assertion, valid) in enumerate(cases):
+        path = _python_file(tmp_path, assertion) if language == "python" else _rust_file(tmp_path, assertion)
+        if index:
+            path = _write(path, path.read_text())
+        report = _report(path)
+        accepted.append(bool(report["observations"]))
+        if not valid:
+            assert report["skipped"][0]["reason"] == "unsupported_expression"
+    assert accepted == [valid for _, valid in cases]
 
 
 def test_unique_definition_in_another_input_file_resolves_call(
@@ -972,6 +1172,7 @@ def test_rust_nested_helper_scopes_are_not_harvested(tmp_path: Path) -> None:
 
     assert len(report["observations"]) == 1
     assert report["observations"][0]["args"] == {"left": 1, "right": 2}
+    assert report["skipped"] == []
 
 
 @pytest.mark.parametrize("write", ["value = 2", "value += 1"])
