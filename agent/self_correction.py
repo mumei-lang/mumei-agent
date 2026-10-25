@@ -14,6 +14,7 @@ from openai import OpenAI
 from agent import telemetry
 from agent.charter_guard import CharterGuard, discover_guard_or_exit
 from agent.config import AgentConfig
+from agent.erosion_guard import ErosionGuard, create_guard, structured_feedback as erosion_feedback
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.strategies import fix_strategy
 
@@ -42,6 +43,7 @@ class SelfCorrectionLoopIteration:
     token_cost: int
     structured_feedback: dict[str, object] = field(default_factory=dict)
     stop_reason: str | None = None
+    erosion_report: dict | None = None
 
 
 @dataclass
@@ -144,6 +146,7 @@ class StructuredFeedbackSelfCorrectionLoop:
         max_tokens: int = 10000,
         repair_fn: RepairFn | None = None,
         guard: CharterGuard | None = None,
+        erosion_guard: ErosionGuard | None = None,
     ) -> None:
         self.client = client
         self.model = model
@@ -153,6 +156,7 @@ class StructuredFeedbackSelfCorrectionLoop:
         self.max_tokens = max(1, max_tokens)
         self.repair_fn = repair_fn or default_repair
         self.guard = guard
+        self.erosion_guard = erosion_guard
 
     def run(
         self,
@@ -172,7 +176,11 @@ class StructuredFeedbackSelfCorrectionLoop:
         structured_feedback: dict[str, object] | str | Path,
     ) -> SelfCorrectionLoopResult:
         path = Path(source_path)
-        original_source = path.read_bytes() if self.guard is not None else None
+        original_source = (
+            path.read_bytes()
+            if self.guard is not None or self.erosion_guard is not None
+            else None
+        )
         current_feedback = load_structured_feedback(structured_feedback)
         iterations: list[SelfCorrectionLoopIteration] = []
         consecutive_successes = 0
@@ -181,6 +189,7 @@ class StructuredFeedbackSelfCorrectionLoop:
         final_error: str | None = None
         loop_result: SelfCorrectionLoopResult | None = None
         last_charter_failure = False
+        last_erosion_failure = False
 
         def stop_if_charter_tampered() -> list[str]:
             if self.guard is None:
@@ -235,8 +244,16 @@ class StructuredFeedbackSelfCorrectionLoop:
             result = self.mumei_client.verify(str(path))
             report = _report_dict(result.get("report"))
             current_feedback = _structured_feedback(report) or current_feedback
+            if result.get("success") and not _structured_feedback(report):
+                current_feedback = {
+                    "status": "verification_passed",
+                    "error_type": None,
+                    "reconstruction_loss": None,
+                }
             success = bool(result.get("success")) and _reconstruction_loss_empty(report, current_feedback)
             last_charter_failure = False
+            last_erosion_failure = False
+            erosion_report = None
             tampered_paths: list[str] = []
             if success and self.guard is not None:
                 outcome = self.guard.check(self.mumei_client, str(path))
@@ -264,6 +281,30 @@ class StructuredFeedbackSelfCorrectionLoop:
                     result["stderr"] = outcome.summary
                     result["report"] = report
                     success = False
+            if success and self.erosion_guard is not None:
+                outcome = self.erosion_guard.check(self.mumei_client, str(path))
+                erosion_report = outcome.report
+                report["erosion_report"] = erosion_report
+                if not outcome.passed:
+                    last_erosion_failure = True
+                    success = False
+                    current_feedback = erosion_feedback(outcome)
+                    report.update(
+                        {
+                            "status": "erosion_failed",
+                            "failure_type": "contract_erosion",
+                            "error_type": "contract_erosion",
+                            "reason": outcome.summary,
+                            "erosion_report": erosion_report,
+                            "loss_vector": current_feedback,
+                            "structured_feedback": current_feedback,
+                        }
+                    )
+                    result = dict(result)
+                    result["success"] = False
+                    result["stderr"] = outcome.summary
+                    result["report"] = report
+                    last_charter_failure = False
             consecutive_successes = consecutive_successes + 1 if success else 0
             verification_result = _verification_result(result, report)
 
@@ -276,6 +317,7 @@ class StructuredFeedbackSelfCorrectionLoop:
                     repair_attempts=repair_attempts,
                     token_cost=token_cost,
                     structured_feedback=current_feedback,
+                    erosion_report=erosion_report,
                 )
             )
 
@@ -360,7 +402,6 @@ class StructuredFeedbackSelfCorrectionLoop:
                 )
                 break
             path.write_text(fixed, encoding="utf-8")
-            last_charter_failure = False
             tampered_paths = stop_if_charter_tampered()
             if tampered_paths:
                 iterations[-1].stop_reason = "charter_tampered"
@@ -389,14 +430,17 @@ class StructuredFeedbackSelfCorrectionLoop:
                 final_error,
             )
         if (
-            self.guard is not None
+            (self.guard is not None or self.erosion_guard is not None)
             and original_source is not None
             and not loop_result.converged
             and loop_result.stop_reason != "charter_tampered"
-            and last_charter_failure
+            and (last_charter_failure or last_erosion_failure)
         ):
             path.write_bytes(original_source)
-            print(f"Final candidate failed charter check; source restored from {path}")
+            if last_erosion_failure:
+                print(f"Final candidate weakened its contract; source restored from {path}")
+            else:
+                print(f"Final candidate failed charter check; source restored from {path}")
         try:
             _loop_span.set_attribute("mumei.loop.final_success", loop_result.converged)  # type: ignore[union-attr]
             _loop_span.set_attribute("mumei.loop.stop_reason", loop_result.stop_reason or "unknown")  # type: ignore[union-attr]
@@ -437,6 +481,7 @@ def run_self_correction_loop(
     mumei_client: MumeiClient | None = None,
     repair_fn: RepairFn | None = None,
     guard: CharterGuard | None = None,
+    erosion_guard: ErosionGuard | None = None,
 ) -> SelfCorrectionLoopResult:
     effective_config = config or AgentConfig()
     loop = StructuredFeedbackSelfCorrectionLoop(
@@ -448,6 +493,7 @@ def run_self_correction_loop(
         max_tokens=effective_config.self_correction_max_tokens,
         repair_fn=repair_fn,
         guard=guard,
+        erosion_guard=erosion_guard,
     )
     return loop.run(source_path, structured_feedback)
 
@@ -471,6 +517,11 @@ def build_self_correct_parser(
         default=None,
         metavar="LOCK_JSON",
         help="Use this charter lock instead of discovering one from the source tree.",
+    )
+    parser.add_argument(
+        "--allow-contract-erosion",
+        action="store_true",
+        help="Disable contract-erosion checks for repair candidates.",
     )
     parser.add_argument("--metadata-output", help="Write self-correction metadata JSON")
     parser.add_argument(
@@ -504,23 +555,41 @@ def main_self_correct(
         lock_arg,
         enabled=config.enable_charter_guard,
     )
-    if args.feedback:
-        result = run_self_correction_loop(
-            source_path=source,
-            structured_feedback=args.feedback,
-            config=config,
-            guard=charter_guard,
-        )
-        payload = result.to_dict()
-    else:
-        mumei_client = create_mumei_client(config.mumei_bin)
-        loop = fix_strategy.SelfCorrectionLoop(
-            max_iterations=args.max_iterations or config.self_correction_max_attempts,
-            convergence_threshold=float(config.self_correction_convergence_threshold),
-        )
-        llm_client = fix_strategy.ConfiguredLossVectorFixClient(config, mumei_client)
-        result = loop.run(Path(source), mumei_client, llm_client, guard=charter_guard)
-        payload = result.to_dict()
+    erosion_guard = create_guard(
+        source,
+        enabled=(
+            config.enable_erosion_guard
+            and not getattr(args, "allow_contract_erosion", False)
+        ),
+    )
+    try:
+        if args.feedback:
+            result = run_self_correction_loop(
+                source_path=source,
+                structured_feedback=args.feedback,
+                config=config,
+                guard=charter_guard,
+                erosion_guard=erosion_guard,
+            )
+            payload = result.to_dict()
+        else:
+            mumei_client = create_mumei_client(config.mumei_bin)
+            loop = fix_strategy.SelfCorrectionLoop(
+                max_iterations=args.max_iterations or config.self_correction_max_attempts,
+                convergence_threshold=float(config.self_correction_convergence_threshold),
+            )
+            llm_client = fix_strategy.ConfiguredLossVectorFixClient(config, mumei_client)
+            result = loop.run(
+                Path(source),
+                mumei_client,
+                llm_client,
+                guard=charter_guard,
+                erosion_guard=erosion_guard,
+            )
+            payload = result.to_dict()
+    finally:
+        if erosion_guard is not None:
+            erosion_guard.close()
     if args.metadata_output:
         Path(args.metadata_output).write_text(
             json.dumps(payload, indent=2, ensure_ascii=False),

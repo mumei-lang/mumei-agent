@@ -25,6 +25,7 @@ from agent.budget_policy import (
 from agent.budget_metrics import aggregate_metrics
 from agent.charter_guard import discover_guard_or_exit
 from agent.config import AgentConfig
+from agent.erosion_guard import create_guard, structured_feedback as erosion_feedback
 from agent.meta_architect import MetaArchitect
 from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
@@ -142,6 +143,8 @@ def _run_directory_heal(
                 next_argv.extend(["--budget-policy", args.budget_policy])
             if getattr(args, "charter_lock", None) is not None:
                 next_argv.extend(["--charter-lock", args.charter_lock])
+            if getattr(args, "allow_contract_erosion", False):
+                next_argv.append("--allow-contract-erosion")
             if args.proof_cert_out is not None:
                 next_argv.extend(
                     [
@@ -284,6 +287,11 @@ def main() -> None:
         metavar="LOCK_JSON",
         help="Use this charter lock instead of discovering one from the source tree.",
     )
+    parser.add_argument(
+        "--allow-contract-erosion",
+        action="store_true",
+        help="Disable contract-erosion checks for repair candidates.",
+    )
     args = parser.parse_args()
 
     if args.generate is not None and args.output is None:
@@ -320,29 +328,42 @@ def main() -> None:
     max_retries = args.max_retries if args.max_retries is not None else config.max_retries
     budget_policy = load_budget_policy(args.budget_policy)
     max_retries = min(max_retries, budget_policy.max_attempts)
+    erosion_guard = create_guard(
+        source_file,
+        enabled=(
+            config.enable_erosion_guard
+            and args.generate is None
+            and not getattr(args, "allow_contract_erosion", False)
+        ),
+    )
 
     if config.enable_self_correction and args.generate is None:
         from agent.self_correction import run_self_correction_loop
 
-        initial = mumei.verify(source_file)
-        initial_report = initial["report"] or {}
-        initial_feedback = initial_report.get("structured_feedback")
-        if not isinstance(initial_feedback, dict):
-            initial_feedback = {
-                "status": "verification_failed" if not initial.get("success") else "verification_passed",
-                "error_type": initial_report.get("failure_type"),
-                "location": None,
-                "reconstruction_loss": initial_report.get("reconstruction_loss"),
-                "feedback_instruction": "Use the verifier report to repair the source.",
-            }
-        result = run_self_correction_loop(
-            source_file,
-            initial_feedback,
-            config=config,
-            client=client,
-            mumei_client=mumei,
-            guard=charter_guard,
-        )
+        try:
+            initial = mumei.verify(source_file)
+            initial_report = initial["report"] or {}
+            initial_feedback = initial_report.get("structured_feedback")
+            if not isinstance(initial_feedback, dict):
+                initial_feedback = {
+                    "status": "verification_failed" if not initial.get("success") else "verification_passed",
+                    "error_type": initial_report.get("failure_type"),
+                    "location": None,
+                    "reconstruction_loss": initial_report.get("reconstruction_loss"),
+                    "feedback_instruction": "Use the verifier report to repair the source.",
+                }
+            result = run_self_correction_loop(
+                source_file,
+                initial_feedback,
+                config=config,
+                client=client,
+                mumei_client=mumei,
+                guard=charter_guard,
+                erosion_guard=erosion_guard,
+            )
+        finally:
+            if erosion_guard is not None:
+                erosion_guard.close()
         payload = result.to_dict()
         if args.proof_cert_out:
             write_repair_certificate(
@@ -363,6 +384,8 @@ def main() -> None:
 
     # --- Generate mode (P1-A): generate → verify → fix loop ---
     if args.generate is not None:
+        if erosion_guard is not None:
+            erosion_guard.close()
         success = True
         _run_generate_mode(
             client, config.model, args.generate,
@@ -382,6 +405,7 @@ def main() -> None:
     success = False
     stop_reason: str | None = None
     applied_fixes = 0
+    last_erosion_failure = False
 
     def stop_if_charter_tampered() -> bool:
         nonlocal stop_reason
@@ -413,6 +437,7 @@ def main() -> None:
             if stop_if_charter_tampered():
                 break
             result = mumei.verify(source_file)
+            last_erosion_failure = False
             if stop_if_charter_tampered():
                 break
             if result["success"] and charter_guard is not None:
@@ -438,6 +463,44 @@ def main() -> None:
                         "failure_type": "charter_violation",
                         "reason": outcome.summary,
                         "charter_report": outcome.report,
+                    }
+                    result["stdout"] = outcome.summary
+                    result["stderr"] = ""
+            if result["success"] and erosion_guard is not None:
+                outcome = erosion_guard.check(mumei, source_file)
+                try:
+                    thought.add_step(
+                        action="erosion_check",
+                        verification_success=outcome.passed,
+                        z3_result={
+                            "status": "skipped"
+                            if outcome.skipped
+                            else ("pass" if outcome.passed else "fail"),
+                            "reason": outcome.summary,
+                            "erosion_report": outcome.report,
+                        },
+                    )
+                except Exception:
+                    pass
+                if stop_if_charter_tampered():
+                    break
+                current_report = dict(result.get("report") or {})
+                current_report["erosion_report"] = outcome.report
+                result = dict(result)
+                result["report"] = current_report
+                if not outcome.passed:
+                    last_erosion_failure = True
+                    feedback = erosion_feedback(outcome)
+                    result["success"] = False
+                    result["report"] = {
+                        **current_report,
+                        "status": "erosion_failed",
+                        "failure_type": "contract_erosion",
+                        "error_type": "contract_erosion",
+                        "reason": outcome.summary,
+                        "erosion_report": outcome.report,
+                        "loss_vector": feedback,
+                        "structured_feedback": feedback,
                     }
                     result["stdout"] = outcome.summary
                     result["stderr"] = ""
@@ -743,6 +806,8 @@ def main() -> None:
             _loop_span_ctx.__exit__(*sys.exc_info())
         except Exception:
             pass
+        if erosion_guard is not None:
+            erosion_guard.close()
         try:
             thought.final_success = success
             thought.total_attempts = len(
@@ -765,8 +830,12 @@ def main() -> None:
         # other non-success exit. On success, `return` executes the finally
         # block but the guard skips restoration.
         if not success:
-            shutil.copy2(backup_file, source_file)
-            print(f"Healing failed. Original source restored from {backup_file}")
+            if last_erosion_failure and erosion_guard is not None:
+                erosion_guard.restore(source_file)
+                print(f"Final candidate weakened its contract; source restored from {source_file}")
+            else:
+                shutil.copy2(backup_file, source_file)
+                print(f"Healing failed. Original source restored from {backup_file}")
         certificate_failed = False
         if args.proof_cert_out:
             try:

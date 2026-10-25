@@ -19,7 +19,16 @@ uv run mumei-agent heal examples/effect_test.mm
 
 # Backward compatible (no subcommand = heal mode)
 uv run mumei-agent examples/sword_test.mm
+
+# Disable the original-contract erosion guard for one repair
+uv run mumei-agent heal examples/sword_test.mm --allow-contract-erosion
 ```
+
+Repair acceptance checks run in order: verifier, pinned charter (when
+configured), then contract erosion against the source snapshot. The
+`--allow-contract-erosion` option disables only the final check for that
+invocation; see [Configuration](CONFIGURATION.md#contract-guards) for the
+environment variables and defaults.
 
 ## Generate Mode
 

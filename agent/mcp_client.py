@@ -398,6 +398,14 @@ class MumeiMCPClient:
             span.set_attribute("mumei.mcp", True)
             return self._fallback.charter_check(source_path, lock_path, cwd=cwd)
 
+    def erosion_check(self, candidate_path: str, baseline_path: str) -> dict[str, Any]:
+        """Run the erosion check through the CLI; no MCP equivalent exists."""
+        with self._tracer.start_as_current_span("mumei.mcp.erosion_check") as span:
+            span.set_attribute("mumei.command", "erosion-check")
+            span.set_attribute("mumei.source_path", candidate_path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.erosion_check(candidate_path, baseline_path)
+
     def infer_effects(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
         with self._tracer.start_as_current_span("mumei.mcp.infer_effects") as span:

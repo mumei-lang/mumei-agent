@@ -300,31 +300,7 @@ class MumeiClient:
             if cwd is not None
             else Path(lock_path).expanduser().resolve().parent
         )
-        command_prefix = list(self._cmd_prefix)
-        if command_prefix:
-            binary = command_prefix[0]
-            binary_path = Path(binary).expanduser()
-            if (
-                not Path(binary).is_absolute()
-                and (os.sep in binary or (os.altsep is not None and os.altsep in binary))
-            ):
-                command_prefix[0] = str((original_cwd / binary_path).resolve())
-            if (
-                Path(command_prefix[0]).name == "cargo"
-                and "run" in command_prefix
-                and not any(
-                    argument == "--manifest-path"
-                    or argument.startswith("--manifest-path=")
-                    for argument in command_prefix
-                )
-            ):
-                cargo_manifest = original_cwd / "Cargo.toml"
-                if cargo_manifest.is_file():
-                    run_index = command_prefix.index("run")
-                    command_prefix[run_index + 1:run_index + 1] = [
-                        "--manifest-path",
-                        str(cargo_manifest.resolve()),
-                    ]
+        command_prefix = self._command_prefix(original_cwd)
         cmd = [
             *command_prefix,
             "charter",
@@ -354,6 +330,62 @@ class MumeiClient:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
+
+    def erosion_check(self, candidate_path: str, baseline_path: str) -> dict:
+        """Compare candidate contracts with a read-only baseline snapshot."""
+        cmd = [
+            *self._command_prefix(Path.cwd()),
+            "erosion",
+            candidate_path,
+            "--baseline",
+            baseline_path,
+            "--json",
+        ]
+        result = self._run_command(
+            cmd,
+            span_name="mumei.erosion.check",
+            source_path=candidate_path,
+            command_label="erosion-check",
+        )
+        report = None
+        try:
+            report = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            pass
+        return {
+            "returncode": result.returncode,
+            "report": report,
+            "stderr": result.stderr,
+        }
+
+    def _command_prefix(self, original_cwd: Path) -> list[str]:
+        command_prefix = list(self._cmd_prefix)
+        if not command_prefix:
+            return command_prefix
+        binary = command_prefix[0]
+        binary_path = Path(binary).expanduser()
+        if (
+            not Path(binary).is_absolute()
+            and (os.sep in binary or (os.altsep is not None and os.altsep in binary))
+        ):
+            command_prefix[0] = str((original_cwd / binary_path).resolve())
+        if (
+            Path(command_prefix[0]).name == "cargo"
+            and "run" in command_prefix
+            and not any(
+                argument == "--manifest-path"
+                or argument.startswith("--manifest-path=")
+                for argument in command_prefix
+            )
+        ):
+            cargo_manifest = original_cwd / "Cargo.toml"
+            if cargo_manifest.is_file():
+                run_index = command_prefix.index("run")
+                command_prefix[run_index + 1:run_index + 1] = [
+                    "--manifest-path",
+                    str(cargo_manifest.resolve()),
+                ]
+        return command_prefix
 
     def infer_effects(self, source_path: str) -> dict:
         """Run mumei infer-effects and return parsed JSON result."""

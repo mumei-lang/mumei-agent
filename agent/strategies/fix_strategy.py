@@ -13,6 +13,7 @@ from openai import OpenAI
 from agent.budget_policy import BudgetPolicy, evaluate_budget
 from agent.charter_guard import CharterGuard
 from agent.config import AgentConfig
+from agent.erosion_guard import ErosionGuard, structured_feedback as erosion_feedback
 from agent.llm_provider import LLMProvider, complete_response
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
@@ -99,19 +100,25 @@ class SelfCorrectionLoop:
         llm_client,
         *,
         guard: CharterGuard | None = None,
+        erosion_guard: ErosionGuard | None = None,
     ) -> SelfCorrectionResult:
         path = Path(code_file)
         source_existed = path.exists()
-        original_source = path.read_bytes() if guard is not None and source_existed else None
+        original_source = (
+            path.read_bytes()
+            if (guard is not None or erosion_guard is not None) and source_existed
+            else None
+        )
         history: list[dict[str, object]] = []
         last_loss_vector: dict | None = None
         repair_attempts = 0
         last_charter_failure = False
+        last_erosion_failure = False
 
         def restore_source() -> None:
             if original_source is not None:
                 path.write_bytes(original_source)
-            elif guard is not None and not source_existed:
+            elif (guard is not None or erosion_guard is not None) and not source_existed:
                 path.unlink(missing_ok=True)
 
         def stop_if_charter_tampered() -> bool:
@@ -130,6 +137,14 @@ class SelfCorrectionLoop:
 
         def finish(result: SelfCorrectionResult) -> SelfCorrectionResult:
             if (
+                erosion_guard is not None
+                and not result.success
+                and result.stop_reason != "charter_tampered"
+                and last_erosion_failure
+            ):
+                restore_source()
+                print(f"Final candidate weakened its contract; source restored from {path}")
+            elif (
                 guard is not None
                 and not result.success
                 and result.stop_reason != "charter_tampered"
@@ -152,6 +167,7 @@ class SelfCorrectionLoop:
             verify_result = mumei_client.verify(str(path))
             all_verified = self._all_verified(verify_result)
             last_charter_failure = False
+            last_erosion_failure = False
             if all_verified and guard is not None:
                 outcome = guard.check(mumei_client, str(path))
                 if stop_if_charter_tampered():
@@ -197,6 +213,39 @@ class SelfCorrectionLoop:
                             "structured_feedback": charter_feedback,
                         },
                     })
+            erosion_report = None
+            if all_verified and erosion_guard is not None:
+                outcome = erosion_guard.check(mumei_client, str(path))
+                erosion_report = outcome.report
+                report = dict(verify_result.get("report") or {})
+                report["erosion_report"] = erosion_report
+                verify_result = dict(verify_result)
+                verify_result["report"] = report
+                if not outcome.passed:
+                    last_erosion_failure = True
+                    all_verified = False
+                    feedback = erosion_feedback(outcome)
+                    report.update(
+                        {
+                            "status": "erosion_failed",
+                            "failure_type": "contract_erosion",
+                            "error_type": "contract_erosion",
+                            "reason": outcome.summary,
+                            "erosion_report": erosion_report,
+                            "loss_vector": feedback,
+                            "structured_feedback": feedback,
+                        }
+                    )
+                    verify_result.update(
+                        {
+                            "all_verified": False,
+                            "success": False,
+                            "stderr": outcome.summary,
+                            "loss_vector": feedback,
+                            "report": report,
+                        }
+                    )
+                    last_charter_failure = False
             loss_vector = self._loss_vector(verify_result)
             last_loss_vector = loss_vector
             history.append(
@@ -204,6 +253,7 @@ class SelfCorrectionLoop:
                     "iteration": iteration,
                     "all_verified": all_verified,
                     "has_loss_vector": loss_vector is not None,
+                    "erosion_report": erosion_report,
                 }
             )
             if all_verified:
@@ -235,7 +285,6 @@ class SelfCorrectionLoop:
                 ))
             path.write_text(fix, encoding="utf-8")
             repair_attempts += 1
-            last_charter_failure = False
             if stop_if_charter_tampered():
                 return finish(SelfCorrectionResult(
                     success=False,
