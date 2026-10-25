@@ -176,6 +176,7 @@ See `.env.example` for configuration details.
 | `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `uv run mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` (python\|rust\|typescript\|go) |
 | `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `uv run mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` (python\|rust\|typescript\|go) |
 | `extract-spec` | Extract forge spec from existing code or natural-language input | `uv run mumei-agent extract-spec --code-file src/foo.py` |
+| `harvest-tests` | Deterministically extract example, relation, and expected-failure observations from Python and Rust tests | `uv run mumei-agent harvest-tests tests/ --target add` |
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `uv run mumei-agent check-spec-health spec.mm` |
 | `cross-validate` | Cross-validate spec↔code consistency across multiple files | `uv run mumei-agent cross-validate --spec spec.txt --code src/foo.py` |
 | `proliferate` | Autonomous weekly loop: analyze gaps → spec → generate → blast-radius check → heal → PR | `uv run mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
@@ -183,6 +184,86 @@ See `.env.example` for configuration details.
 | `analyze-std-gaps` | Identify gaps in std/ coverage | `uv run mumei-agent analyze-std-gaps --mumei-repo ../mumei` |
 | `health` | Show agent health status (LLM provider, mumei binary, etc.) | `uv run mumei-agent health` |
 | `mcp-server` | Run mumei-agent as a FastMCP server (forge / heal / health / propose tools) | `uv run mumei-agent mcp-server` |
+
+## Test Harvest
+
+`harvest-tests` performs deterministic, LLM-free extraction of test observations from Python (`ast`) and Rust (the existing tree-sitter parser). It accepts files or directories; `.py` and `.rs` files are detected automatically, including mixed-language directories. Use `--language python|rust` to restrict directory discovery, `--target NAME` more than once to filter target functions, and `--output FILE` to write the JSON report to a file.
+
+```bash
+uv run python -m agent harvest-tests tests/python/
+uv run python -m agent harvest-tests tests/rust/ --language rust --target add --output observations.json
+```
+
+The report uses schema `mumei.test-harvest/v1`. `sources` and every file path are relative to the common input root. `targets` maps target names to their parameter names and definition locations. A target with no in-input definition has `params`, `file`, and `line` set to `null`. If a name has multiple definitions, its entry is `{"params": null, "ambiguous": true, "definitions": [...]}`; each definition has `params`, `file`, and `line`, sorted by file and line. Calls use a same-file definition when available, otherwise a unique definition across the inputs; ambiguous or unresolved calls keep positional `args`. Each observation contains `kind` (`example`, `relation`, or `rejects`), `target`, literal `args`, `test`, `file`, and `line`; examples add `result`, relations add a Mumei-syntax `predicate`, and rejects add `expected: "failure"`. Unsupported assertions appear in `skipped` with a reason and source text. Partial parse failures are reported as `parse_error` skips; if every source fails to parse, the CLI exits 4 without emitting a report. The totals count test functions, observations by kind, and skipped items.
+
+Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and `*`. Division and modulo expressions are skipped as unsupported because their language-specific integer semantics do not reliably match Mumei's.
+
+```json
+{
+  "schema": "mumei.test-harvest/v1",
+  "sources": ["tests/test_math.py"],
+  "targets": {
+    "add": {
+      "params": ["left", "right"],
+      "file": "tests/test_math.py",
+      "line": 1
+    }
+  },
+  "observations": [
+    {
+      "kind": "example",
+      "target": "add",
+      "args": {"left": 2, "right": 3},
+      "test": "test_add",
+      "file": "tests/test_math.py",
+      "line": 5,
+      "result": 5
+    }
+  ],
+  "skipped": [],
+  "totals": {
+    "tests": 1,
+    "observations": {"example": 1, "relation": 0, "rejects": 0},
+    "skipped": 0
+  }
+}
+```
+
+```python
+# tests/python/test_math.py
+def add(left: int, right: int) -> int:
+    return left + right
+
+def test_add():
+    assert add(2, 3) == 5
+```
+
+```bash
+uv run python -m agent harvest-tests tests/python/test_math.py
+```
+
+The observation is an `example` for target `add`, arguments `{"left": 2, "right": 3}`, and result `5`.
+
+```rust
+// tests/rust/math.rs
+fn add(left: i64, right: i64) -> i64 {
+    left + right
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_add() {
+        assert_eq!(super::add(2, 3), 5);
+    }
+}
+```
+
+```bash
+uv run python -m agent harvest-tests tests/rust/math.rs
+```
+
+This produces the same `example` shape with Rust parameter names and paths relative to the supplied input root.
 
 ## Verification Workflow Guide
 
