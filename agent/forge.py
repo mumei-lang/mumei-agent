@@ -27,6 +27,7 @@ from typing import Any
 from openai import OpenAI
 
 from agent.config import AgentConfig
+from agent.context_files import load_context_files
 from agent.controls_gate import ControlsGate
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.benchmark_feedback import BenchmarkFeedback, load_benchmark_feedback
@@ -637,41 +638,7 @@ class MumeiForge:
         ``self.mumei_repo_dir`` — tasks cannot exfiltrate arbitrary
         host files by supplying a traversal-escaping relative path.
         """
-        context_files = task.get("context_files") or []
-        if not isinstance(context_files, list) or not context_files:
-            return ""
-
-        sections: list[str] = []
-        for rel_path in context_files:
-            if not isinstance(rel_path, str) or not rel_path:
-                continue
-            full_path = (self.mumei_repo_dir / rel_path).resolve()
-            try:
-                full_path.relative_to(self.mumei_repo_dir)
-            except ValueError:
-                _logger.warning("context_file escapes repo root: %s", rel_path)
-                continue
-            if not full_path.exists() or not full_path.is_file():
-                _logger.warning("context_file not found: %s", rel_path)
-                continue
-            try:
-                content = full_path.read_text(encoding="utf-8")
-            except OSError as exc:
-                _logger.warning("Failed to read context_file %s: %s", rel_path, exc)
-                continue
-            sections.append(
-                f"# Context file: `{rel_path}`\n"
-                f"```mumei\n{content.strip()}\n```"
-            )
-
-        if not sections:
-            return ""
-        return (
-            "# Cross-file context — related std modules.\n"
-            "# Use these contracts and types as style references.  Do NOT "
-            "re-emit them.\n\n"
-            + "\n\n".join(sections)
-        )
+        return load_context_files(task.get("context_files"), self.mumei_repo_dir)
 
     def _ensure_openai_client(self) -> OpenAI | LLMProvider:
         if self.config is None:

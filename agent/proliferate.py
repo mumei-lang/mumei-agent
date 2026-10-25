@@ -26,6 +26,7 @@ from typing import Any
 from agent import telemetry
 from agent.benchmark_feedback import BenchmarkFeedback, load_benchmark_feedback
 from agent.config import AgentConfig
+from agent.context_files import load_context_files
 from agent.gap_rules import (
     _IMPORT_RE,
     _STD_GAP_RULES,
@@ -174,11 +175,31 @@ def _run_forge_generation(
         spec_result["cache_hit"] = True
         return index, spec_result, generation_metrics
 
+    generation_spec = spec
+    if mumei_repo_dir is not None:
+        cross_file_context = load_context_files(
+            spec.get("context_files"), mumei_repo_dir
+        )
+        import_preamble = spec.get("import_preamble")
+        if isinstance(import_preamble, str) and import_preamble:
+            preamble_context = (
+                "# Import these dependency modules with:\n"
+                f"```mumei\n{import_preamble}\n```"
+            )
+            cross_file_context = (
+                f"{cross_file_context}\n\n{preamble_context}"
+                if cross_file_context
+                else preamble_context
+            )
+        if cross_file_context:
+            generation_spec = dict(spec)
+            generation_spec["cross_file_context"] = cross_file_context
+
     try:
         code, verified = generate_code(
             client=config.create_client(),
             model=config.model,
-            spec=spec,
+            spec=generation_spec,
             config_max_retries=config.max_retries,
             mumei_client=mumei_client,
             metrics=generation_metrics,
