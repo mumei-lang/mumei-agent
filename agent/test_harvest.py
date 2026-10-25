@@ -1136,9 +1136,17 @@ def _rust_macro_arguments(
 def _rust_scope_nodes(node: Any) -> Iterable[Any]:
     yield node
     for child in node.children:
-        if child.type in {"function_item", "closure_expression", "async_block"}:
+        if child.type in {"function_item", "closure_expression"}:
             continue
         yield from _rust_scope_nodes(child)
+
+
+def _rust_sync_scope_nodes(node: Any) -> Iterable[Any]:
+    yield node
+    for child in node.children:
+        if child.type in {"function_item", "closure_expression", "async_block"}:
+            continue
+        yield from _rust_sync_scope_nodes(child)
 
 
 def _rust_call_names(
@@ -2017,7 +2025,7 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
     counts: Counter[str] = Counter()
     if body is None:
         return counts
-    scope_nodes = tuple(_rust_scope_nodes(body))
+    scope_nodes = tuple(_rust_sync_scope_nodes(body))
     outer_names = set(_rust_params(test.node, source_bytes))
     for node in scope_nodes:
         if node.type == "let_declaration":
@@ -2031,14 +2039,18 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
             if name:
                 counts[name] += 1
 
-    def closure_writes(node: Any) -> None:
+    def captured_writes(node: Any) -> None:
         for child in node.children:
             if child.type == "function_item":
                 continue
-            if child.type == "closure_expression":
-                closure_nodes = tuple(_rust_scope_nodes(child))
+            if child.type in {"closure_expression", "async_block"}:
+                closure_nodes = tuple(_rust_sync_scope_nodes(child))
                 parameter_names: set[str] = set()
-                parameters = child.child_by_field_name("parameters")
+                parameters = (
+                    child.child_by_field_name("parameters")
+                    if child.type == "closure_expression"
+                    else None
+                )
                 if parameters is not None:
                     for parameter in parameters.named_children:
                         pattern = parameter.child_by_field_name("pattern")
@@ -2071,11 +2083,11 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
                         ancestor = ancestor.parent
                     if name in outer_names and not local:
                         counts[name] += 1
-                closure_writes(child)
+                captured_writes(child)
             else:
-                closure_writes(child)
+                captured_writes(child)
 
-    closure_writes(body)
+    captured_writes(body)
     return counts
 
 
@@ -2303,7 +2315,7 @@ def _process_rust_test(
         if node.type in {"function_item", "closure_expression", "async_block"}:
             return []
         return [
-            candidate for candidate in _rust_scope_nodes(node)
+            candidate for candidate in _rust_sync_scope_nodes(node)
             if candidate.type == "macro_invocation"
             and not _rust_standard_path(_rust_macro_path(candidate, source_bytes))
             and _rust_macro_name(candidate, source_bytes)
@@ -2342,7 +2354,7 @@ def _process_rust_test(
                 )
             if any(
                 node.type == "try_expression"
-                for node in _rust_scope_nodes(statement)
+                for node in _rust_sync_scope_nodes(statement)
             ):
                 conditional = True
             continue
@@ -2392,7 +2404,7 @@ def _process_rust_test(
             unreachable = True
         elif any(
             node.type == "try_expression"
-            for node in _rust_scope_nodes(statement)
+            for node in _rust_sync_scope_nodes(statement)
         ):
             conditional = True
 

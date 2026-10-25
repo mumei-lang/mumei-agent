@@ -1648,6 +1648,30 @@ def test_rust_nested_closure_writes_invalidate_literal_bindings(
 
 
 @pytest.mark.parametrize(
+    "async_block",
+    ["async { x = 9; }", "async move { x = 9; }"],
+)
+def test_rust_async_block_writes_invalidate_literal_bindings(
+    tmp_path: Path, async_block: str
+) -> None:
+    source = _write(
+        tmp_path / "test_async_write.rs",
+        "fn f(value: i64) -> i64 { value + 1 }\n"
+        "#[test]\n"
+        "fn test_async_write() {\n"
+        "    let mut x = 3;\n"
+        f"    block_on({async_block});\n"
+        "    assert_eq!(f(x), 4);\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "non_literal_argument"
+
+
+@pytest.mark.parametrize(
     "closure",
     [
         "let closure = || { let mut value = 2; value = 3; };",
