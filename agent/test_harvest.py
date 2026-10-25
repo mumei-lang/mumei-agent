@@ -88,6 +88,7 @@ class _Test:
     should_panic: bool = False
     not_run: bool = False
     python_imports: frozenset[str] = frozenset()
+    python_imported_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,25 @@ def _python_target_name(
     return None
 
 
-def _python_import_roots(tree: ast.Module, test_node: ast.AST) -> frozenset[str]:
+def _python_test_writes(test_node: ast.AST) -> set[str]:
+    writes: set[str] = set()
+    for node in ast.walk(test_node):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            writes.add(node.id)
+        elif isinstance(node, ast.arg):
+            writes.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            writes.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            writes.add(node.name)
+        elif isinstance(node, ast.MatchAs) and node.name:
+            writes.add(node.name)
+    return writes
+
+
+def _python_import_roots(
+    tree: ast.Module, test_node: ast.AST, module_names: set[str]
+) -> frozenset[str]:
     roots: set[str] = set()
     nodes = list(_python_scope_nodes(tree))
     nodes.extend(_python_scope_nodes(test_node))
@@ -144,8 +163,26 @@ def _python_import_roots(tree: ast.Module, test_node: ast.AST) -> frozenset[str]
         if isinstance(node, ast.Import):
             roots.update(alias.asname or alias.name.split(".", 1)[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            roots.update(alias.asname or alias.name for alias in node.names)
-    return frozenset(roots)
+            roots.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in module_names
+            )
+    return frozenset(roots - _python_test_writes(test_node))
+
+
+def _python_imported_names(tree: ast.Module, test_node: ast.AST) -> frozenset[str]:
+    names: set[str] = set()
+    nodes = list(_python_scope_nodes(tree))
+    nodes.extend(_python_scope_nodes(test_node))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            names.update(
+                alias.asname or alias.name.split(".", 1)[0] for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.asname or alias.name for alias in node.names)
+    return frozenset(names - _python_test_writes(test_node))
 
 
 def _python_import_aliases(tree: ast.Module) -> tuple[dict[str, str], dict[str, str]]:
@@ -190,10 +227,33 @@ _SKIP_DECORATORS = {
 def _python_is_skipped(
     decorators: list[ast.expr], modules: dict[str, str], names: dict[str, str]
 ) -> bool:
-    return any(
-        _python_decorator_name(decorator, modules, names) in _SKIP_DECORATORS
-        for decorator in decorators
-    )
+    for decorator in decorators:
+        name = _python_decorator_name(decorator, modules, names)
+        if name not in _SKIP_DECORATORS:
+            continue
+        if name in {"pytest.mark.skipif", "unittest.skipIf", "unittest.skipUnless"}:
+            condition: ast.expr | None = None
+            if isinstance(decorator, ast.Call):
+                condition = decorator.args[0] if decorator.args else next(
+                    (
+                        keyword.value
+                        for keyword in decorator.keywords
+                        if keyword.arg == "condition"
+                    ),
+                    None,
+                )
+            if not isinstance(condition, ast.Constant) or not isinstance(
+                condition.value, bool
+            ):
+                return True
+            if name == "unittest.skipUnless":
+                if not condition.value:
+                    return True
+            elif condition.value:
+                return True
+        else:
+            return True
+    return False
 
 
 def _python_definition_line(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
@@ -401,7 +461,8 @@ def _python_imported_call_names(
                 continue
             name = _python_target_name(node.func, test.python_imports)
             if name and (
-                isinstance(node.func, ast.Attribute) or name in test.python_imports
+                isinstance(node.func, ast.Attribute)
+                or name in test.python_imported_names
             ):
                 names.add(name)
             if (
@@ -413,7 +474,7 @@ def _python_imported_call_names(
                 )
                 if callable_name and (
                     isinstance(node.args[1], ast.Attribute)
-                    or callable_name in test.python_imports
+                    or callable_name in test.python_imported_names
                 ):
                     names.add(callable_name)
     return names
@@ -1634,7 +1695,7 @@ def _python_statement_nodes(
 ) -> list[ast.AST]:
     active: list[ast.AST] = []
 
-    def collect(statements: list[ast.stmt]) -> None:
+    def collect(statements: list[ast.stmt]) -> bool:
         unreachable = False
         for statement in statements:
             if unreachable:
@@ -1648,13 +1709,15 @@ def _python_statement_nodes(
                 )
                 continue
             active.append(statement)
+            exits = isinstance(statement, (ast.Return, ast.Raise))
             if isinstance(statement, (ast.With, ast.AsyncWith)):
                 if not _python_raises_context(statement):
-                    collect(statement.body)
+                    exits = collect(statement.body)
             elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
                 active.append(statement.value)
-            if isinstance(statement, (ast.Return, ast.Raise)):
+            if exits:
                 unreachable = True
+        return unreachable
 
     collect(test.node.body)
     return active
@@ -2163,6 +2226,11 @@ def harvest_tests(
         (path, path.relative_to(root).as_posix(), _EXTENSIONS[path.suffix.lower()])
         for path in source_paths
     ]
+    python_modules = {
+        path.parent.name if path.name == "__init__.py" else path.stem
+        for path, _relative, source_language in sources
+        if source_language == "python"
+    }
     definitions: dict[str, list[_Definition]] = {}
     tests: list[_Test] = []
     parse_skips: list[dict[str, Any]] = []
@@ -2204,7 +2272,10 @@ def harvest_tests(
                     source,
                     test.node,
                     not_run=test.not_run,
-                    python_imports=_python_import_roots(tree, test.node),
+                    python_imports=_python_import_roots(
+                        tree, test.node, python_modules
+                    ),
+                    python_imported_names=_python_imported_names(tree, test.node),
                 )
                 for test in file_tests
             ]

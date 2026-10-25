@@ -782,6 +782,36 @@ def test_python_assertions_after_return_and_raise_are_unreachable(tmp_path: Path
     ]
 
 
+def test_python_exits_inside_nested_with_make_later_assertions_unreachable(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_with_exit.py",
+        "def f(x): return x\n"
+        "def test_return_in_with():\n"
+        "    with open(__file__):\n"
+        "        return\n"
+        "    assert f(1) == 1\n"
+        "def test_raise_in_nested_with():\n"
+        "    with open(__file__):\n"
+        "        with open(__file__):\n"
+        "            raise RuntimeError()\n"
+        "            assert f(2) == 2\n"
+        "        assert f(3) == 3\n"
+        "    assert f(4) == 4\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert [item["reason"] for item in report["skipped"]] == [
+        "unreachable_assertion",
+        "unreachable_assertion",
+        "unreachable_assertion",
+        "unreachable_assertion",
+    ]
+
+
 @pytest.mark.parametrize(
     "decorator",
     [
@@ -827,6 +857,59 @@ def test_python_skip_decorators_produce_one_not_run_skip(
     assert report["skipped"][0]["line"] == len(imports.splitlines()) + 3
 
 
+@pytest.mark.parametrize(
+    ("imports", "decorator", "not_run"),
+    [
+        ("import pytest\n", "@pytest.mark.skipif(False, reason='skip')", False),
+        ("import pytest\n", "@pytest.mark.skipif(True, reason='skip')", True),
+        ("import pytest\n", "@pytest.mark.skipif(condition=False)", False),
+        ("import pytest\n", "@pytest.mark.skipif(condition=True)", True),
+        ("import pytest\n", "@pytest.mark.skipif(CONDITION)", True),
+        ("import unittest\n", "@unittest.skipIf(False, 'skip')", False),
+        ("import unittest\n", "@unittest.skipIf(True, 'skip')", True),
+        ("import unittest\n", "@unittest.skipUnless(True, 'skip')", False),
+        ("import unittest\n", "@unittest.skipUnless(False, 'skip')", True),
+        (
+            "from pytest.mark import skipif as skip_if\n",
+            "@skip_if(False, reason='skip')",
+            False,
+        ),
+        (
+            "from unittest import skipIf as skip_if\n",
+            "@skip_if(False, 'skip')",
+            False,
+        ),
+        (
+            "from unittest import skipUnless as skip_unless\n",
+            "@skip_unless(True, 'skip')",
+            False,
+        ),
+        (
+            "from unittest import skipUnless as skip_unless\n",
+            "@skip_unless(False, 'skip')",
+            True,
+        ),
+    ],
+)
+def test_python_skip_conditions_only_skip_tests_not_known_to_run(
+    tmp_path: Path, imports: str, decorator: str, not_run: bool
+) -> None:
+    source = _write(
+        tmp_path / "test_skip_condition.py",
+        imports
+        + "def f(x): return x\n"
+        + decorator
+        + "\ndef test_condition():\n    assert f(1) == 1\n",
+    )
+
+    report = _report(source)
+
+    assert bool(report["skipped"]) is not_run
+    assert bool(report["observations"]) is (not not_run)
+    if not_run:
+        assert report["skipped"][0]["reason"] == "test_not_run"
+
+
 def test_python_class_skip_and_import_bound_attribute_calls(tmp_path: Path) -> None:
     _write(tmp_path / "lib.py", "def f(x): return x\n")
     source = _write(
@@ -852,6 +935,66 @@ def test_python_class_skip_and_import_bound_attribute_calls(tmp_path: Path) -> N
     assert all(item["reason"] == "no_target_call" for item in report["skipped"] if item["test"] in {"test_self_attr", "test_object_attr", "test_method_target"})
     filtered = harvest_tests([source], None, {"f"})
     assert any(item["test"] == "test_self_attr" and item["reason"] == "no_target_call" for item in filtered["skipped"])
+
+
+def test_python_attribute_targets_require_unshadowed_module_roots(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "pkg" / "module.py", "def f(value): return value\n")
+    _write(
+        tmp_path / "pkg" / "package_module" / "__init__.py",
+        "def g(value): return value\n",
+    )
+    _write(tmp_path / "lib.py", "def h(value): return value\n")
+    source = _write(
+        tmp_path / "test_roots.py",
+        "from pkg import module as imported_module\n"
+        "from pkg import package_module\n"
+        "from pkg import Service\n"
+        "import pkg.module\n"
+        "import lib as root\n"
+        "def test_modules():\n"
+        "    assert imported_module.f(1) == 1\n"
+        "    assert package_module.g(2) == 2\n"
+        "    assert pkg.module.f(3) == 3\n"
+        "    assert Service.f(4) == 4\n"
+        "def test_rebound():\n"
+        "    root = object()\n"
+        "    assert root.h(5) == 5\n"
+        "def test_nested_rebound():\n"
+        "    def helper():\n"
+        "        root = object()\n"
+        "    assert root.h(6) == 6\n"
+        "def test_local_import():\n"
+        "    import lib as local_root\n"
+        "    assert local_root.h(8) == 8\n"
+        "def test_unshadowed():\n"
+        "    assert root.h(7) == 7\n",
+    )
+
+    report = harvest_tests([tmp_path], None, None)
+
+    assert [item["test"] for item in report["observations"]] == [
+        "test_modules",
+        "test_modules",
+        "test_modules",
+        "test_local_import",
+        "test_unshadowed",
+    ]
+    assert [item["target"] for item in report["observations"]] == [
+        "f",
+        "g",
+        "f",
+        "h",
+        "h",
+    ]
+    assert [
+        (item["test"], item["reason"]) for item in report["skipped"]
+    ] == [
+        ("test_modules", "no_target_call"),
+        ("test_rebound", "no_target_call"),
+        ("test_nested_rebound", "no_target_call"),
+    ]
 
 
 def test_rust_direct_conditional_unreachable_and_ignored_assertions(
