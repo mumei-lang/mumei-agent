@@ -4,7 +4,14 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from agent import self_healing
+
+
+@pytest.fixture(autouse=True)
+def _disable_erosion_guard_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_EROSION_GUARD", "false")
 
 
 def test_first_allowed_attempt_reaches_get_fix(monkeypatch, tmp_path) -> None:

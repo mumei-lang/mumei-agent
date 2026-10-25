@@ -22,6 +22,24 @@ Core agent and local Ollama settings are controlled through environment variable
   and structured unsat cores instead of raw JSON dumps to keep long-context runs
   focused on repair-relevant evidence.
 
+### Contract guards
+
+`heal` and `self-correct` protect pinned charters and the source file's original
+contracts while evaluating repairs. A passing verifier result is accepted only
+after the charter check and then the contract-erosion check pass. Erosion
+compares the candidate with a read-only snapshot of the source from the start
+of the run; it does not modify verifier semantics or write reports into the
+project.
+
+- `ENABLE_CHARTER_GUARD` (default: `true`): enable charter-lock checks.
+- `CHARTER_LOCK_PATH`: optional explicit charter-lock path.
+- `ENABLE_EROSION_GUARD` (default: `true`): reject candidates that weaken
+  original contracts. The check is skipped when the configured `mumei` binary
+  does not support `erosion`, or when the source cannot be parsed as a
+  baseline.
+- `--allow-contract-erosion`: disable erosion checks for a single `heal` or
+  `self-correct` invocation.
+
 ### OpenTelemetry Observability
 
 Distributed tracing and token/latency metrics are **opt-in** and default to off.

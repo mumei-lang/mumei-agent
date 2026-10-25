@@ -11,6 +11,11 @@ from agent.charter_guard import CharterGuard
 from agent.self_correction import StructuredFeedbackSelfCorrectionLoop
 
 
+@pytest.fixture(autouse=True)
+def _disable_erosion_guard_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENABLE_EROSION_GUARD", "false")
+
+
 def failed_result() -> dict:
     return {
         "success": False,
@@ -250,7 +255,12 @@ def test_self_correct_cli_passes_guard_to_both_modes(
             def __init__(self, **_kwargs: object) -> None:
                 pass
 
-            def run(self, *_args: object, guard: CharterGuard | None = None) -> Result:
+            def run(
+                self,
+                *_args: object,
+                guard: CharterGuard | None = None,
+                erosion_guard=None,
+            ) -> Result:
                 captured_guards.append(guard)
                 return Result()
 

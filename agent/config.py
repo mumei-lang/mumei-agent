@@ -65,6 +65,9 @@ class AgentConfig:
     enable_charter_guard: bool = field(
         default_factory=lambda: _env_bool("ENABLE_CHARTER_GUARD", True)
     )
+    enable_erosion_guard: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_EROSION_GUARD", True)
+    )
     charter_lock_path: str | None = field(
         default_factory=lambda: os.getenv("CHARTER_LOCK_PATH") or None
     )

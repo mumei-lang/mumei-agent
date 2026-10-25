@@ -36,6 +36,7 @@ def _configure(
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["mumei-heal", *argv])
     monkeypatch.setenv("ENABLE_CHARTER_GUARD", "true")
+    monkeypatch.setenv("ENABLE_EROSION_GUARD", "false")
     monkeypatch.setattr(
         self_healing.AgentConfig, "create_client", lambda self: SimpleNamespace()
     )

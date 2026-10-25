@@ -13,6 +13,7 @@ from agent import telemetry
 from agent.budget_policy import BudgetPolicy, classify_action_class, compute_policy_fingerprint, evaluate_budget
 from agent.charter_guard import CharterGuard, discover_guard_or_exit
 from agent.config import AgentConfig
+from agent.erosion_guard import ErosionGuard, create_guard, structured_feedback as erosion_feedback
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.proofcert import Z3CheckResult
@@ -40,6 +41,7 @@ class SelfCorrectionIteration:
     reconstruction_loss_empty: bool = True
     counterexample: dict[str, object] | None = None
     stop_reason: str | None = None
+    erosion_report: dict | None = None
 
 
 @dataclass
@@ -80,6 +82,7 @@ class SelfCorrectionStrategy:
         budget_policy: BudgetPolicy | None = None,
         metrics: Metrics | None = None,
         guard: CharterGuard | None = None,
+        erosion_guard: ErosionGuard | None = None,
     ) -> None:
         self.client = client
         self.model = model
@@ -94,6 +97,7 @@ class SelfCorrectionStrategy:
         )
         self.metrics = metrics or Metrics()
         self.guard = guard
+        self.erosion_guard = erosion_guard
 
     def run(
         self,
@@ -125,12 +129,16 @@ class SelfCorrectionStrategy:
     ) -> SelfCorrectionResult:
         path = Path(source_path)
         source_existed = path.exists()
-        original_source = path.read_bytes() if self.guard is not None and source_existed else None
+        original_source = (
+            path.read_bytes()
+            if (self.guard is not None or self.erosion_guard is not None) and source_existed
+            else None
+        )
 
         def restore_source() -> None:
             if original_source is not None:
                 path.write_bytes(original_source)
-            elif self.guard is not None and not source_existed:
+            elif (self.guard is not None or self.erosion_guard is not None) and not source_existed:
                 path.unlink(missing_ok=True)
 
         def stop_if_charter_tampered() -> bool:
@@ -182,6 +190,7 @@ class SelfCorrectionStrategy:
         final_error: str | None = None
         loop_result: SelfCorrectionResult | None = None
         last_charter_failure = False
+        last_erosion_failure = False
 
         for iteration in range(1, self.max_repairs + self.required_successes + 1):
             if stop_if_charter_tampered():
@@ -203,6 +212,8 @@ class SelfCorrectionStrategy:
             loss_empty = self._reconstruction_loss_empty(report)
             success = verification_result in {Z3CheckResult.UNSAT.value, Z3CheckResult.LEAN_VERIFIED.value} and loss_empty
             last_charter_failure = False
+            last_erosion_failure = False
+            erosion_report = None
             if success and self.guard is not None:
                 outcome = self.guard.check(self.mumei_client, str(path))
                 if stop_if_charter_tampered():
@@ -263,8 +274,32 @@ class SelfCorrectionStrategy:
                     result["success"] = False
                     result["stderr"] = outcome.summary
                     result["report"] = report
-            elif not success:
-                last_charter_failure = False
+            if success and self.erosion_guard is not None:
+                outcome = self.erosion_guard.check(self.mumei_client, str(path))
+                erosion_report = outcome.report
+                report["erosion_report"] = erosion_report
+                if not outcome.passed:
+                    last_erosion_failure = True
+                    success = False
+                    verification_result = "contract_erosion"
+                    loss_empty = False
+                    feedback = erosion_feedback(outcome)
+                    report.update(
+                        {
+                            "status": "erosion_failed",
+                            "failure_type": "contract_erosion",
+                            "error_type": "contract_erosion",
+                            "reason": outcome.summary,
+                            "erosion_report": erosion_report,
+                            "loss_vector": feedback,
+                            "structured_feedback": feedback,
+                        }
+                    )
+                    result = dict(result)
+                    result["success"] = False
+                    result["stderr"] = outcome.summary
+                    result["report"] = report
+                    last_charter_failure = False
             consecutive_successes = consecutive_successes + 1 if success else 0
 
             iterations.append(
@@ -276,6 +311,7 @@ class SelfCorrectionStrategy:
                     repair_attempts=len(history.attempts),
                     reconstruction_loss_empty=loss_empty,
                     counterexample=self._counterexample(report),
+                    erosion_report=erosion_report,
                 )
             )
             if consecutive_successes >= self.required_successes:
@@ -354,6 +390,7 @@ class SelfCorrectionStrategy:
             path.write_text(fixed, encoding="utf-8")
             tampered = stop_if_charter_tampered()
             last_charter_failure = False
+            last_erosion_failure = False
             history.add(
                 RetryAttempt(
                     attempt_number=len(history.attempts) + 1,
@@ -395,14 +432,17 @@ class SelfCorrectionStrategy:
                 stop_reason=iterations[-1].stop_reason if iterations else "not_started",
             )
         if (
-            self.guard is not None
+            (self.guard is not None or self.erosion_guard is not None)
             and (original_source is not None or not source_existed)
             and not loop_result.converged
             and loop_result.stop_reason != "charter_tampered"
-            and last_charter_failure
+            and (last_charter_failure or last_erosion_failure)
         ):
             restore_source()
-            print(f"Final candidate failed charter check; source restored from {path}")
+            if last_erosion_failure:
+                print(f"Final candidate weakened its contract; source restored from {path}")
+            else:
+                print(f"Final candidate failed charter check; source restored from {path}")
         try:
             _loop_span.set_attribute("mumei.loop.final_success", loop_result.converged)  # type: ignore[union-attr]
             _loop_span.set_attribute("mumei.loop.stop_reason", loop_result.stop_reason or "unknown")  # type: ignore[union-attr]
@@ -540,6 +580,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         metavar="LOCK_JSON",
         help="Use this charter lock instead of discovering one from the source tree.",
     )
+    parser.add_argument(
+        "--allow-contract-erosion",
+        action="store_true",
+        help="Disable contract-erosion checks for repair candidates.",
+    )
     return parser
 
 
@@ -557,24 +602,36 @@ def main(args: argparse.Namespace | None = None) -> SelfCorrectionResult:
         lock_arg,
         enabled=config.enable_charter_guard,
     )
+    erosion_guard = create_guard(
+        args.source_file,
+        enabled=(
+            config.enable_erosion_guard
+            and not getattr(args, "allow_contract_erosion", False)
+        ),
+    )
     required_successes = (
         args.required_successes
         if args.required_successes is not None
         else config.self_correction_convergence_threshold
     )
-    strategy = SelfCorrectionStrategy(
-        config.create_client(),
-        config.model,
-        create_mumei_client(config.mumei_bin),
-        max_repairs=args.max_repairs or config.self_correction_max_attempts,
-        required_successes=required_successes,
-        max_tokens=args.max_tokens,
-        guard=guard,
-    )
-    spec = None
-    if args.spec_file:
-        spec = json.loads(Path(args.spec_file).read_text(encoding="utf-8"))
-    result = strategy.run(args.source_file, spec=spec)
+    try:
+        strategy = SelfCorrectionStrategy(
+            config.create_client(),
+            config.model,
+            create_mumei_client(config.mumei_bin),
+            max_repairs=args.max_repairs or config.self_correction_max_attempts,
+            required_successes=required_successes,
+            max_tokens=args.max_tokens,
+            guard=guard,
+            erosion_guard=erosion_guard,
+        )
+        spec = None
+        if args.spec_file:
+            spec = json.loads(Path(args.spec_file).read_text(encoding="utf-8"))
+        result = strategy.run(args.source_file, spec=spec)
+    finally:
+        if erosion_guard is not None:
+            erosion_guard.close()
     payload = result.to_dict()
     if args.metadata_output:
         Path(args.metadata_output).write_text(
