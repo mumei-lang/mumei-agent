@@ -19,8 +19,6 @@ _BINARY_OPERATORS = {
     "+": 4,
     "-": 4,
     "*": 5,
-    "/": 5,
-    "%": 5,
     "==": 3,
     "!=": 3,
     "<": 3,
@@ -32,12 +30,14 @@ _BINARY_OPERATORS = {
     "and": 2,
     "or": 1,
 }
+_UNSUPPORTED_BINARY_OPERATORS = {
+    "/": 5,
+    "%": 5,
+}
 _PYTHON_BINARY_OPERATORS = {
     ast.Add: "+",
     ast.Sub: "-",
     ast.Mult: "*",
-    ast.Div: "/",
-    ast.Mod: "%",
 }
 _PYTHON_COMPARISON_OPERATORS = {
     ast.Eq: "==",
@@ -494,7 +494,9 @@ class _RustExpressionParser:
         left = self._parse_prefix()
         while True:
             operator = self._peek()
-            precedence = _BINARY_OPERATORS.get(operator or "")
+            precedence = _BINARY_OPERATORS.get(
+                operator or "", _UNSUPPORTED_BINARY_OPERATORS.get(operator or "")
+            )
             if precedence is None or precedence < minimum:
                 break
             self._take()
@@ -514,6 +516,8 @@ class _RustExpressionParser:
                     left = _Expr(kind, operator, (*left.children, right))
                 else:
                     left = _Expr(kind, operator, (left, right))
+            elif operator in _UNSUPPORTED_BINARY_OPERATORS:
+                left = _Expr("unsupported", children=(left, right))
             else:
                 left = _Expr("binary", operator, (left, right))
         return left
@@ -757,7 +761,9 @@ def _render_expression(
         if name not in target_names or has_keywords:
             raise _ExpressionError("unsupported call")
         return "result"
-    if expression.kind == "unary" and expression.value in {"-", "+", "!", "not"}:
+    if expression.kind == "unary" and expression.value == "+":
+        return _render_expression(expression.children[0], target_names, bindings)
+    if expression.kind == "unary" and expression.value in {"-", "!", "not"}:
         operand = _render_expression(expression.children[0], target_names, bindings)
         operator = "!" if expression.value == "not" else expression.value
         return f"({operator}{operand})"
@@ -765,8 +771,6 @@ def _render_expression(
         "+",
         "-",
         "*",
-        "/",
-        "%",
     }:
         left = _render_expression(expression.children[0], target_names, bindings)
         right = _render_expression(expression.children[1], target_names, bindings)

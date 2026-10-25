@@ -150,6 +150,31 @@ def test_python_assert_false_and_arithmetic_predicate_are_translated(
     assert observation["predicate"] == "(!(result == 5))"
 
 
+@pytest.mark.parametrize("operator", ["/", "//", "%"])
+def test_python_division_and_modulo_relations_are_skipped(
+    tmp_path: Path, operator: str
+) -> None:
+    source = _python_file(
+        tmp_path,
+        f"assert add(2, 3) {operator} 2 > 0",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "unsupported_expression"
+
+
+def test_python_unary_plus_renders_the_operand_without_an_operator(
+    tmp_path: Path,
+) -> None:
+    source = _python_file(tmp_path, "assert +add(2, 3) > 0")
+
+    observation = _report(source)["observations"][0]
+
+    assert observation["predicate"] == "(result > 0)"
+
+
 def test_python_boolean_and_arithmetic_operators_are_translated(
     tmp_path: Path,
 ) -> None:
@@ -164,17 +189,17 @@ def test_python_boolean_and_arithmetic_operators_are_translated(
 
     source = _python_file(
         tmp_path,
-        "assert (add(2, 3) % 2 == 1) or False",
+        "assert (add(2, 3) * 2 == 10) or False",
     )
     observation = _report(source)["observations"][0]
-    assert observation["predicate"] == "(((result % 2) == 1) || false)"
+    assert observation["predicate"] == "(((result * 2) == 10) || false)"
 
     source = _python_file(
         tmp_path,
-        "assert (((add(2, 3) * 2 - 1) / 3) > 1) and True",
+        "assert ((add(2, 3) * 2 - 1) > 1) and True",
     )
     observation = _report(source)["observations"][0]
-    assert all(operator in observation["predicate"] for operator in ("*", "-", "/", "&&"))
+    assert all(operator in observation["predicate"] for operator in ("*", "-", "&&"))
 
 
 def test_python_negative_arguments_and_boolean_results_are_literals(
@@ -431,6 +456,21 @@ def test_rust_relation_uses_boolean_operators_and_explicit_precedence(
 
     assert observation["kind"] == "relation"
     assert observation["predicate"] == "(((result + 1) >= 5) && true)"
+
+
+@pytest.mark.parametrize("operator", ["/", "%"])
+def test_rust_division_and_modulo_relations_are_skipped(
+    tmp_path: Path, operator: str
+) -> None:
+    source = _rust_file(
+        tmp_path,
+        f"assert!(add(2, 3) {operator} 2 > 0);",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "unsupported_expression"
 
 
 def test_rust_negative_literal_arguments_and_boolean_values_are_supported(

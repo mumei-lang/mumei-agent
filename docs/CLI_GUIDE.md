@@ -196,6 +196,8 @@ uv run python -m agent harvest-tests tests/rust/ --language rust --target add --
 
 The report uses schema `mumei.test-harvest/v1`. `sources` and every file path are relative to the common input root. `targets` maps target names to their parameter names and definition locations. Each observation contains `kind` (`example`, `relation`, or `rejects`), `target`, literal `args`, `test`, `file`, and `line`; examples add `result`, relations add a Mumei-syntax `predicate`, and rejects add `expected: "failure"`. Unsupported assertions appear in `skipped` with a reason and source text. The totals count test functions, observations by kind, and skipped items.
 
+Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and `*`. Division and modulo expressions are skipped as unsupported because their language-specific integer semantics do not reliably match Mumei's.
+
 ```json
 {
   "schema": "mumei.test-harvest/v1",
