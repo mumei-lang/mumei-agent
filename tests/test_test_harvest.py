@@ -538,9 +538,7 @@ def test_target_filter_and_missing_definition_metadata(tmp_path: Path) -> None:
     assert [item["target"] for item in filtered["observations"]] == ["add"]
     assert filtered["skipped"][0]["reason"] == "no_target_call"
     assert missing["targets"]["missing"] == {
-        "params": None,
-        "file": None,
-        "line": None,
+        "python": {"params": None, "file": None, "line": None}
     }
     assert missing["observations"][0]["args"] == [2]
 
@@ -731,12 +729,14 @@ def test_same_name_definitions_resolve_locally_and_report_ambiguity(
     report = harvest_tests([source_root], None, None)
 
     assert report["targets"]["step"] == {
-        "params": None,
-        "ambiguous": True,
-        "definitions": [
-            {"params": ["value"], "file": "alpha.py", "line": 1},
-            {"params": ["left", "right"], "file": "beta.py", "line": 1},
-        ],
+        "python": {
+            "params": None,
+            "ambiguous": True,
+            "definitions": [
+                {"params": ["value"], "file": "alpha.py", "line": 1},
+                {"params": ["left", "right"], "file": "beta.py", "line": 1},
+            ],
+        }
     }
     assert [item["args"] for item in report["observations"]] == [
         {"value": 1},
@@ -795,7 +795,7 @@ def test_python_exits_inside_nested_with_make_later_assertions_unreachable(
         "def test_raise_in_nested_with():\n"
         "    with open(__file__):\n"
         "        with open(__file__):\n"
-        "            raise RuntimeError()\n"
+        "            return\n"
         "            assert f(2) == 2\n"
         "        assert f(3) == 3\n"
         "    assert f(4) == 4\n",
@@ -810,6 +810,88 @@ def test_python_exits_inside_nested_with_make_later_assertions_unreachable(
         "unreachable_assertion",
         "unreachable_assertion",
     ]
+
+
+def test_python_raise_inside_with_is_conditional_but_top_level_raise_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_raise_with.py",
+        "import contextlib\n"
+        "def f(x): return x\n"
+        "def test_raise_with():\n"
+        "    with contextlib.suppress(ValueError):\n"
+        "        raise ValueError()\n"
+        "        assert f(1) == 1\n"
+        "    assert f(2) == 2\n"
+        "def test_top_level_raise():\n"
+        "    raise ValueError()\n"
+        "    assert f(3) == 3\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert [item["reason"] for item in report["skipped"]] == [
+        "conditional_assertion",
+        "conditional_assertion",
+        "unreachable_assertion",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("imports", "statement"),
+    [
+        ("import pytest\n", "pytest.fail('stop')"),
+        ("from pytest import fail as stop\n", "stop('stop')"),
+        ("import pytest\n", "pytest.skip('stop')"),
+        ("import pytest\n", "pytest.exit('stop')"),
+        ("import sys\n", "sys.exit(0)"),
+        ("from os import _exit as stop\n", "stop(0)"),
+        ("import unittest\n", "raise unittest.SkipTest('stop')"),
+        ("from unittest import SkipTest\n", "raise SkipTest('stop')"),
+        (
+            "import pytest\n",
+            "with open(__file__):\n    pytest.fail('stop')",
+        ),
+    ],
+)
+def test_python_terminating_calls_make_later_assertions_unreachable(
+    tmp_path: Path, imports: str, statement: str
+) -> None:
+    source = _write(
+        tmp_path / "test_terminating.py",
+        imports
+        + "def f(x): return x\n"
+        + "def test_terminating():\n"
+        + "".join(f"    {line}\n" for line in statement.splitlines())
+        + "    assert f(1) == 1\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "unreachable_assertion"
+
+
+@pytest.mark.parametrize("call", ["self.fail('stop')", "self.skipTest('stop')"])
+def test_python_unittest_terminating_methods_make_later_assertions_unreachable(
+    tmp_path: Path, call: str
+) -> None:
+    source = _write(
+        tmp_path / "test_unittest_terminating.py",
+        "import unittest\n"
+        "def f(x): return x\n"
+        "class TestTerminating(unittest.TestCase):\n"
+        "    def test_terminating(self):\n"
+        f"        {call}\n"
+        "        assert f(1) == 1\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "unreachable_assertion"
 
 
 @pytest.mark.parametrize(
@@ -937,6 +1019,24 @@ def test_python_class_skip_and_import_bound_attribute_calls(tmp_path: Path) -> N
     assert any(item["test"] == "test_self_attr" and item["reason"] == "no_target_call" for item in filtered["skipped"])
 
 
+def test_python_imported_class_attribute_is_not_a_module_target(tmp_path: Path) -> None:
+    _write(tmp_path / "lib.py", "def f(value): return value\n")
+    source = _write(
+        tmp_path / "test_service.py",
+        "import lib\n"
+        "from lib import Service\n"
+        "def test_service():\n"
+        "    assert Service.f(1) == 1\n"
+        "    assert lib.f(2) == 2\n",
+    )
+
+    report = harvest_tests([source.parent], None, None)
+
+    assert [item["target"] for item in report["observations"]] == ["f"]
+    assert report["skipped"][0]["reason"] == "no_target_call"
+    assert report["skipped"][0]["test"] == "test_service"
+
+
 def test_python_attribute_targets_require_unshadowed_module_roots(
     tmp_path: Path,
 ) -> None:
@@ -978,6 +1078,7 @@ def test_python_attribute_targets_require_unshadowed_module_roots(
         "test_modules",
         "test_modules",
         "test_modules",
+        "test_nested_rebound",
         "test_local_import",
         "test_unshadowed",
     ]
@@ -987,13 +1088,13 @@ def test_python_attribute_targets_require_unshadowed_module_roots(
         "f",
         "h",
         "h",
+        "h",
     ]
     assert [
         (item["test"], item["reason"]) for item in report["skipped"]
     ] == [
         ("test_modules", "no_target_call"),
         ("test_rebound", "no_target_call"),
-        ("test_nested_rebound", "no_target_call"),
     ]
 
 
@@ -1032,6 +1133,50 @@ def test_rust_assertions_after_terminal_are_unreachable(
     report = _report(source)
     assert report["observations"] == []
     assert report["skipped"][0]["reason"] == "unreachable_assertion"
+
+
+@pytest.mark.parametrize("exit_call", ["std::process::exit(1)", "process::exit(1)"])
+def test_rust_process_exit_makes_later_assertions_unreachable(
+    tmp_path: Path, exit_call: str
+) -> None:
+    source = _rust_file(
+        tmp_path,
+        f"{exit_call}; assert_eq!(add(1, 2), 3);",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "unreachable_assertion"
+
+
+def test_rust_question_mark_makes_later_assertions_conditional(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_question.rs",
+        "fn f(value: i64) -> i64 { value }\n"
+        "#[test]\n"
+        "fn test_question() -> Result<(), String> {\n"
+        "    let _ = Err::<(), String>(\"early\")?;\n"
+        "    assert_eq!(f(1), 1);\n"
+        "    Ok(())\n"
+        "}\n"
+        "#[test]\n"
+        "fn test_closure_question() {\n"
+        "    let closure = || { let _ = Err::<(), String>(\"closure\")?; };\n"
+        "    assert_eq!(f(2), 2);\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert [item["args"] for item in report["observations"]] == [{"value": 2}]
+    conditional = [
+        item for item in report["skipped"]
+        if item["test"] == "test_question"
+    ]
+    assert [item["reason"] for item in conditional] == ["conditional_assertion"]
 
 
 def test_should_panic_conditional_call_remains_ambiguous(tmp_path: Path) -> None:
@@ -1101,11 +1246,33 @@ def test_unique_definition_in_another_input_file_resolves_call(
     report = harvest_tests([source_root], None, None)
 
     assert report["targets"]["step"] == {
-        "params": ["value"],
-        "file": "lib.py",
-        "line": 1,
+        "python": {"params": ["value"], "file": "lib.py", "line": 1}
     }
     assert report["observations"][0]["args"] == {"value": 3}
+
+
+def test_mixed_language_definitions_resolve_and_report_per_language(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "lib.py", "def f(amount):\n    return amount + 1\n")
+    _write(tmp_path / "python_test.py", "def test_python():\n    assert f(2) == 3\n")
+    _write(
+        tmp_path / "lib_test.rs",
+        "fn f(value: i64) -> i64 { value + 1 }\n"
+        "#[test]\n"
+        "fn test_rust() { assert_eq!(f(3), 4); }\n",
+    )
+
+    report = harvest_tests([tmp_path], None, None)
+
+    assert report["targets"]["f"] == {
+        "python": {"params": ["amount"], "file": "lib.py", "line": 1},
+        "rust": {"params": ["value"], "file": "lib_test.rs", "line": 1},
+    }
+    assert [item["args"] for item in report["observations"]] == [
+        {"value": 3},
+        {"amount": 2},
+    ]
 
 
 def test_python_imported_targets_are_selected_without_definitions(
@@ -1123,8 +1290,8 @@ def test_python_imported_targets_are_selected_without_definitions(
     report = _report(source)
 
     assert report["targets"] == {
-        "bump": {"params": None, "file": None, "line": None},
-        "imported_plus": {"params": None, "file": None, "line": None},
+        "bump": {"python": {"params": None, "file": None, "line": None}},
+        "imported_plus": {"python": {"params": None, "file": None, "line": None}},
     }
     assert [item["target"] for item in report["observations"]] == [
         "imported_plus",
@@ -1147,9 +1314,7 @@ def test_python_imported_callable_targets_are_selected_in_raises_forms(
     report = _report(source)
 
     assert report["targets"]["explode"] == {
-        "params": None,
-        "file": None,
-        "line": None,
+        "python": {"params": None, "file": None, "line": None}
     }
     assert [item["kind"] for item in report["observations"]] == [
         "rejects",
@@ -1339,6 +1504,68 @@ def test_python_nested_nonlocal_writes_invalidate_literal_bindings(
     assert report["skipped"][0]["reason"] == "non_literal_argument"
 
 
+def test_python_nested_local_writes_do_not_shadow_outer_bindings_or_roots(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "lib.py", "def f(value):\n    return value + 1\n")
+    source = _write(
+        tmp_path / "test_nested_local.py",
+        "import lib as root\n"
+        "from lib import f\n"
+        "def test_nested_local():\n"
+        "    value = 3\n"
+        "    def helper(root, value, f):\n"
+        "        root = object()\n"
+        "        value = 4\n"
+        "        f = object()\n"
+        "    assert f(value) == 4\n"
+        "    assert root.f(1) == 2\n",
+    )
+
+    report = harvest_tests([source.parent], None, None)
+
+    assert [item["args"] for item in report["observations"]] == [
+        {"value": 3},
+        {"value": 1},
+    ]
+
+
+def test_python_nested_global_write_invalidates_import_root(tmp_path: Path) -> None:
+    _write(tmp_path / "lib.py", "def f(value):\n    return value + 1\n")
+    source = _write(
+        tmp_path / "test_nested_global.py",
+        "import lib as root\n"
+        "def test_nested_global():\n"
+        "    def helper():\n"
+        "        global root\n"
+        "        root = object()\n"
+        "    assert root.f(1) == 2\n",
+    )
+
+    report = harvest_tests([source.parent], None, None)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "no_target_call"
+
+
+def test_python_nested_nonlocal_write_invalidates_import_root(tmp_path: Path) -> None:
+    _write(tmp_path / "lib.py", "def f(value):\n    return value + 1\n")
+    source = _write(
+        tmp_path / "test_nested_nonlocal.py",
+        "def test_nested_nonlocal():\n"
+        "    import lib as root\n"
+        "    def helper():\n"
+        "        nonlocal root\n"
+        "        root = object()\n"
+        "    assert root.f(1) == 2\n",
+    )
+
+    report = harvest_tests([source.parent], None, None)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "no_target_call"
+
+
 @pytest.mark.parametrize("write", ["value = 2", "value += 1"])
 def test_rust_nested_closure_writes_invalidate_literal_bindings(
     tmp_path: Path, write: str
@@ -1358,6 +1585,32 @@ def test_rust_nested_closure_writes_invalidate_literal_bindings(
 
     assert report["observations"] == []
     assert report["skipped"][0]["reason"] == "non_literal_argument"
+
+
+@pytest.mark.parametrize(
+    "closure",
+    [
+        "let closure = || { let mut value = 2; value = 3; };",
+        "let closure = |mut value: i64| { value = 2; };",
+    ],
+)
+def test_rust_closure_local_writes_do_not_invalidate_outer_binding(
+    tmp_path: Path, closure: str
+) -> None:
+    source = _write(
+        tmp_path / "test_closure_local.rs",
+        "fn identity(value: i64) -> i64 { value }\n"
+        "#[test]\n"
+        "fn test_closure_local() {\n"
+        "    let value = 1;\n"
+        f"    {closure}\n"
+        "    assert_eq!(identity(value), 1);\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"][0]["args"] == {"value": 1}
 
 
 @pytest.mark.parametrize(

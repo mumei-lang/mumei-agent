@@ -69,6 +69,7 @@ class _Definition:
     file: str | None
     line: int | None
     receiver: bool = False
+    language: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +90,8 @@ class _Test:
     not_run: bool = False
     python_imports: frozenset[str] = frozenset()
     python_imported_names: frozenset[str] = frozenset()
+    python_module_aliases: tuple[tuple[str, str], ...] = ()
+    python_name_aliases: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,7 +142,13 @@ def _python_target_name(
 
 def _python_test_writes(test_node: ast.AST) -> set[str]:
     writes: set[str] = set()
-    for node in ast.walk(test_node):
+    scope_types = (
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+        ast.Lambda,
+    )
+    for node in _python_scope_nodes(test_node):
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             writes.add(node.id)
         elif isinstance(node, ast.arg):
@@ -150,6 +159,27 @@ def _python_test_writes(test_node: ast.AST) -> set[str]:
             writes.add(node.name)
         elif isinstance(node, ast.MatchAs) and node.name:
             writes.add(node.name)
+
+    def nested_writes(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, scope_types):
+                scope_nodes = tuple(_python_scope_nodes(child))
+                declared_names = {
+                    name
+                    for scope_node in scope_nodes
+                    if isinstance(scope_node, (ast.Global, ast.Nonlocal))
+                    for name in scope_node.names
+                }
+                writes.update(
+                    scope_node.id
+                    for scope_node in scope_nodes
+                    if isinstance(scope_node, ast.Name)
+                    and isinstance(scope_node.ctx, (ast.Store, ast.Del))
+                    and scope_node.id in declared_names
+                )
+            nested_writes(child)
+
+    nested_writes(test_node)
     return writes
 
 
@@ -185,10 +215,15 @@ def _python_imported_names(tree: ast.Module, test_node: ast.AST) -> frozenset[st
     return frozenset(names - _python_test_writes(test_node))
 
 
-def _python_import_aliases(tree: ast.Module) -> tuple[dict[str, str], dict[str, str]]:
+def _python_import_aliases(
+    tree: ast.Module, test_node: ast.AST | None = None
+) -> tuple[dict[str, str], dict[str, str]]:
     modules: dict[str, str] = {}
     names: dict[str, str] = {}
-    for node in _python_scope_nodes(tree):
+    nodes = list(_python_scope_nodes(tree))
+    if test_node is not None:
+        nodes.extend(_python_scope_nodes(test_node))
+    for node in nodes:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 modules[alias.asname or alias.name.split(".", 1)[0]] = alias.name
@@ -222,6 +257,42 @@ _SKIP_DECORATORS = {
     "unittest.skipUnless",
     "unittest.expectedFailure",
 }
+
+_PYTHON_TERMINATING_CALLS = {
+    "pytest.fail",
+    "pytest.skip",
+    "pytest.exit",
+    "self.fail",
+    "self.skipTest",
+    "sys.exit",
+    "os._exit",
+}
+
+
+def _python_resolved_name(
+    node: ast.expr, modules: dict[str, str], names: dict[str, str]
+) -> str:
+    if isinstance(node, ast.Name):
+        return names.get(node.id, modules.get(node.id, node.id))
+    if isinstance(node, ast.Attribute):
+        parent = _python_resolved_name(node.value, modules, names)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _python_statement_terminates(statement: ast.stmt, test: _Test) -> bool:
+    if not isinstance(statement, ast.Expr) or not isinstance(
+        statement.value, ast.Call
+    ):
+        return False
+    return (
+        _python_resolved_name(
+            statement.value.func,
+            dict(test.python_module_aliases),
+            dict(test.python_name_aliases),
+        )
+        in _PYTHON_TERMINATING_CALLS
+    )
 
 
 def _python_is_skipped(
@@ -419,7 +490,9 @@ def _python_definitions(
         params = tuple(arg.arg for arg in positional)
         receiver = bool(params and params[0] in {"self", "cls"})
         definitions.setdefault(node.name, []).append(
-            _Definition(node.name, params, file, node.lineno, receiver)
+            _Definition(
+                node.name, params, file, node.lineno, receiver, language="python"
+            )
         )
     return {
         name: sorted(values, key=lambda item: (item.file or "", item.line or 0))
@@ -730,6 +803,7 @@ def _rust_source_info(
                 file,
                 name_node.start_point.row + 1,
                 bool(_rust_params(fn_node, source_bytes)[:1] == ("self",)),
+                language="rust",
             )
         )
     definitions = {
@@ -1108,9 +1182,14 @@ def _target_calls(expression: _Expr, target_names: set[str]) -> list[_Expr]:
 def _resolve_definition(
     name: str,
     file: str,
+    language: str,
     definitions: dict[str, list[_Definition]],
 ) -> _Definition | None:
-    candidates = definitions.get(name, [])
+    candidates = [
+        definition
+        for definition in definitions.get(name, [])
+        if definition.language == language
+    ]
     same_file = [definition for definition in candidates if definition.file == file]
     if same_file:
         return same_file[0] if len(same_file) == 1 else None
@@ -1118,11 +1197,17 @@ def _resolve_definition(
 
 
 def _target_metadata(
-    name: str, definitions: dict[str, list[_Definition]]
+    name: str,
+    language: str,
+    definitions: dict[str, list[_Definition]],
 ) -> dict[str, Any]:
-    candidates = definitions.get(name, [])
+    candidates = [
+        definition
+        for definition in definitions.get(name, [])
+        if definition.language == language
+    ]
     if not candidates:
-        return _Definition(name, None, None, None).to_dict()
+        return {"params": None, "file": None, "line": None}
     if len(candidates) == 1:
         return candidates[0].to_dict()
     return {
@@ -1217,6 +1302,7 @@ def _target_argument_values(
     call: _Expr,
     definitions: dict[str, list[_Definition]],
     bindings: dict[str, int | bool],
+    language: str,
     file: str,
 ) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
     name, has_keywords = call.value[:2]
@@ -1228,7 +1314,7 @@ def _target_argument_values(
         return None, "unsupported_expression"
     except _ExpressionError:
         return None, "non_literal_argument"
-    definition = _resolve_definition(name, file, definitions)
+    definition = _resolve_definition(name, file, language, definitions)
     if definition is None or definition.params is None:
         return values, None
     params = definition.params
@@ -1316,7 +1402,7 @@ def _emit_assertion(
         return
     call = calls[0]
     args, reason = _target_argument_values(
-        call, definitions, bindings, test.file
+        call, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -1398,7 +1484,7 @@ def _python_store_counts(test_node: ast.AST) -> Counter[str]:
     store_counts = Counter(
         node.id
         for node in _python_scope_nodes(test_node)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
     )
     scope_types = (
         ast.FunctionDef,
@@ -1411,18 +1497,18 @@ def _python_store_counts(test_node: ast.AST) -> Counter[str]:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, scope_types):
                 scope_nodes = tuple(_python_scope_nodes(child))
-                nonlocal_names = {
+                declared_names = {
                     name
                     for scope_node in scope_nodes
-                    if isinstance(scope_node, ast.Nonlocal)
+                    if isinstance(scope_node, (ast.Global, ast.Nonlocal))
                     for name in scope_node.names
                 }
                 store_counts.update(
                     name_node.id
                     for name_node in scope_nodes
                     if isinstance(name_node, ast.Name)
-                    and isinstance(name_node.ctx, ast.Store)
-                    and name_node.id in nonlocal_names
+                    and isinstance(name_node.ctx, (ast.Store, ast.Del))
+                    and name_node.id in declared_names
                 )
             nested_scopes(child)
 
@@ -1540,7 +1626,7 @@ def _python_reject_block(
         return
     target_call = calls[0]
     args, reason = _target_argument_values(
-        target_call, definitions, bindings, test.file
+        target_call, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -1609,7 +1695,7 @@ def _python_callable_reject(
         tuple(_python_expr(arg, test.python_imports) for arg in call_node.args[2:]),
     )
     args, reason = _target_argument_values(
-        expression, definitions, bindings, test.file
+        expression, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -1695,12 +1781,12 @@ def _python_statement_nodes(
 ) -> list[ast.AST]:
     active: list[ast.AST] = []
 
-    def collect(statements: list[ast.stmt]) -> bool:
-        unreachable = False
+    def collect(statements: list[ast.stmt], in_with: bool = False) -> str | None:
+        exit_reason: str | None = None
         for statement in statements:
-            if unreachable:
+            if exit_reason is not None:
                 _python_skip_nested_assertions(
-                    statement, reason="unreachable_assertion", test=test, skipped=skipped
+                    statement, reason=exit_reason, test=test, skipped=skipped
                 )
                 continue
             if isinstance(statement, _PYTHON_CONDITIONALS):
@@ -1709,15 +1795,22 @@ def _python_statement_nodes(
                 )
                 continue
             active.append(statement)
-            exits = isinstance(statement, (ast.Return, ast.Raise))
             if isinstance(statement, (ast.With, ast.AsyncWith)):
                 if not _python_raises_context(statement):
-                    exits = collect(statement.body)
-            elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                    exit_reason = collect(statement.body, in_with=True)
+            elif isinstance(statement, ast.Return):
+                exit_reason = "unreachable_assertion"
+            elif isinstance(statement, ast.Raise):
+                exit_reason = (
+                    "conditional_assertion" if in_with else "unreachable_assertion"
+                )
+            elif isinstance(statement, ast.Expr) and isinstance(
+                statement.value, ast.Call
+            ):
                 active.append(statement.value)
-            if exits:
-                unreachable = True
-        return unreachable
+                if _python_statement_terminates(statement, test):
+                    exit_reason = "unreachable_assertion"
+        return exit_reason
 
     collect(test.node.body)
     return active
@@ -1877,16 +1970,65 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
     counts: Counter[str] = Counter()
     if body is None:
         return counts
-    for node in _walk(body):
+    scope_nodes = tuple(_rust_scope_nodes(body))
+    outer_names = set(_rust_params(test.node, source_bytes))
+    for node in scope_nodes:
         if node.type == "let_declaration":
             name = _rust_identifier(node.child_by_field_name("pattern"), source_bytes)
             if name:
                 counts[name] += 1
+                outer_names.add(name)
         elif node.type in {"assignment_expression", "compound_assignment_expr"}:
             left = node.child_by_field_name("left")
             name = _rust_identifier(left, source_bytes)
             if name:
                 counts[name] += 1
+
+    def closure_writes(node: Any) -> None:
+        for child in node.children:
+            if child.type == "function_item":
+                continue
+            if child.type == "closure_expression":
+                closure_nodes = tuple(_rust_scope_nodes(child))
+                parameter_names: set[str] = set()
+                parameters = child.child_by_field_name("parameters")
+                if parameters is not None:
+                    for parameter in parameters.named_children:
+                        pattern = parameter.child_by_field_name("pattern")
+                        name = _rust_identifier(pattern, source_bytes)
+                        if name:
+                            parameter_names.add(name)
+                for scope_node in closure_nodes:
+                    if scope_node.type not in {
+                        "assignment_expression",
+                        "compound_assignment_expr",
+                    }:
+                        continue
+                    name = _rust_identifier(
+                        scope_node.child_by_field_name("left"), source_bytes
+                    )
+                    local = name in parameter_names
+                    ancestor = scope_node.parent
+                    while ancestor is not None and ancestor != child and not local:
+                        if ancestor.type == "block":
+                            local = any(
+                                previous.type == "let_declaration"
+                                and previous.end_byte <= scope_node.start_byte
+                                and _rust_identifier(
+                                    previous.child_by_field_name("pattern"),
+                                    source_bytes,
+                                )
+                                == name
+                                for previous in ancestor.named_children
+                            )
+                        ancestor = ancestor.parent
+                    if name in outer_names and not local:
+                        counts[name] += 1
+                closure_writes(child)
+            else:
+                closure_writes(child)
+
+    closure_writes(body)
     return counts
 
 
@@ -1922,6 +2064,16 @@ def _rust_bindings(
 
 def _rust_text(node: Any, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
+
+
+def _rust_terminating_call(node: Any, source_bytes: bytes) -> bool:
+    if node.type != "call_expression":
+        return False
+    function = node.child_by_field_name("function")
+    if function is None:
+        return False
+    path = _rust_text(function, source_bytes).replace(" ", "")
+    return path in {"std::process::exit", "process::exit"}
 
 
 def _process_rust_rejects(
@@ -2036,7 +2188,7 @@ def _process_rust_rejects(
         )
         return
     args, reason = _target_argument_values(
-        target_call, definitions, bindings, test.file
+        target_call, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -2094,6 +2246,7 @@ def _process_rust_test(
         return
     store_counts = _rust_store_counts(test, source_bytes)
     unreachable = False
+    conditional = False
     conditional_types = {
         "if_expression", "match_expression", "loop_expression",
         "while_expression", "for_expression", "block", "closure_expression",
@@ -2125,6 +2278,14 @@ def _process_rust_test(
                     reason="unreachable_assertion", text=_rust_text(macro, source_bytes),
                 )
             continue
+        if conditional:
+            for macro in assertion_macros(statement):
+                _skip(
+                    skipped, test=test, file=test.file,
+                    line=macro.start_point.row + 1,
+                    reason="conditional_assertion", text=_rust_text(macro, source_bytes),
+                )
+            continue
         if inner_statement.type in conditional_types:
             for macro in assertion_macros(statement):
                 _skip(
@@ -2132,6 +2293,11 @@ def _process_rust_test(
                     line=macro.start_point.row + 1,
                     reason="conditional_assertion", text=_rust_text(macro, source_bytes),
                 )
+            if any(
+                node.type == "try_expression"
+                for node in _rust_scope_nodes(statement)
+            ):
+                conditional = True
             continue
         macros = assertion_macros(inner_statement)
         if inner_statement.type not in {"macro_invocation"}:
@@ -2175,6 +2341,13 @@ def _process_rust_test(
             in {"panic", "unreachable", "todo", "unimplemented"}
         ):
             unreachable = True
+        elif _rust_terminating_call(inner_statement, source_bytes):
+            unreachable = True
+        elif any(
+            node.type == "try_expression"
+            for node in _rust_scope_nodes(statement)
+        ):
+            conditional = True
 
 
 def _common_root(inputs: list[Path]) -> Path:
@@ -2238,6 +2411,7 @@ def harvest_tests(
     call_names: set[str] = set()
     imported_call_names: set[str] = set()
     qualified_call_names: set[str] = set()
+    call_names_by_language: dict[str, set[str]] = {}
     for path, relative, source_language in sources:
         try:
             source = path.read_text(encoding="utf-8")
@@ -2263,28 +2437,38 @@ def harvest_tests(
                     }
                 )
                 continue
-            file_tests = _python_tests(tree)
-            file_tests = [
-                _Test(
-                    test.name,
-                    relative,
-                    "python",
-                    source,
-                    test.node,
-                    not_run=test.not_run,
-                    python_imports=_python_import_roots(
-                        tree, test.node, python_modules
-                    ),
-                    python_imported_names=_python_imported_names(tree, test.node),
+            file_tests = []
+            for test in _python_tests(tree):
+                module_aliases, name_aliases = _python_import_aliases(
+                    tree, test.node
                 )
-                for test in file_tests
-            ]
+                file_tests.append(
+                    _Test(
+                        test.name,
+                        relative,
+                        "python",
+                        source,
+                        test.node,
+                        not_run=test.not_run,
+                        python_imports=_python_import_roots(
+                            tree, test.node, python_modules
+                        ),
+                        python_imported_names=_python_imported_names(
+                            tree, test.node
+                        ),
+                        python_module_aliases=tuple(module_aliases.items()),
+                        python_name_aliases=tuple(name_aliases.items()),
+                    )
+                )
             tests.extend(file_tests)
             for name, file_definitions in _python_definitions(tree, relative).items():
                 definitions.setdefault(name, []).extend(file_definitions)
             call_names.update(_python_call_names(file_tests))
             imported_call_names.update(
                 _python_imported_call_names(tree, file_tests)
+            )
+            call_names_by_language.setdefault("python", set()).update(
+                _python_call_names(file_tests)
             )
         else:
             file_definitions, file_tests, parse_error, tree, source_bytes = (
@@ -2302,6 +2486,9 @@ def harvest_tests(
             )
             call_names.update(file_call_names)
             qualified_call_names.update(file_qualified_names)
+            call_names_by_language.setdefault("rust", set()).update(
+                file_call_names | file_qualified_names
+            )
             imported_call_names.update(
                 _rust_imported_names(tree.root_node, source_bytes, file_tests)
                 & file_call_names
@@ -2318,6 +2505,20 @@ def harvest_tests(
         )
     else:
         target_names = set(targets)
+    available_languages = {source_language for _, _, source_language in sources}
+    target_languages: dict[str, set[str]] = {}
+    for name in target_names:
+        languages = {
+            definition.language
+            for definition in definitions.get(name, [])
+            if definition.language is not None
+        }
+        languages.update(
+            language
+            for language, names in call_names_by_language.items()
+            if name in names
+        )
+        target_languages[name] = languages or available_languages
     observations: list[dict[str, Any]] = []
     skipped = parse_skips
     for test in tests:
@@ -2361,7 +2562,10 @@ def harvest_tests(
         "schema": "mumei.test-harvest/v1",
         "sources": [relative for _path, relative, _language in sources],
         "targets": {
-            name: _target_metadata(name, definitions)
+            name: {
+                language: _target_metadata(name, language, definitions)
+                for language in sorted(target_languages[name])
+            }
             for name in sorted(target_names)
         },
         "observations": observations,
