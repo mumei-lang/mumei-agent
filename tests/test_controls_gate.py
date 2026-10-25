@@ -397,71 +397,61 @@ class TestForgeControlsGate:
             for call in forge.harness_metrics.record_result.call_args_list
         )
 
-    def test_require_weak_records_no_decidable_success(self, tmp_path) -> None:
-        results = []
-        for name, verify_success in (
-            ("weak", True),
-            ("verify-failure", False),
-        ):
-            case_dir = tmp_path / name
-            case_dir.mkdir()
-            forge, mumei = _make_forge(case_dir, "require")
-            forge.metrics_path = case_dir / "p8_decidable_metrics.json"
-            forge.harness_metrics.record_result = MagicMock()
-            mumei.verify.return_value = {
-                "success": verify_success,
-                "report": {
-                    "decidable_fragment": {
-                        "warning_counts": {"nonlinear_arithmetic": 1},
-                    },
+    def test_require_weak_records_verification_and_controls_separately(
+        self, tmp_path
+    ) -> None:
+        forge, mumei = _make_forge(tmp_path, "require")
+        forge.metrics_path = tmp_path / "p8_decidable_metrics.json"
+        forge.harness_metrics.record_result = MagicMock()
+        forge._commit_change = MagicMock()
+        mumei.verify.return_value = {
+            "success": True,
+            "report": {
+                "decidable_fragment": {
+                    "warning_counts": {"nonlinear_arithmetic": 1},
                 },
-                "stdout": "",
-                "stderr": "",
-            }
-            mumei.controls_check.return_value = _client_result(
-                "f",
-                "weak",
-                tested=1,
-                survived=1,
-                surviving_ids=["constant:1->0@2"],
-            )
+            },
+            "stdout": "",
+            "stderr": "",
+        }
+        mumei.controls_check.return_value = _client_result(
+            "f",
+            "weak",
+            tested=1,
+            survived=1,
+            surviving_ids=["constant:1->0@2"],
+        )
+        task = _deterministic_task("create")
+        task["auto_commit"] = True
 
-            result = forge.forge_one(_deterministic_task("create"))
-            results.append(
-                (
-                    json.loads(forge.metrics_path.read_text(encoding="utf-8")),
-                    forge.harness_metrics.record_result.call_args_list,
-                    result,
-                )
-            )
+        result = forge.forge_one(task)
 
-        weak_metrics, weak_harness_calls, weak_result = results[0]
-        failed_metrics, _failed_harness_calls, failed_result = results[1]
-        assert weak_result.status == failed_result.status == "failed"
+        metrics = json.loads(forge.metrics_path.read_text(encoding="utf-8"))
+        assert result.status == "failed"
+        assert result.error.startswith("weak specification: f:")
+        assert metrics["first_pass_verification_attempts"] == 1
+        assert metrics["first_pass_verification_successes"] == 1
         assert (
-            weak_metrics["new_spec_attempts"]
-            == failed_metrics["new_spec_attempts"]
+            metrics["by_logic_fragment"]["nonlinear_arithmetic"]["successes"]
             == 1
         )
-        assert (
-            weak_metrics["first_pass_verification_attempts"]
-            == failed_metrics["first_pass_verification_attempts"]
-            == 1
+        harness_calls = forge.harness_metrics.record_result.call_args_list
+        assert any(
+            call.args[:2] == ("forge_post_write_verify", True)
+            and call.kwargs["retry_class"] == "none"
+            for call in harness_calls
         )
-        assert (
-            weak_metrics["first_pass_verification_successes"]
-            == failed_metrics["first_pass_verification_successes"]
-            == 0
-        )
-        assert (
-            weak_metrics["by_logic_fragment"]["nonlinear_arithmetic"]["successes"]
-            == failed_metrics["by_logic_fragment"]["nonlinear_arithmetic"]["successes"]
-            == 0
+        assert any(
+            call.args[:2] == ("forge_controls_gate", False)
+            and call.kwargs["retry_class"] == "weak_spec"
+            for call in harness_calls
         )
         assert not any(
-            call.args[:2] == ("forge_post_write_verify", True)
-            for call in weak_harness_calls
+            call.args[0] == "forge_post_write_verify"
+            and call.args[1] is False
+            for call in harness_calls
         )
+        forge._commit_change.assert_not_called()
 
     def test_require_inconclusive_fails(self, tmp_path) -> None:
         forge, mumei = _make_forge(tmp_path, "require")

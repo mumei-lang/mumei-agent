@@ -277,13 +277,13 @@ class MumeiForge:
             str(target_path),
             collect_decidable_metrics=True,
         )
-        if not verify_result["success"]:
-            logic_fragment_tags, metrics_quarter_key = (
-                self._record_decidable_fragment_metrics(
-                    verify_result,
-                    first_pass_verified=False,
-                )
+        logic_fragment_tags, metrics_quarter_key = (
+            self._record_decidable_fragment_metrics(
+                verify_result,
+                first_pass_verified=bool(verify_result.get("success")),
             )
+        )
+        if not verify_result["success"]:
             _logger.warning(
                 "Post-write verification failed for %s: %s",
                 target_path, verify_result.get("stderr", "")[:200],
@@ -308,6 +308,17 @@ class MumeiForge:
                 error="post-write verify failed",
             )
 
+        self.harness_metrics.record_result(
+            "forge_post_write_verify",
+            True,
+            retry_class="none",
+            attempts=attempts,
+            tokens_to_success=generation_metrics.llm_tokens_used,
+            solver_seconds_to_success=sum(
+                generation_metrics.verification_times_seconds
+            ),
+        )
+
         atoms_added = [a.get("name", "") for a in atoms if a.get("name")]
 
         controls_mode = getattr(self.config, "controls_gate", "warn")
@@ -327,12 +338,6 @@ class MumeiForge:
                 "atoms": outcome.atoms,
             }
             if not outcome.passed:
-                logic_fragment_tags, metrics_quarter_key = (
-                    self._record_decidable_fragment_metrics(
-                        verify_result,
-                        first_pass_verified=False,
-                    )
-                )
                 _restore_target()
                 self.harness_metrics.record_result(
                     "forge_controls_gate",
@@ -365,23 +370,6 @@ class MumeiForge:
                     ),
                     controls=controls_result,
                 )
-
-        logic_fragment_tags, metrics_quarter_key = (
-            self._record_decidable_fragment_metrics(
-                verify_result,
-                first_pass_verified=True,
-            )
-        )
-        self.harness_metrics.record_result(
-            "forge_post_write_verify",
-            True,
-            retry_class="none",
-            attempts=attempts,
-            tokens_to_success=generation_metrics.llm_tokens_used,
-            solver_seconds_to_success=sum(
-                generation_metrics.verification_times_seconds
-            ),
-        )
 
         commit_sha: str | None = None
         if bool(task.get("auto_commit", False)):
