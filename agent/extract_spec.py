@@ -340,6 +340,7 @@ def main(args=None):
             harvest = harvest_tests(
                 [Path(path) for path in from_tests],
                 getattr(args, "from_tests_language", None),
+                None,
             )
         except HarvestInputError as exc:
             print(f"Error: failed to harvest tests: {exc}", file=sys.stderr)

@@ -165,6 +165,107 @@ def test_extract_spec_from_tests_text_passes_context_and_writes_report(
 
 
 @pytest.mark.parametrize(
+    ("language", "expected_file", "expected_line"),
+    [
+        ("python", "test_add.py", 5),
+        ("rust", "test_add.rs", 7),
+    ],
+)
+def test_extract_spec_from_tests_harvests_real_observations(
+    language: str,
+    expected_file: str,
+    expected_line: int,
+    tmp_path: Path,
+) -> None:
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_add.py").write_text(
+        "def add(left, right):\n"
+        "    return left + right\n"
+        "\n"
+        "def test_add():\n"
+        "    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_add.rs").write_text(
+        "fn add(left: i64, right: i64) -> i64 { left + right }\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    use super::*;\n"
+        "    #[test]\n"
+        "    fn test_add() {\n"
+        "        assert_eq!(add(2, 3), 5);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    args = _args(
+        tmp_path,
+        "--from-tests",
+        str(tests_dir),
+        "--from-tests-language",
+        language,
+    )
+    mumei = FakeMumei()
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=_config()),
+        patch("agent.extract_spec.create_mumei_client", return_value=mumei),
+        patch(
+            "agent.extract_spec.extract_spec",
+            side_effect=lambda *pos, **kwargs: _call_checker_from_fake_extractor(
+                SPEC, kwargs
+            ),
+        ),
+    ):
+        main(args)
+
+    assert len(mumei.calls) == 1
+    harvest = mumei.calls[0][1]
+    assert set(harvest["targets"]["add"]) == {language}
+    assert len(harvest["observations"]) == 1
+    observation = harvest["observations"][0]
+    assert {
+        "kind": observation["kind"],
+        "target": observation["target"],
+        "test": observation["test"],
+        "file": observation["file"],
+        "line": observation["line"],
+    } == {
+        "kind": "example",
+        "target": "add",
+        "test": "test_add",
+        "file": expected_file,
+        "line": expected_line,
+    }
+
+
+def test_extract_spec_from_tests_without_observations_exits_one_unpatched(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_empty.py").write_text(
+        "def test_only_literal():\n"
+        "    assert 2 == 2\n",
+        encoding="utf-8",
+    )
+    args = _args(
+        tmp_path,
+        "--from-tests",
+        str(tests_dir),
+        "--from-tests-language",
+        "python",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(args)
+
+    assert exc.value.code == 1
+    assert "Error: no test observations were harvested." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
     ("harvest_result", "error_message"),
     [
         ({**HARVEST, "observations": []}, "no test observations"),
