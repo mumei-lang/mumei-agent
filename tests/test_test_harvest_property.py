@@ -491,3 +491,149 @@ def test_property_targets_stay_language_scoped_and_literals_fit_i64(
     assert [
         item["reason"] for item in report["skipped"]
     ] == ["unsupported_expression", "unsupported_expression"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "x = x + 100\nassert f(x) >= 100",
+        "x += 100\nassert f(x) >= 100",
+        "x: int = x + 100\nassert f(x) >= 100",
+        "for x in range(3):\n    pass\nassert f(x) >= 0",
+        "with contextlib.nullcontext(1) as x:\n    pass\nassert f(x) >= 0",
+        "assert f((x := 5)) == 5",
+        "del x\nassert f(x) >= 0",
+        "try:\n    pass\nexcept ValueError as x:\n    pass\nassert f(x) >= 0",
+        "match 1:\n    case x:\n        pass\nassert f(x) >= 0",
+        "match [1, 2]:\n    case [*x]:\n        pass\nassert f(x) >= 0",
+        "match {1: 2}:\n    case {**x}:\n        pass\nassert f(x) >= 0",
+    ],
+)
+def test_hypothesis_generator_variable_rebindings_skip_the_test(
+    tmp_path: Path, body: str
+) -> None:
+    report = _python_report(
+        tmp_path,
+        "import contextlib\n"
+        "from hypothesis import given\n"
+        "from hypothesis import strategies as st\n"
+        "def f(value): return value\n"
+        "@given(st.integers(0, 10))\n"
+        "def test_f(x):\n"
+        + "".join(f"    {line}\n" for line in body.splitlines()),
+    )
+
+    assert report["observations"] == []
+    assert [item["reason"] for item in report["skipped"]] == [
+        "generator_variable_rebound"
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "other = x + 100\nassert f(x) >= 0",
+        "def helper():\n    x = 100\nhelper()\nassert f(x) >= 0",
+    ],
+)
+def test_hypothesis_other_and_nested_local_writes_do_not_rebind_generator(
+    tmp_path: Path, body: str
+) -> None:
+    report = _python_report(
+        tmp_path,
+        "from hypothesis import given\n"
+        "from hypothesis import strategies as st\n"
+        "def f(value): return value\n"
+        "@given(st.integers(0, 10))\n"
+        "def test_f(x):\n"
+        + "".join(f"    {line}\n" for line in body.splitlines()),
+    )
+
+    assert len(report["observations"]) == 1
+    assert report["skipped"] == []
+
+
+def test_hypothesis_nested_nonlocal_write_rebinds_generator(tmp_path: Path) -> None:
+    report = _python_report(
+        tmp_path,
+        "from hypothesis import given\n"
+        "from hypothesis import strategies as st\n"
+        "def f(value): return value\n"
+        "@given(st.integers(0, 10))\n"
+        "def test_f(x):\n"
+        "    def helper():\n"
+        "        nonlocal x\n"
+        "        x = 100\n"
+        "    helper()\n"
+        "    assert f(x) >= 0\n",
+    )
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "generator_variable_rebound"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "let x = x + 100;",
+        "x += 100;",
+        "{ let x = x + 100; }",
+        "for x in 0..3 {}",
+        "if let x = 1 {}",
+        "if let Some(x) = Some(1) {}",
+        "match 0 { x => {} }",
+        "match Some(0) { Some(x) => {}, _ => {} }",
+        "let _ = &mut x;",
+        "let mut change = || { x += 100; };",
+    ],
+)
+def test_rust_proptest_generator_variable_rebindings_skip_the_test(
+    tmp_path: Path, body: str
+) -> None:
+    report = _rust_report(
+        tmp_path,
+        "fn f(value: i64) -> i64 { value }\n"
+        "proptest! {\n"
+        "    #[test]\n"
+        "    fn prop(x in 0..10) {\n"
+        f"        {body}\n"
+        "        prop_assert!(f(x) >= 0);\n"
+        "    }\n"
+        "}\n",
+    )
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "generator_variable_rebound"
+
+
+def test_rust_mut_generator_parameter_is_a_rebound(tmp_path: Path) -> None:
+    report = _rust_report(
+        tmp_path,
+        "fn f(value: i64) -> i64 { value }\n"
+        "proptest! {\n"
+        "    #[test]\n"
+        "    fn prop(mut x in 0..10) { prop_assert!(f(x) >= 0); }\n"
+        "}\n",
+    )
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "generator_variable_rebound"
+
+
+def test_rust_write_to_another_local_does_not_rebind_generator(
+    tmp_path: Path,
+) -> None:
+    report = _rust_report(
+        tmp_path,
+        "fn f(value: i64) -> i64 { value }\n"
+        "proptest! {\n"
+        "    #[test]\n"
+        "    fn prop(x in 0..10) {\n"
+        "        let other = x + 100;\n"
+        "        prop_assert!(f(x) >= 0);\n"
+        "    }\n"
+        "}\n",
+    )
+
+    assert len(report["observations"]) == 1
+    assert report["skipped"] == []

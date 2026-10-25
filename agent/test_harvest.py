@@ -798,15 +798,24 @@ def _rust_proptest_tests(
             skip_reason: str | None = None
             generated_params: list[str] = []
             for parameter in _split_rust_top_level(parameter_text):
-                match = re.fullmatch(r"\s*([A-Za-z_]\w*)\s+in\s+(.+?)\s*", parameter, re.DOTALL)
+                match = re.fullmatch(
+                    r"\s*(mut\s+)?([A-Za-z_]\w*)\s+in\s+(.+?)\s*",
+                    parameter,
+                    re.DOTALL,
+                )
                 if match is None:
                     skip_reason = "unsupported_strategy"
                     continue
-                variable, strategy = match.groups()
+                mutable, variable, strategy = match.groups()
                 parsed, reason = _rust_proptest_strategy(strategy, variable)
+                if mutable:
+                    skip_reason = "generator_variable_rebound"
                 if parsed is None:
-                    skip_reason = reason
+                    if skip_reason != "generator_variable_rebound":
+                        skip_reason = reason
                     variables.append({"name": variable, "type": "i64"})
+                elif mutable:
+                    variables.append(parsed)
                 else:
                     variables.append(parsed)
                 generated_type = "bool" if parsed and parsed["type"] == "bool" else "i64"
@@ -1751,11 +1760,18 @@ def _emit_assertion(
 
 
 def _python_store_counts(test_node: ast.AST) -> Counter[str]:
-    store_counts = Counter(
-        node.id
-        for node in _python_scope_nodes(test_node)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
-    )
+    store_counts: Counter[str] = Counter()
+    for node in _python_scope_nodes(test_node):
+        if isinstance(node, ast.Name) and isinstance(
+            node.ctx, (ast.Store, ast.Del)
+        ):
+            store_counts[node.id] += 1
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            store_counts[node.name] += 1
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            store_counts[node.name] += 1
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            store_counts[node.rest] += 1
     scope_types = (
         ast.FunctionDef,
         ast.AsyncFunctionDef,
@@ -2315,6 +2331,16 @@ def _process_python_test(
             _skip(skipped, test=test, file=test.file, line=line, reason=reason or "unsupported_strategy", text=_python_source_segment(test.source, test.node))
             return
         variable_names = {variable["name"] for variable in variables}
+        if variable_names & _python_store_counts(test.node).keys():
+            _skip(
+                skipped,
+                test=test,
+                file=test.file,
+                line=line,
+                reason="generator_variable_rebound",
+                text=_python_source_segment(test.source, test.node),
+            )
+            return
         if "result" in variable_names:
             _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=_python_source_segment(test.source, test.node))
             return
@@ -2560,6 +2586,22 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
             name = _rust_identifier(left, source_bytes)
             if name:
                 counts[name] += 1
+        elif node.type in {"for_expression", "let_condition"}:
+            pattern = node.child_by_field_name("pattern")
+            for name in _rust_pattern_binding_names(pattern, source_bytes):
+                counts[name] += 1
+        elif node.type == "match_arm":
+            pattern = node.child_by_field_name("pattern")
+            for name in _rust_pattern_binding_names(pattern, source_bytes):
+                counts[name] += 1
+        elif node.type == "reference_expression" and any(
+            child.type == "mutable_specifier" for child in node.children
+        ):
+            name = _rust_identifier(
+                node.child_by_field_name("value"), source_bytes
+            )
+            if name:
+                counts[name] += 1
 
     def captured_writes(node: Any) -> None:
         for child in node.children:
@@ -2611,6 +2653,32 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
 
     captured_writes(body)
     return counts
+
+
+def _rust_pattern_binding_names(node: Any, source_bytes: bytes) -> set[str]:
+    if node is None:
+        return set()
+    if node.type == "identifier":
+        name = _rust_identifier(node, source_bytes)
+        return {name} if name and name != "_" else set()
+    type_node = node.child_by_field_name("type")
+    names: set[str] = set()
+    for child in node.named_children:
+        if child == type_node:
+            continue
+        if node.type == "field_pattern":
+            pattern = node.child_by_field_name("pattern")
+            if pattern is not None:
+                names.update(_rust_pattern_binding_names(pattern, source_bytes))
+                continue
+            field_name = node.child_by_field_name("name")
+            if field_name is not None:
+                names.update(
+                    _rust_pattern_binding_names(field_name, source_bytes)
+                )
+                continue
+        names.update(_rust_pattern_binding_names(child, source_bytes))
+    return names
 
 
 def _rust_bindings(
@@ -2909,6 +2977,16 @@ def _process_rust_property_test(
         _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=text)
         return
     variables = {item["name"] for item in test.property_variables}
+    if variables & _rust_store_counts(test, source_bytes).keys():
+        _skip(
+            skipped,
+            test=test,
+            file=test.file,
+            line=line,
+            reason="generator_variable_rebound",
+            text=text,
+        )
+        return
     if "result" in variables:
         _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=text)
         return
