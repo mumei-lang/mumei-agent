@@ -122,6 +122,80 @@ def test_observe_tests_cli_returns_zero_or_one_for_both_contract_sources(
 
 
 @pytest.mark.parametrize(
+    ("mode", "verdict", "expected"),
+    [
+        ("spec", "not_entailed", 0),
+        ("spec", "contradicts_ensures", 1),
+        ("mm", "not_entailed", 0),
+    ],
+)
+def test_observe_tests_cli_property_warnings_and_blocking(
+    mode: str,
+    verdict: str,
+    expected: int,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    property_harvest = {
+        "schema": "mumei.test-harvest/v1",
+        "targets": {"f": {"python": {"params": ["x"]}}},
+        "observations": [
+            {
+                "kind": "property",
+                "target": "f",
+                "args": [{"var": "x"}],
+                "test": "test_f_property",
+                "file": "test_f.py",
+                "line": 7,
+                "variables": [{"name": "x", "type": "i64", "min": 0}],
+                "assumptions": ["x != 5"],
+                "predicate": "result >= x",
+            }
+        ],
+    }
+    report = {
+        "schema": "mumei.observation-check/v1",
+        "results": [
+            {
+                "kind": "property",
+                "target": "f",
+                "args": [{"var": "x"}],
+                "test": "test_f_property",
+                "file": "test_f.py",
+                "line": 7,
+                "predicate": "result >= x",
+                "verdict": verdict,
+                "detail": "x=0, result=-1",
+            }
+        ],
+    }
+    client = MagicMock()
+    client.observe_check.return_value = {
+        "returncode": int(verdict == "contradicts_ensures"),
+        "report": report,
+        "stderr": "",
+    }
+    args = _cli_args(tmp_path, mode)
+    with (
+        patch(
+            "agent.observe_tests.harvest_tests",
+            return_value=property_harvest,
+        ),
+        patch("agent.observe_tests.create_mumei_client", return_value=client),
+    ):
+        result = main(args)
+
+    assert result == expected
+    captured = capsys.readouterr()
+    if verdict == "not_entailed":
+        assert "Warning: test test_f_property" in captured.err
+        assert "(counterexample: x=0, result=-1)" in captured.err
+    else:
+        assert "Warning:" not in captured.err
+    assert json.loads(captured.out)["results"] == report["results"]
+
+
+@pytest.mark.parametrize(
     ("mode", "expected_args"),
     [("mm", {"x": 2}), ("spec", [2])],
 )

@@ -35,6 +35,7 @@ from agent.test_observations import (
     observation_feedback_parts,
     observation_prompt_context,
     observation_summary,
+    observation_warnings,
     spec_to_observe_module,
 )
 
@@ -357,6 +358,7 @@ def main(args=None):
         "report": None,
         "last_spec": None,
         "blocking": [],
+        "warnings": [],
     }
     spec_checker = None
     extra_context = ""
@@ -364,15 +366,21 @@ def main(args=None):
         extra_context = observation_prompt_context(harvest)
 
         def spec_checker(spec: dict) -> tuple[list[str], list[str]]:
+            aligned = align_harvest_to_spec(harvest, spec)
             report = check_observations(
                 spec_to_observe_module(spec),
-                align_harvest_to_spec(harvest, spec),
+                aligned,
                 mumei,
             )
             observation_state["report"] = report
             observation_state["last_spec"] = copy.deepcopy(spec)
-            blocking, soft = observation_feedback_parts(report, spec)
+            blocking, soft = observation_feedback_parts(report, spec, aligned)
             observation_state["blocking"] = blocking
+            observation_state["warnings"] = observation_warnings(
+                report,
+                spec,
+                aligned,
+            )
             return blocking, soft
 
     def check_final_spec_if_needed(spec: dict) -> list[str]:
@@ -396,7 +404,8 @@ def main(args=None):
             for item in results:
                 if isinstance(item, dict):
                     verdict = item.get("verdict")
-                    result_counts[verdict] = result_counts.get(verdict, 0) + 1
+                    if isinstance(verdict, str):
+                        result_counts[verdict] = result_counts.get(verdict, 0) + 1
         outside_requires = counts.get(
             "outside_requires", result_counts.get("outside_requires", 0)
         )
@@ -406,6 +415,8 @@ def main(args=None):
             f"{outside_requires} not_checked={not_checked}",
             file=sys.stderr,
         )
+        for warning in observation_state["warnings"]:
+            print(f"Warning: {warning}", file=sys.stderr)
         observations_output = getattr(args, "observations_output", None)
         if observations_output:
             try:

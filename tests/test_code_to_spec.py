@@ -209,6 +209,62 @@ def test_extract_from_file_uses_context_instead_of_warm_cache(tmp_path: Path) ->
     assert client.chat.completions.create.call_count == 4
 
 
+def test_extract_from_file_spec_checker_bypasses_warm_cache(tmp_path: Path) -> None:
+    source = tmp_path / "simple_add.rs"
+    source.write_text(
+        "pub fn simple_add(a: i64, b: i64) -> i64 { a + b }\n",
+        encoding="utf-8",
+    )
+    forge_spec = {
+        "task_id": "code-simple-add",
+        "target_file": "std/math/simple_add.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "simple_add",
+                "description": "Add two signed integers",
+                "inputs": [
+                    {"name": "a", "type": "i64"},
+                    {"name": "b", "type": "i64"},
+                ],
+                "return_type": "i64",
+                "requires": "a + b <= i64::MAX",
+                "ensures": "result == a + b",
+                "effects": [],
+            }
+        ],
+    }
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [
+        _make_response("Adds two integers."),
+        _make_response("Adds two integers."),
+    ]
+    config = AgentConfig(
+        api_key="test",
+        model="test-model",
+        spec_cache_dir=str(tmp_path / "spec-cache"),
+    )
+    config.create_client = MagicMock(return_value=client)
+    extractor = CodeToSpecExtractor(config)
+    checker = MagicMock(return_value=([], []))
+
+    def fake_extract(*_args, **kwargs):
+        if kwargs.get("spec_checker") is not None:
+            kwargs["spec_checker"](forge_spec)
+        return forge_spec
+
+    with patch("agent.spec_extractor.extract_spec", side_effect=fake_extract) as extract:
+        first = extractor.extract_from_file(source)
+        second = extractor.extract_from_file(source, spec_checker=checker)
+
+    assert first.success is True
+    assert second.success is True
+    assert extract.call_count == 2
+    assert checker.call_count == 1
+    assert client.chat.completions.create.call_count == 2
+    assert not any("served from cache" in warning for warning in second.warnings)
+
+
 def test_extract_from_file_cache_key_tracks_content(tmp_path: Path) -> None:
     """Editing the source must miss the cache written for the old content."""
     source = tmp_path / "simple_add.rs"
