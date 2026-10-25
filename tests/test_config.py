@@ -1,6 +1,8 @@
 """AgentConfig tests for experimental NLA options."""
 from __future__ import annotations
 
+import pytest
+
 from agent.config import AgentConfig
 
 
@@ -97,9 +99,22 @@ def test_max_retries_default_and_env(monkeypatch) -> None:
     """max_retries defaults to 5 and is overridable via LLM_MAX_RETRIES (#285)."""
     monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
     assert AgentConfig().max_retries == 5
-
     monkeypatch.setenv("LLM_MAX_RETRIES", "9")
     assert AgentConfig().max_retries == 9
+
+
+def test_controls_gate_defaults_to_warn_and_reads_environment(monkeypatch) -> None:
+    monkeypatch.delenv("CONTROLS_GATE", raising=False)
+    assert AgentConfig().controls_gate == "warn"
+
+    monkeypatch.setenv("CONTROLS_GATE", "require")
+    assert AgentConfig().controls_gate == "require"
+
+
+def test_controls_gate_rejects_invalid_environment_value(monkeypatch) -> None:
+    monkeypatch.setenv("CONTROLS_GATE", "sometimes")
+    with pytest.raises(ValueError, match="CONTROLS_GATE"):
+        AgentConfig()
 
 
 def test_create_client_wires_max_retries(monkeypatch) -> None:

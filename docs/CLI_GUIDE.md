@@ -60,6 +60,10 @@ uv run mumei-agent generate --spec '{"name": "add", "params": [{"name": "a", "ty
 
 # With metrics output
 uv run mumei-agent generate --spec-file spec.json --output out.mm --metrics
+
+# Require a discriminating negative-control result
+uv run mumei-agent generate --spec-file spec.json --output out.mm \
+  --controls-gate require
 ```
 
 ### Metrics
@@ -76,6 +80,20 @@ Use the `--metrics` flag to output a JSON summary of generation/fix statistics:
   }
 }
 ```
+
+### Negative-controls gate
+
+After generated code verifies, `generate` checks only the atom names in the
+specification with `mumei controls`. The default mode is `warn`; select
+`--controls-gate off` to disable the check or `--controls-gate require` to fail
+when an atom is weak or inconclusive. A required-gate failure exits with status
+1 but leaves the generated output in place. The mode can also be set with
+`CONTROLS_GATE=off|warn|require`.
+
+See the [Mumei controls guide](https://github.com/mumei-lang/mumei/blob/develop/docs/CONTROLS.md)
+for the report semantics. Equivalent mutants can survive; a surviving mutant
+still needs human judgment. The gate does not run for `proliferate`, MCP
+`generate`/`self_correct` tools, or `heal`.
 
 ## E2E Demo
 
@@ -187,6 +205,10 @@ uv run mumei-agent forge --mumei-repo ../mumei --max-tasks 2 \
 
 # Run the whole queue, capped at 5 tasks per invocation
 uv run mumei-agent forge --tasks-dir forge_tasks/ --mumei-repo ../mumei --max-tasks 5
+
+# Reject task contracts that do not constrain their generated bodies
+uv run mumei-agent forge --mumei-repo ../mumei --task vstd_safe_add.json \
+  --controls-gate require
 ```
 
 Each task spec declares a `target_file` inside the mumei repo, a `mode`
@@ -195,6 +217,15 @@ drives `generate_code()` + `mumei verify --json` + self-healing, appends
 (or creates/replaces) the target `.mm` file, optionally git-commits the
 change, and records the outcome to `forge_log.json`.  Already-completed
 `task_id`s are automatically skipped on subsequent runs.
+
+After full-file verification, Forge checks only the task's atom names; existing
+atoms in append-mode targets are not included. `--controls-gate` accepts `off`,
+`warn` (the default), or `require`, with `CONTROLS_GATE` providing the default
+for both Forge and Generate. In `require` mode a weak or inconclusive task
+contract fails without an LLM retry and restores the target file. See the
+[Mumei controls guide](https://github.com/mumei-lang/mumei/blob/develop/docs/CONTROLS.md);
+equivalent mutants can survive and require human judgment. Proliferate, MCP
+`generate`/`self_correct` tools, and Heal are outside this gate.
 
 Create/replace tasks whose atoms provide explicit `body` values and set
 `deterministic_bodies: true` are rendered deterministically without requiring an

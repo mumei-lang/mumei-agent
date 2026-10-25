@@ -16,6 +16,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"true", "1", "yes", "on"}
 
 
+_CONTROLS_GATE_MODES = {"off", "warn", "require"}
+
+
 def _default_core_axiom_path() -> str:
     """Default search path for ``std/core.mm`` (Phase 2-B).
 
@@ -167,6 +170,7 @@ class AgentConfig:
     spec_split_chars: int = field(
         default_factory=lambda: int(os.getenv("MUMEI_SPEC_SPLIT_CHARS", "0"))
     )
+    controls_gate: str = field(default_factory=lambda: os.getenv("CONTROLS_GATE", "warn"))
 
     def lean_ai_proof_active(self) -> bool:
         """True only when AI Lean proof generation may actually run."""
@@ -188,6 +192,11 @@ class AgentConfig:
         # API key validation is deferred to create_client() so that
         # subcommands that never use the LLM (e.g. ``python -m agent
         # health``) can construct AgentConfig without requiring a key.
+        if self.controls_gate not in _CONTROLS_GATE_MODES:
+            raise ValueError(
+                f"invalid CONTROLS_GATE {self.controls_gate!r}; "
+                "choose from off, warn, require"
+            )
         if self.llm_profile:
             preset = self._LLM_PROFILES.get(self.llm_profile)
             if preset is None:

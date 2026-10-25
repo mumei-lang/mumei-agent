@@ -24,6 +24,7 @@ def _make_config():
     cfg.mumei_bin = "mumei"
     cfg.model = "test-model"
     cfg.max_retries = 2
+    cfg.controls_gate = "off"
     cfg.create_client.return_value = MagicMock()
     return cfg
 
