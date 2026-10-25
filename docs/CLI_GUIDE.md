@@ -194,9 +194,9 @@ uv run python -m agent harvest-tests tests/python/
 uv run python -m agent harvest-tests tests/rust/ --language rust --target add --output observations.json
 ```
 
-The report uses schema `mumei.test-harvest/v1`. `sources` and every file path are relative to the common input root. `targets` maps target names to their parameter names and definition locations. A target with no in-input definition has `params`, `file`, and `line` set to `null`. If a name has multiple definitions, its entry is `{"params": null, "ambiguous": true, "definitions": [...]}`; each definition has `params`, `file`, and `line`, sorted by file and line. Calls use a same-file definition when available, otherwise a unique definition across the inputs; ambiguous or unresolved calls keep positional `args`. Each observation contains `kind` (`example`, `relation`, or `rejects`), `target`, literal `args`, `test`, `file`, and `line`; examples add `result`, relations add a Mumei-syntax `predicate`, and rejects add `expected: "failure"`. Unsupported assertions appear in `skipped` with a reason and source text. Partial parse failures are reported as `parse_error` skips; if every source fails to parse, the CLI exits 4 without emitting a report. The totals count test functions, observations by kind, and skipped items.
+The report uses schema `mumei.test-harvest/v1`. `sources` and every file path are relative to the common input root. `targets` maps target names to per-language metadata, for example `{"f": {"python": {"params": ["x"], "file": "lib.py", "line": 1}, "rust": {"params": ["value"], "file": "lib.rs", "line": 1}}}`. Each language entry uses `params`, `file`, and `line`; unresolved targets set all three to `null`. If a name has multiple definitions in one language, that language's entry is `{"params": null, "ambiguous": true, "definitions": [...]}`; each definition has `params`, `file`, and `line`, sorted by file and line. Calls use a same-file definition when available, otherwise a unique definition in the calling language across the inputs; ambiguous or unresolved calls keep positional `args`. Each observation contains `kind` (`example`, `relation`, or `rejects`), `target`, literal `args`, `test`, `file`, and `line`; examples add `result`, relations add a Mumei-syntax `predicate`, and rejects add `expected: "failure"`. Unsupported assertions appear in `skipped` with a reason and source text. Partial parse failures are reported as `parse_error` skips; if every source fails to parse, the CLI exits 4 without emitting a report. The totals count test functions and observations by kind. `totals.skipped` counts skip entries: one per assertion, except `test_not_run`, which is one per test; `parse_error` entries are per source file.
 
-Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and `*`. Division and modulo expressions are skipped as unsupported because their language-specific integer semantics do not reliably match Mumei's.
+Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and `*`. Division and modulo expressions are skipped as unsupported because their language-specific integer semantics do not reliably match Mumei's. Only direct test-body assertions are harvested (Python also recurses through ordinary `with` blocks); conditional assertions are skipped as `conditional_assertion`. Assertions after top-level Python `return`/`raise`, a return inside an ordinary `with`, recognized Python test/process termination calls, or Rust `return`, panic, or process exit are skipped as `unreachable_assertion`. A raise inside an ordinary Python `with` and a Rust `?` make later assertions conditional. Tests not known to run because of Python skip/xfail decorators or Rust `#[ignore]` produce one `test_not_run` skip. Literal boolean conditions on `skipif`, `skipIf`, and `skipUnless` are evaluated; non-literal conditions are treated as not known to run. `test_not_run` means the test is not known to run. Integer literals must fit signed i64. Other skip reasons include `no_target_call`, `multiple_target_calls`, `non_literal_argument`, `unsupported_expression`, `parse_error`, and `ambiguous_rejects`. Exit code 4 is returned when no source parses, with no report emitted.
 
 ```json
 {
@@ -204,9 +204,11 @@ Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and 
   "sources": ["tests/test_math.py"],
   "targets": {
     "add": {
-      "params": ["left", "right"],
-      "file": "tests/test_math.py",
-      "line": 1
+      "python": {
+        "params": ["left", "right"],
+        "file": "tests/test_math.py",
+        "line": 1
+      }
     }
   },
   "observations": [

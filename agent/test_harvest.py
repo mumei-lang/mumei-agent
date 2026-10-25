@@ -15,6 +15,8 @@ from agent import tree_sitter_extract
 
 _EXTENSIONS = {".py": "python", ".rs": "rust"}
 _OBSERVATION_KINDS = ("example", "relation", "rejects")
+_MIN_I64 = -(2**63)
+_MAX_I64 = 2**63 - 1
 _BINARY_OPERATORS = {
     "+": 4,
     "-": 4,
@@ -67,6 +69,7 @@ class _Definition:
     file: str | None
     line: int | None
     receiver: bool = False
+    language: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +87,11 @@ class _Test:
     source: str
     node: Any
     should_panic: bool = False
+    not_run: bool = False
+    python_imports: frozenset[str] = frozenset()
+    python_imported_names: frozenset[str] = frozenset()
+    python_module_aliases: tuple[tuple[str, str], ...] = ()
+    python_name_aliases: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,6 +111,10 @@ class _ExpressionError(ValueError):
     pass
 
 
+class _OutOfRangeLiteralError(_ExpressionError):
+    pass
+
+
 def _walk(node: Any) -> Iterable[Any]:
     yield node
     for child in getattr(node, "children", ()):
@@ -117,7 +129,256 @@ def _python_name(node: ast.expr) -> str | None:
     return None
 
 
-def _python_expr(node: ast.expr) -> _Expr:
+def _python_target_name(
+    node: ast.expr, imported_roots: frozenset[str]
+) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        if _python_root_name(node) in imported_roots:
+            return node.attr
+    return None
+
+
+def _python_nested_write_names(
+    scope_nodes: tuple[ast.AST, ...], declared_names: set[str]
+) -> Iterable[str]:
+    scope_root = scope_nodes[0] if scope_nodes else None
+    for scope_node in scope_nodes:
+        if isinstance(scope_node, ast.Name) and isinstance(
+            scope_node.ctx, (ast.Store, ast.Del)
+        ):
+            yield scope_node.id
+        elif (
+            scope_node is not scope_root
+            and isinstance(
+                scope_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            )
+            and scope_node.name in declared_names
+        ):
+            yield scope_node.name
+        elif isinstance(scope_node, ast.Import):
+            yield from (
+                alias.asname or alias.name.split(".", 1)[0]
+                for alias in scope_node.names
+            )
+        elif isinstance(scope_node, ast.ImportFrom):
+            yield from (
+                alias.asname or alias.name
+                for alias in scope_node.names
+                if alias.name != "*"
+            )
+        elif isinstance(scope_node, ast.ExceptHandler) and scope_node.name:
+            yield scope_node.name
+        elif isinstance(scope_node, ast.MatchAs) and scope_node.name:
+            yield scope_node.name
+
+
+def _python_scope_write_nodes(node: ast.AST) -> Iterable[ast.AST]:
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(
+            child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        ):
+            yield child
+        else:
+            yield from _python_scope_write_nodes(child)
+
+
+def _python_test_writes(test_node: ast.AST) -> set[str]:
+    writes: set[str] = set()
+    scope_types = (
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+        ast.Lambda,
+    )
+    for node in _python_scope_nodes(test_node):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            writes.add(node.id)
+        elif isinstance(node, ast.arg):
+            writes.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            writes.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            writes.add(node.name)
+        elif isinstance(node, ast.MatchAs) and node.name:
+            writes.add(node.name)
+
+    def nested_writes(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, scope_types):
+                scope_nodes = tuple(_python_scope_write_nodes(child))
+                declared_names = {
+                    name
+                    for scope_node in scope_nodes
+                    if isinstance(scope_node, (ast.Global, ast.Nonlocal))
+                    for name in scope_node.names
+                }
+                writes.update(
+                    name
+                    for name in _python_nested_write_names(
+                        scope_nodes, declared_names
+                    )
+                    if name in declared_names
+                )
+            nested_writes(child)
+
+    nested_writes(test_node)
+    return writes
+
+
+def _python_import_roots(
+    tree: ast.Module, test_node: ast.AST, module_names: set[str]
+) -> frozenset[str]:
+    roots: set[str] = set()
+    nodes = list(_python_scope_nodes(tree))
+    nodes.extend(_python_scope_nodes(test_node))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            roots.update(alias.asname or alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            roots.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name in module_names
+            )
+    return frozenset(roots - _python_test_writes(test_node))
+
+
+def _python_imported_names(tree: ast.Module, test_node: ast.AST) -> frozenset[str]:
+    names: set[str] = set()
+    nodes = list(_python_scope_nodes(tree))
+    nodes.extend(_python_scope_nodes(test_node))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            names.update(
+                alias.asname or alias.name.split(".", 1)[0] for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.asname or alias.name for alias in node.names)
+    return frozenset(names - _python_test_writes(test_node))
+
+
+def _python_import_aliases(
+    tree: ast.Module, test_node: ast.AST | None = None
+) -> tuple[dict[str, str], dict[str, str]]:
+    modules: dict[str, str] = {}
+    names: dict[str, str] = {}
+    nodes = list(_python_scope_nodes(tree))
+    if test_node is not None:
+        nodes.extend(_python_scope_nodes(test_node))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules[alias.asname or alias.name.split(".", 1)[0]] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                names[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return modules, names
+
+
+def _python_decorator_name(
+    decorator: ast.expr,
+    modules: dict[str, str],
+    names: dict[str, str],
+) -> str:
+    if isinstance(decorator, ast.Call):
+        decorator = decorator.func
+    if isinstance(decorator, ast.Name):
+        return names.get(decorator.id, modules.get(decorator.id, decorator.id))
+    if isinstance(decorator, ast.Attribute):
+        parent = _python_decorator_name(decorator.value, modules, names)
+        return f"{parent}.{decorator.attr}" if parent else decorator.attr
+    return ""
+
+
+_SKIP_DECORATORS = {
+    "pytest.mark.skip",
+    "pytest.mark.skipif",
+    "pytest.mark.xfail",
+    "unittest.skip",
+    "unittest.skipIf",
+    "unittest.skipUnless",
+    "unittest.expectedFailure",
+}
+
+_PYTHON_TERMINATING_CALLS = {
+    "pytest.fail",
+    "pytest.skip",
+    "pytest.exit",
+    "self.fail",
+    "self.skipTest",
+    "sys.exit",
+    "os._exit",
+}
+
+
+def _python_resolved_name(
+    node: ast.expr, modules: dict[str, str], names: dict[str, str]
+) -> str:
+    if isinstance(node, ast.Name):
+        return names.get(node.id, modules.get(node.id, node.id))
+    if isinstance(node, ast.Attribute):
+        parent = _python_resolved_name(node.value, modules, names)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _python_statement_terminates(statement: ast.stmt, test: _Test) -> bool:
+    if not isinstance(statement, ast.Expr) or not isinstance(
+        statement.value, ast.Call
+    ):
+        return False
+    return (
+        _python_resolved_name(
+            statement.value.func,
+            dict(test.python_module_aliases),
+            dict(test.python_name_aliases),
+        )
+        in _PYTHON_TERMINATING_CALLS
+    )
+
+
+def _python_is_skipped(
+    decorators: list[ast.expr], modules: dict[str, str], names: dict[str, str]
+) -> bool:
+    for decorator in decorators:
+        name = _python_decorator_name(decorator, modules, names)
+        if name not in _SKIP_DECORATORS:
+            continue
+        if name in {"pytest.mark.skipif", "unittest.skipIf", "unittest.skipUnless"}:
+            condition: ast.expr | None = None
+            if isinstance(decorator, ast.Call):
+                condition = decorator.args[0] if decorator.args else next(
+                    (
+                        keyword.value
+                        for keyword in decorator.keywords
+                        if keyword.arg == "condition"
+                    ),
+                    None,
+                )
+            if not isinstance(condition, ast.Constant) or not isinstance(
+                condition.value, bool
+            ):
+                return True
+            if name == "unittest.skipUnless":
+                if not condition.value:
+                    return True
+            elif condition.value:
+                return True
+        else:
+            return True
+    return False
+
+
+def _python_definition_line(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    return max((decorator.lineno for decorator in node.decorator_list), default=node.lineno - 1) + 1
+
+
+def _python_expr(
+    node: ast.expr, imported_roots: frozenset[str] = frozenset()
+) -> _Expr:
     if isinstance(node, ast.Constant) and (
         isinstance(node.value, bool) or isinstance(node.value, int)
     ):
@@ -125,11 +386,11 @@ def _python_expr(node: ast.expr) -> _Expr:
     if isinstance(node, ast.Name):
         return _Expr("name", node.id)
     if isinstance(node, ast.Call):
-        name = _python_name(node.func)
+        name = _python_target_name(node.func, imported_roots)
         return _Expr(
             "call",
             (name, bool(node.keywords)),
-            tuple(_python_expr(arg) for arg in node.args),
+            tuple(_python_expr(arg, imported_roots) for arg in node.args),
         )
     if isinstance(node, ast.UnaryOp):
         op = "not" if isinstance(node.op, ast.Not) else (
@@ -140,20 +401,27 @@ def _python_expr(node: ast.expr) -> _Expr:
         return _Expr(
             "unary",
             op,
-            (_python_expr(node.operand),),
+            (_python_expr(node.operand, imported_roots),),
         )
     if isinstance(node, ast.BinOp):
         op = _PYTHON_BINARY_OPERATORS.get(type(node.op))
         return _Expr(
             "binary",
             op,
-            (_python_expr(node.left), _python_expr(node.right)),
+            (
+                _python_expr(node.left, imported_roots),
+                _python_expr(node.right, imported_roots),
+            ),
         )
     if isinstance(node, ast.BoolOp):
         op = "and" if isinstance(node.op, ast.And) else (
             "or" if isinstance(node.op, ast.Or) else None
         )
-        return _Expr("boolean", op, tuple(_python_expr(value) for value in node.values))
+        return _Expr(
+            "boolean",
+            op,
+            tuple(_python_expr(value, imported_roots) for value in node.values),
+        )
     if isinstance(node, ast.Compare):
         operators = tuple(
             _PYTHON_COMPARISON_OPERATORS.get(type(op)) for op in node.ops
@@ -161,12 +429,18 @@ def _python_expr(node: ast.expr) -> _Expr:
         return _Expr(
             "compare",
             operators,
-            (_python_expr(node.left), *(_python_expr(value) for value in node.comparators)),
+            (
+                _python_expr(node.left, imported_roots),
+                *(
+                    _python_expr(value, imported_roots)
+                    for value in node.comparators
+                ),
+            ),
         )
     return _Expr(
         "unsupported",
         children=tuple(
-            _python_expr(child)
+            _python_expr(child, imported_roots)
             for child in ast.iter_child_nodes(node)
             if isinstance(child, ast.expr)
         ),
@@ -186,10 +460,22 @@ def _python_scope_nodes(node: ast.AST) -> Iterable[ast.AST]:
 
 def _python_tests(tree: ast.Module) -> list[_Test]:
     tests: list[_Test] = []
+    modules, names = _python_import_aliases(tree)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name.startswith("test_"):
-                tests.append(_Test(node.name, "", "python", "", node))
+                tests.append(
+                    _Test(
+                        node.name,
+                        "",
+                        "python",
+                        "",
+                        node,
+                        not_run=_python_is_skipped(
+                            node.decorator_list, modules, names
+                        ),
+                    )
+                )
         elif isinstance(node, ast.ClassDef):
             is_test_class = node.name.startswith("Test") or any(
                 _python_base_name(base).endswith("TestCase") for base in node.bases
@@ -200,7 +486,21 @@ def _python_tests(tree: ast.Module) -> list[_Test]:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     if child.name.startswith("test_"):
                         tests.append(
-                            _Test(child.name, "", "python", "", child)
+                            _Test(
+                                child.name,
+                                "",
+                                "python",
+                                "",
+                                child,
+                                not_run=(
+                                    _python_is_skipped(
+                                        node.decorator_list, modules, names
+                                    )
+                                    or _python_is_skipped(
+                                        child.decorator_list, modules, names
+                                    )
+                                ),
+                            )
                         )
     return tests
 
@@ -235,7 +535,9 @@ def _python_definitions(
         params = tuple(arg.arg for arg in positional)
         receiver = bool(params and params[0] in {"self", "cls"})
         definitions.setdefault(node.name, []).append(
-            _Definition(node.name, params, file, node.lineno, receiver)
+            _Definition(
+                node.name, params, file, node.lineno, receiver, language="python"
+            )
         )
     return {
         name: sorted(values, key=lambda item: (item.file or "", item.line or 0))
@@ -248,11 +550,13 @@ def _python_call_names(tests: Iterable[_Test]) -> set[str]:
     for test in tests:
         for node in _python_scope_nodes(test.node):
             if isinstance(node, ast.Call):
-                name = _python_name(node.func)
+                name = _python_target_name(node.func, test.python_imports)
                 if name:
                     names.add(name)
-                if name in {"assertRaises", "raises"} and len(node.args) >= 2:
-                    callable_name = _python_callable_argument(node.args[1])
+                if _python_name(node.func) in {"assertRaises", "raises"} and len(node.args) >= 2:
+                    callable_name = _python_target_name(
+                        node.args[1], test.python_imports
+                    )
                     if callable_name:
                         names.add(callable_name)
     return names
@@ -268,46 +572,28 @@ def _python_imported_call_names(
     tree: ast.Module, tests: Iterable[_Test]
 ) -> set[str]:
     tests = tuple(tests)
-    imported_names: set[str] = set()
-    module_names: set[str] = set()
-    import_nodes = list(_python_scope_nodes(tree))
-    for test in tests:
-        import_nodes.extend(_python_scope_nodes(test.node))
-    for node in import_nodes:
-        if isinstance(node, ast.ImportFrom):
-            imported_names.update(
-                alias.asname or alias.name for alias in node.names
-            )
-        elif isinstance(node, ast.Import):
-            module_names.update(
-                alias.asname or alias.name.split(".", 1)[0]
-                for alias in node.names
-            )
     names: set[str] = set()
-
-    def imported_name(node: ast.expr) -> str | None:
-        if isinstance(node, ast.Name) and node.id in imported_names:
-            return node.id
-        if (
-            isinstance(node, ast.Attribute)
-            and _python_root_name(node) in module_names
-        ):
-            return node.attr
-        return None
-
     for test in tests:
         for node in _python_scope_nodes(test.node):
             if not isinstance(node, ast.Call):
                 continue
-            name = imported_name(node.func)
-            if name is not None:
+            name = _python_target_name(node.func, test.python_imports)
+            if name and (
+                isinstance(node.func, ast.Attribute)
+                or name in test.python_imported_names
+            ):
                 names.add(name)
             if (
                 _python_name(node.func) in {"assertRaises", "raises"}
                 and len(node.args) >= 2
             ):
-                callable_name = imported_name(node.args[1])
-                if callable_name is not None:
+                callable_name = _python_target_name(
+                    node.args[1], test.python_imports
+                )
+                if callable_name and (
+                    isinstance(node.args[1], ast.Attribute)
+                    or callable_name in test.python_imported_names
+                ):
                     names.add(callable_name)
     return names
 
@@ -538,7 +824,8 @@ def _rust_source_info(
                     "rust",
                     source,
                     fn_node,
-                    "should_panic" in fn_attributes,
+                    should_panic="should_panic" in fn_attributes,
+                    not_run="ignore" in fn_attributes,
                 )
             )
             continue
@@ -561,6 +848,7 @@ def _rust_source_info(
                 file,
                 name_node.start_point.row + 1,
                 bool(_rust_params(fn_node, source_bytes)[:1] == ("self",)),
+                language="rust",
             )
         )
     definitions = {
@@ -853,6 +1141,14 @@ def _rust_scope_nodes(node: Any) -> Iterable[Any]:
         yield from _rust_scope_nodes(child)
 
 
+def _rust_sync_scope_nodes(node: Any) -> Iterable[Any]:
+    yield node
+    for child in node.children:
+        if child.type in {"function_item", "closure_expression", "async_block"}:
+            continue
+        yield from _rust_sync_scope_nodes(child)
+
+
 def _rust_call_names(
     tests: Iterable[_Test], source_bytes_by_file: dict[str, bytes]
 ) -> tuple[set[str], set[str]]:
@@ -902,13 +1198,25 @@ def _called_names(expression: _Expr) -> set[str]:
 
 
 def _literal_value(expression: _Expr, bindings: dict[str, int | bool]) -> int | bool:
-    if expression.kind == "literal" and (
-        isinstance(expression.value, bool) or isinstance(expression.value, int)
-    ):
-        return expression.value
+    if expression.kind == "literal":
+        if isinstance(expression.value, bool):
+            return expression.value
+        if isinstance(expression.value, int):
+            if _MIN_I64 <= expression.value <= _MAX_I64:
+                return expression.value
+            raise _OutOfRangeLiteralError("integer literal outside i64 range")
     if expression.kind == "name" and expression.value in bindings:
         return bindings[expression.value]
     if expression.kind == "unary" and expression.value in {"-", "+"}:
+        operand = expression.children[0]
+        if (
+            expression.value == "-"
+            and operand.kind == "literal"
+            and isinstance(operand.value, int)
+            and not isinstance(operand.value, bool)
+            and operand.value == _MAX_I64 + 1
+        ):
+            return _MIN_I64
         value = _literal_value(expression.children[0], bindings)
         if isinstance(value, bool):
             raise _ExpressionError("boolean is not an integer literal")
@@ -927,9 +1235,14 @@ def _target_calls(expression: _Expr, target_names: set[str]) -> list[_Expr]:
 def _resolve_definition(
     name: str,
     file: str,
+    language: str,
     definitions: dict[str, list[_Definition]],
 ) -> _Definition | None:
-    candidates = definitions.get(name, [])
+    candidates = [
+        definition
+        for definition in definitions.get(name, [])
+        if definition.language == language
+    ]
     same_file = [definition for definition in candidates if definition.file == file]
     if same_file:
         return same_file[0] if len(same_file) == 1 else None
@@ -937,11 +1250,17 @@ def _resolve_definition(
 
 
 def _target_metadata(
-    name: str, definitions: dict[str, list[_Definition]]
+    name: str,
+    language: str,
+    definitions: dict[str, list[_Definition]],
 ) -> dict[str, Any]:
-    candidates = definitions.get(name, [])
+    candidates = [
+        definition
+        for definition in definitions.get(name, [])
+        if definition.language == language
+    ]
     if not candidates:
-        return _Definition(name, None, None, None).to_dict()
+        return {"params": None, "file": None, "line": None}
     if len(candidates) == 1:
         return candidates[0].to_dict()
     return {
@@ -965,6 +1284,8 @@ def _render_expression(
         if isinstance(expression.value, bool):
             return "true" if expression.value else "false"
         if isinstance(expression.value, int):
+            if not _MIN_I64 <= expression.value <= _MAX_I64:
+                raise _OutOfRangeLiteralError("integer literal outside i64 range")
             return str(expression.value)
     if expression.kind == "name":
         if expression.value in bindings:
@@ -980,6 +1301,15 @@ def _render_expression(
     if expression.kind == "unary" and expression.value == "+":
         return _render_expression(expression.children[0], target_names, bindings)
     if expression.kind == "unary" and expression.value in {"-", "!", "not"}:
+        operand_expression = expression.children[0]
+        if (
+            expression.value == "-"
+            and operand_expression.kind == "literal"
+            and isinstance(operand_expression.value, int)
+            and not isinstance(operand_expression.value, bool)
+            and operand_expression.value == _MAX_I64 + 1
+        ):
+            return str(_MIN_I64)
         operand = _render_expression(expression.children[0], target_names, bindings)
         operator = "!" if expression.value == "not" else expression.value
         return f"({operator}{operand})"
@@ -1025,6 +1355,7 @@ def _target_argument_values(
     call: _Expr,
     definitions: dict[str, list[_Definition]],
     bindings: dict[str, int | bool],
+    language: str,
     file: str,
 ) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
     name, has_keywords = call.value[:2]
@@ -1032,9 +1363,11 @@ def _target_argument_values(
         return None, "non_literal_argument"
     try:
         values = [_literal_value(arg, bindings) for arg in call.children]
+    except _OutOfRangeLiteralError:
+        return None, "unsupported_expression"
     except _ExpressionError:
         return None, "non_literal_argument"
-    definition = _resolve_definition(name, file, definitions)
+    definition = _resolve_definition(name, file, language, definitions)
     if definition is None or definition.params is None:
         return values, None
     params = definition.params
@@ -1122,7 +1455,7 @@ def _emit_assertion(
         return
     call = calls[0]
     args, reason = _target_argument_values(
-        call, definitions, bindings, test.file
+        call, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -1145,6 +1478,16 @@ def _emit_assertion(
                 continue
             try:
                 result = _literal_value(expected, bindings)
+            except _OutOfRangeLiteralError:
+                _skip(
+                    skipped,
+                    test=test,
+                    file=test.file,
+                    line=line,
+                    reason="unsupported_expression",
+                    text=text,
+                )
+                return
             except _ExpressionError:
                 _skip(
                     skipped,
@@ -1194,7 +1537,7 @@ def _python_store_counts(test_node: ast.AST) -> Counter[str]:
     store_counts = Counter(
         node.id
         for node in _python_scope_nodes(test_node)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
     )
     scope_types = (
         ast.FunctionDef,
@@ -1206,19 +1549,19 @@ def _python_store_counts(test_node: ast.AST) -> Counter[str]:
     def nested_scopes(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, scope_types):
-                scope_nodes = tuple(_python_scope_nodes(child))
-                nonlocal_names = {
+                scope_nodes = tuple(_python_scope_write_nodes(child))
+                declared_names = {
                     name
                     for scope_node in scope_nodes
-                    if isinstance(scope_node, ast.Nonlocal)
+                    if isinstance(scope_node, (ast.Global, ast.Nonlocal))
                     for name in scope_node.names
                 }
                 store_counts.update(
-                    name_node.id
-                    for name_node in scope_nodes
-                    if isinstance(name_node, ast.Name)
-                    and isinstance(name_node.ctx, ast.Store)
-                    and name_node.id in nonlocal_names
+                    name
+                    for name in _python_nested_write_names(
+                        scope_nodes, declared_names
+                    )
+                    if name in declared_names
                 )
             nested_scopes(child)
 
@@ -1308,7 +1651,7 @@ def _python_reject_block(
             text=_python_source_segment(test.source, with_node),
         )
         return
-    expression = _python_expr(call_node)
+    expression = _python_expr(call_node, test.python_imports)
     calls = _target_calls(expression, target_names)
     if not calls:
         _skip(
@@ -1336,7 +1679,7 @@ def _python_reject_block(
         return
     target_call = calls[0]
     args, reason = _target_argument_values(
-        target_call, definitions, bindings, test.file
+        target_call, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -1388,7 +1731,7 @@ def _python_callable_reject(
             text=text,
         )
         return
-    name = _python_callable_argument(call_node.args[1])
+    name = _python_target_name(call_node.args[1], test.python_imports)
     if name not in target_names:
         _skip(
             skipped,
@@ -1402,10 +1745,10 @@ def _python_callable_reject(
     expression = _Expr(
         "call",
         (name, bool(call_node.keywords)),
-        tuple(_python_expr(arg) for arg in call_node.args[2:]),
+        tuple(_python_expr(arg, test.python_imports) for arg in call_node.args[2:]),
     )
     args, reason = _target_argument_values(
-        expression, definitions, bindings, test.file
+        expression, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -1429,6 +1772,105 @@ def _python_callable_reject(
     )
 
 
+_PYTHON_ASSERTION_CALLS = {
+    "assertEqual",
+    "assertNotEqual",
+    "assertLess",
+    "assertLessEqual",
+    "assertGreater",
+    "assertGreaterEqual",
+    "assertTrue",
+    "assertFalse",
+}
+_PYTHON_CONDITIONALS = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.Try,
+    ast.TryStar,
+    ast.Match,
+)
+
+
+def _python_raises_context(node: ast.With | ast.AsyncWith) -> bool:
+    return any(
+        isinstance(item.context_expr, ast.Call)
+        and _python_name(item.context_expr.func) in {"raises", "assertRaises"}
+        for item in node.items
+    )
+
+
+def _python_skip_nested_assertions(
+    node: ast.AST,
+    *,
+    reason: str,
+    test: _Test,
+    skipped: list[dict[str, Any]],
+) -> None:
+    nodes = list(_python_scope_nodes(node))
+    for candidate in nodes:
+        if isinstance(candidate, (ast.With, ast.AsyncWith)) and _python_raises_context(candidate):
+            _skip(
+                skipped, test=test, file=test.file, line=candidate.lineno,
+                reason="ambiguous_rejects", text=_python_source_segment(test.source, candidate),
+            )
+        elif isinstance(candidate, ast.Assert):
+            _skip(
+                skipped, test=test, file=test.file, line=candidate.lineno,
+                reason=reason, text=_python_source_segment(test.source, candidate),
+            )
+        elif isinstance(candidate, ast.Call) and _python_name(candidate.func) in (
+            _PYTHON_ASSERTION_CALLS | {"raises", "assertRaises"}
+        ):
+            _skip(
+                skipped, test=test, file=test.file, line=candidate.lineno,
+                reason=reason, text=_python_source_segment(test.source, candidate),
+            )
+
+
+def _python_statement_nodes(
+    test: _Test, skipped: list[dict[str, Any]]
+) -> list[ast.AST]:
+    active: list[ast.AST] = []
+
+    def collect(statements: list[ast.stmt], in_with: bool = False) -> str | None:
+        exit_reason: str | None = None
+        for statement in statements:
+            if exit_reason is not None:
+                _python_skip_nested_assertions(
+                    statement, reason=exit_reason, test=test, skipped=skipped
+                )
+                continue
+            if isinstance(statement, _PYTHON_CONDITIONALS):
+                _python_skip_nested_assertions(
+                    statement, reason="conditional_assertion", test=test, skipped=skipped
+                )
+                continue
+            active.append(statement)
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                if not _python_raises_context(statement):
+                    exit_reason = collect(statement.body, in_with=True)
+            elif isinstance(statement, ast.Return):
+                exit_reason = "unreachable_assertion"
+            elif isinstance(statement, ast.Raise):
+                exit_reason = (
+                    "conditional_assertion" if in_with else "unreachable_assertion"
+                )
+            elif isinstance(statement, ast.Expr) and isinstance(
+                statement.value, ast.Call
+            ):
+                active.append(statement.value)
+                if _python_statement_terminates(statement, test):
+                    exit_reason = (
+                        "conditional_assertion" if in_with else "unreachable_assertion"
+                    )
+        return exit_reason
+
+    collect(test.node.body)
+    return active
+
+
 def _process_python_test(
     test: _Test,
     target_names: set[str],
@@ -1437,8 +1879,14 @@ def _process_python_test(
     skipped: list[dict[str, Any]],
 ) -> None:
     assert isinstance(test.node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    if test.not_run:
+        _skip(
+            skipped, test=test, file=test.file, line=_python_definition_line(test.node),
+            reason="test_not_run", text=_python_source_segment(test.source, test.node),
+        )
+        return
     store_counts = _python_store_counts(test.node)
-    scope_nodes = list(_python_scope_nodes(test.node))
+    scope_nodes = _python_statement_nodes(test, skipped)
     context_calls: set[int] = set()
     raises_contexts: list[ast.With | ast.AsyncWith] = []
     for node in scope_nodes:
@@ -1480,16 +1928,7 @@ def _process_python_test(
                 skipped=skipped,
             )
     raised_assertions: set[int] = set()
-    assertion_methods = {
-        "assertEqual",
-        "assertNotEqual",
-        "assertLess",
-        "assertLessEqual",
-        "assertGreater",
-        "assertGreaterEqual",
-        "assertTrue",
-        "assertFalse",
-    }
+    assertion_methods = _PYTHON_ASSERTION_CALLS
     for with_node in raises_contexts:
         for node in _python_scope_nodes(with_node):
             if node is with_node:
@@ -1506,7 +1945,7 @@ def _process_python_test(
             position = (node.lineno, node.col_offset)
             bindings = _python_bindings(test.node, store_counts, position)
             _emit_assertion(
-                _python_expr(node.test),
+                _python_expr(node.test, test.python_imports),
                 test=test,
                 line=node.lineno,
                 text=_python_source_segment(test.source, node),
@@ -1533,16 +1972,7 @@ def _process_python_test(
                     observations=observations,
                     skipped=skipped,
                 )
-            elif name in {
-                "assertEqual",
-                "assertNotEqual",
-                "assertLess",
-                "assertLessEqual",
-                "assertGreater",
-                "assertGreaterEqual",
-                "assertTrue",
-                "assertFalse",
-            }:
+            elif name in assertion_methods:
                 position = (node.lineno, node.col_offset)
                 bindings = _python_bindings(test.node, store_counts, position)
                 if name in {"assertEqual", *tuple(_UNITTEST_ASSERTIONS)}:
@@ -1553,13 +1983,16 @@ def _process_python_test(
                         expression = _Expr(
                             "compare",
                             (operator,),
-                            (_python_expr(node.args[0]), _python_expr(node.args[1])),
+                            (
+                                _python_expr(node.args[0], test.python_imports),
+                                _python_expr(node.args[1], test.python_imports),
+                            ),
                         )
                 elif name in {"assertTrue", "assertFalse"}:
                     if not _python_assertion_message_allowed(node, 1):
                         expression = _Expr("unsupported")
                     else:
-                        expression = _python_expr(node.args[0])
+                        expression = _python_expr(node.args[0], test.python_imports)
                         if name == "assertFalse":
                             expression = _Expr("unary", "not", (expression,))
                 else:
@@ -1592,16 +2025,69 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
     counts: Counter[str] = Counter()
     if body is None:
         return counts
-    for node in _walk(body):
+    scope_nodes = tuple(_rust_sync_scope_nodes(body))
+    outer_names = set(_rust_params(test.node, source_bytes))
+    for node in scope_nodes:
         if node.type == "let_declaration":
             name = _rust_identifier(node.child_by_field_name("pattern"), source_bytes)
             if name:
                 counts[name] += 1
+                outer_names.add(name)
         elif node.type in {"assignment_expression", "compound_assignment_expr"}:
             left = node.child_by_field_name("left")
             name = _rust_identifier(left, source_bytes)
             if name:
                 counts[name] += 1
+
+    def captured_writes(node: Any) -> None:
+        for child in node.children:
+            if child.type == "function_item":
+                continue
+            if child.type in {"closure_expression", "async_block"}:
+                closure_nodes = tuple(_rust_sync_scope_nodes(child))
+                parameter_names: set[str] = set()
+                parameters = (
+                    child.child_by_field_name("parameters")
+                    if child.type == "closure_expression"
+                    else None
+                )
+                if parameters is not None:
+                    for parameter in parameters.named_children:
+                        pattern = parameter.child_by_field_name("pattern")
+                        name = _rust_identifier(pattern, source_bytes)
+                        if name:
+                            parameter_names.add(name)
+                for scope_node in closure_nodes:
+                    if scope_node.type not in {
+                        "assignment_expression",
+                        "compound_assignment_expr",
+                    }:
+                        continue
+                    name = _rust_identifier(
+                        scope_node.child_by_field_name("left"), source_bytes
+                    )
+                    local = name in parameter_names
+                    ancestor = scope_node.parent
+                    while ancestor is not None and ancestor != child and not local:
+                        if ancestor.type == "block":
+                            local = any(
+                                previous.type == "let_declaration"
+                                and previous.end_byte <= scope_node.start_byte
+                                and _rust_identifier(
+                                    previous.child_by_field_name("pattern"),
+                                    source_bytes,
+                                )
+                                == name
+                                for previous in ancestor.named_children
+                            )
+                        ancestor = ancestor.parent
+                    if name in outer_names and not local:
+                        counts[name] += 1
+                captured_writes(child)
+            else:
+                captured_writes(child)
+
+    captured_writes(body)
     return counts
 
 
@@ -1637,6 +2123,16 @@ def _rust_bindings(
 
 def _rust_text(node: Any, source_bytes: bytes) -> str:
     return source_bytes[node.start_byte : node.end_byte].decode("utf-8", "replace")
+
+
+def _rust_terminating_call(node: Any, source_bytes: bytes) -> bool:
+    if node.type != "call_expression":
+        return False
+    function = node.child_by_field_name("function")
+    if function is None:
+        return False
+    path = _rust_text(function, source_bytes).replace(" ", "")
+    return path in {"std::process::exit", "process::exit"}
 
 
 def _process_rust_rejects(
@@ -1751,7 +2247,7 @@ def _process_rust_rejects(
         )
         return
     args, reason = _target_argument_values(
-        target_call, definitions, bindings, test.file
+        target_call, definitions, bindings, test.language, test.file
     )
     if reason is not None or args is None:
         _skip(
@@ -1783,6 +2279,17 @@ def _process_rust_test(
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
 ) -> None:
+    if test.not_run:
+        line = test.node.start_point.row + 1
+        _skip(
+            skipped,
+            test=test,
+            file=test.file,
+            line=line,
+            reason="test_not_run",
+            text=_rust_text(test.node, source_bytes),
+        )
+        return
     if test.should_panic:
         _process_rust_rejects(
             test,
@@ -1797,47 +2304,109 @@ def _process_rust_test(
     if body is None:
         return
     store_counts = _rust_store_counts(test, source_bytes)
-    for node in _rust_scope_nodes(body):
-        if node.type != "macro_invocation":
-            continue
-        if _rust_standard_path(_rust_macro_path(node, source_bytes)):
-            continue
-        name = _rust_macro_name(node, source_bytes)
-        if name not in {"assert", "assert_eq", "assert_ne"}:
-            continue
-        line = node.start_point.row + 1
-        text = _rust_text(node, source_bytes)
-        try:
-            args = _rust_macro_arguments(
-                node, source_bytes, 1 if name == "assert" else 2
-            )
-            if name == "assert":
-                expression = args[0] if args else _Expr("unsupported")
-            elif len(args) >= 2:
-                operator = "==" if name == "assert_eq" else "!="
-                expression = _Expr(
-                    "compare",
-                    (operator,),
-                    (args[0], args[1]),
+    unreachable = False
+    conditional = False
+    conditional_types = {
+        "if_expression", "match_expression", "loop_expression",
+        "while_expression", "for_expression", "block", "closure_expression",
+    }
+
+    def assertion_macros(node: Any) -> list[Any]:
+        if node.type in {"function_item", "closure_expression", "async_block"}:
+            return []
+        return [
+            candidate for candidate in _rust_sync_scope_nodes(node)
+            if candidate.type == "macro_invocation"
+            and not _rust_standard_path(_rust_macro_path(candidate, source_bytes))
+            and _rust_macro_name(candidate, source_bytes)
+            in {"assert", "assert_eq", "assert_ne"}
+        ]
+
+    for statement in body.named_children:
+        inner_statement = (
+            statement.named_children[0]
+            if statement.type == "expression_statement"
+            and len(statement.named_children) == 1
+            else statement
+        )
+        if unreachable:
+            for macro in assertion_macros(statement):
+                _skip(
+                    skipped, test=test, file=test.file,
+                    line=macro.start_point.row + 1,
+                    reason="unreachable_assertion", text=_rust_text(macro, source_bytes),
                 )
-            else:
-                expression = _Expr("unsupported")
-        except _ExpressionError:
-            expression = _Expr("unsupported")
-        bindings = _rust_bindings(
-            test, source_bytes, store_counts, (line, node.start_point.column)
-        )
-        _emit_assertion(
-            expression,
-            test=test,
-            line=line,
-            text=text,
-            bindings=bindings,
-            target_names=target_names,
-            definitions=definitions,
-            observations=observations,
-            skipped=skipped,
-        )
+            continue
+        if conditional:
+            for macro in assertion_macros(statement):
+                _skip(
+                    skipped, test=test, file=test.file,
+                    line=macro.start_point.row + 1,
+                    reason="conditional_assertion", text=_rust_text(macro, source_bytes),
+                )
+            continue
+        if inner_statement.type in conditional_types:
+            for macro in assertion_macros(statement):
+                _skip(
+                    skipped, test=test, file=test.file,
+                    line=macro.start_point.row + 1,
+                    reason="conditional_assertion", text=_rust_text(macro, source_bytes),
+                )
+            if any(
+                node.type == "try_expression"
+                for node in _rust_sync_scope_nodes(statement)
+            ):
+                conditional = True
+            continue
+        macros = assertion_macros(inner_statement)
+        if inner_statement.type not in {"macro_invocation"}:
+            for macro in macros:
+                _skip(
+                    skipped, test=test, file=test.file,
+                    line=macro.start_point.row + 1,
+                    reason="conditional_assertion", text=_rust_text(macro, source_bytes),
+                )
+        else:
+            for node in macros:
+                line = node.start_point.row + 1
+                text = _rust_text(node, source_bytes)
+                try:
+                    args = _rust_macro_arguments(
+                        node, source_bytes, 1 if _rust_macro_name(node, source_bytes) == "assert" else 2
+                    )
+                    name = _rust_macro_name(node, source_bytes)
+                    if name == "assert":
+                        expression = args[0] if args else _Expr("unsupported")
+                    elif len(args) >= 2:
+                        operator = "==" if name == "assert_eq" else "!="
+                        expression = _Expr("compare", (operator,), (args[0], args[1]))
+                    else:
+                        expression = _Expr("unsupported")
+                except _ExpressionError:
+                    expression = _Expr("unsupported")
+                bindings = _rust_bindings(
+                    test, source_bytes, store_counts, (line, node.start_point.column)
+                )
+                _emit_assertion(
+                    expression, test=test, line=line, text=text, bindings=bindings,
+                    target_names=target_names, definitions=definitions,
+                    observations=observations, skipped=skipped,
+                )
+        if inner_statement.type == "return_expression":
+            unreachable = True
+        elif (
+            inner_statement.type == "macro_invocation"
+            and _rust_macro_name(inner_statement, source_bytes)
+            in {"panic", "unreachable", "todo", "unimplemented"}
+        ):
+            unreachable = True
+        elif _rust_terminating_call(inner_statement, source_bytes):
+            unreachable = True
+        elif any(
+            node.type == "try_expression"
+            for node in _rust_sync_scope_nodes(statement)
+        ):
+            conditional = True
 
 
 def _common_root(inputs: list[Path]) -> Path:
@@ -1889,6 +2458,11 @@ def harvest_tests(
         (path, path.relative_to(root).as_posix(), _EXTENSIONS[path.suffix.lower()])
         for path in source_paths
     ]
+    python_modules = {
+        path.parent.name if path.name == "__init__.py" else path.stem
+        for path, _relative, source_language in sources
+        if source_language == "python"
+    }
     definitions: dict[str, list[_Definition]] = {}
     tests: list[_Test] = []
     parse_skips: list[dict[str, Any]] = []
@@ -1896,6 +2470,7 @@ def harvest_tests(
     call_names: set[str] = set()
     imported_call_names: set[str] = set()
     qualified_call_names: set[str] = set()
+    call_names_by_language: dict[str, set[str]] = {}
     for path, relative, source_language in sources:
         try:
             source = path.read_text(encoding="utf-8")
@@ -1921,17 +2496,38 @@ def harvest_tests(
                     }
                 )
                 continue
-            file_tests = _python_tests(tree)
-            file_tests = [
-                _Test(test.name, relative, "python", source, test.node)
-                for test in file_tests
-            ]
+            file_tests = []
+            for test in _python_tests(tree):
+                module_aliases, name_aliases = _python_import_aliases(
+                    tree, test.node
+                )
+                file_tests.append(
+                    _Test(
+                        test.name,
+                        relative,
+                        "python",
+                        source,
+                        test.node,
+                        not_run=test.not_run,
+                        python_imports=_python_import_roots(
+                            tree, test.node, python_modules
+                        ),
+                        python_imported_names=_python_imported_names(
+                            tree, test.node
+                        ),
+                        python_module_aliases=tuple(module_aliases.items()),
+                        python_name_aliases=tuple(name_aliases.items()),
+                    )
+                )
             tests.extend(file_tests)
             for name, file_definitions in _python_definitions(tree, relative).items():
                 definitions.setdefault(name, []).extend(file_definitions)
             call_names.update(_python_call_names(file_tests))
             imported_call_names.update(
                 _python_imported_call_names(tree, file_tests)
+            )
+            call_names_by_language.setdefault("python", set()).update(
+                _python_call_names(file_tests)
             )
         else:
             file_definitions, file_tests, parse_error, tree, source_bytes = (
@@ -1949,6 +2545,9 @@ def harvest_tests(
             )
             call_names.update(file_call_names)
             qualified_call_names.update(file_qualified_names)
+            call_names_by_language.setdefault("rust", set()).update(
+                file_call_names | file_qualified_names
+            )
             imported_call_names.update(
                 _rust_imported_names(tree.root_node, source_bytes, file_tests)
                 & file_call_names
@@ -1965,6 +2564,20 @@ def harvest_tests(
         )
     else:
         target_names = set(targets)
+    available_languages = {source_language for _, _, source_language in sources}
+    target_languages: dict[str, set[str]] = {}
+    for name in target_names:
+        languages = {
+            definition.language
+            for definition in definitions.get(name, [])
+            if definition.language is not None
+        }
+        languages.update(
+            language
+            for language, names in call_names_by_language.items()
+            if name in names
+        )
+        target_languages[name] = languages or available_languages
     observations: list[dict[str, Any]] = []
     skipped = parse_skips
     for test in tests:
@@ -2008,7 +2621,10 @@ def harvest_tests(
         "schema": "mumei.test-harvest/v1",
         "sources": [relative for _path, relative, _language in sources],
         "targets": {
-            name: _target_metadata(name, definitions)
+            name: {
+                language: _target_metadata(name, language, definitions)
+                for language in sorted(target_languages[name])
+            }
             for name in sorted(target_names)
         },
         "observations": observations,
