@@ -67,7 +67,7 @@ class PropertyMumei:
     def __init__(
         self,
         verdicts: list[str],
-        detail: str | None = "x=0, result=-1",
+        detail: str | None = "contract does not entail the property",
     ):
         self.verdicts = list(verdicts)
         self.detail = detail
@@ -179,7 +179,7 @@ def test_property_feedback_retries_with_quantified_counterexample() -> None:
     ]
     assert "not guarantee it" in retry_prompt
     assert "for all x in [0, 10], assuming x != 5" in retry_prompt
-    assert "(counterexample: x=0, result=-1)" in retry_prompt
+    assert "(detail: contract does not entail the property)" in retry_prompt
 
 
 def test_property_not_entailed_is_dropped_on_the_final_retry_attempt() -> None:
@@ -224,7 +224,7 @@ def test_property_contradiction_fails_extraction_after_each_attempt() -> None:
 @pytest.mark.parametrize(
     ("verdict", "detail", "expect_warning", "expected_exit"),
     [
-        ("not_entailed", "x=0, result=-1", True, 0),
+        ("not_entailed", "contract does not entail the property", True, 0),
         ("domain_exceeds_requires", None, True, 0),
         ("not_checked", "unsupported observation kind", True, 0),
         ("mystery_verdict", None, True, 0),

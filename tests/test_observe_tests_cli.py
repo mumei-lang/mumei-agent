@@ -165,7 +165,7 @@ def test_observe_tests_cli_property_warnings_and_blocking(
                 "line": 7,
                 "predicate": "result >= x",
                 "verdict": verdict,
-                "detail": "x=0, result=-1",
+                "detail": "contract does not entail the property",
             }
         ],
     }
@@ -189,7 +189,7 @@ def test_observe_tests_cli_property_warnings_and_blocking(
     captured = capsys.readouterr()
     if verdict == "not_entailed":
         assert "Warning: test test_f_property" in captured.err
-        assert "(counterexample: x=0, result=-1)" in captured.err
+        assert "(detail: contract does not entail the property)" in captured.err
     else:
         assert "Warning:" not in captured.err
     assert json.loads(captured.out)["results"] == report["results"]
