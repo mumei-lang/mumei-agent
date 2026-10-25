@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from agent.__main__ import main as agent_cli_main
+from agent import test_harvest
 from agent.test_harvest import harvest_tests
 
 
@@ -384,7 +385,7 @@ def test_rust_should_panic_collects_literal_bindings_and_nested_test_module(
 @pytest.mark.parametrize(
     ("body", "reason"),
     [
-        ("panic!(\"expected\");", "no_target_call"),
+        ("panic!(\"expected\");", "ambiguous_rejects"),
         ("add(1, 2); add(3, 4);", "ambiguous_rejects"),
         ("add(value, 2);", "non_literal_argument"),
     ],
@@ -706,3 +707,344 @@ def test_parse_error_in_single_file_is_not_an_input_error(tmp_path: Path) -> Non
 
     assert report["totals"]["tests"] == 0
     assert report["skipped"][0]["reason"] == "parse_error"
+
+
+def test_same_name_definitions_resolve_locally_and_report_ambiguity(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "sources"
+    _write(
+        source_root / "alpha.py",
+        "def step(value):\n    return value\n"
+        "def test_alpha():\n    assert step(1) == 1\n",
+    )
+    _write(
+        source_root / "beta.py",
+        "def step(left, right):\n    return left + right\n"
+        "def test_beta():\n    assert step(2, 3) == 5\n",
+    )
+    _write(
+        source_root / "gamma.py",
+        "def test_gamma():\n    assert step(7) == 7\n",
+    )
+
+    report = harvest_tests([source_root], None, None)
+
+    assert report["targets"]["step"] == {
+        "params": None,
+        "ambiguous": True,
+        "definitions": [
+            {"params": ["value"], "file": "alpha.py", "line": 1},
+            {"params": ["left", "right"], "file": "beta.py", "line": 1},
+        ],
+    }
+    assert [item["args"] for item in report["observations"]] == [
+        {"value": 1},
+        {"left": 2, "right": 3},
+        [7],
+    ]
+
+
+def test_unique_definition_in_another_input_file_resolves_call(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "sources"
+    _write(source_root / "lib.py", "def step(value):\n    return value\n")
+    _write(
+        source_root / "test_step.py",
+        "def test_step():\n    assert step(3) == 3\n",
+    )
+
+    report = harvest_tests([source_root], None, None)
+
+    assert report["targets"]["step"] == {
+        "params": ["value"],
+        "file": "lib.py",
+        "line": 1,
+    }
+    assert report["observations"][0]["args"] == {"value": 3}
+
+
+def test_python_imported_targets_are_selected_without_definitions(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_imports.py",
+        "from mathlib import plus as imported_plus\n"
+        "import helpers as helper_module\n"
+        "def test_imports():\n"
+        "    assert imported_plus(1, 2) == 3\n"
+        "    assert helper_module.bump(4) == 5\n",
+    )
+
+    report = _report(source)
+
+    assert report["targets"] == {
+        "bump": {"params": None, "file": None, "line": None},
+        "imported_plus": {"params": None, "file": None, "line": None},
+    }
+    assert [item["target"] for item in report["observations"]] == [
+        "imported_plus",
+        "bump",
+    ]
+    assert [item["args"] for item in report["observations"]] == [[1, 2], [4]]
+
+
+def test_rust_imported_and_qualified_targets_are_selected(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_imports.rs",
+        "use service::direct;\n"
+        "use service::{grouped, unused};\n"
+        "#[test]\n"
+        "fn test_imports() {\n"
+        "    assert_eq!(direct(1), 1);\n"
+        "    assert_eq!(grouped(2), 2);\n"
+        "    assert_eq!(super::helper(3), 3);\n"
+        "    assert_eq!(crate::module::qualified(4), 4);\n"
+        "    assert_eq!(module::nested(5), 5);\n"
+        "    assert_eq!(std::cmp::max(1, 2), 2);\n"
+        "    std::assert_eq!(outside(6), 6);\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert set(report["targets"]) == {
+        "direct",
+        "grouped",
+        "helper",
+        "qualified",
+        "nested",
+    }
+    assert [item["target"] for item in report["observations"]] == [
+        "direct",
+        "grouped",
+        "helper",
+        "qualified",
+        "nested",
+    ]
+    assert all(item["args"] == [index] for index, item in enumerate(report["observations"], 1))
+
+
+@pytest.mark.parametrize(
+    ("assertion", "kind"),
+    [
+        ("self.assertEqual(add(2, 3), 5, 'message')", "example"),
+        ("self.assertEqual(add(2, 3), 5, msg='message')", "example"),
+        ("self.assertNotEqual(add(2, 3), 5, 'message')", "relation"),
+        ("self.assertNotEqual(add(2, 3), 5, msg='message')", "relation"),
+        ("self.assertTrue(add(2, 3) > 0, 'message')", "relation"),
+        ("self.assertTrue(add(2, 3) > 0, msg='message')", "relation"),
+        ("self.assertFalse(add(2, 3) == 5, 'message')", "relation"),
+        ("self.assertFalse(add(2, 3) == 5, msg='message')", "relation"),
+        ("self.assertLess(add(2, 3), 5, 'message')", "relation"),
+        ("self.assertLess(add(2, 3), 5, msg='message')", "relation"),
+        ("self.assertLessEqual(add(2, 3), 5, 'message')", "relation"),
+        ("self.assertLessEqual(add(2, 3), 5, msg='message')", "relation"),
+        ("self.assertGreater(add(2, 3), 5, 'message')", "relation"),
+        ("self.assertGreater(add(2, 3), 5, msg='message')", "relation"),
+        ("self.assertGreaterEqual(add(2, 3), 5, 'message')", "relation"),
+        ("self.assertGreaterEqual(add(2, 3), 5, msg='message')", "relation"),
+    ],
+)
+def test_python_unittest_assertion_messages_are_ignored(
+    tmp_path: Path, assertion: str, kind: str
+) -> None:
+    report = _report(_python_file(tmp_path, assertion))
+
+    assert report["observations"][0]["kind"] == kind
+    assert report["skipped"] == []
+
+
+def test_python_assert_statement_message_is_ignored(tmp_path: Path) -> None:
+    report = _report(_python_file(tmp_path, "assert add(2, 3) == 5, 'message'"))
+
+    assert report["observations"][0]["kind"] == "example"
+    assert report["observations"][0]["result"] == 5
+
+
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        "with pytest.raises(AssertionError):\n    assert add(1, 2) == 3",
+        "with self.assertRaises(AssertionError):\n    self.assertEqual(add(1, 2), 3)",
+    ],
+)
+def test_assertions_inside_raises_contexts_are_ambiguous(
+    tmp_path: Path, assertion: str
+) -> None:
+    source = _write(
+        tmp_path / "test_raises.py",
+        "def add(left, right):\n    return left + right\n"
+        "def test_raises():\n"
+        + "".join(f"    {line}\n" for line in assertion.splitlines()),
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "ambiguous_rejects"
+
+
+def test_python_nested_helper_scopes_are_not_harvested(tmp_path: Path) -> None:
+    source = _write(
+        tmp_path / "test_nested.py",
+        "def add(value):\n    return value\n"
+        "def test_nested():\n"
+        "    value = 1\n"
+        "    def helper():\n"
+        "        value = 2\n"
+        "        assert add(2) == 2\n"
+        "    class Nested:\n"
+        "        def check(self):\n"
+        "            assert add(3) == 3\n"
+        "    callback = lambda: add(4)\n"
+        "    assert add(value) == 1\n",
+    )
+
+    report = _report(source)
+
+    assert len(report["observations"]) == 1
+    assert report["observations"][0]["args"] == {"value": 1}
+
+
+def test_rust_nested_helper_scopes_are_not_harvested(tmp_path: Path) -> None:
+    source = _rust_file(
+        tmp_path,
+        "fn helper() { assert_eq!(add(2, 3), 5); }\n"
+        "let mut left = 1;\n"
+        "let closure = || { left = 2; assert_eq!(add(4, 5), 9); };\n"
+        "assert_eq!(add(left, 2), 3);",
+    )
+
+    report = _report(source)
+
+    assert len(report["observations"]) == 1
+    assert report["observations"][0]["args"] == {"left": 1, "right": 2}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'assert_eq!(add(1, 2), 3);',
+        'panic!("other panic");',
+        "other_macro!(add(1, 2));",
+    ],
+)
+def test_rust_should_panic_rejects_other_body_statements_as_ambiguous(
+    tmp_path: Path, body: str
+) -> None:
+    source = _write(
+        tmp_path / "test_should_panic.rs",
+        "fn add(left: i64, right: i64) -> i64 { left + right }\n"
+        "#[test]\n"
+        "#[should_panic]\n"
+        "fn test_rejects() {\n"
+        f"    {body}\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "ambiguous_rejects"
+
+
+def test_rust_should_panic_accepts_ignored_call_after_literal_bindings(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_should_panic.rs",
+        "fn add(left: i64, right: i64) -> i64 { left + right }\n"
+        "#[test]\n"
+        "#[should_panic]\n"
+        "fn test_rejects() {\n"
+        "    let left: i64 = 1;\n"
+        "    let _ = add(left, 2);\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"][0]["kind"] == "rejects"
+    assert report["observations"][0]["args"] == {"left": 1, "right": 2}
+
+
+def test_rust_assert_macros_ignore_trailing_format_arguments(
+    tmp_path: Path,
+) -> None:
+    source = _rust_file(
+        tmp_path,
+        'assert_eq!(add(2, 3), 5, "message {}", add(9, 9));\n'
+        'assert_ne!(add(2, 3), 0, "message {}", add(9, 9));\n'
+        'assert!(add(2, 3) > 0, "message {}", add(9, 9));',
+    )
+
+    report = _report(source)
+
+    assert [item["kind"] for item in report["observations"]] == [
+        "example",
+        "relation",
+        "relation",
+    ]
+    assert [item["args"] for item in report["observations"]] == [
+        {"left": 2, "right": 3},
+        {"left": 2, "right": 3},
+        {"left": 2, "right": 3},
+    ]
+
+
+def test_cli_all_parse_errors_exit_four_but_partial_parse_errors_succeed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    broken = _write(tmp_path / "broken.py", "def broken(:\n")
+
+    code, stdout, stderr = _invoke_cli(monkeypatch, capsys, str(broken))
+
+    assert code == 4
+    assert stdout == ""
+    assert "no source files could be parsed" in stderr
+
+    source_root = tmp_path / "mixed"
+    _write(source_root / "broken.py", "def broken(:\n")
+    _write(
+        source_root / "valid.py",
+        "def add(value):\n    return value\n"
+        "def test_add():\n    assert add(2) == 2\n",
+    )
+
+    code, stdout, stderr = _invoke_cli(monkeypatch, capsys, str(source_root))
+
+    assert code == 0
+    assert stderr == ""
+    assert len(json.loads(stdout)["observations"]) == 1
+    assert "parse_error" in stdout
+
+
+def test_rust_source_is_parsed_once_for_multiple_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write(
+        tmp_path / "math.rs",
+        "fn add(value: i64) -> i64 { value }\n"
+        "#[test]\nfn test_first() { assert_eq!(add(1), 1); }\n"
+        "#[test]\nfn test_second() { assert_eq!(add(2), 2); }\n",
+    )
+    original_parse = test_harvest.tree_sitter_extract.parse
+    parse_count = 0
+
+    def counted_parse(source_text: str, language: str):
+        nonlocal parse_count
+        parse_count += 1
+        return original_parse(source_text, language)
+
+    monkeypatch.setattr(test_harvest.tree_sitter_extract, "parse", counted_parse)
+
+    report = _report(source)
+
+    assert parse_count == 1
+    assert len(report["observations"]) == 2

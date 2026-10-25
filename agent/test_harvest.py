@@ -173,6 +173,17 @@ def _python_expr(node: ast.expr) -> _Expr:
     )
 
 
+def _python_scope_nodes(node: ast.AST) -> Iterable[ast.AST]:
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(
+            child,
+            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+        ):
+            continue
+        yield from _python_scope_nodes(child)
+
+
 def _python_tests(tree: ast.Module) -> list[_Test]:
     tests: list[_Test] = []
     for node in tree.body:
@@ -205,7 +216,7 @@ def _python_base_name(node: ast.expr) -> str:
 
 def _python_definitions(
     tree: ast.Module, file: str
-) -> dict[str, _Definition]:
+) -> dict[str, list[_Definition]]:
     tests = _python_tests(tree)
     test_owned: set[int] = set()
     for test in tests:
@@ -214,7 +225,7 @@ def _python_definitions(
             for node in ast.walk(test.node)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         )
-    definitions: dict[str, _Definition] = {}
+    definitions: dict[str, list[_Definition]] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -223,17 +234,19 @@ def _python_definitions(
         positional = [*node.args.posonlyargs, *node.args.args]
         params = tuple(arg.arg for arg in positional)
         receiver = bool(params and params[0] in {"self", "cls"})
-        definitions.setdefault(
-            node.name,
-            _Definition(node.name, params, file, node.lineno, receiver),
+        definitions.setdefault(node.name, []).append(
+            _Definition(node.name, params, file, node.lineno, receiver)
         )
-    return definitions
+    return {
+        name: sorted(values, key=lambda item: (item.file or "", item.line or 0))
+        for name, values in definitions.items()
+    }
 
 
 def _python_call_names(tests: Iterable[_Test]) -> set[str]:
     names: set[str] = set()
     for test in tests:
-        for node in ast.walk(test.node):
+        for node in _python_scope_nodes(test.node):
             if isinstance(node, ast.Call):
                 name = _python_name(node.func)
                 if name:
@@ -242,6 +255,46 @@ def _python_call_names(tests: Iterable[_Test]) -> set[str]:
                     callable_name = _python_callable_argument(node.args[1])
                     if callable_name:
                         names.add(callable_name)
+    return names
+
+
+def _python_root_name(node: ast.expr) -> str | None:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _python_imported_call_names(
+    tree: ast.Module, tests: Iterable[_Test]
+) -> set[str]:
+    tests = tuple(tests)
+    imported_names: set[str] = set()
+    module_names: set[str] = set()
+    import_nodes = list(_python_scope_nodes(tree))
+    for test in tests:
+        import_nodes.extend(_python_scope_nodes(test.node))
+    for node in import_nodes:
+        if isinstance(node, ast.ImportFrom):
+            imported_names.update(
+                alias.asname or alias.name for alias in node.names
+            )
+        elif isinstance(node, ast.Import):
+            module_names.update(
+                alias.asname or alias.name.split(".", 1)[0]
+                for alias in node.names
+            )
+    names: set[str] = set()
+    for test in tests:
+        for node in _python_scope_nodes(test.node):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name) and node.func.id in imported_names:
+                names.add(node.func.id)
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and _python_root_name(node.func) in module_names
+            ):
+                names.add(node.func.attr)
     return names
 
 
@@ -296,18 +349,143 @@ def _rust_source_error(root: Any, source: str, file: str) -> dict[str, Any] | No
     }
 
 
-def _rust_macro_name(node: Any, source_bytes: bytes) -> str:
+def _rust_macro_path(node: Any, source_bytes: bytes) -> str:
     if not node.named_children:
         return ""
-    text = source_bytes[
+    return source_bytes[
         node.named_children[0].start_byte : node.named_children[0].end_byte
     ].decode("utf-8", "replace")
-    return text.split("::")[-1].strip()
+
+
+def _rust_macro_name(node: Any, source_bytes: bytes) -> str:
+    return _rust_macro_path(node, source_bytes).split("::")[-1].strip()
+
+
+def _rust_standard_path(path: str) -> bool:
+    return path.lstrip(":").startswith(("std::", "core::"))
+
+
+def _rust_attribute_names(fn_node: Any, source_bytes: bytes) -> set[str]:
+    parent = fn_node.parent
+    if parent is None:
+        return set()
+    siblings = parent.named_children
+    index = next(
+        (
+            index
+            for index, sibling in enumerate(siblings)
+            if sibling.start_byte == fn_node.start_byte
+        ),
+        None,
+    )
+    if index is None:
+        return set()
+    attributes: set[str] = set()
+    for sibling in reversed(siblings[:index]):
+        if sibling.type != "attribute_item":
+            break
+        text = _rust_text(sibling, source_bytes)
+        attribute = text[2:-1].strip() if text.startswith("#[") else ""
+        name = attribute.split("(", 1)[0].split("=", 1)[0].strip().split("::")[-1]
+        if name:
+            attributes.add(name)
+    return attributes
+
+
+def _rust_use_names(node: Any, source_bytes: bytes) -> set[str]:
+    argument = node.child_by_field_name("argument")
+    if argument is None:
+        return set()
+    names: set[str] = set()
+    if argument.type == "scoped_identifier":
+        path = _rust_text(argument, source_bytes)
+        if not _rust_standard_path(path):
+            name_node = argument.child_by_field_name("name")
+            name = _rust_text(name_node, source_bytes) if name_node is not None else ""
+            if name:
+                names.add(name)
+    elif argument.type == "use_as_clause":
+        path_node = argument.child_by_field_name("path")
+        alias_node = argument.child_by_field_name("alias")
+        path = _rust_text(path_node, source_bytes) if path_node is not None else ""
+        alias = _rust_text(alias_node, source_bytes) if alias_node is not None else ""
+        if alias and not _rust_standard_path(path):
+            names.add(alias)
+    elif argument.type == "identifier":
+        names.add(_rust_text(argument, source_bytes))
+    elif argument.type == "scoped_use_list":
+        prefix_node = argument.child_by_field_name("path")
+        list_node = argument.child_by_field_name("list")
+        prefix = _rust_text(prefix_node, source_bytes) if prefix_node is not None else ""
+        if _rust_standard_path(prefix) or list_node is None:
+            return names
+        for item in list_node.named_children:
+            if item.type == "use_wildcard":
+                continue
+            if item.type == "use_as_clause":
+                path_node = item.child_by_field_name("path")
+                alias_node = item.child_by_field_name("alias")
+                path = _rust_text(path_node, source_bytes) if path_node is not None else ""
+                full_path = f"{prefix}::{path}"
+                alias = _rust_text(alias_node, source_bytes) if alias_node is not None else ""
+                if alias and not _rust_standard_path(full_path):
+                    names.add(alias)
+            elif item.type == "identifier":
+                names.add(_rust_text(item, source_bytes))
+            elif item.type == "scoped_identifier":
+                path = f"{prefix}::{_rust_text(item, source_bytes)}"
+                name_node = item.child_by_field_name("name")
+                name = _rust_text(name_node, source_bytes) if name_node is not None else ""
+                if name and not _rust_standard_path(path):
+                    names.add(name)
+            elif item.type == "scoped_use_list":
+                names.update(_rust_use_names_for_scoped_list(item, source_bytes))
+    return names
+
+
+def _rust_use_names_for_scoped_list(node: Any, source_bytes: bytes) -> set[str]:
+    names: set[str] = set()
+    prefix_node = node.child_by_field_name("path")
+    list_node = node.child_by_field_name("list")
+    prefix = _rust_text(prefix_node, source_bytes) if prefix_node is not None else ""
+    if _rust_standard_path(prefix) or list_node is None:
+        return names
+    for item in list_node.named_children:
+        if item.type == "use_wildcard":
+            continue
+        if item.type == "use_as_clause":
+            alias_node = item.child_by_field_name("alias")
+            alias = _rust_text(alias_node, source_bytes) if alias_node is not None else ""
+            if alias:
+                names.add(alias)
+        elif item.type == "identifier":
+            names.add(_rust_text(item, source_bytes))
+        elif item.type == "scoped_identifier":
+            name_node = item.child_by_field_name("name")
+            name = _rust_text(name_node, source_bytes) if name_node is not None else ""
+            if name:
+                names.add(name)
+    return names
+
+
+def _rust_imported_names(
+    root: Any, source_bytes: bytes, tests: Iterable[_Test] = ()
+) -> set[str]:
+    names: set[str] = set()
+    import_nodes = list(_rust_scope_nodes(root))
+    for test in tests:
+        import_nodes.extend(_rust_scope_nodes(test.node))
+    for node in import_nodes:
+        if node.type == "use_declaration":
+            names.update(_rust_use_names(node, source_bytes))
+    return names
 
 
 def _rust_source_info(
     source: str, file: str
-) -> tuple[dict[str, _Definition], list[_Test], dict[str, Any] | None, Any, bytes]:
+) -> tuple[
+    dict[str, list[_Definition]], list[_Test], dict[str, Any] | None, Any, bytes
+]:
     tree, source_bytes = tree_sitter_extract.parse(source, "rust")
     if tree is None or source_bytes is None:
         return {}, [], {
@@ -320,47 +498,61 @@ def _rust_source_info(
     parse_error = _rust_source_error(tree.root_node, source, file)
     if parse_error is not None:
         return {}, [], parse_error, tree, source_bytes
-    extracted = tree_sitter_extract.extract_functions(
-        source, "rust", lambda name: name
-    )
-    if extracted is None:
-        return {}, [], {
-            "test": None,
-            "file": file,
-            "line": 1,
-            "reason": "parse_error",
-            "text": "Rust function extraction failed",
-        }, tree, source_bytes
-    records = {function.start_byte: function for function in extracted}
-    definitions: dict[str, _Definition] = {}
+    function_nodes = list(_rust_function_nodes(tree.root_node))
+    attributes = {
+        id(fn_node): _rust_attribute_names(fn_node, source_bytes)
+        for fn_node in function_nodes
+    }
+    test_node_starts = {
+        fn_node.start_byte
+        for fn_node in function_nodes
+        if "test" in attributes[id(fn_node)]
+    }
+    definitions: dict[str, list[_Definition]] = {}
     tests: list[_Test] = []
-    for fn_node in _rust_function_nodes(tree.root_node):
-        record = records.get(fn_node.start_byte)
-        if record is None:
+    for fn_node in function_nodes:
+        fn_attributes = attributes[id(fn_node)]
+        name_node = fn_node.child_by_field_name("name")
+        name = _rust_identifier(name_node, source_bytes)
+        if name is None:
             continue
-        attributes = set(record.attributes)
-        if "test" in attributes:
+        if "test" in fn_attributes:
             tests.append(
                 _Test(
-                    record.raw_name,
+                    name,
                     file,
                     "rust",
                     source,
                     fn_node,
-                    "should_panic" in attributes,
+                    "should_panic" in fn_attributes,
                 )
             )
             continue
-        definitions.setdefault(
-            record.raw_name,
+        ancestor = fn_node.parent
+        nested_in_test = False
+        while ancestor is not None:
+            if (
+                ancestor.type == "function_item"
+                and ancestor.start_byte in test_node_starts
+            ):
+                nested_in_test = True
+                break
+            ancestor = ancestor.parent
+        if nested_in_test:
+            continue
+        definitions.setdefault(name, []).append(
             _Definition(
-                record.raw_name,
+                name,
                 _rust_params(fn_node, source_bytes),
                 file,
-                record.line,
+                name_node.start_point.row + 1,
                 bool(_rust_params(fn_node, source_bytes)[:1] == ("self",)),
-            ),
+            )
         )
+    definitions = {
+        name: sorted(values, key=lambda item: (item.file or "", item.line or 0))
+        for name, values in definitions.items()
+    }
     return definitions, tests, None, tree, source_bytes
 
 
@@ -548,13 +740,14 @@ class _RustExpressionParser:
                 if next_part.kind != "identifier":
                     raise _ExpressionError("invalid path")
                 parts.append(next_part.text)
+            path = "::".join(parts)
             name = parts[-1]
-            if name == "true":
+            if len(parts) == 1 and name == "true":
                 expression = _Expr("literal", True)
-            elif name == "false":
+            elif len(parts) == 1 and name == "false":
                 expression = _Expr("literal", False)
             else:
-                expression = _Expr("name", name)
+                expression = _Expr("name", path)
             return self._parse_postfix(expression)
         if current.kind == "literal_other":
             return _Expr("unsupported")
@@ -573,8 +766,17 @@ class _RustExpressionParser:
                     if self._peek() == ")":
                         break
             self._expect(")")
-            name = expression.value if expression.kind == "name" else None
-            expression = _Expr("call", (name, False), tuple(arguments))
+            path = expression.value if expression.kind == "name" else None
+            name = (
+                path.split("::")[-1]
+                if path is not None and not _rust_standard_path(path)
+                else None
+            )
+            expression = _Expr(
+                "call",
+                (name, False, bool(path and "::" in path)),
+                tuple(arguments),
+            )
         return expression
 
 
@@ -612,7 +814,9 @@ def _split_rust_macro_arguments(text: str) -> list[str]:
     ]
 
 
-def _rust_macro_arguments(node: Any, source_bytes: bytes) -> list[_Expr]:
+def _rust_macro_arguments(
+    node: Any, source_bytes: bytes, limit: int | None = None
+) -> list[_Expr]:
     token_tree = next(
         (child for child in node.children if child.type == "token_tree"), None
     )
@@ -622,91 +826,57 @@ def _rust_macro_arguments(node: Any, source_bytes: bytes) -> list[_Expr]:
         "utf-8", "replace"
     )
     parts = _split_rust_macro_arguments(text)
+    if limit is not None:
+        parts = parts[:limit]
     return [_parse_rust_expression(part) for part in parts]
 
 
-def _rust_call_expressions(
-    node: Any, source_bytes: bytes
-) -> list[tuple[_Expr, tuple[int, int], str]]:
-    body = node.child_by_field_name("body")
-    if body is None:
-        return []
-    expressions: list[tuple[_Expr, tuple[int, int], str]] = []
-
-    def visit(current: Any, inside_call: bool = False) -> None:
-        if current.type == "call_expression" and not inside_call:
-            text = source_bytes[current.start_byte : current.end_byte].decode(
-                "utf-8", "replace"
-            )
-            try:
-                expression = _parse_rust_expression(text)
-            except _ExpressionError:
-                expression = _Expr("unsupported")
-            expressions.append(
-                (
-                    expression,
-                    (current.start_point.row + 1, current.start_point.column),
-                    text,
-                )
-            )
-            return
-        nested = inside_call or current.type == "call_expression"
-        for child in current.children:
-            visit(child, nested)
-
-    visit(body)
-    for current in _walk(body):
-        if current.type != "macro_invocation":
+def _rust_scope_nodes(node: Any) -> Iterable[Any]:
+    yield node
+    for child in node.children:
+        if child.type in {"function_item", "closure_expression"}:
             continue
-        if _rust_macro_name(current, source_bytes) not in {
-            "assert",
-            "assert_eq",
-            "assert_ne",
-        }:
-            continue
-        try:
-            macro_line = current.start_point.row + 1
-            macro_text = _rust_text(current, source_bytes)
-            expressions.extend(
-                (
-                    expression,
-                    (macro_line, current.start_point.column),
-                    macro_text,
-                )
-                for expression in _rust_macro_arguments(current, source_bytes)
-            )
-        except _ExpressionError:
-            continue
-    return expressions
+        yield from _rust_scope_nodes(child)
 
 
-def _rust_call_names(tests: Iterable[_Test]) -> set[str]:
+def _rust_call_names(
+    tests: Iterable[_Test], source_bytes_by_file: dict[str, bytes]
+) -> tuple[set[str], set[str]]:
     names: set[str] = set()
+    qualified_names: set[str] = set()
+
+    def record(expression: _Expr) -> None:
+        for call in _walk(expression):
+            if call.kind != "call" or not call.value[0]:
+                continue
+            names.add(call.value[0])
+            if len(call.value) > 2 and call.value[2]:
+                qualified_names.add(call.value[0])
+
     for test in tests:
-        tree, source_bytes = tree_sitter_extract.parse(test.source, "rust")
-        if tree is None or source_bytes is None:
-            continue
-        body = test.node.child_by_field_name("body")
-        if body is None:
-            continue
-        for node in _walk(body):
+        source_bytes = source_bytes_by_file[test.file]
+        for node in _rust_scope_nodes(test.node):
             if node.type == "call_expression":
-                text = source_bytes[node.start_byte : node.end_byte].decode(
-                    "utf-8", "replace"
-                )
                 try:
-                    names.update(_called_names(_parse_rust_expression(text)))
+                    record(_parse_rust_expression(_rust_text(node, source_bytes)))
                 except _ExpressionError:
                     continue
-            elif node.type == "macro_invocation" and _rust_macro_name(
-                node, source_bytes
-            ) in {"assert", "assert_eq", "assert_ne"}:
+            elif node.type == "macro_invocation":
+                macro_path = _rust_macro_path(node, source_bytes)
+                if _rust_standard_path(macro_path):
+                    continue
+                macro_name = _rust_macro_name(node, source_bytes)
+                if macro_name not in {"assert", "assert_eq", "assert_ne"}:
+                    continue
                 try:
-                    for expression in _rust_macro_arguments(node, source_bytes):
-                        names.update(_called_names(expression))
+                    limit = 1 if macro_name == "assert" else 2
+                    for expression in _rust_macro_arguments(
+                        node, source_bytes, limit
+                    ):
+                        record(expression)
                 except _ExpressionError:
                     continue
-    return names
+    return names, qualified_names
 
 
 def _called_names(expression: _Expr) -> set[str]:
@@ -740,6 +910,38 @@ def _target_calls(expression: _Expr, target_names: set[str]) -> list[_Expr]:
     ]
 
 
+def _resolve_definition(
+    name: str,
+    file: str,
+    definitions: dict[str, list[_Definition]],
+) -> _Definition | None:
+    candidates = definitions.get(name, [])
+    same_file = [definition for definition in candidates if definition.file == file]
+    if same_file:
+        return same_file[0] if len(same_file) == 1 else None
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _target_metadata(
+    name: str, definitions: dict[str, list[_Definition]]
+) -> dict[str, Any]:
+    candidates = definitions.get(name, [])
+    if not candidates:
+        return _Definition(name, None, None, None).to_dict()
+    if len(candidates) == 1:
+        return candidates[0].to_dict()
+    return {
+        "params": None,
+        "ambiguous": True,
+        "definitions": [
+            definition.to_dict()
+            for definition in sorted(
+                candidates, key=lambda item: (item.file or "", item.line or 0)
+            )
+        ],
+    }
+
+
 def _render_expression(
     expression: _Expr,
     target_names: set[str],
@@ -757,7 +959,7 @@ def _render_expression(
             )
         raise _ExpressionError("unbound name")
     if expression.kind == "call":
-        name, has_keywords = expression.value
+        name, has_keywords = expression.value[:2]
         if name not in target_names or has_keywords:
             raise _ExpressionError("unsupported call")
         return "result"
@@ -807,17 +1009,18 @@ def _render_expression(
 
 def _target_argument_values(
     call: _Expr,
-    definitions: dict[str, _Definition],
+    definitions: dict[str, list[_Definition]],
     bindings: dict[str, int | bool],
+    file: str,
 ) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
-    name, has_keywords = call.value
+    name, has_keywords = call.value[:2]
     if has_keywords:
         return None, "non_literal_argument"
     try:
         values = [_literal_value(arg, bindings) for arg in call.children]
     except _ExpressionError:
         return None, "non_literal_argument"
-    definition = definitions.get(name)
+    definition = _resolve_definition(name, file, definitions)
     if definition is None or definition.params is None:
         return values, None
     params = definition.params
@@ -878,7 +1081,7 @@ def _emit_assertion(
     text: str,
     bindings: dict[str, int | bool],
     target_names: set[str],
-    definitions: dict[str, _Definition],
+    definitions: dict[str, list[_Definition]],
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
 ) -> None:
@@ -904,7 +1107,9 @@ def _emit_assertion(
         )
         return
     call = calls[0]
-    args, reason = _target_argument_values(call, definitions, bindings)
+    args, reason = _target_argument_values(
+        call, definitions, bindings, test.file
+    )
     if reason is not None or args is None:
         _skip(
             skipped,
@@ -974,7 +1179,7 @@ def _emit_assertion(
 def _python_store_counts(test_node: ast.AST) -> Counter[str]:
     return Counter(
         node.id
-        for node in ast.walk(test_node)
+        for node in _python_scope_nodes(test_node)
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
     )
 
@@ -1014,7 +1219,7 @@ def _python_reject_block(
     *,
     test: _Test,
     target_names: set[str],
-    definitions: dict[str, _Definition],
+    definitions: dict[str, list[_Definition]],
     bindings: dict[str, int | bool],
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
@@ -1031,6 +1236,27 @@ def _python_reject_block(
         return
     call_node = with_node.body[0].value
     if not isinstance(call_node, ast.Call):
+        _skip(
+            skipped,
+            test=test,
+            file=test.file,
+            line=with_node.lineno,
+            reason="ambiguous_rejects",
+            text=_python_source_segment(test.source, with_node),
+        )
+        return
+    if _python_name(call_node.func) in {
+        "assertEqual",
+        "assertNotEqual",
+        "assertLess",
+        "assertLessEqual",
+        "assertGreater",
+        "assertGreaterEqual",
+        "assertTrue",
+        "assertFalse",
+        "assertRaises",
+        "raises",
+    }:
         _skip(
             skipped,
             test=test,
@@ -1067,7 +1293,9 @@ def _python_reject_block(
         )
         return
     target_call = calls[0]
-    args, reason = _target_argument_values(target_call, definitions, bindings)
+    args, reason = _target_argument_values(
+        target_call, definitions, bindings, test.file
+    )
     if reason is not None or args is None:
         _skip(
             skipped,
@@ -1101,7 +1329,7 @@ def _python_callable_reject(
     *,
     test: _Test,
     target_names: set[str],
-    definitions: dict[str, _Definition],
+    definitions: dict[str, list[_Definition]],
     bindings: dict[str, int | bool],
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
@@ -1134,7 +1362,9 @@ def _python_callable_reject(
         (name, bool(call_node.keywords)),
         tuple(_python_expr(arg) for arg in call_node.args[2:]),
     )
-    args, reason = _target_argument_values(expression, definitions, bindings)
+    args, reason = _target_argument_values(
+        expression, definitions, bindings, test.file
+    )
     if reason is not None or args is None:
         _skip(
             skipped,
@@ -1160,14 +1390,16 @@ def _python_callable_reject(
 def _process_python_test(
     test: _Test,
     target_names: set[str],
-    definitions: dict[str, _Definition],
+    definitions: dict[str, list[_Definition]],
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
 ) -> None:
     assert isinstance(test.node, (ast.FunctionDef, ast.AsyncFunctionDef))
     store_counts = _python_store_counts(test.node)
+    scope_nodes = list(_python_scope_nodes(test.node))
     context_calls: set[int] = set()
-    for node in ast.walk(test.node):
+    raises_contexts: list[ast.With | ast.AsyncWith] = []
+    for node in scope_nodes:
         if not isinstance(node, (ast.With, ast.AsyncWith)):
             continue
         reject_contexts: list[ast.Call] = []
@@ -1182,6 +1414,7 @@ def _process_python_test(
             reject_contexts.append(context)
         if not reject_contexts:
             continue
+        raises_contexts.append(node)
         if len(reject_contexts) > 1:
             _skip(
                 skipped,
@@ -1202,9 +1435,31 @@ def _process_python_test(
             definitions=definitions,
             bindings=bindings,
             observations=observations,
-            skipped=skipped,
-        )
-    for node in ast.walk(test.node):
+                skipped=skipped,
+            )
+    raised_assertions: set[int] = set()
+    assertion_methods = {
+        "assertEqual",
+        "assertNotEqual",
+        "assertLess",
+        "assertLessEqual",
+        "assertGreater",
+        "assertGreaterEqual",
+        "assertTrue",
+        "assertFalse",
+    }
+    for with_node in raises_contexts:
+        for node in _python_scope_nodes(with_node):
+            if node is with_node:
+                continue
+            if isinstance(node, ast.Assert) or (
+                isinstance(node, ast.Call)
+                and _python_name(node.func) in assertion_methods
+            ):
+                raised_assertions.add(id(node))
+    for node in scope_nodes:
+        if id(node) in raised_assertions:
+            continue
         if isinstance(node, ast.Assert):
             position = (node.lineno, node.col_offset)
             bindings = _python_bindings(test.node, store_counts, position)
@@ -1249,7 +1504,7 @@ def _process_python_test(
                 position = (node.lineno, node.col_offset)
                 bindings = _python_bindings(test.node, store_counts, position)
                 if name in {"assertEqual", *tuple(_UNITTEST_ASSERTIONS)}:
-                    if len(node.args) != 2:
+                    if not _python_assertion_message_allowed(node, 2):
                         expression = _Expr("unsupported")
                     else:
                         operator = "==" if name == "assertEqual" else _UNITTEST_ASSERTIONS[name]
@@ -1259,7 +1514,7 @@ def _process_python_test(
                             (_python_expr(node.args[0]), _python_expr(node.args[1])),
                         )
                 elif name in {"assertTrue", "assertFalse"}:
-                    if len(node.args) != 1:
+                    if not _python_assertion_message_allowed(node, 1):
                         expression = _Expr("unsupported")
                     else:
                         expression = _python_expr(node.args[0])
@@ -1280,12 +1535,22 @@ def _process_python_test(
                 )
 
 
+def _python_assertion_message_allowed(call: ast.Call, required_args: int) -> bool:
+    if not required_args <= len(call.args) <= required_args + 1:
+        return False
+    if any(keyword.arg != "msg" for keyword in call.keywords):
+        return False
+    if len(call.keywords) > 1 or (len(call.args) > required_args and call.keywords):
+        return False
+    return True
+
+
 def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
     body = test.node.child_by_field_name("body")
     counts: Counter[str] = Counter()
     if body is None:
         return counts
-    for node in _walk(body):
+    for node in _rust_scope_nodes(body):
         if node.type == "let_declaration":
             name = _rust_identifier(node.child_by_field_name("pattern"), source_bytes)
             if name:
@@ -1336,30 +1601,14 @@ def _process_rust_rejects(
     test: _Test,
     source_bytes: bytes,
     target_names: set[str],
-    definitions: dict[str, _Definition],
+    definitions: dict[str, list[_Definition]],
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
 ) -> None:
-    expressions = _rust_call_expressions(test.node, source_bytes)
-    calls = [
-        (call, position)
-        for expression, position, _text in expressions
-        for call in _target_calls(expression, target_names)
-    ]
     body = test.node.child_by_field_name("body")
     line = body.start_point.row + 1 if body is not None else test.node.start_point.row + 1
     text = _rust_text(body, source_bytes) if body is not None else _rust_text(test.node, source_bytes)
-    if not calls:
-        _skip(
-            skipped,
-            test=test,
-            file=test.file,
-            line=line,
-            reason="no_target_call",
-            text=text,
-        )
-        return
-    if len(calls) != 1:
+    if body is None:
         _skip(
             skipped,
             test=test,
@@ -1369,17 +1618,101 @@ def _process_rust_rejects(
             text=text,
         )
         return
-    call, position = calls[0]
-    line = position[0]
     store_counts = _rust_store_counts(test, source_bytes)
-    bindings = _rust_bindings(test, source_bytes, store_counts, position)
-    args, reason = _target_argument_values(call, definitions, bindings)
-    if reason is not None or args is None:
+    bindings: dict[str, int | bool] = {}
+    target_call: _Expr | None = None
+    call_position: tuple[int, int] | None = None
+    invalid_shape = False
+    for statement in body.named_children:
+        if statement.type == "let_declaration":
+            pattern = statement.child_by_field_name("pattern")
+            value_node = statement.child_by_field_name("value")
+            pattern_text = _rust_text(pattern, source_bytes).strip() if pattern else ""
+            if pattern_text == "_" and value_node is not None:
+                if target_call is not None:
+                    invalid_shape = True
+                    break
+                try:
+                    target_call = _parse_rust_expression(
+                        _rust_text(value_node, source_bytes)
+                    )
+                except _ExpressionError:
+                    invalid_shape = True
+                    break
+                call_position = (
+                    value_node.start_point.row + 1,
+                    value_node.start_point.column,
+                )
+                continue
+            name = _rust_identifier(pattern, source_bytes)
+            if (
+                target_call is not None
+                or name is None
+                or value_node is None
+                or store_counts[name] != 1
+            ):
+                invalid_shape = True
+                break
+            try:
+                bindings[name] = _literal_value(
+                    _parse_rust_expression(_rust_text(value_node, source_bytes)),
+                    bindings,
+                )
+            except _ExpressionError:
+                invalid_shape = True
+                break
+            continue
+        if statement.type == "expression_statement":
+            expressions = statement.named_children
+            if (
+                target_call is not None
+                or len(expressions) != 1
+                or expressions[0].type != "call_expression"
+            ):
+                invalid_shape = True
+                break
+            try:
+                target_call = _parse_rust_expression(
+                    _rust_text(expressions[0], source_bytes)
+                )
+            except _ExpressionError:
+                invalid_shape = True
+                break
+            call_position = (
+                expressions[0].start_point.row + 1,
+                expressions[0].start_point.column,
+            )
+            continue
+        invalid_shape = True
+        break
+    if (
+        invalid_shape
+        or target_call is None
+        or target_call.kind != "call"
+        or target_call.value[0] not in target_names
+        or any(
+            call is not target_call
+            for call in _target_calls(target_call, target_names)
+        )
+    ):
         _skip(
             skipped,
             test=test,
             file=test.file,
             line=line,
+            reason="ambiguous_rejects",
+            text=text,
+        )
+        return
+    args, reason = _target_argument_values(
+        target_call, definitions, bindings, test.file
+    )
+    if reason is not None or args is None:
+        _skip(
+            skipped,
+            test=test,
+            file=test.file,
+            line=call_position[0] if call_position else line,
             reason=reason or "non_literal_argument",
             text=text,
         )
@@ -1387,10 +1720,10 @@ def _process_rust_rejects(
     observations.append(
         _make_observation(
             kind="rejects",
-            target=call.value[0],
+            target=target_call.value[0],
             args=args,
             test=test,
-            line=line,
+            line=call_position[0] if call_position else line,
             extra={"expected": "failure"},
         )
     )
@@ -1400,7 +1733,7 @@ def _process_rust_test(
     test: _Test,
     source_bytes: bytes,
     target_names: set[str],
-    definitions: dict[str, _Definition],
+    definitions: dict[str, list[_Definition]],
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
 ) -> None:
@@ -1418,8 +1751,10 @@ def _process_rust_test(
     if body is None:
         return
     store_counts = _rust_store_counts(test, source_bytes)
-    for node in _walk(body):
+    for node in _rust_scope_nodes(body):
         if node.type != "macro_invocation":
+            continue
+        if _rust_standard_path(_rust_macro_path(node, source_bytes)):
             continue
         name = _rust_macro_name(node, source_bytes)
         if name not in {"assert", "assert_eq", "assert_ne"}:
@@ -1427,7 +1762,9 @@ def _process_rust_test(
         line = node.start_point.row + 1
         text = _rust_text(node, source_bytes)
         try:
-            args = _rust_macro_arguments(node, source_bytes)
+            args = _rust_macro_arguments(
+                node, source_bytes, 1 if name == "assert" else 2
+            )
             if name == "assert":
                 expression = args[0] if args else _Expr("unsupported")
             elif len(args) >= 2:
@@ -1506,11 +1843,13 @@ def harvest_tests(
         (path, path.relative_to(root).as_posix(), _EXTENSIONS[path.suffix.lower()])
         for path in source_paths
     ]
-    definitions: dict[str, _Definition] = {}
+    definitions: dict[str, list[_Definition]] = {}
     tests: list[_Test] = []
     parse_skips: list[dict[str, Any]] = []
     rust_bytes: dict[str, bytes] = {}
     call_names: set[str] = set()
+    imported_call_names: set[str] = set()
+    qualified_call_names: set[str] = set()
     for path, relative, source_language in sources:
         try:
             source = path.read_text(encoding="utf-8")
@@ -1542,11 +1881,14 @@ def harvest_tests(
                 for test in file_tests
             ]
             tests.extend(file_tests)
-            for name, definition in _python_definitions(tree, relative).items():
-                definitions.setdefault(name, definition)
+            for name, file_definitions in _python_definitions(tree, relative).items():
+                definitions.setdefault(name, []).extend(file_definitions)
             call_names.update(_python_call_names(file_tests))
+            imported_call_names.update(
+                _python_imported_call_names(tree, file_tests)
+            )
         else:
-            file_definitions, file_tests, parse_error, _tree, source_bytes = (
+            file_definitions, file_tests, parse_error, tree, source_bytes = (
                 _rust_source_info(source, relative)
             )
             if parse_error is not None:
@@ -1554,20 +1896,29 @@ def harvest_tests(
                 continue
             tests.extend(file_tests)
             rust_bytes.update({test.file: source_bytes for test in file_tests})
-            for name, definition in file_definitions.items():
-                definitions.setdefault(name, definition)
-            call_names.update(_rust_call_names(file_tests))
+            for name, file_definition_list in file_definitions.items():
+                definitions.setdefault(name, []).extend(file_definition_list)
+            file_call_names, file_qualified_names = _rust_call_names(
+                file_tests, {relative: source_bytes}
+            )
+            call_names.update(file_call_names)
+            qualified_call_names.update(file_qualified_names)
+            imported_call_names.update(
+                _rust_imported_names(tree.root_node, source_bytes, file_tests)
+                & file_call_names
+            )
+    definitions = {
+        name: sorted(values, key=lambda item: (item.file or "", item.line or 0))
+        for name, values in definitions.items()
+    }
     if targets is None:
-        target_names = set(definitions) & call_names
+        target_names = (
+            (set(definitions) & call_names)
+            | imported_call_names
+            | qualified_call_names
+        )
     else:
         target_names = set(targets)
-    selected_definitions = {
-        name: definitions.get(
-            name,
-            _Definition(name, None, None, None),
-        )
-        for name in sorted(target_names)
-    }
     observations: list[dict[str, Any]] = []
     skipped = parse_skips
     for test in tests:
@@ -1611,8 +1962,8 @@ def harvest_tests(
         "schema": "mumei.test-harvest/v1",
         "sources": [relative for _path, relative, _language in sources],
         "targets": {
-            name: selected_definitions[name].to_dict()
-            for name in sorted(selected_definitions)
+            name: _target_metadata(name, definitions)
+            for name in sorted(target_names)
         },
         "observations": observations,
         "skipped": skipped,
@@ -1652,6 +2003,14 @@ def main(args: argparse.Namespace | None = None) -> int:
         )
     except HarvestInputError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 4
+    parse_error_files = {
+        item["file"]
+        for item in report["skipped"]
+        if item["reason"] == "parse_error" and item["test"] is None
+    }
+    if report["sources"] and len(parse_error_files) == len(report["sources"]):
+        print("error: no source files could be parsed", file=sys.stderr)
         return 4
     output = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
