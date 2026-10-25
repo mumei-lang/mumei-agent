@@ -271,6 +271,7 @@ class ForgeResult:
     metrics_quarter: str | None = None
     commit_sha: str | None = None
     error: str | None = None
+    controls: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

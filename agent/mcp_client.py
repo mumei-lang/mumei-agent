@@ -406,6 +406,16 @@ class MumeiMCPClient:
             span.set_attribute("mumei.mcp", True)
             return self._fallback.erosion_check(candidate_path, baseline_path)
 
+    def controls_check(
+        self, path: str, atom: str | None = None
+    ) -> dict[str, Any]:
+        """Run the negative-controls check through the CLI."""
+        with self._tracer.start_as_current_span("mumei.mcp.controls_check") as span:
+            span.set_attribute("mumei.command", "controls-check")
+            span.set_attribute("mumei.source_path", path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.controls_check(path, atom=atom)
+
     def infer_effects(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
         with self._tracer.start_as_current_span("mumei.mcp.infer_effects") as span:

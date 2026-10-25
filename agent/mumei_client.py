@@ -358,6 +358,30 @@ class MumeiClient:
             "stderr": result.stderr,
         }
 
+    def controls_check(self, path: str, atom: str | None = None) -> dict:
+        """Run the negative-controls report for one atom or a whole file."""
+        cmd = [*self._command_prefix(Path.cwd()), "controls", path, "--json"]
+        if atom is not None:
+            cmd.extend(["--atom", atom])
+        result = self._run_command(
+            cmd,
+            span_name="mumei.controls.check",
+            source_path=path,
+            command_label="controls-check",
+        )
+        report = None
+        try:
+            parsed = json.loads(result.stdout)
+            if isinstance(parsed, dict):
+                report = parsed
+        except json.JSONDecodeError:
+            pass
+        return {
+            "returncode": result.returncode,
+            "report": report,
+            "stderr": result.stderr,
+        }
+
     def _command_prefix(self, original_cwd: Path) -> list[str]:
         command_prefix = list(self._cmd_prefix)
         if not command_prefix:

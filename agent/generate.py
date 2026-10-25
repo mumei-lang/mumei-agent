@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from agent.config import AgentConfig
+from agent.controls_gate import ControlsGate
 from agent.mumei_client import create_mumei_client
 from agent.metrics import Metrics
 from agent.strategies.generate_strategy import generate_code
@@ -182,6 +183,12 @@ def build_parser(
         default=False,
         help="Output JSON metrics summary at the end",
     )
+    parser.add_argument(
+        "--controls-gate",
+        choices=("off", "warn", "require"),
+        default=None,
+        help="Negative-controls gate mode (default: CONTROLS_GATE or warn)",
+    )
 
     return parser
 
@@ -193,7 +200,11 @@ def main(args: argparse.Namespace | None = None) -> None:
         args = parser.parse_args()
 
     spec = _load_spec(args)
-    config = AgentConfig()
+    controls_gate_override = getattr(args, "controls_gate", None)
+    if isinstance(controls_gate_override, str):
+        config = AgentConfig(controls_gate=controls_gate_override)
+    else:
+        config = AgentConfig()
     client = config.create_client()
     # Honor ``USE_MCP_CLIENT`` so generate runs can pick up richer
     # semantic feedback from the mumei MCP server when available.
@@ -245,3 +256,30 @@ def main(args: argparse.Namespace | None = None) -> None:
 
     if not verified:
         sys.exit(1)
+
+    controls_outcome = None
+    if config.controls_gate != "off":
+        atom_names = (
+            [atom.get("name") for atom in spec["atoms"]]
+            if spec.get("atoms")
+            else [spec.get("name")]
+        )
+        controls_outcome = ControlsGate(config.controls_gate).check(
+            mumei,
+            args.output,
+            atom_names,
+        )
+        controls_payload = {
+            "mode": config.controls_gate,
+            "skipped": controls_outcome.skipped,
+            "summary": controls_outcome.summary,
+            "atoms": controls_outcome.atoms,
+        }
+        if args.metrics:
+            print(
+                f"Controls outcome: {json.dumps(controls_payload, sort_keys=True)}",
+                file=sys.stderr,
+            )
+        if not controls_outcome.passed:
+            print(controls_outcome.summary, file=sys.stderr)
+            sys.exit(1)

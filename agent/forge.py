@@ -27,6 +27,7 @@ from typing import Any
 from openai import OpenAI
 
 from agent.config import AgentConfig
+from agent.controls_gate import ControlsGate
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.benchmark_feedback import BenchmarkFeedback, load_benchmark_feedback
 from agent.forge_discovery import discover_tasks, filter_completed_tasks
@@ -276,9 +277,11 @@ class MumeiForge:
             str(target_path),
             collect_decidable_metrics=True,
         )
-        logic_fragment_tags, metrics_quarter_key = self._record_decidable_fragment_metrics(
-            verify_result,
-            first_pass_verified=bool(verify_result.get("success", False)),
+        logic_fragment_tags, metrics_quarter_key = (
+            self._record_decidable_fragment_metrics(
+                verify_result,
+                first_pass_verified=bool(verify_result.get("success")),
+            )
         )
         if not verify_result["success"]:
             _logger.warning(
@@ -305,7 +308,6 @@ class MumeiForge:
                 error="post-write verify failed",
             )
 
-        atoms_added = [a.get("name", "") for a in atoms if a.get("name")]
         self.harness_metrics.record_result(
             "forge_post_write_verify",
             True,
@@ -316,6 +318,58 @@ class MumeiForge:
                 generation_metrics.verification_times_seconds
             ),
         )
+
+        atoms_added = [a.get("name", "") for a in atoms if a.get("name")]
+
+        controls_mode = getattr(self.config, "controls_gate", "warn")
+        if not isinstance(controls_mode, str):
+            controls_mode = "warn"
+        controls_result: dict[str, Any] | None = None
+        if controls_mode != "off":
+            outcome = ControlsGate(controls_mode).check(
+                self.mumei,
+                str(target_path),
+                [atom.get("name") for atom in atoms],
+            )
+            controls_result = {
+                "mode": controls_mode,
+                "skipped": outcome.skipped,
+                "summary": outcome.summary,
+                "atoms": outcome.atoms,
+            }
+            if not outcome.passed:
+                _restore_target()
+                self.harness_metrics.record_result(
+                    "forge_controls_gate",
+                    False,
+                    retry_class="weak_spec",
+                    attempts=attempts,
+                    tokens_to_success=generation_metrics.llm_tokens_used,
+                    solver_seconds_to_success=sum(
+                        generation_metrics.verification_times_seconds
+                    ),
+                )
+                # The task author owns the contract; regenerating its body
+                # cannot make a weak specification constraining.
+                return ForgeResult(
+                    task_id=task_id,
+                    status="failed",
+                    attempts=attempts,
+                    target_file=target_rel,
+                    atoms_added=atoms_added,
+                    logic_fragment_tags=logic_fragment_tags,
+                    outside_decidable_fragment=bool(logic_fragment_tags),
+                    metrics_quarter=metrics_quarter_key,
+                    error=(
+                        outcome.summary
+                        if outcome.summary.startswith((
+                            "weak specification:",
+                            "controls cannot check unnamed atom(s)",
+                        ))
+                        else f"weak specification: {outcome.summary}"
+                    ),
+                    controls=controls_result,
+                )
 
         commit_sha: str | None = None
         if bool(task.get("auto_commit", False)):
@@ -331,6 +385,7 @@ class MumeiForge:
             outside_decidable_fragment=bool(logic_fragment_tags),
             metrics_quarter=metrics_quarter_key,
             commit_sha=commit_sha,
+            controls=controls_result,
         )
 
     # ------------------------------------------------------------------
@@ -814,6 +869,12 @@ def build_parser(parser) -> None:  # type: ignore[no-untyped-def]
         help="Override each task's max_retries",
     )
     parser.add_argument(
+        "--controls-gate",
+        choices=("off", "warn", "require"),
+        default=None,
+        help="Negative-controls gate mode (default: CONTROLS_GATE or warn)",
+    )
+    parser.add_argument(
         "--log-path",
         default=None,
         help="Path to forge_log.json (default: <tasks_dir>/../forge_log.json)",
@@ -861,7 +922,13 @@ def main(args) -> None:  # type: ignore[no-untyped-def]
     # ``LLM_API_KEY`` / ``OPENAI_API_KEY`` is unset.  The README
     # advertises dry-run as a no-dependency preview, so it must work
     # without an API key configured.
-    config: AgentConfig | None = None if args.dry_run else AgentConfig()
+    controls_gate_override = getattr(args, "controls_gate", None)
+    if args.dry_run:
+        config: AgentConfig | None = None
+    elif isinstance(controls_gate_override, str):
+        config = AgentConfig(controls_gate=controls_gate_override)
+    else:
+        config = AgentConfig()
     mumei_bin = config.mumei_bin if config else os.environ.get("MUMEI_BIN", "mumei")
     # Use the factory so ``USE_MCP_CLIENT=true`` routes forge verification
     # through the mumei MCP server when available (falls back to the CLI

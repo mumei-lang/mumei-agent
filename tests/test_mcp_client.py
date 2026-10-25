@@ -115,6 +115,27 @@ class TestModeDetection:
         assert client.mode == "stdio"
 
 
+def test_controls_check_forwards_to_cli_fallback():
+    fallback = MagicMock()
+    fallback.controls_check.return_value = {
+        "returncode": 0,
+        "report": {"atoms": []},
+        "stderr": "",
+    }
+    client = MumeiMCPClient(fallback_client=fallback)
+
+    result = client.controls_check("/tmp/contract.mm", atom="Type::method")
+
+    assert result == {
+        "returncode": 0,
+        "report": {"atoms": []},
+        "stderr": "",
+    }
+    fallback.controls_check.assert_called_once_with(
+        "/tmp/contract.mm", atom="Type::method"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool wrappers
 # ---------------------------------------------------------------------------
