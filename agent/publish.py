@@ -113,6 +113,7 @@ def publish(
     pr_title_prefix: str | None = None,
     pr_body_extra: str | None = None,
     pre_generated_code: str | None = None,
+    extra_files: list[tuple[str, str]] | None = None,
 ) -> dict:
     """Run the full publish pipeline.
 
@@ -148,6 +149,9 @@ def publish(
         When provided, skip LLM code generation and use this code
         directly.  Used by ``proliferate()`` to commit the exact
         blast-radius-tested code instead of re-generating from scratch.
+    extra_files:
+        Additional relative file paths and contents to verify and stage with
+        the primary generated file.
 
     Returns
     -------
@@ -227,6 +231,20 @@ def publish(
     generated_path.parent.mkdir(parents=True, exist_ok=True)
     with open(generated_path, "w", encoding="utf-8") as f:
         f.write(code)
+    extra_file_paths: list[tuple[str, Path]] = []
+    if extra_files is not None:
+        for relative_path, contents in extra_files:
+            relative = Path(relative_path)
+            if relative.is_absolute() or ".." in relative.parts:
+                result["verify_error"] = {
+                    "success": False,
+                    "stderr": f"extra file path must be repo-relative: {relative_path}",
+                }
+                return result
+            extra_path = cwd / relative
+            extra_path.parent.mkdir(parents=True, exist_ok=True)
+            extra_path.write_text(contents, encoding="utf-8")
+            extra_file_paths.append((relative.as_posix(), extra_path))
     result["generated_file"] = generated_file
     result["verified_at_generation"] = verified
     logger.info("Generated: %s (verified=%s)", generated_path, verified)
@@ -243,6 +261,24 @@ def publish(
         logger.error("Verification failed: %s", verify_result.get("stderr", ""))
         result["verify_error"] = verify_result
         return result
+    if extra_files is not None:
+        extra_verifications = []
+        for relative_path, extra_path in extra_file_paths:
+            extra_verify = client.verify(str(extra_path))
+            extra_verifications.append(
+                {
+                    "file": relative_path,
+                    "success": bool(extra_verify.get("success")),
+                    "report": extra_verify.get("report"),
+                    "stderr": extra_verify.get("stderr", ""),
+                }
+            )
+            if not extra_verify.get("success"):
+                result["extra_file_verifications"] = extra_verifications
+                result["failed_extra_file"] = relative_path
+                result["verify_error"] = extra_verify
+                return result
+        result["extra_file_verifications"] = extra_verifications
 
     # Surface the parsed proof certificate (``mumei verify --json``'s
     # ``report`` payload) so downstream consumers — notably
@@ -301,7 +337,10 @@ def publish(
         result["git_error"] = checkout.stderr
         return result
 
-    add_gen = _git(["add", "--", generated_file], cwd=cwd)
+    files_to_add = [generated_file]
+    if extra_files is not None:
+        files_to_add.extend(relative_path for relative_path, _ in extra_file_paths)
+    add_gen = _git(["add", "--", *files_to_add], cwd=cwd)
     if add_gen.returncode != 0:
         logger.warning("git add %s failed: %s", generated_file, add_gen.stderr)
     # Add any output artifacts
@@ -358,6 +397,11 @@ def publish(
         f"**FFI glue code**, not transpiled source. They produce `extern \"C\"` "
         f"bindings / ctypes wrappers for calling the compiled mumei binary."
     )
+    if extra_files is not None:
+        grouped_files = [generated_file, *(path for path, _ in extra_file_paths)]
+        pr_body += "\n\n### Grouped files\n\n" + "\n".join(
+            f"- `{path}`" for path in grouped_files
+        )
     if pr_body_extra:
         pr_body = f"{pr_body_extra.rstrip()}\n\n---\n\n{pr_body}"
 

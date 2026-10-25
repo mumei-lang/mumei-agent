@@ -417,6 +417,49 @@ class MumeiClient:
             "stderr": result.stderr,
         }
 
+    def claims(
+        self,
+        path: str,
+        cert_path: str,
+        out_dir: str | Path,
+    ) -> dict:
+        """Generate and return the Claim Book JSON report for a verified file."""
+        cmd = [
+            *self._command_prefix(Path.cwd()),
+            "claims",
+            path,
+            "--cert",
+            cert_path,
+            "--format",
+            "json",
+            "--out-dir",
+            str(out_dir),
+        ]
+        result = self._run_command(
+            cmd,
+            span_name="mumei.claims",
+            source_path=path,
+            command_label="claims",
+        )
+        report = None
+        report_path = Path(out_dir) / "claimbook.json"
+        if report_path.is_file():
+            try:
+                parsed = json.loads(report_path.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    report = parsed
+            except (OSError, json.JSONDecodeError):
+                pass
+        if report is None:
+            parsed = _parse_json_object_from_output(result.stdout)
+            report = parsed or None
+        return {
+            "returncode": result.returncode,
+            "report": report,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
     def _command_prefix(self, original_cwd: Path) -> list[str]:
         command_prefix = list(self._cmd_prefix)
         if not command_prefix:

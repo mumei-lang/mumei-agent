@@ -27,6 +27,7 @@ _NON_GENERATION_SPEC_FIELDS = (
 def _spec_cache_key(
     spec: dict[str, Any],
     mumei_repo_dir: Path | None = None,
+    in_batch_dependency_codes: list[tuple[str, str]] | None = None,
 ) -> str:
     keyed_spec = {
         key: value
@@ -57,6 +58,14 @@ def _spec_cache_key(
             else:
                 context_hashes[rel_path] = None
         payload_obj["context_hashes"] = context_hashes
+    if in_batch_dependency_codes:
+        payload_obj["in_batch_dependency_hashes"] = [
+            {
+                "target_file": target_file,
+                "sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+            }
+            for target_file, code in in_batch_dependency_codes
+        ]
     payload = json.dumps(payload_obj, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

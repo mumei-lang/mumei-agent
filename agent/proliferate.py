@@ -11,13 +11,14 @@ Usage::
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import datetime
 import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 from threading import Lock
 from pathlib import Path
@@ -89,11 +90,16 @@ def _cache_results(
     spec: dict[str, Any],
     result: dict[str, Any] | None = None,
     mumei_repo_dir: Path | None = None,
+    in_batch_dependency_codes: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any] | None:
     """Read or write a verified forge result cache entry for *spec*."""
     with _FORGE_CACHE_LOCK:
         path = Path(cache_path)
-        key = _spec_cache_key(spec, mumei_repo_dir)
+        key = _spec_cache_key(
+            spec,
+            mumei_repo_dir,
+            in_batch_dependency_codes=in_batch_dependency_codes,
+        )
         cache: dict[str, Any] = {}
         if path.exists():
             try:
@@ -158,6 +164,9 @@ def _run_forge_generation(
     mumei_client: MumeiClient,
     cache_path: Path,
     mumei_repo_dir: Path | None = None,
+    verify_dir: Path | None = None,
+    dependency_lemmas: list[dict[str, str]] | None = None,
+    in_batch_dependency_codes: list[tuple[str, str]] | None = None,
 ) -> tuple[int, dict[str, Any], Metrics]:
     target_file = spec.get("target_file", "unknown.mm")
     thought = ThoughtProcess(target_file=str(target_file))
@@ -168,7 +177,12 @@ def _run_forge_generation(
     }
     generation_metrics = Metrics()
 
-    cached = _cache_results(cache_path, spec, mumei_repo_dir=mumei_repo_dir)
+    cached = _cache_results(
+        cache_path,
+        spec,
+        mumei_repo_dir=mumei_repo_dir,
+        in_batch_dependency_codes=in_batch_dependency_codes,
+    )
     if cached and cached.get("verified") and cached.get("code"):
         spec_result["code"] = cached["code"]
         spec_result["verified"] = True
@@ -191,6 +205,31 @@ def _run_forge_generation(
                 if cross_file_context
                 else preamble_context
             )
+        if dependency_lemmas:
+            lemmas_by_source: dict[str, list[dict[str, str]]] = {}
+            for lemma in dependency_lemmas:
+                source = lemma.get("source")
+                if isinstance(source, str):
+                    lemmas_by_source.setdefault(source, []).append(lemma)
+            lemma_sections: list[str] = []
+            for source, lemmas in lemmas_by_source.items():
+                lemma_sections.append(
+                    f"# Machine-verified (G4) atoms from `{source}`, generated in "
+                    "this run. Import the module and call them; do NOT re-define."
+                )
+                lemma_sections.extend(
+                    f"atom {lemma['atom']}  requires: {lemma.get('requires', 'true')}  "
+                    f"ensures: {lemma.get('ensures', 'true')}"
+                    for lemma in lemmas
+                    if isinstance(lemma.get("atom"), str)
+                )
+            if lemma_sections:
+                lemma_context = "\n\n".join(lemma_sections)
+                cross_file_context = (
+                    f"{cross_file_context}\n\n{lemma_context}"
+                    if cross_file_context
+                    else lemma_context
+                )
         if cross_file_context:
             generation_spec = dict(spec)
             generation_spec["cross_file_context"] = cross_file_context
@@ -204,6 +243,7 @@ def _run_forge_generation(
             mumei_client=mumei_client,
             metrics=generation_metrics,
             thought_process=thought,
+            verify_dir=verify_dir,
         )
     except Exception as exc:
         logger.error("Code generation failed for %s: %s", target_file, exc)
@@ -229,6 +269,8 @@ def _run_forge_generation(
             mumei_client=mumei_client,
             cache_path=cache_path,
             mumei_repo_dir=mumei_repo_dir,
+            verify_dir=verify_dir,
+            in_batch_dependency_codes=in_batch_dependency_codes,
         )
         verified = bool(spec_result.get("verified"))
 
@@ -242,7 +284,13 @@ def _run_forge_generation(
         _log_info(f"Forged {target_file}: verified=True")
         spec_result.setdefault("code", code)
         spec_result["verified"] = verified
-        _cache_results(cache_path, spec, spec_result, mumei_repo_dir=mumei_repo_dir)
+        _cache_results(
+            cache_path,
+            spec,
+            spec_result,
+            mumei_repo_dir=mumei_repo_dir,
+            in_batch_dependency_codes=in_batch_dependency_codes,
+        )
 
     if not spec_result.get("verified"):
         try:
@@ -268,6 +316,8 @@ def _try_self_correction_for_forge_failure(
     mumei_client: MumeiClient,
     cache_path: str | Path,
     mumei_repo_dir: Path | None,
+    verify_dir: Path | None = None,
+    in_batch_dependency_codes: list[tuple[str, str]] | None = None,
 ) -> None:
     spec = spec_result["spec"]
     tmp_path: str | None = None
@@ -277,6 +327,7 @@ def _try_self_correction_for_forge_failure(
             suffix=".mm",
             delete=False,
             encoding="utf-8",
+            dir=verify_dir,
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(code)
@@ -307,7 +358,13 @@ def _try_self_correction_for_forge_failure(
             spec_result["code"] = Path(tmp_path).read_text(encoding="utf-8")
             spec_result["verified"] = True
             spec_result.pop("reason", None)
-            _cache_results(cache_path, spec, spec_result, mumei_repo_dir=mumei_repo_dir)
+            _cache_results(
+                cache_path,
+                spec,
+                spec_result,
+                mumei_repo_dir=mumei_repo_dir,
+                in_batch_dependency_codes=in_batch_dependency_codes,
+            )
     except Exception as exc:
         logger.warning("Self-correction failed during forge for %s: %s", spec.get("target_file"), exc)
         spec_result["self_correction_error"] = str(exc)
@@ -320,6 +377,110 @@ def _has_structured_feedback(report: object) -> bool:
     return isinstance(report, dict) and isinstance(report.get("structured_feedback"), dict)
 
 
+def _cycle_indices(dependencies: list[list[int]]) -> set[int]:
+    indices: dict[int, int] = {}
+    lowlinks: dict[int, int] = {}
+    stack: list[int] = []
+    on_stack: set[int] = set()
+    cycle_members: set[int] = set()
+    next_index = 0
+
+    def visit(node: int) -> None:
+        nonlocal next_index
+        indices[node] = next_index
+        lowlinks[node] = next_index
+        next_index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for dependency in dependencies[node]:
+            if dependency not in indices:
+                visit(dependency)
+                lowlinks[node] = min(lowlinks[node], lowlinks[dependency])
+            elif dependency in on_stack:
+                lowlinks[node] = min(lowlinks[node], indices[dependency])
+        if lowlinks[node] == indices[node]:
+            component: list[int] = []
+            while stack:
+                member = stack.pop()
+                on_stack.remove(member)
+                component.append(member)
+                if member == node:
+                    break
+            if len(component) > 1:
+                cycle_members.update(component)
+
+    for node in range(len(dependencies)):
+        if node not in indices:
+            visit(node)
+    return cycle_members
+
+
+def _collect_g4_lemmas(
+    mumei_client: MumeiClient,
+    staged_file: Path,
+    target_file: str,
+    code: str,
+    verify_dir: Path,
+) -> list[dict[str, str]]:
+    try:
+        verification_source: str | None = None
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".mm",
+            delete=False,
+            encoding="utf-8",
+            dir=verify_dir,
+        ) as source:
+            verification_source = source.name
+            source.write(code)
+        source_path = Path(verification_source)
+        certificate_path = source_path.with_suffix(".proof.json")
+        cli_client = getattr(mumei_client, "_fallback", mumei_client)
+        verification = cli_client.verify(
+            str(source_path),
+            extra_args=["--proof-cert", "--output", str(certificate_path)],
+        )
+        if not verification.get("success") or not certificate_path.is_file():
+            raise RuntimeError("staged module did not produce a proof certificate")
+        with tempfile.TemporaryDirectory(prefix="mumei-claims-") as output_dir:
+            claims_result = mumei_client.claims(
+                str(source_path),
+                str(certificate_path),
+                output_dir,
+            )
+        if claims_result.get("returncode", 0) != 0:
+            raise RuntimeError(
+                str(claims_result.get("stderr") or "mumei claims failed")
+            )
+        report = claims_result.get("report", claims_result)
+        claim_rows = report.get("claims") if isinstance(report, dict) else None
+        if not isinstance(claim_rows, list):
+            raise RuntimeError("mumei claims JSON did not contain a claims array")
+        return [
+            {
+                "atom": claim["atom"],
+                "requires": str(claim.get("requires", "true")),
+                "ensures": str(claim.get("ensures", "true")),
+                "source": target_file,
+            }
+            for claim in claim_rows
+            if isinstance(claim, dict)
+            and isinstance(claim.get("atom"), str)
+            and claim.get("effective_grade") == "G4"
+        ]
+    except Exception as exc:
+        logger.warning(
+            "Could not collect verified claims from %s: %s",
+            staged_file,
+            exc,
+        )
+        return []
+    finally:
+        if "source_path" in locals():
+            source_path.unlink(missing_ok=True)
+            source_path.with_suffix(".proof.json").unlink(missing_ok=True)
+
+
 def _parallel_forge(
     specs: list[dict[str, Any]],
     *,
@@ -330,28 +491,175 @@ def _parallel_forge(
     mumei_repo_dir: Path | None = None,
     max_workers: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Generate forge candidates concurrently and preserve input order."""
+    """Generate forge candidates when their in-batch dependencies are ready."""
     if not specs:
         return []
     workers = _forge_worker_count(len(specs), max_workers)
     path = Path(cache_path)
+    target_files = {
+        str(spec.get("target_file"))
+        for spec in specs
+        if isinstance(spec.get("target_file"), str)
+    }
+    target_indices = {
+        str(spec.get("target_file")): index
+        for index, spec in enumerate(specs)
+        if isinstance(spec.get("target_file"), str)
+    }
+    dependency_targets: list[list[str]] = []
+    dependency_indices: list[list[int]] = []
+    for index, spec in enumerate(specs):
+        target = str(spec.get("target_file", ""))
+        declared = spec.get("depends_on")
+        dependencies = (
+            [
+                dependency
+                for dependency in declared
+                if isinstance(dependency, str)
+                and dependency in target_files
+                and dependency != target
+            ]
+            if isinstance(declared, list)
+            else []
+        )
+        dependency_targets.append(dependencies)
+        dependency_indices.append(
+            [target_indices[dependency] for dependency in dependencies]
+        )
+    cycle_nodes = _cycle_indices(dependency_indices)
+    dependency_target_names = {
+        dependency
+        for dependencies in dependency_targets
+        for dependency in dependencies
+    }
+    verify_dir_context = tempfile.TemporaryDirectory(
+        prefix="mumei-proliferate-verify-"
+    )
+    verify_dir = Path(verify_dir_context.name)
+    try:
+        (verify_dir / "std").mkdir(parents=True, exist_ok=True)
+        if mumei_repo_dir is not None:
+            source_std = mumei_repo_dir / "std"
+            if source_std.is_dir():
+                shutil.copytree(source_std, verify_dir / "std", dirs_exist_ok=True)
+    except Exception:
+        verify_dir_context.cleanup()
+        raise
     # Capture the current (forge) span context so worker-thread spans parent
     # onto the ``mumei.proliferate.forge`` span rather than appearing as roots.
     forge_context = telemetry.capture_context()
+    board_lock = Lock()
+    lemma_board: dict[str, list[dict[str, str]]] = {}
+    completed: dict[int, dict[str, Any]] = {}
+    running: dict[Any, int] = {}
+    pending = set(range(len(specs)))
 
-    def run(index: int, spec: dict[str, Any]) -> dict[str, Any]:
+    def record_result(
+        result: dict[str, Any],
+        metrics: Metrics,
+    ) -> dict[str, Any]:
+        success = bool(result.get("verified"))
+        retry_class = (
+            ("cache_hit" if result.get("cache_hit") else "none")
+            if success
+            else str(result.get("reason", "generation_error")).split(":", 1)[0]
+        )
+        harness_metrics.record_result(
+            "proliferate_generation",
+            success,
+            retry_class=retry_class,
+            **_metrics_payload(metrics),
+        )
+        return result
+
+    def synthetic_failure(
+        index: int,
+        reason: str,
+        waited_on: list[str],
+    ) -> dict[str, Any]:
+        spec = specs[index]
+        target = str(spec.get("target_file", "unknown.mm"))
+        result = {
+            "spec": spec,
+            "success": False,
+            "verified": False,
+            "reason": reason,
+            "thought_process": ThoughtProcess(target_file=target),
+        }
         with telemetry.use_context(forge_context), telemetry.start_span(
             "mumei.proliferate.forge.candidate",
-            **{"mumei.proliferate.target_file": spec.get("target_file")},
+            **{
+                "mumei.proliferate.target_file": target,
+                "mumei.proliferate.waited_on": waited_on,
+            },
+        ) as span:
+            telemetry.set_span_attributes(
+                span,
+                {
+                    "mumei.proliferate.verified": False,
+                    "mumei.proliferate.cache_hit": False,
+                },
+            )
+            record_result(result, Metrics())
+        return result
+
+    def stage_verified_result(
+        index: int,
+        result: dict[str, Any],
+    ) -> None:
+        target = str(specs[index].get("target_file", ""))
+        code = result.get("code")
+        if not target or not isinstance(code, str):
+            return
+        staged_file = _safe_relative_file(verify_dir, target)
+        if staged_file is None:
+            logger.warning("Ignoring unsafe staged forge target %s", target)
+            return
+        try:
+            staged_file.parent.mkdir(parents=True, exist_ok=True)
+            staged_file.write_text(code, encoding="utf-8")
+        except OSError:
+            logger.warning("Could not stage verified forge target %s", target, exc_info=True)
+            return
+        if target in dependency_target_names:
+            lemmas = _collect_g4_lemmas(
+                mumei_client,
+                staged_file,
+                target,
+                code,
+                verify_dir,
+            )
+            with board_lock:
+                lemma_board[target] = lemmas
+
+    def run(
+        index: int,
+        spec: dict[str, Any],
+        waited_on: list[str],
+        dependency_codes: list[tuple[str, str]],
+        dependency_lemmas: list[dict[str, str]],
+        generation_client: Any,
+    ) -> dict[str, Any]:
+        with telemetry.use_context(forge_context), telemetry.start_span(
+            "mumei.proliferate.forge.candidate",
+            **{
+                "mumei.proliferate.target_file": spec.get("target_file"),
+                "mumei.proliferate.waited_on": waited_on,
+            },
         ) as _span:
             _, result, metrics = _run_forge_generation(
                 index=index,
                 spec=spec,
                 config=config,
-                mumei_client=mumei_client,
+                mumei_client=generation_client,
                 cache_path=path,
                 mumei_repo_dir=mumei_repo_dir,
+                verify_dir=verify_dir,
+                dependency_lemmas=dependency_lemmas,
+                in_batch_dependency_codes=dependency_codes,
             )
+            if result.get("verified"):
+                stage_verified_result(index, result)
             success = bool(result.get("verified"))
             telemetry.set_span_attributes(
                 _span,
@@ -360,28 +668,491 @@ def _parallel_forge(
                     "mumei.proliferate.cache_hit": bool(result.get("cache_hit")),
                 },
             )
-            harness_metrics.record_result(
-                "proliferate_generation",
-                success,
-                retry_class=("cache_hit" if result.get("cache_hit") else "none")
-                if success
-                else str(result.get("reason", "generation_error")).split(":", 1)[0],
-                **_metrics_payload(metrics),
-            )
+            record_result(result, metrics)
             return result
 
-    if workers == 1:
-        return [run(idx, spec) for idx, spec in enumerate(specs, start=1)]
+    def dependency_closure(index: int) -> list[int]:
+        ordered: list[int] = []
+        visited = {index}
 
-    ordered: dict[int, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(run, idx, spec): idx
-            for idx, spec in enumerate(specs, start=1)
+        def visit(current: int) -> None:
+            for dependency in dependency_indices[current]:
+                if dependency in visited:
+                    continue
+                visited.add(dependency)
+                ordered.append(dependency)
+                visit(dependency)
+
+        visit(index)
+        return ordered
+
+    try:
+        for index in sorted(cycle_nodes):
+            completed[index] = synthetic_failure(
+                index,
+                "dependency_cycle",
+                dependency_targets[index],
+            )
+        pending.difference_update(cycle_nodes)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            while pending or running:
+                made_progress = True
+                while made_progress and len(running) < workers:
+                    made_progress = False
+                    for index in sorted(pending):
+                        dependencies = dependency_indices[index]
+                        if not all(dependency in completed for dependency in dependencies):
+                            continue
+                        failed_dependency = next(
+                            (
+                                dependency
+                                for dependency in dependencies
+                                if not completed[dependency].get("verified")
+                            ),
+                            None,
+                        )
+                        pending.remove(index)
+                        if failed_dependency is not None:
+                            target = dependency_targets[index][
+                                dependencies.index(failed_dependency)
+                            ]
+                            completed[index] = synthetic_failure(
+                                index,
+                                f"dependency_failed:{target}",
+                                dependency_targets[index],
+                            )
+                        else:
+                            dependency_codes = [
+                                (
+                                    str(specs[dependency].get("target_file", "")),
+                                    str(completed[dependency]["code"]),
+                                )
+                                for dependency in dependency_closure(index)
+                            ]
+                            with board_lock:
+                                dependency_lemmas = [
+                                    lemma
+                                    for target in dependency_targets[index]
+                                    for lemma in lemma_board.get(target, [])
+                                ]
+                            running[
+                                executor.submit(
+                                    run,
+                                    index,
+                                    specs[index],
+                                    dependency_targets[index],
+                                    dependency_codes,
+                                    dependency_lemmas,
+                                    (
+                                        getattr(mumei_client, "_fallback", mumei_client)
+                                        if dependencies
+                                        else mumei_client
+                                    ),
+                                )
+                            ] = index
+                        made_progress = True
+                        break
+                if running:
+                    done, _ = wait(running, return_when=FIRST_COMPLETED)
+                    for future in sorted(done, key=lambda item: running[item]):
+                        index = running.pop(future)
+                        completed[index] = future.result()
+                elif pending and not made_progress:
+                    raise RuntimeError("forge dependency scheduler made no progress")
+        return [completed[index] for index in range(len(specs))]
+    finally:
+        verify_dir_context.cleanup()
+
+
+def _dependency_publish_groups(
+    specs: list[dict[str, Any]],
+    forged_results: list[dict[str, Any]],
+    mumei_repo: Path,
+) -> list[list[int]]:
+    targets = {
+        str(spec.get("target_file")): index
+        for index, spec in enumerate(specs)
+        if isinstance(spec.get("target_file"), str)
+    }
+    dependencies: list[list[int]] = []
+    changed: list[bool] = []
+    for index, (spec, result) in enumerate(zip(specs, forged_results)):
+        declared = spec.get("depends_on")
+        names = (
+            [
+                name
+                for name in declared
+                if isinstance(name, str)
+                and name in targets
+                and name != spec.get("target_file")
+            ]
+            if isinstance(declared, list)
+            else []
+        )
+        dependencies.append([targets[name] for name in names])
+        if result.get("verified") and isinstance(result.get("code"), str):
+            diff = _detect_diffs(
+                mumei_repo,
+                str(spec.get("target_file", "unknown.mm")),
+                result["code"],
+            )
+            result["diff"] = diff
+            has_diff = bool(diff["changed"])
+            changed.append(has_diff)
+            if not has_diff:
+                result["success"] = True
+                result["reason"] = "no_diff"
+                result["dry_run"] = False
+        else:
+            changed.append(False)
+
+    parent = list(range(len(specs)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    def reachable_changed_dependencies(index: int) -> set[int]:
+        found: set[int] = set()
+        visited: set[int] = set()
+
+        def visit(dependency: int) -> None:
+            if dependency in visited:
+                return
+            visited.add(dependency)
+            if changed[dependency]:
+                found.add(dependency)
+                return
+            for ancestor in dependencies[dependency]:
+                visit(ancestor)
+
+        for dependency in dependencies[index]:
+            visit(dependency)
+        return found
+
+    reachable_dependencies = {
+        index: reachable_changed_dependencies(index)
+        for index, has_diff in enumerate(changed)
+        if has_diff
+    }
+    for index, ancestors in reachable_dependencies.items():
+        for dependency in ancestors:
+            union(index, dependency)
+
+    components: dict[int, list[int]] = {}
+    for index, has_diff in enumerate(changed):
+        if has_diff:
+            components.setdefault(find(index), []).append(index)
+
+    groups: list[list[int]] = []
+    for members in components.values():
+        if len(members) < 2:
+            continue
+        member_set = set(members)
+        remaining = set(members)
+        ordered: list[int] = []
+        while remaining:
+            ready = sorted(
+                index
+                for index in remaining
+                if not (reachable_dependencies[index] & member_set & remaining)
+            )
+            if not ready:
+                ready = [min(remaining)]
+            chosen = ready[0]
+            ordered.append(chosen)
+            remaining.remove(chosen)
+        groups.append(ordered)
+    return sorted(groups, key=lambda group: min(group))
+
+
+def _publish_dependency_group(
+    group: list[int],
+    *,
+    specs: list[dict[str, Any]],
+    forged_results: list[dict[str, Any]],
+    mumei_repo: Path,
+    proposals_by_target: dict[str, dict[str, Any]],
+    config: AgentConfig,
+    effective_mumei_bin: str,
+    mumei_client: MumeiClient,
+    harness_metrics: HarnessMetrics,
+    health_before: dict[str, Any] | None,
+    dry_run: bool,
+    enable_lean_fallback: bool,
+) -> dict[int, dict[str, Any]]:
+    group_targets = [
+        str(specs[index].get("target_file", "unknown.mm")) for index in group
+    ]
+    all_targets = {
+        str(spec.get("target_file"))
+        for spec in specs
+        if isinstance(spec.get("target_file"), str)
+    }
+    root_candidates = [
+        index
+        for index in group
+        if not any(
+            isinstance(dependency, str)
+            and dependency in all_targets
+            and dependency != specs[index].get("target_file")
+            for dependency in (
+                specs[index].get("depends_on")
+                if isinstance(specs[index].get("depends_on"), list)
+                else []
+            )
+        )
+    ]
+    root_index = min(root_candidates) if root_candidates else min(group)
+    root_target = str(specs[root_index].get("target_file", "unknown.mm"))
+    publish_group = group_targets
+    members = {index: forged_results[index] for index in group}
+    originals: dict[Path, str | None] = {}
+    healed_files: dict[str, str] = {}
+
+    def snapshot(path: Path) -> None:
+        if path in originals:
+            return
+        try:
+            originals[path] = path.read_text(encoding="utf-8") if path.is_file() else None
+        except OSError:
+            originals[path] = None
+
+    def rollback() -> None:
+        for path, original in originals.items():
+            try:
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(original, encoding="utf-8")
+            except OSError:
+                logger.warning("Could not restore %s during group rollback", path)
+
+    def finish_failure(reason: str, broken: list[dict[str, Any]] | None = None) -> dict[int, dict[str, Any]]:
+        rollback()
+        output: dict[int, dict[str, Any]] = {}
+        for index, result in members.items():
+            result["success"] = False
+            result["reason"] = reason
+            result["publish_group"] = publish_group
+            if broken:
+                result["blast_radius"] = broken
+            output[index] = result
+        return output
+
+    target_paths: dict[int, Path] = {}
+    for index, target in zip(group, group_targets):
+        candidate = _safe_relative_file(mumei_repo, target)
+        if candidate is None:
+            return finish_failure("unsafe_target")
+        target_paths[index] = candidate
+
+    for index in group:
+        target = str(specs[index].get("target_file", "unknown.mm"))
+        code = str(forged_results[index]["code"])
+        candidate = target_paths[index]
+        snapshot(candidate)
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text(code, encoding="utf-8")
+        except Exception:
+            logger.exception("Could not place grouped target %s", target)
+            return finish_failure("blast_radius_heal_failed")
+
+    def place_group_members() -> None:
+        for group_index in group:
+            candidate = target_paths[group_index]
+            code = str(forged_results[group_index]["code"])
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text(code, encoding="utf-8")
+
+    for index in group:
+        target = str(specs[index].get("target_file", "unknown.mm"))
+        code = str(forged_results[index]["code"])
+        candidate = target_paths[index]
+        try:
+            place_group_members()
+            blast = check_blast_radius(mumei_client, mumei_repo, candidate, code)
+        except Exception:
+            logger.exception("Blast-radius check failed for grouped target %s", target)
+            return finish_failure("blast_radius_heal_failed")
+        if not blast.get("all_passed", False):
+            broken_files = blast.get("broken_files") or []
+            if dry_run:
+                harness_metrics.record_stage(
+                    "proliferate_blast_radius",
+                    module="stateful_handoff",
+                    verification_gate=False,
+                    handoff_count=len(broken_files),
+                    retry_class="blast_radius_broken_dry_run",
+                    intent_fidelity_status="untested",
+                )
+                return finish_failure("blast_radius_broken_dry_run", broken_files)
+            if not broken_files:
+                return finish_failure("blast_radius_heal_failed")
+            all_healed = True
+            try:
+                healing_client = config.create_client()
+                place_group_members()
+                for broken in broken_files:
+                    broken_path = Path(str(broken["file"]))
+                    snapshot(broken_path)
+                    if not attempt_heal(
+                        client=healing_client,
+                        model=config.model,
+                        broken_info=broken,
+                        mumei_client=mumei_client,
+                        thought_process=forged_results[index].get("thought_process"),
+                    ):
+                        all_healed = False
+                        break
+                    try:
+                        healed_code = broken_path.read_text(encoding="utf-8")
+                        relative = broken_path.relative_to(mumei_repo).as_posix()
+                        original = originals.get(broken_path)
+                        if healed_code != original:
+                            healed_files[relative] = healed_code
+                    except (OSError, ValueError):
+                        pass
+            except Exception:
+                logger.exception("Group healing failed for %s", target)
+                all_healed = False
+            if not all_healed:
+                return finish_failure("blast_radius_heal_failed", broken_files)
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text(code, encoding="utf-8")
+        except OSError:
+            return finish_failure("blast_radius_heal_failed")
+
+    for index, result in members.items():
+        result["publish_group"] = publish_group
+    if dry_run:
+        rollback()
+        for result in members.values():
+            result["success"] = True
+            result["dry_run"] = True
+            result.pop("reason", None)
+        if enable_lean_fallback:
+            try:
+                _attach_dry_run_proof_certificate(
+                    members[root_index],
+                    str(forged_results[root_index]["code"]),
+                    mumei_client,
+                )
+            except Exception:
+                logger.debug(
+                    "Could not attach dry-run proof certificate for %s",
+                    root_target,
+                    exc_info=True,
+                )
+        return members
+
+    if members[root_index].get("should_close_pr"):
+        rollback()
+        members[root_index]["reason"] = "health_regression"
+        members[root_index]["success"] = False
+        for index, result in members.items():
+            if index != root_index:
+                result["reason"] = "dependency_not_published"
+                result["success"] = False
+        return members
+
+    extra_files: list[tuple[str, str]] = []
+    for index in group:
+        if index == root_index:
+            continue
+        extra_files.append(
+            (
+                group_targets[group.index(index)],
+                str(forged_results[index]["code"]),
+            )
+        )
+    group_paths = set(group_targets)
+    extra_files.extend(
+        (relative, code)
+        for relative, code in healed_files.items()
+        if relative not in group_paths
+    )
+    spec = specs[root_index]
+    tmp_spec_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            json.dump(spec, tmp, indent=2, ensure_ascii=False)
+            tmp_spec_path = tmp.name
+        proposal_meta = proposals_by_target.get(root_target)
+        pr_body_extra = _build_pr_body_extra(
+            spec=spec,
+            proposal=proposal_meta,
+            health_before=health_before,
+            health_after=None,
+        )
+        pub_result = publish(
+            spec_path=tmp_spec_path,
+            mumei_bin=effective_mumei_bin,
+            repo_dir=str(mumei_repo),
+            dry_run=False,
+            pr_title_prefix="[SI-5 Autonomous Proliferation]",
+            pr_body_extra=pr_body_extra,
+            pre_generated_code=str(forged_results[root_index]["code"]),
+            extra_files=extra_files,
+        )
+    except Exception as exc:
+        logger.exception("Grouped publish failed for %s", root_target)
+        pub_result = {"success": False, "error": str(exc)}
+    finally:
+        if tmp_spec_path is not None:
+            Path(tmp_spec_path).unlink(missing_ok=True)
+
+    if not pub_result.get("success"):
+        rollback()
+
+    members[root_index]["publish_result"] = pub_result
+    members[root_index]["success"] = bool(pub_result.get("success"))
+    if pub_result.get("pr_url"):
+        members[root_index]["pr_url"] = pub_result["pr_url"]
+    extra_verifications = pub_result.get("extra_file_verifications")
+    extra_reports = (
+        {
+            verification.get("file"): verification.get("report")
+            for verification in extra_verifications
+            if isinstance(verification, dict)
         }
-        for future in as_completed(futures):
-            ordered[futures[future]] = future.result()
-    return [ordered[idx] for idx in sorted(ordered)]
+        if isinstance(extra_verifications, list)
+        else {}
+    )
+    for index, result in members.items():
+        if index == root_index:
+            continue
+        result["published_with"] = root_target
+        dependent_publish_result = dict(pub_result)
+        dependent_publish_result.pop("proof_certificate", None)
+        dependent_publish_result.pop("certificate", None)
+        report = extra_reports.get(str(specs[index].get("target_file", "")))
+        if isinstance(report, dict):
+            dependent_publish_result["proof_certificate"] = report
+        result["publish_result"] = dependent_publish_result
+        result["success"] = bool(pub_result.get("success"))
+        if not result["success"]:
+            result["reason"] = "dependency_not_published"
+        elif pub_result.get("pr_url"):
+            result["pr_url"] = pub_result["pr_url"]
+    return members
 
 
 def _log_step(step: int, total: int, message: str) -> None:
@@ -436,6 +1207,22 @@ def _close_pr_for_regression(pr_url: str, health_delta: float) -> bool:
         return False
     logger.info("auto-close: closed %s due to health regression", pr_url)
     return True
+
+
+def _close_prs_for_regression(
+    results: list[dict[str, Any]],
+    health_delta: float,
+) -> None:
+    closed: dict[str, bool] = {}
+    for result in results:
+        result["should_close_pr"] = True
+        result["health_delta"] = health_delta
+        pr_url = result.get("pr_url")
+        if not pr_url:
+            continue
+        if pr_url not in closed:
+            closed[pr_url] = _close_pr_for_regression(pr_url, health_delta)
+        result["pr_closed"] = closed[pr_url]
 
 
 def _run_lean_fallback(
@@ -888,8 +1675,30 @@ def _proliferate_inner(
             max_workers=parallel_forge_workers,
         )
 
+    grouped_results: dict[int, dict[str, Any]] = {}
+    publish_groups = _dependency_publish_groups(specs, forged_results, mumei_repo)
+    for group in publish_groups:
+        grouped_results.update(
+            _publish_dependency_group(
+                group,
+                specs=specs,
+                forged_results=forged_results,
+                mumei_repo=mumei_repo,
+                proposals_by_target=proposals_by_target,
+                config=config,
+                effective_mumei_bin=effective_mumei_bin,
+                mumei_client=mumei_client,
+                harness_metrics=harness_metrics,
+                health_before=health_before,
+                dry_run=dry_run,
+                enable_lean_fallback=enable_lean_fallback,
+            )
+        )
+
     results: list[dict[str, Any]] = []
     for idx, spec_result, _p_span in _proposal_spans(forged_results):
+        if idx - 1 in grouped_results:
+            continue
         spec = spec_result["spec"]
         target_file = spec.get("target_file", "unknown.mm")
         thought = spec_result["thought_process"]
@@ -1204,6 +2013,15 @@ def _proliferate_inner(
 
         results.append(spec_result)
 
+    ordinary_results = {id(result["spec"]): result for result in results}
+    grouped_by_spec = {
+        id(result["spec"]): result for result in grouped_results.values()
+    }
+    results = [
+        grouped_by_spec.get(id(spec)) or ordinary_results[id(spec)]
+        for spec in specs
+    ]
+
     # Task 2-C — default-on Lean fallback for unknown atoms.
     #
     # After the forge + verify pass, walk every spec_result and offer
@@ -1271,15 +2089,7 @@ def _proliferate_inner(
                 # best-effort close already-published PRs via the
                 # GitHub API.
                 if not dry_run:
-                    for r in results:
-                        r["should_close_pr"] = True
-                        r["health_delta"] = health_delta
-                        pr_url = r.get("pr_url")
-                        if pr_url:
-                            close_ok = _close_pr_for_regression(
-                                pr_url, health_delta
-                            )
-                            r["pr_closed"] = bool(close_ok)
+                    _close_prs_for_regression(results, health_delta)
         except Exception:
             logger.debug("Could not measure final health", exc_info=True)
 
