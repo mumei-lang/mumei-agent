@@ -585,6 +585,7 @@ def test_hypothesis_nested_nonlocal_write_rebinds_generator(tmp_path: Path) -> N
         "match Some(0) { Some(x) => {}, _ => {} }",
         "let _ = &mut x;",
         "let mut change = || { x += 100; };",
+        "let change = || { let (x, _) = (100, 0); x };",
     ],
 )
 def test_rust_proptest_generator_variable_rebindings_skip_the_test(
@@ -637,3 +638,145 @@ def test_rust_write_to_another_local_does_not_rebind_generator(
 
     assert len(report["observations"]) == 1
     assert report["skipped"] == []
+
+
+@pytest.mark.parametrize(
+    ("declaration", "body"),
+    [
+        ("", "let (x, _) = (100, 0);"),
+        ("", "let [x] = [100];"),
+        ("", "let &x = &100;"),
+        ("", "let mut x = 100;"),
+        ("", "let ((x,), _) = ((100,), 0);"),
+        (
+            "struct Pair { x: i64 }\n",
+            "let Pair { x } = Pair { x: 100 };",
+        ),
+    ],
+)
+def test_rust_pattern_let_rebinding_generator_is_skipped(
+    tmp_path: Path, declaration: str, body: str
+) -> None:
+    report = _rust_report(
+        tmp_path,
+        declaration
+        + "fn f(value: i64) -> i64 { value }\n"
+        + "proptest! {\n"
+        + "    #[test]\n"
+        + "    fn prop(x in 0..10) {\n"
+        + f"        {body}\n"
+        + "        prop_assert!(f(x) >= 0);\n"
+        + "    }\n"
+        + "}\n",
+    )
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "generator_variable_rebound"
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    ["x", "(x, _)"],
+)
+def test_rust_closure_parameter_shadowing_generator_is_skipped(
+    tmp_path: Path, parameters: str
+) -> None:
+    report = _rust_report(
+        tmp_path,
+        "fn f(value: i64) -> i64 { value }\n"
+        "proptest! {\n"
+        "    #[test]\n"
+        "    fn prop(x in 0..10) {\n"
+        f"        let closure = |{parameters}| x;\n"
+        "        prop_assert!(f(x) >= 0);\n"
+        "    }\n"
+        "}\n",
+    )
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "generator_variable_rebound"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import m as x",
+        "from m import y as x",
+        "import x",
+        "def x(): pass",
+        "async def x(): pass",
+        "class x: pass",
+        "def helper():\n    global x\n    x = 100\nhelper()",
+    ],
+)
+def test_hypothesis_imports_and_definitions_rebind_generator(
+    tmp_path: Path, body: str
+) -> None:
+    report = _python_report(
+        tmp_path,
+        "from hypothesis import given\n"
+        "from hypothesis import strategies as st\n"
+        "def f(value): return value\n"
+        "@given(st.integers(0, 10))\n"
+        "def test_f(x):\n"
+        + "".join(f"    {line}\n" for line in body.splitlines())
+        + "    assert f(x) >= 0\n",
+    )
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "generator_variable_rebound"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "let value = 'c';",
+        r"let value = '\n';",
+        r"let value = '\'';",
+        r"let value = '\u{7b}';",
+        "let value = b'x';",
+        'let borrowed: &\'static str = "value";',
+        "'outer: loop { break 'outer; }",
+    ],
+)
+def test_rust_proptest_lifetimes_labels_and_char_literals_keep_observation(
+    tmp_path: Path, statement: str
+) -> None:
+    report = _rust_report(
+        tmp_path,
+        "fn f(value: i64) -> i64 { value }\n"
+        "proptest! {\n"
+        "    #[test]\n"
+        "    fn prop(x in 0..10) {\n"
+        f"        {statement}\n"
+        "        prop_assert!(f(x) >= 0);\n"
+        "    }\n"
+        "}\n",
+    )
+
+    assert len(report["observations"]) == 1
+    assert report["observations"][0]["kind"] == "property"
+    assert report["skipped"] == []
+
+
+def test_unparseable_proptest_body_is_reported_as_parse_error(
+    tmp_path: Path,
+) -> None:
+    report = _rust_report(
+        tmp_path,
+        "fn f(value: i64) -> i64 { value }\n"
+        "proptest! {\n"
+        "    #[test]\n"
+        "    fn malformed(x in 0..10) {\n"
+        "        let value = ;\n"
+        "        prop_assert!(f(x) >= 0);\n"
+        "    }\n"
+        "}\n",
+    )
+
+    assert report["observations"] == []
+    assert len(report["skipped"]) == 1
+    assert report["skipped"][0]["test"] == "malformed"
+    assert report["skipped"][0]["file"] == "property.rs"
+    assert report["skipped"][0]["line"] == 4
+    assert report["skipped"][0]["reason"] == "parse_error"

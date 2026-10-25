@@ -97,6 +97,8 @@ class _Test:
     property_variables: tuple[dict[str, Any], ...] = ()
     property_assumptions: tuple[str, ...] = ()
     property_skip_reason: str | None = None
+    property_skip_line: int | None = None
+    property_skip_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -671,6 +673,30 @@ def _rust_source_error(root: Any, source: str, file: str) -> dict[str, Any] | No
     }
 
 
+def _rust_char_literal_end(text: str, start: int) -> int | None:
+    index = start + 1
+    if index >= len(text):
+        return None
+    if text[index] == "\\":
+        index += 1
+        if index >= len(text):
+            return None
+        if text[index] == "u" and index + 1 < len(text) and text[index + 1] == "{":
+            end = text.find("}", index + 2)
+            if end < 0:
+                return None
+            index = end + 1
+        elif text[index] == "x":
+            index += 3
+        else:
+            index += 1
+    else:
+        if text[index] in {"'", "\n", "\r"}:
+            return None
+        index += 1
+    return index if index < len(text) and text[index] == "'" else None
+
+
 def _rust_matching_delimiter(text: str, start: int) -> int | None:
     opening = text[start]
     closing = {"(": ")", "{": "}", "[": "]"}.get(opening)
@@ -689,7 +715,9 @@ def _rust_matching_delimiter(text: str, start: int) -> int | None:
                 escaped = True
             elif char == quote:
                 quote = None
-        elif char in {"'", '"'}:
+        elif char == "'" and _rust_char_literal_end(text, index) is not None:
+            quote = "'"
+        elif char == '"':
             quote = char
         elif text.startswith("//", index):
             end = text.find("\n", index)
@@ -781,13 +809,37 @@ def _rust_proptest_tests(
             if function is None:
                 continue
             name = function.group(1)
+            function_offset = test_attr.end() + function.start()
+
+            def record_parse_error(text: str) -> None:
+                line = (
+                    macro.start_point.row
+                    + 1
+                    + inner[:function_offset].count("\n")
+                )
+                tests.append(
+                    _Test(
+                        name,
+                        file,
+                        "rust",
+                        source_bytes.decode("utf-8", "replace"),
+                        macro,
+                        property_test=True,
+                        property_skip_reason="parse_error",
+                        property_skip_line=line,
+                        property_skip_text=text,
+                    )
+                )
+
             open_paren = test_attr.end() + function.end() - 1
             close_paren = _rust_matching_delimiter(inner, open_paren)
             if close_paren is None:
+                record_parse_error(inner[test_attr.start():])
                 continue
             body_open = inner.find("{", close_paren + 1)
             body_close = _rust_matching_delimiter(inner, body_open) if body_open >= 0 else None
             if body_close is None:
+                record_parse_error(inner[test_attr.start():])
                 continue
             attr_boundary = max(inner.rfind("}", 0, test_attr.start()), 0)
             test_attributes = inner[attr_boundary:body_open]
@@ -832,6 +884,7 @@ def _rust_proptest_tests(
             synthetic = "\n" * padding + generated
             tree, generated_bytes = tree_sitter_extract.parse(synthetic, "rust")
             if tree is None or generated_bytes is None or tree.root_node.has_error:
+                record_parse_error(inner[test_attr.start():body_close + 1])
                 continue
             fn_node = next(
                 (
@@ -841,6 +894,7 @@ def _rust_proptest_tests(
                 None,
             )
             if fn_node is None:
+                record_parse_error(inner[test_attr.start():body_close + 1])
                 continue
             tests.append(
                 _Test(
@@ -1761,11 +1815,29 @@ def _emit_assertion(
 
 def _python_store_counts(test_node: ast.AST) -> Counter[str]:
     store_counts: Counter[str] = Counter()
-    for node in _python_scope_nodes(test_node):
+    for node in _python_scope_write_nodes(test_node):
         if isinstance(node, ast.Name) and isinstance(
             node.ctx, (ast.Store, ast.Del)
         ):
             store_counts[node.id] += 1
+        elif isinstance(node, ast.Import):
+            store_counts.update(
+                alias.asname or alias.name.split(".", 1)[0]
+                for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            store_counts.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name != "*"
+            )
+        elif (
+            node is not test_node
+            and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            )
+        ):
+            store_counts[node.name] += 1
         elif isinstance(node, ast.ExceptHandler) and node.name:
             store_counts[node.name] += 1
         elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
@@ -2575,10 +2647,14 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
         return counts
     scope_nodes = tuple(_rust_sync_scope_nodes(body))
     outer_names = set(_rust_params(test.node, source_bytes))
+    generator_names = {
+        variable["name"] for variable in test.property_variables
+    }
     for node in scope_nodes:
         if node.type == "let_declaration":
-            name = _rust_identifier(node.child_by_field_name("pattern"), source_bytes)
-            if name:
+            pattern = node.child_by_field_name("pattern")
+            names = _rust_pattern_binding_names(pattern, source_bytes)
+            for name in names:
                 counts[name] += 1
                 outer_names.add(name)
         elif node.type in {"assignment_expression", "compound_assignment_expr"}:
@@ -2618,9 +2694,33 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
                 if parameters is not None:
                     for parameter in parameters.named_children:
                         pattern = parameter.child_by_field_name("pattern")
-                        name = _rust_identifier(pattern, source_bytes)
-                        if name:
+                        if pattern is None:
+                            pattern = parameter
+                        names = _rust_pattern_binding_names(
+                            pattern, source_bytes
+                        )
+                        for name in names:
                             parameter_names.add(name)
+                            if name in generator_names:
+                                counts[name] += 1
+                for scope_node in closure_nodes:
+                    if scope_node.type == "let_declaration":
+                        pattern = scope_node.child_by_field_name("pattern")
+                        names = _rust_pattern_binding_names(
+                            pattern, source_bytes
+                        )
+                    elif scope_node.type in {
+                        "for_expression",
+                        "let_condition",
+                        "match_arm",
+                    }:
+                        pattern = scope_node.child_by_field_name("pattern")
+                        names = _rust_pattern_binding_names(
+                            pattern, source_bytes
+                        )
+                    else:
+                        continue
+                    counts.update(name for name in names if name in generator_names)
                 for scope_node in closure_nodes:
                     if scope_node.type not in {
                         "assignment_expression",
@@ -2658,8 +2758,12 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
 def _rust_pattern_binding_names(node: Any, source_bytes: bytes) -> set[str]:
     if node is None:
         return set()
-    if node.type == "identifier":
-        name = _rust_identifier(node, source_bytes)
+    if node.type in {"identifier", "shorthand_field_identifier"}:
+        name = (
+            _rust_identifier(node, source_bytes)
+            if node.type == "identifier"
+            else _rust_text(node, source_bytes)
+        )
         return {name} if name and name != "_" else set()
     type_node = node.child_by_field_name("type")
     names: set[str] = set()
@@ -2968,8 +3072,12 @@ def _process_rust_property_test(
     observations: list[dict[str, Any]],
     skipped: list[dict[str, Any]],
 ) -> None:
-    line = test.node.start_point.row + 1
-    text = _rust_text(test.node, source_bytes)
+    line = test.property_skip_line or test.node.start_point.row + 1
+    text = (
+        test.property_skip_text
+        if test.property_skip_text is not None
+        else _rust_text(test.node, source_bytes)
+    )
     if test.property_skip_reason:
         _skip(skipped, test=test, file=test.file, line=line, reason=test.property_skip_reason, text=text)
         return
