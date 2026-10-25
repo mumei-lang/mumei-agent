@@ -124,6 +124,55 @@ def test_structured_final_erosion_failure_restores_original(tmp_path: Path, caps
         erosion_guard.close()
 
 
+def test_structured_loop_restores_after_identical_fix_exhausts_budget(tmp_path: Path):
+    source = tmp_path / "app.mm"
+    source.write_text("original", encoding="utf-8")
+    original = source.read_bytes()
+    erosion_guard = ErosionGuard.create(source)
+    failure = {
+        "success": False,
+        "report": {
+            "failure_type": "postcondition_violated",
+            "structured_feedback": {
+                "status": "verification_failed",
+                "error_type": "postcondition_violated",
+                "reconstruction_loss": {
+                    "loss_set_size": 1,
+                    "loss_vector": [{"violated_property": "p"}],
+                },
+            },
+        },
+        "stdout": "",
+        "stderr": "verification failed",
+    }
+    client = SequenceClient(
+        [failure, _verified(), _verified()],
+        [_erosion_fail(), _erosion_fail()],
+    )
+    fixes: list[str] = []
+
+    def same_fix(*_args: object) -> str:
+        fixes.append("candidate")
+        return "candidate"
+
+    try:
+        loop = StructuredFeedbackSelfCorrectionLoop(
+            SimpleNamespace(),
+            "model",
+            client,
+            max_retries=2,
+            convergence_threshold=1,
+            repair_fn=same_fix,  # type: ignore[arg-type]
+            erosion_guard=erosion_guard,
+        )
+        result = loop.run(source, failure["report"]["structured_feedback"])
+        assert not result.converged
+        assert fixes == ["candidate", "candidate"]
+        assert source.read_bytes() == original
+    finally:
+        erosion_guard.close()
+
+
 def test_structured_verify_failure_keeps_candidate(tmp_path: Path):
     source = tmp_path / "app.mm"
     source.write_text("original", encoding="utf-8")
@@ -258,6 +307,41 @@ def test_fix_strategy_final_erosion_failure_restores_original(tmp_path: Path, ca
         erosion_guard.close()
 
 
+def test_fix_strategy_restores_after_identical_fix_exhausts_budget(tmp_path: Path):
+    source = tmp_path / "app.mm"
+    source.write_text("original", encoding="utf-8")
+    original = source.read_bytes()
+    erosion_guard = ErosionGuard.create(source)
+    failure = {
+        "success": False,
+        "loss_vector": {
+            "status": "verification_failed",
+            "error_type": "postcondition_violated",
+            "feedback_instruction": "repair",
+        },
+        "report": {"failure_type": "postcondition_violated"},
+    }
+    client = SequenceClient([failure, _verified()], [_erosion_fail()])
+
+    class SameFix:
+        calls = 0
+
+        def fix_with_loss_vector(self, _path: Path, _vector: dict) -> str:
+            self.calls += 1
+            return "eroded candidate"
+
+    fixer = SameFix()
+    try:
+        result = SelfCorrectionLoop(max_iterations=2).run(
+            source, client, fixer, erosion_guard=erosion_guard
+        )
+        assert not result.success
+        assert fixer.calls == 2
+        assert source.read_bytes() == original
+    finally:
+        erosion_guard.close()
+
+
 def test_fix_strategy_verify_failure_does_not_restore_candidate(tmp_path: Path):
     source = tmp_path / "app.mm"
     source.write_text("original", encoding="utf-8")
@@ -364,6 +448,47 @@ def test_standalone_strategy_final_erosion_failure_restores_source(
         assert not result.converged
         assert source.read_bytes() == original
         assert "Final candidate weakened its contract" in capsys.readouterr().out
+    finally:
+        erosion_guard.close()
+
+
+def test_standalone_strategy_restores_after_identical_fix_exhausts_budget(
+    monkeypatch, tmp_path: Path
+):
+    source = tmp_path / "app.mm"
+    source.write_text("original", encoding="utf-8")
+    original = source.read_bytes()
+    erosion_guard = ErosionGuard.create(source)
+    failure = {
+        "success": False,
+        "report": {"failure_type": "postcondition_violated"},
+        "stdout": "",
+        "stderr": "verification failed",
+    }
+    client = SequenceClient(
+        [failure, _verified(), _verified()],
+        [_erosion_fail(), _erosion_fail()],
+    )
+    fixes: list[str] = []
+
+    def same_fix(*_args: object, **_kwargs: object) -> str:
+        fixes.append("candidate")
+        return "candidate"
+
+    monkeypatch.setattr(self_correction_strategy.fix_strategy, "get_fix", same_fix)
+    try:
+        strategy = SelfCorrectionStrategy(
+            SimpleNamespace(),
+            "model",
+            client,  # type: ignore[arg-type]
+            max_repairs=2,
+            required_successes=1,
+            erosion_guard=erosion_guard,
+        )
+        result = strategy.run(source)
+        assert not result.converged
+        assert fixes == ["candidate", "candidate"]
+        assert source.read_bytes() == original
     finally:
         erosion_guard.close()
 

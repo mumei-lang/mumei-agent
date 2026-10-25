@@ -402,8 +402,6 @@ class StructuredFeedbackSelfCorrectionLoop:
                 )
                 break
             path.write_text(fixed, encoding="utf-8")
-            last_charter_failure = False
-            last_erosion_failure = False
             tampered_paths = stop_if_charter_tampered()
             if tampered_paths:
                 iterations[-1].stop_reason = "charter_tampered"

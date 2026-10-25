@@ -434,10 +434,10 @@ def main() -> None:
     _loop_span = _loop_span_ctx.__enter__()
     try:
         for attempt in range(max_retries + 1):
-            last_erosion_failure = False
             if stop_if_charter_tampered():
                 break
             result = mumei.verify(source_file)
+            last_erosion_failure = False
             if stop_if_charter_tampered():
                 break
             if result["success"] and charter_guard is not None:
@@ -635,7 +635,6 @@ def main() -> None:
                     )
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(meta_fixed_code)
-                    last_erosion_failure = False
                     if stop_if_charter_tampered():
                         break
                     applied_fixes += 1
@@ -681,7 +680,6 @@ def main() -> None:
                     )
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(meta_fixed_code)
-                    last_erosion_failure = False
                     if stop_if_charter_tampered():
                         break
                     applied_fixes += 1
@@ -719,7 +717,6 @@ def main() -> None:
                         pass
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(fixed_code)
-                    last_erosion_failure = False
                     if stop_if_charter_tampered():
                         break
                     applied_fixes += 1
@@ -787,7 +784,6 @@ def main() -> None:
             # Overwrite source file
             with open(source_file, "w", encoding="utf-8") as f:
                 f.write(fixed_code)
-            last_erosion_failure = False
             if stop_if_charter_tampered():
                 break
             applied_fixes += 1

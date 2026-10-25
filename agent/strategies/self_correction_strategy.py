@@ -208,11 +208,11 @@ class SelfCorrectionStrategy:
                 break
             result = self.mumei_client.verify(str(path))
             report = dict(result.get("report") or {})
+            last_charter_failure = False
+            last_erosion_failure = False
             verification_result = self._verification_result(result, report)
             loss_empty = self._reconstruction_loss_empty(report)
             success = verification_result in {Z3CheckResult.UNSAT.value, Z3CheckResult.LEAN_VERIFIED.value} and loss_empty
-            last_charter_failure = False
-            last_erosion_failure = False
             erosion_report = None
             if success and self.guard is not None:
                 outcome = self.guard.check(self.mumei_client, str(path))
@@ -389,8 +389,6 @@ class SelfCorrectionStrategy:
 
             path.write_text(fixed, encoding="utf-8")
             tampered = stop_if_charter_tampered()
-            last_charter_failure = False
-            last_erosion_failure = False
             history.add(
                 RetryAttempt(
                     attempt_number=len(history.attempts) + 1,

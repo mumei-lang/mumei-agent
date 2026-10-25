@@ -137,6 +137,38 @@ def test_final_erosion_failure_restores_source(
     )
 
 
+def test_heal_restores_after_identical_fix_exhausts_budget(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = _source(tmp_path)
+    original = source.read_bytes()
+
+    class Client:
+        def verify(self, _source: str) -> dict:
+            return {"success": True, "report": {}, "stdout": "", "stderr": ""}
+
+        def erosion_check(self, _candidate: str, _baseline: str) -> dict:
+            return _erosion_failure()
+
+    fixes: list[str] = []
+
+    def same_fix(*_args: object, **_kwargs: object) -> str:
+        candidate = source.read_text(encoding="utf-8")
+        fixes.append(candidate)
+        return candidate
+
+    _configure(monkeypatch, tmp_path, Client(), [str(source), "--max-retries", "1"])
+    monkeypatch.setattr(self_healing, "get_fix", same_fix)
+    with pytest.raises(SystemExit) as exc:
+        self_healing.main()
+    assert exc.value.code == 1
+    assert fixes == [original.decode("utf-8")]
+    assert source.read_bytes() == original
+    assert f"Final candidate weakened its contract; source restored from {source}" in (
+        capsys.readouterr().out
+    )
+
+
 @pytest.mark.parametrize(
     ("extra_args", "env_value"),
     [

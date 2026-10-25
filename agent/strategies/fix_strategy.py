@@ -285,8 +285,6 @@ class SelfCorrectionLoop:
                 ))
             path.write_text(fix, encoding="utf-8")
             repair_attempts += 1
-            last_charter_failure = False
-            last_erosion_failure = False
             if stop_if_charter_tampered():
                 return finish(SelfCorrectionResult(
                     success=False,
