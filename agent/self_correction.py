@@ -12,6 +12,7 @@ from typing import Callable
 from openai import OpenAI
 
 from agent import telemetry
+from agent.charter_guard import CharterGuard, discover_guard_or_exit
 from agent.config import AgentConfig
 from agent.mumei_client import MumeiClient, create_mumei_client
 from agent.strategies import fix_strategy
@@ -142,6 +143,7 @@ class StructuredFeedbackSelfCorrectionLoop:
         convergence_threshold: int = 2,
         max_tokens: int = 10000,
         repair_fn: RepairFn | None = None,
+        guard: CharterGuard | None = None,
     ) -> None:
         self.client = client
         self.model = model
@@ -150,6 +152,7 @@ class StructuredFeedbackSelfCorrectionLoop:
         self.convergence_threshold = max(1, convergence_threshold)
         self.max_tokens = max(1, max_tokens)
         self.repair_fn = repair_fn or default_repair
+        self.guard = guard
 
     def run(
         self,
@@ -169,6 +172,7 @@ class StructuredFeedbackSelfCorrectionLoop:
         structured_feedback: dict[str, object] | str | Path,
     ) -> SelfCorrectionLoopResult:
         path = Path(source_path)
+        original_source = path.read_bytes() if self.guard is not None else None
         current_feedback = load_structured_feedback(structured_feedback)
         iterations: list[SelfCorrectionLoopIteration] = []
         consecutive_successes = 0
@@ -176,6 +180,21 @@ class StructuredFeedbackSelfCorrectionLoop:
         token_cost = 0
         final_error: str | None = None
         loop_result: SelfCorrectionLoopResult | None = None
+        last_charter_failure = False
+
+        def stop_if_charter_tampered() -> list[str]:
+            if self.guard is None:
+                return []
+            changed_paths = self.guard.tampered()
+            if changed_paths:
+                if original_source is not None:
+                    path.write_bytes(original_source)
+                print(
+                    "Charter files or lock changed during self-correction: "
+                    + ", ".join(changed_paths)
+                )
+                print(f"Source restored from {path}")
+            return changed_paths
 
         for iteration in range(1, self.max_retries + self.convergence_threshold + 1):
             if token_cost >= self.max_tokens:
@@ -201,10 +220,50 @@ class StructuredFeedbackSelfCorrectionLoop:
                 )
                 break
 
+            if stop_if_charter_tampered():
+                loop_result = _finish(
+                    False,
+                    repair_attempts,
+                    consecutive_successes,
+                    token_cost,
+                    iterations,
+                    "charter_tampered",
+                    "charter_tampered",
+                )
+                break
+
             result = self.mumei_client.verify(str(path))
             report = _report_dict(result.get("report"))
             current_feedback = _structured_feedback(report) or current_feedback
             success = bool(result.get("success")) and _reconstruction_loss_empty(report, current_feedback)
+            last_charter_failure = False
+            tampered_paths: list[str] = []
+            if success and self.guard is not None:
+                outcome = self.guard.check(self.mumei_client, str(path))
+                tampered_paths = stop_if_charter_tampered()
+                if tampered_paths:
+                    success = False
+                elif not outcome.passed:
+                    current_feedback = {
+                        "status": "verification_failed",
+                        "error_type": "charter_violation",
+                        "location": None,
+                        "reconstruction_loss": None,
+                        "feedback_instruction": outcome.summary,
+                    }
+                    report = {
+                        "status": "charter_failed",
+                        "failure_type": "charter_violation",
+                        "reason": outcome.summary,
+                        "charter_report": outcome.report,
+                        "structured_feedback": current_feedback,
+                    }
+                    last_charter_failure = True
+                    result = dict(result)
+                    result["success"] = False
+                    result["stderr"] = outcome.summary
+                    result["report"] = report
+                    success = False
             consecutive_successes = consecutive_successes + 1 if success else 0
             verification_result = _verification_result(result, report)
 
@@ -219,6 +278,19 @@ class StructuredFeedbackSelfCorrectionLoop:
                     structured_feedback=current_feedback,
                 )
             )
+
+            if tampered_paths:
+                iterations[-1].stop_reason = "charter_tampered"
+                loop_result = _finish(
+                    False,
+                    repair_attempts,
+                    consecutive_successes,
+                    token_cost,
+                    iterations,
+                    "charter_tampered",
+                    "charter_tampered",
+                )
+                break
 
             if consecutive_successes >= self.convergence_threshold:
                 iterations[-1].stop_reason = "converged"
@@ -288,6 +360,20 @@ class StructuredFeedbackSelfCorrectionLoop:
                 )
                 break
             path.write_text(fixed, encoding="utf-8")
+            last_charter_failure = False
+            tampered_paths = stop_if_charter_tampered()
+            if tampered_paths:
+                iterations[-1].stop_reason = "charter_tampered"
+                loop_result = _finish(
+                    False,
+                    repair_attempts,
+                    consecutive_successes,
+                    token_cost,
+                    iterations,
+                    "charter_tampered",
+                    "charter_tampered",
+                )
+                break
             repair_attempts += 1
             iterations[-1].repair_attempts = repair_attempts
             iterations[-1].token_cost = token_cost
@@ -302,6 +388,15 @@ class StructuredFeedbackSelfCorrectionLoop:
                 "max_retries_reached",
                 final_error,
             )
+        if (
+            self.guard is not None
+            and original_source is not None
+            and not loop_result.converged
+            and loop_result.stop_reason != "charter_tampered"
+            and last_charter_failure
+        ):
+            path.write_bytes(original_source)
+            print(f"Final candidate failed charter check; source restored from {path}")
         try:
             _loop_span.set_attribute("mumei.loop.final_success", loop_result.converged)  # type: ignore[union-attr]
             _loop_span.set_attribute("mumei.loop.stop_reason", loop_result.stop_reason or "unknown")  # type: ignore[union-attr]
@@ -341,6 +436,7 @@ def run_self_correction_loop(
     client: OpenAI | None = None,
     mumei_client: MumeiClient | None = None,
     repair_fn: RepairFn | None = None,
+    guard: CharterGuard | None = None,
 ) -> SelfCorrectionLoopResult:
     effective_config = config or AgentConfig()
     loop = StructuredFeedbackSelfCorrectionLoop(
@@ -351,6 +447,7 @@ def run_self_correction_loop(
         convergence_threshold=effective_config.self_correction_convergence_threshold,
         max_tokens=effective_config.self_correction_max_tokens,
         repair_fn=repair_fn,
+        guard=guard,
     )
     return loop.run(source_path, structured_feedback)
 
@@ -368,6 +465,13 @@ def build_self_correct_parser(
         help="Path to structured feedback JSON, or an inline JSON object.",
     )
     parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument(
+        "--charter-lock",
+        type=str,
+        default=None,
+        metavar="LOCK_JSON",
+        help="Use this charter lock instead of discovering one from the source tree.",
+    )
     parser.add_argument("--metadata-output", help="Write self-correction metadata JSON")
     parser.add_argument(
         "--proof-cert-out",
@@ -390,11 +494,22 @@ def main_self_correct(
     if not source:
         raise SystemExit("--source or source_file is required")
     config = AgentConfig()
+    lock_arg = (
+        getattr(args, "charter_lock", None)
+        if getattr(args, "charter_lock", None) is not None
+        else config.charter_lock_path
+    )
+    charter_guard = discover_guard_or_exit(
+        source,
+        lock_arg,
+        enabled=config.enable_charter_guard,
+    )
     if args.feedback:
         result = run_self_correction_loop(
             source_path=source,
             structured_feedback=args.feedback,
             config=config,
+            guard=charter_guard,
         )
         payload = result.to_dict()
     else:
@@ -404,7 +519,7 @@ def main_self_correct(
             convergence_threshold=float(config.self_correction_convergence_threshold),
         )
         llm_client = fix_strategy.ConfiguredLossVectorFixClient(config, mumei_client)
-        result = loop.run(Path(source), mumei_client, llm_client)
+        result = loop.run(Path(source), mumei_client, llm_client, guard=charter_guard)
         payload = result.to_dict()
     if args.metadata_output:
         Path(args.metadata_output).write_text(

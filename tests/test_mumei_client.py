@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from agent.mumei_client import MumeiClient
+from agent.mcp_client import MumeiMCPClient
 
 
 def test_verify_command_default():
@@ -17,6 +18,141 @@ def test_verify_command_default():
         assert call_args == ["mumei", "verify", "--json", "test.mm"]
         assert result["success"] is True
         assert result["report"]["status"] == "success"
+
+
+def test_charter_check_defaults_cwd_to_lock_directory(tmp_path):
+    client = MumeiClient()
+    lock = tmp_path / "charter.lock"
+    source = tmp_path / "src" / "app.mm"
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"status":"pass","atoms":[]}',
+            stderr="",
+        )
+        result = client.charter_check(str(source), str(lock))
+        assert mock_run.call_args.args[0] == [
+            "mumei",
+            "charter",
+            "check",
+            str(source),
+            "--lock",
+            str(lock.resolve()),
+            "--json",
+        ]
+        assert mock_run.call_args.kwargs["cwd"] == tmp_path
+        assert result == {
+            "exit_code": 0,
+            "report": {"status": "pass", "atoms": []},
+            "stdout": '{"status":"pass","atoms":[]}',
+            "stderr": "",
+        }
+
+
+def test_charter_check_accepts_project_root_cwd(tmp_path):
+    client = MumeiClient()
+    lock = tmp_path / "locks" / "charter.lock"
+    project_root = tmp_path / "project"
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(lock), cwd=project_root)
+        assert mock_run.call_args.kwargs["cwd"] == project_root.resolve()
+
+
+def test_charter_check_adds_manifest_for_cargo_run(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    client = MumeiClient("cargo run --")
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(tmp_path / "charter.lock"), cwd=tmp_path)
+        assert mock_run.call_args.args[0] == [
+            "cargo",
+            "run",
+            "--manifest-path",
+            str((tmp_path / "Cargo.toml").resolve()),
+            "--",
+            "charter",
+            "check",
+            "source.mm",
+            "--lock",
+            str((tmp_path / "charter.lock").resolve()),
+            "--json",
+        ]
+
+
+def test_charter_check_preserves_existing_cargo_manifest_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    client = MumeiClient("cargo run --manifest-path /existing/Cargo.toml --")
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(tmp_path / "charter.lock"), cwd=tmp_path)
+        command = mock_run.call_args.args[0]
+        assert command[:5] == [
+            "cargo",
+            "run",
+            "--manifest-path",
+            "/existing/Cargo.toml",
+            "--",
+        ]
+        assert command.count("--manifest-path") == 1
+
+
+def test_charter_check_preserves_inline_cargo_manifest_path(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'\n", encoding="utf-8")
+    client = MumeiClient("cargo run --manifest-path=/existing/Cargo.toml --")
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(tmp_path / "charter.lock"), cwd=tmp_path)
+        command = mock_run.call_args.args[0]
+        assert command[:4] == [
+            "cargo",
+            "run",
+            "--manifest-path=/existing/Cargo.toml",
+            "--",
+        ]
+        assert sum(
+            argument == "--manifest-path" or argument.startswith("--manifest-path=")
+            for argument in command
+        ) == 1
+
+
+def test_charter_check_keeps_plain_binary_prefix_unchanged(tmp_path):
+    client = MumeiClient("mumei")
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(tmp_path / "charter.lock"))
+        assert mock_run.call_args.args[0][:3] == ["mumei", "charter", "check"]
+
+
+def test_charter_check_resolves_relative_binary_against_original_cwd(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    client = MumeiClient("./tools/mumei")
+    with patch("agent.mumei_client.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="{}", stderr="")
+        client.charter_check("source.mm", str(tmp_path / "charter.lock"), cwd=tmp_path)
+        command = mock_run.call_args.args[0]
+        assert command[0] == str((tmp_path / "tools" / "mumei").resolve())
+
+
+def test_mcp_client_forwards_charter_check_to_cli_fallback(tmp_path):
+    fallback = MagicMock()
+    fallback.charter_check.return_value = {
+        "exit_code": 0,
+        "report": {"status": "pass"},
+        "stdout": "{}",
+        "stderr": "",
+    }
+    client = MumeiMCPClient(fallback_client=fallback)
+    result = client.charter_check("source.mm", "charter.lock", cwd=tmp_path)
+    fallback.charter_check.assert_called_once_with(
+        "source.mm", "charter.lock", cwd=tmp_path
+    )
+    assert result["report"]["status"] == "pass"
 
 
 def test_verify_command_with_report_dir():

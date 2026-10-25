@@ -23,6 +23,7 @@ from agent.budget_policy import (
     load_budget_policy,
 )
 from agent.budget_metrics import aggregate_metrics
+from agent.charter_guard import discover_guard_or_exit
 from agent.config import AgentConfig
 from agent.meta_architect import MetaArchitect
 from agent.metrics import Metrics
@@ -139,6 +140,8 @@ def _run_directory_heal(
                 next_argv.extend(["--strategy", args.strategy])
             if args.budget_policy is not None:
                 next_argv.extend(["--budget-policy", args.budget_policy])
+            if getattr(args, "charter_lock", None) is not None:
+                next_argv.extend(["--charter-lock", args.charter_lock])
             if args.proof_cert_out is not None:
                 next_argv.extend(
                     [
@@ -274,6 +277,13 @@ def main() -> None:
             "<dir>/<relative path>.proof.json."
         ),
     )
+    parser.add_argument(
+        "--charter-lock",
+        type=str,
+        default=None,
+        metavar="LOCK_JSON",
+        help="Use this charter lock instead of discovering one from the source tree.",
+    )
     args = parser.parse_args()
 
     if args.generate is not None and args.output is None:
@@ -291,6 +301,16 @@ def main() -> None:
     config = AgentConfig()
     if args.strategy is not None:
         config.strategy = args.strategy
+    lock_arg = (
+        args.charter_lock
+        if args.charter_lock is not None
+        else config.charter_lock_path
+    )
+    charter_guard = discover_guard_or_exit(
+        source_file,
+        lock_arg,
+        enabled=config.enable_charter_guard and args.generate is None,
+    )
     client = config.create_client()
     # Use the factory so ``USE_MCP_CLIENT=true`` transparently routes
     # verification through the mumei MCP server when it's reachable,
@@ -321,6 +341,7 @@ def main() -> None:
             config=config,
             client=client,
             mumei_client=mumei,
+            guard=charter_guard,
         )
         payload = result.to_dict()
         if args.proof_cert_out:
@@ -361,6 +382,23 @@ def main() -> None:
     success = False
     stop_reason: str | None = None
     applied_fixes = 0
+
+    def stop_if_charter_tampered() -> bool:
+        nonlocal stop_reason
+        if charter_guard is None:
+            return False
+        changed_paths = charter_guard.tampered()
+        if not changed_paths:
+            return False
+        shutil.copy2(backup_file, source_file)
+        stop_reason = "charter_tampered"
+        print(
+            "Charter files or lock changed during healing: "
+            + ", ".join(changed_paths)
+        )
+        print(f"Source restored from {backup_file}")
+        return True
+
     outer_history = RetryHistory()
     pattern_lib = PatternLibrary()
     thought = ThoughtProcess(target_file=source_file)
@@ -372,7 +410,37 @@ def main() -> None:
     _loop_span = _loop_span_ctx.__enter__()
     try:
         for attempt in range(max_retries + 1):
+            if stop_if_charter_tampered():
+                break
             result = mumei.verify(source_file)
+            if stop_if_charter_tampered():
+                break
+            if result["success"] and charter_guard is not None:
+                outcome = charter_guard.check(mumei, source_file)
+                try:
+                    thought.add_step(
+                        action="charter_check",
+                        verification_success=outcome.passed,
+                        z3_result={
+                            "status": "pass" if outcome.passed else "fail",
+                            "reason": outcome.summary,
+                        },
+                    )
+                except Exception:
+                    pass
+                if stop_if_charter_tampered():
+                    break
+                if not outcome.passed:
+                    result = dict(result)
+                    result["success"] = False
+                    result["report"] = {
+                        "status": "charter_failed",
+                        "failure_type": "charter_violation",
+                        "reason": outcome.summary,
+                        "charter_report": outcome.report,
+                    }
+                    result["stdout"] = outcome.summary
+                    result["stderr"] = ""
             report = result["report"] or {}
             try:
                 thought.add_step(
@@ -504,6 +572,8 @@ def main() -> None:
                     )
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(meta_fixed_code)
+                    if stop_if_charter_tampered():
+                        break
                     applied_fixes += 1
                     print("Meta-Architect applied interface refactoring. Retrying...")
                     time.sleep(2)
@@ -547,6 +617,8 @@ def main() -> None:
                     )
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(meta_fixed_code)
+                    if stop_if_charter_tampered():
+                        break
                     applied_fixes += 1
                     print("Meta-Architect applied interface refactoring. Retrying...")
                     time.sleep(2)
@@ -582,6 +654,8 @@ def main() -> None:
                         pass
                     with open(source_file, "w", encoding="utf-8") as f:
                         f.write(fixed_code)
+                    if stop_if_charter_tampered():
+                        break
                     applied_fixes += 1
                     print(
                         "CEGIS generated loop invariant "
@@ -647,6 +721,8 @@ def main() -> None:
             # Overwrite source file
             with open(source_file, "w", encoding="utf-8") as f:
                 f.write(fixed_code)
+            if stop_if_charter_tampered():
+                break
             applied_fixes += 1
 
             print("Code updated. Retrying...")

@@ -62,6 +62,12 @@ class AgentConfig:
     strategy: str = field(default_factory=lambda: os.getenv("AGENT_STRATEGY", "single"))
     visualizer_sync: bool = field(default_factory=lambda: _env_bool("ENABLE_VISUALIZER_SYNC"))
     use_mcp_sampling: bool = field(default_factory=lambda: _env_bool("USE_MCP_SAMPLING"))
+    enable_charter_guard: bool = field(
+        default_factory=lambda: _env_bool("ENABLE_CHARTER_GUARD", True)
+    )
+    charter_lock_path: str | None = field(
+        default_factory=lambda: os.getenv("CHARTER_LOCK_PATH") or None
+    )
 
     # Phase 12 — NLAE-inspired features.  Latent debugging and dense
     # property generation are opt-in because they add extra agent work.

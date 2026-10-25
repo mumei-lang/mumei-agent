@@ -385,6 +385,19 @@ class MumeiMCPClient:
             span.set_attribute("mumei.exit_code", 0 if result.get("success") else 1)
             return result
 
+    def charter_check(
+        self,
+        source_path: str,
+        lock_path: str,
+        cwd: str | os.PathLike[str] | None = None,
+    ) -> dict[str, Any]:
+        """Run the charter check through the CLI; no MCP equivalent exists."""
+        with self._tracer.start_as_current_span("mumei.mcp.charter_check") as span:
+            span.set_attribute("mumei.command", "charter-check")
+            span.set_attribute("mumei.source_path", source_path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.charter_check(source_path, lock_path, cwd=cwd)
+
     def infer_effects(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
         with self._tracer.start_as_current_span("mumei.mcp.infer_effects") as span:
