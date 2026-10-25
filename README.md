@@ -92,6 +92,7 @@ Generate verified `.mm` code from a JSON specification with `uv run mumei-agent 
 | `verify-conformance` | Produce a spec-to-code conformance matrix | `uv run mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` |
 | `verify-traceability` | Combine conformance and drift summaries | `uv run mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` |
 | `extract-spec` | Extract a forge specification | `uv run mumei-agent extract-spec --code-file src/foo.py` |
+| `harvest-tests` | Extract examples, relations, property predicates, and expected failures | `uv run mumei-agent harvest-tests tests/ --target add` |
 | `check-spec-health` | Check contradictions, over-constraints, and vacuity | `uv run mumei-agent check-spec-health spec.mm` |
 | `cross-validate` | Cross-validate specs and code | `uv run mumei-agent cross-validate --spec spec.txt --code src/foo.py` |
 | `proliferate` | Analyze gaps, generate, heal, and deliver | `uv run mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
@@ -104,6 +105,18 @@ Pass `--clause-labels` to label existing `requires` clauses from issues whose JS
 
 ```sh
 uv run mumei-agent migrate-suggest --code-file src/divide.py --language python --issues-json '[{"kind":"postcondition_violated","location":"safe_divide","message":"divisor must be nonzero","required_contracts":["b != 0"]}]' --clause-labels
+```
+
+## Test Harvest
+
+`harvest-tests` statically extracts test examples, relations, property-test
+predicates, and expected failures from Python and Rust source. It supports
+Hypothesis `@given` strategies and Rust `proptest!` ranges without importing or
+running tests. See the [CLI guide](docs/CLI_GUIDE.md#test-harvest) for the
+`mumei.test-harvest/v1` observation schema and supported forms.
+
+```bash
+uv run mumei-agent harvest-tests tests/ --target add --output observations.json
 ```
 
 ## MCP Server
