@@ -25,6 +25,7 @@ _SUBCOMMANDS = {
     "check-spec-health",
     "migrate-suggest",
     "cross-validate",
+    "harvest-tests",
 }
 
 
@@ -455,6 +456,12 @@ def main() -> None:
                 print("⚠️  Spec drift detected!")
             if report.is_consistent:
                 print("✅ Spec and implementation are consistent.")
+    elif command == "harvest-tests":
+        from agent.test_harvest import build_parser, main as harvest_main
+
+        parser = build_parser()
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(harvest_main(args))
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
