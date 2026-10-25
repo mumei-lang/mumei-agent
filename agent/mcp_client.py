@@ -429,6 +429,19 @@ class MumeiMCPClient:
             span.set_attribute("mumei.mcp", True)
             return self._fallback.observe_check(path, harvest_path, atom=atom)
 
+    def claims(
+        self,
+        path: str,
+        cert_path: str,
+        out_dir: str | Path,
+    ) -> dict:
+        """Run the Claim Book report through the CLI."""
+        with self._tracer.start_as_current_span("mumei.mcp.claims") as span:
+            span.set_attribute("mumei.command", "claims")
+            span.set_attribute("mumei.source_path", path)
+            span.set_attribute("mumei.mcp", True)
+            return self._fallback.claims(path, cert_path, out_dir)
+
     def infer_effects(self, source_path: str) -> dict[str, Any]:
         """Forward to the CLI client (no MCP equivalent for path-based input)."""
         with self._tracer.start_as_current_span("mumei.mcp.infer_effects") as span:

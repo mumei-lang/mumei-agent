@@ -162,11 +162,16 @@ def _time_verify_candidate(
     spec: dict,
     *,
     enabled: bool = True,
+    verify_dir: str | Path | None = None,
 ) -> tuple[dict, float]:
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".mm", delete=False, encoding="utf-8"
+            mode="w",
+            suffix=".mm",
+            delete=False,
+            encoding="utf-8",
+            dir=verify_dir,
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(code)
@@ -272,6 +277,7 @@ def generate_multi_atom(
     enable_dense_properties: bool | None = None,
     enable_spec_code_mapping: bool | None = None,
     prompt_report_truncate_chars: int | None = None,
+    verify_dir: str | Path | None = None,
 ) -> tuple[str, bool]:
     """Generate a multi-atom Mumei module from a specification.
 
@@ -310,6 +316,7 @@ def generate_multi_atom(
             enable_dense_properties=enable_dense_properties,
             enable_spec_code_mapping=enable_spec_code_mapping,
             prompt_report_truncate_chars=prompt_report_truncate_chars,
+            verify_dir=verify_dir,
         )
 
 
@@ -325,6 +332,7 @@ def _generate_multi_atom_inner(
     enable_dense_properties: bool | None = None,
     enable_spec_code_mapping: bool | None = None,
     prompt_report_truncate_chars: int | None = None,
+    verify_dir: str | Path | None = None,
 ) -> tuple[str, bool]:
     if metrics is None:
         metrics = Metrics()
@@ -424,6 +432,7 @@ def _generate_multi_atom_inner(
             metrics,
             mumei_client=mumei_client,
             enable_spec_code_mapping=bool(enable_spec_code_mapping),
+            verify_dir=verify_dir,
         )
         dense_properties_applied = generated_code != original_code
 
@@ -463,7 +472,11 @@ def _generate_multi_atom_inner(
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".mm", delete=False, encoding="utf-8"
+                mode="w",
+                suffix=".mm",
+                delete=False,
+                encoding="utf-8",
+                dir=verify_dir,
             ) as tmp:
                 tmp_path = tmp.name
                 tmp.write(current_code)
@@ -601,7 +614,11 @@ def _generate_multi_atom_inner(
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".mm", delete=False, encoding="utf-8"
+            mode="w",
+            suffix=".mm",
+            delete=False,
+            encoding="utf-8",
+            dir=verify_dir,
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(current_code)
@@ -727,6 +744,7 @@ def generate_code(
     enable_dense_properties: bool | None = None,
     enable_spec_code_mapping: bool | None = None,
     prompt_report_truncate_chars: int | None = None,
+    verify_dir: str | Path | None = None,
 ) -> tuple[str, bool]:
     """Generate Mumei code from a specification, verify, and fix if needed.
 
@@ -769,6 +787,7 @@ def generate_code(
             enable_dense_properties=enable_dense_properties,
             enable_spec_code_mapping=enable_spec_code_mapping,
             prompt_report_truncate_chars=prompt_report_truncate_chars,
+            verify_dir=verify_dir,
         )
 
     with telemetry.start_loop_span(
@@ -786,6 +805,7 @@ def generate_code(
             enable_dense_properties=enable_dense_properties,
             enable_spec_code_mapping=enable_spec_code_mapping,
             prompt_report_truncate_chars=prompt_report_truncate_chars,
+            verify_dir=verify_dir,
         )
 
 
@@ -801,6 +821,7 @@ def _generate_code_inner(
     enable_dense_properties: bool | None = None,
     enable_spec_code_mapping: bool | None = None,
     prompt_report_truncate_chars: int | None = None,
+    verify_dir: str | Path | None = None,
 ) -> tuple[str, bool]:
     if metrics is None:
         metrics = Metrics()
@@ -896,6 +917,7 @@ def _generate_code_inner(
             metrics,
             mumei_client=mumei_client,
             enable_spec_code_mapping=bool(enable_spec_code_mapping),
+            verify_dir=verify_dir,
         )
         dense_properties_applied = generated_code != original_code
 
@@ -936,7 +958,11 @@ def _generate_code_inner(
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".mm", delete=False, encoding="utf-8"
+                mode="w",
+                suffix=".mm",
+                delete=False,
+                encoding="utf-8",
+                dir=verify_dir,
             ) as tmp:
                 tmp_path = tmp.name
                 tmp.write(current_code)
@@ -1073,7 +1099,11 @@ def _generate_code_inner(
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".mm", delete=False, encoding="utf-8"
+            mode="w",
+            suffix=".mm",
+            delete=False,
+            encoding="utf-8",
+            dir=verify_dir,
         ) as tmp:
             tmp_path = tmp.name
             tmp.write(current_code)
@@ -1170,6 +1200,7 @@ def _try_apply_dense_properties(
     *,
     mumei_client: MumeiClient | None = None,
     enable_spec_code_mapping: bool = True,
+    verify_dir: str | Path | None = None,
 ) -> str:
     """Best-effort dense property generation with safe fallback."""
     if metrics is not None:
@@ -1198,12 +1229,14 @@ def _try_apply_dense_properties(
                 current_code,
                 spec,
                 enabled=enable_spec_code_mapping,
+                verify_dir=verify_dir,
             )
             dense_result, dense_seconds = _time_verify_candidate(
                 mumei_client,
                 updated_code,
                 spec,
                 enabled=enable_spec_code_mapping,
+                verify_dir=verify_dir,
             )
             if metrics is not None:
                 metrics.record_dense_property_verification_time(
