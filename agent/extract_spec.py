@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from agent.config import AgentConfig
 from agent.extract_spec_helpers import (
@@ -26,6 +26,16 @@ from agent.llm_provider import LLMProvider
 from agent.metrics import Metrics
 from agent.mumei_client import create_mumei_client
 from agent.spec_extractor import extract_spec
+from agent.test_harvest import HarvestInputError, harvest_tests
+from agent.test_observations import (
+    ObservationCheckError,
+    align_harvest_to_spec,
+    check_observations,
+    observation_feedback_parts,
+    observation_prompt_context,
+    observation_summary,
+    spec_to_observe_module,
+)
 
 def extract_spec_from_code_directory(
     config: AgentConfig,
@@ -38,6 +48,8 @@ def extract_spec_from_code_directory(
     metrics: Metrics | None = None,
     client: object | None = None,
     llm_provider: LLMProvider | None = None,
+    spec_checker: Callable[[dict], tuple[list[str], list[str]]] | None = None,
+    extra_context: str = "",
 ) -> dict[str, Any]:
     """Extract per-file specs from a source directory and merge them."""
     from agent.code_to_spec import CodeToSpecExtractor
@@ -110,6 +122,8 @@ def extract_spec_from_code_directory(
         mumei_client=mumei_client,
         max_retries=max_retries,
         metrics=metrics,
+        spec_checker=spec_checker,
+        extra_context=extra_context,
     )
     return {"files": files, "merged_spec": merged_spec}
 
@@ -208,6 +222,21 @@ def build_parser(parser=None):
         help="Optional language override for --code-file",
     )
     parser.add_argument(
+        "--from-tests",
+        nargs="+",
+        metavar="PATH",
+        help="Check the extracted spec against harvested Python/Rust tests.",
+    )
+    parser.add_argument(
+        "--from-tests-language",
+        choices=("rust", "python"),
+        help="Language override for --from-tests inputs.",
+    )
+    parser.add_argument(
+        "--observations-output",
+        help="Write the final observation-check report to this JSON file.",
+    )
+    parser.add_argument(
         "--domain",
         choices=[
             "financial",
@@ -303,12 +332,97 @@ def main(args=None):
         )
         sys.exit(1)
 
+    harvest = None
+    from_tests = getattr(args, "from_tests", None)
+    if from_tests:
+        try:
+            harvest = harvest_tests(
+                [Path(path) for path in from_tests],
+                getattr(args, "from_tests_language", None),
+            )
+        except HarvestInputError as exc:
+            print(f"Error: failed to harvest tests: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if not harvest.get("observations"):
+            print("Error: no test observations were harvested.", file=sys.stderr)
+            sys.exit(1)
+
     config = AgentConfig()
     client = config.create_client()
     mumei = create_mumei_client(config.mumei_bin)
     domain_hint = "" if args.domain == "general" else args.domain
     directory_result: dict[str, Any] | None = None
+    observation_state: dict[str, Any] = {
+        "report": None,
+        "last_spec": None,
+    }
+    spec_checker = None
+    extra_context = ""
+    if harvest is not None:
+        extra_context = observation_prompt_context(harvest)
 
+        def spec_checker(spec: dict) -> tuple[list[str], list[str]]:
+            report = check_observations(
+                spec_to_observe_module(spec),
+                align_harvest_to_spec(harvest, spec),
+                mumei,
+            )
+            observation_state["report"] = report
+            observation_state["last_spec"] = spec
+            return observation_feedback_parts(report, spec)
+
+    def check_final_spec_if_needed(spec: dict) -> list[str]:
+        if spec_checker is None:
+            return []
+        blocking, _soft = (
+            spec_checker(spec)
+            if observation_state["last_spec"] != spec
+            else ([], [])
+        )
+        return blocking
+
+    def emit_observation_report() -> None:
+        report = observation_state["report"]
+        if not isinstance(report, dict):
+            return
+        print(observation_summary(report), file=sys.stderr)
+        results = report.get("results", [])
+        counts = report.get("totals", {})
+        if not isinstance(counts, dict):
+            counts = {}
+        result_counts: dict[str, int] = {}
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict):
+                    verdict = item.get("verdict")
+                    result_counts[verdict] = result_counts.get(verdict, 0) + 1
+        outside_requires = counts.get(
+            "outside_requires", result_counts.get("outside_requires", 0)
+        )
+        not_checked = counts.get("not_checked", result_counts.get("not_checked", 0))
+        print(
+            "outside_requires="
+            f"{outside_requires} not_checked={not_checked}",
+            file=sys.stderr,
+        )
+        observations_output = getattr(args, "observations_output", None)
+        if observations_output:
+            try:
+                output_path = Path(observations_output).expanduser()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(
+                    json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                print(
+                    f"Error: cannot write observation report: {exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+    pending_observation_errors: list[str] = []
     try:
         if args.code_file:
             from agent.code_to_spec import CodeToSpecExtractor
@@ -324,6 +438,8 @@ def main(args=None):
                     mumei_client=mumei,
                     max_retries=args.max_retries,
                     metrics=metrics,
+                    spec_checker=spec_checker,
+                    extra_context=extra_context,
                 )
                 for file_result in directory_result["files"]:
                     for warning in file_result["warnings"]:
@@ -340,6 +456,7 @@ def main(args=None):
                     for file_result in directory_result["files"]
                 )
                 forge_spec = directory_result["merged_spec"]
+                pending_observation_errors = check_final_spec_if_needed(forge_spec)
             else:
                 code_result = CodeToSpecExtractor(config).extract_from_file(
                     source_path,
@@ -347,6 +464,8 @@ def main(args=None):
                     domain_hint=domain_hint,
                     mumei_client=mumei,
                     max_retries=args.max_retries,
+                    spec_checker=spec_checker,
+                    extra_context=extra_context,
                 )
                 for warning in code_result.warnings:
                     print(f"Warning: {warning}", file=sys.stderr)
@@ -363,6 +482,7 @@ def main(args=None):
                 )
                 natural_language = code_result.natural_language_spec
                 forge_spec = code_result.forge_task_spec
+                pending_observation_errors = check_final_spec_if_needed(forge_spec)
                 metrics = Metrics()
         else:
             natural_language = _read_text(args)
@@ -375,7 +495,10 @@ def main(args=None):
                 mumei_client=mumei,
                 max_retries=args.max_retries,
                 metrics=metrics,
+                spec_checker=spec_checker,
+                extra_context=extra_context,
             )
+            pending_observation_errors = check_final_spec_if_needed(forge_spec)
             print(
                 f"Extraction metrics: attempts={metrics.extraction_attempts}, "
                 f"successes={metrics.extraction_successes}",
@@ -415,6 +538,11 @@ def main(args=None):
             )
             print(contradiction_report["natural_language_explanation"])
             print(f"Contradiction report written to {args.output}")
+            emit_observation_report()
+            if pending_observation_errors:
+                for error in pending_observation_errors:
+                    print(f"Error: {error}", file=sys.stderr)
+                sys.exit(1)
             return
 
         if args.generate:
@@ -437,10 +565,17 @@ def main(args=None):
                 mumei_client=mumei,
                 metrics=metrics,
             )
+            pending_observation_errors = (
+                spec_checker(spec)[0] if spec_checker is not None else []
+            )
         else:
             code = ""
             verified = False
             spec = forge_spec
+            pending_observation_errors = check_final_spec_if_needed(spec)
+    except ObservationCheckError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -458,6 +593,13 @@ def main(args=None):
     )
     print(f"Extracted spec written to {args.output}")
 
+    if not args.generate:
+        emit_observation_report()
+        if pending_observation_errors:
+            for error in pending_observation_errors:
+                print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
+
     if args.forge:
         # Use the original (unnormalized) forge task spec, which is required
         # to have `atoms`, `task_id`, and `mode` for the forge pipeline.
@@ -469,6 +611,7 @@ def main(args=None):
             print("Error: Generation failed — no code produced.", file=sys.stderr)
             sys.exit(1)
         Path(args.generate_output).write_text(code, encoding="utf-8")
+        emit_observation_report()
         if verified:
             print(f"Generated verified code written to {args.generate_output}")
         else:
@@ -477,4 +620,11 @@ def main(args=None):
                 "but verification failed — output is NOT verified.",
                 file=sys.stderr,
             )
+            if pending_observation_errors:
+                for error in pending_observation_errors:
+                    print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
+        if pending_observation_errors:
+            for error in pending_observation_errors:
+                print(f"Error: {error}", file=sys.stderr)
             sys.exit(1)

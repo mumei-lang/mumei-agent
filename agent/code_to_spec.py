@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, cast
@@ -572,6 +573,8 @@ class CodeToSpecExtractor:
         domain_hint: str = "",
         mumei_client: MumeiClient | None = None,
         max_retries: int = 3,
+        spec_checker: Callable[[dict], tuple[list[str], list[str]]] | None = None,
+        extra_context: str = "",
     ) -> CodeToSpecResult:
         """Extract a natural language spec from source code and build a forge spec."""
         if not self.config.enable_code_to_spec:
@@ -734,6 +737,8 @@ class CodeToSpecExtractor:
                                 domain_hint=final_domain_hint,
                                 mumei_client=mumei_client,
                                 max_retries=max_retries,
+                                spec_checker=spec_checker,
+                                extra_context=extra_context,
                             )
                             if nl
                             else None
@@ -780,6 +785,8 @@ class CodeToSpecExtractor:
                     domain_hint=final_domain_hint,
                     mumei_client=mumei_client,
                     max_retries=max_retries,
+                    spec_checker=spec_checker,
+                    extra_context=extra_context,
                 )
             if forge_task_spec and not deterministic.errors:
                 forge_task_spec = _align_llm_spec_with_source(

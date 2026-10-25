@@ -26,6 +26,7 @@ _SUBCOMMANDS = {
     "migrate-suggest",
     "cross-validate",
     "harvest-tests",
+    "observe-tests",
 }
 
 
@@ -462,6 +463,12 @@ def main() -> None:
         parser = build_parser()
         args = parser.parse_args(argv[1:])
         raise SystemExit(harvest_main(args))
+    elif command == "observe-tests":
+        from agent.observe_tests import build_parser, main as observe_tests_main
+
+        parser = build_parser()
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(observe_tests_main(args))
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
