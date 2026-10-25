@@ -14,7 +14,7 @@ from agent.harness_metrics import HarnessMetrics
 from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 from agent.proliferate_cache import _spec_cache_key
-from agent import proliferate
+from agent import lean_bridge, proliferate
 from agent.strategies import generate_strategy
 
 
@@ -877,20 +877,32 @@ def test_group_rollback_marks_every_member_when_healing_fails(
     )
 
 
-def test_failed_root_publish_marks_dependents_not_published(
+@pytest.mark.parametrize("publish_raises", [False, True])
+def test_failed_root_publish_rolls_back_and_marks_dependents_not_published(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    publish_raises: bool,
 ) -> None:
     specs, results = _group_inputs(tmp_path)
+    root = tmp_path / "std" / "root.mm"
+    root.parent.mkdir(parents=True)
+    root.write_text("original root", encoding="utf-8")
+
     monkeypatch.setattr(
         proliferate,
         "check_blast_radius",
         lambda *args: {"all_passed": True, "broken_files": []},
     )
+
+    def fail_publish(**kwargs):
+        if publish_raises:
+            raise RuntimeError("publish failed")
+        return {"success": False}
+
     monkeypatch.setattr(
         proliferate,
         "publish",
-        lambda **kwargs: {"success": False},
+        fail_publish,
     )
     grouped = proliferate._publish_dependency_group(
         [0, 1],
@@ -908,6 +920,8 @@ def test_failed_root_publish_marks_dependents_not_published(
     )
     assert grouped[0]["success"] is False
     assert grouped[1]["reason"] == "dependency_not_published"
+    assert root.read_text(encoding="utf-8") == "original root"
+    assert not (tmp_path / "std" / "child.mm").exists()
 
 
 def test_dry_run_group_reports_all_members_and_restores_files(
@@ -1046,3 +1060,381 @@ def test_publish_none_extra_files_preserves_single_file_path(
     assert client.verify.call_count == 1
     assert "extra_file_verifications" not in result
     assert ["add", "--", "std/root.mm"] in git_calls
+
+
+def test_root_blast_radius_sees_all_group_members_before_healing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs, results = _group_inputs(tmp_path)
+    child = tmp_path / "std" / "child.mm"
+    child.parent.mkdir(parents=True)
+    child.write_text("old incompatible child", encoding="utf-8")
+    healed: list[str] = []
+
+    def check(_client, _repo, path, _code):
+        if path.name == "root.mm" and child.read_text(encoding="utf-8") != (
+            "code for std/child.mm"
+        ):
+            return {
+                "all_passed": False,
+                "broken_files": [{"file": str(child), "error": "incompatible"}],
+            }
+        return {"all_passed": True, "broken_files": []}
+
+    monkeypatch.setattr(proliferate, "check_blast_radius", check)
+    monkeypatch.setattr(
+        proliferate,
+        "attempt_heal",
+        lambda **kwargs: healed.append(kwargs["broken_info"]["file"]) or False,
+    )
+    publish_mock = MagicMock(return_value={"success": True})
+    monkeypatch.setattr(proliferate, "publish", publish_mock)
+
+    grouped = proliferate._publish_dependency_group(
+        [0, 1],
+        specs=specs,
+        forged_results=results,
+        mumei_repo=tmp_path,
+        proposals_by_target={},
+        config=MagicMock(),
+        effective_mumei_bin="mumei",
+        mumei_client=MagicMock(),
+        harness_metrics=HarnessMetrics(),
+        health_before=None,
+        dry_run=False,
+        enable_lean_fallback=False,
+    )
+
+    assert healed == []
+    publish_mock.assert_called_once()
+    assert grouped[0]["success"] is True
+    assert grouped[1]["success"] is True
+
+
+def test_publish_groups_changed_nodes_through_unchanged_intermediate(
+    tmp_path: Path,
+) -> None:
+    specs = [
+        _spec("std/child.mm", ["std/intermediate.mm"]),
+        _spec("std/intermediate.mm", ["std/root.mm"]),
+        _spec("std/root.mm"),
+    ]
+    (tmp_path / "std").mkdir()
+    (tmp_path / "std" / "intermediate.mm").write_text(
+        "code for std/intermediate.mm",
+        encoding="utf-8",
+    )
+    results = [_forge_result(spec) for spec in specs]
+
+    assert proliferate._dependency_publish_groups(specs, results, tmp_path) == [
+        [2, 0]
+    ]
+    assert results[1]["reason"] == "no_diff"
+
+
+def test_changed_dependents_of_unchanged_root_remain_separate(
+    tmp_path: Path,
+) -> None:
+    specs = [
+        _spec("std/dependent_a.mm", ["std/root.mm"]),
+        _spec("std/dependent_b.mm", ["std/root.mm"]),
+        _spec("std/root.mm"),
+    ]
+    (tmp_path / "std").mkdir()
+    (tmp_path / "std" / "root.mm").write_text(
+        "code for std/root.mm",
+        encoding="utf-8",
+    )
+    results = [_forge_result(spec) for spec in specs]
+
+    assert proliferate._dependency_publish_groups(specs, results, tmp_path) == []
+
+
+def test_parallel_forge_uses_cli_fallback_only_for_dependents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs = [
+        _spec("std/root.mm"),
+        _spec("std/child.mm", ["std/root.mm"]),
+        _spec("std/independent.mm"),
+    ]
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.verify_calls: list[str] = []
+
+        def verify(self, path: str) -> None:
+            self.verify_calls.append(path)
+
+    mcp_client = RecordingClient()
+    fallback_client = RecordingClient()
+    mcp_client._fallback = fallback_client
+
+    def fake_run(*, index: int, spec: dict, mumei_client, **kwargs):
+        target = spec["target_file"]
+        mumei_client.verify(f"generation:{target}")
+        return index, _forge_result(spec), Metrics()
+
+    monkeypatch.setattr(proliferate, "_run_forge_generation", fake_run)
+    monkeypatch.setattr(proliferate, "_collect_g4_lemmas", lambda *args: [])
+
+    proliferate._parallel_forge(
+        specs,
+        config=MagicMock(),
+        mumei_client=mcp_client,
+        harness_metrics=MagicMock(),
+        cache_path=tmp_path / "cache.json",
+        mumei_repo_dir=None,
+        max_workers=3,
+    )
+
+    assert set(mcp_client.verify_calls) == {
+        "generation:std/root.mm",
+        "generation:std/independent.mm",
+    }
+    assert fallback_client.verify_calls == ["generation:std/child.mm"]
+
+
+def test_transitive_dependency_code_changes_dependent_cache_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs = [
+        _spec("std/a.mm"),
+        _spec("std/b.mm", ["std/a.mm"]),
+        _spec("std/c.mm", ["std/b.mm"]),
+    ]
+    dependency_lists: list[list[tuple[str, str]]] = []
+    cache_keys: list[str] = []
+
+    def run_batch(a_code: str) -> None:
+        def fake_run(*, index: int, spec: dict, **kwargs):
+            target = spec["target_file"]
+            code = a_code if target == "std/a.mm" else f"code for {target}"
+            if target == "std/c.mm":
+                dependencies = kwargs["in_batch_dependency_codes"]
+                dependency_lists.append(dependencies)
+                cache_keys.append(
+                    _spec_cache_key(spec, None, in_batch_dependency_codes=dependencies)
+                )
+            return index, {**_forge_result(spec), "code": code}, Metrics()
+
+        monkeypatch.setattr(proliferate, "_run_forge_generation", fake_run)
+        monkeypatch.setattr(proliferate, "_collect_g4_lemmas", lambda *args: [])
+        proliferate._parallel_forge(
+            specs,
+            config=MagicMock(),
+            mumei_client=MagicMock(),
+            harness_metrics=MagicMock(),
+            cache_path=tmp_path / "cache.json",
+            mumei_repo_dir=None,
+            max_workers=1,
+        )
+
+    run_batch("A first")
+    run_batch("A changed")
+
+    assert dependency_lists[0] == [
+        ("std/b.mm", "code for std/b.mm"),
+        ("std/a.mm", "A first"),
+    ]
+    assert dependency_lists[1] == [
+        ("std/b.mm", "code for std/b.mm"),
+        ("std/a.mm", "A changed"),
+    ]
+    assert cache_keys[0] != cache_keys[1]
+
+
+@pytest.mark.parametrize("unsafe_kind", ["absolute", "traversal", "symlink"])
+def test_group_publish_rejects_unsafe_targets_before_writing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_kind: str,
+) -> None:
+    root = tmp_path / "std" / "root.mm"
+    std_dir = root.parent
+    std_dir.mkdir(parents=True)
+    outside_file: Path
+    if unsafe_kind == "absolute":
+        outside_file = tmp_path.parent / "outside-absolute.mm"
+        unsafe_target = str(outside_file)
+    elif unsafe_kind == "traversal":
+        outside_file = tmp_path.parent / "outside-traversal.mm"
+        unsafe_target = "../outside-traversal.mm"
+    else:
+        outside_dir = tmp_path.parent / "outside-symlink"
+        outside_dir.mkdir()
+        link = std_dir / "escaped"
+        try:
+            link.symlink_to(outside_dir, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+        outside_file = outside_dir / "child.mm"
+        unsafe_target = "std/escaped/child.mm"
+    outside_file.write_text("outside sentinel", encoding="utf-8")
+    specs = [
+        _spec("std/root.mm"),
+        _spec(unsafe_target, ["std/root.mm"]),
+    ]
+    results = [_forge_result(spec) for spec in specs]
+    monkeypatch.setattr(
+        proliferate,
+        "check_blast_radius",
+        lambda *args: pytest.fail("unsafe targets must be rejected before checks"),
+    )
+    monkeypatch.setattr(
+        proliferate,
+        "publish",
+        lambda **kwargs: pytest.fail("unsafe targets must not be published"),
+    )
+
+    grouped = proliferate._publish_dependency_group(
+        [0, 1],
+        specs=specs,
+        forged_results=results,
+        mumei_repo=tmp_path,
+        proposals_by_target={},
+        config=MagicMock(),
+        effective_mumei_bin="mumei",
+        mumei_client=MagicMock(),
+        harness_metrics=HarnessMetrics(),
+        health_before=None,
+        dry_run=False,
+        enable_lean_fallback=False,
+    )
+
+    assert all(result["reason"] == "unsafe_target" for result in grouped.values())
+    assert not root.exists()
+    assert outside_file.read_text(encoding="utf-8") == "outside sentinel"
+
+
+def test_group_publish_uses_each_dependent_certificate_for_lean_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs, results = _group_inputs(tmp_path)
+    root_certificate = {
+        "file": "std/root.mm",
+        "atoms": [{"name": "root_unknown", "z3_check_result": "unknown"}],
+    }
+    child_certificate = {
+        "file": "std/child.mm",
+        "atoms": [{"name": "child_unknown", "z3_check_result": "unknown"}],
+    }
+    monkeypatch.setattr(
+        proliferate,
+        "check_blast_radius",
+        lambda *args: {"all_passed": True, "broken_files": []},
+    )
+    monkeypatch.setattr(
+        proliferate,
+        "publish",
+        lambda **kwargs: {
+            "success": True,
+            "proof_certificate": root_certificate,
+            "extra_file_verifications": [
+                {"file": "std/child.mm", "report": child_certificate}
+            ],
+        },
+    )
+
+    grouped = proliferate._publish_dependency_group(
+        [0, 1],
+        specs=specs,
+        forged_results=results,
+        mumei_repo=tmp_path,
+        proposals_by_target={},
+        config=MagicMock(),
+        effective_mumei_bin="mumei",
+        mumei_client=MagicMock(),
+        harness_metrics=HarnessMetrics(),
+        health_before=None,
+        dry_run=False,
+        enable_lean_fallback=True,
+    )
+
+    assert grouped[0]["publish_result"]["proof_certificate"] is root_certificate
+    assert grouped[1]["publish_result"] is not grouped[0]["publish_result"]
+    assert grouped[1]["publish_result"]["proof_certificate"] is child_certificate
+
+    seen_atom_names: list[list[str]] = []
+
+    def run_lean_bridge(**kwargs):
+        certificate = json.loads(Path(kwargs["cert_path"]).read_text(encoding="utf-8"))
+        seen_atom_names.append([atom["name"] for atom in certificate["atoms"]])
+        return {"success": True, "returncode": 0, "lean_cert": None}
+
+    monkeypatch.setattr(lean_bridge, "lean_fallback_available", lambda _repo: True)
+    monkeypatch.setattr(lean_bridge, "run_lean_bridge", run_lean_bridge)
+    proliferate._run_lean_fallback_inner(
+        [grouped[0], grouped[1]],
+        mumei_lean_repo="fake-lean-repo",
+    )
+
+    assert seen_atom_names == [["root_unknown"], ["child_unknown"]]
+    assert grouped[1]["lean_fallback"]["unknown_count"] == 1
+
+
+def test_dependent_publish_result_drops_root_certificate_when_report_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs, results = _group_inputs(tmp_path)
+    root_certificate = {"atoms": [{"name": "root_unknown"}]}
+    monkeypatch.setattr(
+        proliferate,
+        "check_blast_radius",
+        lambda *args: {"all_passed": True, "broken_files": []},
+    )
+    monkeypatch.setattr(
+        proliferate,
+        "publish",
+        lambda **kwargs: {
+            "success": True,
+            "proof_certificate": root_certificate,
+            "certificate": root_certificate,
+            "extra_file_verifications": [
+                {"file": "std/child.mm", "report": None}
+            ],
+        },
+    )
+
+    grouped = proliferate._publish_dependency_group(
+        [0, 1],
+        specs=specs,
+        forged_results=results,
+        mumei_repo=tmp_path,
+        proposals_by_target={},
+        config=MagicMock(),
+        effective_mumei_bin="mumei",
+        mumei_client=MagicMock(),
+        harness_metrics=HarnessMetrics(),
+        health_before=None,
+        dry_run=False,
+        enable_lean_fallback=False,
+    )
+
+    assert grouped[0]["publish_result"]["proof_certificate"] is root_certificate
+    assert "proof_certificate" not in grouped[1]["publish_result"]
+    assert "certificate" not in grouped[1]["publish_result"]
+
+
+def test_health_regression_closes_duplicate_pr_urls_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr_url = "https://github.com/mumei-lang/mumei-agent/pull/627"
+    results = [{"pr_url": pr_url}, {"pr_url": pr_url}]
+    closed: list[tuple[str, float]] = []
+    monkeypatch.setattr(
+        proliferate,
+        "_close_pr_for_regression",
+        lambda url, delta: closed.append((url, delta)) or True,
+    )
+
+    proliferate._close_prs_for_regression(results, -0.25)
+
+    assert closed == [(pr_url, -0.25)]
+    assert all(result["pr_closed"] is True for result in results)
+    assert all(result["should_close_pr"] is True for result in results)

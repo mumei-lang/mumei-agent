@@ -638,6 +638,7 @@ def _parallel_forge(
         waited_on: list[str],
         dependency_codes: list[tuple[str, str]],
         dependency_lemmas: list[dict[str, str]],
+        generation_client: Any,
     ) -> dict[str, Any]:
         with telemetry.use_context(forge_context), telemetry.start_span(
             "mumei.proliferate.forge.candidate",
@@ -650,7 +651,7 @@ def _parallel_forge(
                 index=index,
                 spec=spec,
                 config=config,
-                mumei_client=mumei_client,
+                mumei_client=generation_client,
                 cache_path=path,
                 mumei_repo_dir=mumei_repo_dir,
                 verify_dir=verify_dir,
@@ -669,6 +670,21 @@ def _parallel_forge(
             )
             record_result(result, metrics)
             return result
+
+    def dependency_closure(index: int) -> list[int]:
+        ordered: list[int] = []
+        visited = {index}
+
+        def visit(current: int) -> None:
+            for dependency in dependency_indices[current]:
+                if dependency in visited:
+                    continue
+                visited.add(dependency)
+                ordered.append(dependency)
+                visit(dependency)
+
+        visit(index)
+        return ordered
 
     try:
         for index in sorted(cycle_nodes):
@@ -709,10 +725,10 @@ def _parallel_forge(
                         else:
                             dependency_codes = [
                                 (
-                                    dependency_targets[index][position],
+                                    str(specs[dependency].get("target_file", "")),
                                     str(completed[dependency]["code"]),
                                 )
-                                for position, dependency in enumerate(dependencies)
+                                for dependency in dependency_closure(index)
                             ]
                             with board_lock:
                                 dependency_lemmas = [
@@ -728,6 +744,11 @@ def _parallel_forge(
                                     dependency_targets[index],
                                     dependency_codes,
                                     dependency_lemmas,
+                                    (
+                                        getattr(mumei_client, "_fallback", mumei_client)
+                                        if dependencies
+                                        else mumei_client
+                                    ),
                                 )
                             ] = index
                         made_progress = True
@@ -800,12 +821,32 @@ def _dependency_publish_groups(
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
-    for index, deps in enumerate(dependencies):
-        if not changed[index]:
-            continue
-        for dependency in deps:
+    def reachable_changed_dependencies(index: int) -> set[int]:
+        found: set[int] = set()
+        visited: set[int] = set()
+
+        def visit(dependency: int) -> None:
+            if dependency in visited:
+                return
+            visited.add(dependency)
             if changed[dependency]:
-                union(index, dependency)
+                found.add(dependency)
+                return
+            for ancestor in dependencies[dependency]:
+                visit(ancestor)
+
+        for dependency in dependencies[index]:
+            visit(dependency)
+        return found
+
+    reachable_dependencies = {
+        index: reachable_changed_dependencies(index)
+        for index, has_diff in enumerate(changed)
+        if has_diff
+    }
+    for index, ancestors in reachable_dependencies.items():
+        for dependency in ancestors:
+            union(index, dependency)
 
     components: dict[int, list[int]] = {}
     for index, has_diff in enumerate(changed):
@@ -816,13 +857,14 @@ def _dependency_publish_groups(
     for members in components.values():
         if len(members) < 2:
             continue
+        member_set = set(members)
         remaining = set(members)
         ordered: list[int] = []
         while remaining:
             ready = sorted(
                 index
                 for index in remaining
-                if not (set(dependencies[index]) & remaining)
+                if not (reachable_dependencies[index] & member_set & remaining)
             )
             if not ready:
                 ready = [min(remaining)]
@@ -908,15 +950,30 @@ def _publish_dependency_group(
             output[index] = result
         return output
 
+    target_paths: dict[int, Path] = {}
+    for index, target in zip(group, group_targets):
+        candidate = _safe_relative_file(mumei_repo, target)
+        if candidate is None:
+            return finish_failure("unsafe_target")
+        target_paths[index] = candidate
+
     for index in group:
-        spec = specs[index]
-        target = group_targets[group.index(index)]
+        target = str(specs[index].get("target_file", "unknown.mm"))
         code = str(forged_results[index]["code"])
-        candidate = mumei_repo / target
+        candidate = target_paths[index]
         snapshot(candidate)
         try:
             candidate.parent.mkdir(parents=True, exist_ok=True)
             candidate.write_text(code, encoding="utf-8")
+        except Exception:
+            logger.exception("Could not place grouped target %s", target)
+            return finish_failure("blast_radius_heal_failed")
+
+    for index in group:
+        target = str(specs[index].get("target_file", "unknown.mm"))
+        code = str(forged_results[index]["code"])
+        candidate = target_paths[index]
+        try:
             blast = check_blast_radius(mumei_client, mumei_repo, candidate, code)
         except Exception:
             logger.exception("Blast-radius check failed for grouped target %s", target)
@@ -1053,15 +1110,34 @@ def _publish_dependency_group(
         if tmp_spec_path is not None:
             Path(tmp_spec_path).unlink(missing_ok=True)
 
+    if not pub_result.get("success"):
+        rollback()
+
     members[root_index]["publish_result"] = pub_result
     members[root_index]["success"] = bool(pub_result.get("success"))
     if pub_result.get("pr_url"):
         members[root_index]["pr_url"] = pub_result["pr_url"]
+    extra_verifications = pub_result.get("extra_file_verifications")
+    extra_reports = (
+        {
+            verification.get("file"): verification.get("report")
+            for verification in extra_verifications
+            if isinstance(verification, dict)
+        }
+        if isinstance(extra_verifications, list)
+        else {}
+    )
     for index, result in members.items():
         if index == root_index:
             continue
         result["published_with"] = root_target
-        result["publish_result"] = pub_result
+        dependent_publish_result = dict(pub_result)
+        dependent_publish_result.pop("proof_certificate", None)
+        dependent_publish_result.pop("certificate", None)
+        report = extra_reports.get(str(specs[index].get("target_file", "")))
+        if isinstance(report, dict):
+            dependent_publish_result["proof_certificate"] = report
+        result["publish_result"] = dependent_publish_result
         result["success"] = bool(pub_result.get("success"))
         if not result["success"]:
             result["reason"] = "dependency_not_published"
@@ -1122,6 +1198,22 @@ def _close_pr_for_regression(pr_url: str, health_delta: float) -> bool:
         return False
     logger.info("auto-close: closed %s due to health regression", pr_url)
     return True
+
+
+def _close_prs_for_regression(
+    results: list[dict[str, Any]],
+    health_delta: float,
+) -> None:
+    closed: dict[str, bool] = {}
+    for result in results:
+        result["should_close_pr"] = True
+        result["health_delta"] = health_delta
+        pr_url = result.get("pr_url")
+        if not pr_url:
+            continue
+        if pr_url not in closed:
+            closed[pr_url] = _close_pr_for_regression(pr_url, health_delta)
+        result["pr_closed"] = closed[pr_url]
 
 
 def _run_lean_fallback(
@@ -1988,15 +2080,7 @@ def _proliferate_inner(
                 # best-effort close already-published PRs via the
                 # GitHub API.
                 if not dry_run:
-                    for r in results:
-                        r["should_close_pr"] = True
-                        r["health_delta"] = health_delta
-                        pr_url = r.get("pr_url")
-                        if pr_url:
-                            close_ok = _close_pr_for_regression(
-                                pr_url, health_delta
-                            )
-                            r["pr_closed"] = bool(close_ok)
+                    _close_prs_for_regression(results, health_delta)
         except Exception:
             logger.debug("Could not measure final health", exc_info=True)
 
