@@ -235,7 +235,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     if not generated_code:
         print("Error: Generation failed — no code produced.", file=sys.stderr)
         if args.metrics:
-            print(metrics.to_json())
+            print(json.dumps(metrics.to_dict(), sort_keys=True))
         sys.exit(1)
 
     # Write output
@@ -252,7 +252,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         )
 
     if args.metrics:
-        print(metrics.to_json())
+        print(json.dumps(metrics.to_dict(), sort_keys=True))
 
     if not verified:
         sys.exit(1)
@@ -260,9 +260,9 @@ def main(args: argparse.Namespace | None = None) -> None:
     controls_outcome = None
     if config.controls_gate != "off":
         atom_names = (
-            [atom["name"] for atom in spec["atoms"]]
+            [atom.get("name") for atom in spec["atoms"]]
             if spec.get("atoms")
-            else [spec["name"]]
+            else [spec.get("name")]
         )
         controls_outcome = ControlsGate(config.controls_gate).check(
             mumei,
@@ -276,7 +276,10 @@ def main(args: argparse.Namespace | None = None) -> None:
             "atoms": controls_outcome.atoms,
         }
         if args.metrics:
-            print(f"Controls outcome: {json.dumps(controls_payload, sort_keys=True)}")
+            print(
+                f"Controls outcome: {json.dumps(controls_payload, sort_keys=True)}",
+                file=sys.stderr,
+            )
         if not controls_outcome.passed:
             print(controls_outcome.summary, file=sys.stderr)
             sys.exit(1)

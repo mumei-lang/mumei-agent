@@ -277,11 +277,13 @@ class MumeiForge:
             str(target_path),
             collect_decidable_metrics=True,
         )
-        logic_fragment_tags, metrics_quarter_key = self._record_decidable_fragment_metrics(
-            verify_result,
-            first_pass_verified=bool(verify_result.get("success", False)),
-        )
         if not verify_result["success"]:
+            logic_fragment_tags, metrics_quarter_key = (
+                self._record_decidable_fragment_metrics(
+                    verify_result,
+                    first_pass_verified=False,
+                )
+            )
             _logger.warning(
                 "Post-write verification failed for %s: %s",
                 target_path, verify_result.get("stderr", "")[:200],
@@ -307,16 +309,6 @@ class MumeiForge:
             )
 
         atoms_added = [a.get("name", "") for a in atoms if a.get("name")]
-        self.harness_metrics.record_result(
-            "forge_post_write_verify",
-            True,
-            retry_class="none",
-            attempts=attempts,
-            tokens_to_success=generation_metrics.llm_tokens_used,
-            solver_seconds_to_success=sum(
-                generation_metrics.verification_times_seconds
-            ),
-        )
 
         controls_mode = getattr(self.config, "controls_gate", "warn")
         if not isinstance(controls_mode, str):
@@ -326,7 +318,7 @@ class MumeiForge:
             outcome = ControlsGate(controls_mode).check(
                 self.mumei,
                 str(target_path),
-                atoms_added,
+                [atom.get("name") for atom in atoms],
             )
             controls_result = {
                 "mode": controls_mode,
@@ -335,6 +327,12 @@ class MumeiForge:
                 "atoms": outcome.atoms,
             }
             if not outcome.passed:
+                logic_fragment_tags, metrics_quarter_key = (
+                    self._record_decidable_fragment_metrics(
+                        verify_result,
+                        first_pass_verified=False,
+                    )
+                )
                 _restore_target()
                 self.harness_metrics.record_result(
                     "forge_controls_gate",
@@ -359,11 +357,31 @@ class MumeiForge:
                     metrics_quarter=metrics_quarter_key,
                     error=(
                         outcome.summary
-                        if outcome.summary.startswith("weak specification:")
+                        if outcome.summary.startswith((
+                            "weak specification:",
+                            "controls cannot check unnamed atom(s)",
+                        ))
                         else f"weak specification: {outcome.summary}"
                     ),
                     controls=controls_result,
                 )
+
+        logic_fragment_tags, metrics_quarter_key = (
+            self._record_decidable_fragment_metrics(
+                verify_result,
+                first_pass_verified=True,
+            )
+        )
+        self.harness_metrics.record_result(
+            "forge_post_write_verify",
+            True,
+            retry_class="none",
+            attempts=attempts,
+            tokens_to_success=generation_metrics.llm_tokens_used,
+            solver_seconds_to_success=sum(
+                generation_metrics.verification_times_seconds
+            ),
+        )
 
         commit_sha: str | None = None
         if bool(task.get("auto_commit", False)):

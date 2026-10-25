@@ -35,22 +35,48 @@ class ControlsGate:
         self,
         mumei_client: Any,
         path: str,
-        atom_names: Iterable[str],
+        atom_names: Iterable[str | None],
     ) -> ControlsOutcome:
-        names = list(dict.fromkeys(name for name in atom_names if name))
+        raw_names = list(atom_names)
+        has_unnamed = any(
+            not isinstance(name, str) or not name.strip()
+            for name in raw_names
+        )
+        names = list(
+            dict.fromkeys(
+                name for name in raw_names
+                if isinstance(name, str) and name.strip()
+            )
+        )
         if not names:
+            summary = "controls cannot check unnamed atom(s)"
+            if self.mode == "warn":
+                print(f"WARNING: {summary}", file=sys.stderr)
             return ControlsOutcome(
-                passed=True,
+                passed=self.mode != "require",
                 skipped=True,
-                summary="controls skipped: no generated atom names",
+                summary=summary,
+                atoms={},
+            )
+        if has_unnamed and self.mode == "require":
+            return ControlsOutcome(
+                passed=False,
+                skipped=True,
+                summary="controls cannot check unnamed atom(s)",
                 atoms={},
             )
 
         atoms: dict[str, dict[str, Any]] = {}
         malformed: list[str] = []
         unavailable: list[str] = []
+        controls_unavailable = False
 
         for name in names:
+            if controls_unavailable:
+                unavailable.append(
+                    f"{name}: not checked after controls became unavailable"
+                )
+                continue
             try:
                 result = mumei_client.controls_check(path, atom=name)
             except Exception as exc:
@@ -73,6 +99,7 @@ class ControlsGate:
                 and "unrecognized subcommand" in stderr_text.lower()
             ):
                 unavailable.append(f"{name}: {stderr_text}")
+                controls_unavailable = True
                 continue
 
             report = result.get("report")
@@ -153,6 +180,8 @@ class ControlsGate:
         }
         unavailable = list(dict.fromkeys(unavailable))
         messages: list[str] = []
+        if has_unnamed:
+            messages.append("controls cannot check unnamed atom(s)")
         if weak_atoms:
             failures = []
             for name, atom in weak_atoms.items():
@@ -176,7 +205,7 @@ class ControlsGate:
 
         return ControlsOutcome(
             passed=self.mode == "warn" or not messages,
-            skipped=bool(unavailable),
+            skipped=has_unnamed or bool(unavailable),
             summary=summary,
             atoms=atoms,
         )

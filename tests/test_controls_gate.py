@@ -115,12 +115,32 @@ class TestControlsGate:
             "stderr": "unrecognized subcommand 'controls'",
         }
 
-        outcome = ControlsGate("warn").check(client, "file.mm", ["a", "b"])
+        outcome = ControlsGate("warn").check(
+            client, "file.mm", ["a", "b", "c"]
+        )
 
         assert outcome.passed is True
         assert outcome.skipped is True
-        assert client.controls_check.call_count == 2
+        assert client.controls_check.call_count == 1
+        assert "b: not checked" in outcome.summary
+        assert "c: not checked" in outcome.summary
         assert capsys.readouterr().err.count("WARNING:") == 1
+
+    @pytest.mark.parametrize(
+        ("mode", "passed"),
+        [("warn", True), ("require", False)],
+    )
+    def test_empty_atom_names_are_unchecked(self, mode, passed, capsys) -> None:
+        client = MagicMock()
+
+        outcome = ControlsGate(mode).check(client, "file.mm", [])
+
+        assert outcome.passed is passed
+        assert outcome.skipped is True
+        assert outcome.summary == "controls cannot check unnamed atom(s)"
+        client.controls_check.assert_not_called()
+        if mode == "warn":
+            assert "controls cannot check unnamed atom(s)" in capsys.readouterr().err
 
     def test_unavailable_fails_require(self) -> None:
         client = MagicMock()
@@ -347,6 +367,101 @@ class TestForgeControlsGate:
             for call in forge.harness_metrics.record_result.call_args_list
         )
 
+    def test_require_unnamed_atom_fails_closed(self, tmp_path) -> None:
+        forge, mumei = _make_forge(tmp_path, "require")
+        task = _deterministic_task("create")
+        task["atoms"][0].pop("name")
+
+        def generate_module(_task, path, _mode, _max_retries, *, metrics=None):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("generated output", encoding="utf-8")
+            return "generated output", 1
+
+        forge._forge_module = generate_module
+        forge._commit_change = MagicMock()
+        forge.harness_metrics.record_result = MagicMock()
+        target = forge.mumei_repo_dir / "std/generated.mm"
+
+        result = forge.forge_one(task)
+
+        assert result.status == "failed"
+        assert result.error == "controls cannot check unnamed atom(s)"
+        assert result.controls["summary"] == result.error
+        assert not target.exists()
+        mumei.controls_check.assert_not_called()
+        forge._commit_change.assert_not_called()
+        assert any(
+            call.args[0] == "forge_controls_gate"
+            and call.kwargs["retry_class"] == "weak_spec"
+            for call in forge.harness_metrics.record_result.call_args_list
+        )
+
+    def test_require_weak_records_no_decidable_success(self, tmp_path) -> None:
+        results = []
+        for name, verify_success in (
+            ("weak", True),
+            ("verify-failure", False),
+        ):
+            case_dir = tmp_path / name
+            case_dir.mkdir()
+            forge, mumei = _make_forge(case_dir, "require")
+            forge.metrics_path = case_dir / "p8_decidable_metrics.json"
+            forge.harness_metrics.record_result = MagicMock()
+            mumei.verify.return_value = {
+                "success": verify_success,
+                "report": {
+                    "decidable_fragment": {
+                        "warning_counts": {"nonlinear_arithmetic": 1},
+                    },
+                },
+                "stdout": "",
+                "stderr": "",
+            }
+            mumei.controls_check.return_value = _client_result(
+                "f",
+                "weak",
+                tested=1,
+                survived=1,
+                surviving_ids=["constant:1->0@2"],
+            )
+
+            result = forge.forge_one(_deterministic_task("create"))
+            results.append(
+                (
+                    json.loads(forge.metrics_path.read_text(encoding="utf-8")),
+                    forge.harness_metrics.record_result.call_args_list,
+                    result,
+                )
+            )
+
+        weak_metrics, weak_harness_calls, weak_result = results[0]
+        failed_metrics, _failed_harness_calls, failed_result = results[1]
+        assert weak_result.status == failed_result.status == "failed"
+        assert (
+            weak_metrics["new_spec_attempts"]
+            == failed_metrics["new_spec_attempts"]
+            == 1
+        )
+        assert (
+            weak_metrics["first_pass_verification_attempts"]
+            == failed_metrics["first_pass_verification_attempts"]
+            == 1
+        )
+        assert (
+            weak_metrics["first_pass_verification_successes"]
+            == failed_metrics["first_pass_verification_successes"]
+            == 0
+        )
+        assert (
+            weak_metrics["by_logic_fragment"]["nonlinear_arithmetic"]["successes"]
+            == failed_metrics["by_logic_fragment"]["nonlinear_arithmetic"]["successes"]
+            == 0
+        )
+        assert not any(
+            call.args[:2] == ("forge_post_write_verify", True)
+            for call in weak_harness_calls
+        )
+
     def test_require_inconclusive_fails(self, tmp_path) -> None:
         forge, mumei = _make_forge(tmp_path, "require")
         mumei.controls_check.return_value = _client_result(
@@ -529,6 +644,59 @@ class TestGenerateControlsGate:
         assert exc.value.code == 1
         assert output.exists()
         mumei.controls_check.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            {
+                "name": "",
+                "params": [{"name": "x", "type": "i64"}],
+                "requires": "x >= 0",
+                "ensures": "result >= 0",
+            },
+            {
+                "module_name": "module",
+                "atoms": [
+                    {
+                        "name": "",
+                        "params": [{"name": "x", "type": "i64"}],
+                        "requires": "x >= 0",
+                        "ensures": "result >= 0",
+                    },
+                ],
+            },
+        ],
+        ids=["single-atom", "multi-atom"],
+    )
+    def test_unnamed_spec_atom_fails_closed(
+        self, tmp_path, monkeypatch, capsys, spec
+    ) -> None:
+        output, mumei, args = self._run(
+            tmp_path, monkeypatch, mode="require"
+        )
+        args.spec = json.dumps(spec)
+
+        with pytest.raises(SystemExit) as exc:
+            generate.main(args)
+
+        assert exc.value.code == 1
+        assert output.exists()
+        assert "controls cannot check unnamed atom(s)" in capsys.readouterr().err
+        mumei.controls_check.assert_not_called()
+
+    def test_metrics_json_is_last_stdout_line(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        _output, _mumei, args = self._run(
+            tmp_path, monkeypatch, mode="warn"
+        )
+        args.metrics = True
+
+        generate.main(args)
+
+        captured = capsys.readouterr()
+        assert isinstance(json.loads(captured.out.strip().splitlines()[-1]), dict)
+        assert "Controls outcome:" in captured.err
 
     def test_generate_cli_flag_overrides_environment(
         self, tmp_path, monkeypatch
