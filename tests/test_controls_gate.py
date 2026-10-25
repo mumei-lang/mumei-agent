@@ -14,6 +14,7 @@ from agent import generate
 from agent.config import AgentConfig
 from agent.controls_gate import ControlsGate
 from agent.forge import ForgeResult, MumeiForge
+from agent.metrics import Metrics
 from agent.mumei_client import MumeiClient
 
 
@@ -684,18 +685,31 @@ class TestGenerateControlsGate:
         assert "controls cannot check unnamed atom(s)" in capsys.readouterr().err
         mumei.controls_check.assert_not_called()
 
-    def test_metrics_json_is_last_stdout_line(
+    def test_metrics_json_output_is_preserved_and_controls_stay_on_stderr(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
         _output, _mumei, args = self._run(
             tmp_path, monkeypatch, mode="warn"
         )
         args.metrics = True
+        metrics_json = []
+        original_to_json = Metrics.to_json
+
+        def record_metrics_json(metrics):
+            result = original_to_json(metrics)
+            metrics_json.append(result)
+            return result
+
+        monkeypatch.setattr(Metrics, "to_json", record_metrics_json)
 
         generate.main(args)
 
         captured = capsys.readouterr()
-        assert isinstance(json.loads(captured.out.strip().splitlines()[-1]), dict)
+        assert metrics_json
+        suffix = metrics_json[-1] + "\n"
+        assert captured.out.endswith(suffix)
+        assert json.loads(captured.out[-len(suffix):-1]) == json.loads(metrics_json[-1])
+        assert "Controls outcome:" not in captured.out
         assert "Controls outcome:" in captured.err
 
     def test_generate_cli_flag_overrides_environment(

@@ -235,7 +235,7 @@ def main(args: argparse.Namespace | None = None) -> None:
     if not generated_code:
         print("Error: Generation failed — no code produced.", file=sys.stderr)
         if args.metrics:
-            print(json.dumps(metrics.to_dict(), sort_keys=True))
+            print(metrics.to_json())
         sys.exit(1)
 
     # Write output
@@ -252,7 +252,7 @@ def main(args: argparse.Namespace | None = None) -> None:
         )
 
     if args.metrics:
-        print(json.dumps(metrics.to_dict(), sort_keys=True))
+        print(metrics.to_json())
 
     if not verified:
         sys.exit(1)
