@@ -790,6 +790,31 @@ def test_python_imported_targets_are_selected_without_definitions(
     assert [item["args"] for item in report["observations"]] == [[1, 2], [4]]
 
 
+def test_python_imported_callable_targets_are_selected_in_raises_forms(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_imported_raises.py",
+        "from service import explode\n"
+        "def test_imported_raises():\n"
+        "    pytest.raises(ValueError, explode, 1)\n"
+        "    self.assertRaises(ValueError, explode, 2)\n",
+    )
+
+    report = _report(source)
+
+    assert report["targets"]["explode"] == {
+        "params": None,
+        "file": None,
+        "line": None,
+    }
+    assert [item["kind"] for item in report["observations"]] == [
+        "rejects",
+        "rejects",
+    ]
+    assert [item["args"] for item in report["observations"]] == [[1], [2]]
+
+
 def test_rust_imported_and_qualified_targets_are_selected(
     tmp_path: Path,
 ) -> None:
@@ -858,6 +883,30 @@ def test_python_unittest_assertion_messages_are_ignored(
     assert report["skipped"] == []
 
 
+@pytest.mark.parametrize(
+    "assertion",
+    [
+        "self.assertEqual(f(1), 1, 'msg')",
+        "self.assertEqual(f(1), 1, msg='msg')",
+    ],
+)
+def test_python_one_argument_assert_equal_messages_are_ignored(
+    tmp_path: Path, assertion: str
+) -> None:
+    source = _write(
+        tmp_path / "test_assert_equal_message.py",
+        "def f(value):\n    return value\n"
+        "class TestF:\n"
+        "    def test_f(self):\n"
+        f"        {assertion}\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"][0]["args"] == {"value": 1}
+    assert report["observations"][0]["result"] == 1
+
+
 def test_python_assert_statement_message_is_ignored(tmp_path: Path) -> None:
     report = _report(_python_file(tmp_path, "assert add(2, 3) == 5, 'message'"))
 
@@ -915,7 +964,7 @@ def test_rust_nested_helper_scopes_are_not_harvested(tmp_path: Path) -> None:
         tmp_path,
         "fn helper() { assert_eq!(add(2, 3), 5); }\n"
         "let mut left = 1;\n"
-        "let closure = || { left = 2; assert_eq!(add(4, 5), 9); };\n"
+        "let closure = || { assert_eq!(add(4, 5), 9); };\n"
         "assert_eq!(add(left, 2), 3);",
     )
 
@@ -923,6 +972,48 @@ def test_rust_nested_helper_scopes_are_not_harvested(tmp_path: Path) -> None:
 
     assert len(report["observations"]) == 1
     assert report["observations"][0]["args"] == {"left": 1, "right": 2}
+
+
+@pytest.mark.parametrize("write", ["value = 2", "value += 1"])
+def test_python_nested_nonlocal_writes_invalidate_literal_bindings(
+    tmp_path: Path, write: str
+) -> None:
+    source = _write(
+        tmp_path / "test_nested_write.py",
+        "def identity(value):\n    return value\n"
+        "def test_nested_write():\n"
+        "    value = 1\n"
+        "    def helper():\n"
+        "        nonlocal value\n"
+        f"        {write}\n"
+        "    assert identity(value) == 1\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "non_literal_argument"
+
+
+@pytest.mark.parametrize("write", ["value = 2", "value += 1"])
+def test_rust_nested_closure_writes_invalidate_literal_bindings(
+    tmp_path: Path, write: str
+) -> None:
+    source = _write(
+        tmp_path / "test_nested_write.rs",
+        "fn identity(value: i64) -> i64 { value }\n"
+        "#[test]\n"
+        "fn test_nested_write() {\n"
+        "    let mut value = 1;\n"
+        f"    let closure = || {{ {write}; }};\n"
+        "    assert_eq!(identity(value), 1);\n"
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"] == []
+    assert report["skipped"][0]["reason"] == "non_literal_argument"
 
 
 @pytest.mark.parametrize(
@@ -972,6 +1063,21 @@ def test_rust_should_panic_accepts_ignored_call_after_literal_bindings(
     assert report["observations"][0]["args"] == {"left": 1, "right": 2}
 
 
+def test_rust_should_panic_accepts_tail_call_expression(tmp_path: Path) -> None:
+    source = _write(
+        tmp_path / "test_tail_reject.rs",
+        "fn fail(value: i64) { panic!(\"failure\"); }\n"
+        "#[test]\n"
+        "#[should_panic]\n"
+        "fn test_fail() { fail(1) }\n",
+    )
+
+    report = _report(source)
+
+    assert report["observations"][0]["kind"] == "rejects"
+    assert report["observations"][0]["args"] == {"value": 1}
+
+
 def test_rust_assert_macros_ignore_trailing_format_arguments(
     tmp_path: Path,
 ) -> None:
@@ -993,6 +1099,31 @@ def test_rust_assert_macros_ignore_trailing_format_arguments(
         {"left": 2, "right": 3},
         {"left": 2, "right": 3},
         {"left": 2, "right": 3},
+    ]
+
+
+def test_rust_single_argument_assertions_ignore_format_messages(
+    tmp_path: Path,
+) -> None:
+    source = _write(
+        tmp_path / "test_single_argument_messages.rs",
+        "fn f(value: i64) -> i64 { value }\n"
+        "#[test]\n"
+        "fn test_messages() {\n"
+        '    assert_eq!(f(1), 1, "msg {}", f(2));\n'
+        '    assert!(f(1) > 0, "msg");\n'
+        "}\n",
+    )
+
+    report = _report(source)
+
+    assert [item["kind"] for item in report["observations"]] == [
+        "example",
+        "relation",
+    ]
+    assert [item["args"] for item in report["observations"]] == [
+        {"value": 1},
+        {"value": 1},
     ]
 
 

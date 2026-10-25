@@ -284,17 +284,31 @@ def _python_imported_call_names(
                 for alias in node.names
             )
     names: set[str] = set()
+
+    def imported_name(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Name) and node.id in imported_names:
+            return node.id
+        if (
+            isinstance(node, ast.Attribute)
+            and _python_root_name(node) in module_names
+        ):
+            return node.attr
+        return None
+
     for test in tests:
         for node in _python_scope_nodes(test.node):
             if not isinstance(node, ast.Call):
                 continue
-            if isinstance(node.func, ast.Name) and node.func.id in imported_names:
-                names.add(node.func.id)
-            elif (
-                isinstance(node.func, ast.Attribute)
-                and _python_root_name(node.func) in module_names
+            name = imported_name(node.func)
+            if name is not None:
+                names.add(name)
+            if (
+                _python_name(node.func) in {"assertRaises", "raises"}
+                and len(node.args) >= 2
             ):
-                names.add(node.func.attr)
+                callable_name = imported_name(node.args[1])
+                if callable_name is not None:
+                    names.add(callable_name)
     return names
 
 
@@ -1177,11 +1191,39 @@ def _emit_assertion(
 
 
 def _python_store_counts(test_node: ast.AST) -> Counter[str]:
-    return Counter(
+    store_counts = Counter(
         node.id
         for node in _python_scope_nodes(test_node)
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
     )
+    scope_types = (
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+        ast.Lambda,
+    )
+
+    def nested_scopes(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, scope_types):
+                scope_nodes = tuple(_python_scope_nodes(child))
+                nonlocal_names = {
+                    name
+                    for scope_node in scope_nodes
+                    if isinstance(scope_node, ast.Nonlocal)
+                    for name in scope_node.names
+                }
+                store_counts.update(
+                    name_node.id
+                    for name_node in scope_nodes
+                    if isinstance(name_node, ast.Name)
+                    and isinstance(name_node.ctx, ast.Store)
+                    and name_node.id in nonlocal_names
+                )
+            nested_scopes(child)
+
+    nested_scopes(test_node)
+    return store_counts
 
 
 def _python_bindings(
@@ -1550,7 +1592,7 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
     counts: Counter[str] = Counter()
     if body is None:
         return counts
-    for node in _rust_scope_nodes(body):
+    for node in _walk(body):
         if node.type == "let_declaration":
             name = _rust_identifier(node.child_by_field_name("pattern"), source_bytes)
             if name:
@@ -1662,8 +1704,12 @@ def _process_rust_rejects(
                 invalid_shape = True
                 break
             continue
-        if statement.type == "expression_statement":
-            expressions = statement.named_children
+        if statement.type in {"call_expression", "expression_statement"}:
+            expressions = (
+                [statement]
+                if statement.type == "call_expression"
+                else statement.named_children
+            )
             if (
                 target_call is not None
                 or len(expressions) != 1
