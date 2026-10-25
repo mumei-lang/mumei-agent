@@ -300,3 +300,106 @@ def test_load_context_files_skips_unreadable_file(
         "Failed to read context_file std/unreadable.mm: permission denied"
         in caplog.text
     )
+
+
+def test_load_context_files_skips_non_utf8_file(
+    tmp_path: Path, caplog: Any
+) -> None:
+    repo_dir = tmp_path / "mumei"
+    std_dir = repo_dir / "std"
+    std_dir.mkdir(parents=True)
+    (std_dir / "latin1.mm").write_bytes(b"// caf\xe9\natom a() body: 0;\n")
+    (std_dir / "readable.mm").write_text(
+        "// readable_context_marker\n", encoding="utf-8"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="agent.context_files"):
+        context = load_context_files(
+            ["std/latin1.mm", "std/readable.mm"], repo_dir
+        )
+
+    assert "readable_context_marker" in context
+    assert "std/latin1.mm" not in context
+    assert "Failed to read context_file std/latin1.mm" in caplog.text
+
+
+def test_non_utf8_dependency_does_not_abort_generation(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "mumei"
+    core_path = repo_dir / "std" / "core.mm"
+    core_path.parent.mkdir(parents=True)
+    core_path.write_bytes(b"// caf\xe9\n")
+    spec = _proposal_spec(["std/core.mm"])
+    llm_client, requests = _recording_client(_response_for_spec(spec))
+
+    result = _run_generation(
+        spec=spec,
+        repo_dir=repo_dir,
+        cache_path=tmp_path / "cache.json",
+        llm_client=llm_client,
+    )
+
+    assert result["verified"] is True
+    assert len(requests) == 1
+
+
+def test_retry_prompt_keeps_dependency_context(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "mumei"
+    core_path = repo_dir / "std" / "core.mm"
+    core_path.parent.mkdir(parents=True)
+    core_path.write_text("// RETRY_CONTEXT_SENTINEL\n", encoding="utf-8")
+    spec = _proposal_spec(["std/core.mm"])
+    llm_client, requests = _recording_client(_response_for_spec(spec))
+    mumei_client = MagicMock(spec=MumeiClient)
+    failure = {
+        "success": False,
+        "report": {"status": "failed", "atom": spec["atoms"][0]["name"]},
+        "stdout": "",
+        "stderr": "Verification failed: postcondition",
+    }
+    success = {"success": True, "report": {"status": "ok"}, "stdout": "", "stderr": ""}
+    mumei_client.verify.side_effect = [failure, success, success, success]
+    mumei_client.check.return_value = {"success": True, "stdout": "", "stderr": ""}
+    config = SimpleNamespace(
+        create_client=lambda: llm_client,
+        model="fake-model",
+        max_retries=1,
+        enable_self_correction=False,
+    )
+
+    _index, result, _metrics = _run_forge_generation(
+        index=1,
+        spec=spec,
+        config=config,  # type: ignore[arg-type]
+        mumei_client=mumei_client,
+        cache_path=tmp_path / "cache.json",
+        mumei_repo_dir=repo_dir,
+    )
+
+    assert len(requests) >= 2, result
+    for messages in requests:
+        assert "RETRY_CONTEXT_SENTINEL" in messages[-1]["content"]
+
+
+def test_fix_prompts_append_cross_file_context() -> None:
+    from agent.prompts import generate_atom
+    from agent.strategies.generate_strategy import (
+        _attempt_fix,
+        _attempt_multi_atom_fix,
+    )
+
+    context = "# Cross-file context — FIX_PROMPT_SENTINEL"
+    for with_context in (True, False):
+        spec: dict[str, Any] = {"atoms": [{"name": "probe"}]}
+        kwargs = {"cross_file_context": context} if with_context else {}
+        client, requests = _recording_client("```mumei\natom probe() body: 0;\n```")
+        _attempt_fix(
+            client, "m", "{}", "code", "err", {}, generate_atom, MagicMock(),
+            spec=spec, enable_spec_code_mapping=False, **kwargs,
+        )
+        _attempt_multi_atom_fix(
+            client, "m", "{}", "code", "err", {}, ["probe"], MagicMock(),
+            spec=spec, enable_spec_code_mapping=False, **kwargs,
+        )
+        assert len(requests) == 2
+        for messages in requests:
+            assert (context in messages[-1]["content"]) is with_context
