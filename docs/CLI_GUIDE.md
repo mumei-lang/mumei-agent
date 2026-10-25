@@ -176,7 +176,7 @@ See `.env.example` for configuration details.
 | `verify-conformance` | Produce the V1-C spec→code conformance matrix and next_steps-first report | `uv run mumei-agent verify-conformance --spec spec.txt --code src/foo.py --language python --format human` (python\|rust\|typescript\|go) |
 | `verify-traceability` | Combine V1-C conformance and V1-D drift into one bidirectional traceability summary | `uv run mumei-agent verify-traceability --code src/foo.py --spec spec.txt --language python --format human` (python\|rust\|typescript\|go) |
 | `extract-spec` | Extract forge spec from existing code or natural-language input | `uv run mumei-agent extract-spec --code-file src/foo.py` |
-| `harvest-tests` | Deterministically extract example, relation, and expected-failure observations from Python and Rust tests | `uv run mumei-agent harvest-tests tests/ --target add` |
+| `harvest-tests` | Deterministically extract example, relation, property, and expected-failure observations from Python and Rust tests | `uv run mumei-agent harvest-tests tests/ --target add` |
 | `check-spec-health` | Check a Mumei spec for contradictions, over-constraints, and vacuity | `uv run mumei-agent check-spec-health spec.mm` |
 | `cross-validate` | Cross-validate spec↔code consistency across multiple files | `uv run mumei-agent cross-validate --spec spec.txt --code src/foo.py` |
 | `proliferate` | Autonomous weekly loop: analyze gaps → spec → generate → blast-radius check → heal → PR | `uv run mumei-agent proliferate --mumei-repo ../mumei --max-proposals 3` |
@@ -194,9 +194,25 @@ uv run python -m agent harvest-tests tests/python/
 uv run python -m agent harvest-tests tests/rust/ --language rust --target add --output observations.json
 ```
 
-The report uses schema `mumei.test-harvest/v1`. `sources` and every file path are relative to the common input root. `targets` maps target names to per-language metadata, for example `{"f": {"python": {"params": ["x"], "file": "lib.py", "line": 1}, "rust": {"params": ["value"], "file": "lib.rs", "line": 1}}}`. Each language entry uses `params`, `file`, and `line`; unresolved targets set all three to `null`. If a name has multiple definitions in one language, that language's entry is `{"params": null, "ambiguous": true, "definitions": [...]}`; each definition has `params`, `file`, and `line`, sorted by file and line. Calls use a same-file definition when available, otherwise a unique definition in the calling language across the inputs; ambiguous or unresolved calls keep positional `args`. Each observation contains `kind` (`example`, `relation`, or `rejects`), `target`, literal `args`, `test`, `file`, and `line`; examples add `result`, relations add a Mumei-syntax `predicate`, and rejects add `expected: "failure"`. Unsupported assertions appear in `skipped` with a reason and source text. Partial parse failures are reported as `parse_error` skips; if every source fails to parse, the CLI exits 4 without emitting a report. The totals count test functions and observations by kind. `totals.skipped` counts skip entries: one per assertion, except `test_not_run`, which is one per test; `parse_error` entries are per source file.
+The report uses schema `mumei.test-harvest/v1`. `sources` and every file path are relative to the common input root. `targets` maps target names to per-language metadata, for example `{"f": {"python": {"params": ["x"], "file": "lib.py", "line": 1}, "rust": {"params": ["value"], "file": "lib.rs", "line": 1}}}`. Each language entry uses `params`, `file`, and `line`; unresolved targets set all three to `null`. If a name has multiple definitions in one language, that language's entry is `{"params": null, "ambiguous": true, "definitions": [...]}`; each definition has `params`, `file`, and `line`, sorted by file and line. Calls use a same-file definition when available, otherwise a unique definition in the calling language across the inputs; ambiguous or unresolved calls keep positional `args`. Each observation contains `kind` (`example`, `relation`, `property`, or `rejects`), `target`, `args`, `test`, `file`, and `line`; examples add `result`, relations add a Mumei-syntax `predicate`, rejects add `expected: "failure"`, and properties add declared `variables`, rendered `assumptions`, and a `predicate`. A property argument is either a literal or `{"var": "name"}`; property variable bounds are inclusive and omitted when unbounded. Unsupported assertions appear in `skipped` with a reason and source text. Partial parse failures are reported as `parse_error` skips; if every source fails to parse, the CLI exits 4 without emitting a report. The totals count test functions and observations by kind. `totals.skipped` counts skip entries: one per assertion or unsupported property test, except `test_not_run`, which is one per test; `parse_error` entries are per source file.
 
-Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and `*`. Division and modulo expressions are skipped as unsupported because their language-specific integer semantics do not reliably match Mumei's. Only direct test-body assertions are harvested (Python also recurses through ordinary `with` blocks); conditional assertions are skipped as `conditional_assertion`. Assertions after top-level Python `return`/`raise`, a return inside an ordinary `with`, recognized Python test/process termination calls, or Rust `return`, panic, or process exit are skipped as `unreachable_assertion`. A raise inside an ordinary Python `with` and a Rust `?` make later assertions conditional. Tests not known to run because of Python skip/xfail decorators or Rust `#[ignore]` produce one `test_not_run` skip. Literal boolean conditions on `skipif`, `skipIf`, and `skipUnless` are evaluated; non-literal conditions are treated as not known to run. `test_not_run` means the test is not known to run. Integer literals must fit signed i64. Other skip reasons include `no_target_call`, `multiple_target_calls`, `non_literal_argument`, `unsupported_expression`, `parse_error`, and `ambiguous_rejects`. Exit code 4 is returned when no source parses, with no report emitted.
+Property observations are extracted statically from Python Hypothesis `@given` tests and Rust `proptest!` cases. Python supports integer and boolean strategies from `hypothesis.strategies`; Rust supports integer ranges and `any::<i64>()` / `any::<bool>()`. Top-level assumptions before the first assertion are recorded. Unsupported strategies, assumptions, or expressions are skipped rather than executed; the harvest command never imports or runs test code.
+
+```json
+{
+  "kind": "property",
+  "target": "f",
+  "args": {"a": {"var": "x"}, "b": 3},
+  "test": "test_f_nonnegative",
+  "file": "tests/test_f.py",
+  "line": 12,
+  "variables": [{"name": "x", "type": "i64", "min": 0, "max": 100}],
+  "assumptions": ["(x != 5)"],
+  "predicate": "(result >= x)"
+}
+```
+
+Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and `*`. Division and modulo expressions are skipped as unsupported because their language-specific integer semantics do not reliably match Mumei's. Only direct test-body assertions are harvested (Python also recurses through ordinary `with` blocks); conditional assertions are skipped as `conditional_assertion`. In property tests, only top-level assumptions before the first assertion are accepted, and tests that rebind or shadow a generator variable are skipped as `generator_variable_rebound`. Assertions after top-level Python `return`/`raise`, a return inside an ordinary `with`, recognized Python test/process termination calls, or Rust `return`, panic, or process exit are skipped as `unreachable_assertion`. A raise inside an ordinary Python `with` and a Rust `?` make later assertions conditional. Tests not known to run because of Python skip/xfail decorators or Rust `#[ignore]` produce one `test_not_run` skip. Literal boolean conditions on `skipif`, `skipIf`, and `skipUnless` are evaluated; non-literal conditions are treated as not known to run. `test_not_run` means the test is not known to run. Integer literals must fit signed i64. Other skip reasons include `no_target_call`, `multiple_target_calls`, `non_literal_argument`, `unsupported_expression`, `unsupported_strategy`, `unsupported_assumption`, `generator_variable_rebound`, `parse_error`, and `ambiguous_rejects`. Exit code 4 is returned when no source parses, with no report emitted.
 
 ```json
 {
@@ -225,7 +241,7 @@ Predicates support comparisons, boolean operators, and arithmetic `+`, `-`, and 
   "skipped": [],
   "totals": {
     "tests": 1,
-    "observations": {"example": 1, "relation": 0, "rejects": 0},
+    "observations": {"example": 1, "relation": 0, "rejects": 0, "property": 0},
     "skipped": 0
   }
 }

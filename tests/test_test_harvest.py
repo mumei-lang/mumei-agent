@@ -613,6 +613,7 @@ def test_cli_success_zero_observations_and_output_file(
         "example": 0,
         "relation": 0,
         "rejects": 0,
+        "property": 0,
     }
 
     output = tmp_path / "nested" / "observations.json"

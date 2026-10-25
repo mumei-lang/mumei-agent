@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 
@@ -14,7 +15,7 @@ from agent import tree_sitter_extract
 
 
 _EXTENSIONS = {".py": "python", ".rs": "rust"}
-_OBSERVATION_KINDS = ("example", "relation", "rejects")
+_OBSERVATION_KINDS = ("example", "relation", "rejects", "property")
 _MIN_I64 = -(2**63)
 _MAX_I64 = 2**63 - 1
 _BINARY_OPERATORS = {
@@ -92,6 +93,12 @@ class _Test:
     python_imported_names: frozenset[str] = frozenset()
     python_module_aliases: tuple[tuple[str, str], ...] = ()
     python_name_aliases: tuple[tuple[str, str], ...] = ()
+    property_test: bool = False
+    property_variables: tuple[dict[str, Any], ...] = ()
+    property_assumptions: tuple[str, ...] = ()
+    property_skip_reason: str | None = None
+    property_skip_line: int | None = None
+    property_skip_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -325,6 +332,17 @@ def _python_resolved_name(
     return ""
 
 
+def _python_is_hypothesis_call(node: ast.expr, test: _Test) -> bool:
+    if not test.property_test:
+        return False
+    resolved = _python_resolved_name(
+        node,
+        dict(test.python_module_aliases),
+        dict(test.python_name_aliases),
+    )
+    return resolved.startswith("hypothesis.")
+
+
 def _python_statement_terminates(statement: ast.stmt, test: _Test) -> bool:
     if not isinstance(statement, ast.Expr) or not isinstance(
         statement.value, ast.Call
@@ -549,16 +567,21 @@ def _python_call_names(tests: Iterable[_Test]) -> set[str]:
     names: set[str] = set()
     for test in tests:
         for node in _python_scope_nodes(test.node):
-            if isinstance(node, ast.Call):
-                name = _python_target_name(node.func, test.python_imports)
-                if name:
-                    names.add(name)
-                if _python_name(node.func) in {"assertRaises", "raises"} and len(node.args) >= 2:
-                    callable_name = _python_target_name(
-                        node.args[1], test.python_imports
-                    )
-                    if callable_name:
-                        names.add(callable_name)
+            if not isinstance(node, ast.Call) or _python_is_hypothesis_call(
+                node.func, test
+            ):
+                continue
+            name = _python_target_name(node.func, test.python_imports)
+            if name:
+                names.add(name)
+            if _python_name(node.func) in {"assertRaises", "raises"} and len(
+                node.args
+            ) >= 2:
+                callable_name = _python_target_name(
+                    node.args[1], test.python_imports
+                )
+                if callable_name:
+                    names.add(callable_name)
     return names
 
 
@@ -575,7 +598,9 @@ def _python_imported_call_names(
     names: set[str] = set()
     for test in tests:
         for node in _python_scope_nodes(test.node):
-            if not isinstance(node, ast.Call):
+            if not isinstance(node, ast.Call) or _python_is_hypothesis_call(
+                node.func, test
+            ):
                 continue
             name = _python_target_name(node.func, test.python_imports)
             if name and (
@@ -583,10 +608,9 @@ def _python_imported_call_names(
                 or name in test.python_imported_names
             ):
                 names.add(name)
-            if (
-                _python_name(node.func) in {"assertRaises", "raises"}
-                and len(node.args) >= 2
-            ):
+            if _python_name(node.func) in {"assertRaises", "raises"} and len(
+                node.args
+            ) >= 2:
                 callable_name = _python_target_name(
                     node.args[1], test.python_imports
                 )
@@ -647,6 +671,246 @@ def _rust_source_error(root: Any, source: str, file: str) -> dict[str, Any] | No
         "reason": "parse_error",
         "text": text,
     }
+
+
+def _rust_char_literal_end(text: str, start: int) -> int | None:
+    index = start + 1
+    if index >= len(text):
+        return None
+    if text[index] == "\\":
+        index += 1
+        if index >= len(text):
+            return None
+        if text[index] == "u" and index + 1 < len(text) and text[index + 1] == "{":
+            end = text.find("}", index + 2)
+            if end < 0:
+                return None
+            index = end + 1
+        elif text[index] == "x":
+            index += 3
+        else:
+            index += 1
+    else:
+        if text[index] in {"'", "\n", "\r"}:
+            return None
+        index += 1
+    return index if index < len(text) and text[index] == "'" else None
+
+
+def _rust_matching_delimiter(text: str, start: int) -> int | None:
+    opening = text[start]
+    closing = {"(": ")", "{": "}", "[": "]"}.get(opening)
+    if closing is None:
+        return None
+    stack = [closing]
+    quote: str | None = None
+    escaped = False
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char == "'" and _rust_char_literal_end(text, index) is not None:
+            quote = "'"
+        elif char == '"':
+            quote = char
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = len(text) if end < 0 else end + 1
+        elif char in "({[":
+            stack.append({"(": ")", "{": "}", "[": "]"}[char])
+        elif char in ")}]":
+            if not stack or char != stack.pop():
+                return None
+            if not stack:
+                return index
+        index += 1
+    return None
+
+
+def _split_rust_top_level(text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    index = 0
+    while index < len(text):
+        if text[index] in "({[":
+            closing = _rust_matching_delimiter(text, index)
+            if closing is None:
+                return [text]
+            index = closing
+        elif text[index] == ",":
+            parts.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    if text[start:].strip():
+        parts.append(text[start:].strip())
+    return parts
+
+
+def _rust_proptest_strategy(
+    text: str, name: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    strategy = text.strip()
+    any_match = re.fullmatch(
+        r"(?:[A-Za-z_]\w*::)*any\s*::\s*<\s*(i64|bool)\s*>\s*\(\s*\)",
+        strategy,
+    )
+    if any_match:
+        return {"name": name, "type": any_match.group(1)}, None
+    range_match = re.fullmatch(
+        r"(-?\d[\d_]*(?:i64)?)\s*(\.\.=|\.\.)\s*"
+        r"(-?\d[\d_]*(?:i64)?)",
+        strategy,
+    )
+    if not range_match:
+        return None, "unsupported_strategy"
+    try:
+        lower = _rust_integer(range_match.group(1))
+        upper = _rust_integer(range_match.group(3))
+    except ValueError:
+        return None, "unsupported_strategy"
+    inclusive = range_match.group(2) == "..="
+    if lower < _MIN_I64 or lower > _MAX_I64 or upper < _MIN_I64 or upper > _MAX_I64:
+        return None, "unsupported_strategy"
+    if (inclusive and lower > upper) or (not inclusive and lower >= upper):
+        return None, "unsupported_strategy"
+    maximum = upper if inclusive else upper - 1
+    return {"name": name, "type": "i64", "min": lower, "max": maximum}, None
+
+
+def _rust_proptest_tests(
+    root: Any, source_bytes: bytes, file: str
+) -> list[_Test]:
+    tests: list[_Test] = []
+    for macro in _walk(root):
+        if macro.type != "macro_invocation" or _rust_macro_name(macro, source_bytes) != "proptest":
+            continue
+        token_tree = next(
+            (child for child in macro.children if child.type == "token_tree"), None
+        )
+        if token_tree is None:
+            continue
+        raw = source_bytes[token_tree.start_byte:token_tree.end_byte].decode(
+            "utf-8", "replace"
+        )
+        inner = raw[1:-1] if raw.startswith("{") and raw.endswith("}") else raw
+        for test_attr in re.finditer(r"#\s*\[\s*test\s*\]", inner):
+            function = re.search(
+                r"\bfn\s+([A-Za-z_]\w*)\s*\(", inner[test_attr.end():]
+            )
+            if function is None:
+                continue
+            name = function.group(1)
+            function_offset = test_attr.end() + function.start()
+
+            def record_parse_error(text: str) -> None:
+                line = (
+                    macro.start_point.row
+                    + 1
+                    + inner[:function_offset].count("\n")
+                )
+                tests.append(
+                    _Test(
+                        name,
+                        file,
+                        "rust",
+                        source_bytes.decode("utf-8", "replace"),
+                        macro,
+                        property_test=True,
+                        property_skip_reason="parse_error",
+                        property_skip_line=line,
+                        property_skip_text=text,
+                    )
+                )
+
+            open_paren = test_attr.end() + function.end() - 1
+            close_paren = _rust_matching_delimiter(inner, open_paren)
+            if close_paren is None:
+                record_parse_error(inner[test_attr.start():])
+                continue
+            body_open = inner.find("{", close_paren + 1)
+            body_close = _rust_matching_delimiter(inner, body_open) if body_open >= 0 else None
+            if body_close is None:
+                record_parse_error(inner[test_attr.start():])
+                continue
+            attr_boundary = max(inner.rfind("}", 0, test_attr.start()), 0)
+            test_attributes = inner[attr_boundary:body_open]
+            should_panic = bool(re.search(r"#\s*\[\s*should_panic\b", test_attributes))
+            not_run = bool(re.search(r"#\s*\[\s*ignore\b", test_attributes))
+            parameter_text = inner[open_paren + 1:close_paren]
+            variables: list[dict[str, Any]] = []
+            skip_reason: str | None = None
+            generated_params: list[str] = []
+            for parameter in _split_rust_top_level(parameter_text):
+                match = re.fullmatch(
+                    r"\s*(mut\s+)?([A-Za-z_]\w*)\s+in\s+(.+?)\s*",
+                    parameter,
+                    re.DOTALL,
+                )
+                if match is None:
+                    skip_reason = "unsupported_strategy"
+                    continue
+                mutable, variable, strategy = match.groups()
+                parsed, reason = _rust_proptest_strategy(strategy, variable)
+                if mutable:
+                    skip_reason = "generator_variable_rebound"
+                if parsed is None:
+                    if skip_reason != "generator_variable_rebound":
+                        skip_reason = reason
+                    variables.append({"name": variable, "type": "i64"})
+                elif mutable:
+                    variables.append(parsed)
+                else:
+                    variables.append(parsed)
+                generated_type = "bool" if parsed and parsed["type"] == "bool" else "i64"
+                generated_params.append(f"{variable}: {generated_type}")
+            if not variables:
+                skip_reason = skip_reason or "unsupported_strategy"
+            replacement = "(" + ", ".join(generated_params) + "\n" * parameter_text.count("\n") + ")"
+            header = inner[test_attr.start():body_open + 1]
+            local_open = open_paren - test_attr.start()
+            local_close = close_paren - test_attr.start()
+            generated = header[:local_open] + replacement + header[local_close + 1:]
+            generated += inner[body_open + 1:body_close + 1]
+            padding = macro.start_point.row + inner[:test_attr.start()].count("\n")
+            synthetic = "\n" * padding + generated
+            tree, generated_bytes = tree_sitter_extract.parse(synthetic, "rust")
+            if tree is None or generated_bytes is None or tree.root_node.has_error:
+                record_parse_error(inner[test_attr.start():body_close + 1])
+                continue
+            fn_node = next(
+                (
+                    node for node in _rust_function_nodes(tree.root_node)
+                    if _rust_identifier(node.child_by_field_name("name"), generated_bytes) == name
+                ),
+                None,
+            )
+            if fn_node is None:
+                record_parse_error(inner[test_attr.start():body_close + 1])
+                continue
+            tests.append(
+                _Test(
+                    name,
+                    file,
+                    "rust",
+                    synthetic,
+                    fn_node,
+                    should_panic=should_panic,
+                    not_run=not_run,
+                    property_test=True,
+                    property_variables=tuple(variables),
+                    property_skip_reason=skip_reason,
+                )
+            )
+    return tests
 
 
 def _rust_macro_path(node: Any, source_bytes: bytes) -> str:
@@ -851,6 +1115,7 @@ def _rust_source_info(
                 language="rust",
             )
         )
+    tests.extend(_rust_proptest_tests(tree.root_node, source_bytes, file))
     definitions = {
         name: sorted(values, key=lambda item: (item.file or "", item.line or 0))
         for name, values in definitions.items()
@@ -1164,7 +1429,11 @@ def _rust_call_names(
                 qualified_names.add(call.value[0])
 
     for test in tests:
-        source_bytes = source_bytes_by_file[test.file]
+        source_bytes = (
+            test.source.encode("utf-8")
+            if test.property_test
+            else source_bytes_by_file[test.file]
+        )
         for node in _rust_scope_nodes(test.node):
             if node.type == "call_expression":
                 try:
@@ -1176,10 +1445,13 @@ def _rust_call_names(
                 if _rust_standard_path(macro_path):
                     continue
                 macro_name = _rust_macro_name(node, source_bytes)
-                if macro_name not in {"assert", "assert_eq", "assert_ne"}:
+                if macro_name not in {
+                    "assert", "assert_eq", "assert_ne",
+                    "prop_assert", "prop_assert_eq", "prop_assert_ne",
+                }:
                     continue
                 try:
-                    limit = 1 if macro_name == "assert" else 2
+                    limit = 1 if macro_name in {"assert", "prop_assert"} else 2
                     for expression in _rust_macro_arguments(
                         node, source_bytes, limit
                     ):
@@ -1279,6 +1551,7 @@ def _render_expression(
     expression: _Expr,
     target_names: set[str],
     bindings: dict[str, int | bool],
+    variable_names: set[str] | None = None,
 ) -> str:
     if expression.kind == "literal":
         if isinstance(expression.value, bool):
@@ -1290,8 +1563,11 @@ def _render_expression(
     if expression.kind == "name":
         if expression.value in bindings:
             return _render_expression(
-                _Expr("literal", bindings[expression.value]), target_names, bindings
+                _Expr("literal", bindings[expression.value]), target_names, bindings,
+                variable_names,
             )
+        if variable_names is not None and expression.value in variable_names:
+            return expression.value
         raise _ExpressionError("unbound name")
     if expression.kind == "call":
         name, has_keywords = expression.value[:2]
@@ -1299,7 +1575,9 @@ def _render_expression(
             raise _ExpressionError("unsupported call")
         return "result"
     if expression.kind == "unary" and expression.value == "+":
-        return _render_expression(expression.children[0], target_names, bindings)
+        return _render_expression(
+            expression.children[0], target_names, bindings, variable_names
+        )
     if expression.kind == "unary" and expression.value in {"-", "!", "not"}:
         operand_expression = expression.children[0]
         if (
@@ -1310,7 +1588,9 @@ def _render_expression(
             and operand_expression.value == _MAX_I64 + 1
         ):
             return str(_MIN_I64)
-        operand = _render_expression(expression.children[0], target_names, bindings)
+        operand = _render_expression(
+            expression.children[0], target_names, bindings, variable_names
+        )
         operator = "!" if expression.value == "not" else expression.value
         return f"({operator}{operand})"
     if expression.kind == "binary" and expression.value in {
@@ -1318,13 +1598,13 @@ def _render_expression(
         "-",
         "*",
     }:
-        left = _render_expression(expression.children[0], target_names, bindings)
-        right = _render_expression(expression.children[1], target_names, bindings)
+        left = _render_expression(expression.children[0], target_names, bindings, variable_names)
+        right = _render_expression(expression.children[1], target_names, bindings, variable_names)
         return f"({left} {expression.value} {right})"
     if expression.kind == "boolean" and expression.value in {"and", "or", "&&", "||"}:
         operator = {"and": "&&", "or": "||"}.get(expression.value, expression.value)
         parts = [
-            _render_expression(child, target_names, bindings)
+            _render_expression(child, target_names, bindings, variable_names)
             for child in expression.children
         ]
         return f"({f' {operator} '.join(parts)})"
@@ -1337,10 +1617,10 @@ def _render_expression(
             if operator not in {"==", "!=", "<", "<=", ">", ">="}:
                 raise _ExpressionError("unsupported comparison")
             left = _render_expression(
-                expression.children[index], target_names, bindings
+                expression.children[index], target_names, bindings, variable_names
             )
             right = _render_expression(
-                expression.children[index + 1], target_names, bindings
+                expression.children[index + 1], target_names, bindings, variable_names
             )
             comparisons.append(f"({left} {operator} {right})")
         return (
@@ -1534,11 +1814,36 @@ def _emit_assertion(
 
 
 def _python_store_counts(test_node: ast.AST) -> Counter[str]:
-    store_counts = Counter(
-        node.id
-        for node in _python_scope_nodes(test_node)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
-    )
+    store_counts: Counter[str] = Counter()
+    for node in _python_scope_write_nodes(test_node):
+        if isinstance(node, ast.Name) and isinstance(
+            node.ctx, (ast.Store, ast.Del)
+        ):
+            store_counts[node.id] += 1
+        elif isinstance(node, ast.Import):
+            store_counts.update(
+                alias.asname or alias.name.split(".", 1)[0]
+                for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            store_counts.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name != "*"
+            )
+        elif (
+            node is not test_node
+            and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            )
+        ):
+            store_counts[node.name] += 1
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            store_counts[node.name] += 1
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            store_counts[node.name] += 1
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            store_counts[node.rest] += 1
     scope_types = (
         ast.FunctionDef,
         ast.AsyncFunctionDef,
@@ -1871,6 +2176,211 @@ def _python_statement_nodes(
     return active
 
 
+def _python_given_decorator(test: _Test) -> ast.Call | None:
+    modules = dict(test.python_module_aliases)
+    names = dict(test.python_name_aliases)
+    for decorator in test.node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        name = _python_decorator_name(decorator, modules, names)
+        if name in {"given", "hypothesis.given"}:
+            return decorator
+    return None
+
+
+def _python_int_literal(node: ast.expr) -> int | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        value = _python_int_literal(node.operand)
+        return -value if value is not None else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.UAdd):
+        return _python_int_literal(node.operand)
+    return None
+
+
+def _python_property_variables(
+    test: _Test, given: ast.Call
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    params = [
+        arg.arg for arg in (*test.node.args.posonlyargs, *test.node.args.args)
+    ]
+    if params and params[0] in {"self", "cls"}:
+        params = params[1:]
+    variables: list[dict[str, Any]] = []
+    bound_names: set[str] = set()
+    strategies = [(None, arg) for arg in given.args] + [
+        (keyword.arg, keyword.value) for keyword in given.keywords
+    ]
+    positional_index = 0
+    modules = dict(test.python_module_aliases)
+    names = dict(test.python_name_aliases)
+    for parameter, strategy in strategies:
+        if parameter is None:
+            if positional_index >= len(params):
+                return None, "unsupported_strategy"
+            parameter = params[positional_index]
+            positional_index += 1
+        if parameter is None or parameter in bound_names:
+            return None, "unsupported_strategy"
+        bound_names.add(parameter)
+        if not isinstance(strategy, ast.Call):
+            return None, "unsupported_strategy"
+        strategy_name = _python_resolved_name(strategy.func, modules, names)
+        if strategy_name in {"hypothesis.strategies.integers", "strategies.integers"}:
+            if len(strategy.args) > 2 or any(keyword.arg not in {"min_value", "max_value"} for keyword in strategy.keywords):
+                return None, "unsupported_strategy"
+            if len({keyword.arg for keyword in strategy.keywords}) != len(strategy.keywords):
+                return None, "unsupported_strategy"
+            bound_nodes: list[ast.expr | None] = [None, None]
+            for index, arg in enumerate(strategy.args):
+                bound_nodes[index] = arg
+            for keyword in strategy.keywords:
+                index = 0 if keyword.arg == "min_value" else 1
+                if bound_nodes[index] is not None:
+                    return None, "unsupported_strategy"
+                bound_nodes[index] = keyword.value
+            lower = _python_int_literal(bound_nodes[0]) if bound_nodes[0] is not None else None
+            upper = _python_int_literal(bound_nodes[1]) if bound_nodes[1] is not None else None
+            if (bound_nodes[0] is not None and lower is None) or (bound_nodes[1] is not None and upper is None):
+                return None, "unsupported_strategy"
+            if any(
+                value is not None and not _MIN_I64 <= value <= _MAX_I64
+                for value in (lower, upper)
+            ) or (lower is not None and upper is not None and lower > upper):
+                return None, "unsupported_strategy"
+            variable = {"name": parameter, "type": "i64"}
+            if lower is not None:
+                variable["min"] = lower
+            if upper is not None:
+                variable["max"] = upper
+        elif strategy_name in {"hypothesis.strategies.booleans", "strategies.booleans"} and not strategy.args and not strategy.keywords:
+            variable = {"name": parameter, "type": "bool"}
+        else:
+            return None, "unsupported_strategy"
+        variables.append(variable)
+    return variables, None
+
+
+def _python_property_args(
+    call: _Expr,
+    variables: set[str],
+    definitions: dict[str, list[_Definition]],
+    test: _Test,
+) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
+    name, has_keywords = call.value[:2]
+    if has_keywords:
+        return None, "non_literal_argument"
+    values: list[Any] = []
+    for argument in call.children:
+        if argument.kind == "name" and argument.value in variables:
+            values.append({"var": argument.value})
+            continue
+        try:
+            values.append(_literal_value(argument, {}))
+        except _OutOfRangeLiteralError:
+            return None, "unsupported_expression"
+        except _ExpressionError:
+            return None, "non_literal_argument"
+    definition = _resolve_definition(name, test.file, test.language, definitions)
+    if definition is None or definition.params is None:
+        return values, None
+    params = definition.params
+    if definition.receiver and params[:1] in {("self",), ("cls",)}:
+        params = params[1:]
+    if len(values) > len(params):
+        return None, "non_literal_argument"
+    return dict(zip(params, values)), None
+
+
+def _python_property_expression(
+    node: ast.expr,
+    *,
+    test: _Test,
+    variables: set[str],
+    target_names: set[str],
+    definitions: dict[str, list[_Definition]],
+    observations: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+    variable_records: list[dict[str, Any]],
+    assumptions: list[str],
+) -> None:
+    _python_property_expression_from_expr(
+        _python_expr(node, test.python_imports),
+        test=test,
+        line=node.lineno,
+        text=_python_source_segment(test.source, node),
+        variables=variables,
+        target_names=target_names,
+        definitions=definitions,
+        observations=observations,
+        skipped=skipped,
+        variable_records=variable_records,
+        assumptions=assumptions,
+    )
+
+
+def _python_property_expression_from_expr(
+    expression: _Expr,
+    *,
+    test: _Test,
+    line: int,
+    text: str,
+    variables: set[str],
+    target_names: set[str],
+    definitions: dict[str, list[_Definition]],
+    observations: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+    variable_records: list[dict[str, Any]],
+    assumptions: list[str],
+) -> None:
+    calls = _target_calls(expression, target_names)
+    if not calls:
+        _skip(skipped, test=test, file=test.file, line=line, reason="no_target_call", text=text)
+        return
+    if len(calls) != 1:
+        _skip(skipped, test=test, file=test.file, line=line, reason="multiple_target_calls", text=text)
+        return
+    call = calls[0]
+    if "result" in variables:
+        _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=text)
+        return
+    args, reason = _python_property_args(call, variables, definitions, test)
+    if reason is not None or args is None:
+        _skip(skipped, test=test, file=test.file, line=line, reason=reason or "non_literal_argument", text=text)
+        return
+    names = {
+        item.value for item in _walk(expression)
+        if isinstance(item, _Expr) and item.kind == "name"
+    }
+    if names - variables:
+        _skip(skipped, test=test, file=test.file, line=line, reason="non_literal_argument", text=text)
+        return
+    try:
+        predicate = _render_expression(expression, target_names, {}, variables)
+    except _OutOfRangeLiteralError:
+        reason = "unsupported_expression"
+    except _ExpressionError:
+        reason = "unsupported_expression"
+    else:
+        observations.append(
+            _make_observation(
+                kind="property",
+                target=call.value[0],
+                args=args,
+                test=test,
+                line=line,
+                extra={
+                    "variables": [dict(variable) for variable in variable_records],
+                    "assumptions": list(assumptions),
+                    "predicate": predicate,
+                },
+            )
+        )
+        return
+    _skip(skipped, test=test, file=test.file, line=line, reason=reason, text=text)
+
+
 def _process_python_test(
     test: _Test,
     target_names: set[str],
@@ -1884,6 +2394,116 @@ def _process_python_test(
             skipped, test=test, file=test.file, line=_python_definition_line(test.node),
             reason="test_not_run", text=_python_source_segment(test.source, test.node),
         )
+        return
+    given = _python_given_decorator(test)
+    if given is not None:
+        variables, reason = _python_property_variables(test, given)
+        line = _python_definition_line(test.node)
+        if variables is None:
+            _skip(skipped, test=test, file=test.file, line=line, reason=reason or "unsupported_strategy", text=_python_source_segment(test.source, test.node))
+            return
+        variable_names = {variable["name"] for variable in variables}
+        if variable_names & _python_store_counts(test.node).keys():
+            _skip(
+                skipped,
+                test=test,
+                file=test.file,
+                line=line,
+                reason="generator_variable_rebound",
+                text=_python_source_segment(test.source, test.node),
+            )
+            return
+        if "result" in variable_names:
+            _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=_python_source_segment(test.source, test.node))
+            return
+        modules = dict(test.python_module_aliases)
+        imported = dict(test.python_name_aliases)
+        assert_nodes = [
+            node for node in ast.walk(test.node)
+            if isinstance(node, ast.Assert)
+            or isinstance(node, ast.Call) and _python_name(node.func) in _PYTHON_ASSERTION_CALLS
+        ]
+        first_assert = min(
+            ((node.lineno, node.col_offset) for node in assert_nodes),
+            default=(10**9, 0),
+        )
+        assume_calls = [
+            node for node in ast.walk(test.node)
+            if isinstance(node, ast.Call)
+            and _python_resolved_name(node.func, modules, imported).split(".")[-1] == "assume"
+        ]
+        valid_assumptions: list[ast.Call] = []
+        top_level_assumes = {
+            id(statement.value): statement.value
+            for statement in test.node.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and _python_resolved_name(statement.value.func, modules, imported).split(".")[-1] == "assume"
+        }
+        for assume in assume_calls:
+            if id(assume) not in top_level_assumes or (assume.lineno, assume.col_offset) >= first_assert:
+                _skip(skipped, test=test, file=test.file, line=assume.lineno, reason="unsupported_assumption", text=_python_source_segment(test.source, assume))
+                return
+            valid_assumptions.append(assume)
+        if any(
+            isinstance(node, (ast.With, ast.AsyncWith)) and _python_raises_context(node)
+            for node in ast.walk(test.node)
+        ) or any(
+            isinstance(node, ast.Call)
+            and _python_name(node.func).split(".")[-1]
+            in {"raises", "assertRaises"}
+            for node in ast.walk(test.node)
+        ):
+            _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=_python_source_segment(test.source, test.node))
+            return
+        assumptions: list[str] = []
+        for assume in sorted(valid_assumptions, key=lambda item: (item.lineno, item.col_offset)):
+            if len(assume.args) != 1 or assume.keywords:
+                _skip(skipped, test=test, file=test.file, line=assume.lineno, reason="unsupported_assumption", text=_python_source_segment(test.source, assume))
+                return
+            expression = _python_expr(assume.args[0], test.python_imports)
+            if _target_calls(expression, target_names) or any(
+                item.kind == "name" and item.value not in variable_names
+                for item in _walk(expression)
+            ):
+                _skip(skipped, test=test, file=test.file, line=assume.lineno, reason="unsupported_assumption", text=_python_source_segment(test.source, assume))
+                return
+            try:
+                assumptions.append(_render_expression(expression, set(), {}, variable_names))
+            except _ExpressionError:
+                _skip(skipped, test=test, file=test.file, line=assume.lineno, reason="unsupported_assumption", text=_python_source_segment(test.source, assume))
+                return
+        scope_nodes = _python_statement_nodes(test, skipped)
+        for node in scope_nodes:
+            if isinstance(node, ast.Assert):
+                _python_property_expression(
+                    node.test, test=test, variables=variable_names,
+                    target_names=target_names, definitions=definitions,
+                    observations=observations, skipped=skipped,
+                    variable_records=variables, assumptions=assumptions,
+                )
+            elif isinstance(node, ast.Call) and _python_name(node.func) in _PYTHON_ASSERTION_CALLS:
+                name = _python_name(node.func)
+                if name in {"assertEqual", *tuple(_UNITTEST_ASSERTIONS)} and _python_assertion_message_allowed(node, 2):
+                    op = "==" if name == "assertEqual" else _UNITTEST_ASSERTIONS[name]
+                    expr = _Expr("compare", (op,), (
+                        _python_expr(node.args[0], test.python_imports),
+                        _python_expr(node.args[1], test.python_imports),
+                    ))
+                elif name in {"assertTrue", "assertFalse"} and _python_assertion_message_allowed(node, 1):
+                    expr = _python_expr(node.args[0], test.python_imports)
+                    if name == "assertFalse":
+                        expr = _Expr("unary", "not", (expr,))
+                else:
+                    expr = _Expr("unsupported")
+                _python_property_expression_from_expr(
+                    expr, test=test, line=node.lineno,
+                    text=_python_source_segment(test.source, node),
+                    variables=variable_names, target_names=target_names,
+                    definitions=definitions, observations=observations,
+                    skipped=skipped,
+                    variable_records=variables, assumptions=assumptions,
+                )
         return
     store_counts = _python_store_counts(test.node)
     scope_nodes = _python_statement_nodes(test, skipped)
@@ -2027,15 +2647,35 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
         return counts
     scope_nodes = tuple(_rust_sync_scope_nodes(body))
     outer_names = set(_rust_params(test.node, source_bytes))
+    generator_names = {
+        variable["name"] for variable in test.property_variables
+    }
     for node in scope_nodes:
         if node.type == "let_declaration":
-            name = _rust_identifier(node.child_by_field_name("pattern"), source_bytes)
-            if name:
+            pattern = node.child_by_field_name("pattern")
+            names = _rust_pattern_binding_names(pattern, source_bytes)
+            for name in names:
                 counts[name] += 1
                 outer_names.add(name)
         elif node.type in {"assignment_expression", "compound_assignment_expr"}:
             left = node.child_by_field_name("left")
             name = _rust_identifier(left, source_bytes)
+            if name:
+                counts[name] += 1
+        elif node.type in {"for_expression", "let_condition"}:
+            pattern = node.child_by_field_name("pattern")
+            for name in _rust_pattern_binding_names(pattern, source_bytes):
+                counts[name] += 1
+        elif node.type == "match_arm":
+            pattern = node.child_by_field_name("pattern")
+            for name in _rust_pattern_binding_names(pattern, source_bytes):
+                counts[name] += 1
+        elif node.type == "reference_expression" and any(
+            child.type == "mutable_specifier" for child in node.children
+        ):
+            name = _rust_identifier(
+                node.child_by_field_name("value"), source_bytes
+            )
             if name:
                 counts[name] += 1
 
@@ -2054,9 +2694,33 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
                 if parameters is not None:
                     for parameter in parameters.named_children:
                         pattern = parameter.child_by_field_name("pattern")
-                        name = _rust_identifier(pattern, source_bytes)
-                        if name:
+                        if pattern is None:
+                            pattern = parameter
+                        names = _rust_pattern_binding_names(
+                            pattern, source_bytes
+                        )
+                        for name in names:
                             parameter_names.add(name)
+                            if name in generator_names:
+                                counts[name] += 1
+                for scope_node in closure_nodes:
+                    if scope_node.type == "let_declaration":
+                        pattern = scope_node.child_by_field_name("pattern")
+                        names = _rust_pattern_binding_names(
+                            pattern, source_bytes
+                        )
+                    elif scope_node.type in {
+                        "for_expression",
+                        "let_condition",
+                        "match_arm",
+                    }:
+                        pattern = scope_node.child_by_field_name("pattern")
+                        names = _rust_pattern_binding_names(
+                            pattern, source_bytes
+                        )
+                    else:
+                        continue
+                    counts.update(name for name in names if name in generator_names)
                 for scope_node in closure_nodes:
                     if scope_node.type not in {
                         "assignment_expression",
@@ -2089,6 +2753,36 @@ def _rust_store_counts(test: _Test, source_bytes: bytes) -> Counter[str]:
 
     captured_writes(body)
     return counts
+
+
+def _rust_pattern_binding_names(node: Any, source_bytes: bytes) -> set[str]:
+    if node is None:
+        return set()
+    if node.type in {"identifier", "shorthand_field_identifier"}:
+        name = (
+            _rust_identifier(node, source_bytes)
+            if node.type == "identifier"
+            else _rust_text(node, source_bytes)
+        )
+        return {name} if name and name != "_" else set()
+    type_node = node.child_by_field_name("type")
+    names: set[str] = set()
+    for child in node.named_children:
+        if child == type_node:
+            continue
+        if node.type == "field_pattern":
+            pattern = node.child_by_field_name("pattern")
+            if pattern is not None:
+                names.update(_rust_pattern_binding_names(pattern, source_bytes))
+                continue
+            field_name = node.child_by_field_name("name")
+            if field_name is not None:
+                names.update(
+                    _rust_pattern_binding_names(field_name, source_bytes)
+                )
+                continue
+        names.update(_rust_pattern_binding_names(child, source_bytes))
+    return names
 
 
 def _rust_bindings(
@@ -2271,6 +2965,229 @@ def _process_rust_rejects(
     )
 
 
+def _rust_property_args(
+    call: _Expr,
+    variables: set[str],
+    definitions: dict[str, list[_Definition]],
+    test: _Test,
+) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
+    name, has_keywords = call.value[:2]
+    if has_keywords:
+        return None, "non_literal_argument"
+    values: list[Any] = []
+    for argument in call.children:
+        if argument.kind == "name" and argument.value in variables:
+            values.append({"var": argument.value})
+            continue
+        try:
+            values.append(_literal_value(argument, {}))
+        except _OutOfRangeLiteralError:
+            return None, "unsupported_expression"
+        except _ExpressionError:
+            return None, "non_literal_argument"
+    definition = _resolve_definition(name, test.file, test.language, definitions)
+    if definition is None or definition.params is None:
+        return values, None
+    params = definition.params
+    if definition.receiver and params[:1] in {("self",), ("cls",)}:
+        params = params[1:]
+    if len(values) > len(params):
+        return None, "non_literal_argument"
+    return dict(zip(params, values)), None
+
+
+def _rust_property_observation(
+    macro: Any,
+    *,
+    test: _Test,
+    source_bytes: bytes,
+    variables: set[str],
+    assumptions: list[str],
+    target_names: set[str],
+    definitions: dict[str, list[_Definition]],
+    observations: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+) -> None:
+    line = macro.start_point.row + 1
+    text = _rust_text(macro, source_bytes)
+    name = _rust_macro_name(macro, source_bytes)
+    try:
+        args = _rust_macro_arguments(
+            macro, source_bytes, 1 if name in {"assert", "prop_assert"} else 2
+        )
+        if name in {"assert", "prop_assert"}:
+            expression = args[0] if args else _Expr("unsupported")
+        elif len(args) >= 2:
+            operator = "!=" if name in {"assert_ne", "prop_assert_ne"} else "=="
+            expression = _Expr("compare", (operator,), (args[0], args[1]))
+        else:
+            expression = _Expr("unsupported")
+    except _ExpressionError:
+        expression = _Expr("unsupported")
+    calls = _target_calls(expression, target_names)
+    if not calls:
+        _skip(skipped, test=test, file=test.file, line=line, reason="no_target_call", text=text)
+        return
+    if len(calls) != 1:
+        _skip(skipped, test=test, file=test.file, line=line, reason="multiple_target_calls", text=text)
+        return
+    call = calls[0]
+    args_value, reason = _rust_property_args(call, variables, definitions, test)
+    if reason is not None or args_value is None:
+        _skip(skipped, test=test, file=test.file, line=line, reason=reason or "non_literal_argument", text=text)
+        return
+    names = {
+        item.value for item in _walk(expression)
+        if isinstance(item, _Expr) and item.kind == "name"
+    }
+    if names - variables:
+        _skip(skipped, test=test, file=test.file, line=line, reason="non_literal_argument", text=text)
+        return
+    try:
+        predicate = _render_expression(expression, target_names, {}, variables)
+    except _ExpressionError:
+        _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=text)
+        return
+    observations.append(
+        _make_observation(
+            kind="property",
+            target=call.value[0],
+            args=args_value,
+            test=test,
+            line=line,
+            extra={
+                "variables": [dict(variable) for variable in test.property_variables],
+                "assumptions": list(assumptions),
+                "predicate": predicate,
+            },
+        )
+    )
+
+
+def _process_rust_property_test(
+    test: _Test,
+    source_bytes: bytes,
+    target_names: set[str],
+    definitions: dict[str, list[_Definition]],
+    observations: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+) -> None:
+    line = test.property_skip_line or test.node.start_point.row + 1
+    text = (
+        test.property_skip_text
+        if test.property_skip_text is not None
+        else _rust_text(test.node, source_bytes)
+    )
+    if test.property_skip_reason:
+        _skip(skipped, test=test, file=test.file, line=line, reason=test.property_skip_reason, text=text)
+        return
+    if test.should_panic:
+        _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=text)
+        return
+    variables = {item["name"] for item in test.property_variables}
+    if variables & _rust_store_counts(test, source_bytes).keys():
+        _skip(
+            skipped,
+            test=test,
+            file=test.file,
+            line=line,
+            reason="generator_variable_rebound",
+            text=text,
+        )
+        return
+    if "result" in variables:
+        _skip(skipped, test=test, file=test.file, line=line, reason="unsupported_expression", text=text)
+        return
+    body = test.node.child_by_field_name("body")
+    if body is None:
+        return
+    assertion_names = {
+        "assert", "assert_eq", "assert_ne",
+        "prop_assert", "prop_assert_eq", "prop_assert_ne",
+    }
+
+    def is_macro(node: Any, names: set[str]) -> bool:
+        return (
+            node.type == "macro_invocation"
+            and _rust_macro_name(node, source_bytes) in names
+        )
+
+    top_level = [
+        statement.named_children[0]
+        if statement.type == "expression_statement" and len(statement.named_children) == 1
+        else statement
+        for statement in body.named_children
+    ]
+    all_assumes = [
+        node for node in _rust_sync_scope_nodes(body)
+        if is_macro(node, {"prop_assume"})
+    ]
+    direct_assumes = [node for node in top_level if is_macro(node, {"prop_assume"})]
+    assertions = [
+        node for node in _rust_sync_scope_nodes(body)
+        if is_macro(node, assertion_names)
+    ]
+    first_assert = min((node.start_byte for node in assertions), default=10**30)
+    assumptions: list[str] = []
+    for assume in all_assumes:
+        if assume not in direct_assumes or assume.start_byte >= first_assert:
+            _skip(skipped, test=test, file=test.file, line=assume.start_point.row + 1, reason="unsupported_assumption", text=_rust_text(assume, source_bytes))
+            return
+        try:
+            args = _rust_macro_arguments(assume, source_bytes)
+            expression = args[0] if len(args) == 1 else _Expr("unsupported")
+            names = {
+                item.value for item in _walk(expression)
+                if isinstance(item, _Expr) and item.kind == "name"
+            }
+            if names - variables or _target_calls(expression, target_names):
+                raise _ExpressionError("unsupported assumption")
+            assumptions.append(_render_expression(expression, set(), {}, variables))
+        except _ExpressionError:
+            _skip(skipped, test=test, file=test.file, line=assume.start_point.row + 1, reason="unsupported_assumption", text=_rust_text(assume, source_bytes))
+            return
+
+    unreachable = False
+    conditional = False
+    conditional_types = {
+        "if_expression", "match_expression", "loop_expression",
+        "while_expression", "for_expression", "block", "closure_expression",
+    }
+    for statement, inner in zip(body.named_children, top_level):
+        macros = [
+            node for node in _rust_sync_scope_nodes(statement)
+            if is_macro(node, assertion_names)
+        ]
+        if unreachable or conditional or inner.type in conditional_types:
+            reason = "unreachable_assertion" if unreachable else "conditional_assertion"
+            for macro in macros:
+                _skip(skipped, test=test, file=test.file, line=macro.start_point.row + 1, reason=reason, text=_rust_text(macro, source_bytes))
+            if inner.type in conditional_types and any(node.type == "try_expression" for node in _rust_sync_scope_nodes(statement)):
+                conditional = True
+            continue
+        if is_macro(inner, {"prop_assume"}):
+            continue
+        if inner.type == "macro_invocation":
+            for macro in macros:
+                _rust_property_observation(
+                    macro, test=test, source_bytes=source_bytes,
+                    variables=variables, assumptions=assumptions,
+                    target_names=target_names, definitions=definitions,
+                    observations=observations, skipped=skipped,
+                )
+        else:
+            for macro in macros:
+                _skip(skipped, test=test, file=test.file, line=macro.start_point.row + 1, reason="conditional_assertion", text=_rust_text(macro, source_bytes))
+        if inner.type == "return_expression":
+            unreachable = True
+        elif is_macro(inner, {"panic", "unreachable", "todo", "unimplemented"}):
+            unreachable = True
+        elif _rust_terminating_call(inner, source_bytes):
+            unreachable = True
+        elif any(node.type == "try_expression" for node in _rust_sync_scope_nodes(statement)):
+            conditional = True
+
+
 def _process_rust_test(
     test: _Test,
     source_bytes: bytes,
@@ -2288,6 +3205,11 @@ def _process_rust_test(
             line=line,
             reason="test_not_run",
             text=_rust_text(test.node, source_bytes),
+        )
+        return
+    if test.property_test:
+        _process_rust_property_test(
+            test, source_bytes, target_names, definitions, observations, skipped
         )
         return
     if test.should_panic:
@@ -2517,6 +3439,14 @@ def harvest_tests(
                         ),
                         python_module_aliases=tuple(module_aliases.items()),
                         python_name_aliases=tuple(name_aliases.items()),
+                        property_test=any(
+                            isinstance(decorator, ast.Call)
+                            and _python_decorator_name(
+                                decorator, module_aliases, name_aliases
+                            )
+                            in {"given", "hypothesis.given"}
+                            for decorator in test.node.decorator_list
+                        ),
                     )
                 )
             tests.extend(file_tests)
@@ -2592,7 +3522,7 @@ def harvest_tests(
         else:
             _process_rust_test(
                 test,
-                rust_bytes[test.file],
+                test.source.encode("utf-8") if test.property_test else rust_bytes[test.file],
                 target_names,
                 definitions,
                 observations,
