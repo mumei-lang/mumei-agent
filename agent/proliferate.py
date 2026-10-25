@@ -969,11 +969,19 @@ def _publish_dependency_group(
             logger.exception("Could not place grouped target %s", target)
             return finish_failure("blast_radius_heal_failed")
 
+    def place_group_members() -> None:
+        for group_index in group:
+            candidate = target_paths[group_index]
+            code = str(forged_results[group_index]["code"])
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_text(code, encoding="utf-8")
+
     for index in group:
         target = str(specs[index].get("target_file", "unknown.mm"))
         code = str(forged_results[index]["code"])
         candidate = target_paths[index]
         try:
+            place_group_members()
             blast = check_blast_radius(mumei_client, mumei_repo, candidate, code)
         except Exception:
             logger.exception("Blast-radius check failed for grouped target %s", target)
@@ -995,6 +1003,7 @@ def _publish_dependency_group(
             all_healed = True
             try:
                 healing_client = config.create_client()
+                place_group_members()
                 for broken in broken_files:
                     broken_path = Path(str(broken["file"]))
                     snapshot(broken_path)

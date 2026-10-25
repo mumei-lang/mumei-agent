@@ -1438,3 +1438,133 @@ def test_health_regression_closes_duplicate_pr_urls_once(
     assert closed == [(pr_url, -0.25)]
     assert all(result["pr_closed"] is True for result in results)
     assert all(result["should_close_pr"] is True for result in results)
+
+
+class ImportResolvingClient:
+    def __init__(self, repo: Path) -> None:
+        self.repo = repo
+
+    def verify(self, path: str) -> dict[str, object]:
+        pending = [Path(path)]
+        visited: set[Path] = set()
+        while pending:
+            source = pending.pop()
+            if source in visited:
+                continue
+            visited.add(source)
+            for line in source.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped.startswith('import "'):
+                    continue
+                module = stripped.split('"')[1]
+                dependency = self.repo / f"{module}.mm"
+                if not dependency.is_file():
+                    return {
+                        "success": False,
+                        "stderr": f"missing import {module}",
+                    }
+                pending.append(dependency)
+        return {"success": True, "stderr": ""}
+
+
+def _three_member_group(tmp_path: Path) -> tuple[list[dict], list[dict]]:
+    specs = [
+        _spec("std/root.mm"),
+        _spec("std/child.mm", ["std/root.mm"]),
+        _spec("std/grandchild.mm", ["std/child.mm"]),
+    ]
+    code = [
+        "atom root_value() -> i64 body: 1;",
+        'import "std/root" as root;\natom child_value() -> i64 body: root::root_value();',
+        'import "std/child" as child;\natom grandchild_value() -> i64 body: child::child_value();',
+    ]
+    results = [_forge_result(spec) for spec in specs]
+    for result, source in zip(results, code):
+        result["code"] = source
+    return specs, results
+
+
+def test_real_blast_radius_preserves_a_three_member_dependency_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs, results = _three_member_group(tmp_path)
+    healed: list[str] = []
+    monkeypatch.setattr(
+        proliferate,
+        "attempt_heal",
+        lambda **kwargs: healed.append(kwargs["broken_info"]["file"]) or True,
+    )
+    publish_mock = MagicMock(return_value={"success": True})
+    monkeypatch.setattr(proliferate, "publish", publish_mock)
+
+    grouped = proliferate._publish_dependency_group(
+        [0, 1, 2],
+        specs=specs,
+        forged_results=results,
+        mumei_repo=tmp_path,
+        proposals_by_target={},
+        config=MagicMock(),
+        effective_mumei_bin="mumei",
+        mumei_client=ImportResolvingClient(tmp_path),
+        harness_metrics=HarnessMetrics(),
+        health_before=None,
+        dry_run=False,
+        enable_lean_fallback=False,
+    )
+
+    assert healed == []
+    publish_mock.assert_called_once()
+    assert all(grouped[index]["success"] for index in range(3))
+
+
+def test_real_blast_radius_restages_group_before_healing_other_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs, results = _three_member_group(tmp_path)
+    legacy = tmp_path / "std" / "legacy.mm"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        'import "std/missing" as missing;\natom legacy_value() -> i64 body: 0;',
+        encoding="utf-8",
+    )
+    group_paths = [tmp_path / spec["target_file"] for spec in specs]
+    heal_calls: list[str] = []
+
+    def heal(**kwargs):
+        assert all(path.is_file() for path in group_paths)
+        broken_path = Path(kwargs["broken_info"]["file"])
+        heal_calls.append(str(broken_path))
+        broken_path.write_text(
+            "atom legacy_value() -> i64 body: 0;",
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(proliferate, "attempt_heal", heal)
+    publish_mock = MagicMock(return_value={"success": True})
+    monkeypatch.setattr(proliferate, "publish", publish_mock)
+
+    grouped = proliferate._publish_dependency_group(
+        [0, 1, 2],
+        specs=specs,
+        forged_results=results,
+        mumei_repo=tmp_path,
+        proposals_by_target={},
+        config=MagicMock(),
+        effective_mumei_bin="mumei",
+        mumei_client=ImportResolvingClient(tmp_path),
+        harness_metrics=HarnessMetrics(),
+        health_before=None,
+        dry_run=False,
+        enable_lean_fallback=False,
+    )
+
+    assert heal_calls == [str(legacy)]
+    assert publish_mock.call_args.kwargs["extra_files"] == [
+        ("std/child.mm", results[1]["code"]),
+        ("std/grandchild.mm", results[2]["code"]),
+        ("std/legacy.mm", "atom legacy_value() -> i64 body: 0;"),
+    ]
+    assert all(grouped[index]["success"] for index in range(3))
