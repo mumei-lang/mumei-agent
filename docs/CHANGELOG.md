@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-24–25: Trust-aware repair and test-observation integrations (#616–#627)
+
+- Agent workflows now consume Claim Book evidence and Seal Grade; sibling-lemma proliferation is constrained to machine-verified claims and preserves dependency context.
+- Added Charter, contract-erosion, and negative-controls gates to repair and self-correction paths without changing proof semantics.
+- Added `harvest-tests` and `observe-tests`, plus `extract-spec --from-tests`, to carry harvested examples, relations, and expected rejections into observation checks and spec extraction. The #625 follow-up fixes the test-observation extraction path.
+- Regression coverage was added for Claim Book consumption, the three gates, test harvesting/observation, test-aware extraction, and dependency-aware sibling-lemma proliferation.
+
 ## 2026-09-26: V1-B-2 follow-up 6 — intermediate Tier-3: one-level return taint, receiver mutexes, more sinks/sanitizers
 
 - `agent/language_patterns.py` — intermediate expansion of the Tier-3-lite checks (still intra-file and warnings-only):
