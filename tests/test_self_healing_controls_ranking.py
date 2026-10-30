@@ -687,5 +687,14 @@ def test_atom_names_include_trusted_atoms_and_skip_comment_lines() -> None:
         "atom first() -> i64 body: { 0 }\n"
         "trusted atom trusted() -> i64 body: 0;\n"
         "// atom commented() -> i64 body: 0;\n"
+        "async atom fetch() -> i64 body: 0;\n"
+        "unverified atom legacy() -> i64 body: 0;\n"
+        "trusted async atom bridged() -> i64 body: 0;\n"
     )
-    assert self_healing._atom_names(source) == ["first", "trusted"]
+    assert self_healing._atom_names(source) == [
+        "first",
+        "trusted",
+        "fetch",
+        "legacy",
+        "bridged",
+    ]

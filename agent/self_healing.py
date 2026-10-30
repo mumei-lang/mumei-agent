@@ -75,7 +75,7 @@ from agent.self_healing_report import (
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
 _ATOM_DECLARATION_RE = re.compile(
-    r"^[ \t]*(?:trusted[ \t]+)?atom[ \t]+([A-Za-z_][A-Za-z0-9_]*)\b",
+    r"^[ \t]*(?:(?:async|trusted|unverified)[ \t]+)*atom[ \t]+([A-Za-z_][A-Za-z0-9_]*)\b",
     re.MULTILINE,
 )
 
