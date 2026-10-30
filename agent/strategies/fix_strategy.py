@@ -27,6 +27,7 @@ from agent.prompts import (
     invariant,
     postcondition,
     temporal_effect,
+    weak_specification,
 )
 from agent.spec_code_mapper import SpecCodeMapper
 from agent.strategies.retry_history import RetryHistory
@@ -80,6 +81,7 @@ _FAILURE_TYPE_MAP = {
     "invariant_violated": invariant,
     "postcondition_violated": postcondition,
     "temporal_effect_violated": temporal_effect,
+    "weak_specification": weak_specification,
 }
 
 class SelfCorrectionLoop:

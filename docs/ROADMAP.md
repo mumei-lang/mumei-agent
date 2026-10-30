@@ -108,7 +108,7 @@ Future work:
 ## 2026-10: Trust-aware repair and test-observation integrations (#616–#627)
 
 - Claim Book consumption makes claim evidence and Seal Grade available to agent workflows. Sibling-lemma reuse is limited to machine-verified claims and carries dependency context.
-- Repair and self-correction paths can use Charter, contract-erosion, and negative-controls checks as additional gates; these checks do not replace the underlying proof result.
+- Repair paths can use Charter and contract-erosion checks, and classic heal now supports opt-in negative-controls candidate ranking after those checks. These checks do not replace the underlying proof result.
 - `harvest-tests`, `observe-tests`, and `extract-spec --from-tests` connect existing test behavior to extracted contracts and observation checks. These observations inform spec extraction but are not proofs.
 - Regression coverage spans Claim Book consumption, guard/gate behavior, harvested-test observations, `--from-tests` extraction (including the #625 fix), and sibling-lemma proliferation.
 

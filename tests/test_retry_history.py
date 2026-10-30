@@ -275,6 +275,58 @@ class TestNonSequentialAttemptNumbers:
         assert "SAME ERROR REPEATED" not in text
 
 
+def test_controls_weak_signature_tracks_surviving_count_and_details():
+    history = RetryHistory()
+    first = {
+        "failure_type": "weak_specification",
+        "status": "controls_weak",
+        "semantic_feedback": {
+            "controls": {
+                "app": {
+                    "status": "weak",
+                    "survived": 1,
+                    "surviving": ["mutant-1"],
+                }
+            }
+        },
+    }
+    changed = {
+        "failure_type": "weak_specification",
+        "status": "controls_weak",
+        "semantic_feedback": {
+            "controls": {
+                "app": {
+                    "status": "weak",
+                    "survived": 2,
+                    "surviving": ["mutant-1", "mutant-2"],
+                }
+            }
+        },
+    }
+    identical = {
+        "failure_type": "weak_specification",
+        "status": "controls_weak",
+        "semantic_feedback": {
+            "controls": {
+                "app": {
+                    "status": "weak",
+                    "survived": 1,
+                    "surviving": ["mutant-1"],
+                }
+            }
+        },
+    }
+
+    assert (
+        history.counterexample_signature(first)
+        != history.counterexample_signature(changed)
+    )
+    assert (
+        history.counterexample_signature(first)
+        == history.counterexample_signature(identical)
+    )
+
+
 # ---------- _repeat_threshold is not settable via constructor ----------
 
 

@@ -10,6 +10,7 @@ from agent.prompts import (
     postcondition,
     spec_code_mapping,
     temporal_effect,
+    weak_specification,
 )
 from agent.prompts.report_formatter import (
     format_counterexample,
@@ -308,6 +309,38 @@ def test_postcondition_prompt():
     result = postcondition.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
     assert "postcondition" in result.lower()
     assert "ensures" in result.lower()
+
+
+def test_weak_specification_prompt_renders_surviving_mutant_descriptions():
+    report = {
+        "controls": {
+            "zeta": {
+                "status": "inconclusive",
+                "survived": 1,
+                "surviving_descriptions": ["returns zero instead of the input"],
+            },
+            "alpha": {
+                "status": "weak",
+                "survived": 2,
+                "surviving_descriptions": ["drops the overflow check", "returns one"],
+            },
+            "clean": {"status": "discriminating", "survived": 0, "surviving": []},
+        }
+    }
+
+    result = weak_specification.build_prompt(SAMPLE_SOURCE, SAMPLE_ERROR_LOG, report)
+
+    assert "verification passed" in result.lower()
+    assert "too weak to tell the body apart from the generated mutants" in result
+    assert "`alpha` (weak): 2 survived" in result
+    assert "drops the overflow check" in result
+    assert "returns one" in result
+    assert "`zeta` (inconclusive): 1 survived" in result
+    assert "ensures" in result
+    assert "keeping the body's behavior unchanged" in result
+    assert "Do not weaken `requires` or `ensures`" in result
+    assert "do not add `trusted`" in result
+    assert "Keep the resulting code verifiable" in result
 
 
 def test_temporal_effect_prompt():

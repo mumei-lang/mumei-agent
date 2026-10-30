@@ -22,13 +22,24 @@ uv run mumei-agent examples/sword_test.mm
 
 # Disable the original-contract erosion guard for one repair
 uv run mumei-agent heal examples/sword_test.mm --allow-contract-erosion
+
+# Keep trying after a weak negative-controls result
+uv run mumei-agent heal examples/sword_test.mm --controls-gate warn
 ```
 
 Repair acceptance checks run in order: verifier, pinned charter (when
-configured), then contract erosion against the source snapshot. The
-`--allow-contract-erosion` option disables only the final check for that
-invocation; see [Configuration](CONFIGURATION.md#contract-guards) for the
-environment variables and defaults.
+configured), contract erosion against the source snapshot, then negative
+controls when enabled. `--allow-contract-erosion` disables only the erosion
+check for that invocation; see [Configuration](CONFIGURATION.md#contract-guards)
+for its environment variables and defaults.
+
+The classic heal loop accepts `--controls-gate {off,warn,require}`. It defaults
+to `off` and reads only this CLI flag, not `CONTROLS_GATE`. In `warn` mode,
+weak or malformed results are fed back for another repair; if retries end
+without a clean result, the best verified candidate is restored by weak-atom
+count, surviving mutants, then attempt order. Unavailable controls are treated
+as clean in `warn` mode. `require` rejects weak, malformed, and unavailable
+results and never restores a weak candidate.
 
 ## Generate Mode
 
@@ -92,8 +103,9 @@ when an atom is weak or inconclusive. A required-gate failure exits with status
 
 See the [Mumei controls guide](https://github.com/mumei-lang/mumei/blob/develop/docs/CONTROLS.md)
 for the report semantics. Equivalent mutants can survive; a surviving mutant
-still needs human judgment. The gate does not run for `proliferate`, MCP
-`generate`/`self_correct` tools, or `heal`.
+still needs human judgment. This generate-mode gate does not run for
+`proliferate`, MCP `generate`/`self_correct` tools, or self-correction; heal
+uses the separate opt-in candidate-ranking flag described above.
 
 ## E2E Demo
 

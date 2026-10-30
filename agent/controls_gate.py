@@ -21,6 +21,8 @@ class ControlsOutcome:
     skipped: bool
     summary: str
     atoms: dict[str, dict[str, Any]]
+    malformed: bool = False
+    unavailable: bool = False
 
 
 class ControlsGate:
@@ -57,6 +59,7 @@ class ControlsGate:
                 skipped=True,
                 summary=summary,
                 atoms={},
+                malformed=True,
             )
         if has_unnamed and self.mode == "require":
             return ControlsOutcome(
@@ -64,6 +67,7 @@ class ControlsGate:
                 skipped=True,
                 summary="controls cannot check unnamed atom(s)",
                 atoms={},
+                malformed=True,
             )
 
         atoms: dict[str, dict[str, Any]] = {}
@@ -168,10 +172,18 @@ class ControlsGate:
                 and mutant.get("outcome") == "survived"
                 and isinstance(mutant.get("id"), str)
             ]
+            surviving_descriptions = [
+                mutant.get("detail")
+                if isinstance(mutant.get("detail"), str) and mutant["detail"]
+                else mutant["id"]
+                for mutant in mutants
+                if mutant.get("outcome") == "survived"
+            ]
             atoms[name] = {
                 "status": status,
                 **counts,
                 "surviving": surviving,
+                "surviving_descriptions": surviving_descriptions,
             }
 
         weak_atoms = {
@@ -208,4 +220,6 @@ class ControlsGate:
             skipped=has_unnamed or bool(unavailable),
             summary=summary,
             atoms=atoms,
+            malformed=has_unnamed or bool(malformed),
+            unavailable=bool(unavailable),
         )

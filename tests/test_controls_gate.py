@@ -30,7 +30,11 @@ def _atom_entry(
 ) -> dict:
     surviving_ids = surviving_ids or []
     mutants = [
-        {"id": mutant_id, "outcome": "survived"}
+        {
+            "id": mutant_id,
+            "outcome": "survived",
+            "detail": f"mutates behavior at {mutant_id}",
+        }
         for mutant_id in surviving_ids
     ]
     mutants.extend(
@@ -94,6 +98,9 @@ class TestControlsGate:
 
         assert outcome.passed is False
         assert outcome.atoms["f"]["surviving"] == ["constant:1->0@2"]
+        assert outcome.atoms["f"]["surviving_descriptions"] == [
+            "mutates behavior at constant:1->0@2"
+        ]
         assert "f: constant:1->0@2" in outcome.summary
 
     def test_rc1_inconclusive_fails_require(self) -> None:
