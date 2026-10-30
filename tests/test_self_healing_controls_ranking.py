@@ -41,7 +41,7 @@ def _configure(
     monkeypatch.setattr(self_healing, "PatternLibrary", FakePatternLibrary)
 
 
-def _controls_result(status: str, survived: int = 0) -> dict:
+def _controls_result(status: str, survived: int = 0, atom: str = "app") -> dict:
     if status == "discriminating":
         tested, killed, unanalyzable = 2, 2, 0
         outcomes = [{"id": f"killed-{index}", "outcome": "killed"} for index in range(2)]
@@ -64,7 +64,7 @@ def _controls_result(status: str, survived: int = 0) -> dict:
         "report": {
             "atoms": [
                 {
-                    "name": "app",
+                    "name": atom,
                     "status": status,
                     "tested": tested,
                     "killed": killed,
@@ -104,7 +104,7 @@ class FakeClient:
         return {"success": True, "report": {}, "stdout": "", "stderr": ""}
 
     def controls_check(self, _source: str, *, atom: str) -> dict:
-        assert atom == "app"
+        assert atom in {"app", "extra"}
         self.controls_calls += 1
         return next(self.controls)
 
@@ -221,6 +221,51 @@ def test_warn_continues_after_weak_feedback_until_clean_candidate(
     assert [entry["status"] for entry in ranking["candidates"]] == ["weak", "clean"]
     assert [entry["selected"] for entry in ranking["candidates"]] == [False, True]
     assert source.read_text(encoding="utf-8") == "atom app() -> i64 body: { 1 }\n"
+
+
+def test_warn_weak_atom_with_an_unavailable_atom_still_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "app.mm"
+    source.write_text(
+        "atom app() -> i64 body: { 0 }\n"
+        "atom extra() -> i64 body: { 0 }\n",
+        encoding="utf-8",
+    )
+    client = FakeClient(
+        [
+            _controls_result("weak", 1, atom="app"),
+            _unavailable_result(),
+            _controls_result("discriminating", atom="app"),
+            _controls_result("discriminating", atom="extra"),
+        ]
+    )
+    fixes: list[dict] = []
+
+    def get_fix(*args: object, **_kwargs: object) -> str:
+        fixes.append(args[4])
+        return (
+            "atom app() -> i64 body: { 1 }\n"
+            "atom extra() -> i64 body: { 1 }\n"
+        )
+
+    _configure(
+        monkeypatch,
+        tmp_path,
+        client,
+        [str(source), "--max-retries", "1", "--controls-gate", "warn"],
+    )
+    monkeypatch.setattr(self_healing, "get_fix", get_fix)
+
+    self_healing.main()
+
+    ranking = _ranking(capsys)
+    assert client.controls_calls == 4
+    assert fixes[0]["status"] == "controls_weak"
+    assert [entry["status"] for entry in ranking["candidates"]] == ["weak", "clean"]
+    assert ranking["candidates"][1]["selected"] is True
 
 
 def test_warn_fallback_selects_candidate_with_fewer_survivors(

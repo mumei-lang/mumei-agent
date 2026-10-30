@@ -100,12 +100,14 @@ def _controls_counts(outcome: ControlsOutcome) -> tuple[int, int]:
 def _controls_candidate_is_clean(outcome: ControlsOutcome, mode: str) -> bool:
     if outcome.malformed:
         return False
-    if outcome.unavailable:
-        return mode == "warn"
-    return outcome.passed and not any(
+    if any(
         atom.get("status") in {"weak", "inconclusive"}
         for atom in outcome.atoms.values()
-    )
+    ):
+        return False
+    if outcome.unavailable:
+        return mode == "warn"
+    return outcome.passed
 
 
 def _print_controls_ranking(mode: str, candidates: list[dict]) -> None:
