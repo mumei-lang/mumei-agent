@@ -97,6 +97,19 @@ def _controls_counts(outcome: ControlsOutcome) -> tuple[int, int]:
     return weak_atoms, survived
 
 
+def _controls_semantic_feedback(outcome: ControlsOutcome) -> dict:
+    return {
+        "controls": {
+            name: {
+                "status": atom.get("status"),
+                "survived": atom.get("survived"),
+                "surviving": list(atom.get("surviving", [])),
+            }
+            for name, atom in sorted(outcome.atoms.items())
+        }
+    }
+
+
 def _controls_candidate_is_clean(outcome: ControlsOutcome, mode: str) -> bool:
     if outcome.malformed:
         return False
@@ -628,6 +641,7 @@ def main() -> None:
                         "failure_type": "weak_specification",
                         "reason": outcome.summary,
                         "controls": outcome.atoms,
+                        "semantic_feedback": _controls_semantic_feedback(outcome),
                     }
                     result["stdout"] = outcome.summary
                     result["stderr"] = ""

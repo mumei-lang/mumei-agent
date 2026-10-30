@@ -219,9 +219,42 @@ def test_warn_continues_after_weak_feedback_until_clean_candidate(
     assert reports[0]["status"] == "controls_weak"
     assert reports[0]["failure_type"] == "weak_specification"
     assert reports[0]["controls"]["app"]["status"] == "weak"
+    assert reports[0]["semantic_feedback"] == {
+        "controls": {
+            "app": {
+                "status": "weak",
+                "survived": 2,
+                "surviving": ["survived-0", "survived-1"],
+            }
+        }
+    }
     assert [entry["status"] for entry in ranking["candidates"]] == ["weak", "clean"]
     assert [entry["selected"] for entry in ranking["candidates"]] == [False, True]
     assert source.read_text(encoding="utf-8") == "atom app() -> i64 body: { 1 }\n"
+
+
+def test_controls_semantic_feedback_sorts_atom_names() -> None:
+    outcome = self_healing.ControlsOutcome(
+        passed=False,
+        skipped=False,
+        summary="weak",
+        atoms={
+            "zeta": {
+                "status": "weak",
+                "survived": 1,
+                "surviving": ["z1"],
+            },
+            "alpha": {
+                "status": "inconclusive",
+                "survived": 0,
+                "surviving": [],
+            },
+        },
+    )
+
+    feedback = self_healing._controls_semantic_feedback(outcome)
+
+    assert list(feedback["controls"]) == ["alpha", "zeta"]
 
 
 def test_warn_weak_atom_with_an_unavailable_atom_still_continues(
