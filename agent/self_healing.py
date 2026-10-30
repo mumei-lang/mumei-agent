@@ -5,6 +5,7 @@ uses LLM to fix verification failures iteratively.
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from agent.budget_policy import (
 from agent.budget_metrics import aggregate_metrics
 from agent.charter_guard import discover_guard_or_exit
 from agent.config import AgentConfig
+from agent.controls_gate import ControlsGate, ControlsOutcome
 from agent.erosion_guard import create_guard, structured_feedback as erosion_feedback
 from agent.meta_architect import MetaArchitect
 from agent.metrics import Metrics
@@ -72,6 +74,49 @@ from agent.self_healing_report import (
 
 ROOT_DIR = Path(__file__).parent.parent.absolute()
 HISTORY_FILE = ROOT_DIR / "visualizer" / "report_history.json"
+_ATOM_DECLARATION_RE = re.compile(
+    r"^[ \t]*(?:trusted[ \t]+)?atom[ \t]+([A-Za-z_][A-Za-z0-9_]*)\b",
+    re.MULTILINE,
+)
+
+
+def _atom_names(source: str) -> list[str]:
+    return _ATOM_DECLARATION_RE.findall(source)
+
+
+def _controls_counts(outcome: ControlsOutcome) -> tuple[int, int]:
+    weak_atoms = sum(
+        atom.get("status") in {"weak", "inconclusive"}
+        for atom in outcome.atoms.values()
+    )
+    survived = sum(
+        count
+        for atom in outcome.atoms.values()
+        if isinstance((count := atom.get("survived")), int)
+    )
+    return weak_atoms, survived
+
+
+def _controls_candidate_is_clean(outcome: ControlsOutcome, mode: str) -> bool:
+    if outcome.malformed:
+        return False
+    if outcome.unavailable:
+        return mode == "warn"
+    return outcome.passed and not any(
+        atom.get("status") in {"weak", "inconclusive"}
+        for atom in outcome.atoms.values()
+    )
+
+
+def _print_controls_ranking(mode: str, candidates: list[dict]) -> None:
+    if mode != "off":
+        print(
+            "Heal candidate ranking: "
+            + json.dumps(
+                {"mode": mode, "candidates": candidates},
+                ensure_ascii=False,
+            )
+        )
 
 
 def _child_proof_cert_out(cert_dir: str, source_root: Path, source: Path) -> str:
@@ -145,6 +190,9 @@ def _run_directory_heal(
                 next_argv.extend(["--charter-lock", args.charter_lock])
             if getattr(args, "allow_contract_erosion", False):
                 next_argv.append("--allow-contract-erosion")
+            controls_gate = getattr(args, "controls_gate", "off")
+            if controls_gate != "off":
+                next_argv.extend(["--controls-gate", controls_gate])
             if args.proof_cert_out is not None:
                 next_argv.extend(
                     [
@@ -216,8 +264,7 @@ def sync_to_visualizer(report_data: dict, *, enabled: bool = True) -> None:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
-def main() -> None:
-    """Run the self-healing loop."""
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Mumei Self-Healing Loop: AI-driven autonomous fix loop"
     )
@@ -292,7 +339,20 @@ def main() -> None:
         action="store_true",
         help="Disable contract-erosion checks for repair candidates.",
     )
+    parser.add_argument(
+        "--controls-gate",
+        choices=["off", "warn", "require"],
+        default="off",
+        help="Rank verified heal candidates using negative controls (default: off).",
+    )
+    return parser
+
+
+def main() -> None:
+    """Run the self-healing loop."""
+    parser = _build_parser()
     args = parser.parse_args()
+    controls_mode = args.controls_gate
 
     if args.generate is not None and args.output is None:
         parser.error("--output is required when using --generate")
@@ -338,6 +398,11 @@ def main() -> None:
     )
 
     if config.enable_self_correction and args.generate is None:
+        if controls_mode != "off":
+            print(
+                "Warning: --controls-gate ranking applies only to the classic "
+                "heal loop and is ignored when self-correction is enabled."
+            )
         from agent.self_correction import run_self_correction_loop
 
         try:
@@ -380,6 +445,7 @@ def main() -> None:
             )
             payload["proof_cert_out"] = args.proof_cert_out
         print(json.dumps(payload, indent=2, ensure_ascii=False))
+        _print_controls_ranking(controls_mode, [])
         return
 
     # --- Generate mode (P1-A): generate → verify → fix loop ---
@@ -393,6 +459,7 @@ def main() -> None:
             max_retries=max_retries,
             mumei_client=mumei,
         )
+        _print_controls_ranking(controls_mode, [])
         return
 
     print("Mumei Self-Healing Loop Start...")
@@ -406,6 +473,8 @@ def main() -> None:
     stop_reason: str | None = None
     applied_fixes = 0
     last_erosion_failure = False
+    controls_ranking: list[dict] = []
+    weak_controls_candidates: list[dict] = []
 
     def stop_if_charter_tampered() -> bool:
         nonlocal stop_reason
@@ -501,6 +570,60 @@ def main() -> None:
                         "erosion_report": outcome.report,
                         "loss_vector": feedback,
                         "structured_feedback": feedback,
+                    }
+                    result["stdout"] = outcome.summary
+                    result["stderr"] = ""
+            if result["success"] and controls_mode != "off":
+                outcome = ControlsGate(controls_mode).check(
+                    mumei,
+                    source_file,
+                    _atom_names(Path(source_file).read_text(encoding="utf-8")),
+                )
+                controls_clean = _controls_candidate_is_clean(
+                    outcome, controls_mode
+                )
+                weak_atoms, survived = _controls_counts(outcome)
+                thought.add_step(
+                    action="controls_check",
+                    verification_success=controls_clean,
+                    z3_result={
+                        "status": "skipped"
+                        if outcome.unavailable
+                        else ("pass" if controls_clean else "fail"),
+                        "reason": outcome.summary,
+                        "controls": outcome.atoms,
+                    },
+                )
+                if stop_if_charter_tampered():
+                    break
+                ranking_entry = {
+                    "attempt": attempt + 1,
+                    "status": "clean" if controls_clean else "weak",
+                    "weak_atoms": weak_atoms,
+                    "survived": survived,
+                    "selected": controls_clean,
+                }
+                controls_ranking.append(ranking_entry)
+                if not controls_clean:
+                    weak_controls_candidates.append(
+                        {
+                            "attempt": attempt + 1,
+                            "source": Path(source_file).read_text(
+                                encoding="utf-8"
+                            ),
+                            "survived": survived,
+                            "weak_atoms": weak_atoms,
+                            "summary": outcome.summary,
+                            "ranking_index": len(controls_ranking) - 1,
+                        }
+                    )
+                    result = dict(result)
+                    result["success"] = False
+                    result["report"] = {
+                        "status": "controls_weak",
+                        "failure_type": "weak_specification",
+                        "reason": outcome.summary,
+                        "controls": outcome.atoms,
                     }
                     result["stdout"] = outcome.summary
                     result["stderr"] = ""
@@ -795,6 +918,30 @@ def main() -> None:
         stop_reason = f"exception:{type(exc).__name__}"
         print(f"Error during healing: {exc}")
     finally:
+        if (
+            not success
+            and controls_mode == "warn"
+            and weak_controls_candidates
+            and stop_reason
+            in {"max_retries_exhausted", "budget_denied", "manual_review_required"}
+        ):
+            best_candidate = min(
+                weak_controls_candidates,
+                key=lambda candidate: (
+                    candidate["weak_atoms"],
+                    candidate["survived"],
+                    candidate["attempt"],
+                ),
+            )
+            Path(source_file).write_text(
+                best_candidate["source"], encoding="utf-8"
+            )
+            success = True
+            controls_ranking[best_candidate["ranking_index"]]["selected"] = True
+            print(
+                "Warn mode restored the best controls-ranked candidate "
+                f"from attempt {best_candidate['attempt']}."
+            )
         try:
             _loop_span.set_attribute("mumei.loop.final_success", success)
             _loop_span.set_attribute("mumei.loop.attempt", len(
@@ -855,6 +1002,7 @@ def main() -> None:
             except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as exc:
                 certificate_failed = True
                 print(f"Error: repair certificate not written: {exc}")
+        _print_controls_ranking(controls_mode, controls_ranking)
         if not success or certificate_failed:
             sys.exit(1)
 

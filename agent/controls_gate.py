@@ -21,6 +21,8 @@ class ControlsOutcome:
     skipped: bool
     summary: str
     atoms: dict[str, dict[str, Any]]
+    malformed: bool = False
+    unavailable: bool = False
 
 
 class ControlsGate:
@@ -57,6 +59,7 @@ class ControlsGate:
                 skipped=True,
                 summary=summary,
                 atoms={},
+                malformed=True,
             )
         if has_unnamed and self.mode == "require":
             return ControlsOutcome(
@@ -64,6 +67,7 @@ class ControlsGate:
                 skipped=True,
                 summary="controls cannot check unnamed atom(s)",
                 atoms={},
+                malformed=True,
             )
 
         atoms: dict[str, dict[str, Any]] = {}
@@ -208,4 +212,6 @@ class ControlsGate:
             skipped=has_unnamed or bool(unavailable),
             summary=summary,
             atoms=atoms,
+            malformed=has_unnamed or bool(malformed),
+            unavailable=bool(unavailable),
         )

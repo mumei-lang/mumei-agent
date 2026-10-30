@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased: Heal negative-controls ranking
+
+- Added opt-in `heal --controls-gate {off,warn,require}` candidate ranking after verification, Charter, and contract-erosion checks. `off` preserves existing behavior; `warn` retries weak candidates and may restore the best verified candidate after eligible retry stops, while `require` never accepts a weak or unavailable result.
+
 ## 2026-10-24–25: Trust-aware repair and test-observation integrations (#616–#627)
 
 - Agent workflows now consume Claim Book evidence and Seal Grade; sibling-lemma proliferation is constrained to machine-verified claims and preserves dependency context.
