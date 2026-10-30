@@ -601,6 +601,7 @@ def main() -> None:
                 ranking_entry = {
                     "attempt": attempt + 1,
                     "status": "clean" if controls_clean else "weak",
+                    "malformed": outcome.malformed,
                     "weak_atoms": weak_atoms,
                     "survived": survived,
                     "selected": controls_clean,
@@ -613,6 +614,7 @@ def main() -> None:
                             "source": Path(source_file).read_text(
                                 encoding="utf-8"
                             ),
+                            "malformed": outcome.malformed,
                             "survived": survived,
                             "weak_atoms": weak_atoms,
                             "summary": outcome.summary,
@@ -930,6 +932,7 @@ def main() -> None:
             best_candidate = min(
                 weak_controls_candidates,
                 key=lambda candidate: (
+                    candidate["malformed"],
                     candidate["weak_atoms"],
                     candidate["survived"],
                     candidate["attempt"],

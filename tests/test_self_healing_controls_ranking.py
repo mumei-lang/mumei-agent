@@ -180,6 +180,7 @@ def test_warn_accepts_clean_first_candidate(
             {
                 "attempt": 1,
                 "status": "clean",
+                "malformed": False,
                 "weak_atoms": 0,
                 "survived": 0,
                 "selected": True,
@@ -658,6 +659,38 @@ def test_malformed_controls_result_is_not_clean_in_warn_mode(
     assert reports[0]["status"] == "controls_weak"
     assert [entry["status"] for entry in ranking["candidates"]] == ["weak", "clean"]
     assert ranking["candidates"][1]["selected"] is True
+
+
+def test_warn_fallback_prefers_checked_weak_candidate_to_malformed_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _source(tmp_path)
+    malformed = {
+        "returncode": 1,
+        "report": {"atoms": []},
+        "stderr": "missing atom",
+    }
+    client = FakeClient([malformed, _controls_result("weak", 2)])
+    _configure(
+        monkeypatch,
+        tmp_path,
+        client,
+        [str(source), "--max-retries", "1", "--controls-gate", "warn"],
+    )
+    monkeypatch.setattr(
+        self_healing,
+        "get_fix",
+        lambda *_args, **_kwargs: "atom app() -> i64 body: { 1 }\n",
+    )
+
+    self_healing.main()
+
+    ranking = _ranking(capsys)
+    assert source.read_text(encoding="utf-8") == "atom app() -> i64 body: { 1 }\n"
+    assert [entry["malformed"] for entry in ranking["candidates"]] == [True, False]
+    assert [entry["selected"] for entry in ranking["candidates"]] == [False, True]
 
 
 def test_directory_heal_forwards_controls_gate(
