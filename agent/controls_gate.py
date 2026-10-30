@@ -172,10 +172,18 @@ class ControlsGate:
                 and mutant.get("outcome") == "survived"
                 and isinstance(mutant.get("id"), str)
             ]
+            surviving_descriptions = [
+                mutant.get("detail")
+                if isinstance(mutant.get("detail"), str) and mutant["detail"]
+                else mutant["id"]
+                for mutant in mutants
+                if mutant.get("outcome") == "survived"
+            ]
             atoms[name] = {
                 "status": status,
                 **counts,
                 "surviving": surviving,
+                "surviving_descriptions": surviving_descriptions,
             }
 
         weak_atoms = {

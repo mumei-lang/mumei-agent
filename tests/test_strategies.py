@@ -257,6 +257,26 @@ def test_postcondition_violated_routes_correctly():
     assert "postcondition" in prompt.lower()
 
 
+def test_weak_specification_routes_to_negative_controls_prompt():
+    client = _mock_client("```mumei\natom fixed() body: 1;\n```")
+    report = {
+        "failure_type": "weak_specification",
+        "controls": {
+            "f": {
+                "status": "weak",
+                "survived": 1,
+                "surviving_descriptions": ["returns a constant"],
+            }
+        },
+    }
+
+    get_fix(client, "test-model", "source", "error", report)
+
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert "negative controls show" in prompt
+    assert "returns a constant" in prompt
+
+
 def test_structured_feedback_error_type_routes_prompt_and_guidance():
     client = _mock_client("```mumei\natom fixed() body: 1;\n```")
     report = {
