@@ -105,6 +105,22 @@ def _config() -> MagicMock:
     return config
 
 
+def _response_for_spec(spec: dict) -> MagicMock:
+    response = MagicMock()
+    response.choices = [
+        MagicMock(message=MagicMock(content=json.dumps(spec)))
+    ]
+    return response
+
+
+def _llm_client(*specs: dict) -> MagicMock:
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [
+        _response_for_spec(spec) for spec in specs
+    ]
+    return client
+
+
 def _args(tmp_path: Path, *options: str):
     return build_parser().parse_args(
         [
@@ -162,6 +178,86 @@ def test_extract_spec_from_tests_text_passes_context_and_writes_report(
     captured = capsys.readouterr()
     assert "Observation checks:" in captured.err
     assert "outside_requires=0 not_checked=0" in captured.err
+
+
+def test_extract_spec_from_tests_retries_inconclusive_observations(
+    tmp_path: Path,
+) -> None:
+    retried_spec = copy.deepcopy(SPEC)
+    retried_spec["atoms"][0]["requires"] = "a >= 0 && b >= 0"
+    args = _args(
+        tmp_path,
+        "--from-tests",
+        str(tmp_path / "tests"),
+        "--max-retries",
+        "2",
+    )
+    mumei = FakeMumei(["inconclusive", "consistent"])
+    config = _config()
+    client = _llm_client(SPEC, retried_spec)
+    config.create_client.return_value = client
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=config),
+        patch("agent.extract_spec.create_mumei_client", return_value=mumei),
+        patch("agent.extract_spec.harvest_tests", return_value=HARVEST),
+    ):
+        main(args)
+
+    assert json.loads((tmp_path / "spec.json").read_text(encoding="utf-8")) == (
+        retried_spec
+    )
+    assert client.chat.completions.create.call_count == 2
+    retry_prompt = client.chat.completions.create.call_args_list[1].kwargs[
+        "messages"
+    ][1]["content"]
+    assert (
+        "test test_add (test_add.py:4) observed add(2, 3) == 5, but mumei "
+        "observe could not decide it against atom add's contract (detail: "
+        "observation detail); use only parameters, literals, and Mumei "
+        "arithmetic, comparison, and logical operators, with result only in "
+        "ensures"
+    ) in retry_prompt
+
+
+@pytest.mark.parametrize(
+    ("verdict", "warning"),
+    [
+        ("inconclusive", "could not decide it (detail: observation detail)"),
+        ("outside_requires", "atom add's requires excludes these arguments"),
+    ],
+)
+def test_extract_spec_from_tests_warns_on_final_soft_observation(
+    verdict: str,
+    warning: str,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    args = _args(
+        tmp_path,
+        "--from-tests",
+        str(tmp_path / "tests"),
+        "--max-retries",
+        "1",
+    )
+    config = _config()
+    config.create_client.return_value = _llm_client(SPEC)
+    with (
+        patch("agent.extract_spec.AgentConfig", return_value=config),
+        patch(
+            "agent.extract_spec.create_mumei_client",
+            return_value=FakeMumei([verdict]),
+        ),
+        patch("agent.extract_spec.harvest_tests", return_value=HARVEST),
+    ):
+        main(args)
+
+    assert json.loads((tmp_path / "spec.json").read_text(encoding="utf-8")) == SPEC
+    stderr = capsys.readouterr().err
+    assert "Warning: test test_add (test_add.py:4) observed add(2, 3) == 5, " in (
+        stderr
+    )
+    assert warning in stderr
+    assert "Error:" not in stderr
 
 
 @pytest.mark.parametrize(

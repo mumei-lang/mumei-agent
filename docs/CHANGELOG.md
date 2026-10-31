@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased: Observation feedback for undecided checks
+
+- `extract-spec --from-tests` now retries inconclusive and outside-requires observation results while retries remain, then warns on the final attempt. `observe-tests` also warns about inconclusive example, relation, and rejection checks and about outside-requires example and relation checks, without changing exit codes.
+
 ## Unreleased: Heal negative-controls ranking
 
 - Added opt-in `heal --controls-gate {off,warn,require}` candidate ranking after verification, Charter, and contract-erosion checks. `off` preserves existing behavior; `warn` retries weak candidates and may restore the best verified candidate after eligible retry stops, while `require` never accepts a weak or unavailable result.

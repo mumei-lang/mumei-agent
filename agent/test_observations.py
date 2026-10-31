@@ -33,6 +33,10 @@ _PROPERTY_VERDICTS = {
     "inconclusive",
     "not_checked",
 }
+_DECIDABLE_HINT = (
+    "use only parameters, literals, and Mumei arithmetic, comparison, and "
+    "logical operators, with result only in ensures"
+)
 
 
 class ObservationCheckError(ValueError):
@@ -283,6 +287,15 @@ def _format_call(result: dict[str, Any], spec: dict) -> str:
     return f"{target}({', '.join(_format_value(value) for value in values)})"
 
 
+def _observed_text(result: dict[str, Any], spec: dict) -> str:
+    call = _format_call(result, spec)
+    if result.get("kind") == "example":
+        return f"{call} == {_format_value(result.get('result'))}"
+    if result.get("kind") == "relation":
+        return f"{call} with relation {result.get('predicate', '<unknown>')}"
+    return call
+
+
 def _property_metadata(
     result: dict[str, Any],
     harvest: dict | None,
@@ -385,7 +398,7 @@ def observation_feedback_parts(
     """Split blocking contract conflicts from retryable feedback."""
     ordered = _ordered_results(report)
     blocking: list[str] = []
-    not_entailed: list[str] = []
+    retry: list[str] = []
     missing_targets: set[str] = set()
     for result in ordered:
         verdict = result.get("verdict")
@@ -412,38 +425,70 @@ def observation_feedback_parts(
                 predicate = result.get("predicate")
                 if not isinstance(predicate, str) or not predicate:
                     predicate = "<unknown>"
-                not_entailed.append(
+                retry.append(
                     f"test {test} ({location}) checks {quantified}, but atom "
                     f"{target}'s ensures do not guarantee it; strengthen "
                     f"ensures so that {predicate} holds whenever requires and "
                     f"the test's assumptions hold"
                     f"{_detail_suffix(result)}"
                 )
-            continue
-        if verdict not in _BLOCKING_VERDICTS:
-            continue
-        test, location = _observation_location(result)
-        call = _format_call(result, spec)
-        if verdict == "contradicts_ensures":
-            if result.get("kind") == "example":
-                observed = f"{call} == {_format_value(result.get('result'))}"
-            elif result.get("kind") == "relation":
-                observed = (
-                    f"{call} with relation "
-                    f"{result.get('predicate', '<unknown>')}"
+            elif verdict == "inconclusive":
+                retry.append(
+                    f"test {test} ({location}) checks {quantified}, but mumei "
+                    f"observe could not decide it{_detail_suffix(result)}; "
+                    f"{_DECIDABLE_HINT}"
                 )
-            else:
-                observed = call
+            elif verdict == "outside_requires":
+                retry.append(
+                    f"test {test} ({location}) checks {quantified}, but no "
+                    f"generated input satisfies atom {target}'s requires; "
+                    "widen requires to admit the test's inputs"
+                )
+            continue
+        if verdict == "contradicts_ensures":
+            test, location = _observation_location(result)
+            observed = _observed_text(result, spec)
             blocking.append(
                 f"test {test} ({location}) observed {observed}, "
                 f"but atom {target}'s ensures forbids it"
             )
-        else:
+        elif verdict == "requires_admits_rejected":
+            test, location = _observation_location(result)
+            call = _format_call(result, spec)
             blocking.append(
                 f"test {test} ({location}) expects {call} to be rejected, "
                 f"but atom {target}'s requires admits it"
             )
-    soft = list(not_entailed)
+        elif verdict == "inconclusive":
+            test, location = _observation_location(result)
+            call = _format_call(result, spec)
+            if result.get("kind") in {"example", "relation"}:
+                observed = _observed_text(result, spec)
+                retry.append(
+                    f"test {test} ({location}) observed {observed}, but mumei "
+                    "observe could not decide it against atom "
+                    f"{target}'s contract{_detail_suffix(result)}; "
+                    f"{_DECIDABLE_HINT}"
+                )
+            elif result.get("kind") == "rejects":
+                retry.append(
+                    f"test {test} ({location}) expects {call} to be rejected, "
+                    "but mumei observe could not decide it against atom "
+                    f"{target}'s requires{_detail_suffix(result)}; "
+                    f"{_DECIDABLE_HINT}"
+                )
+        elif verdict == "outside_requires" and result.get("kind") in {
+            "example",
+            "relation",
+        }:
+            test, location = _observation_location(result)
+            observed = _observed_text(result, spec)
+            retry.append(
+                f"test {test} ({location}) observed {observed}, but atom "
+                f"{target}'s requires excludes these arguments; widen requires "
+                "to admit them"
+            )
+    soft = list(retry)
     if missing_targets:
         soft.append(
             "No atom in the extracted spec for harvested targets: "
@@ -493,7 +538,7 @@ def observation_warnings(
     spec: dict,
     harvest: dict | None = None,
 ) -> list[str]:
-    """Return stable warnings for unchecked and non-failing property results."""
+    """Return stable warnings for unchecked and non-failing observations."""
     warnings = []
     for result in _ordered_results(report):
         verdict = result.get("verdict")
@@ -505,6 +550,30 @@ def observation_warnings(
             )
             continue
         if result.get("kind") != "property":
+            target = str(result.get("target", "<unknown>"))
+            kind = result.get("kind")
+            if verdict == "inconclusive" and kind in {"example", "relation"}:
+                observed = _observed_text(result, spec)
+                warnings.append(
+                    f"test {test} ({location}) observed {observed}, but mumei "
+                    f"observe could not decide it{_detail_suffix(result)}"
+                )
+            elif verdict == "inconclusive" and kind == "rejects":
+                call = _format_call(result, spec)
+                warnings.append(
+                    f"test {test} ({location}) expects {call} to be rejected, "
+                    f"but mumei observe could not decide it"
+                    f"{_detail_suffix(result)}"
+                )
+            elif verdict == "outside_requires" and kind in {
+                "example",
+                "relation",
+            }:
+                observed = _observed_text(result, spec)
+                warnings.append(
+                    f"test {test} ({location}) observed {observed}, but atom "
+                    f"{target}'s requires excludes these arguments"
+                )
             continue
         target = str(result.get("target", "<unknown>"))
         quantified = _property_quantified(result, spec, harvest)

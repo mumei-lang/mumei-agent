@@ -10,8 +10,10 @@ from agent.test_observations import (
     align_harvest_to_spec,
     check_observations,
     observation_feedback,
+    observation_feedback_parts,
     observation_prompt_context,
     observation_summary,
+    observation_warnings,
     spec_to_observe_module,
 )
 
@@ -262,6 +264,13 @@ def test_observation_feedback_covers_blocking_verdicts_in_stable_order() -> None
         "relation result >= 0, but atom add's ensures forbids it",
         "test test_rejects (tests/test_lib.py:4) expects add(-1, 2) to be "
         "rejected, but atom add's requires admits it",
+        "test test_outside (tests/test_lib.py:8) observed add() == null, but "
+        "atom add's requires excludes these arguments; widen requires to "
+        "admit them",
+        "test test_unknown (tests/test_lib.py:10) observed add() == null, but "
+        "mumei observe could not decide it against atom add's contract; use "
+        "only parameters, literals, and Mumei arithmetic, comparison, and "
+        "logical operators, with result only in ensures",
         "No atom in the extracted spec for harvested targets: missing",
     ]
     assert observation_feedback(report, spec) == expected
@@ -398,3 +407,286 @@ def test_observation_prompt_renders_relations_and_rejects() -> None:
     assert "add(x…) with result >= 0" in prompt
     assert "args: {\"a\":1,\"b\":2}" in prompt
     assert "add(…) is rejected" in prompt
+
+
+_OBSERVATION_SPEC = {
+    "atoms": [
+        {
+            "name": "add",
+            "inputs": [{"name": "x", "type": "i64"}],
+        }
+    ]
+}
+_TEST_DECIDABLE_HINT = (
+    "use only parameters, literals, and Mumei arithmetic, comparison, and "
+    "logical operators, with result only in ensures"
+)
+
+
+def _observation_result(
+    kind: str,
+    verdict: str,
+    *,
+    detail: str | None = None,
+    test: str = "test_add",
+    line: int = 3,
+) -> dict:
+    result = {
+        "kind": kind,
+        "target": "add",
+        "test": test,
+        "file": "tests/test_add.py",
+        "line": line,
+        "args": [{"var": "x"}] if kind == "property" else [2],
+        "result": 5,
+        "predicate": "result >= 0",
+        "verdict": verdict,
+    }
+    if detail is not None:
+        result["detail"] = detail
+    if kind == "property":
+        result["variables"] = [
+            {"name": "x", "type": "i64", "min": 0, "max": 10}
+        ]
+        result["assumptions"] = ["x >= 0"]
+    return result
+
+
+@pytest.mark.parametrize(
+    ("kind", "verdict", "detail", "expected"),
+    [
+        (
+            "example",
+            "inconclusive",
+            None,
+            "test test_add (tests/test_add.py:3) observed add(2) == 5, but "
+            "mumei observe could not decide it against atom add's contract; "
+            f"{_TEST_DECIDABLE_HINT}",
+        ),
+        (
+            "example",
+            "inconclusive",
+            "solver timeout",
+            "test test_add (tests/test_add.py:3) observed add(2) == 5, but "
+            "mumei observe could not decide it against atom add's contract "
+            f"(detail: solver timeout); {_TEST_DECIDABLE_HINT}",
+        ),
+        (
+            "relation",
+            "inconclusive",
+            None,
+            "test test_add (tests/test_add.py:3) observed add(2) with relation "
+            "result >= 0, but mumei observe could not decide it against atom "
+            f"add's contract; {_TEST_DECIDABLE_HINT}",
+        ),
+        (
+            "relation",
+            "inconclusive",
+            "solver timeout",
+            "test test_add (tests/test_add.py:3) observed add(2) with relation "
+            "result >= 0, but mumei observe could not decide it against atom "
+            f"add's contract (detail: solver timeout); {_TEST_DECIDABLE_HINT}",
+        ),
+        (
+            "rejects",
+            "inconclusive",
+            None,
+            "test test_add (tests/test_add.py:3) expects add(2) to be rejected, "
+            "but mumei observe could not decide it against atom add's requires; "
+            f"{_TEST_DECIDABLE_HINT}",
+        ),
+        (
+            "rejects",
+            "inconclusive",
+            "solver timeout",
+            "test test_add (tests/test_add.py:3) expects add(2) to be rejected, "
+            "but mumei observe could not decide it against atom add's requires "
+            f"(detail: solver timeout); {_TEST_DECIDABLE_HINT}",
+        ),
+        (
+            "example",
+            "outside_requires",
+            None,
+            "test test_add (tests/test_add.py:3) observed add(2) == 5, but "
+            "atom add's requires excludes these arguments; widen requires to "
+            "admit them",
+        ),
+        (
+            "relation",
+            "outside_requires",
+            None,
+            "test test_add (tests/test_add.py:3) observed add(2) with relation "
+            "result >= 0, but atom add's requires excludes these arguments; "
+            "widen requires to admit them",
+        ),
+        (
+            "property",
+            "inconclusive",
+            "solver timeout",
+            "test test_add (tests/test_add.py:3) checks for all x in [0, 10], "
+            "assuming x >= 0: add(x=x) satisfies result >= 0, but mumei observe "
+            "could not decide it (detail: solver timeout); "
+            f"{_TEST_DECIDABLE_HINT}",
+        ),
+        (
+            "property",
+            "outside_requires",
+            None,
+            "test test_add (tests/test_add.py:3) checks for all x in [0, 10], "
+            "assuming x >= 0: add(x=x) satisfies result >= 0, but no generated "
+            "input satisfies atom add's requires; widen requires to admit the "
+            "test's inputs",
+        ),
+    ],
+)
+def test_observation_feedback_parts_retries_undecidable_results(
+    kind: str,
+    verdict: str,
+    detail: str | None,
+    expected: str,
+) -> None:
+    row = _observation_result(kind, verdict, detail=detail)
+
+    blocking, soft = observation_feedback_parts(
+        {"results": [row]}, _OBSERVATION_SPEC
+    )
+
+    assert blocking == []
+    assert soft == [expected]
+
+
+@pytest.mark.parametrize(
+    ("kind", "verdict", "detail"),
+    [
+        ("example", "consistent", None),
+        ("property", "entailed", None),
+        ("rejects", "rejection_explained", None),
+        ("property", "domain_exceeds_requires", None),
+        ("example", "not_checked", "generic_atom"),
+        ("property", "not_checked", None),
+    ],
+)
+def test_observation_feedback_parts_ignores_other_nonblocking_results(
+    kind: str,
+    verdict: str,
+    detail: str | None,
+) -> None:
+    row = _observation_result(kind, verdict, detail=detail)
+
+    assert observation_feedback_parts(
+        {"results": [row]}, _OBSERVATION_SPEC
+    ) == ([], [])
+
+
+@pytest.mark.parametrize(
+    ("kind", "verdict", "detail", "expected"),
+    [
+        (
+            "example",
+            "inconclusive",
+            "solver timeout",
+            "test test_add (tests/test_add.py:3) observed add(2) == 5, but "
+            "mumei observe could not decide it (detail: solver timeout)",
+        ),
+        (
+            "relation",
+            "inconclusive",
+            None,
+            "test test_add (tests/test_add.py:3) observed add(2) with relation "
+            "result >= 0, but mumei observe could not decide it",
+        ),
+        (
+            "rejects",
+            "inconclusive",
+            "unsupported expression",
+            "test test_add (tests/test_add.py:3) expects add(2) to be rejected, "
+            "but mumei observe could not decide it (detail: unsupported "
+            "expression)",
+        ),
+        (
+            "example",
+            "outside_requires",
+            None,
+            "test test_add (tests/test_add.py:3) observed add(2) == 5, but "
+            "atom add's requires excludes these arguments",
+        ),
+        (
+            "relation",
+            "outside_requires",
+            None,
+            "test test_add (tests/test_add.py:3) observed add(2) with relation "
+            "result >= 0, but atom add's requires excludes these arguments",
+        ),
+    ],
+)
+def test_observation_warnings_for_undecidable_non_property_results(
+    kind: str,
+    verdict: str,
+    detail: str | None,
+    expected: str,
+) -> None:
+    row = _observation_result(kind, verdict, detail=detail)
+
+    assert observation_warnings(
+        {"results": [row]}, _OBSERVATION_SPEC
+    ) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("kind", "verdict"),
+    [("example", "consistent"), ("rejects", "rejection_explained")],
+)
+def test_observation_warnings_ignore_consistent_and_explained_non_property(
+    kind: str,
+    verdict: str,
+) -> None:
+    row = _observation_result(kind, verdict)
+
+    assert observation_warnings(
+        {"results": [row]}, _OBSERVATION_SPEC
+    ) == []
+
+
+def test_observation_feedback_soft_messages_are_ordered_and_deterministic() -> None:
+    property_result = _observation_result(
+        "property", "not_entailed", test="test_property", line=9
+    )
+    report = {
+        "results": [
+            property_result,
+            _observation_result(
+                "example", "outside_requires", test="test_outside", line=4
+            ),
+            {
+                "kind": "example",
+                "target": "missing",
+                "test": "test_missing",
+                "file": "tests/test_add.py",
+                "line": 1,
+                "verdict": "not_checked",
+                "detail": "no_atom",
+            },
+            _observation_result(
+                "example", "inconclusive", test="test_unknown", line=2
+            ),
+        ]
+    }
+
+    first = observation_feedback_parts(report, _OBSERVATION_SPEC)
+    second = observation_feedback_parts(report, _OBSERVATION_SPEC)
+
+    expected = [
+        "test test_unknown (tests/test_add.py:2) observed add(2) == 5, but "
+        "mumei observe could not decide it against atom add's contract; "
+        f"{_TEST_DECIDABLE_HINT}",
+        "test test_outside (tests/test_add.py:4) observed add(2) == 5, but "
+        "atom add's requires excludes these arguments; widen requires to "
+        "admit them",
+        "test test_property (tests/test_add.py:9) checks for all x in [0, 10], "
+        "assuming x >= 0: add(x=x) satisfies result >= 0, but atom add's "
+        "ensures do not guarantee it; strengthen ensures so that result >= 0 "
+        "holds whenever requires and the test's assumptions hold",
+        "No atom in the extracted spec for harvested targets: missing",
+    ]
+    assert first == ([], expected)
+    assert second == first

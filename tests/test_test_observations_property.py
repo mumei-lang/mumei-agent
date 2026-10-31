@@ -356,8 +356,6 @@ def test_not_entailed_feedback_adds_detail_and_precedes_missing_atom() -> None:
     [
         "entailed",
         "domain_exceeds_requires",
-        "outside_requires",
-        "inconclusive",
         "not_checked",
     ],
 )
@@ -459,7 +457,10 @@ def test_property_warning_unrecognized_verdicts_and_non_property_verdicts() -> N
     assert observation_warnings(
         {"results": [{"kind": "example", "verdict": "outside_requires"}]},
         SPEC,
-    ) == []
+    ) == [
+        "test <unknown> (<unknown>:?) observed <unknown>() == null, but atom "
+        "<unknown>'s requires excludes these arguments"
+    ]
 
 
 def test_not_checked_no_atom_is_not_a_warning_but_missing_detail_is() -> None:
