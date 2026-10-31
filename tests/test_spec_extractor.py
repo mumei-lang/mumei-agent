@@ -1,8 +1,11 @@
 """Tests for natural language specification extraction."""
 from __future__ import annotations
 
+import copy
 import json
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from agent import mcp_server
 from agent.metrics import Metrics
@@ -638,6 +641,315 @@ def test_extract_spec_missing_atom_feedback_does_not_block_final_attempt() -> No
         "content"
     ]
     assert "missing atom" in retry_prompt
+
+
+def test_extract_spec_falls_back_after_later_schema_invalid_specs(caplog) -> None:
+    invalid_spec = {"task_id": "invalid"}
+    client = _mock_client(
+        json.dumps(VALID_SPEC),
+        json.dumps(invalid_spec),
+        json.dumps(invalid_spec),
+    )
+    checker = MagicMock(return_value=([], ["inconclusive observation"]))
+    metrics = Metrics()
+
+    with caplog.at_level("WARNING", logger="agent.spec_extractor"):
+        result = extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=3,
+            metrics=metrics,
+            spec_checker=checker,
+        )
+
+    assert result == VALID_SPEC
+    assert checker.call_count == 1
+    assert metrics.extraction_attempts == 3
+    assert metrics.extraction_successes == 1
+    assert "Later extraction attempts were invalid" in caplog.text
+    assert "soft-feedback spec from attempt 1" in caplog.text
+
+
+def test_extract_spec_falls_back_after_later_invalid_json() -> None:
+    client = _mock_client(json.dumps(VALID_SPEC), "not json", "also not json")
+    checker = MagicMock(return_value=([], ["outside requires"]))
+
+    result = extract_spec(
+        client,
+        "m",
+        "safe transfer requires a positive amount",
+        max_retries=3,
+        spec_checker=checker,
+    )
+
+    assert result == VALID_SPEC
+    assert checker.call_count == 1
+
+
+def test_extract_spec_uses_latest_soft_feedback_candidate() -> None:
+    latest_spec = copy.deepcopy(VALID_SPEC)
+    latest_spec["task_id"] = "nl-latest-soft"
+    invalid_spec = {"task_id": "invalid"}
+    client = _mock_client(
+        json.dumps(VALID_SPEC),
+        json.dumps(latest_spec),
+        json.dumps(invalid_spec),
+    )
+    checker = MagicMock(
+        side_effect=[
+            ([], ["first soft observation"]),
+            ([], ["second soft observation"]),
+        ]
+    )
+
+    result = extract_spec(
+        client,
+        "m",
+        "safe transfer requires a positive amount",
+        max_retries=3,
+        spec_checker=checker,
+    )
+
+    assert result == latest_spec
+    assert checker.call_count == 2
+
+
+def test_extract_spec_falls_back_to_soft_candidate_after_blocking_candidates() -> None:
+    second_spec = copy.deepcopy(VALID_SPEC)
+    second_spec["task_id"] = "nl-blocked-second"
+    third_spec = copy.deepcopy(VALID_SPEC)
+    third_spec["task_id"] = "nl-blocked-third"
+    client = _mock_client(
+        json.dumps(VALID_SPEC),
+        json.dumps(second_spec),
+        json.dumps(third_spec),
+    )
+    checker = MagicMock(
+        side_effect=[
+            ([], ["soft observation"]),
+            (["blocking observation"], []),
+            (["final blocking observation"], []),
+        ]
+    )
+
+    result = extract_spec(
+        client,
+        "m",
+        "safe transfer requires a positive amount",
+        max_retries=3,
+        spec_checker=checker,
+    )
+
+    assert result == VALID_SPEC
+    assert checker.call_count == 3
+
+
+def test_extract_spec_does_not_fallback_to_blocking_candidate(caplog) -> None:
+    invalid_spec = {"task_id": "invalid"}
+    client = _mock_client(
+        json.dumps(VALID_SPEC),
+        json.dumps(invalid_spec),
+        json.dumps(invalid_spec),
+    )
+    checker = MagicMock(return_value=(["blocking observation"], []))
+
+    with caplog.at_level("WARNING", logger="agent.spec_extractor"):
+        with pytest.raises(ValueError) as exc_info:
+            extract_spec(
+                client,
+                "m",
+                "safe transfer requires a positive amount",
+                max_retries=3,
+                spec_checker=checker,
+            )
+
+    expected_errors = _validate_extracted_spec(invalid_spec)
+    assert str(exc_info.value) == (
+        "failed to extract valid forge task spec after 3 attempts: "
+        + "; ".join(expected_errors)
+    )
+    assert checker.call_count == 1
+    assert "Later extraction attempts were invalid" not in caplog.text
+
+
+def test_extract_spec_raises_unchanged_when_all_specs_are_schema_invalid() -> None:
+    invalid_spec = {"task_id": "invalid"}
+    client = _mock_client(
+        json.dumps(invalid_spec),
+        json.dumps(invalid_spec),
+        json.dumps(invalid_spec),
+    )
+    checker = MagicMock(return_value=([], ["soft observation"]))
+
+    with pytest.raises(ValueError) as exc_info:
+        extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=3,
+            spec_checker=checker,
+        )
+
+    expected_errors = _validate_extracted_spec(invalid_spec)
+    assert str(exc_info.value) == (
+        "failed to extract valid forge task spec after 3 attempts: "
+        + "; ".join(expected_errors)
+    )
+    checker.assert_not_called()
+
+
+def test_extract_spec_returns_clean_retry_without_fallback_warning(caplog) -> None:
+    clean_spec = copy.deepcopy(VALID_SPEC)
+    clean_spec["task_id"] = "nl-clean-retry"
+    client = _mock_client(json.dumps(VALID_SPEC), json.dumps(clean_spec))
+    checker = MagicMock(side_effect=[([], ["soft observation"]), ([], [])])
+
+    with caplog.at_level("WARNING", logger="agent.spec_extractor"):
+        result = extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=2,
+            spec_checker=checker,
+        )
+
+    assert result == clean_spec
+    assert "Later extraction attempts were invalid" not in caplog.text
+
+
+def test_extract_spec_accepts_final_soft_spec_without_fallback_warning(caplog) -> None:
+    final_spec = copy.deepcopy(VALID_SPEC)
+    final_spec["task_id"] = "nl-final-soft"
+    client = _mock_client(json.dumps(VALID_SPEC), json.dumps(final_spec))
+    checker = MagicMock(
+        side_effect=[
+            ([], ["first soft observation"]),
+            ([], ["final soft observation"]),
+        ]
+    )
+
+    with caplog.at_level("WARNING", logger="agent.spec_extractor"):
+        result = extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=2,
+            spec_checker=checker,
+        )
+
+    assert result == final_spec
+    assert "Later extraction attempts were invalid" not in caplog.text
+
+
+def test_extract_spec_without_checker_does_not_fallback() -> None:
+    invalid_spec = {"task_id": "invalid"}
+    client = _mock_client(json.dumps(invalid_spec), json.dumps(invalid_spec))
+
+    with pytest.raises(ValueError) as exc_info:
+        extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=2,
+        )
+
+    expected_errors = _validate_extracted_spec(invalid_spec)
+    assert str(exc_info.value) == (
+        "failed to extract valid forge task spec after 2 attempts: "
+        + "; ".join(expected_errors)
+    )
+
+
+def test_extract_spec_soft_fallback_is_deep_copied_before_later_mutation() -> None:
+    original_spec = copy.deepcopy(VALID_SPEC)
+    second_spec = copy.deepcopy(VALID_SPEC)
+    second_spec["task_id"] = "nl-blocked-second"
+    invalid_spec = {"task_id": "invalid"}
+    client = _mock_client(
+        json.dumps(original_spec),
+        json.dumps(second_spec),
+        json.dumps(invalid_spec),
+    )
+    checked_specs: list[dict] = []
+
+    def checker(spec: dict) -> tuple[list[str], list[str]]:
+        if not checked_specs:
+            checked_specs.append(spec)
+            return [], ["soft observation"]
+        checked_specs[0]["atoms"][0]["ensures"] = "result == 0"
+        return ["blocking observation"], []
+
+    result = extract_spec(
+        client,
+        "m",
+        "safe transfer requires a positive amount",
+        max_retries=3,
+        spec_checker=checker,
+    )
+
+    assert checked_specs[0]["atoms"][0]["ensures"] == "result == 0"
+    assert result == original_spec
+
+
+def test_extract_spec_accepts_soft_observation_on_single_final_attempt(
+    caplog,
+) -> None:
+    client = _mock_client(json.dumps(VALID_SPEC))
+    checker = MagicMock(return_value=([], ["soft observation"]))
+    metrics = Metrics()
+
+    with caplog.at_level("WARNING", logger="agent.spec_extractor"):
+        result = extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=1,
+            metrics=metrics,
+            spec_checker=checker,
+        )
+
+    assert result == VALID_SPEC
+    assert metrics.extraction_successes == 1
+    assert checker.call_count == 1
+    assert "Later extraction attempts were invalid" not in caplog.text
+
+
+def test_extract_spec_does_not_fallback_for_trivial_spec_rejection() -> None:
+    trivial_spec = {
+        "task_id": "nl-trivial",
+        "target_file": "std/math/add.mm",
+        "mode": "create",
+        "atoms": [
+            {
+                "name": "add",
+                "description": "Add two integers",
+                "inputs": [{"name": "a", "type": "i64"}],
+                "return_type": "i64",
+                "requires": "a is not None",
+                "ensures": "true",
+                "effects": [],
+            }
+        ],
+    }
+    invalid_spec = {"task_id": "invalid"}
+    client = _mock_client(
+        json.dumps(trivial_spec),
+        json.dumps(invalid_spec),
+        json.dumps(invalid_spec),
+    )
+    checker = MagicMock(return_value=([], ["soft observation"]))
+
+    with pytest.raises(ValueError):
+        extract_spec(
+            client,
+            "m",
+            "safe transfer requires a positive amount",
+            max_retries=3,
+            spec_checker=checker,
+        )
+
+    checker.assert_not_called()
 
 
 def test_extract_spec_appends_extra_context_to_prompt() -> None:

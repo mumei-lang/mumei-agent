@@ -302,7 +302,9 @@ guarantee a property predicate. Property contradictions block extraction;
 `not_entailed`, `inconclusive`, and `outside_requires` verdicts are retry
 feedback while retries remain and warnings on the final attempt, while
 `domain_exceeds_requires` remains a warning. Missing atoms are retry feedback
-but do not block the final extraction attempt. `observe-tests` also warns
+but do not block the final extraction attempt. If later retries produce
+invalid specs, extraction keeps the latest spec rejected only for retry
+feedback and warns. `observe-tests` also warns
 about inconclusive example, relation, and rejection checks and about
 outside-requires example and relation checks; these warnings do not change
 exit codes:

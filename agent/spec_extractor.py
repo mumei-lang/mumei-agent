@@ -1,6 +1,7 @@
 """Natural-language to forge task spec extraction."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from collections.abc import Callable
@@ -99,6 +100,7 @@ def extract_spec(
     feedback = ""
     attempts = max(1, max_retries)
     last_errors: list[str] = []
+    soft_fallback: tuple[int, dict] | None = None
 
     for attempt in range(1, attempts + 1):
         if metrics is not None:
@@ -146,12 +148,25 @@ def extract_spec(
             )
             if observation_errors:
                 validation_errors = observation_errors
+                if not blocking_errors and soft_errors and attempt < attempts:
+                    soft_fallback = (attempt, copy.deepcopy(spec))
         if not validation_errors:
             if metrics is not None:
                 metrics.record_extraction_success()
             return spec
         last_errors = validation_errors
         feedback = _format_retry_feedback(raw, validation_errors)
+
+    if soft_fallback is not None:
+        fallback_attempt, fallback_spec = soft_fallback
+        logger.warning(
+            "Later extraction attempts were invalid; using the "
+            "soft-feedback spec from attempt %d",
+            fallback_attempt,
+        )
+        if metrics is not None:
+            metrics.record_extraction_success()
+        return fallback_spec
 
     raise ValueError(
         f"failed to extract valid forge task spec after {attempts} attempts: "
