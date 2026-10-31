@@ -299,9 +299,12 @@ unavailable/incompatible `mumei observe` returns status `4`.
 `extract-spec --from-tests` uses the same observations as extraction context
 and retries specs that contradict examples, admit rejected inputs, or fail to
 guarantee a property predicate. Property contradictions block extraction;
-`not_entailed` is retry feedback while retries remain and a warning on the
-final attempt, while `domain_exceeds_requires` is a warning. Missing atoms are
-retry feedback but do not block the final extraction attempt:
+`not_entailed`, `inconclusive`, and `outside_requires` verdicts are retry
+feedback while retries remain and warnings on the final attempt, while
+`domain_exceeds_requires` remains a warning. Missing atoms are retry feedback
+but do not block the final extraction attempt. `observe-tests` also warns
+about inconclusive and outside-requires example, relation, and rejection
+checks; these warnings do not change exit codes:
 
 ```bash
 uv run mumei-agent extract-spec \
