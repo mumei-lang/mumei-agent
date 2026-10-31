@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -258,6 +259,89 @@ def test_extract_spec_from_tests_warns_on_final_soft_observation(
     )
     assert warning in stderr
     assert "Error:" not in stderr
+
+
+def test_extract_spec_from_tests_falls_back_when_later_specs_are_invalid(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    invalid_spec = {"task_id": "invalid"}
+    args = _args(
+        tmp_path,
+        "--from-tests",
+        str(tmp_path / "tests"),
+        "--max-retries",
+        "3",
+    )
+    config = _config()
+    config.create_client.return_value = _llm_client(SPEC, invalid_spec, invalid_spec)
+    mumei = FakeMumei(["inconclusive"])
+    with (
+        patch.object(logging.getLogger(), "handlers", []),
+        patch("agent.extract_spec.AgentConfig", return_value=config),
+        patch("agent.extract_spec.create_mumei_client", return_value=mumei),
+        patch("agent.extract_spec.harvest_tests", return_value=HARVEST),
+    ):
+        main(args)
+
+    assert json.loads((tmp_path / "spec.json").read_text(encoding="utf-8")) == SPEC
+    assert len(mumei.calls) == 1
+    stderr = capsys.readouterr().err
+    assert (
+        "Later extraction attempts were invalid; using the "
+        "soft-feedback spec from attempt 1"
+    ) in stderr
+    assert "Extraction metrics: attempts=3, successes=1" in stderr
+    assert "Warning:" in stderr
+    assert "could not decide it" in stderr
+
+
+def test_extract_spec_fallback_refreshes_observation_report_for_returned_spec(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    blocking_spec = copy.deepcopy(SPEC)
+    blocking_spec["atoms"][0]["ensures"] = "result == 0"
+    invalid_spec = {"task_id": "invalid"}
+    report_path = tmp_path / "observations.json"
+    args = _args(
+        tmp_path,
+        "--from-tests",
+        str(tmp_path / "tests"),
+        "--max-retries",
+        "3",
+        "--observations-output",
+        str(report_path),
+    )
+    config = _config()
+    config.create_client.return_value = _llm_client(
+        SPEC,
+        blocking_spec,
+        invalid_spec,
+    )
+    mumei = FakeMumei(
+        ["inconclusive", "contradicts_ensures", "inconclusive"]
+    )
+    with (
+        patch.object(logging.getLogger(), "handlers", []),
+        patch("agent.extract_spec.AgentConfig", return_value=config),
+        patch("agent.extract_spec.create_mumei_client", return_value=mumei),
+        patch("agent.extract_spec.harvest_tests", return_value=HARVEST),
+    ):
+        main(args)
+
+    assert json.loads((tmp_path / "spec.json").read_text(encoding="utf-8")) == SPEC
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["results"][0]["verdict"] == "inconclusive"
+    assert report["totals"]["contradicts_ensures"] == 0
+    assert len(mumei.calls) == 3
+    assert mumei.calls[0][0] == mumei.calls[2][0]
+    stderr = capsys.readouterr().err
+    assert "inconclusive=1" in stderr
+    assert "contradicts_ensures=0" in stderr
+    assert "Warning:" in stderr
+    assert "could not decide it" in stderr
+    assert "ensures forbids it" not in stderr
 
 
 @pytest.mark.parametrize(

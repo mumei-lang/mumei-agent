@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased: Soft-feedback extraction fallback
+
+- `extract-spec --from-tests` now keeps the latest spec rejected only for soft observation feedback when later retries are invalid, and warns when it falls back.
+
 ## Unreleased: Observation feedback for undecided checks
 
 - `extract-spec --from-tests` now retries inconclusive and outside-requires observation results while retries remain, then warns on the final attempt. `observe-tests` also warns about inconclusive example, relation, and rejection checks and about outside-requires example and relation checks, without changing exit codes.
