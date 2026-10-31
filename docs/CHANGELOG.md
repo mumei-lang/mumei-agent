@@ -2,7 +2,7 @@
 
 ## Unreleased: Observation feedback for undecided checks
 
-- `extract-spec --from-tests` now retries inconclusive and outside-requires observation results while retries remain, then warns on the final attempt. `observe-tests` also warns about inconclusive and outside-requires example, relation, and rejection checks without changing exit codes.
+- `extract-spec --from-tests` now retries inconclusive and outside-requires observation results while retries remain, then warns on the final attempt. `observe-tests` also warns about inconclusive example, relation, and rejection checks and about outside-requires example and relation checks, without changing exit codes.
 
 ## Unreleased: Heal negative-controls ranking
 

@@ -303,8 +303,9 @@ guarantee a property predicate. Property contradictions block extraction;
 feedback while retries remain and warnings on the final attempt, while
 `domain_exceeds_requires` remains a warning. Missing atoms are retry feedback
 but do not block the final extraction attempt. `observe-tests` also warns
-about inconclusive and outside-requires example, relation, and rejection
-checks; these warnings do not change exit codes:
+about inconclusive example, relation, and rejection checks and about
+outside-requires example and relation checks; these warnings do not change
+exit codes:
 
 ```bash
 uv run mumei-agent extract-spec \
