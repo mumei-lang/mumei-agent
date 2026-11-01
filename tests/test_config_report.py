@@ -169,7 +169,11 @@ def test_llm_base_url_credentials_and_metadata_are_stripped(
 def test_no_environment_hides_default_entries(monkeypatch, capsys) -> None:
     status, output, _ = _run(monkeypatch, capsys)
     assert status == 0
-    assert "environment (0 from env, 0 from preset," in output
+    assert (
+        f"environment (0 from env, 0 from preset, 0 from llm profile, "
+        f"of {len(ENV_VARS)} known; values loaded from .env count as env):"
+        in output
+    )
     assert "  CONTROLS_GATE =" not in output
 
 
@@ -261,10 +265,21 @@ def test_fixture_mode_reports_lean_ai_proof_inactive_reason_in_text(
 def test_llm_profile_is_in_header(monkeypatch, capsys) -> None:
     _scrub_environment(monkeypatch)
     monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-small")
+    profile = AgentConfig._LLM_PROFILES["local-small"]
+    assert set(profile) == {"model", "llm_max_tokens"}
+    profile_variables = {
+        variable.name for variable in ENV_VARS if variable.config_field in profile
+    }
+    assert profile_variables == {"LLM_MODEL", "LLM_MAX_TOKENS"}
     args = build_parser().parse_args([])
     assert config_main(args) == 0
     output = capsys.readouterr().out
     assert "llm profile: local-small" in output
+    assert (
+        f"environment (1 from env, 0 from preset, 2 from llm profile, "
+        f"of {len(ENV_VARS)} known; values loaded from .env count as env):"
+        in output
+    )
     assert "LLM_MODEL = qwen2.5-coder:1.5b-2k  [llm-profile local-small]" in output
     assert "LLM_MAX_TOKENS = 2048  [llm-profile local-small]" in output
 
@@ -279,6 +294,22 @@ def test_llm_profile_is_in_header(monkeypatch, capsys) -> None:
     assert model["set"] is max_tokens["set"] is False
     assert model["effective"] == "qwen2.5-coder:1.5b-2k"
     assert max_tokens["effective"] == 2048
+
+
+def test_explicit_llm_model_moves_profile_value_to_env(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-small")
+    monkeypatch.setenv("LLM_MODEL", "explicit-model")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert (
+        f"environment (2 from env, 0 from preset, 1 from llm profile, "
+        f"of {len(ENV_VARS)} known; values loaded from .env count as env):"
+        in output
+    )
+    assert "LLM_MODEL = explicit-model  [env]" in output
+    assert "LLM_MAX_TOKENS = 2048  [llm-profile local-small]" in output
 
 
 @pytest.mark.parametrize("all_values", [False, True])

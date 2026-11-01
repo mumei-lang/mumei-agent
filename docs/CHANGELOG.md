@@ -13,6 +13,8 @@
 - Values of variables classified as sensitive in the registry are never
   printed, only whether they are set. URLs are shown without credentials,
   query, or fragment.
+- The text header counts values sourced from environment variables, presets,
+  and LLM profiles.
 
 ## Unreleased: agent environment presets
 
