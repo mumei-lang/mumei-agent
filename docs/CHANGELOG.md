@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased: executable reference generator
+
+- `scripts/gen_reference_docs.py` is now executable, so `./scripts/gen_reference_docs.py --check`
+  works from an activated environment; it already adds the repository root to `sys.path`,
+  so `PYTHONPATH` is not needed.
+
 ## Unreleased: configuration report
 
 - Added `python -m agent config` with text and JSON output for effective
