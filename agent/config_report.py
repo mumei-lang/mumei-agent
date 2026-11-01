@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -38,6 +39,10 @@ def build_parser(
 
 def _sanitize_url_value(value: Any) -> Any:
     if not isinstance(value, str) or "://" not in value:
+        return value
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) is None or any(
+        character.isspace() for character in value
+    ):
         return value
     scheme, remainder = value.split("://", 1)
     authority_end = min(

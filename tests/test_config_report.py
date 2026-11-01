@@ -42,10 +42,30 @@ def _entry(report: dict, name: str) -> dict:
         ("https://host/a@b", "https://host/a@b"),
         ("https://host/v1?api_key=x#f", "https://host/v1"),
         ("not-a-url@host", "not-a-url@host"),
+        ('{"u":"https://h/x?y"}', '{"u":"https://h/x?y"}'),
+        ("key=https://u:p@h", "key=https://u:p@h"),
+        ("https://u:p@h/path with space", "https://u:p@h/path with space"),
     ],
 )
 def test_url_sanitizer(value: str, expected: str) -> None:
     assert _sanitize_url_value(value) == expected
+
+
+def test_json_value_with_embedded_url_is_not_sanitized(monkeypatch, capsys) -> None:
+    value = '{"u":"https://h/x?y"}'
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("LLM_BASE_URL", value)
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    assert f"LLM_BASE_URL = {value}  [env]" in capsys.readouterr().out
+
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("LLM_BASE_URL", value)
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    entry = _entry(json.loads(capsys.readouterr().out), "LLM_BASE_URL")
+    assert entry["value"] == value
+    assert entry["effective"] == value
 
 
 def test_sensitive_registry_classification_covers_secret_like_names() -> None:
