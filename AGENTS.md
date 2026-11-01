@@ -31,3 +31,11 @@ These rules follow the OWASP Logging and Secrets Management cheat sheets, CWE-20
 ## When you change an output surface
 
 When a change adds or widens an output surface, check it against the rules above before opening the PR. Output surfaces include a command, a report field, a log line, an MCP tool, a prompt template and a JSON schema. Don't paste secret values into chat, issues, PRs or tool arguments that may be logged. To check a credential, check whether it is set.
+
+## Adding or renaming flags and environment variables
+
+- Read [`docs/NAMING.md`](docs/NAMING.md) before choosing a flag or environment-variable name.
+- Never rename an existing name in place; add an alias and deprecate the old name through the next major release.
+- Register every environment variable in `agent/env_reference.py` with its category, default, description, and `sensitive` classification; regenerate references with `PYTHONPATH=$PWD .venv/bin/python scripts/gen_reference_docs.py`.
+- Run `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/test_naming.py tests/test_reference_docs.py tests/test_config_report.py -q`.
+- Use the [adding CLI flags and environment variables skill](.agents/skills/adding-cli-flags-and-env-vars/SKILL.md).
