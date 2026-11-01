@@ -152,9 +152,11 @@ def main(args: argparse.Namespace) -> int:
     print(f"llm profile: {config.llm_profile or 'none'}")
     env_count = sum(entry.source == "env" for entry in entries)
     preset_count = sum(entry.source == "preset" for entry in entries)
+    llm_count = sum(entry.source == "llm-profile" for entry in entries)
     print(
         f"environment ({env_count} from env, {preset_count} from preset, "
-        f"of {len(ENV_VARS)} known; values loaded from .env count as env):"
+        f"{llm_count} from llm profile, of {len(ENV_VARS)} known; "
+        "values loaded from .env count as env):"
     )
     for entry in visible:
         if entry.variable.sensitive:
