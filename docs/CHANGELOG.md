@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased: naming convention
+
+- Documented CLI flag and environment-variable naming rules and added tests
+  that grandfather existing names without renaming them.
+
 ## Unreleased: executable reference generator
 
 - `scripts/gen_reference_docs.py` is now executable, so `./scripts/gen_reference_docs.py --check`
