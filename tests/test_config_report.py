@@ -86,6 +86,25 @@ def test_llm_max_tokens_is_reported_as_non_sensitive(monkeypatch, capsys) -> Non
     assert "LLM_MAX_TOKENS = 321  [env]" in output
 
 
+def test_unparsed_environment_value_is_reported_as_raw(
+    monkeypatch, capsys
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("USE_MCP_CLIENT", "garbage")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    assert "USE_MCP_CLIENT = garbage  [env, raw]" in capsys.readouterr().out
+
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("USE_MCP_CLIENT", "garbage")
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    entry = _entry(json.loads(capsys.readouterr().out), "USE_MCP_CLIENT")
+    assert entry["source"] == "env"
+    assert entry["value"] == "garbage"
+    assert entry["effective"] is None
+
+
 def test_llm_base_url_credentials_and_metadata_are_stripped(
     monkeypatch, capsys
 ) -> None:

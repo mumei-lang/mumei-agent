@@ -77,7 +77,9 @@ def _entries(config: AgentConfig) -> list[_Entry]:
             if variable.config_field in llm_profile_values
             else "default"
         )
-        if variable.config_field and hasattr(config, variable.config_field):
+        if not variable.config_field:
+            effective = None
+        elif hasattr(config, variable.config_field):
             effective = getattr(config, variable.config_field)
         elif raw is not None:
             effective = raw
@@ -164,6 +166,10 @@ def main(args: argparse.Namespace) -> int:
                     f"  {entry.variable.name} = "
                     f"{_display(entry.variable.default)}  [default]"
                 )
+            continue
+        if entry.raw is not None and not entry.variable.config_field:
+            value = _display(_sanitize_url_value(entry.raw))
+            print(f"  {entry.variable.name} = {value}  [env, raw]")
             continue
         value = _display(_sanitize_url_value(entry.effective))
         if entry.source == "preset":
