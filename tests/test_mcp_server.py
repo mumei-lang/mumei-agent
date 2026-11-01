@@ -92,6 +92,22 @@ class TestGetAgentStatus:
         assert "ENABLE_CODE_TO_SPEC" in result["feature_flags"]
         assert "USE_MCP_SAMPLING" in result["feature_flags"]
 
+    def test_reports_configured_agent_preset(self, monkeypatch) -> None:
+        monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+        monkeypatch.delenv("ENABLE_LATENT_DEBUG", raising=False)
+
+        result = _payload(mcp_server.get_agent_status())
+
+        assert result["agent_preset"] == "experimental"
+        assert result["feature_flags"]["ENABLE_LATENT_DEBUG"] == ""
+
+    def test_reports_unset_agent_preset(self, monkeypatch) -> None:
+        monkeypatch.delenv("MUMEI_AGENT_PRESET", raising=False)
+
+        result = _payload(mcp_server.get_agent_status())
+
+        assert result["agent_preset"] is None
+
     def test_without_context_reports_no_mcp_client_capabilities(self) -> None:
         result = _payload(mcp_server.get_agent_status())
         assert result["mcp_client"] == {

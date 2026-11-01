@@ -379,6 +379,9 @@ def _toggle_summary() -> tuple[str, str]:
 
 
 def render_env_reference() -> str:
+    with _neutralized_environment():
+        from agent.config import _AGENT_PRESETS
+
     enabled_by_default, opt_in = _toggle_summary()
     lines = [
         "---",
@@ -418,6 +421,28 @@ def render_env_reference() -> str:
                 f"| `{markdown_cell(entry.name)}` | {entry.kind} | "
                 f"{markdown_cell(default)} | {markdown_cell(entry.description)} |"
             )
+    lines.extend(
+        [
+            "",
+            "## Presets",
+            "",
+            "Precedence is explicit environment variable > preset > built-in default. "
+            "An explicit variable is used whenever set; otherwise a preset value is "
+            "used when present, and all other settings retain their built-in defaults.",
+        ]
+    )
+    for preset, values in _AGENT_PRESETS.items():
+        lines.extend(
+            [
+                "",
+                f"### `{markdown_cell(preset)}`",
+                "",
+                "| Variable | Value |",
+                "|---|---|",
+            ]
+        )
+        for name, value in values.items():
+            lines.append(f"| `{markdown_cell(name)}` | `{markdown_cell(value)}` |")
     return "\n".join(lines).rstrip() + "\n"
 
 

@@ -45,6 +45,14 @@ tools, or Heal. See the
 [Mumei controls guide](https://github.com/mumei-lang/mumei/blob/develop/docs/CONTROLS.md).
 Equivalent mutants can still survive, so survivors need human judgment.
 
+### Presets
+
+Set `MUMEI_AGENT_PRESET=ci-strict` or `MUMEI_AGENT_PRESET=experimental` to apply
+the environment values listed in the generated [preset tables](ENV_REFERENCE.md#presets).
+Explicit environment variables override presets, and settings absent from a
+preset keep their built-in defaults. The classic `heal --controls-gate` option
+continues to ignore `CONTROLS_GATE` and its preset value.
+
 ### Contract guards
 
 `heal` and `self-correct` protect pinned charters and the source file's original

@@ -31,6 +31,7 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("AGENT_STRATEGY", "llm", "value", "single", "strategy", "Default agent strategy name."),
     EnvVar("PROMPT_REPORT_TRUNCATE_CHARS", "llm", "value", "4000", "prompt_report_truncate_chars", "Maximum characters retained in a prompt report."),
     EnvVar("MUMEI_LLM_PROFILE", "llm", "value", "", "llm_profile", "Optional `local-small` or `local-large` preset. Explicit `LLM_MODEL` and `LLM_MAX_TOKENS` values take precedence."),
+    EnvVar("MUMEI_AGENT_PRESET", "mumei", "value", "", "agent_preset", "Optional `ci-strict` or `experimental` preset. Explicit environment variables override preset values, which override built-in defaults; unset means no preset."),
     EnvVar("MUMEI_BIN", "mumei", "value", "mumei", "mumei_bin", "Path or command name for the Mumei executable."),
     EnvVar("MUMEI_REPO", "mumei", "value", ".", None, "Mumei checkout path used by commands that need repository assets; defaults to the current directory."),
     EnvVar("MUMEI_MCP_COMMAND", "mcp", "value", "", None, "Optional command used to launch an MCP server; when unset, the built-in default is used."),
