@@ -5,6 +5,7 @@ import importlib
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 from agent.cli_reference import (
@@ -106,7 +107,10 @@ def test_env_registry_covers_reads_without_stale_or_duplicate_entries() -> None:
 
 
 def test_environment_scanner_handles_literal_read_forms_and_comments() -> None:
-    source = """
+    source = textwrap.dedent("""
+    def _env_bool(name: str, default: bool = False):
+        return os.getenv(name, default)
+
     os.getenv(
         "ONE",
         "fallback",
@@ -120,7 +124,7 @@ def test_environment_scanner_handles_literal_read_forms_and_comments() -> None:
         True,
     )
     # os.getenv("COMMENTED") is counted conservatively.
-    """
+    """)
     assert scan_environment_source(source) == {
         "ONE",
         "TWO",
@@ -132,6 +136,59 @@ def test_environment_scanner_handles_literal_read_forms_and_comments() -> None:
     }
     assert scan_environment_source('export FOO="${FROM_SHELL:-value}"', ".sh") == {
         "FROM_SHELL"
+    }
+
+
+def test_environment_scanner_discovers_typed_helpers_and_constant_aliases() -> None:
+    source = textwrap.dedent("""
+        DIRECT_ENV = "DIRECT_ALIAS"
+        HELPER_ENV = "HELPER_ALIAS"
+
+        def read_env(name: str) -> str | None:
+            return os.getenv(name)
+
+        def read_environ(name: str) -> str | None:
+            return os.environ.get(name)
+
+        def not_a_read(name: str) -> str:
+            return name
+
+        read_env("HELPER_LITERAL")
+        read_env(HELPER_ENV)
+        read_environ(name=DIRECT_ENV)
+        os.getenv(DIRECT_ENV)
+        not_a_read("NOT_AN_ENV_READ")
+    """)
+    assert scan_environment_source(source) == {
+        "DIRECT_ALIAS",
+        "HELPER_ALIAS",
+        "HELPER_LITERAL",
+    }
+
+
+def test_environment_scanner_excludes_subprocess_environment_writes() -> None:
+    source = textwrap.dedent("""
+        os.environ["OS_WRITE_ONLY"] = "value"
+        env = {}
+        env["SUBPROCESS_WRITE_ONLY"] = "value"
+    """)
+    assert scan_environment_source(source) == set()
+
+
+def test_environment_scanner_excludes_subprocess_writes_in_agent_sources() -> None:
+    self_correction = (REPO_ROOT / "agent/self_correction.py").read_text(
+        encoding="utf-8"
+    )
+    mumei_client = (REPO_ROOT / "agent/mumei_client.py").read_text(encoding="utf-8")
+    assert "MUMEI_SELF_CORRECTION_METADATA" not in scan_environment_source(
+        self_correction
+    )
+    assert "TRACEPARENT" not in scan_environment_source(mumei_client)
+
+
+def test_environment_scanner_tracks_opentelemetry_sdk_endpoint_reads() -> None:
+    assert scan_environment_source("OTLPSpanExporter()") == {
+        "OTEL_EXPORTER_OTLP_ENDPOINT"
     }
 
 

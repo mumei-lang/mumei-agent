@@ -36,7 +36,7 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 | `MUMEI_SPEC_CACHE_DIR` | value | unset | Directory for the opt-in content-addressed spec cache; unset disables the cache. |
 | `MUMEI_SPEC_SPLIT_CHARS` | value | 0 | Character threshold for splitting extracted specs; `0` leaves splitting disabled. |
 | `CORE_AXIOM_PATH` | value | auto-detected; otherwise `std/core.mm` | Override the core axiom file path; when unset, a sibling Mumei checkout is searched before `std/core.mm`. |
-| `INJECT_CORE_AXIOMS` | toggle | on | Inject core axioms by default. The values `false`, `0`, `no`, and `off` disable injection; other values enable it without trimming whitespace. |
+| `INJECT_CORE_AXIOMS` | toggle | on | Generation prompts for `std/` modules include the configured core axioms; enabled by default, while `false`, `0`, `no`, and `off` disable injection without whitespace trimming. |
 
 ## Guards
 
@@ -45,31 +45,31 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 | `CHARTER_LOCK_PATH` | value | unset | Optional pinned charter file checked by applicable repair and generation flows. |
 | `CONTROLS_GATE` | value | warn | Default negative-controls policy for forge and generate. The classic `heal --controls-gate` option defaults to `off` and does not read this variable. |
 | `CONTRACT_MANIFEST_PATH` | value | unset | Optional contract manifest used by validation and generation. |
-| `ENABLE_CHARTER_GUARD` | toggle | on | Enable the charter guard by default. |
-| `ENABLE_EROSION_GUARD` | toggle | on | Enable the contract-erosion guard by default. |
+| `ENABLE_CHARTER_GUARD` | toggle | on | When a lock is configured or discovered, `heal` and `self-correct` reject edits to pinned charter files and abort on malformed lock data; enabled by default. |
+| `ENABLE_EROSION_GUARD` | toggle | on | The `heal` and `self-correct` repair flows reject candidate fixes that remove existing contract clauses; enabled by default. |
 
 ## Features
 
 | Variable | Kind | Default | Description |
 |---|---|---|---|
-| `ENABLE_CODE_TO_SPEC` | toggle | on | Enable code-to-spec support by default. |
-| `ENABLE_GENERATION_HEALTH_CHECK` | toggle | on | Enable the generation health check by default. |
-| `ENABLE_SPEC_CODE_MAPPING` | toggle | on | Enable spec-to-code mapping by default. |
-| `ENABLE_AMBIGUITY_DETECTION` | toggle | on | Enable ambiguity detection by default. |
-| `ENABLE_INTENT_TRACKING` | toggle | on | Enable intent tracking by default. |
-| `ENABLE_CONTRACT_ISOLATION` | toggle | on | Enable contract isolation by default. |
-| `ENABLE_CEGIS_LOOP` | toggle | on | Enable the CEGIS loop by default. |
-| `ENABLE_DENSE_PROPERTIES` | toggle | off | Opt in to dense property generation. |
-| `ENABLE_LATENT_PROTOCOL` | toggle | off | Opt in to the latent protocol. |
-| `ENABLE_NLAE_MULTI_AGENT` | toggle | off | Opt in to NLAE multi-agent orchestration. |
-| `ENABLE_SELF_CORRECTION` | toggle | off | Opt in to the self-correction loop. |
-| `ENABLE_VISUALIZER_SYNC` | toggle | off | Opt in to visualizer synchronization. |
-| `CEGIS_MAX_ITERATIONS` | value | 10 | Maximum CEGIS iterations. |
-| `NLAE_MULTI_AGENT_MAX_ROUNDS` | value | 2 | Maximum NLAE multi-agent rounds. |
-| `INTENT_DRIFT_THRESHOLD` | value | 0.7 | Intent-drift threshold used by the intent-tracking feature. |
-| `SELF_CORRECTION_MAX_ATTEMPTS` | value | 10 | Maximum self-correction attempts. |
-| `SELF_CORRECTION_CONVERGENCE_THRESHOLD` | value | 2 | Convergence threshold for self-correction. |
-| `SELF_CORRECTION_MAX_TOKENS` | value | 10000 | Token budget for self-correction requests. |
+| `ENABLE_CODE_TO_SPEC` | toggle | on | The code-to-spec extraction flow returns a disabled result instead of extracting a Mumei spec when this flag is off; enabled by default. |
+| `ENABLE_GENERATION_HEALTH_CHECK` | toggle | on | Code-generation flows run `GenerationHealthChecker` against prior examples before accepting generated code; enabled by default. |
+| `ENABLE_SPEC_CODE_MAPPING` | toggle | on | Generation and repair flows attach or update spec-to-code mapping metadata for generated and fixed code; enabled by default. |
+| `ENABLE_AMBIGUITY_DETECTION` | toggle | on | `extract-spec` adds LLM-based ambiguity findings to the extraction result when LLM detection is requested; enabled by default. |
+| `ENABLE_INTENT_TRACKING` | toggle | on | Spec-refinement attempts compare an accepted refined spec with the original and report intent drift; enabled by default. |
+| `ENABLE_CONTRACT_ISOLATION` | toggle | on | Spec refinement loads `CONTRACT_MANIFEST_PATH` and checks each refined spec against that manifest; enabled by default. |
+| `ENABLE_CEGIS_LOOP` | toggle | on | The `heal` repair flow attempts CEGIS invariant synthesis for reported `invariant_violated` loops; enabled by default. |
+| `ENABLE_DENSE_PROPERTIES` | toggle | off | Generation applies the dense-property pass to generated contract clauses before verification; opt-in and off by default. |
+| `ENABLE_LATENT_PROTOCOL` | toggle | off | The MCP server exposes latent-message tools when this protocol is enabled; opt-in and off by default. |
+| `ENABLE_NLAE_MULTI_AGENT` | toggle | off | The NLAE pipeline runs multi-agent collaboration rounds instead of its single-agent path; opt-in and off by default. |
+| `ENABLE_SELF_CORRECTION` | toggle | off | `heal` switches to structured self-correction and `proliferate` applies it to failed generated code; opt-in and off by default. |
+| `ENABLE_VISUALIZER_SYNC` | toggle | off | The `heal` flow sends verification reports to the visualizer after repair attempts; opt-in and off by default. |
+| `CEGIS_MAX_ITERATIONS` | value | 10 | Iteration budget for invariant synthesis attempted by `heal` on loop-related failures. |
+| `NLAE_MULTI_AGENT_MAX_ROUNDS` | value | 2 | Maximum collaboration rounds for the opt-in NLAE multi-agent pipeline. |
+| `INTENT_DRIFT_THRESHOLD` | value | 0.7 | Intent-preservation scores below this threshold are reported as drift during spec refinement. |
+| `SELF_CORRECTION_MAX_ATTEMPTS` | value | 10 | Maximum structured repair attempts in `self-correct` and self-correction-enabled `heal` or `proliferate` flows. |
+| `SELF_CORRECTION_CONVERGENCE_THRESHOLD` | value | 2 | Number of consecutive successful repair iterations required before structured self-correction stops as converged. |
+| `SELF_CORRECTION_MAX_TOKENS` | value | 10000 | Cumulative token-cost ceiling for the structured self-correction loop. |
 | `PROLIFERATE_FORGE_WORKERS` | value | 4 | Maximum parallel forge workers; unset uses up to four workers, capped by the number of specs. |
 
 ## Lean
@@ -77,8 +77,8 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 | Variable | Kind | Default | Description |
 |---|---|---|---|
 | `MUMEI_LEAN_REPO` | value | unset | Optional mumei-lean checkout for Lean fallback. The MCP server has a `../mumei-lean` fallback when unset. |
-| `ENABLE_LEAN_AI_PROOF` | toggle | off | Opt in to LLM-generated Lean proofs. It is effectively forced off without an API key or when `CI_FIXTURE_MODE` is enabled. |
-| `CEGIS_ESCALATE_TO_LEAN` | toggle | on | Enable escalation of unresolved CEGIS cases to Lean by default. |
+| `ENABLE_LEAN_AI_PROOF` | toggle | off | The `proliferate` flow asks an LLM for Lean proofs of unknown obligations; opt-in and off by default, and disabled without an API key or in `CI_FIXTURE_MODE`. |
+| `CEGIS_ESCALATE_TO_LEAN` | toggle | on | When the `heal` CEGIS loop cannot find an invariant, it creates a Lean escalation bundle; enabled by default. |
 | `LEAN_AI_PROOF_MAX_ATTEMPTS` | value | 3 | Maximum attempts for AI-generated Lean proofs. |
 | `LEAN_AI_PROOF_EVIDENCE_DIR` | value | unset | Optional directory for Lean proof evidence. |
 
@@ -88,9 +88,9 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 |---|---|---|---|
 | `MUMEI_MCP_COMMAND` | value | unset | Optional command used to launch an MCP server; when unset, the built-in default is used. |
 | `MCP_SAMPLING_MAX_TOKENS` | value | 4096 | Completion-token limit for LLM requests made through MCP sampling. |
-| `USE_MCP_CLIENT` | toggle | off | Opt in to using the configured MCP client. |
-| `USE_MCP_SAMPLING` | toggle | off | Opt in to LLM requests through MCP sampling. The Devin wrapper script enables it by default when unset. |
-| `PREFER_MCP_GAPS` | toggle | off | Prefer gap data from MCP when the MCP path is available. |
+| `USE_MCP_CLIENT` | toggle | off | `heal` and `proliferate` route Mumei verification through the MCP client when available and otherwise fall back to the CLI; opt-in and off by default. |
+| `USE_MCP_SAMPLING` | toggle | off | LLM calls through the MCP server can use request-context sampling instead of the configured provider; opt-in and off by default, though the Devin wrapper enables it when unset. |
+| `PREFER_MCP_GAPS` | toggle | off | Proliferation delegates gap analysis to the MCP server when available and falls back to the local analyzer otherwise; opt-in and off by default. |
 | `LATENT_PROTOCOL_KEY` | value | unset | Optional encryption key for latent-protocol state. |
 | `LATENT_PROTOCOL_AUDIT_LOG` | value | unset | Optional path for the latent-protocol audit log. |
 | `MUMEI_AGENT_MCP_LOG` | value | $HOME/mumei_agent_mcp.log | Log file for the Devin MCP wrapper script. |
@@ -100,7 +100,7 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 
 | Variable | Kind | Default | Description |
 |---|---|---|---|
-| `OTEL_ENABLED` | toggle | off | Enable OpenTelemetry instrumentation when the optional dependencies are installed. |
+| `OTEL_ENABLED` | toggle | off | When the optional OpenTelemetry packages are installed, `heal`, `generate`, `forge`, and `proliferate` emit traces and metrics; opt-in and off by default. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | value | grpc | OTLP exporter protocol: `grpc`, `http/protobuf`, or `http/json`; values beginning with `http` select the HTTP exporter. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | value | SDK default | OTLP endpoint consumed by the OpenTelemetry exporter SDK. |
 
@@ -110,13 +110,13 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 |---|---|---|---|
 | `MUMEI_DEBUG_JSON_FAIL_DIR` | value | unset | Optional directory where malformed JSON payloads are saved for debugging. |
 | `MUMEI_DEBUG_JSON_STAMP` | value | process ID and current time | Optional filename stamp for debug JSON; otherwise generated from the process ID and current time. |
-| `ENABLE_LATENT_DEBUG` | toggle | off | Opt in to latent-state debugging. |
+| `ENABLE_LATENT_DEBUG` | toggle | off | Repair flows try latent-space decoding before the standard rule-based and LLM fixes; opt-in and off by default. |
 
 ## CI
 
 | Variable | Kind | Default | Description |
 |---|---|---|---|
-| `CI_FIXTURE_MODE` | toggle | off | Use deterministic fixture behavior; also disables AI Lean proof generation. |
+| `CI_FIXTURE_MODE` | toggle | off | Fixture-mode runs suppress the `proliferate` flow's LLM-generated Lean proof attempts; off by default. |
 | `GITHUB_TOKEN` | value | unset | GitHub API token used by publish operations; unset outside configured CI or local GitHub workflows. |
 | `GITHUB_OWNER` | value | unset | Default GitHub repository owner for publish operations; may be supplied on the command line instead. |
 | `GITHUB_REPO` | value | unset | Default GitHub repository name for publish operations; may be supplied on the command line instead. |
