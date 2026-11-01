@@ -354,3 +354,17 @@ def test_hidden_actions_boolean_defaults_choices_and_help_expansion() -> None:
     assert _value_label(options[1]) == "{fast, safe}"
     assert _default_label(options[1]) == "safe"
     assert _help_text(parser, options[1]) == "Choose safe from fast, safe."
+
+
+def test_generator_script_is_directly_executable() -> None:
+    script = REPO_ROOT / "scripts" / "gen_reference_docs.py"
+    assert script.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3\n")
+    assert os.access(script, os.X_OK)
+    tracked_mode = subprocess.run(
+        ["git", "ls-files", "--stage", "--", str(script)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()[0]
+    assert tracked_mode == "100755"
