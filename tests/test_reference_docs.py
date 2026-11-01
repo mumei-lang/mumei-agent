@@ -219,7 +219,7 @@ def test_registry_defaults_match_agent_config_when_environment_is_scrubbed() -> 
 
 def test_ast_subcommands_and_visible_parser_option_counts_are_documented() -> None:
     commands = discover_subcommands()
-    assert len(commands) == 25
+    assert len(commands) == 26
     document = render_cli_reference()
     assert discover_aliases() == {"verify-foreign": "validate-code"}
     assert "`verify-foreign` is an alias of `validate-code`." in document

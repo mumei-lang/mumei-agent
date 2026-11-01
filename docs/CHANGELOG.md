@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased: configuration report
+
+- Added `python -m agent config` with text and JSON output for effective
+  environment settings, preset values, and their sources.
+
 ## Unreleased: agent environment presets
 
 - Added `MUMEI_AGENT_PRESET=ci-strict|experimental` with explicit-environment,

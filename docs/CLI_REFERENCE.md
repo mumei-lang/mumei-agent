@@ -38,6 +38,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `cross-validate` | 4 | Cross-validate a Mumei spec (.mm) against implementation code. Detects semantic consistency gaps and spec coverage. |
 | `harvest-tests` | 3 | Deterministically harvest observations from Python and Rust tests. |
 | `observe-tests` | 5 | Check harvested Python and Rust test observations against Mumei atoms. |
+| `config` | 2 | Show effective settings and where each value comes from |
 | `mcp-server` | 0 | Expose agent tools over the MCP stdio transport; extra arguments are ignored. |
 | `heal` | 9 | Mumei Self-Healing Loop: AI-driven autonomous fix loop |
 
@@ -475,6 +476,18 @@ Exactly one of `--mm`, `--spec` is required.
 | `--language` | `{rust, python}` | no | — | — |
 | `--target` | `<TARGET>` | no | [] | — |
 | `--output` | `<OUTPUT>` | no | — | Write the observation report to this file. |
+
+
+## `mumei-agent config`
+
+Show effective settings and where each value comes from
+
+### Options
+
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--json` | — | no | — | Output JSON. |
+| `--all` | — | no | — | Include default values. |
 
 
 ## `mumei-agent mcp-server`

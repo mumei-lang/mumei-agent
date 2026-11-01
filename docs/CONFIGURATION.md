@@ -53,6 +53,13 @@ Explicit environment variables override presets, and settings absent from a
 preset keep their built-in defaults. The classic `heal --controls-gate` option
 continues to ignore `CONTROLS_GATE` and its preset value.
 
+### Effective configuration report
+
+Run `python -m agent config` to show the active preset and LLM profile plus
+environment values and their sources. Use `--all` to include built-in defaults
+or `--json` for machine-readable output. Sensitive values such as API keys are
+redacted.
+
 ### Contract guards
 
 `heal` and `self-correct` protect pinned charters and the source file's original
