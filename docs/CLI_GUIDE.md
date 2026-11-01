@@ -1,5 +1,9 @@
 # CLI and E2E Guide
 
+For the generated exhaustive command and option list, see the
+[CLI option reference](CLI_REFERENCE.md). This page retains examples and
+narrative workflow guidance.
+
 ## Examples
 
 The `examples/` directory contains sample `.mm` files with known verification
