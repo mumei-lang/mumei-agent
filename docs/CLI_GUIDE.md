@@ -4,6 +4,19 @@ For the generated exhaustive command and option list, see the
 [CLI option reference](CLI_REFERENCE.md). This page retains examples and
 narrative workflow guidance.
 
+## Configuration Report
+
+```bash
+python -m agent config
+python -m agent config --all
+python -m agent config --json
+```
+
+The report shows effective values and whether they came from the environment,
+an agent preset, or built-in defaults. Values of variables classified as
+sensitive in the registry are never printed, only whether they are set. URLs
+are shown without credentials, query, or fragment.
+
 ## Examples
 
 The `examples/` directory contains sample `.mm` files with known verification

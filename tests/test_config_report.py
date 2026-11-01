@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+import json
+import re
+import sys
+
+import pytest
+
+from agent.config import AgentConfig
+from agent.config_report import (
+    _sanitize_url_value,
+    build_parser,
+    main as config_main,
+)
+from agent.env_reference import ENV_VARS
+
+
+def _scrub_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for variable in ENV_VARS:
+        monkeypatch.delenv(variable.name, raising=False)
+    monkeypatch.delenv("MUMEI_AGENT_PRESET", raising=False)
+
+
+def _run(monkeypatch: pytest.MonkeyPatch, capsys, *args: str) -> tuple[int, str, str]:
+    _scrub_environment(monkeypatch)
+    parsed = build_parser().parse_args(args)
+    status = config_main(parsed)
+    captured = capsys.readouterr()
+    return status, captured.out, captured.err
+
+
+def _entry(report: dict, name: str) -> dict:
+    return next(entry for entry in report["env"] if entry["name"] == name)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://u:p@host:8443/v1?api_key=x#f", "https://host:8443/v1"),
+        ("https://u@host", "https://host"),
+        ("https://host/v1", "https://host/v1"),
+        ("https://host/a@b", "https://host/a@b"),
+        ("https://host/v1?api_key=x#f", "https://host/v1"),
+        ("not-a-url@host", "not-a-url@host"),
+        ('{"u":"https://h/x?y"}', '{"u":"https://h/x?y"}'),
+        ("key=https://u:p@h", "key=https://u:p@h"),
+        ("  key=https://u:p@h  ", "  key=https://u:p@h  "),
+        ("https://u:p@h/path with space", "https://h/path with space"),
+        ("https://u:p@h/a b?t=1", "https://h/a b"),
+        (" https://u:p@h/x?t=1 ", "https://h/x"),
+        ("\t\nhttps://u:p@h/x?t=1\r\n\t", "https://h/x"),
+    ],
+)
+def test_url_sanitizer(value: str, expected: str) -> None:
+    assert _sanitize_url_value(value) == expected
+
+
+def test_json_value_with_embedded_url_is_not_sanitized(monkeypatch, capsys) -> None:
+    value = '{"u":"https://h/x?y"}'
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("LLM_BASE_URL", value)
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    assert f"LLM_BASE_URL = {value}  [env]" in capsys.readouterr().out
+
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("LLM_BASE_URL", value)
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    entry = _entry(json.loads(capsys.readouterr().out), "LLM_BASE_URL")
+    assert entry["value"] == value
+    assert entry["effective"] == value
+
+
+def test_sensitive_registry_classification_covers_secret_like_names() -> None:
+    pattern = re.compile(
+        r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE",
+        re.IGNORECASE,
+    )
+    exceptions = {
+        "LLM_MAX_TOKENS",  # Numeric limit.
+        "MAX_CONTEXT_TOKENS",  # Numeric limit.
+        "MCP_SAMPLING_MAX_TOKENS",  # Numeric limit.
+        "SELF_CORRECTION_MAX_TOKENS",  # Numeric limit.
+    }
+    names = {variable.name for variable in ENV_VARS}
+    assert exceptions <= names
+    assert all(
+        not variable.sensitive
+        for variable in ENV_VARS
+        if variable.name in exceptions
+    )
+    assert {variable.name for variable in ENV_VARS if variable.sensitive} == {
+        "GITHUB_TOKEN",
+        "LATENT_PROTOCOL_KEY",
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+    }
+    for variable in ENV_VARS:
+        if pattern.search(variable.name) and variable.name not in exceptions:
+            assert variable.sensitive, variable.name
+
+
+def test_llm_max_tokens_is_reported_as_non_sensitive(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("LLM_MAX_TOKENS", "321")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "LLM_MAX_TOKENS = 321  [env]" in output
+
+
+def test_unparsed_environment_value_is_reported_as_raw(
+    monkeypatch, capsys
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("USE_MCP_CLIENT", "garbage")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    assert "USE_MCP_CLIENT = garbage  [env, raw]" in capsys.readouterr().out
+
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("USE_MCP_CLIENT", "garbage")
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    entry = _entry(json.loads(capsys.readouterr().out), "USE_MCP_CLIENT")
+    assert entry["source"] == "env"
+    assert entry["value"] == "garbage"
+    assert entry["effective"] is None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://url-user:url-secret@host/v1?api_key=url-query#fragment",
+            "https://host/v1",
+        ),
+        (" https://url-user:url-secret@h/x?t=1 ", "https://h/x"),
+        ("\t\nhttps://url-user:url-secret@h/x?t=1\r\n\t", "https://h/x"),
+        (
+            "https://url-user:url-secret@h/a b?t=1",
+            "https://h/a b",
+        ),
+    ],
+)
+def test_llm_base_url_credentials_and_metadata_are_stripped(
+    monkeypatch, capsys, url: str, expected: str
+) -> None:
+    for args in ([], ["--json"], ["--all"], ["--json", "--all"]):
+        _scrub_environment(monkeypatch)
+        monkeypatch.setenv("LLM_BASE_URL", url)
+        parsed = build_parser().parse_args(args)
+        assert config_main(parsed) == 0
+        output = capsys.readouterr().out
+        assert "url-user" not in output
+        assert "url-secret" not in output
+        assert "url-query" not in output
+        assert "#fragment" not in output
+        if "--json" in args:
+            entry = _entry(json.loads(output), "LLM_BASE_URL")
+            assert entry["value"] == expected
+            assert entry["effective"] == expected
+            assert entry["sensitive"] is False
+        else:
+            assert f"LLM_BASE_URL = {expected}  [env]" in output
+
+
+def test_no_environment_hides_default_entries(monkeypatch, capsys) -> None:
+    status, output, _ = _run(monkeypatch, capsys)
+    assert status == 0
+    assert "environment (0 from env, 0 from preset," in output
+    assert "  CONTROLS_GATE =" not in output
+
+
+def test_all_lists_every_registry_entry_as_default(monkeypatch, capsys) -> None:
+    status, output, _ = _run(monkeypatch, capsys, "--all")
+    assert status == 0
+    assert sum(f"  {entry.name} =" in output for entry in ENV_VARS) == len(ENV_VARS)
+    assert output.count("[default]") == len(ENV_VARS)
+
+
+def test_explicit_environment_value_is_reported_as_env(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("CONTROLS_GATE", "off")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "CONTROLS_GATE = off  [env]" in output
+
+
+def test_ci_strict_reports_preset_effective_controls_gate(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "ci-strict")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "preset: ci-strict" in output
+    assert "CONTROLS_GATE = require  [preset ci-strict]" in output
+
+
+def test_explicit_false_overrides_experimental_preset(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+    monkeypatch.setenv("ENABLE_LATENT_DEBUG", "false")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "ENABLE_LATENT_DEBUG = false  [env]" in output
+
+
+def test_experimental_lean_proof_reports_effective_config_field(
+    monkeypatch, capsys
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+    config = AgentConfig()
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    expected = "true" if config.enable_lean_ai_proof else "false"
+    assert f"ENABLE_LEAN_AI_PROOF = {expected}  [preset experimental]" in output
+    assert "  (inactive: no API key)" in output
+
+
+@pytest.mark.parametrize(
+    ("api_key", "fixture_mode", "expected_note"),
+    [
+        (None, None, "inactive: no API key"),
+        ("configured", "1", "inactive: CI_FIXTURE_MODE"),
+    ],
+)
+def test_json_reports_lean_ai_proof_inactive_reason(
+    monkeypatch, capsys, api_key, fixture_mode, expected_note
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+    if api_key is not None:
+        monkeypatch.setenv("LLM_API_KEY", api_key)
+    if fixture_mode is not None:
+        monkeypatch.setenv("CI_FIXTURE_MODE", fixture_mode)
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    entry = _entry(json.loads(capsys.readouterr().out), "ENABLE_LEAN_AI_PROOF")
+    assert entry["effective"] is True
+    assert entry["note"] == expected_note
+
+
+def test_fixture_mode_reports_lean_ai_proof_inactive_reason_in_text(
+    monkeypatch, capsys
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+    monkeypatch.setenv("LLM_API_KEY", "configured")
+    monkeypatch.setenv("CI_FIXTURE_MODE", "1")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    assert "  (inactive: CI_FIXTURE_MODE)" in capsys.readouterr().out
+
+
+def test_llm_profile_is_in_header(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-small")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "llm profile: local-small" in output
+    assert "LLM_MODEL = qwen2.5-coder:1.5b-2k  [llm-profile local-small]" in output
+    assert "LLM_MAX_TOKENS = 2048  [llm-profile local-small]" in output
+
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-small")
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    model = _entry(report, "LLM_MODEL")
+    max_tokens = _entry(report, "LLM_MAX_TOKENS")
+    assert model["source"] == max_tokens["source"] == "llm-profile"
+    assert model["set"] is max_tokens["set"] is False
+    assert model["effective"] == "qwen2.5-coder:1.5b-2k"
+    assert max_tokens["effective"] == 2048
+
+
+@pytest.mark.parametrize("all_values", [False, True])
+def test_api_key_is_never_printed_in_text(monkeypatch, capsys, all_values) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("LLM_API_KEY", "sensitive-api-key")
+    args = build_parser().parse_args(["--all"] if all_values else [])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "sensitive-api-key" not in output
+    assert "LLM_API_KEY: set  [env]" in output
+
+
+@pytest.mark.parametrize("all_values", [False, True])
+def test_json_schema_native_types_and_api_key_redaction(
+    monkeypatch, capsys, all_values
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "ci-strict")
+    monkeypatch.setenv("LLM_API_KEY", "sensitive-api-key")
+    args = build_parser().parse_args(["--json", *(["--all"] if all_values else [])])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "sensitive-api-key" not in output
+    report = json.loads(output)
+    assert set(report) == {"agent_preset", "llm_profile", "env"}
+    assert report["agent_preset"] == "ci-strict"
+    entry = _entry(report, "ENABLE_LATENT_DEBUG")
+    assert entry["category"] == next(
+        variable.category for variable in ENV_VARS if variable.name == entry["name"]
+    )
+    assert entry["source"] == "preset"
+    assert entry["set"] is False
+    assert entry["effective"] is False
+    key_entry = _entry(report, "LLM_API_KEY")
+    assert key_entry["sensitive"] is True
+    assert "value" not in key_entry
+    assert "effective" not in key_entry
+    if not all_values:
+        assert all(entry["source"] != "default" for entry in report["env"])
+
+
+def test_json_all_includes_unset_entries_as_null(monkeypatch, capsys) -> None:
+    status, output, _ = _run(monkeypatch, capsys, "--json", "--all")
+    assert status == 0
+    report = json.loads(output)
+    assert len(report["env"]) == len(ENV_VARS)
+    entry = _entry(report, "MUMEI_LLM_PROFILE")
+    assert entry["set"] is False
+    assert entry["value"] is None
+
+
+def test_unknown_preset_exits_two_with_choices(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "unknown")
+    with pytest.raises(ValueError, match="ci-strict.*experimental"):
+        AgentConfig()
+    args = build_parser().parse_args([])
+    assert config_main(args) == 2
+    assert "ci-strict" in capsys.readouterr().err
+
+
+def test_dispatch_config_command(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["agent", "config"])
+    from agent.__main__ import main
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 0
+    assert "preset: none" in capsys.readouterr().out
+
+
+def test_unregistered_environment_variables_are_not_reported(
+    monkeypatch, capsys
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_UNREGISTERED_SECRET", "hidden")
+    args = build_parser().parse_args(["--all"])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "MUMEI_UNREGISTERED_SECRET" not in output
+    assert "hidden" not in output
+
+
+def test_generated_cli_reference_contains_config() -> None:
+    from pathlib import Path
+
+    reference = Path("docs/CLI_REFERENCE.md").read_text(encoding="utf-8")
+    assert "## `mumei-agent config`" in reference

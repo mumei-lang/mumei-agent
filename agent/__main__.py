@@ -27,6 +27,7 @@ _SUBCOMMANDS = {
     "cross-validate",
     "harvest-tests",
     "observe-tests",
+    "config",
 }
 
 
@@ -469,6 +470,17 @@ def main() -> None:
         parser = build_parser()
         args = parser.parse_args(argv[1:])
         raise SystemExit(observe_tests_main(args))
+    elif command == "config":
+        import argparse
+        from agent.config_report import build_parser, main as config_main
+
+        parser = argparse.ArgumentParser(
+            prog="python -m agent config",
+            description="Show effective settings and where each value comes from",
+        )
+        build_parser(parser)
+        args = parser.parse_args(argv[1:])
+        raise SystemExit(config_main(args))
     elif command == "mcp-server":
         # P10 — expose forge / heal / health / propose as MCP tools.
         # Any extra positional/optional args are ignored: FastMCP's
