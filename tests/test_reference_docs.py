@@ -9,6 +9,7 @@ import textwrap
 from pathlib import Path
 
 from agent.cli_reference import (
+    CommandReference,
     REPO_ROOT,
     _neutralized_environment,
     capture_command_references,
@@ -232,10 +233,30 @@ def test_ast_subcommands_and_visible_parser_option_counts_are_documented() -> No
     assert mcp_server.options == []
     assert "extra arguments are ignored" in mcp_server.description
     assert (
-        "| `--controls-gate` | {off, warn, require} | — | "
+        "| `--controls-gate` | {off, warn, require} | no | — | "
         "Negative-controls gate mode (default: CONTROLS_GATE or warn) |"
     ) in document
     assert "Rank verified heal candidates using negative controls (default: off)." in document
+    generate_start = document.find("## `mumei-agent generate`")
+    generate_end = document.find("\n## `", generate_start + 1)
+    generate = document[generate_start:generate_end]
+    assert "| `--output` | <OUTPUT> | yes | — |" in generate
+    assert "Exactly one of `--spec`, `--spec-file` is required." in generate
+
+
+def test_required_options_and_groups_are_rendered(monkeypatch) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", required=True, help="Output path.")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--spec", help="Inline specification.")
+    group.add_argument("--spec-file", help="Specification file.")
+    reference = CommandReference("fixture", "Fixture parser.", parser)
+    monkeypatch.setattr("agent.cli_reference.capture_command_references", lambda: [reference])
+
+    document = render_cli_reference()
+    assert "| `--output` | <OUTPUT> | yes | — | Output path. |" in document
+    assert "| `--spec` | <SPEC> | no | — | Inline specification. |" in document
+    assert "Exactly one of `--spec`, `--spec-file` is required." in document
 
 
 def test_parser_capture_restores_argparse_and_argv_on_success_and_error() -> None:

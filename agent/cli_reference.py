@@ -263,6 +263,20 @@ def render_cli_reference() -> str:
         lines.extend(["", f"## `mumei-agent {reference.name}`", ""])
         if reference.description:
             lines.extend([markdown_cell(reference.description), ""])
+        for group in reference.parser._mutually_exclusive_groups:
+            if not group.required:
+                continue
+            options = []
+            for action in group._group_actions:
+                if not action.option_strings:
+                    continue
+                option = next(
+                    (item for item in action.option_strings if item.startswith("--")),
+                    action.option_strings[0],
+                )
+                options.append(f"`{markdown_cell(option)}`")
+            if options:
+                lines.extend([f"Exactly one of {', '.join(options)} is required.", ""])
         positionals = _visible_actions(reference.parser, positional=True)
         if positionals:
             lines.extend(
@@ -287,14 +301,15 @@ def render_cli_reference() -> str:
                 [
                     "### Options",
                     "",
-                    "| Option | Value | Default | Description |",
-                    "|---|---|---|---|",
+                    "| Option | Value | Required | Default | Description |",
+                    "|---|---|---|---|---|",
                 ]
             )
             for action in options:
                 option = ", ".join(action.option_strings)
                 lines.append(
                     f"| `{markdown_cell(option)}` | {markdown_cell(_value_label(action))} | "
+                    f"{'yes' if action.required else 'no'} | "
                     f"{markdown_cell(_default_label(action))} | "
                     f"{markdown_cell(_help_text(reference.parser, action))} |"
                 )

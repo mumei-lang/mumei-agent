@@ -45,34 +45,36 @@ Autonomous forge mode: extend the mumei std library with verified atoms from tas
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--tasks-dir` | <TASKS_DIR> | forge_tasks/ | Directory containing forge task spec JSON files (default: forge_tasks/) |
-| `--mumei-repo` | <MUMEI_REPO> | — | Path to the mumei repo (the one containing std/). Defaults to the MUMEI_REPO env var or the agent repo root. |
-| `--max-tasks` | <MAX_TASKS> | — | Maximum number of tasks to execute (default: all) |
-| `--task` | <TASK> | — | Run a single task spec file (looked up relative to --tasks-dir if not absolute) |
-| `--dry-run` | — | — | Print the execution plan and exit without running anything |
-| `--auto-commit, --no-auto-commit` | — | — | Override each task's auto_commit flag (--auto-commit to force on, --no-auto-commit to force off) |
-| `--max-retries` | <MAX_RETRIES> | — | Override each task's max_retries |
-| `--controls-gate` | {off, warn, require} | — | Negative-controls gate mode (default: CONTROLS_GATE or warn) |
-| `--log-path` | <LOG_PATH> | — | Path to forge_log.json (default: <tasks_dir>/../forge_log.json) |
-| `--harness-profile` | {basic, stateful, verifier, self_evolution, lean_fallback, full} | basic | NLAH module-ablation profile. Heavy multi-candidate search is enabled only by self_evolution/full. |
-| `--benchmark-feedback` | <BENCHMARK_FEEDBACK> | — | Path to a mumei.benchmark_forge_feedback/v1 document from 'benchmarks/run_benchmarks.py --forge-feedback'. Biases task priorities toward the weakest benchmark categories' stdlib domains. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--tasks-dir` | <TASKS_DIR> | no | forge_tasks/ | Directory containing forge task spec JSON files (default: forge_tasks/) |
+| `--mumei-repo` | <MUMEI_REPO> | no | — | Path to the mumei repo (the one containing std/). Defaults to the MUMEI_REPO env var or the agent repo root. |
+| `--max-tasks` | <MAX_TASKS> | no | — | Maximum number of tasks to execute (default: all) |
+| `--task` | <TASK> | no | — | Run a single task spec file (looked up relative to --tasks-dir if not absolute) |
+| `--dry-run` | — | no | — | Print the execution plan and exit without running anything |
+| `--auto-commit, --no-auto-commit` | — | no | — | Override each task's auto_commit flag (--auto-commit to force on, --no-auto-commit to force off) |
+| `--max-retries` | <MAX_RETRIES> | no | — | Override each task's max_retries |
+| `--controls-gate` | {off, warn, require} | no | — | Negative-controls gate mode (default: CONTROLS_GATE or warn) |
+| `--log-path` | <LOG_PATH> | no | — | Path to forge_log.json (default: <tasks_dir>/../forge_log.json) |
+| `--harness-profile` | {basic, stateful, verifier, self_evolution, lean_fallback, full} | no | basic | NLAH module-ablation profile. Heavy multi-candidate search is enabled only by self_evolution/full. |
+| `--benchmark-feedback` | <BENCHMARK_FEEDBACK> | no | — | Path to a mumei.benchmark_forge_feedback/v1 document from 'benchmarks/run_benchmarks.py --forge-feedback'. Biases task priorities toward the weakest benchmark categories' stdlib domains. |
 
 
 ## `mumei-agent propose`
 
 Generate forge task specs from analyze_std_gaps output (SI-5 Phase 2-A).
 
+Exactly one of `--gaps-json`, `--auto` is required.
+
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--gaps-json` | <GAPS_JSON> | — | Path to a JSON file produced by analyze_std_gaps |
-| `--auto` | — | — | Invoke analyze_std_gaps via the mumei MCP server in-process (requires the mumei repo on PYTHONPATH) |
-| `--output-dir` | <OUTPUT_DIR> | forge_tasks | Directory to write generated spec files into (default: forge_tasks/) |
-| `--overwrite` | — | — | Overwrite existing vstd_*.json files instead of writing a suffixed copy |
-| `--dry-run` | — | — | Print the plan without writing any files |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--gaps-json` | <GAPS_JSON> | no | — | Path to a JSON file produced by analyze_std_gaps |
+| `--auto` | — | no | — | Invoke analyze_std_gaps via the mumei MCP server in-process (requires the mumei repo on PYTHONPATH) |
+| `--output-dir` | <OUTPUT_DIR> | no | forge_tasks | Directory to write generated spec files into (default: forge_tasks/) |
+| `--overwrite` | — | no | — | Overwrite existing vstd_*.json files instead of writing a suffixed copy |
+| `--dry-run` | — | no | — | Print the plan without writing any files |
 
 
 ## `mumei-agent analyze-std-gaps`
@@ -81,11 +83,11 @@ Analyze vStd roadmap gap coverage for forge automation.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--std-dir` | <STD_DIR> | ../mumei/std | Path to the mumei std directory. |
-| `--forge-tasks-dir` | <FORGE_TASKS_DIR> | forge_tasks | Path to the forge_tasks directory. |
-| `--output-json` | <OUTPUT_JSON> | — | Optional path to write the roadmap gap report as JSON. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--std-dir` | <STD_DIR> | no | ../mumei/std | Path to the mumei std directory. |
+| `--forge-tasks-dir` | <FORGE_TASKS_DIR> | no | forge_tasks | Path to the forge_tasks directory. |
+| `--output-json` | <OUTPUT_JSON> | no | — | Optional path to write the roadmap gap report as JSON. |
 
 
 ## `mumei-agent publish`
@@ -94,32 +96,34 @@ Autonomous delivery: generate → verify → emit wrappers → PR
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--spec` | <SPEC> | — | Path to the spec JSON file |
-| `--mumei-bin` | <MUMEI_BIN> | — | Path to the mumei binary (default: MUMEI_BIN env or 'mumei') |
-| `--output` | <OUTPUT> | katana | Output directory for build artifacts (default: katana) |
-| `--repo-dir` | <REPO_DIR> | — | Working directory for git operations (default: cwd) |
-| `--base-branch` | <BASE_BRANCH> | develop | Base branch for the PR (default: develop) |
-| `--github-owner` | <GITHUB_OWNER> | — | GitHub repository owner (or set GITHUB_OWNER env var) |
-| `--github-repo` | <GITHUB_REPO> | — | GitHub repository name (or set GITHUB_REPO env var) |
-| `--dry-run` | — | — | Skip git operations and PR creation |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--spec` | <SPEC> | yes | — | Path to the spec JSON file |
+| `--mumei-bin` | <MUMEI_BIN> | no | — | Path to the mumei binary (default: MUMEI_BIN env or 'mumei') |
+| `--output` | <OUTPUT> | no | katana | Output directory for build artifacts (default: katana) |
+| `--repo-dir` | <REPO_DIR> | no | — | Working directory for git operations (default: cwd) |
+| `--base-branch` | <BASE_BRANCH> | no | develop | Base branch for the PR (default: develop) |
+| `--github-owner` | <GITHUB_OWNER> | no | — | GitHub repository owner (or set GITHUB_OWNER env var) |
+| `--github-repo` | <GITHUB_REPO> | no | — | GitHub repository name (or set GITHUB_REPO env var) |
+| `--dry-run` | — | no | — | Skip git operations and PR creation |
 
 
 ## `mumei-agent generate`
 
 Generate verified Mumei code from a JSON specification
 
+Exactly one of `--spec`, `--spec-file` is required.
+
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--spec` | <SPEC> | — | Inline JSON specification string |
-| `--spec-file` | <SPEC_FILE> | — | Path to a JSON specification file |
-| `--output` | <OUTPUT> | — | Output path for the generated .mm file |
-| `--max-retries` | <MAX_RETRIES> | — | Maximum number of fix attempts (default: from config or 5) |
-| `--metrics` | — | — | Output JSON metrics summary at the end |
-| `--controls-gate` | {off, warn, require} | — | Negative-controls gate mode (default: CONTROLS_GATE or warn) |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--spec` | <SPEC> | no | — | Inline JSON specification string |
+| `--spec-file` | <SPEC_FILE> | no | — | Path to a JSON specification file |
+| `--output` | <OUTPUT> | yes | — | Output path for the generated .mm file |
+| `--max-retries` | <MAX_RETRIES> | no | — | Maximum number of fix attempts (default: from config or 5) |
+| `--metrics` | — | no | — | Output JSON metrics summary at the end |
+| `--controls-gate` | {off, warn, require} | no | — | Negative-controls gate mode (default: CONTROLS_GATE or warn) |
 
 
 ## `mumei-agent proliferate`
@@ -128,20 +132,20 @@ Autonomous proliferation loop: analyze gaps → spec → generate → blast-radi
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--mumei-repo` | <MUMEI_REPO> | — | Path to the mumei repository (must contain std/) |
-| `--max-proposals` | <MAX_PROPOSALS> | 3 | Maximum number of proposals to process (default: 3) |
-| `--mumei-bin` | <MUMEI_BIN> | — | Path to the mumei binary (default: MUMEI_BIN env or 'mumei') |
-| `--dry-run` | — | — | Skip git/PR operations and do not persist generated files |
-| `--output-json` | <OUTPUT_JSON> | — | Optional path to write a structured run summary as JSON (used by the SI-5 Phase 3-B scheduled workflow). |
-| `--enable-lean-fallback` | — | True | Enabled by default: after forge + verify, hand any ``unknown`` atoms to mumei-lean's bridge.py for Lean 4 discharge. Requires MUMEI_LEAN_REPO to point at a mumei-lang/mumei-lean checkout. |
-| `--disable-lean-fallback` | — | True | Disable Lean 4 fallback for local/debug runs. CI keeps the default enabled path. |
-| `--enable-lean-ai-proof` | — | — | Task 2-D opt-in: after the Lean fallback, let the LLM write and auto-repair Lean 4 proofs for atoms that are still unknown; only proofs that pass 'lake build' are promoted to lean_verified. Skipped when no LLM key is configured or CI_FIXTURE_MODE is set. |
-| `--enable-self-correction` | — | — | Run the structured-feedback self-correction loop when forge verification fails with structured feedback. |
-| `--harness-profile` | {basic, stateful, verifier, self_evolution, lean_fallback, full} | basic | NLAH module-ablation profile. Heavy multi-candidate search is enabled only by self_evolution/full. |
-| `--benchmark-feedback` | <BENCHMARK_FEEDBACK> | — | Path to a mumei.benchmark_forge_feedback/v1 document from 'benchmarks/run_benchmarks.py --forge-feedback'. Weak benchmark categories bias their stdlib domains forward in the queue. |
-| `--parallel-forge-workers` | <PARALLEL_FORGE_WORKERS> | — | Maximum concurrent forge generations. Defaults to min(4, proposals) or PROLIFERATE_FORGE_WORKERS when set. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--mumei-repo` | <MUMEI_REPO> | yes | — | Path to the mumei repository (must contain std/) |
+| `--max-proposals` | <MAX_PROPOSALS> | no | 3 | Maximum number of proposals to process (default: 3) |
+| `--mumei-bin` | <MUMEI_BIN> | no | — | Path to the mumei binary (default: MUMEI_BIN env or 'mumei') |
+| `--dry-run` | — | no | — | Skip git/PR operations and do not persist generated files |
+| `--output-json` | <OUTPUT_JSON> | no | — | Optional path to write a structured run summary as JSON (used by the SI-5 Phase 3-B scheduled workflow). |
+| `--enable-lean-fallback` | — | no | True | Enabled by default: after forge + verify, hand any ``unknown`` atoms to mumei-lean's bridge.py for Lean 4 discharge. Requires MUMEI_LEAN_REPO to point at a mumei-lang/mumei-lean checkout. |
+| `--disable-lean-fallback` | — | no | True | Disable Lean 4 fallback for local/debug runs. CI keeps the default enabled path. |
+| `--enable-lean-ai-proof` | — | no | — | Task 2-D opt-in: after the Lean fallback, let the LLM write and auto-repair Lean 4 proofs for atoms that are still unknown; only proofs that pass 'lake build' are promoted to lean_verified. Skipped when no LLM key is configured or CI_FIXTURE_MODE is set. |
+| `--enable-self-correction` | — | no | — | Run the structured-feedback self-correction loop when forge verification fails with structured feedback. |
+| `--harness-profile` | {basic, stateful, verifier, self_evolution, lean_fallback, full} | no | basic | NLAH module-ablation profile. Heavy multi-candidate search is enabled only by self_evolution/full. |
+| `--benchmark-feedback` | <BENCHMARK_FEEDBACK> | no | — | Path to a mumei.benchmark_forge_feedback/v1 document from 'benchmarks/run_benchmarks.py --forge-feedback'. Weak benchmark categories bias their stdlib domains forward in the queue. |
+| `--parallel-forge-workers` | <PARALLEL_FORGE_WORKERS> | no | — | Maximum concurrent forge generations. Defaults to min(4, proposals) or PROLIFERATE_FORGE_WORKERS when set. |
 
 
 ## `mumei-agent harness-ablation`
@@ -156,11 +160,11 @@ Compare harness_metrics aggregates across --harness-profile runs against a basel
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--baseline` | <BASELINE> | — | Label of the baseline run to compare against. |
-| `--format` | {json, markdown} | json | Report output format (default: json). |
-| `--output` | <OUTPUT> | — | Write the report to this path instead of stdout. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--baseline` | <BASELINE> | yes | — | Label of the baseline run to compare against. |
+| `--format` | {json, markdown} | no | json | Report output format (default: json). |
+| `--output` | <OUTPUT> | no | — | Write the report to this path instead of stdout. |
 
 
 ## `mumei-agent scale-report`
@@ -169,13 +173,13 @@ Report large-scale composability and trust-surface measurements through the fixe
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--composability` | <COMPOSABILITY> | — | Composability report emitted by mumei scripts/measure_composability.py. |
-| `--trust-surface` | <TRUST_SURFACE> | — | Trust surface report emitted by mumei scripts/scale_trust_surface.py. |
-| `--json` | — | — | Output the full result as JSON. |
-| `--format` | {human, markdown, json, text} | human | Output format (default: human). |
-| `--output` | <OUTPUT> | — | Optional output path. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--composability` | <COMPOSABILITY> | yes | — | Composability report emitted by mumei scripts/measure_composability.py. |
+| `--trust-surface` | <TRUST_SURFACE> | no | — | Trust surface report emitted by mumei scripts/scale_trust_surface.py. |
+| `--json` | — | no | — | Output the full result as JSON. |
+| `--format` | {human, markdown, json, text} | no | human | Output format (default: human). |
+| `--output` | <OUTPUT> | no | — | Optional output path. |
 
 
 ## `mumei-agent health`
@@ -184,11 +188,11 @@ Measure proof health metrics for the mumei std library (SI-5 Phase 3-A).
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--mumei-repo` | <MUMEI_REPO> | — | Path to the mumei repository (must contain std/) |
-| `--mumei-bin` | <MUMEI_BIN> | — | Path to the mumei binary (default: MUMEI_BIN env or 'mumei') |
-| `--format` | {json, table} | json | Output format (default: json) |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--mumei-repo` | <MUMEI_REPO> | yes | — | Path to the mumei repository (must contain std/) |
+| `--mumei-bin` | <MUMEI_BIN> | no | — | Path to the mumei binary (default: MUMEI_BIN env or 'mumei') |
+| `--format` | {json, table} | no | json | Output format (default: json) |
 
 
 ## `mumei-agent audit`
@@ -197,50 +201,52 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--code-file` | <CODE_FILE> | — | Path to existing source code file or directory. |
-| `--language` | {python, rust, typescript, go, solidity} | — | Source language. Inferred from the file extension when omitted. |
-| `--json` | — | — | Output the full result as JSON. |
-| `--format` | {human, markdown, json, text} | human | Output format (default: human). |
-| `--output` | <OUTPUT> | — | Optional output path. |
-| `--domain-hint` | <DOMAIN_HINT> | — | Optional domain hint for spec extraction. |
-| `--auto-migrate` | — | — | Emit migration_hints by generating .mm migration skeletons for functions with issues. |
-| `--auto-heal` | — | — | Run the self-healing loop on each skeleton produced by --auto-migrate. |
-| `--heal-output-dir` | <HEAL_OUTPUT_DIR> | — | Directory to write healed .mm files (default: same directory as --code-file). |
-| `--enable-lean-bridge` | — | — | Run the optional mumei-lean bridge for Solidity guard-trace certificates. |
-| `--mumei-lean-repo` | <MUMEI_LEAN_REPO> | — | Path to the mumei-lean checkout used by --enable-lean-bridge. |
-| `--include-tests` | — | — | Also audit test files (e.g. *_test.go, *.test.ts, test_*.py, tests/ dirs), which are skipped by default for directory audits. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--code-file` | <CODE_FILE> | yes | — | Path to existing source code file or directory. |
+| `--language` | {python, rust, typescript, go, solidity} | no | — | Source language. Inferred from the file extension when omitted. |
+| `--json` | — | no | — | Output the full result as JSON. |
+| `--format` | {human, markdown, json, text} | no | human | Output format (default: human). |
+| `--output` | <OUTPUT> | no | — | Optional output path. |
+| `--domain-hint` | <DOMAIN_HINT> | no | — | Optional domain hint for spec extraction. |
+| `--auto-migrate` | — | no | — | Emit migration_hints by generating .mm migration skeletons for functions with issues. |
+| `--auto-heal` | — | no | — | Run the self-healing loop on each skeleton produced by --auto-migrate. |
+| `--heal-output-dir` | <HEAL_OUTPUT_DIR> | no | — | Directory to write healed .mm files (default: same directory as --code-file). |
+| `--enable-lean-bridge` | — | no | — | Run the optional mumei-lean bridge for Solidity guard-trace certificates. |
+| `--mumei-lean-repo` | <MUMEI_LEAN_REPO> | no | — | Path to the mumei-lean checkout used by --enable-lean-bridge. |
+| `--include-tests` | — | no | — | Also audit test files (e.g. *_test.go, *.test.ts, test_*.py, tests/ dirs), which are skipped by default for directory audits. |
 
 
 ## `mumei-agent extract-spec`
 
 Extract Mumei specifications from natural language text. Optionally generate and verify code in one step.
 
+Exactly one of `--text`, `--text-file`, `--code-file` is required.
+
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--text` | <TEXT> | — | Natural language requirement text |
-| `--text-file` | <TEXT_FILE> | — | Path to a file containing natural language requirements |
-| `--code-file` | <CODE_FILE> | — | Path to a source-code file or directory to convert into natural language requirements |
-| `--code-language` | {rust, c, go, python, javascript, typescript, java, cpp, solidity, unknown} | — | Optional language override for --code-file |
-| `--from-tests` | <PATH> ... | — | Check the extracted spec against harvested Python/Rust tests. |
-| `--from-tests-language` | {rust, python} | — | Language override for --from-tests inputs. |
-| `--observations-output` | <OBSERVATIONS_OUTPUT> | — | Write the final observation-check report to this JSON file. |
-| `--domain` | {financial, compliance, regtech, security, iot, web, data_structure, math, general} | — | Optional domain hint for safer specification extraction |
-| `--output` | <OUTPUT> | — | Output path for the extracted forge task spec JSON |
-| `--generate` | — | — | Generate and verify .mm code after extracting the spec |
-| `--check-contradiction-only` | — | — | Extract specs and run only direct contradiction detection; skip code generation |
-| `--generate-output` | <GENERATE_OUTPUT> | — | Output path for generated .mm code when --generate is set |
-| `--max-retries` | <MAX_RETRIES> | 3 | Maximum spec extraction retry attempts |
-| `--max-generation-retries` | <MAX_GENERATION_RETRIES> | — | Maximum code generation/self-healing retry attempts |
-| `--max-refinements` | <MAX_REFINEMENTS> | 3 | Maximum spec refinement attempts when --generate is set |
-| `--forge` | — | — | Write the extracted spec to forge_tasks/ and run the forge pipeline |
-| `--forge-tasks-dir` | <FORGE_TASKS_DIR> | forge_tasks | Directory where --forge writes the extracted task spec |
-| `--mumei-repo` | <MUMEI_REPO> | — | Path to the mumei repo used by --forge |
-| `--forge-dry-run` | — | — | Preview the forge plan after extraction without generating code |
-| `--forge-log-path` | <FORGE_LOG_PATH> | — | Path to forge_log.json when --forge runs |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--text` | <TEXT> | no | — | Natural language requirement text |
+| `--text-file` | <TEXT_FILE> | no | — | Path to a file containing natural language requirements |
+| `--code-file` | <CODE_FILE> | no | — | Path to a source-code file or directory to convert into natural language requirements |
+| `--code-language` | {rust, c, go, python, javascript, typescript, java, cpp, solidity, unknown} | no | — | Optional language override for --code-file |
+| `--from-tests` | <PATH> ... | no | — | Check the extracted spec against harvested Python/Rust tests. |
+| `--from-tests-language` | {rust, python} | no | — | Language override for --from-tests inputs. |
+| `--observations-output` | <OBSERVATIONS_OUTPUT> | no | — | Write the final observation-check report to this JSON file. |
+| `--domain` | {financial, compliance, regtech, security, iot, web, data_structure, math, general} | no | — | Optional domain hint for safer specification extraction |
+| `--output` | <OUTPUT> | yes | — | Output path for the extracted forge task spec JSON |
+| `--generate` | — | no | — | Generate and verify .mm code after extracting the spec |
+| `--check-contradiction-only` | — | no | — | Extract specs and run only direct contradiction detection; skip code generation |
+| `--generate-output` | <GENERATE_OUTPUT> | no | — | Output path for generated .mm code when --generate is set |
+| `--max-retries` | <MAX_RETRIES> | no | 3 | Maximum spec extraction retry attempts |
+| `--max-generation-retries` | <MAX_GENERATION_RETRIES> | no | — | Maximum code generation/self-healing retry attempts |
+| `--max-refinements` | <MAX_REFINEMENTS> | no | 3 | Maximum spec refinement attempts when --generate is set |
+| `--forge` | — | no | — | Write the extracted spec to forge_tasks/ and run the forge pipeline |
+| `--forge-tasks-dir` | <FORGE_TASKS_DIR> | no | forge_tasks | Directory where --forge writes the extracted task spec |
+| `--mumei-repo` | <MUMEI_REPO> | no | — | Path to the mumei repo used by --forge |
+| `--forge-dry-run` | — | no | — | Preview the forge plan after extraction without generating code |
+| `--forge-log-path` | <FORGE_LOG_PATH> | no | — | Path to forge_log.json when --forge runs |
 
 
 ## `mumei-agent validate-spec`
@@ -249,31 +255,33 @@ Validate natural-language specifications for logical health.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--input` | <INPUT> | — | Path to the natural-language spec file. |
-| `--format` | {nl, human, json, markdown} | nl | Output format (nl/json default, human, or markdown table). |
-| `--domain, --domain-hint` | <DOMAIN> | — | Domain hint (financial/security/crypto/data_structure). |
-| `--output` | <OUTPUT> | — | Optional report output path. |
-| `--no-llm` | — | — | Skip LLM contract extraction. |
-| `--no-mumei` | — | — | Skip mumei verify. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--input` | <INPUT> | yes | — | Path to the natural-language spec file. |
+| `--format` | {nl, human, json, markdown} | no | nl | Output format (nl/json default, human, or markdown table). |
+| `--domain, --domain-hint` | <DOMAIN> | no | — | Domain hint (financial/security/crypto/data_structure). |
+| `--output` | <OUTPUT> | no | — | Optional report output path. |
+| `--no-llm` | — | no | — | Skip LLM contract extraction. |
+| `--no-mumei` | — | no | — | Skip mumei verify. |
 
 
 ## `mumei-agent validate-code`
 
 Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity).
 
+Exactly one of `--input`, `--file` is required.
+
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--input` | <INPUT> | — | Path to source code. |
-| `--language` | {python, rust, typescript, go, solidity} | — | Target language. 省略時は --input の拡張子から推定する。 |
-| `--output` | <OUTPUT> | — | Optional JSON report path. |
-| `--no-llm` | — | — | Skip LLM contract inference. |
-| `--no-mumei` | — | — | Skip mumei verify. |
-| `--enable-lean-bridge` | — | — | Run the optional mumei-lean bridge for Solidity guard-trace certificates. |
-| `--mumei-lean-repo` | <MUMEI_LEAN_REPO> | — | Path to the mumei-lean checkout used by --enable-lean-bridge. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--input` | <INPUT> | no | — | Path to source code. |
+| `--language` | {python, rust, typescript, go, solidity} | no | — | Target language. 省略時は --input の拡張子から推定する。 |
+| `--output` | <OUTPUT> | no | — | Optional JSON report path. |
+| `--no-llm` | — | no | — | Skip LLM contract inference. |
+| `--no-mumei` | — | no | — | Skip mumei verify. |
+| `--enable-lean-bridge` | — | no | — | Run the optional mumei-lean bridge for Solidity guard-trace certificates. |
+| `--mumei-lean-repo` | <MUMEI_LEAN_REPO> | no | — | Path to the mumei-lean checkout used by --enable-lean-bridge. |
 
 
 ## `mumei-agent validate-spec-to-code`
@@ -282,16 +290,16 @@ Detect missing implementation constraints and report the spec constraint to code
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--spec, --input` | <SPEC> | — | Path to spec file. |
-| `--code` | <CODE> | — | Path to source code. |
-| `--language` | {python, rust, typescript, go, solidity} | — | Source language. |
-| `--lang` | {auto, en, ja} | auto | Report language. |
-| `--output` | <OUTPUT> | — | Optional report path. |
-| `--format` | {human, json, markdown} | markdown | Output format (default: markdown). |
-| `--no-llm` | — | — | Skip LLM contract inference. |
-| `--no-mumei` | — | — | Skip mumei verify. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--spec, --input` | <SPEC> | yes | — | Path to spec file. |
+| `--code` | <CODE> | yes | — | Path to source code. |
+| `--language` | {python, rust, typescript, go, solidity} | no | — | Source language. |
+| `--lang` | {auto, en, ja} | no | auto | Report language. |
+| `--output` | <OUTPUT> | no | — | Optional report path. |
+| `--format` | {human, json, markdown} | no | markdown | Output format (default: markdown). |
+| `--no-llm` | — | no | — | Skip LLM contract inference. |
+| `--no-mumei` | — | no | — | Skip mumei verify. |
 
 
 ## `mumei-agent validate-code-to-spec`
@@ -300,16 +308,16 @@ Detect spec drift by comparing changed code to specs.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--code` | <CODE> | — | Path to source code. |
-| `--spec` | <SPEC> | — | Path to spec file. |
-| `--language` | {python, rust, typescript, go, solidity} | — | Source language. |
-| `--lang` | {auto, en, ja} | auto | Report language. |
-| `--output` | <OUTPUT> | — | Optional report path. |
-| `--format` | {human, json, markdown} | markdown | Output format (default: markdown). |
-| `--no-llm` | — | — | Skip LLM contract inference. |
-| `--no-mumei` | — | — | Skip mumei verify. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--code` | <CODE> | yes | — | Path to source code. |
+| `--spec` | <SPEC> | yes | — | Path to spec file. |
+| `--language` | {python, rust, typescript, go, solidity} | no | — | Source language. |
+| `--lang` | {auto, en, ja} | no | auto | Report language. |
+| `--output` | <OUTPUT> | no | — | Optional report path. |
+| `--format` | {human, json, markdown} | no | markdown | Output format (default: markdown). |
+| `--no-llm` | — | no | — | Skip LLM contract inference. |
+| `--no-mumei` | — | no | — | Skip mumei verify. |
 
 
 ## `mumei-agent verify-conformance`
@@ -318,16 +326,16 @@ Return structured JSON for natural-language spec to code conformance.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--spec` | <SPEC> | — | Path to natural-language spec file. |
-| `--code` | <CODE> | — | Path to source code. |
-| `--language` | {python, rust, typescript, go} | — | Source language. |
-| `--output` | <OUTPUT> | — | Optional output path. |
-| `--format` | {human, json, markdown} | json | Output format (default: json). |
-| `--lang` | {auto, en, ja} | auto | Report language. |
-| `--no-llm` | — | — | Skip LLM contract inference. |
-| `--no-mumei` | — | — | Skip mumei verify. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--spec` | <SPEC> | yes | — | Path to natural-language spec file. |
+| `--code` | <CODE> | yes | — | Path to source code. |
+| `--language` | {python, rust, typescript, go} | no | — | Source language. |
+| `--output` | <OUTPUT> | no | — | Optional output path. |
+| `--format` | {human, json, markdown} | no | json | Output format (default: json). |
+| `--lang` | {auto, en, ja} | no | auto | Report language. |
+| `--no-llm` | — | no | — | Skip LLM contract inference. |
+| `--no-mumei` | — | no | — | Skip mumei verify. |
 
 
 ## `mumei-agent verify-traceability`
@@ -336,16 +344,16 @@ Return structured JSON for bidirectional spec/code traceability.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--code` | <CODE> | — | Path to source code. |
-| `--spec` | <SPEC> | — | Path to natural-language spec file. |
-| `--language` | {python, rust, typescript, go} | — | Source language. |
-| `--output` | <OUTPUT> | — | Optional output path. |
-| `--format` | {human, json, markdown} | json | Output format (default: json). |
-| `--lang` | {auto, en, ja} | auto | Report language. |
-| `--no-llm` | — | — | Skip LLM contract inference. |
-| `--no-mumei` | — | — | Skip mumei verify. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--code` | <CODE> | yes | — | Path to source code. |
+| `--spec` | <SPEC> | yes | — | Path to natural-language spec file. |
+| `--language` | {python, rust, typescript, go} | no | — | Source language. |
+| `--output` | <OUTPUT> | no | — | Optional output path. |
+| `--format` | {human, json, markdown} | no | json | Output format (default: json). |
+| `--lang` | {auto, en, ja} | no | auto | Report language. |
+| `--no-llm` | — | no | — | Skip LLM contract inference. |
+| `--no-mumei` | — | no | — | Skip mumei verify. |
 
 
 ## `mumei-agent self-correct`
@@ -360,15 +368,15 @@ Run the P9-F self-correction protocol.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--source` | <SOURCE> | — | Mumei .mm source to repair |
-| `--feedback` | <FEEDBACK> | — | Path to structured feedback JSON, or an inline JSON object. |
-| `--max-iterations` | <MAX_ITERATIONS> | — | — |
-| `--charter-lock` | <LOCK_JSON> | — | Use this charter lock instead of discovering one from the source tree. |
-| `--allow-contract-erosion` | — | — | Disable contract-erosion checks for repair candidates. |
-| `--metadata-output` | <METADATA_OUTPUT> | — | Write self-correction metadata JSON |
-| `--proof-cert-out` | <PROOF_CERT_OUT> | — | After the loop, run `mumei verify --proof-cert` on the repaired source with the loop outcome attached as self_correction_metadata and write the certificate here (input for mumei benchmarks/evaluation_suite.py --repair-cert-dir). |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--source` | <SOURCE> | no | — | Mumei .mm source to repair |
+| `--feedback` | <FEEDBACK> | no | — | Path to structured feedback JSON, or an inline JSON object. |
+| `--max-iterations` | <MAX_ITERATIONS> | no | — | — |
+| `--charter-lock` | <LOCK_JSON> | no | — | Use this charter lock instead of discovering one from the source tree. |
+| `--allow-contract-erosion` | — | no | — | Disable contract-erosion checks for repair candidates. |
+| `--metadata-output` | <METADATA_OUTPUT> | no | — | Write self-correction metadata JSON |
+| `--proof-cert-out` | <PROOF_CERT_OUT> | no | — | After the loop, run `mumei verify --proof-cert` on the repaired source with the loop outcome attached as self_correction_metadata and write the certificate here (input for mumei benchmarks/evaluation_suite.py --repair-cert-dir). |
 
 
 ## `mumei-agent check-spec-health`
@@ -383,10 +391,10 @@ Check a Mumei spec for contradictions, over-constraints, and vacuity.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--output, -o` | <OUTPUT> | — | Write the JSON health report to this file (default: stdout). |
-| `--mumei-repo` | <MUMEI_REPO> | — | Path to the mumei repo (used to locate the mumei binary). |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--output, -o` | <OUTPUT> | no | — | Write the JSON health report to this file (default: stdout). |
+| `--mumei-repo` | <MUMEI_REPO> | no | — | Path to the mumei repo (used to locate the mumei binary). |
 
 
 ## `mumei-agent migrate-suggest`
@@ -395,13 +403,13 @@ Generate .mm migration skeletons for functions with verification issues.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--code-file` | <CODE_FILE> | — | Path to source code file. |
-| `--language` | {python, rust, typescript, go} | — | Source language. |
-| `--issues-json` | <ISSUES_JSON> | [] | JSON issues array. |
-| `--output` | <OUTPUT> | — | Optional output directory for .mm skeletons. |
-| `--clause-labels` | — | — | Emit requires clause labels from issues that carry required_contracts (pass them via --issues-json); needs a mumei build with clause-label support (v0.6.21 or later) |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--code-file` | <CODE_FILE> | yes | — | Path to source code file. |
+| `--language` | {python, rust, typescript, go} | yes | — | Source language. |
+| `--issues-json` | <ISSUES_JSON> | no | [] | JSON issues array. |
+| `--output` | <OUTPUT> | no | — | Optional output directory for .mm skeletons. |
+| `--clause-labels` | — | no | — | Emit requires clause labels from issues that carry required_contracts (pass them via --issues-json); needs a mumei build with clause-label support (v0.6.21 or later) |
 
 
 ## `mumei-agent cross-validate`
@@ -417,12 +425,12 @@ Cross-validate a Mumei spec (.mm) against implementation code. Detects semantic 
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--language, -l` | <LANGUAGE> | — | Implementation language (python/rust/typescript/go/solidity). Inferred from extension if omitted. |
-| `--old-cert` | <OLD_CERT> | — | Path to old proof certificate for drift detection |
-| `--new-cert` | <NEW_CERT> | — | Path to new proof certificate for drift detection |
-| `--json` | — | — | Output as JSON |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--language, -l` | <LANGUAGE> | no | — | Implementation language (python/rust/typescript/go/solidity). Inferred from extension if omitted. |
+| `--old-cert` | <OLD_CERT> | no | — | Path to old proof certificate for drift detection |
+| `--new-cert` | <NEW_CERT> | no | — | Path to new proof certificate for drift detection |
+| `--json` | — | no | — | Output as JSON |
 
 
 ## `mumei-agent harvest-tests`
@@ -437,16 +445,18 @@ Deterministically harvest observations from Python and Rust tests.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--language` | <LANGUAGE> | — | Source language: python or rust. |
-| `--target` | <TARGET> | [] | Restrict harvesting to a target name; may be repeated. |
-| `--output` | <OUTPUT> | — | Write JSON to this file instead of stdout. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--language` | <LANGUAGE> | no | — | Source language: python or rust. |
+| `--target` | <TARGET> | no | [] | Restrict harvesting to a target name; may be repeated. |
+| `--output` | <OUTPUT> | no | — | Write JSON to this file instead of stdout. |
 
 
 ## `mumei-agent observe-tests`
 
 Check harvested Python and Rust test observations against Mumei atoms.
+
+Exactly one of `--mm`, `--spec` is required.
 
 ### Positional arguments
 
@@ -456,13 +466,13 @@ Check harvested Python and Rust test observations against Mumei atoms.
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--mm` | <MM> | — | Mumei module containing the contracts. |
-| `--spec` | <SPEC> | — | Forge task spec JSON containing the contracts. |
-| `--language` | {rust, python} | — | — |
-| `--target` | <TARGET> | [] | — |
-| `--output` | <OUTPUT> | — | Write the observation report to this file. |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--mm` | <MM> | no | — | Mumei module containing the contracts. |
+| `--spec` | <SPEC> | no | — | Forge task spec JSON containing the contracts. |
+| `--language` | {rust, python} | no | — | — |
+| `--target` | <TARGET> | no | [] | — |
+| `--output` | <OUTPUT> | no | — | Write the observation report to this file. |
 
 
 ## `mumei-agent mcp-server`
@@ -482,14 +492,14 @@ Mumei Self-Healing Loop: AI-driven autonomous fix loop
 
 ### Options
 
-| Option | Value | Default | Description |
-|---|---|---|---|
-| `--max-retries` | <MAX_RETRIES> | — | Maximum number of fix attempts (default: from config or 5) |
-| `--strategy` | {single, multi-stage} | — | Fix strategy: 'single' (one-shot) or 'multi-stage' (diagnose→fix→validate). Default: from AGENT_STRATEGY env var or 'single'. |
-| `--generate` | <SPEC_JSON> | — | Generate mode: path to a JSON spec file describing the atom to generate. Runs generate → verify → fix loop instead of the normal heal loop. |
-| `--output` | <OUTPUT_FILE> | — | Output file for generated code (required with --generate). |
-| `--budget-policy` | <POLICY_JSON> | — | Path to retry budget policy JSON (default: built-in P8-G policy). |
-| `--proof-cert-out` | <CERT_JSON> | — | After healing, emit a proof certificate for the final source with the repair outcome attached as self_correction_metadata (input for mumei benchmarks/evaluation_suite.py --repair-cert-dir). When SOURCE is a directory this is a directory too: each file gets <dir>/<relative path>.proof.json. |
-| `--charter-lock` | <LOCK_JSON> | — | Use this charter lock instead of discovering one from the source tree. |
-| `--allow-contract-erosion` | — | — | Disable contract-erosion checks for repair candidates. |
-| `--controls-gate` | {off, warn, require} | off | Rank verified heal candidates using negative controls (default: off). |
+| Option | Value | Required | Default | Description |
+|---|---|---|---|---|
+| `--max-retries` | <MAX_RETRIES> | no | — | Maximum number of fix attempts (default: from config or 5) |
+| `--strategy` | {single, multi-stage} | no | — | Fix strategy: 'single' (one-shot) or 'multi-stage' (diagnose→fix→validate). Default: from AGENT_STRATEGY env var or 'single'. |
+| `--generate` | <SPEC_JSON> | no | — | Generate mode: path to a JSON spec file describing the atom to generate. Runs generate → verify → fix loop instead of the normal heal loop. |
+| `--output` | <OUTPUT_FILE> | no | — | Output file for generated code (required with --generate). |
+| `--budget-policy` | <POLICY_JSON> | no | — | Path to retry budget policy JSON (default: built-in P8-G policy). |
+| `--proof-cert-out` | <CERT_JSON> | no | — | After healing, emit a proof certificate for the final source with the repair outcome attached as self_correction_metadata (input for mumei benchmarks/evaluation_suite.py --repair-cert-dir). When SOURCE is a directory this is a directory too: each file gets <dir>/<relative path>.proof.json. |
+| `--charter-lock` | <LOCK_JSON> | no | — | Use this charter lock instead of discovering one from the source tree. |
+| `--allow-contract-erosion` | — | no | — | Disable contract-erosion checks for repair candidates. |
+| `--controls-gate` | {off, warn, require} | no | off | Rank verified heal candidates using negative controls (default: off). |
