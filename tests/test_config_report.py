@@ -161,6 +161,42 @@ def test_experimental_lean_proof_reports_effective_config_field(
     output = capsys.readouterr().out
     expected = "true" if config.enable_lean_ai_proof else "false"
     assert f"ENABLE_LEAN_AI_PROOF = {expected}  [preset experimental]" in output
+    assert "  (inactive: no API key)" in output
+
+
+@pytest.mark.parametrize(
+    ("api_key", "fixture_mode", "expected_note"),
+    [
+        (None, None, "inactive: no API key"),
+        ("configured", "1", "inactive: CI_FIXTURE_MODE"),
+    ],
+)
+def test_json_reports_lean_ai_proof_inactive_reason(
+    monkeypatch, capsys, api_key, fixture_mode, expected_note
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+    if api_key is not None:
+        monkeypatch.setenv("LLM_API_KEY", api_key)
+    if fixture_mode is not None:
+        monkeypatch.setenv("CI_FIXTURE_MODE", fixture_mode)
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    entry = _entry(json.loads(capsys.readouterr().out), "ENABLE_LEAN_AI_PROOF")
+    assert entry["effective"] is True
+    assert entry["note"] == expected_note
+
+
+def test_fixture_mode_reports_lean_ai_proof_inactive_reason_in_text(
+    monkeypatch, capsys
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+    monkeypatch.setenv("LLM_API_KEY", "configured")
+    monkeypatch.setenv("CI_FIXTURE_MODE", "1")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    assert "  (inactive: CI_FIXTURE_MODE)" in capsys.readouterr().out
 
 
 def test_llm_profile_is_in_header(monkeypatch, capsys) -> None:

@@ -20,6 +20,7 @@ class _Entry:
     source: str
     preset: str | None
     effective: Any
+    note: str | None = None
 
 
 def build_parser(
@@ -84,7 +85,17 @@ def _entries(config: AgentConfig) -> list[_Entry]:
             effective = preset
         else:
             effective = variable.default
-        entries.append(_Entry(variable, raw, source, preset, effective))
+        note = None
+        if (
+            variable.name == "ENABLE_LEAN_AI_PROOF"
+            and config.enable_lean_ai_proof
+            and not config.lean_ai_proof_active()
+        ):
+            if not config.api_key:
+                note = "inactive: no API key"
+            elif config.ci_fixture_mode:
+                note = "inactive: CI_FIXTURE_MODE"
+        entries.append(_Entry(variable, raw, source, preset, effective, note))
     return entries
 
 
@@ -103,6 +114,8 @@ def _entry_json(entry: _Entry) -> dict[str, Any]:
     if not variable.sensitive:
         result["value"] = _sanitize_url_value(entry.raw)
         result["effective"] = _sanitize_url_value(entry.effective)
+    if entry.note is not None:
+        result["note"] = entry.note
     return result
 
 
@@ -160,4 +173,6 @@ def main(args: argparse.Namespace) -> int:
         else:
             source = f"[{entry.source}]"
         print(f"  {entry.variable.name} = {value}  {source}")
+        if entry.note is not None:
+            print(f"  ({entry.note})")
     return 0
