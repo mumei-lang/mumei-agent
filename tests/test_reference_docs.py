@@ -360,6 +360,8 @@ def test_generator_script_is_directly_executable() -> None:
     script = REPO_ROOT / "scripts" / "gen_reference_docs.py"
     assert script.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3\n")
     assert os.access(script, os.X_OK)
+    if not (REPO_ROOT / ".git").exists():
+        return
     tracked_mode = subprocess.run(
         ["git", "ls-files", "--stage", "--", str(script)],
         cwd=REPO_ROOT,
