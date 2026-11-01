@@ -161,6 +161,11 @@ def _value_label(action: argparse.Action) -> str:
     return label
 
 
+def _markdown_value_label(action: argparse.Action) -> str:
+    value = _value_label(action)
+    return "—" if value == "—" else f"`{markdown_cell(value)}`"
+
+
 def _default_label(action: argparse.Action) -> str:
     default = action.default
     if default is None or default == argparse.SUPPRESS:
@@ -291,7 +296,7 @@ def render_cli_reference() -> str:
                 required = action.nargs not in {argparse.OPTIONAL, argparse.ZERO_OR_MORE}
                 lines.append(
                     f"| `{markdown_cell(action.dest)}` | {'yes' if required else 'no'} | "
-                    f"{markdown_cell(_value_label(action))} | "
+                    f"{_markdown_value_label(action)} | "
                     f"{markdown_cell(_help_text(reference.parser, action))} |"
                 )
             lines.append("")
@@ -308,7 +313,7 @@ def render_cli_reference() -> str:
             for action in options:
                 option = ", ".join(action.option_strings)
                 lines.append(
-                    f"| `{markdown_cell(option)}` | {markdown_cell(_value_label(action))} | "
+                    f"| `{markdown_cell(option)}` | {_markdown_value_label(action)} | "
                     f"{'yes' if action.required else 'no'} | "
                     f"{markdown_cell(_default_label(action))} | "
                     f"{markdown_cell(_help_text(reference.parser, action))} |"

@@ -233,14 +233,14 @@ def test_ast_subcommands_and_visible_parser_option_counts_are_documented() -> No
     assert mcp_server.options == []
     assert "extra arguments are ignored" in mcp_server.description
     assert (
-        "| `--controls-gate` | {off, warn, require} | no | — | "
+        "| `--controls-gate` | `{off, warn, require}` | no | — | "
         "Negative-controls gate mode (default: CONTROLS_GATE or warn) |"
     ) in document
     assert "Rank verified heal candidates using negative controls (default: off)." in document
     generate_start = document.find("## `mumei-agent generate`")
     generate_end = document.find("\n## `", generate_start + 1)
     generate = document[generate_start:generate_end]
-    assert "| `--output` | <OUTPUT> | yes | — |" in generate
+    assert "| `--output` | `<OUTPUT>` | yes | — |" in generate
     assert "Exactly one of `--spec`, `--spec-file` is required." in generate
 
 
@@ -254,9 +254,23 @@ def test_required_options_and_groups_are_rendered(monkeypatch) -> None:
     monkeypatch.setattr("agent.cli_reference.capture_command_references", lambda: [reference])
 
     document = render_cli_reference()
-    assert "| `--output` | <OUTPUT> | yes | — | Output path. |" in document
-    assert "| `--spec` | <SPEC> | no | — | Inline specification. |" in document
+    assert "| `--output` | `<OUTPUT>` | yes | — | Output path. |" in document
+    assert "| `--spec` | `<SPEC>` | no | — | Inline specification. |" in document
     assert "Exactly one of `--spec`, `--spec-file` is required." in document
+
+
+def test_nonempty_value_labels_are_markdown_code_spans(monkeypatch) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("tasks_dir", metavar="TASKS_DIR", help="Tasks directory.")
+    parser.add_argument("--mode", choices=["fast", "safe"], help="Execution mode.")
+    parser.add_argument("--enabled", action="store_true", help="Enable the feature.")
+    reference = CommandReference("fixture", "Fixture parser.", parser)
+    monkeypatch.setattr("agent.cli_reference.capture_command_references", lambda: [reference])
+
+    document = render_cli_reference()
+    assert "| `tasks_dir` | yes | `<TASKS_DIR>` | Tasks directory. |" in document
+    assert "| `--mode` | `{fast, safe}` | no | — | Execution mode. |" in document
+    assert "| `--enabled` | — | no | — | Enable the feature. |" in document
 
 
 def test_parser_capture_restores_argparse_and_argv_on_success_and_error() -> None:
