@@ -1,5 +1,7 @@
 # mumei-agent Claude Code Guide
 
+Repository-wide rules for agents, including secret handling, are in [AGENTS.md](../AGENTS.md).
+
 ## Overview
 
 mumei-agent is an AI-driven autonomous repair loop that uses mumei verification to generate, verify, and self-heal `.mm` code: 「mumei の検証機能を活用した AI 駆動の自律修正ループ」. It combines LLM output with Z3-backed proof checks so generated code can be iteratively repaired until it satisfies mumei contracts.
