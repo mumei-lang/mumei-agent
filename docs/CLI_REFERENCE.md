@@ -11,6 +11,8 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 `mumei-extract-spec`, and `mumei-agent-mcp` console scripts map to `heal`,
 `extract-spec`, and `mcp-server`, respectively.
 
+`verify-foreign` is an alias of `validate-code`.
+
 | Subcommand | Option count | Description |
 |---|---:|---|
 | `forge` | 11 | Autonomous forge mode: extend the mumei std library with verified atoms from task specs. |

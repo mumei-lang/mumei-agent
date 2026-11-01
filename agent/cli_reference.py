@@ -89,6 +89,43 @@ def discover_subcommands(path: Path = MAIN_PATH) -> list[str]:
     return found
 
 
+def discover_aliases(path: Path = MAIN_PATH) -> dict[str, str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    main = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "main"
+        ),
+        None,
+    )
+    if main is None:
+        return {}
+
+    for statement in main.body:
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [statement.target]
+            value = statement.value
+        else:
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "aliases" for target in targets):
+            continue
+        if not isinstance(value, ast.Dict):
+            continue
+        return {
+            key.value: alias.value
+            for key, alias in zip(value.keys, value.values)
+            if isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and isinstance(alias, ast.Constant)
+            and isinstance(alias.value, str)
+        }
+    return {}
+
+
 def capture_parser(main_fn: Callable[[], object], argv: list[str]) -> argparse.ArgumentParser | None:
     original_parse_args = argparse.ArgumentParser.parse_args
     original_parse_known_args = argparse.ArgumentParser.parse_known_args
@@ -242,6 +279,7 @@ def _neutralized_environment():
 
 def render_cli_reference() -> str:
     references = capture_command_references()
+    aliases = discover_aliases()
     lines = [
         "---",
         "layout: default",
@@ -256,9 +294,17 @@ def render_cli_reference() -> str:
         "`mumei-extract-spec`, and `mumei-agent-mcp` console scripts map to `heal`,",
         "`extract-spec`, and `mcp-server`, respectively.",
         "",
-        "| Subcommand | Option count | Description |",
-        "|---|---:|---|",
     ]
+    for alias, command in sorted(aliases.items()):
+        lines.extend(
+            [f"`{markdown_cell(alias)}` is an alias of `{markdown_cell(command)}`.", ""]
+        )
+    lines.extend(
+        [
+            "| Subcommand | Option count | Description |",
+            "|---|---:|---|",
+        ]
+    )
     for reference in references:
         lines.append(
             f"| `{markdown_cell(reference.name)}` | {len(reference.options)} | "

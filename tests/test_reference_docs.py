@@ -21,6 +21,7 @@ from agent.cli_reference import (
     render_references,
     sync_reference_docs,
     _default_label,
+    discover_aliases,
     _help_text,
     _value_label,
     _visible_actions,
@@ -220,6 +221,8 @@ def test_ast_subcommands_and_visible_parser_option_counts_are_documented() -> No
     commands = discover_subcommands()
     assert len(commands) == 25
     document = render_cli_reference()
+    assert discover_aliases() == {"verify-foreign": "validate-code"}
+    assert "`verify-foreign` is an alias of `validate-code`." in document
     references = capture_command_references()
     assert [reference.name for reference in references] == commands
     for reference in references:
@@ -242,6 +245,32 @@ def test_ast_subcommands_and_visible_parser_option_counts_are_documented() -> No
     generate = document[generate_start:generate_end]
     assert "| `--output` | `<OUTPUT>` | yes | — |" in generate
     assert "Exactly one of `--spec`, `--spec-file` is required." in generate
+
+
+def test_aliases_are_discovered_from_the_main_ast(tmp_path: Path) -> None:
+    main_path = tmp_path / "main.py"
+    main_path.write_text(
+        textwrap.dedent(
+            """\
+            def main():
+                aliases = {
+                    "alias-one": "command-one",
+                    "alias-two": "command-two",
+                }
+
+            def another():
+                aliases = {"ignored": "outside-main"}
+
+            aliases = {"also-ignored": "module-level"}
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    assert discover_aliases(main_path) == {
+        "alias-one": "command-one",
+        "alias-two": "command-two",
+    }
 
 
 def test_required_options_and_groups_are_rendered(monkeypatch) -> None:
