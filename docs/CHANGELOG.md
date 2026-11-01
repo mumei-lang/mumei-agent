@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased: agent environment presets
+
+- Added `MUMEI_AGENT_PRESET=ci-strict|experimental` with explicit-environment,
+  preset, and built-in-default precedence.
+- Regenerate references with `PYTHONPATH=$PWD .venv/bin/python scripts/gen_reference_docs.py`;
+  `tests/test_reference_docs.py` checks for drift.
+
 ## Unreleased: generated CLI and environment references
 
 - Added generated references for CLI options and environment variables.

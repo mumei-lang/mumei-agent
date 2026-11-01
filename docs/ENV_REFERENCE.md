@@ -31,6 +31,7 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 
 | Variable | Kind | Default | Description |
 |---|---|---|---|
+| `MUMEI_AGENT_PRESET` | value | unset | Optional `ci-strict` or `experimental` preset. Explicit environment variables override preset values, which override built-in defaults; unset means no preset. |
 | `MUMEI_BIN` | value | mumei | Path or command name for the Mumei executable. |
 | `MUMEI_REPO` | value | . | Mumei checkout path used by commands that need repository assets; defaults to the current directory. |
 | `MUMEI_SPEC_CACHE_DIR` | value | unset | Directory for the opt-in content-addressed spec cache; unset disables the cache. |
@@ -124,3 +125,32 @@ Unset optional values are shown as `unset`; toggle defaults are `on` or `off`.
 | `GITHUB_RUN_ID` | value | unset | GitHub Actions run identifier used to label triage metrics. |
 | `GITHUB_STEP_SUMMARY` | value | unset | GitHub Actions summary-file path; unset outside GitHub Actions. |
 | `GITHUB_OUTPUT` | value | unset | GitHub Actions output-file path; unset outside GitHub Actions. |
+
+## Presets
+
+Precedence is explicit environment variable > preset > built-in default. An explicit variable is used whenever set; otherwise a preset value is used when present, and all other settings retain their built-in defaults.
+
+### `ci-strict`
+
+| Variable | Value |
+|---|---|
+| `CONTROLS_GATE` | `require` |
+| `ENABLE_CHARTER_GUARD` | `true` |
+| `ENABLE_EROSION_GUARD` | `true` |
+| `ENABLE_LEAN_AI_PROOF` | `false` |
+| `ENABLE_SELF_CORRECTION` | `false` |
+| `ENABLE_NLAE_MULTI_AGENT` | `false` |
+| `ENABLE_LATENT_DEBUG` | `false` |
+| `ENABLE_DENSE_PROPERTIES` | `false` |
+| `ENABLE_LATENT_PROTOCOL` | `false` |
+
+### `experimental`
+
+| Variable | Value |
+|---|---|
+| `ENABLE_LATENT_DEBUG` | `true` |
+| `ENABLE_DENSE_PROPERTIES` | `true` |
+| `ENABLE_LATENT_PROTOCOL` | `true` |
+| `ENABLE_NLAE_MULTI_AGENT` | `true` |
+| `ENABLE_SELF_CORRECTION` | `true` |
+| `ENABLE_LEAN_AI_PROOF` | `true` |

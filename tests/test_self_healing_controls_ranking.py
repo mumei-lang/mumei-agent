@@ -132,7 +132,8 @@ def _ranking(capsys: pytest.CaptureFixture[str]) -> dict:
     return json.loads(line.removeprefix("Heal candidate ranking: "))
 
 
-def test_controls_gate_cli_default_is_off() -> None:
+def test_controls_gate_cli_default_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "ci-strict")
     args = self_healing._build_parser().parse_args(["app.mm"])
     assert args.controls_gate == "off"
 

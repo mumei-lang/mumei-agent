@@ -8,12 +8,52 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+_AGENT_PRESETS: dict[str, dict[str, str]] = {
+    "ci-strict": {
+        "CONTROLS_GATE": "require",
+        "ENABLE_CHARTER_GUARD": "true",
+        "ENABLE_EROSION_GUARD": "true",
+        "ENABLE_LEAN_AI_PROOF": "false",
+        "ENABLE_SELF_CORRECTION": "false",
+        "ENABLE_NLAE_MULTI_AGENT": "false",
+        "ENABLE_LATENT_DEBUG": "false",
+        "ENABLE_DENSE_PROPERTIES": "false",
+        "ENABLE_LATENT_PROTOCOL": "false",
+    },
+    "experimental": {
+        "ENABLE_LATENT_DEBUG": "true",
+        "ENABLE_DENSE_PROPERTIES": "true",
+        "ENABLE_LATENT_PROTOCOL": "true",
+        "ENABLE_NLAE_MULTI_AGENT": "true",
+        "ENABLE_SELF_CORRECTION": "true",
+        "ENABLE_LEAN_AI_PROOF": "true",
+    },
+}
+
+
+def _preset_value(name: str) -> str | None:
+    preset = os.getenv("MUMEI_AGENT_PRESET")
+    if not preset:
+        return None
+    return _AGENT_PRESETS.get(preset, {}).get(name)
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     """Parse common environment boolean values."""
     raw = os.getenv(name)
     if raw is None:
+        raw = _preset_value(name)
+    if raw is None:
         return default
     return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def _env_str(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is not None:
+        return raw
+    preset = _preset_value(name)
+    return preset if preset is not None else default
 
 
 _CONTROLS_GATE_MODES = {"off", "warn", "require"}
@@ -167,10 +207,13 @@ class AgentConfig:
     llm_profile: str | None = field(
         default_factory=lambda: os.getenv("MUMEI_LLM_PROFILE") or None
     )
+    agent_preset: str | None = field(
+        default_factory=lambda: os.getenv("MUMEI_AGENT_PRESET") or None
+    )
     spec_split_chars: int = field(
         default_factory=lambda: int(os.getenv("MUMEI_SPEC_SPLIT_CHARS", "0"))
     )
-    controls_gate: str = field(default_factory=lambda: os.getenv("CONTROLS_GATE", "warn"))
+    controls_gate: str = field(default_factory=lambda: _env_str("CONTROLS_GATE", "warn"))
 
     def lean_ai_proof_active(self) -> bool:
         """True only when AI Lean proof generation may actually run."""
@@ -192,6 +235,11 @@ class AgentConfig:
         # API key validation is deferred to create_client() so that
         # subcommands that never use the LLM (e.g. ``python -m agent
         # health``) can construct AgentConfig without requiring a key.
+        if self.agent_preset is not None and self.agent_preset not in _AGENT_PRESETS:
+            raise ValueError(
+                f"unknown MUMEI_AGENT_PRESET {self.agent_preset!r}; "
+                f"choose from {sorted(_AGENT_PRESETS)}"
+            )
         if self.controls_gate not in _CONTROLS_GATE_MODES:
             raise ValueError(
                 f"invalid CONTROLS_GATE {self.controls_gate!r}; "
