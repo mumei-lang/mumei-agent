@@ -1084,6 +1084,7 @@ def get_agent_status(ctx: Context | None = None) -> str:
                 "base_url": config.base_url,
                 "mumei_bin": config.mumei_bin,
                 "strategy": config.strategy,
+                "agent_preset": config.agent_preset,
                 "subcommands": subcommands,
                 "mcp_tools": sorted(mcp._tool_manager._tools),
                 "mcp_client": _mcp_client_info(ctx),
