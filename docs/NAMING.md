@@ -17,6 +17,7 @@ Rule IDs are enforced by [`tests/test_naming.py`](../tests/test_naming.py).
 - **E2 — positive feature toggles:** Repo-owned names avoid `USE_`, `DISABLE_`, `NO_`, `MUMEI_USE_`, `MUMEI_DISABLE_`, and `MUMEI_NO_`, and avoid `_ENABLED` / `_DISABLED`; new boolean feature toggles use `ENABLE_X`. Good: `ENABLE_CACHE`. Bad: `USE_CACHE`.
 - **E3 — repository prefix (mumei only):** Repo-owned Mumei variables start with `MUMEI_`; this distinguishes them from process and toolchain settings. This rule does not apply to mumei-agent. Good for mumei: `MUMEI_ENABLE_CACHE`. Bad for mumei: `ENABLE_CACHE`.
 - **E4 — safety-only allow:** Every variable containing `ALLOW` is listed in `SAFETY_RELAXATIONS` with the check it relaxes; an allow variable is a reviewed safety exception. Good (mumei): `MUMEI_REGISTRY_ALLOW_PLAINTEXT` with its transport-policy reason. Bad: `MUMEI_ALLOW_PREVIEW`.
+- **E5 — positive toggle names:** Repo-owned environment variables with `kind="toggle"` start with `ENABLE_`; this gives every boolean feature toggle the same positive form. Good: `ENABLE_CACHE`. Bad: `CACHE_ACTIVE`.
 
 OpenTelemetry, GitHub Actions, shared CI fixture-mode, W3C trace-context, OpenAI-client, and toolchain variables are external and listed in `EXTERNAL`; the repo-owned prefix and toggle rules do not apply to them. New mumei-agent feature toggles use `ENABLE_X`.
 

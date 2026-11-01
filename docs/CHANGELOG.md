@@ -3,7 +3,8 @@
 ## Unreleased: naming convention
 
 - Documented CLI flag and environment-variable naming rules and added tests
-  that grandfather existing names without renaming them.
+  that grandfather existing names without renaming them. Toggle naming is
+  enforced, and exceptions record their violated rule IDs.
 
 ## Unreleased: executable reference generator
 

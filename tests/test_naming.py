@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import re
 from collections.abc import Iterable, Mapping
 
@@ -12,20 +13,25 @@ DEFAULT_GRANDFATHER_REASON = (
 )
 
 GRANDFATHERED = {
-    "mumei-agent validate-code --no-llm": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent validate-code --no-mumei": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent validate-code-to-spec --no-llm": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent validate-code-to-spec --no-mumei": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent validate-spec --no-llm": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent validate-spec --no-mumei": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent validate-spec-to-code --no-llm": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent validate-spec-to-code --no-mumei": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent verify-conformance --no-llm": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent verify-conformance --no-mumei": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent verify-traceability --no-llm": DEFAULT_GRANDFATHER_REASON,
-    "mumei-agent verify-traceability --no-mumei": DEFAULT_GRANDFATHER_REASON,
-    "USE_MCP_CLIENT": DEFAULT_GRANDFATHER_REASON,
-    "USE_MCP_SAMPLING": DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-code --no-llm", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-code --no-mumei", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-code-to-spec --no-llm", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-code-to-spec --no-mumei", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-spec --no-llm", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-spec --no-mumei", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-spec-to-code --no-llm", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent validate-spec-to-code --no-mumei", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent verify-conformance --no-llm", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent verify-conformance --no-mumei", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent verify-traceability --no-llm", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("mumei-agent verify-traceability --no-mumei", "F3"): DEFAULT_GRANDFATHER_REASON,
+    ("USE_MCP_CLIENT", "E2"): DEFAULT_GRANDFATHER_REASON,
+    ("USE_MCP_CLIENT", "E5"): DEFAULT_GRANDFATHER_REASON,
+    ("USE_MCP_SAMPLING", "E2"): DEFAULT_GRANDFATHER_REASON,
+    ("USE_MCP_SAMPLING", "E5"): DEFAULT_GRANDFATHER_REASON,
+    ("CEGIS_ESCALATE_TO_LEAN", "E5"): DEFAULT_GRANDFATHER_REASON,
+    ("INJECT_CORE_AXIOMS", "E5"): DEFAULT_GRANDFATHER_REASON,
+    ("PREFER_MCP_GAPS", "E5"): DEFAULT_GRANDFATHER_REASON,
 }
 
 SAFETY_RELAXATIONS = {
@@ -36,8 +42,6 @@ SAFETY_RELAXATIONS = {
 }
 
 EXTERNAL = {
-    "category:ci": "GitHub Actions variables and the CI fixture mode shared across repositories.",
-    "category:observability": "OpenTelemetry SDK and exporter settings.",
     "CI_FIXTURE_MODE": "Shared fixture-mode control used by repository CI.",
     "GITHUB_*": "Variables defined by GitHub Actions and GitHub tooling.",
     "OPENAI_API_KEY": "Credential name defined by the OpenAI client ecosystem.",
@@ -53,14 +57,22 @@ _LONG_FLAG_PATTERN = re.compile(r"--[a-z0-9]+(-[a-z0-9]+)*\Z")
 _ENV_NAME_PATTERN = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 
 
+def _collect_parser_flags(
+    command: str, parser: argparse.ArgumentParser
+) -> set[tuple[str, str]]:
+    flags = set()
+    for action in parser._actions:
+        for option in action.option_strings:
+            if option.startswith("--") and option not in {"--help", "--version"}:
+                flags.add((command, option))
+    return flags
+
+
 def _collect_flags() -> set[tuple[str, str]]:
     flags = set()
     for reference in capture_command_references():
         command = f"mumei-agent {reference.name}"
-        for action in reference.options:
-            for option in action.option_strings:
-                if option.startswith("--") and option not in {"--help", "--version"}:
-                    flags.add((command, option))
+        flags.update(_collect_parser_flags(command, reference.parser))
     return flags
 
 
@@ -89,12 +101,8 @@ def _flag_violations(
     return violations
 
 
-def _is_external(name: str, category: str) -> bool:
+def _is_external(name: str) -> bool:
     for selector in EXTERNAL:
-        if selector.startswith("category:") and category == selector.removeprefix(
-            "category:"
-        ):
-            return True
         if selector.endswith("*") and name.startswith(selector[:-1]):
             return True
         if selector == name:
@@ -103,16 +111,16 @@ def _is_external(name: str, category: str) -> bool:
 
 
 def _environment_violations(
-    variables: Iterable[tuple[str, str]],
+    variables: Iterable[tuple[str, str, str]],
     safety_relaxations: Mapping[str, str] = SAFETY_RELAXATIONS,
 ) -> set[tuple[str, str]]:
     violations = set()
-    for name, category in variables:
+    for name, _category, kind in variables:
         if not _ENV_NAME_PATTERN.fullmatch(name):
             violations.add((name, "E1"))
         if "ALLOW" in name and name not in safety_relaxations:
             violations.add((name, "E4"))
-        if _is_external(name, category):
+        if _is_external(name):
             continue
         if name.startswith(
             (
@@ -125,12 +133,14 @@ def _environment_violations(
             )
         ) or name.endswith(("_ENABLED", "_DISABLED")):
             violations.add((name, "E2"))
+        if kind == "toggle" and not name.startswith("ENABLE_"):
+            violations.add((name, "E5"))
     return violations
 
 
 def _all_violations() -> set[tuple[str, str]]:
     flags = _collect_flags()
-    variables = [(entry.name, entry.category) for entry in ENV_VARS]
+    variables = [(entry.name, entry.category, entry.kind) for entry in ENV_VARS]
     return _flag_violations(flags) | _environment_violations(variables)
 
 
@@ -140,17 +150,23 @@ def _assert_violation(
     assert (name, rule) in violations, f"{rule} regression not rejected; see docs/NAMING.md"
 
 
+def _unrecorded_violations(
+    violations: set[tuple[str, str]],
+    grandfathered: Mapping[tuple[str, str], str],
+) -> set[tuple[str, str]]:
+    return violations - set(grandfathered)
+
+
 def test_existing_violations_are_grandfathered_and_entries_are_not_stale() -> None:
     violations = _all_violations()
-    violating_names = {name for name, _ in violations}
-    expected_names = set(GRANDFATHERED)
-    unrecorded = violating_names - expected_names
-    stale = expected_names - violating_names
+    expected = set(GRANDFATHERED)
+    unrecorded = _unrecorded_violations(violations, GRANDFATHERED)
+    stale = expected - violations
     assert not unrecorded, (
         f"unrecorded naming violations {sorted(violations)}; see docs/NAMING.md"
     )
     assert not stale, (
-        f"stale GRANDFATHERED entries for F1-F5/E1-E4: {sorted(stale)}; "
+        f"stale GRANDFATHERED entries for F1-F5/E1-E5: {sorted(stale)}; "
         "see docs/NAMING.md"
     )
     assert all(reason.strip() for reason in GRANDFATHERED.values()), (
@@ -220,31 +236,60 @@ def test_flag_rule_regressions_are_rejected_and_compliant_names_are_accepted() -
     ), "F5 compliant name rejected; see docs/NAMING.md"
 
 
+def test_hidden_parser_options_are_included_in_flag_rule_checks() -> None:
+    parser = argparse.ArgumentParser(prog="fixture")
+    parser.add_argument("--Bad_Flag", help=argparse.SUPPRESS)
+    violations = _flag_violations(_collect_parser_flags("fixture", parser))
+    _assert_violation(violations, "fixture --Bad_Flag", "F1")
+
+
 def test_environment_rule_regressions_are_rejected_and_compliant_names_are_accepted() -> None:
     _assert_violation(
-        _environment_violations([("mumei_cache", "features")]),
+        _environment_violations([("mumei_cache", "features", "value")]),
         "mumei_cache",
         "E1",
     )
-    assert not _environment_violations([("MUMEI_CACHE", "features")]), (
+    assert not _environment_violations([("MUMEI_CACHE", "features", "value")]), (
         "E1 compliant name rejected; see docs/NAMING.md"
     )
 
     _assert_violation(
-        _environment_violations([("USE_CACHE", "features")]),
+        _environment_violations([("USE_CACHE", "features", "value")]),
         "USE_CACHE",
         "E2",
     )
-    assert not _environment_violations([("ENABLE_CACHE", "features")]), (
+    _assert_violation(
+        _environment_violations([("USE_CI_FEATURE", "ci", "value")]),
+        "USE_CI_FEATURE",
+        "E2",
+    )
+    assert not _environment_violations([("ENABLE_CACHE", "features", "toggle")]), (
         "E2 compliant name rejected; see docs/NAMING.md"
     )
 
     _assert_violation(
-        _environment_violations([("MUMEI_ALLOW_PREVIEW", "features")]),
+        _environment_violations([("CACHE_ACTIVE", "features", "toggle")]),
+        "CACHE_ACTIVE",
+        "E5",
+    )
+    assert not _environment_violations([("ENABLE_CACHE", "features", "toggle")]), (
+        "E5 compliant toggle rejected; see docs/NAMING.md"
+    )
+
+    _assert_violation(
+        _environment_violations([("MUMEI_ALLOW_PREVIEW", "features", "value")]),
         "MUMEI_ALLOW_PREVIEW",
         "E4",
     )
     assert not _environment_violations(
-        [("MUMEI_ALLOW_PREVIEW", "features")],
+        [("MUMEI_ALLOW_PREVIEW", "features", "value")],
         safety_relaxations={"MUMEI_ALLOW_PREVIEW": "test safety check"},
     ), "E4 documented safety relaxation rejected; see docs/NAMING.md"
+
+
+def test_grandfathering_is_rule_specific() -> None:
+    violations = _environment_violations([("USE_CACHE", "mcp", "toggle")])
+    grandfathered = {("USE_CACHE", "E2"): "legacy negative toggle"}
+    assert _unrecorded_violations(violations, grandfathered) == {("USE_CACHE", "E5")}, (
+        "a grandfathered name must still fail for an unrecorded rule; see docs/NAMING.md"
+    )
