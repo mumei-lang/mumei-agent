@@ -168,7 +168,22 @@ def test_llm_profile_is_in_header(monkeypatch, capsys) -> None:
     monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-small")
     args = build_parser().parse_args([])
     assert config_main(args) == 0
-    assert "llm profile: local-small" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "llm profile: local-small" in output
+    assert "LLM_MODEL = qwen2.5-coder:1.5b-2k  [llm-profile local-small]" in output
+    assert "LLM_MAX_TOKENS = 2048  [llm-profile local-small]" in output
+
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_LLM_PROFILE", "local-small")
+    args = build_parser().parse_args(["--json"])
+    assert config_main(args) == 0
+    report = json.loads(capsys.readouterr().out)
+    model = _entry(report, "LLM_MODEL")
+    max_tokens = _entry(report, "LLM_MAX_TOKENS")
+    assert model["source"] == max_tokens["source"] == "llm-profile"
+    assert model["set"] is max_tokens["set"] is False
+    assert model["effective"] == "qwen2.5-coder:1.5b-2k"
+    assert max_tokens["effective"] == 2048
 
 
 @pytest.mark.parametrize("all_values", [False, True])

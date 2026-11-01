@@ -63,10 +63,19 @@ def _display(value: Any) -> str:
 
 def _entries(config: AgentConfig) -> list[_Entry]:
     entries: list[_Entry] = []
+    llm_profile_values = AgentConfig._LLM_PROFILES.get(config.llm_profile or "", {})
     for variable in ENV_VARS:
         raw = os.environ.get(variable.name)
         preset = _preset_value(variable.name)
-        source = "env" if raw is not None else "preset" if preset is not None else "default"
+        source = (
+            "env"
+            if raw is not None
+            else "preset"
+            if preset is not None
+            else "llm-profile"
+            if variable.config_field in llm_profile_values
+            else "default"
+        )
         if variable.config_field and hasattr(config, variable.config_field):
             effective = getattr(config, variable.config_field)
         elif raw is not None:
@@ -146,6 +155,8 @@ def main(args: argparse.Namespace) -> int:
         value = _display(_sanitize_url_value(entry.effective))
         if entry.source == "preset":
             source = f"[preset {config.agent_preset}]"
+        elif entry.source == "llm-profile":
+            source = f"[llm-profile {config.llm_profile}]"
         else:
             source = f"[{entry.source}]"
         print(f"  {entry.variable.name} = {value}  {source}")
