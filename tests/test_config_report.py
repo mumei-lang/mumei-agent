@@ -44,7 +44,11 @@ def _entry(report: dict, name: str) -> dict:
         ("not-a-url@host", "not-a-url@host"),
         ('{"u":"https://h/x?y"}', '{"u":"https://h/x?y"}'),
         ("key=https://u:p@h", "key=https://u:p@h"),
-        ("https://u:p@h/path with space", "https://u:p@h/path with space"),
+        ("  key=https://u:p@h  ", "  key=https://u:p@h  "),
+        ("https://u:p@h/path with space", "https://h/path with space"),
+        ("https://u:p@h/a b?t=1", "https://h/a b"),
+        (" https://u:p@h/x?t=1 ", "https://h/x"),
+        ("\t\nhttps://u:p@h/x?t=1\r\n\t", "https://h/x"),
     ],
 )
 def test_url_sanitizer(value: str, expected: str) -> None:
@@ -125,25 +129,41 @@ def test_unparsed_environment_value_is_reported_as_raw(
     assert entry["effective"] is None
 
 
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://url-user:url-secret@host/v1?api_key=url-query#fragment",
+            "https://host/v1",
+        ),
+        (" https://url-user:url-secret@h/x?t=1 ", "https://h/x"),
+        ("\t\nhttps://url-user:url-secret@h/x?t=1\r\n\t", "https://h/x"),
+        (
+            "https://url-user:url-secret@h/a b?t=1",
+            "https://h/a b",
+        ),
+    ],
+)
 def test_llm_base_url_credentials_and_metadata_are_stripped(
-    monkeypatch, capsys
+    monkeypatch, capsys, url: str, expected: str
 ) -> None:
-    url = "https://u:p@host/v1?api_key=url-secret#fragment"
-    for args in ([], ["--json"], ["--all"]):
+    for args in ([], ["--json"], ["--all"], ["--json", "--all"]):
         _scrub_environment(monkeypatch)
         monkeypatch.setenv("LLM_BASE_URL", url)
         parsed = build_parser().parse_args(args)
         assert config_main(parsed) == 0
         output = capsys.readouterr().out
+        assert "url-user" not in output
         assert "url-secret" not in output
+        assert "url-query" not in output
         assert "#fragment" not in output
-        if args == ["--json"]:
+        if "--json" in args:
             entry = _entry(json.loads(output), "LLM_BASE_URL")
-            assert entry["value"] == "https://host/v1"
-            assert entry["effective"] == "https://host/v1"
+            assert entry["value"] == expected
+            assert entry["effective"] == expected
             assert entry["sensitive"] is False
         else:
-            assert "LLM_BASE_URL = https://host/v1  [env]" in output
+            assert f"LLM_BASE_URL = {expected}  [env]" in output
 
 
 def test_no_environment_hides_default_entries(monkeypatch, capsys) -> None:
