@@ -163,6 +163,17 @@ def test_agent_preset_coexists_with_llm_profile(
     assert config.llm_max_tokens == 2048
 
 
+def test_agent_preset_is_environment_derived_and_not_a_constructor_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("MUMEI_AGENT_PRESET", "experimental")
+
+    assert AgentConfig().agent_preset == "experimental"
+    with pytest.raises(TypeError):
+        AgentConfig(agent_preset="experimental")
+
+
 def test_generated_environment_reference_matches_preset_maps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

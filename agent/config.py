@@ -208,6 +208,7 @@ class AgentConfig:
         default_factory=lambda: os.getenv("MUMEI_LLM_PROFILE") or None
     )
     agent_preset: str | None = field(
+        init=False,
         default_factory=lambda: os.getenv("MUMEI_AGENT_PRESET") or None
     )
     spec_split_chars: int = field(
