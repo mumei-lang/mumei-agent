@@ -5,6 +5,7 @@
 - Documented CLI flag and environment-variable naming rules and added tests
   that grandfather existing names without renaming them. Toggle naming is
   enforced, and exceptions record their violated rule IDs.
+- Clarify in NAMING.md that deprecated names are removed only at 1.0 (or a later major release); adding an alias can happen any time.
 
 ## Unreleased: executable reference generator
 
