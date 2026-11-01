@@ -38,13 +38,12 @@ def build_parser(
 
 
 def _sanitize_url_value(value: Any) -> Any:
-    if not isinstance(value, str) or "://" not in value:
+    if not isinstance(value, str):
         return value
-    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) is None or any(
-        character.isspace() for character in value
-    ):
+    trimmed_value = value.strip()
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", trimmed_value) is None:
         return value
-    scheme, remainder = value.split("://", 1)
+    scheme, remainder = trimmed_value.split("://", 1)
     authority_end = min(
         (index for delimiter in ("/", "?", "#") if (index := remainder.find(delimiter)) >= 0),
         default=len(remainder),
