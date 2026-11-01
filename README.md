@@ -21,6 +21,9 @@ docker-compose.yml                     docker-compose.yml
 
 The detailed generate flow, MCP relationships, and harness vocabulary are in [`docs/CLI_GUIDE.md`](docs/CLI_GUIDE.md) and [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md).
 
+Generated exhaustive references: [CLI options](docs/CLI_REFERENCE.md) and
+[environment variables and defaults](docs/ENV_REFERENCE.md).
+
 ## Background
 
 This repository was extracted from the [mumei](https://github.com/mumei-lang/mumei)
@@ -161,7 +164,9 @@ See [`docs/ROADMAP.md`](docs/ROADMAP.md) and the [cross-project roadmap](https:/
 |---|---|
 | [`docs/AUDIT_CONTRACT.md`](docs/AUDIT_CONTRACT.md) | No-.mm audit contract, vocabulary, layers, and review flow |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Environment variables, retry budgets, OTel, and Ollama tuning |
+| [`docs/ENV_REFERENCE.md`](docs/ENV_REFERENCE.md) | Generated list of environment variables and defaults |
 | [`docs/CLI_GUIDE.md`](docs/CLI_GUIDE.md) | Examples, generate mode, E2E demos, and P11 extraction |
+| [`docs/CLI_REFERENCE.md`](docs/CLI_REFERENCE.md) | Generated exhaustive command and option reference |
 | [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md) | MCP tools, configuration, diagnostics, and verification |
 | [`docs/CI_WORKFLOWS.md`](docs/CI_WORKFLOWS.md) | CI verification gate and standalone usage |
 | [`docs/NLAE_INTEGRATION.md`](docs/NLAE_INTEGRATION.md) | P9 NLAE integration |

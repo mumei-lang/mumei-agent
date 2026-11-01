@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased: generated CLI and environment references
+
+- Added generated references for CLI options and environment variables.
+- Regenerate with `PYTHONPATH=$PWD .venv/bin/python scripts/gen_reference_docs.py`; `tests/test_reference_docs.py` fails when the committed pages drift.
+
 ## Unreleased: Soft-feedback extraction fallback
 
 - `extract-spec --from-tests` now keeps the latest spec rejected only for soft observation feedback when later retries are invalid, and warns when it falls back.

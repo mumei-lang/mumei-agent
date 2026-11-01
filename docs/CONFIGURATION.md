@@ -1,5 +1,9 @@
 # Configuration Reference
 
+For the complete generated list of environment variables and defaults, see the
+[environment variable reference](ENV_REFERENCE.md). This page retains the
+narrative setup guidance and configuration explanations.
+
 ## Configuration
 
 Core agent and local Ollama settings are controlled through environment variables
