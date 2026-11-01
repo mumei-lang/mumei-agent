@@ -4,6 +4,9 @@
 
 - Added `python -m agent config` with text and JSON output for effective
   environment settings, preset values, and their sources.
+- Values of variables classified as sensitive in the registry are never
+  printed, only whether they are set. URLs are shown without credentials,
+  query, or fragment.
 
 ## Unreleased: agent environment presets
 

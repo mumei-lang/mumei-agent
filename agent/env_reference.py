@@ -18,11 +18,12 @@ class EnvVar:
     default: str
     config_field: str | None
     description: str
+    sensitive: bool = False
 
 
 ENV_VARS: tuple[EnvVar, ...] = (
-    EnvVar("LLM_API_KEY", "llm", "value", "", "api_key", "API key for the OpenAI-compatible provider; `OPENAI_API_KEY` is used as a fallback."),
-    EnvVar("OPENAI_API_KEY", "llm", "value", "", "api_key", "Fallback API key used when `LLM_API_KEY` is unset."),
+    EnvVar("LLM_API_KEY", "llm", "value", "", "api_key", "API key for the OpenAI-compatible provider; `OPENAI_API_KEY` is used as a fallback.", sensitive=True),
+    EnvVar("OPENAI_API_KEY", "llm", "value", "", "api_key", "Fallback API key used when `LLM_API_KEY` is unset.", sensitive=True),
     EnvVar("LLM_BASE_URL", "llm", "value", "", "base_url", "Optional base URL for an OpenAI-compatible API."),
     EnvVar("LLM_MODEL", "llm", "value", "gpt-4o", "model", "Model name; overrides the model selected by `MUMEI_LLM_PROFILE`."),
     EnvVar("LLM_MAX_TOKENS", "llm", "value", "", "llm_max_tokens", "Optional maximum completion tokens; overrides the profile value. Unset or `0` means no explicit limit."),
@@ -76,14 +77,14 @@ ENV_VARS: tuple[EnvVar, ...] = (
     EnvVar("USE_MCP_CLIENT", "mcp", "toggle", "false", None, "`heal` and `proliferate` route Mumei verification through the MCP client when available and otherwise fall back to the CLI; opt-in and off by default."),
     EnvVar("USE_MCP_SAMPLING", "mcp", "toggle", "false", "use_mcp_sampling", "LLM calls through the MCP server can use request-context sampling instead of the configured provider; opt-in and off by default, though the Devin wrapper enables it when unset."),
     EnvVar("PREFER_MCP_GAPS", "mcp", "toggle", "false", None, "Proliferation delegates gap analysis to the MCP server when available and falls back to the local analyzer otherwise; opt-in and off by default."),
-    EnvVar("LATENT_PROTOCOL_KEY", "mcp", "value", "", None, "Optional encryption key for latent-protocol state."),
+    EnvVar("LATENT_PROTOCOL_KEY", "mcp", "value", "", None, "Optional encryption key for latent-protocol state.", sensitive=True),
     EnvVar("LATENT_PROTOCOL_AUDIT_LOG", "mcp", "value", "", None, "Optional path for the latent-protocol audit log."),
     EnvVar("MUMEI_AGENT_MCP_LOG", "mcp", "value", "$HOME/mumei_agent_mcp.log", None, "Log file for the Devin MCP wrapper script."),
     EnvVar("MUMEI_AGENT_MCP_LOG_MAX_KB", "mcp", "value", "10240", None, "Maximum MCP wrapper log size in KiB before rotation."),
     EnvVar("OTEL_ENABLED", "observability", "toggle", "false", None, "When the optional OpenTelemetry packages are installed, `heal`, `generate`, `forge`, and `proliferate` emit traces and metrics; opt-in and off by default."),
     EnvVar("OTEL_EXPORTER_OTLP_PROTOCOL", "observability", "value", "grpc", None, "OTLP exporter protocol: `grpc`, `http/protobuf`, or `http/json`; values beginning with `http` select the HTTP exporter."),
     EnvVar("OTEL_EXPORTER_OTLP_ENDPOINT", "observability", "value", "SDK default", None, "OTLP endpoint consumed by the OpenTelemetry exporter SDK."),
-    EnvVar("GITHUB_TOKEN", "ci", "value", "", None, "GitHub API token used by publish operations; unset outside configured CI or local GitHub workflows."),
+    EnvVar("GITHUB_TOKEN", "ci", "value", "", None, "GitHub API token used by publish operations; unset outside configured CI or local GitHub workflows.", sensitive=True),
     EnvVar("GITHUB_OWNER", "ci", "value", "", None, "Default GitHub repository owner for publish operations; may be supplied on the command line instead."),
     EnvVar("GITHUB_REPO", "ci", "value", "", None, "Default GitHub repository name for publish operations; may be supplied on the command line instead."),
     EnvVar("GITHUB_BASE_REF", "ci", "value", "", None, "Optional GitHub Actions base branch used for report comparisons."),

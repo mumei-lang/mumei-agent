@@ -13,7 +13,9 @@ python -m agent config --json
 ```
 
 The report shows effective values and whether they came from the environment,
-an agent preset, or built-in defaults. Sensitive values are redacted.
+an agent preset, or built-in defaults. Values of variables classified as
+sensitive in the registry are never printed, only whether they are set. URLs
+are shown without credentials, query, or fragment.
 
 ## Examples
 

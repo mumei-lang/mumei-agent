@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import pytest
 
 from agent.config import AgentConfig
-from agent.config_report import build_parser, main as config_main
+from agent.config_report import (
+    _sanitize_url_value,
+    build_parser,
+    main as config_main,
+)
 from agent.env_reference import ENV_VARS
 
 
@@ -26,6 +31,80 @@ def _run(monkeypatch: pytest.MonkeyPatch, capsys, *args: str) -> tuple[int, str,
 
 def _entry(report: dict, name: str) -> dict:
     return next(entry for entry in report["env"] if entry["name"] == name)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("https://u:p@host:8443/v1?api_key=x#f", "https://host:8443/v1"),
+        ("https://u@host", "https://host"),
+        ("https://host/v1", "https://host/v1"),
+        ("https://host/a@b", "https://host/a@b"),
+        ("https://host/v1?api_key=x#f", "https://host/v1"),
+        ("not-a-url@host", "not-a-url@host"),
+    ],
+)
+def test_url_sanitizer(value: str, expected: str) -> None:
+    assert _sanitize_url_value(value) == expected
+
+
+def test_sensitive_registry_classification_covers_secret_like_names() -> None:
+    pattern = re.compile(
+        r"TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE",
+        re.IGNORECASE,
+    )
+    exceptions = {
+        "LLM_MAX_TOKENS",  # Numeric limit.
+        "MAX_CONTEXT_TOKENS",  # Numeric limit.
+        "MCP_SAMPLING_MAX_TOKENS",  # Numeric limit.
+        "SELF_CORRECTION_MAX_TOKENS",  # Numeric limit.
+    }
+    names = {variable.name for variable in ENV_VARS}
+    assert exceptions <= names
+    assert all(
+        not variable.sensitive
+        for variable in ENV_VARS
+        if variable.name in exceptions
+    )
+    assert {variable.name for variable in ENV_VARS if variable.sensitive} == {
+        "GITHUB_TOKEN",
+        "LATENT_PROTOCOL_KEY",
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+    }
+    for variable in ENV_VARS:
+        if pattern.search(variable.name) and variable.name not in exceptions:
+            assert variable.sensitive, variable.name
+
+
+def test_llm_max_tokens_is_reported_as_non_sensitive(monkeypatch, capsys) -> None:
+    _scrub_environment(monkeypatch)
+    monkeypatch.setenv("LLM_MAX_TOKENS", "321")
+    args = build_parser().parse_args([])
+    assert config_main(args) == 0
+    output = capsys.readouterr().out
+    assert "LLM_MAX_TOKENS = 321  [env]" in output
+
+
+def test_llm_base_url_credentials_and_metadata_are_stripped(
+    monkeypatch, capsys
+) -> None:
+    url = "https://u:p@host/v1?api_key=url-secret#fragment"
+    for args in ([], ["--json"], ["--all"]):
+        _scrub_environment(monkeypatch)
+        monkeypatch.setenv("LLM_BASE_URL", url)
+        parsed = build_parser().parse_args(args)
+        assert config_main(parsed) == 0
+        output = capsys.readouterr().out
+        assert "url-secret" not in output
+        assert "#fragment" not in output
+        if args == ["--json"]:
+            entry = _entry(json.loads(output), "LLM_BASE_URL")
+            assert entry["value"] == "https://host/v1"
+            assert entry["effective"] == "https://host/v1"
+            assert entry["sensitive"] is False
+        else:
+            assert "LLM_BASE_URL = https://host/v1  [env]" in output
 
 
 def test_no_environment_hides_default_entries(monkeypatch, capsys) -> None:
@@ -93,14 +172,14 @@ def test_llm_profile_is_in_header(monkeypatch, capsys) -> None:
 
 
 @pytest.mark.parametrize("all_values", [False, True])
-def test_api_key_is_redacted_in_text(monkeypatch, capsys, all_values) -> None:
+def test_api_key_is_never_printed_in_text(monkeypatch, capsys, all_values) -> None:
     _scrub_environment(monkeypatch)
     monkeypatch.setenv("LLM_API_KEY", "sensitive-api-key")
     args = build_parser().parse_args(["--all"] if all_values else [])
     assert config_main(args) == 0
     output = capsys.readouterr().out
     assert "sensitive-api-key" not in output
-    assert "LLM_API_KEY = ***" in output
+    assert "LLM_API_KEY: set  [env]" in output
 
 
 @pytest.mark.parametrize("all_values", [False, True])
@@ -125,8 +204,9 @@ def test_json_schema_native_types_and_api_key_redaction(
     assert entry["set"] is False
     assert entry["effective"] is False
     key_entry = _entry(report, "LLM_API_KEY")
-    assert key_entry["value"] == "***"
-    assert key_entry["effective"] == "***"
+    assert key_entry["sensitive"] is True
+    assert "value" not in key_entry
+    assert "effective" not in key_entry
     if not all_values:
         assert all(entry["source"] != "default" for entry in report["env"])
 

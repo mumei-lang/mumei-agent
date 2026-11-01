@@ -35,13 +35,22 @@ def build_parser(
     return parser
 
 
-def _is_sensitive(name: str) -> bool:
-    upper_name = name.upper()
-    return any(term in upper_name for term in ("TOKEN", "KEY", "SECRET", "PASSWORD"))
-
-
-def _redact(name: str, value: Any) -> Any:
-    return "***" if _is_sensitive(name) and value is not None else value
+def _sanitize_url_value(value: Any) -> Any:
+    if not isinstance(value, str) or "://" not in value:
+        return value
+    scheme, remainder = value.split("://", 1)
+    authority_end = min(
+        (index for delimiter in ("/", "?", "#") if (index := remainder.find(delimiter)) >= 0),
+        default=len(remainder),
+    )
+    authority = remainder[:authority_end]
+    host = authority.rsplit("@", 1)[-1]
+    suffix = remainder[authority_end:]
+    suffix_end = min(
+        (index for delimiter in ("?", "#") if (index := suffix.find(delimiter)) >= 0),
+        default=len(suffix),
+    )
+    return f"{scheme}://{host}{suffix[:suffix_end]}"
 
 
 def _display(value: Any) -> str:
@@ -72,17 +81,20 @@ def _entries(config: AgentConfig) -> list[_Entry]:
 
 def _entry_json(entry: _Entry) -> dict[str, Any]:
     variable = entry.variable
-    return {
+    result = {
         "name": variable.name,
         "category": variable.category,
         "source": entry.source,
         "set": entry.raw is not None,
-        "value": _redact(variable.name, entry.raw),
-        "effective": _redact(variable.name, entry.effective),
         "default": variable.default,
         "config_field": variable.config_field,
         "description": variable.description,
+        "sensitive": variable.sensitive,
     }
+    if not variable.sensitive:
+        result["value"] = _sanitize_url_value(entry.raw)
+        result["effective"] = _sanitize_url_value(entry.effective)
+    return result
 
 
 def main(args: argparse.Namespace) -> int:
@@ -117,7 +129,21 @@ def main(args: argparse.Namespace) -> int:
         f"of {len(ENV_VARS)} known; values loaded from .env count as env):"
     )
     for entry in visible:
-        value = _display(_redact(entry.variable.name, entry.effective))
+        if entry.variable.sensitive:
+            if entry.raw is not None:
+                print(f"  {entry.variable.name}: set  [env]")
+            elif entry.source == "preset":
+                print(
+                    f"  {entry.variable.name}: set  "
+                    f"[preset {config.agent_preset}]"
+                )
+            else:
+                print(
+                    f"  {entry.variable.name} = "
+                    f"{_display(entry.variable.default)}  [default]"
+                )
+            continue
+        value = _display(_sanitize_url_value(entry.effective))
         if entry.source == "preset":
             source = f"[preset {config.agent_preset}]"
         else:

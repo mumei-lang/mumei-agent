@@ -57,8 +57,9 @@ continues to ignore `CONTROLS_GATE` and its preset value.
 
 Run `python -m agent config` to show the active preset and LLM profile plus
 environment values and their sources. Use `--all` to include built-in defaults
-or `--json` for machine-readable output. Sensitive values such as API keys are
-redacted.
+or `--json` for machine-readable output. Values of variables classified as
+sensitive in the registry are never printed, only whether they are set. URLs
+are shown without credentials, query, or fragment.
 
 ### Contract guards
 
