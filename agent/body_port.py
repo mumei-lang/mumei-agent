@@ -332,14 +332,14 @@ class BodyPorter:
         if body is None:
             entry["reason"] = reason
             return entry
-        # Verify the redacted body, so a secret the model echoes back is never
-        # written to the module file or mumei's report.
+        # Verify redacted text, so a secret in the body or a callee's contract
+        # is never written to the module file or mumei's report.
         body = redact_secrets(body)
         entry["body"] = body
         # Only the callees the body uses: another atom's extracted contract
         # may not lower, and that should not decide this port.
         callees = [_forge_atom_to_mumei(a) for a in others if _calls(body, a)]
-        module = "\n\n".join([*callees, ported_atom(atom, body)]) + "\n"
+        module = redact_secrets("\n\n".join([*callees, ported_atom(atom, body)]) + "\n")
         with tempfile.TemporaryDirectory(prefix="mumei-body-port-") as tmp:
             path = Path(tmp) / "body_port.mm"
             path.write_text(module, encoding="utf-8")

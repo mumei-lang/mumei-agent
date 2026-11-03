@@ -190,6 +190,9 @@ def test_body_port_never_writes_an_echoed_secret_to_the_module(monkeypatch):
             written.append(open(path, encoding="utf-8").read())
             return self.verification
 
-    BodyPorter(_Client(json.dumps({"body": f"x + 0 // {env_value}"})), "m",
-               _Reading({"success": True, "report": {"status": "success"}})).port(GO_CLAMP, "go", {"atoms": [CLAMP]})
-    assert written and env_value not in written[0]
+    helper = {**CLAMP, "name": "helper", "requires": f'x != "{env_value}"'}
+    BodyPorter(_Client(json.dumps({"body": f"helper(x, hi) + 0 // {env_value}"})), "m",
+               _Reading({"success": True, "report": {"status": "success"}})).port(
+        GO_CLAMP, "go", {"atoms": [CLAMP, helper]}
+    )
+    assert written and "helper" in written[0] and all(env_value not in w for w in written)
