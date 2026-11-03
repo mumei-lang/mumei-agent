@@ -196,14 +196,17 @@ def _status_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list
         if verification_status is None:
             verification_status = source_payload.get("verification_status")
         lines.append(f"- verification_status: `{verification_status or 'unverifiable'}`")
-    finding_counts = payload.get("finding_counts")
+    # scan_and_fix nests the audit result under "audit".
+    finding_counts = payload.get("finding_counts") or source_payload.get("finding_counts")
     if isinstance(finding_counts, dict) and finding_counts:
         counts = ", ".join(f"{key}={value}" for key, value in finding_counts.items())
         lines.append(f"- finding_counts: `{counts}`")
-    if "files_with_spec_diagnostics" in payload:
-        lines.append(
-            f"- files_with_spec_diagnostics: `{payload['files_with_spec_diagnostics']}`"
-        )
+    for holder in (payload, source_payload):
+        if "files_with_spec_diagnostics" in holder:
+            lines.append(
+                f"- files_with_spec_diagnostics: `{holder['files_with_spec_diagnostics']}`"
+            )
+            break
     summary = payload.get("summary")
     if summary:
         lines.append(f"- Summary: {_inline_value(summary)}")
