@@ -204,6 +204,14 @@ def test_classify(verification, outcome):
     assert classify(verification)[0] == outcome
 
 
+@pytest.mark.parametrize("first", [{"message": None}, {"message": ""}, {}, ""])
+def test_classify_skips_empty_diagnostics(first):
+    outcome, message, _ = classify({"success": False, "report": {
+        "status": "failed",
+        "diagnostics": [first, {"message": "Verification Error: Postcondition (ensures) is not satisfied."}]}})
+    assert outcome == "refuted" and message.startswith("Verification Error: Postcondition")
+
+
 def test_classify_returns_the_counterexample_of_a_refutation():
     outcome, message, ce = classify({"success": False, "report": {
         "status": "failed", "counterexample": {"x": "-1"},
@@ -563,6 +571,19 @@ def test_typescript_object_types_are_not_the_body(signature):
 def test_typescript_methods_with_function_and_object_types(signature):
     source = f"class A {{\n{signature}\n    return a;\n  }}\n}}\n"
     assert function_source(source, "typescript", "f") == f"{signature}\n    return a;\n  }}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "class A {\n  f(x: number) { return x; }\n}\n",
+        "class A {\n  static f(x: number): number { return x; }\n}\n",
+        "class A {\n  async f(x: number) { return x; } // trailing\n}\n",
+    ],
+)
+def test_typescript_one_line_methods(source):
+    line = source.splitlines()[1]
+    assert function_source(source, "typescript", "f") == line[: line.rindex("}") + 1]
 
 
 def test_typescript_callback_calls_are_not_method_declarations():

@@ -63,7 +63,7 @@ _DECLARATION = {
     "typescript": r"^\s*(export\s+)?(default\s+)?(async\s+)?function\s*\*?\s*{n}\s*[<(]"
     r"|^\s*(export\s+)?(const|let)\s+{n}\s*(:[^=]*)?=\s*(async\s+)?(\([^)]*\)|\w+)\s*(:[^=]*)?=>"
     # A method declaration: a call statement would end with `;` and not with `{`.
-    r"|^\s*((public|private|protected|static|async|override)\s+)*{n}\s*(<[^>]*>)?\s*\([^;]*\)\s*(:[^;]*)?\{{[ \t]*$",
+    r"|^\s*((public|private|protected|static|async|override)\s+)*{n}\s*(<[^>]*>)?\s*\([^;]*\)\s*(:[^;]*)?\{{",
     "solidity": r"^\s*function\s+{n}\s*\(",
 }
 
@@ -273,7 +273,7 @@ def classify(verification: dict[str, object]) -> tuple[BodyPortOutcome, str, dic
     report = report if isinstance(report, dict) else {}
     raw = report.get("diagnostics")
     messages = [
-        str(d.get("message", "")) if isinstance(d, dict) else d
+        str(d.get("message") or "") if isinstance(d, dict) else d
         for d in (raw if isinstance(raw, list) else [])
         if isinstance(d, (dict, str))
     ]
