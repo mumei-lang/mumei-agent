@@ -43,6 +43,7 @@ from agent.audit_reporting import (
     _dict_value,
     _file_result_to_markdown,
     _finalize_audit_result,
+    _finding_counts,
     _forge_atom_to_mumei,
     _forge_task_to_mumei_source,
     _format_params,
@@ -612,6 +613,7 @@ class AuditPipeline:
                 language=normalized_language or "mixed",
                 errors=errors,
             )
+            result.finding_counts = _finding_counts([], [], [], errors)
             result.next_steps = _generate_directory_next_steps(result)
             result.summary = _build_directory_report(result)
             return result
