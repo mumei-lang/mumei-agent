@@ -31,6 +31,7 @@ from agent.audit_reporting import (
     _safe_identifier,
     _string_value,
 )
+from agent.secret_redaction import redact_secrets, redact_value
 
 BodyPortOutcome = Literal["proven", "refuted", "inconclusive", "not_ported"]
 
@@ -321,10 +322,9 @@ class BodyPorter:
             entry["reason"] = f"function is longer than {MAX_FUNCTION_CHARS} characters"
             return entry
         others = [a for a in atoms if a is not atom]
+        prompt = body_port_prompt(language, atom, native, "\n\n".join(_forge_atom_to_mumei(a) for a in others))
         try:
-            text = self._complete(
-                body_port_prompt(language, atom, native, "\n\n".join(_forge_atom_to_mumei(a) for a in others))
-            )
+            text = self._complete([{**m, "content": redact_secrets(m["content"])} for m in prompt])
         except Exception as exc:  # noqa: BLE001 - any transport failure leaves the function unported
             entry["reason"] = f"LLM request failed: {type(exc).__name__}"
             return entry
@@ -332,11 +332,14 @@ class BodyPorter:
         if body is None:
             entry["reason"] = reason
             return entry
+        # Verify redacted text, so a secret in the body or a callee's contract
+        # is never written to the module file or mumei's report.
+        body = redact_secrets(body)
         entry["body"] = body
         # Only the callees the body uses: another atom's extracted contract
         # may not lower, and that should not decide this port.
         callees = [_forge_atom_to_mumei(a) for a in others if _calls(body, a)]
-        module = "\n\n".join([*callees, ported_atom(atom, body)]) + "\n"
+        module = redact_secrets("\n\n".join([*callees, ported_atom(atom, body)]) + "\n")
         with tempfile.TemporaryDirectory(prefix="mumei-body-port-") as tmp:
             path = Path(tmp) / "body_port.mm"
             path.write_text(module, encoding="utf-8")
@@ -349,9 +352,9 @@ class BodyPorter:
         outcome, message, counterexample = classify(verification)
         message = message.replace(str(path), path.name).replace(tmp, "")
         entry["outcome"] = outcome
-        entry["reason"] = message
+        entry["reason"] = redact_secrets(message)
         if counterexample:
-            entry["counterexample"] = counterexample
+            entry["counterexample"] = redact_value(counterexample)
         return entry
 
     def _complete(self, messages: list[dict[str, str]]) -> str:

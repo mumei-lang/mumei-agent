@@ -942,9 +942,10 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         help=(
             "Have the LLM port each function body to Mumei and verify it against the "
             "extracted contract; refuted ports count as code findings (needs an LLM). "
-            "The function source is sent to the LLM unredacted and the returned body, "
-            "diagnostics and counterexamples are written to the report as is, so don't "
-            "use it on code that holds credentials."
+            "Sensitive environment values and credential-shaped literals are redacted "
+            "from the source sent to the LLM and from the stored body, diagnostics and "
+            "counterexamples; the redaction is pattern-based, so review code that holds "
+            "unusual credentials before enabling it."
         ),
     )
     parser.add_argument(
