@@ -49,9 +49,9 @@ def test_redacts_sensitive_environment_values_only():
     assert SENTINEL not in out and "plain-model-name" in out
 
 
-def test_ignores_short_or_unset_environment_values():
-    assert sensitive_env_values({"LLM_API_KEY": "abc", "GITHUB_TOKEN": ""}) == []
-    assert redact_secrets("a + abc", environ={"LLM_API_KEY": "abc"}) == "a + abc"
+def test_short_values_count_but_only_as_whole_tokens():
+    assert sensitive_env_values({"LLM_API_KEY": "abc", "GITHUB_TOKEN": ""}) == ["abc"]
+    assert redact_secrets("a + abcd", environ={"LLM_API_KEY": "abc"}) == "a + abcd"
 
 
 def test_extra_values_are_redacted():
@@ -132,7 +132,7 @@ def test_body_port_entry_never_carries_a_sensitive_env_value(monkeypatch):
         "success": False,
         "report": {
             "status": "failed",
-            "violations": [{"message": f"Postcondition violated near {env_value}"}],
+            "diagnostics": [{"message": f"Postcondition violated near {env_value}"}],
             "counterexample": {"x": env_value, "hi": 0, env_value: 1},
         },
     }
@@ -146,3 +146,50 @@ def test_body_port_entry_redacts_a_secret_echoed_in_the_body(monkeypatch):
     _, entry = _port(json.dumps({"body": f"x + 0 // {env_value}"}),
                      {"success": True, "report": {"status": "success"}}, monkeypatch, env_value=env_value)
     assert env_value not in json.dumps(entry)
+
+
+@pytest.mark.parametrize("source", [
+    'password = "hello\\"fake-sentinel-value-0123456789"',
+    "token = 'it\\'s fake-sentinel-value-0123456789'",
+    'secret = "it\'s fake-sentinel-value-0123456789"',
+])
+def test_redaction_covers_escaped_and_mixed_quotes(source):
+    assert SENTINEL not in redact_secrets(source)
+
+
+def test_short_sensitive_env_value_is_redacted_as_a_whole_token():
+    environ = {"LLM_API_KEY": "fk42"}
+    assert redact_secrets("key=fk42 end", environ=environ) == f"key={REDACTED} end"
+    assert redact_secrets("fk425 xfk42", environ=environ) == "fk425 xfk42"
+
+
+def test_redacted_counterexample_keys_keep_every_value():
+    environ = {"LLM_API_KEY": "fake-env-sentinel-aaaa", "GITHUB_TOKEN": "fake-env-sentinel-bbbb"}
+    out = redact_value({"fake-env-sentinel-aaaa": 1, "fake-env-sentinel-bbbb": 2}, environ=environ)
+    assert sorted(out.values()) == [1, 2]
+    assert "sentinel" not in json.dumps(out)
+
+
+def test_body_port_prompt_redacts_other_atoms_contracts(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", SENTINEL)
+    other = {**CLAMP, "name": "helper", "requires": f'x != "{SENTINEL}"'}
+    client = _Client('{"body": "x"}')
+    BodyPorter(client, "m", _Mumei({"success": True, "report": {"status": "success"}})).port(
+        GO_CLAMP, "go", {"atoms": [CLAMP, other]}
+    )
+    assert SENTINEL not in json.dumps(client.prompts)
+
+
+def test_body_port_never_writes_an_echoed_secret_to_the_module(monkeypatch):
+    env_value = "fake-env-sentinel-9876543210"
+    monkeypatch.setenv("LLM_API_KEY", env_value)
+    written = []
+
+    class _Reading(_Mumei):
+        def verify(self, path, report_dir=None):
+            written.append(open(path, encoding="utf-8").read())
+            return self.verification
+
+    BodyPorter(_Client(json.dumps({"body": f"x + 0 // {env_value}"})), "m",
+               _Reading({"success": True, "report": {"status": "success"}})).port(GO_CLAMP, "go", {"atoms": [CLAMP]})
+    assert written and env_value not in written[0]

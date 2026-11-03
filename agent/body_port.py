@@ -321,12 +321,10 @@ class BodyPorter:
         if len(native) > MAX_FUNCTION_CHARS:
             entry["reason"] = f"function is longer than {MAX_FUNCTION_CHARS} characters"
             return entry
-        native = redact_secrets(native)
         others = [a for a in atoms if a is not atom]
+        prompt = body_port_prompt(language, atom, native, "\n\n".join(_forge_atom_to_mumei(a) for a in others))
         try:
-            text = self._complete(
-                body_port_prompt(language, atom, native, "\n\n".join(_forge_atom_to_mumei(a) for a in others))
-            )
+            text = self._complete([{**m, "content": redact_secrets(m["content"])} for m in prompt])
         except Exception as exc:  # noqa: BLE001 - any transport failure leaves the function unported
             entry["reason"] = f"LLM request failed: {type(exc).__name__}"
             return entry
@@ -334,7 +332,10 @@ class BodyPorter:
         if body is None:
             entry["reason"] = reason
             return entry
-        entry["body"] = redact_secrets(body)
+        # Verify the redacted body, so a secret the model echoes back is never
+        # written to the module file or mumei's report.
+        body = redact_secrets(body)
+        entry["body"] = body
         # Only the callees the body uses: another atom's extracted contract
         # may not lower, and that should not decide this port.
         callees = [_forge_atom_to_mumei(a) for a in others if _calls(body, a)]

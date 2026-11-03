@@ -17,6 +17,7 @@ from agent.env_reference import ENV_VARS
 
 REDACTED = "<redacted>"
 MIN_ENV_VALUE_CHARS = 8
+"""Shorter sensitive values are only replaced as whole tokens."""
 
 _TOKEN_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S),
@@ -29,9 +30,12 @@ _TOKEN_PATTERNS = (
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
 )
 _CREDENTIAL_NAME = r"[\w$]*?(?:password|passwd|secret|token|api_?key|apikey|private_?key|auth|credential)[\w$]*"
+_QUOTED = "|".join(
+    rf"{q}(?P<v{i}>(?:\\.|[^{q}\\\n]){{6,}}){q}" for i, q in enumerate(('"', "'", "`"))
+)
 _ASSIGNED_LITERAL = re.compile(
     rf"(?P<name>\b{_CREDENTIAL_NAME}\b[\"']?\s*(?::\s*[\w\[\]<>.,&' ]+?)?\s*(?::=|=|:)\s*)"
-    r"(?P<quote>[\"'`])(?P<value>[^\"'`\n]{6,})(?P=quote)",
+    rf"(?P<literal>{_QUOTED})",
     re.I,
 )
 
@@ -40,22 +44,30 @@ def sensitive_env_values(environ: Mapping[str, str] | None = None) -> list[str]:
     """The set values of every environment variable registered as sensitive."""
     env = os.environ if environ is None else environ
     values = {env.get(var.name, "") for var in ENV_VARS if var.sensitive}
-    return sorted((v for v in values if len(v) >= MIN_ENV_VALUE_CHARS), key=len, reverse=True)
+    return sorted((v for v in values if v), key=len, reverse=True)
+
+
+def _replace_value(text: str, value: str) -> str:
+    # A short value would also hit unrelated substrings, so it only counts as a whole token.
+    if len(value) >= MIN_ENV_VALUE_CHARS:
+        return text.replace(value, REDACTED)
+    return re.sub(rf"(?<![\w-]){re.escape(value)}(?![\w-])", REDACTED, text)
 
 
 def redact_secrets(text: str, extra_values: Iterable[str] = (), environ: Mapping[str, str] | None = None) -> str:
     """``text`` with sensitive environment values and credential-shaped literals replaced."""
     if not text:
         return text
-    for value in [*sensitive_env_values(environ), *(v for v in extra_values if len(v) >= MIN_ENV_VALUE_CHARS)]:
-        text = text.replace(value, REDACTED)
+    values = {*sensitive_env_values(environ), *(v for v in extra_values if v)}
+    for value in sorted(values, key=len, reverse=True):
+        text = _replace_value(text, value)
     for pattern in _TOKEN_PATTERNS:
         text = pattern.sub(REDACTED, text)
     return _ASSIGNED_LITERAL.sub(_redact_assigned_literal, text)
 
 
 def _redact_assigned_literal(match: re.Match[str]) -> str:
-    quote = match.group("quote")
+    quote = match.group("literal")[0]
     return f"{match.group('name')}{quote}{REDACTED}{quote}"
 
 
@@ -65,7 +77,15 @@ def redact_value(value: Any, extra_values: Iterable[str] = (), environ: Mapping[
     if isinstance(value, str):
         return redact_secrets(value, extra, environ)
     if isinstance(value, dict):
-        return {redact_value(k, extra, environ): redact_value(v, extra, environ) for k, v in value.items()}
+        out: dict[Any, Any] = {}
+        for k, v in value.items():
+            key = redact_value(k, extra, environ)
+            # Two keys can redact to the same text; keep both values.
+            n = 2
+            while key in out:
+                key, n = f"{redact_value(k, extra, environ)}#{n}", n + 1
+            out[key] = redact_value(v, extra, environ)
+        return out
     if isinstance(value, (list, tuple)):
         return type(value)(redact_value(v, extra, environ) for v in value)
     return value
