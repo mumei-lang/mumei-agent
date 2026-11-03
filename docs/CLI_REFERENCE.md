@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 12 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 13 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -217,6 +217,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--heal-output-dir` | `<HEAL_OUTPUT_DIR>` | no | — | Directory to write healed .mm files (default: same directory as --code-file). |
 | `--enable-lean-bridge` | — | no | — | Run the optional mumei-lean bridge for Solidity guard-trace certificates. |
 | `--mumei-lean-repo` | `<MUMEI_LEAN_REPO>` | no | — | Path to the mumei-lean checkout used by --enable-lean-bridge. |
+| `--enable-body-port` | — | no | — | Have the LLM port each function body to Mumei and verify it against the extracted contract; refuted ports count as code findings (needs an LLM). The function source is sent to the LLM unredacted and the returned body, diagnostics and counterexamples are written to the report as is, so don't use it on code that holds credentials. |
 | `--include-tests` | — | no | — | Also audit test files (e.g. *_test.go, *.test.ts, test_*.py, tests/ dirs), which are skipped by default for directory audits. |
 
 

@@ -76,7 +76,8 @@ from agent.extract_spec import _collect_code_files
 from agent.extract_spec_helpers import _is_test_file
 from agent.gap_rules import _TRUSTED_ATOM_RE
 from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
-from agent.llm_provider import LLMProvider
+from agent.body_port import BodyPorter, body_port_violations
+from agent.llm_provider import LLMProvider, openai_client_adapter
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
 from agent.spec_ambiguity import classify_spec_ambiguity
@@ -211,8 +212,13 @@ class AuditPipeline:
         heal_output_dir: str | None = None,
         client: object | None = None,
         llm_provider: LLMProvider | None = None,
+        body_porter: BodyPorter | None = None,
     ) -> None:
         self.config = config or AgentConfig()
+        if llm_provider is not None and client is None:
+            client = openai_client_adapter(llm_provider)
+        self._llm_client = client
+        self._body_porter = body_porter
         self.mumei_client = mumei_client or create_mumei_client(self.config.mumei_bin)
         self.code_to_spec_extractor = code_to_spec_extractor or CodeToSpecExtractor(
             self.config, client=client, llm_provider=llm_provider,
@@ -233,6 +239,7 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
+        enable_body_port: bool = False,
         include_tests: bool = False,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
@@ -244,6 +251,7 @@ class AuditPipeline:
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
+                enable_body_port=enable_body_port,
                 include_tests=include_tests,
             )
         with telemetry.start_span(
@@ -257,6 +265,7 @@ class AuditPipeline:
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
+                enable_body_port=enable_body_port,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -277,6 +286,7 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
+        enable_body_port: bool = False,
     ) -> AuditResult:
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
@@ -450,6 +460,21 @@ class AuditPipeline:
             if malformed_extraction_issues and not counterexample_values:
                 verification_status = "unverifiable"
 
+            body_ports: list[dict] = []
+            if enable_body_port and spec_source and not malformed_extraction_issues:
+                body_ports = self._port_bodies(
+                    source_code, audit_language, extraction.forge_task_spec
+                )
+                refuted = body_port_violations(body_ports)
+                verification_violations.extend(refuted)
+                counterexample_values.extend(
+                    {"function_name": port["function"], "counterexample": port["counterexample"]}
+                    for port in body_ports
+                    if port.get("outcome") == "refuted" and port.get("counterexample")
+                )
+                if refuted:
+                    verification_status = "refuted"
+
             if spec_source and not malformed_extraction_issues:
                 cross_report = self.cross_validator.validate_spec_vs_impl(
                     str(spec_path),
@@ -504,6 +529,7 @@ class AuditPipeline:
             proof_certificate=proof_certificate,
             lean_bridge=lean_bridge_result,
             trusted_atoms=trusted_atoms,
+            body_ports=body_ports,
         )
         if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
@@ -547,6 +573,7 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
+        enable_body_port: bool = False,
         include_tests: bool = False,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
@@ -568,6 +595,7 @@ class AuditPipeline:
                 auto_migrate=auto_migrate,
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
+                enable_body_port=enable_body_port,
                 include_tests=include_tests,
             )
             telemetry.set_span_attributes(
@@ -589,6 +617,7 @@ class AuditPipeline:
         auto_migrate: bool = False,
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
+        enable_body_port: bool = False,
         include_tests: bool = False,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
@@ -662,6 +691,7 @@ class AuditPipeline:
                     auto_migrate=auto_migrate,
                     auto_heal=auto_heal,
                     enable_lean_bridge=enable_lean_bridge,
+                    enable_body_port=enable_body_port,
                 )
             except Exception as exc:
                 file_result = AuditResult(
@@ -808,6 +838,26 @@ class AuditPipeline:
             )
             return result
 
+    def _port_bodies(
+        self, source_code: str, language: str, forge_task_spec: dict[str, object]
+    ) -> list[dict]:
+        porter = self._body_porter
+        if porter is None:
+            client = self._llm_client
+            if client is None and self.config.api_key:
+                client = self.config.create_client()
+            if client is None:
+                return [
+                    {
+                        "function": "",
+                        "outcome": "not_ported",
+                        "reason": "body porting needs an LLM; LLM_API_KEY/OPENAI_API_KEY is not set",
+                        "body": "",
+                    }
+                ]
+            porter = BodyPorter(client, self.config.model, self.mumei_client)
+        return porter.port(source_code, language, forge_task_spec)
+
     def _check_spec_health(self, spec_path: Path, report_dir: str) -> SpecHealthReport:
         cert_path = str(Path(report_dir) / "audit_spec.proof.json")
         verify_result = self.mumei_client.verify(
@@ -887,6 +937,17 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         help="Path to the mumei-lean checkout used by --enable-lean-bridge.",
     )
     parser.add_argument(
+        "--enable-body-port",
+        action="store_true",
+        help=(
+            "Have the LLM port each function body to Mumei and verify it against the "
+            "extracted contract; refuted ports count as code findings (needs an LLM). "
+            "The function source is sent to the LLM unredacted and the returned body, "
+            "diagnostics and counterexamples are written to the report as is, so don't "
+            "use it on code that holds credentials."
+        ),
+    )
+    parser.add_argument(
         "--include-tests",
         action="store_true",
         help=(
@@ -907,6 +968,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         auto_heal=args.auto_heal,
         enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
         include_tests=bool(getattr(args, "include_tests", False)),
+        enable_body_port=bool(getattr(args, "enable_body_port", False)),
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)

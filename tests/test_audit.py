@@ -1819,6 +1819,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         auto_heal=False,
         enable_lean_bridge=False,
         include_tests=False,
+        enable_body_port=False,
     )
 
 
