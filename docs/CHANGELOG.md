@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased: audit spec diagnostics
+
+- `audit` no longer fails a file for spec diagnostics alone. `spec_health_issues`
+  and `cross_validation_gaps` report on the extracted spec, not the code, so
+  `success` and `files_with_issues` now depend only on `verification_violations`,
+  errors and malformed extractions. The new `finding_counts`
+  (`code` / `spec` / `model_limitations` / `errors`) and
+  `files_with_spec_diagnostics` fields keep the spec findings visible, and the
+  text report says "passed with N spec diagnostics to review". The finding
+  lists themselves are unchanged.
+
 ## Unreleased: naming convention
 
 - Documented CLI flag and environment-variable naming rules and added tests
