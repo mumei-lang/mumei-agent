@@ -43,6 +43,7 @@ from agent.audit_reporting import (
     _dict_value,
     _file_result_to_markdown,
     _finalize_audit_result,
+    _finding_counts,
     _forge_atom_to_mumei,
     _forge_task_to_mumei_source,
     _format_params,
@@ -479,11 +480,14 @@ class AuditPipeline:
         if missing_requirements and verification_status == "verified":
             verification_status = "unverifiable"
 
+        # Spec diagnostics (spec_health_issues, cross_validation_gaps) are
+        # evidence against the extracted spec, not the code, so they are
+        # counted in finding_counts["spec"] but do not fail the audit. A
+        # malformed extraction still does: the code was never checked.
         success = (
             not errors
-            and not spec_health_issues
             and not verification_violations
-            and not cross_validation_gaps
+            and not malformed_extraction_issues
         )
         result = AuditResult(
             success=success,
@@ -609,6 +613,7 @@ class AuditPipeline:
                 language=normalized_language or "mixed",
                 errors=errors,
             )
+            result.finding_counts = _finding_counts([], [], [], errors)
             result.next_steps = _generate_directory_next_steps(result)
             result.summary = _build_directory_report(result)
             return result
