@@ -30,6 +30,10 @@ class AuditResult:
     # findings (severity ``warning``) since they bypass Z3 verification.
     trusted_atoms: list[dict] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
+    # One entry per extracted atom when the audit ports bodies
+    # (``enable_body_port``): function, outcome (proven / refuted /
+    # inconclusive / not_ported), reason, body and any counterexample.
+    body_ports: list[dict] = field(default_factory=list)
     proof_certificate: dict[str, object] | None = None
     lean_bridge: dict[str, object] | None = None
     report: str = ""
