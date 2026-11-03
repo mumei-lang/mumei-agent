@@ -31,6 +31,7 @@ from agent.audit_reporting import (
     _safe_identifier,
     _string_value,
 )
+from agent.secret_redaction import redact_secrets, redact_value
 
 BodyPortOutcome = Literal["proven", "refuted", "inconclusive", "not_ported"]
 
@@ -320,6 +321,7 @@ class BodyPorter:
         if len(native) > MAX_FUNCTION_CHARS:
             entry["reason"] = f"function is longer than {MAX_FUNCTION_CHARS} characters"
             return entry
+        native = redact_secrets(native)
         others = [a for a in atoms if a is not atom]
         try:
             text = self._complete(
@@ -332,7 +334,7 @@ class BodyPorter:
         if body is None:
             entry["reason"] = reason
             return entry
-        entry["body"] = body
+        entry["body"] = redact_secrets(body)
         # Only the callees the body uses: another atom's extracted contract
         # may not lower, and that should not decide this port.
         callees = [_forge_atom_to_mumei(a) for a in others if _calls(body, a)]
@@ -349,9 +351,9 @@ class BodyPorter:
         outcome, message, counterexample = classify(verification)
         message = message.replace(str(path), path.name).replace(tmp, "")
         entry["outcome"] = outcome
-        entry["reason"] = message
+        entry["reason"] = redact_secrets(message)
         if counterexample:
-            entry["counterexample"] = counterexample
+            entry["counterexample"] = redact_value(counterexample)
         return entry
 
     def _complete(self, messages: list[dict[str, str]]) -> str:
