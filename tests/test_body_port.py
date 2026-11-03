@@ -536,3 +536,34 @@ def test_reports_list_body_ports():
     md = _build_markdown_report(result)
     assert "split: not_ported" in md
     assert "clamp: proven" not in md
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "function f(a: { x: number }): { y: number } {",
+        "export function f(a: number): Promise<{ ok: boolean }> {",
+        "function f(a: number): { a: 1 } | { b: 2 } {",
+        "function f(\n  a: { x: number },\n  b: number,\n): number {",
+    ],
+)
+def test_typescript_object_types_are_not_the_body(signature):
+    source = f"{signature}\n  return a;\n}}\n\nfunction g() {{}}\n"
+    assert function_source(source, "typescript", "f") == f"{signature}\n  return a;\n}}"
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "  f(): () => number {",
+        "  f(a: { x: number }): number {",
+        "  public f(\n    a: number,\n  ): (b: number) => { c: number } {",
+    ],
+)
+def test_typescript_methods_with_function_and_object_types(signature):
+    source = f"class A {{\n{signature}\n    return a;\n  }}\n}}\n"
+    assert function_source(source, "typescript", "f") == f"{signature}\n    return a;\n  }}"
+
+
+def test_typescript_callback_calls_are_not_method_declarations():
+    assert function_source("function g() {\n  f(x).then(() => {\n    h();\n  });\n}\n", "typescript", "f") is None

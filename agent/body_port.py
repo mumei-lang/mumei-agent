@@ -55,6 +55,7 @@ _REFUTATION = re.compile(
     r"(Loop )?[Ii]nvariant|[Tt]ermination|[Dd]ecreases)"
 )
 _GO_TYPE_BRACE = re.compile(r"\b(struct|interface)\s*$")
+_TS_TYPE_BRACE = re.compile(r"(:|=>|\||&|<|,)\s*$")
 _RUST_CHAR = re.compile(r"'(\\[^']{1,10}|[^\\'\n])'")
 _DECLARATION = {
     "go": r"^func\s+(\([^)]*\)\s*)?{n}\s*[\[(]",
@@ -62,7 +63,7 @@ _DECLARATION = {
     "typescript": r"^\s*(export\s+)?(default\s+)?(async\s+)?function\s*\*?\s*{n}\s*[<(]"
     r"|^\s*(export\s+)?(const|let)\s+{n}\s*(:[^=]*)?=\s*(async\s+)?(\([^)]*\)|\w+)\s*(:[^=]*)?=>"
     # A method declaration: a call statement would end with `;` and not with `{`.
-    r"|^\s*((public|private|protected|static|async|override)\s+)*{n}\s*(<[^>]*>)?\s*\([^;{{}}]*\)[^;{{}}=]*\{{",
+    r"|^\s*((public|private|protected|static|async|override)\s+)*{n}\s*(<[^>]*>)?\s*\([^;]*\)\s*(:[^;]*)?\{{[ \t]*$",
     "solidity": r"^\s*function\s+{n}\s*\(",
 }
 
@@ -78,10 +79,18 @@ def function_source(source: str, language: str, name: str) -> str | None:
     # Solidity interface declarations come without one.
     for match in re.finditer(pattern.format(n=re.escape(name)), source, re.MULTILINE):
         start = source.rfind("\n", 0, match.start()) + 1
-        if match.group(0).endswith("=>") and not source[match.end():].lstrip().startswith("{"):
-            end = _expression_end(source, match.end())
+        if match.group(0).endswith("=>"):
+            body = len(source) - len(source[match.end():].lstrip())
+            end = (
+                _closing_brace(source, body)
+                if source.startswith("{", body)
+                else _expression_end(source, match.end())
+            )
         else:
-            end = _closing_brace(source, match.start(), rust=language == "rust", go=language == "go")
+            end = _closing_brace(
+                source, match.start(), rust=language == "rust", go=language == "go",
+                typescript=language == "typescript",
+            )
         if end is not None:
             return source[start:end]
     return None
@@ -124,13 +133,16 @@ def _python_function_source(source: str, name: str) -> str | None:
     return None
 
 
-def _closing_brace(source: str, pos: int, *, rust: bool = False, go: bool = False) -> int | None:
+def _closing_brace(
+    source: str, pos: int, *, rust: bool = False, go: bool = False, typescript: bool = False
+) -> int | None:
     """Offset just past the brace that closes the first ``{`` at or after ``pos``.
 
     In Rust a ``'`` opens a char literal only when one closes it; otherwise it is a lifetime.
-    In Go the braces of a ``struct{...}`` or ``interface{...}`` type in the signature are skipped.
+    In Go the braces of a ``struct{...}`` or ``interface{...}`` type in the signature are skipped,
+    and in TypeScript those of an object type in the parameters or after ``:``, ``=>``, ``|`` or ``&``.
     """
-    depth, i, quote = 0, pos, ""
+    depth, parens, i, quote = 0, 0, pos, ""
     while i < len(source):
         ch = source[i]
         if quote:
@@ -152,7 +164,12 @@ def _closing_brace(source: str, pos: int, *, rust: bool = False, go: bool = Fals
             quote = ch
         elif ch == ";" and depth == 0:
             return None
-        elif ch == "{" and depth == 0 and go and _GO_TYPE_BRACE.search(source, 0, i):
+        elif ch in "()" and depth == 0 and typescript:
+            parens += 1 if ch == "(" else -1
+        elif ch == "{" and depth == 0 and (
+            (go and _GO_TYPE_BRACE.search(source, 0, i))
+            or (typescript and (parens > 0 or _TS_TYPE_BRACE.search(source, 0, i)))
+        ):
             end = _closing_brace(source, i)
             if end is None:
                 return None
