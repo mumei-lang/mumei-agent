@@ -217,7 +217,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--heal-output-dir` | `<HEAL_OUTPUT_DIR>` | no | — | Directory to write healed .mm files (default: same directory as --code-file). |
 | `--enable-lean-bridge` | — | no | — | Run the optional mumei-lean bridge for Solidity guard-trace certificates. |
 | `--mumei-lean-repo` | `<MUMEI_LEAN_REPO>` | no | — | Path to the mumei-lean checkout used by --enable-lean-bridge. |
-| `--enable-body-port` | — | no | — | Have the LLM port each function body to Mumei and verify it against the extracted contract; refuted ports count as code findings (needs an LLM). |
+| `--enable-body-port` | — | no | — | Have the LLM port each function body to Mumei and verify it against the extracted contract; refuted ports count as code findings (needs an LLM). The function source is sent to the LLM unredacted and the returned body, diagnostics and counterexamples are written to the report as is, so don't use it on code that holds credentials. |
 | `--include-tests` | — | no | — | Also audit test files (e.g. *_test.go, *.test.ts, test_*.py, tests/ dirs), which are skipped by default for directory audits. |
 
 
