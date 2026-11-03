@@ -54,6 +54,7 @@ _REFUTATION = re.compile(
     r"Verification Error: (Postcondition|Call to \S+: precondition|Potential |"
     r"(Loop )?[Ii]nvariant|[Tt]ermination|[Dd]ecreases)"
 )
+_GO_TYPE_BRACE = re.compile(r"\b(struct|interface)\s*$")
 _RUST_CHAR = re.compile(r"'(\\[^']{1,10}|[^\\'\n])'")
 _DECLARATION = {
     "go": r"^func\s+(\([^)]*\)\s*)?{n}\s*[\[(]",
@@ -73,12 +74,41 @@ def function_source(source: str, language: str, name: str) -> str | None:
     pattern = _DECLARATION.get(language)
     if pattern is None:
         return None
-    match = re.search(pattern.format(n=re.escape(name)), source, re.MULTILINE)
-    if match is None:
-        return None
-    start = source.rfind("\n", 0, match.start()) + 1
-    end = _closing_brace(source, match.start(), rust=language == "rust")
-    return source[start:end] if end is not None else None
+    # The first declaration with a body: TypeScript overload signatures and
+    # Solidity interface declarations come without one.
+    for match in re.finditer(pattern.format(n=re.escape(name)), source, re.MULTILINE):
+        start = source.rfind("\n", 0, match.start()) + 1
+        if match.group(0).endswith("=>") and not source[match.end():].lstrip().startswith("{"):
+            end = _expression_end(source, match.end())
+        else:
+            end = _closing_brace(source, match.start(), rust=language == "rust", go=language == "go")
+        if end is not None:
+            return source[start:end]
+    return None
+
+
+def _expression_end(source: str, pos: int) -> int:
+    """End of an arrow function's expression body: the first ``;`` or newline outside brackets."""
+    depth, i, quote = 0, pos, ""
+    while i < len(source):
+        ch = source[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch in "\"'`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return i
+        elif ch in ";\n" and depth == 0 and source[pos:i].strip():
+            return i + (ch == ";")
+        i += 1
+    return len(source)
 
 
 def _python_function_source(source: str, name: str) -> str | None:
@@ -94,10 +124,11 @@ def _python_function_source(source: str, name: str) -> str | None:
     return None
 
 
-def _closing_brace(source: str, pos: int, *, rust: bool = False) -> int | None:
+def _closing_brace(source: str, pos: int, *, rust: bool = False, go: bool = False) -> int | None:
     """Offset just past the brace that closes the first ``{`` at or after ``pos``.
 
     In Rust a ``'`` opens a char literal only when one closes it; otherwise it is a lifetime.
+    In Go the braces of a ``struct{...}`` or ``interface{...}`` type in the signature are skipped.
     """
     depth, i, quote = 0, pos, ""
     while i < len(source):
@@ -121,6 +152,12 @@ def _closing_brace(source: str, pos: int, *, rust: bool = False) -> int | None:
             quote = ch
         elif ch == ";" and depth == 0:
             return None
+        elif ch == "{" and depth == 0 and go and _GO_TYPE_BRACE.search(source, 0, i):
+            end = _closing_brace(source, i)
+            if end is None:
+                return None
+            i = end
+            continue
         elif ch == "{":
             depth += 1
         elif ch == "}":
@@ -217,8 +254,13 @@ def classify(verification: dict[str, object]) -> tuple[BodyPortOutcome, str, dic
     """Map a ``mumei verify`` result to an outcome, the first diagnostic and the counterexample."""
     report = verification.get("report")
     report = report if isinstance(report, dict) else {}
-    diagnostics = [d for d in report.get("diagnostics") or [] if isinstance(d, dict)]
-    message = next((str(d.get("message", "")) for d in diagnostics if d.get("message")), "")
+    raw = report.get("diagnostics")
+    messages = [
+        str(d.get("message", "")) if isinstance(d, dict) else d
+        for d in (raw if isinstance(raw, list) else [])
+        if isinstance(d, (dict, str))
+    ]
+    message = next((m for m in messages if m), "")
     counterexample = report.get("counterexample")
     counterexample = dict(counterexample) if isinstance(counterexample, dict) else None
     status = str(report.get("status", ""))

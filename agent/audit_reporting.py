@@ -755,6 +755,13 @@ def _build_report(result: AuditResult) -> str:
         f"counterexample_values: {result.counterexample_values}",
         f"cross_validation_gaps: {result.cross_validation_gaps}",
     ]
+    if result.body_ports:
+        lines.append("body_ports:")
+        lines.extend(
+            f"  - {port.get('function')}: {port.get('outcome')}"
+            + (f" ({port['reason']})" if port.get("reason") else "")
+            for port in result.body_ports
+        )
     if result.errors:
         lines.append(f"errors: {result.errors}")
     lines.append("migration_hints:")
@@ -827,6 +834,16 @@ def _file_result_to_markdown(result: AuditResult) -> str:
                     "⚠️",
                     "trusted_atoms",
                     _trusted_atom_strings(result.trusted_atoms),
+                ),
+                (
+                    "⚠️",
+                    "body_ports",
+                    [
+                        f"{port.get('function')}: {port.get('outcome')}"
+                        + (f" ({port['reason']})" if port.get("reason") else "")
+                        for port in result.body_ports
+                        if port.get("outcome") != "proven"
+                    ],
                 ),
             ]
         )

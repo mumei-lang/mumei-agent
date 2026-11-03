@@ -470,3 +470,69 @@ def test_a_verifier_that_cannot_run_leaves_the_port_inconclusive(exc):
     (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(GO_CLAMP, "go", {"atoms": [CLAMP]})
     assert entry["outcome"] == "inconclusive"
     assert entry["reason"] == f"mumei verify failed to run: {type(exc).__name__}"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("const f = (x: number) => x + 1;\nconst g = 2;\n", "const f = (x: number) => x + 1;"),
+        ("export const f = (x) => g(x,\n  1)\nconst h = 3\n", "export const f = (x) => g(x,\n  1)"),
+        ("const f = x =>\n  x * 2;\n", "const f = x =>\n  x * 2;"),
+    ],
+)
+def test_typescript_expression_bodied_arrows(source, expected):
+    assert function_source(source, "typescript", "f") == expected
+
+
+def test_typescript_overloads_resolve_to_the_implementation():
+    source = (
+        "function f(a: string): string;\n"
+        "function f(a: number): number;\n"
+        "function f(a: any): any {\n  return a;\n}\n"
+    )
+    assert function_source(source, "typescript", "f") == "function f(a: any): any {\n  return a;\n}"
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "func f(a int) struct{ ok bool } {",
+        "func f(a int) (struct{ v struct{ n int } }, error) {",
+        "func f[T interface{ ~int }](a T) T {",
+        "func f(a interface{}) interface {\n\tM()\n} {",
+    ],
+)
+def test_go_signature_type_braces_are_not_the_body(signature):
+    source = f"{signature}\n\treturn a\n}}\n\nfunc g() {{}}\n"
+    assert function_source(source, "go", "f") == f"{signature}\n\treturn a\n}}"
+
+
+@pytest.mark.parametrize(
+    ("diagnostics", "outcome"),
+    [
+        (["Verification Error: Postcondition (ensures) is not satisfied"], "refuted"),
+        (["", "Verification Error: Potential division by zero"], "refuted"),
+        (["Unknown function: foo"], "inconclusive"),
+        ([42, None], "inconclusive"),
+    ],
+)
+def test_string_diagnostics_are_classified(diagnostics, outcome):
+    got, _, _ = classify({"success": False, "report": {"status": "failed", "diagnostics": diagnostics}})
+    assert got == outcome
+
+
+def test_reports_list_body_ports():
+    from agent.audit_models import AuditResult
+    from agent.audit_reporting import _build_markdown_report, _build_report
+
+    result = AuditResult(source_file="a.go", language="go", success=False, spec_extracted=True)
+    result.body_ports = [
+        {"function": "clamp", "outcome": "proven", "reason": ""},
+        {"function": "split", "outcome": "not_ported", "reason": "the LLM could not express the function in Mumei"},
+    ]
+    text = _build_report(result)
+    assert "  - clamp: proven\n" in text
+    assert "  - split: not_ported (the LLM could not express the function in Mumei)" in text
+    md = _build_markdown_report(result)
+    assert "split: not_ported" in md
+    assert "clamp: proven" not in md
