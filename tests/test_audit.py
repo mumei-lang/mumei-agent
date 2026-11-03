@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
+
+import pytest
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -1686,6 +1688,7 @@ def test_audit_directory_summary_table(tmp_path: Path) -> None:
     assert "payment.py: 1 violation, 1 gap" in result.summary
     assert "transfer.py: 0 violations, 0 gaps" in result.summary
     assert "Summary: 2 files, 1 file with issues" in result.summary
+    assert "finding_counts: code=1, spec=1, model_limitations=0, errors=0" in result.summary
     assert "next_steps:" in result.summary
     assert "mumei-agent migrate-suggest --code-file <file>" in result.summary
 
@@ -2694,3 +2697,124 @@ def test_finding_counts_split_encoding_gaps_from_spec() -> None:
 def test_finding_counts_text_report_has_no_braces() -> None:
     assert _finding_counts_text({"code": 1, "spec": 2}) == "code=1, spec=2"
     assert _finding_counts_text({}) == "none"
+
+
+@pytest.mark.parametrize(
+    "issues, expected",
+    [
+        (
+            ["malformed-extraction: calc ensures: garbled comparison operators '<= >'"],
+            {"code": 0, "spec": 0, "model_limitations": 0, "errors": 1},
+        ),
+        (
+            [
+                "lib.py: malformed-extraction: calc requires: split hexadecimal literal '0 xFF'",
+                "contradiction: calc: ensures clauses are mutually inconsistent",
+            ],
+            {"code": 0, "spec": 1, "model_limitations": 0, "errors": 1},
+        ),
+        (
+            ["over-constrained: calc mentions malformed-extraction: in its text"],
+            {"code": 0, "spec": 1, "model_limitations": 0, "errors": 0},
+        ),
+    ],
+)
+def test_finding_counts_count_malformed_extraction_as_errors(
+    issues: list[str], expected: dict[str, int]
+) -> None:
+    assert _finding_counts(issues, [], [], []) == expected
+
+
+def test_audit_malformed_extraction_counts_as_an_error(tmp_path: Path) -> None:
+    source = tmp_path / "common.py"
+    source.write_text("def calc(offset, length):\n    return 0\n", encoding="utf-8")
+    malformed_spec = _forge_spec()
+    malformed_atoms = cast(list[dict[str, object]], malformed_spec["atoms"])
+    malformed_atoms[0]["ensures"] = "overflow == true <= >(offset > 0)"
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="overflow-safe calculation",
+        forge_task_spec=malformed_spec,
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.return_value = {
+        "success": True,
+        "verification": {"success": True, "report": {"status": "satisfiable"}},
+    }
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+
+    result = AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=MagicMock(),
+        mumei_client=mumei,
+    ).audit_file(source, "python")
+
+    assert result.success is False
+    assert result.finding_counts["errors"] >= 1
+    assert result.finding_counts["code"] == 0
+    assert not any(
+        issue.startswith("malformed-extraction:") for issue in result.errors
+    )
+
+
+@pytest.mark.parametrize(
+    "make_path, language, errors",
+    [
+        (lambda tmp: tmp / "missing", "python", 1),
+        (lambda tmp: tmp, "cobol", 1),
+        (lambda tmp: tmp / "missing", "cobol", 2),
+    ],
+)
+def test_audit_directory_early_errors_are_counted(
+    tmp_path: Path, make_path, language: str, errors: int
+) -> None:
+    result = AuditPipeline(AgentConfig(api_key="test")).audit_directory(
+        make_path(tmp_path), language
+    )
+
+    assert result.success is False
+    assert len(result.errors) == errors
+    assert result.finding_counts == {
+        "code": 0,
+        "spec": 0,
+        "model_limitations": 0,
+        "errors": errors,
+    }
+    assert f"errors={errors}" in result.summary
+
+
+def test_audit_directory_without_supported_files_counts_the_error(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+    result = AuditPipeline(AgentConfig(api_key="test")).audit_directory(tmp_path)
+
+    assert result.success is False
+    assert result.finding_counts["errors"] == 1
+
+
+def test_scan_and_fix_human_report_reads_nested_finding_counts(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    result = AuditDirectoryResult(
+        success=True,
+        source_dir=str(source_dir),
+        language="python",
+        total_files=2,
+        files_with_spec_diagnostics=1,
+        finding_counts={"code": 0, "spec": 2, "model_limitations": 1, "errors": 0},
+        summary="Audit directory",
+    )
+
+    with patch("agent.audit.AuditPipeline") as pipeline_cls:
+        pipeline_cls.return_value.audit_directory.return_value = result
+        payload = mcp_server.scan_and_fix(
+            str(source_dir), "python", auto_heal=False, output_format="human"
+        )
+
+    report = payload["formatted_report"]
+    assert "- finding_counts: `code=0, spec=2, model_limitations=1, errors=0`" in report
+    assert report.count("- files_with_spec_diagnostics: `1`") == 1
