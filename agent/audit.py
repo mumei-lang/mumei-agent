@@ -479,11 +479,14 @@ class AuditPipeline:
         if missing_requirements and verification_status == "verified":
             verification_status = "unverifiable"
 
+        # Spec diagnostics (spec_health_issues, cross_validation_gaps) are
+        # evidence against the extracted spec, not the code, so they are
+        # counted in finding_counts["spec"] but do not fail the audit. A
+        # malformed extraction still does: the code was never checked.
         success = (
             not errors
-            and not spec_health_issues
             and not verification_violations
-            and not cross_validation_gaps
+            and not malformed_extraction_issues
         )
         result = AuditResult(
             success=success,

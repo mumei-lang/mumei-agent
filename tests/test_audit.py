@@ -21,6 +21,8 @@ from agent.audit import (
     main,
 )
 from agent.audit_reporting import (
+    _finding_counts,
+    _finding_counts_text,
     _malformed_extraction_issue_strings,
     _spec_health_issue_strings,
     _verification_issue_strings,
@@ -2254,8 +2256,12 @@ def test_audit_domain_hint_emits_domain_completeness_issues(
         "domain-completeness: financial spec lacks balance conservation "
         "(残高保存則（送受信合計が不変）; expected in ensures)"
     ]
-    assert result.success is False
-    # Domain completeness stays a spec-health finding, not a code violation.
+    # Domain completeness stays a spec-health finding, not a code violation,
+    # so it is counted as a spec diagnostic and does not fail the audit.
+    assert result.success is True
+    assert result.finding_counts["code"] == 0
+    assert result.finding_counts["spec"] >= 1
+    assert "spec diagnostic" in result.report.splitlines()[0]
     assert not any(
         "domain-completeness" in violation
         for violation in result.verification_violations
@@ -2520,3 +2526,171 @@ def test_format_result_report_renders_trusted_atom_locations() -> None:
         "  - **warning** `spec.mm:7`: trusted atom `fast_path` skips Z3 "
         "verification",
     ]
+
+
+def _spec_diagnostic_pipeline(
+    foreign_results: list[dict[str, object]],
+    cross_reports: list[CrossValidationReport],
+) -> AuditPipeline:
+    extractor = MagicMock()
+    extractor.extract_from_file.return_value = CodeToSpecResult(
+        success=True,
+        natural_language_spec="withdraw preserves balances",
+        forge_task_spec=_forge_spec(),
+        detected_language="python",
+    )
+    foreign_verifier = MagicMock()
+    foreign_verifier.verify.side_effect = foreign_results
+    cross_validator = MagicMock()
+    cross_validator.validate_spec_vs_impl.side_effect = cross_reports
+    mumei = MagicMock()
+    mumei.verify.side_effect = _healthy_verify
+    return AuditPipeline(
+        AgentConfig(api_key="test"),
+        code_to_spec_extractor=extractor,
+        foreign_code_verifier=foreign_verifier,
+        cross_validator=cross_validator,
+        mumei_client=mumei,
+    )
+
+
+def _write_withdraw(path: Path) -> Path:
+    path.write_text(
+        "def withdraw(balance: int, amount: int) -> int:\n    return balance - amount\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_audit_spec_gap_alone_passes_with_spec_diagnostics(tmp_path: Path) -> None:
+    source = _write_withdraw(tmp_path / "payment.py")
+    result = _spec_diagnostic_pipeline(
+        [{"success": True, "report": {}}],
+        [CrossValidationReport(spec_stronger_than_impl=["withdraw"], coverage_ratio=1.0)],
+    ).audit_file(source, "python")
+
+    assert result.cross_validation_gaps
+    assert result.verification_violations == []
+    assert result.success is True
+    assert result.finding_counts == {
+        "code": 0,
+        "spec": len(result.cross_validation_gaps),
+        "model_limitations": 0,
+        "errors": 0,
+    }
+    first_line = result.report.splitlines()[0]
+    assert first_line.startswith("Audit passed with ")
+    assert "spec diagnostic" in first_line
+    assert "finding_counts: code=0" in result.report
+    payload = json.loads(_format_result(result, "json"))
+    assert payload["finding_counts"]["spec"] >= 1
+    assert payload["success"] is True
+
+
+def test_audit_code_violation_still_fails(tmp_path: Path) -> None:
+    source = _write_withdraw(tmp_path / "payment.py")
+    result = _spec_diagnostic_pipeline(
+        [{"success": False, "errors": ["withdraw can return a negative balance"]}],
+        [CrossValidationReport(coverage_ratio=1.0)],
+    ).audit_file(source, "python")
+
+    assert result.success is False
+    assert result.finding_counts["code"] >= 1
+    assert result.finding_counts["spec"] == 0
+    assert result.report.splitlines()[0].startswith("Audit found issues: ")
+
+
+def test_audit_code_violation_and_spec_gap_counts_both(tmp_path: Path) -> None:
+    source = _write_withdraw(tmp_path / "payment.py")
+    result = _spec_diagnostic_pipeline(
+        [{"success": False, "errors": ["withdraw can return a negative balance"]}],
+        [CrossValidationReport(spec_stronger_than_impl=["withdraw"], coverage_ratio=1.0)],
+    ).audit_file(source, "python")
+
+    assert result.success is False
+    assert result.finding_counts["code"] == len(result.verification_violations) >= 1
+    assert result.finding_counts["spec"] == len(result.cross_validation_gaps) >= 1
+
+
+def test_audit_clean_file_has_zero_finding_counts(tmp_path: Path) -> None:
+    source = _write_withdraw(tmp_path / "payment.py")
+    result = _spec_diagnostic_pipeline(
+        [{"success": True, "report": {}}],
+        [CrossValidationReport(coverage_ratio=1.0)],
+    ).audit_file(source, "python")
+
+    assert result.success is True
+    assert result.finding_counts == {"code": 0, "spec": 0, "model_limitations": 0, "errors": 0}
+    assert result.report.splitlines()[0].startswith("Audit passed: ")
+
+
+def test_audit_directory_separates_spec_diagnostic_files(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    for name in ("a_clean.py", "b_spec_gap.py", "c_violation.py"):
+        _write_withdraw(source_dir / name)
+    result = _spec_diagnostic_pipeline(
+        [
+            {"success": True, "report": {}},
+            {"success": True, "report": {}},
+            {"success": False, "errors": ["withdraw can return a negative balance"]},
+        ],
+        [
+            CrossValidationReport(coverage_ratio=1.0),
+            CrossValidationReport(spec_stronger_than_impl=["withdraw"], coverage_ratio=1.0),
+            CrossValidationReport(coverage_ratio=1.0),
+        ],
+    ).audit_file(source_dir)
+
+    assert isinstance(result, AuditDirectoryResult)
+    by_name = {Path(fr.source_file).name: fr for fr in result.file_results}
+    assert by_name["a_clean.py"].success is True
+    assert by_name["b_spec_gap.py"].success is True
+    assert by_name["c_violation.py"].success is False
+    assert result.success is False
+    assert result.files_with_issues == 1
+    assert result.files_with_spec_diagnostics == 1
+    assert result.finding_counts["code"] == len(result.verification_violations) >= 1
+    assert result.finding_counts["spec"] == len(result.cross_validation_gaps) >= 1
+    markdown = _format_result(result, "markdown")
+    assert "- files_with_spec_diagnostics: `1`" in markdown
+    assert "- finding_counts: `code=" in markdown
+
+
+def test_audit_directory_with_only_spec_gaps_succeeds(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    for name in ("a.py", "b.py"):
+        _write_withdraw(source_dir / name)
+    result = _spec_diagnostic_pipeline(
+        [{"success": True, "report": {}}, {"success": True, "report": {}}],
+        [
+            CrossValidationReport(spec_stronger_than_impl=["withdraw"], coverage_ratio=1.0),
+            CrossValidationReport(spec_stronger_than_impl=["withdraw"], coverage_ratio=1.0),
+        ],
+    ).audit_file(source_dir)
+
+    assert isinstance(result, AuditDirectoryResult)
+    assert result.success is True
+    assert result.files_with_issues == 0
+    assert result.files_with_spec_diagnostics == 2
+
+
+def test_finding_counts_split_encoding_gaps_from_spec() -> None:
+    counts = _finding_counts(
+        [
+            "contradiction: withdraw: ensures clauses are mutually inconsistent",
+            "encoding-gap: withdraw: Skipped unsupported Z3 clause",
+            "lib.py: encoding-gap: deposit: unknown function: %",
+            "over-constrained: withdraw (amount >= 0)",
+        ],
+        ["withdraw can return a negative balance"],
+        ["spec stronger than impl: withdraw"],
+        ["audit failed: boom"],
+    )
+    assert counts == {"code": 1, "spec": 3, "model_limitations": 2, "errors": 1}
+
+
+def test_finding_counts_text_report_has_no_braces() -> None:
+    assert _finding_counts_text({"code": 1, "spec": 2}) == "code=1, spec=2"
+    assert _finding_counts_text({}) == "none"

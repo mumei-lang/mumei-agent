@@ -488,10 +488,42 @@ def _format_result(result: AuditResult | AuditDirectoryResult, output_format: st
 
     return format_result_report(result, "markdown" if output_format == "markdown" else "human")
 
+def _finding_counts(
+    spec_health_issues: list[str],
+    verification_violations: list[str],
+    cross_validation_gaps: list[str],
+    errors: list[str],
+) -> dict[str, int]:
+    model_limitations = sum(
+        1 for issue in spec_health_issues if _is_encoding_gap(issue)
+    )
+    return {
+        "code": len(verification_violations),
+        "spec": len(spec_health_issues) - model_limitations + len(cross_validation_gaps),
+        "model_limitations": model_limitations,
+        "errors": len(errors),
+    }
+
+
+def _is_encoding_gap(issue: str) -> bool:
+    # Directory results prefix each issue with its file label.
+    return issue.startswith("encoding-gap") or ": encoding-gap:" in issue
+
+
+def _spec_diagnostic_count(counts: dict[str, int]) -> int:
+    return counts.get("spec", 0) + counts.get("model_limitations", 0)
+
+
 def _finalize_audit_result(
     result: AuditResult,
     ambiguities: Sequence[SpecAmbiguity] = (),
 ) -> AuditResult:
+    result.finding_counts = _finding_counts(
+        result.spec_health_issues,
+        result.verification_violations,
+        result.cross_validation_gaps,
+        result.errors,
+    )
     result.next_steps = _generate_next_steps(result)
     # Before the report is rendered, so every output format carries the same
     # clarification requests.
@@ -702,6 +734,17 @@ def _aggregate_directory_fixed_keys(result: AuditDirectoryResult) -> None:
     result.migration_hints = hints
     result.healed_files = healed
     result.heal_errors = heal_errors
+    result.files_with_spec_diagnostics = sum(
+        1
+        for file_result in result.file_results
+        if _spec_diagnostic_count(file_result.finding_counts)
+    )
+    result.finding_counts = _finding_counts(
+        spec_health,
+        violations,
+        gaps,
+        [*result.errors, *(e for fr in result.file_results for e in fr.errors)],
+    )
 
 def _build_directory_report(result: AuditDirectoryResult) -> str:
     lines = [f"Audit directory: {result.source_dir}"]
@@ -719,7 +762,9 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
         "Summary: "
         f"{result.total_files} {_pluralize('file', result.total_files)}, "
         f"{result.files_with_issues} {_pluralize('file', result.files_with_issues)} "
-        "with issues"
+        "with issues, "
+        f"{result.files_with_spec_diagnostics} "
+        f"{_pluralize('file', result.files_with_spec_diagnostics)} with spec diagnostics"
     )
     if result.trusted_atoms:
         lines.append("trusted_atoms:")
@@ -743,10 +788,21 @@ def _directory_file_label(source_dir: str, source_file: str) -> str:
     except ValueError:
         return source_file
 
+def _finding_counts_text(counts: dict[str, int]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in counts.items()) or "none"
+
+def _audit_outcome(success: bool, counts: dict[str, int]) -> str:
+    if not success:
+        return "found issues"
+    spec = _spec_diagnostic_count(counts)
+    if spec:
+        return f"passed with {spec} spec {_pluralize('diagnostic', spec)} to review"
+    return "passed"
+
 def _build_report(result: AuditResult) -> str:
     next_steps = result.next_steps or _generate_next_steps(result)
     lines = [
-        f"Audit {'passed' if result.success else 'found issues'}: {result.source_file}",
+        f"Audit {_audit_outcome(result.success, result.finding_counts)}: {result.source_file}",
         f"language: {result.language or 'unknown'}",
         f"spec_extracted: {result.spec_extracted}",
         f"verification_status: {result.verification_status or 'unverifiable'}",
@@ -754,6 +810,7 @@ def _build_report(result: AuditResult) -> str:
         f"verification_violations: {result.verification_violations}",
         f"counterexample_values: {result.counterexample_values}",
         f"cross_validation_gaps: {result.cross_validation_gaps}",
+        f"finding_counts: {_finding_counts_text(result.finding_counts)}",
     ]
     if result.errors:
         lines.append(f"errors: {result.errors}")
@@ -812,6 +869,7 @@ def _file_result_to_markdown(result: AuditResult) -> str:
         f"| language | {_markdown_cell(result.language or 'unknown')} |",
         f"| spec_extracted | {result.spec_extracted} |",
         f"| success | {result.success} |",
+        f"| finding_counts | {_markdown_cell(_finding_counts_text(result.finding_counts))} |",
         "",
         "### Issues",
         "",
@@ -865,6 +923,7 @@ def _directory_result_to_markdown(result: AuditDirectoryResult) -> str:
         f"| success | {result.success} |",
         f"| total_files | {result.total_files} |",
         f"| files_with_issues | {result.files_with_issues} |",
+        f"| files_with_spec_diagnostics | {result.files_with_spec_diagnostics} |",
         "",
         "### Files",
         "",

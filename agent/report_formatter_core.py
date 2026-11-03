@@ -196,6 +196,14 @@ def _status_lines(payload: dict[str, object], lang: Literal["en", "ja"]) -> list
         if verification_status is None:
             verification_status = source_payload.get("verification_status")
         lines.append(f"- verification_status: `{verification_status or 'unverifiable'}`")
+    finding_counts = payload.get("finding_counts")
+    if isinstance(finding_counts, dict) and finding_counts:
+        counts = ", ".join(f"{key}={value}" for key, value in finding_counts.items())
+        lines.append(f"- finding_counts: `{counts}`")
+    if "files_with_spec_diagnostics" in payload:
+        lines.append(
+            f"- files_with_spec_diagnostics: `{payload['files_with_spec_diagnostics']}`"
+        )
     summary = payload.get("summary")
     if summary:
         lines.append(f"- Summary: {_inline_value(summary)}")

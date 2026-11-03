@@ -30,6 +30,12 @@ class AuditResult:
     # findings (severity ``warning``) since they bypass Z3 verification.
     trusted_atoms: list[dict] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
+    # Findings per level: ``code`` (verification_violations: evidence against
+    # the code), ``spec`` (spec health and spec/code cross-check diagnostics:
+    # evidence against the extracted spec), ``model_limitations`` (spec
+    # clauses mumei could not encode) and ``errors``. Only ``code`` and
+    # ``errors`` make ``success`` false.
+    finding_counts: dict[str, int] = field(default_factory=dict)
     proof_certificate: dict[str, object] | None = None
     lean_bridge: dict[str, object] | None = None
     report: str = ""
@@ -47,6 +53,7 @@ class AuditDirectoryResult:
     summary: str = ""
     total_files: int = 0
     files_with_issues: int = 0
+    files_with_spec_diagnostics: int = 0
     # Fixed audit-contract keys aggregated across ``file_results`` so directory
     # audits expose the same top-level schema as single-file audits and the
     # MCP ``scan_and_fix`` tool.
@@ -59,6 +66,7 @@ class AuditDirectoryResult:
     heal_errors: list[str] = field(default_factory=list)
     trusted_atoms: list[dict] = field(default_factory=list)
     next_steps: list[dict] = field(default_factory=list)
+    finding_counts: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     skipped_rate_limited_files: list[str] = field(default_factory=list)
 
