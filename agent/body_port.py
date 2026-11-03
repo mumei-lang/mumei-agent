@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
@@ -58,7 +59,9 @@ _DECLARATION = {
     "go": r"^func\s+(\([^)]*\)\s*)?{n}\s*[\[(]",
     "rust": r"^\s*(pub(\([^)]*\))?\s+)?(const\s+)?(async\s+)?(unsafe\s+)?fn\s+{n}\s*[<(]",
     "typescript": r"^\s*(export\s+)?(default\s+)?(async\s+)?function\s*\*?\s*{n}\s*[<(]"
-    r"|^\s*((public|private|protected|static|async|readonly)\s+)*{n}\s*(<[^>]*>)?\s*\([^;]*$",
+    r"|^\s*(export\s+)?(const|let)\s+{n}\s*(:[^=]*)?=\s*(async\s+)?(\([^)]*\)|\w+)\s*(:[^=]*)?=>"
+    # A method declaration: a call statement would end with `;` and not with `{`.
+    r"|^\s*((public|private|protected|static|async|override)\s+)*{n}\s*(<[^>]*>)?\s*\([^;{{}}]*\)[^;{{}}=]*\{{",
     "solidity": r"^\s*function\s+{n}\s*\(",
 }
 
@@ -278,7 +281,12 @@ class BodyPorter:
         with tempfile.TemporaryDirectory(prefix="mumei-body-port-") as tmp:
             path = Path(tmp) / "body_port.mm"
             path.write_text(module, encoding="utf-8")
-            verification = self.mumei_client.verify(str(path), report_dir=str(Path(tmp) / "report"))
+            try:
+                verification = self.mumei_client.verify(str(path), report_dir=str(Path(tmp) / "report"))
+            except (OSError, subprocess.SubprocessError) as exc:
+                entry["outcome"] = "inconclusive"
+                entry["reason"] = f"mumei verify failed to run: {type(exc).__name__}"
+                return entry
         outcome, message, counterexample = classify(verification)
         message = message.replace(str(path), path.name).replace(tmp, "")
         entry["outcome"] = outcome

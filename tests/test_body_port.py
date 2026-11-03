@@ -441,3 +441,32 @@ def test_cli_flag(argv, expected):
 )
 def test_rust_lifetimes_and_char_literals(source):
     assert function_source(source, "rust", "f") == source.rstrip("\n")
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("export const f = (a: number): number => {\n  return a;\n};\n",
+         "export const f = (a: number): number => {\n  return a;\n}"),
+        ("const f = async x => {\n  return x;\n};\n", "const f = async x => {\n  return x;\n}"),
+        ("class A {\n  g() {\n    f(1);\n  }\n  f(a: number) {\n    return a;\n  }\n}\n",
+         "  f(a: number) {\n    return a;\n  }"),
+        ("class A {\n  async f<T>(a: T): Promise<T> {\n    return a;\n  }\n}\n",
+         "  async f<T>(a: T): Promise<T> {\n    return a;\n  }"),
+    ],
+)
+def test_typescript_arrow_functions_and_methods(source, expected):
+    assert function_source(source, "typescript", "f") == expected
+
+
+def test_typescript_call_statements_are_not_declarations():
+    assert function_source("function g() {\n  f(1);\n}\n", "typescript", "f") is None
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError("mumei"), PermissionError("mumei")])
+def test_a_verifier_that_cannot_run_leaves_the_port_inconclusive(exc):
+    mumei = MagicMock()
+    mumei.verify.side_effect = exc
+    (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(GO_CLAMP, "go", {"atoms": [CLAMP]})
+    assert entry["outcome"] == "inconclusive"
+    assert entry["reason"] == f"mumei verify failed to run: {type(exc).__name__}"
