@@ -497,17 +497,32 @@ def _finding_counts(
     model_limitations = sum(
         1 for issue in spec_health_issues if _is_encoding_gap(issue)
     )
+    # A malformed extraction means the code was never checked, so it fails the
+    # audit like an error rather than counting as a spec diagnostic.
+    malformed = sum(
+        1 for issue in spec_health_issues if _is_malformed_extraction(issue)
+    )
     return {
         "code": len(verification_violations),
-        "spec": len(spec_health_issues) - model_limitations + len(cross_validation_gaps),
+        "spec": len(spec_health_issues)
+        - model_limitations
+        - malformed
+        + len(cross_validation_gaps),
         "model_limitations": model_limitations,
-        "errors": len(errors),
+        "errors": len(errors) + malformed,
     }
 
 
 def _is_encoding_gap(issue: str) -> bool:
     # Directory results prefix each issue with its file label.
     return issue.startswith("encoding-gap") or ": encoding-gap:" in issue
+
+
+def _is_malformed_extraction(issue: str) -> bool:
+    return (
+        issue.startswith("malformed-extraction:")
+        or ": malformed-extraction:" in issue
+    )
 
 
 def _spec_diagnostic_count(counts: dict[str, int]) -> int:
@@ -766,6 +781,7 @@ def _build_directory_report(result: AuditDirectoryResult) -> str:
         f"{result.files_with_spec_diagnostics} "
         f"{_pluralize('file', result.files_with_spec_diagnostics)} with spec diagnostics"
     )
+    lines.append(f"finding_counts: {_finding_counts_text(result.finding_counts)}")
     if result.trusted_atoms:
         lines.append("trusted_atoms:")
         lines.extend(
