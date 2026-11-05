@@ -7801,3 +7801,14 @@ def test_solidity_member_owner_write_is_not_excused_by_a_local_owner() -> None:
         "        settings.owner = next;\n    }\n}\n"
     )
     assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_solidity_brace_in_a_single_quoted_string_does_not_keep_a_block_local_live() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function take(address next) external {\n"
+        "        { address owner = msg.sender; string memory tag = 'a{b'; }\n"
+        "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
+    )
+    assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))

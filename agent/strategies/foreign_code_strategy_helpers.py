@@ -8538,6 +8538,8 @@ def _solidity_function_is_caller_scoped(body: str) -> bool:
     body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
     # Braces inside strings and comments are masked so they don't count as blocks.
     masked = _strip_go_rust_literals_and_comments(body)
+    # Solidity also quotes strings with ``'``; the Go/Rust masker only knows char literals.
+    masked = re.sub(r"'(?:\\.|[^'\\\n])*'", lambda q: " " * len(q.group(0)), masked)
     depth = [0]
     for ch in masked:
         depth.append(depth[-1] + (ch == "{") - (ch == "}"))
