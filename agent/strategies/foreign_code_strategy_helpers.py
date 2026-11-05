@@ -3885,6 +3885,9 @@ def _detect_block_safety_issues(
     solidity_checked_arithmetic = (
         label == "Solidity" and _solidity_is_default_checked_arithmetic(source)
     )
+    solidity_member_types = (
+        _solidity_struct_member_types(source) if label == "Solidity" else None
+    )
     for block_idx, (name, body) in enumerate(blocks):
         expressions = _return_expressions(body, fallback=fallback, language=language)
         if not expressions and label == "Rust":
@@ -3982,6 +3985,7 @@ def _detect_block_safety_issues(
                 raw_param_types=block_raw_types,
                 local_names=cast_sub_local_names,
                 solidity_default_checks=sub_default_checks,
+                member_types=solidity_member_types,
                 subtraction_regions=(
                     _unchecked_block_spans(body)
                     if (
@@ -6655,6 +6659,114 @@ def _cast_out_of_range_counterexample(
     return {operand: hi + 1}
 
 
+_COMPARISON_TERM = r"type\(\s*u?int\d*\s*\)\.(?:max|min)|[A-Za-z_][\w.]*|\d[\d_]*"
+_FLIPPED_COMPARISON = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "=="}
+_NEGATED_COMPARISON = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}
+
+
+def _comparison_term_range(
+    term: str,
+    label: str,
+    known_constants: dict[str, int],
+    types: dict[str, str] | None,
+    member_types: dict[str, str] | None,
+) -> tuple[int, int] | None:
+    """The values ``term`` can take: a literal, a constant, or the range of
+    a typed parameter, ``type(uintN).max`` or a typed struct member."""
+    if re.fullmatch(r"\d[\d_]*", term):
+        value = int(term.replace("_", ""))
+        return value, value
+    if term in known_constants:
+        return known_constants[term], known_constants[term]
+    bound = re.fullmatch(r"type\(\s*(u?int\d*)\s*\)\.(max|min)", term)
+    raw: str | None = None
+    if bound:
+        raw = bound.group(1)
+    elif types and term in types:
+        raw = types[term]
+    elif "." in term and member_types:
+        raw = member_types.get(term.rsplit(".", 1)[1])
+    bits_signed = _integer_type_bits(label, raw) if raw else None
+    if bits_signed is None:
+        return None
+    bits, signed = bits_signed
+    tmin = -(2 ** (bits - 1)) if signed else 0
+    tmax = 2 ** (bits - 1) - 1 if signed else 2**bits - 1
+    if bound:
+        value = tmax if bound.group(2) == "max" else tmin
+        return value, value
+    return tmin, tmax
+
+
+def _cast_range_guarded(
+    expression: str,
+    operand: str,
+    cast_pos: int,
+    lo: int | None,
+    hi: int | None,
+    label: str,
+    *,
+    known_constants: dict[str, int],
+    types: dict[str, str] | None,
+    member_types: dict[str, str] | None,
+) -> bool:
+    """Whether comparisons dominating ``cast_pos`` keep ``operand`` within
+    the bounds a cast needs (``lo``/``hi``; ``None`` when not needed).
+
+    ``if x > 0 { x as u64 }`` gives the lower bound and
+    ``require(pos.shares >= shares); uint128(shares)`` the upper one when
+    ``pos.shares`` is a ``uint128`` field."""
+    if lo is None and hi is None:
+        return True
+    op_re = r"(?<![<>=!\-])(?P<op><=|>=|==|<|>)(?![<>=])"
+    pattern = re.compile(
+        rf"(?<![\w.])(?P<l>{_COMPARISON_TERM})\s*{op_re}\s*(?P<r>{_COMPARISON_TERM})(?![\w(\[])"
+    )
+    low_ok, high_ok = lo is None, hi is None
+    for match in pattern.finditer(expression):
+        if match.end() > cast_pos:
+            break
+        left, op, right = match.group("l"), match.group("op"), match.group("r")
+        if left == operand:
+            other = right
+        elif right == operand:
+            other, op = left, _FLIPPED_COMPARISON[op]
+        else:
+            continue
+        mechanism = _guard_mechanism(expression, match, cast_pos)
+        if mechanism in _GUARD_NEGATED_MECHANISMS:
+            if op == "==":
+                continue
+            op = _NEGATED_COMPARISON[op]
+        elif mechanism not in _GUARD_HOLDS_MECHANISMS:
+            continue
+        bounds = _comparison_term_range(other, label, known_constants, types, member_types)
+        if bounds is None:
+            continue
+        bmin, bmax = bounds
+        if lo is not None and op in {">", ">=", "=="}:
+            low_ok |= (bmin + (op == ">")) >= lo
+        if hi is not None and op in {"<", "<=", "=="}:
+            high_ok |= (bmax - (op == "<")) <= hi
+        if low_ok and high_ok:
+            return True
+    return False
+
+
+def _solidity_struct_member_types(source: str) -> dict[str, str]:
+    """Integer types of struct fields by field name; a name declared with
+    different types in different structs is left out."""
+    types: dict[str, str] = {}
+    clashes: set[str] = set()
+    for struct in re.finditer(r"\bstruct\s+\w+\s*\{([^}]*)\}", source):
+        for field in re.finditer(r"\b(u?int\d*)\s+(\w+)\s*;", struct.group(1)):
+            ty, name = field.groups()
+            if types.get(name, ty) != ty:
+                clashes.add(name)
+            types[name] = ty
+    return {name: ty for name, ty in types.items() if name not in clashes}
+
+
 def _narrowing_cast_issues(
     function_name: str,
     expression: str,
@@ -6664,6 +6776,7 @@ def _narrowing_cast_issues(
     param_types: dict[str, str] | None,
     raw_param_types: dict[str, str] | None,
     local_names: set[str] | None,
+    member_types: dict[str, str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Flag integer casts that can truncate or sign-flip a provably wider or
     differently-signed operand — Rust ``x as u8``, Go ``uint8(x)``,
@@ -6678,17 +6791,17 @@ def _narrowing_cast_issues(
     they are skipped rather than guessed at."""
     if label == "Rust":
         sites = [
-            (m.group("operand"), m.group("ty"))
+            (m.group("operand"), m.group("ty"), m.start())
             for m in _RUST_CAST_RE.finditer(expression)
         ]
     elif label == "Go":
         sites = [
-            (m.group("operand"), m.group("ty"))
+            (m.group("operand"), m.group("ty"), m.start())
             for m in _GO_CONVERSION_RE.finditer(expression)
         ]
     elif label == "Solidity":
         sites = [
-            (m.group("operand"), m.group("ty"))
+            (m.group("operand"), m.group("ty"), m.start())
             for m in _SOLIDITY_CONVERSION_RE.finditer(expression)
         ]
     else:
@@ -6696,10 +6809,9 @@ def _narrowing_cast_issues(
     table = _INTEGER_TYPE_BITS.get(label, {})
     issues: list[ForeignSafetyIssue] = []
     seen: set[tuple[str, str]] = set()
-    for operand, target in sites:
+    for operand, target, cast_pos in sites:
         if (operand, target) in seen:
             continue
-        seen.add((operand, target))
         if local_names and operand in local_names:
             continue
         target_bits_signed = table.get(target)
@@ -6714,6 +6826,7 @@ def _narrowing_cast_issues(
                 continue
             # Definite out-of-range cast — the constant's value is the
             # witness, and the contract is whichever bound it violates.
+            seen.add((operand, target))
             contracts = [
                 *([f"{operand} >= {lo}"] if value < lo else []),
                 *([f"{operand} <= {hi}"] if value > hi else []),
@@ -6750,6 +6863,21 @@ def _narrowing_cast_issues(
         )
         if safe_widening:
             continue
+        smin = -(2 ** (sbits - 1)) if ssigned else 0
+        smax = 2 ** (sbits - 1) - 1 if ssigned else 2 ** sbits - 1
+        if _cast_range_guarded(
+            expression,
+            operand,
+            cast_pos,
+            lo if smin < lo else None,
+            hi if smax > hi else None,
+            label,
+            known_constants=known_constants,
+            types=types,
+            member_types=member_types,
+        ):
+            continue
+        seen.add((operand, target))
         contracts: list[str] = []
         if ssigned:
             contracts.append(f"{operand} >= {lo}")
@@ -7307,6 +7435,7 @@ def _cast_and_subtraction_issues(
     local_names: set[str] | None = None,
     solidity_default_checks: bool = False,
     subtraction_regions: list[tuple[int, int]] | None = None,
+    member_types: dict[str, str] | None = None,
 ) -> list[ForeignSafetyIssue]:
     """Run the narrowing-cast, unsigned-subtraction, and shift-amount checks
     over ``text``.
@@ -7328,6 +7457,7 @@ def _cast_and_subtraction_issues(
         param_types=param_types,
         raw_param_types=raw_param_types,
         local_names=local_names,
+        member_types=member_types,
     )
     issues.extend(
         _unsigned_subtraction_issues(
