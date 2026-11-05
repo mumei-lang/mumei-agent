@@ -910,8 +910,9 @@ def test_verifier_suppresses_solidity_reentrancy_when_guarded() -> None:
 
     result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "solidity")
 
-    assert result["success"] is False
-    assert any("no access-control guard" in error for error in result["errors"])
+    # Both withdrawals only move the caller's own balance, so they are not
+    # access-control findings either.
+    assert all("no access-control guard" not in error for error in result["errors"])
     assert all("may be vulnerable to reentrancy" not in error for error in result["errors"])
     assert "counterexample" not in result
     mumei.verify.assert_called_once()
@@ -7625,3 +7626,44 @@ def test_go_unreachable_counterexample_nested_literal_len(tmp_path) -> None:
         "var trailing = []int{1, 2,}\n"
     )
     assert lens == {"pts": 3, "empty": 0, "trailing": 2}
+
+
+def test_solidity_access_control_skips_functions_scoped_to_the_caller() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Token {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    address public feeRecipient;
+    uint256 public pool;
+    event Changed(address who, address to);
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        _move(from, to, amount);
+        return true;
+    }
+    function fund() external payable {
+        pool += msg.value;
+    }
+    function setFeeRecipient(address who) external {
+        feeRecipient = who;
+        emit Changed(msg.sender, who);
+    }
+    function _move(address from, address to, uint256 amount) internal {
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+    }
+}
+"""
+    flagged = {
+        issue.function_name
+        for issue in _detect_solidity_contract_issues(source)
+        if "no access-control guard" in issue.message
+    }
+    assert flagged == {"setFeeRecipient"}

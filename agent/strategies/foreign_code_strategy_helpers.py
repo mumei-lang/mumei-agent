@@ -8398,9 +8398,10 @@ def _detect_solidity_contract_issues(
             maybe_cei_issue = _solidity_cei_issue(name, attrs, body)
             if maybe_cei_issue is not None:
                 issues.append(maybe_cei_issue)
-            if _solidity_function_is_externally_callable(attrs) and not _solidity_function_has_access_guard(
-                attrs,
-                body,
+            if (
+                _solidity_function_is_externally_callable(attrs)
+                and not _solidity_function_has_access_guard(attrs, body)
+                and not _solidity_function_is_caller_scoped(body)
             ):
                 issues.append(
                     ForeignSafetyIssue(
@@ -8432,6 +8433,23 @@ def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
     if _SOLIDITY_ACCESS_MODIFIER_PATTERN.search(attrs):
         return True
     return any(pattern.search(body) for pattern in _SOLIDITY_ACCESS_GUARD_PATTERNS)
+
+# A function that acts on the caller's own entry, address or payment is
+# meant to be callable by anyone: `balances[msg.sender]`,
+# `allowance[from][msg.sender]`, `_move(msg.sender, ...)`, `msg.value`.
+# `emit` arguments are left out, since logging the caller scopes nothing.
+_SOLIDITY_CALLER_SCOPED_PATTERN = re.compile(
+    r"\[\s*msg\.sender\s*\]"
+    r"|[(,]\s*msg\.sender\s*[,)]"
+    r"|\bmsg\.sender\s*\.\s*(?:call|transfer|send)\b"
+    r"|\bmsg\.value\b"
+)
+_SOLIDITY_EMIT_STATEMENT = re.compile(r"\bemit\b[^;]*;")
+
+
+def _solidity_function_is_caller_scoped(body: str) -> bool:
+    return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(_SOLIDITY_EMIT_STATEMENT.sub("", body)))
+
 
 def _solidity_named_return_params(attrs: str) -> set[str]:
     """Return the named return-parameter names declared in ``returns (...)``."""
