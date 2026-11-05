@@ -624,3 +624,12 @@ def test_a_mumei_without_the_flag_falls_back_to_unbounded_integers():
     (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(GO_CLAMP, "go", {"atoms": [CLAMP]})
     assert calls == [["--check-i64-overflow"], None]
     assert (entry["outcome"], entry["integer_semantics"]) == ("proven", "unbounded")
+
+
+def test_go_and_rust_ports_with_unsigned_integers_keep_unbounded_integers():
+    rust = "fn bump(x: u64) -> u64 {\n    x + 1\n}\n"
+    mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
+    atom = {**CLAMP, "name": "bump"}
+    (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(rust, "rust", {"atoms": [atom]})
+    assert "extra_args" not in mumei.verify.call_args.kwargs
+    assert entry["integer_semantics"] == "unbounded"

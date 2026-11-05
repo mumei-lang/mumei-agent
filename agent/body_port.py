@@ -39,6 +39,14 @@ BodyPortOutcome = Literal["proven", "refuted", "inconclusive", "not_ported"]
 # ports are verified with mumei's fixed-width i64 arithmetic check.
 FIXED_WIDTH_I64_LANGUAGES = frozenset({"go", "rust"})
 CHECK_I64_OVERFLOW_FLAG = "--check-i64-overflow"
+# An unsigned native integer has a different range than i64, so a function
+# that uses one is verified unbounded rather than checked against i64.
+_UNSIGNED_INT = re.compile(r"\b(?:u8|u16|u32|u64|u128|usize|uint|uint8|uint16|uint32|uint64|uintptr|byte)\b")
+
+
+def _signature(native: str) -> str:
+    """The function's header: its source up to the opening brace of the body."""
+    return native.split("{", 1)[0]
 
 BODY_PORT_SYSTEM_PROMPT = (
     "You translate one function into the Mumei language so that it can be checked against a fixed contract. "
@@ -349,7 +357,9 @@ class BodyPorter:
             path = Path(tmp) / "body_port.mm"
             path.write_text(module, encoding="utf-8")
             try:
-                verification, semantics = self._verify(str(path), str(Path(tmp) / "report"), language)
+                verification, semantics = self._verify(
+                    str(path), str(Path(tmp) / "report"), language, native
+                )
             except (OSError, subprocess.SubprocessError) as exc:
                 entry["outcome"] = "inconclusive"
                 entry["reason"] = f"mumei verify failed to run: {type(exc).__name__}"
@@ -363,9 +373,9 @@ class BodyPorter:
             entry["counterexample"] = redact_value(counterexample)
         return entry
 
-    def _verify(self, path: str, report_dir: str, language: str) -> tuple[dict, str]:
+    def _verify(self, path: str, report_dir: str, language: str, native: str) -> tuple[dict, str]:
         """The verification and the integer semantics it used: ``i64`` or ``unbounded``."""
-        if language in FIXED_WIDTH_I64_LANGUAGES:
+        if language in FIXED_WIDTH_I64_LANGUAGES and not _UNSIGNED_INT.search(_signature(native)):
             verification = self.mumei_client.verify(
                 path, report_dir=report_dir, extra_args=[CHECK_I64_OVERFLOW_FLAG]
             )
