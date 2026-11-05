@@ -468,6 +468,7 @@ class AuditPipeline:
                 verification_status = "unverifiable"
 
             body_ports: list[dict] = []
+            port_counterexamples: list[dict] = []
             status_before_ports = verification_status
             if enable_body_port and spec_source and not malformed_extraction_issues:
                 body_ports = self._port_bodies(
@@ -475,11 +476,12 @@ class AuditPipeline:
                 )
                 refuted = body_port_violations(body_ports)
                 verification_violations.extend(refuted)
-                counterexample_values.extend(
+                port_counterexamples = [
                     {"function_name": port["function"], "counterexample": port["counterexample"]}
                     for port in body_ports
                     if port.get("outcome") == "refuted" and port.get("counterexample")
-                )
+                ]
+                counterexample_values.extend(port_counterexamples)
                 if refuted:
                     verification_status = "refuted"
 
@@ -496,13 +498,9 @@ class AuditPipeline:
                     verification_violations[:] = [
                         v for v in verification_violations if not v.startswith(f"body-port: {name}:")
                     ]
-                    counterexample_values[:] = [
-                        c for c in counterexample_values
-                        if not (c.get("function_name") == name and any(
-                            p.get("function") == name and p.get("counterexample") == c.get("counterexample")
-                            for p in body_ports
-                        ))
-                    ]
+                    # By identity: a foreign verifier may report the same values independently.
+                    dropped = [id(c) for c in port_counterexamples if c["function_name"] == name]
+                    counterexample_values[:] = [c for c in counterexample_values if id(c) not in dropped]
                 confirmed = native_replay_violations(native_replays)
                 verification_violations.extend(confirmed)
                 if confirmed or any(v.startswith("body-port: ") for v in verification_violations):

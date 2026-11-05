@@ -345,3 +345,17 @@ def test_a_dropped_port_refutation_leaves_no_counterexample(tmp_path):
     pipeline, source = _pipeline(tmp_path, replayer, _porter(port))
     result = pipeline.audit_file(source, "python", enable_body_port=True, enable_native_replay=True)
     assert result.counterexample_values == []
+
+
+def test_an_independent_counterexample_with_the_same_values_is_kept(tmp_path):
+    port = {"function": "clamp", "outcome": "refuted", "reason": "Postcondition violated", "body": "x",
+            "counterexample": {"x": "5", "hi": "2"}}
+    replayer = MagicMock()
+    replayer.replay.return_value = [{"function": "clamp", "input": {"x": 5, "hi": 2}, "source": "body_port",
+                                     "native": {"ok": True, "value": 2}, "verdict": "meets", "reason": ""}]
+    pipeline, source = _pipeline(tmp_path, replayer, _porter(port))
+    pipeline.foreign_code_verifier.verify.return_value = {
+        "success": False, "function_name": "clamp", "counterexample": {"x": "5", "hi": "2"},
+        "verification": {"success": False, "report": {"status": "failed"}}}
+    result = pipeline.audit_file(source, "python", enable_body_port=True, enable_native_replay=True)
+    assert result.counterexample_values == [{"function_name": "clamp", "counterexample": {"x": "5", "hi": "2"}}]
