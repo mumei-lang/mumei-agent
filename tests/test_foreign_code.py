@@ -7754,3 +7754,25 @@ def test_solidity_local_named_owner_keeps_the_caller_scoped_exemption() -> None:
         "        address owner = msg.sender;\n        balances[owner] += msg.value;\n    }\n}\n"
     )
     assert not any("deposit" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_go_call_with_a_nonzero_literal_argument_is_not_a_safe_divisor() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    src = (
+        "package main\n\nfunc zero(n int) int {\n\treturn 0\n}\n\n"
+        "func f(total int) int {\n\treturn total / zero(1)\n}\n"
+    )
+    errors = [e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e]
+    assert errors
+
+
+def test_solidity_inner_block_local_owner_does_not_hide_a_state_owner_write() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function take(address next) external {\n"
+        "        { address owner = msg.sender; }\n"
+        "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
+    )
+    assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
