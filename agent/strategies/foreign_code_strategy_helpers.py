@@ -3784,6 +3784,11 @@ def _first_counterexample_payload(
             }
     return {}
 
+_GO_NARROW_INT_CASTS = frozenset(
+    {"int8", "int16", "int32", "uint8", "uint16", "uint32", "byte", "rune"}
+)
+
+
 def _python_zero_exit_guards(func: ast.FunctionDef) -> list[tuple[int, str]]:
     """``(line, expr)`` for each top-level ``if expr == 0: return/raise``.
 
@@ -3812,7 +3817,8 @@ def _python_zero_exit_guards(func: ast.FunctionDef) -> list[tuple[int, str]]:
             and not stmt.orelse
             and isinstance(stmt.body[-1], (ast.Return, ast.Raise))
         ):
-            guards.extend((stmt.lineno, ast.unparse(e)) for e in zero_tests(stmt.test))
+            end = stmt.end_lineno or stmt.lineno
+            guards.extend((end, ast.unparse(e)) for e in zero_tests(stmt.test))
     return guards
 
 
@@ -3826,12 +3832,25 @@ def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
         if not isinstance(node, ast.FunctionDef):
             continue
         guards = _python_zero_exit_guards(node)
+        assigned = [
+            (stmt.lineno, target.id)
+            for stmt in ast.walk(node)
+            if isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+            for target in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target])
+            if isinstance(target, ast.Name)
+        ]
         for ret in [ret for ret in ast.walk(node) if isinstance(ret, ast.Return) and ret.value is not None]:
             try:
                 text = ast.unparse(ret.value)
             except ValueError:
                 continue
-            nonzero = {name for line, name in guards if line < ret.lineno}
+            # A guard covers returns after its block, until the name is reassigned.
+            nonzero = {
+                name
+                for line, name in guards
+                if line < ret.lineno
+                and not any(n == name and line < at <= ret.lineno for at, n in assigned)
+            }
             issues.extend(
                 _issues_for_expression(
                     _safe_identifier(node.name), text, "Python", guaranteed_nonzero=nonzero
@@ -6217,10 +6236,16 @@ def _division_safety_issue(
     # Every layer of a cast like ``int32(len(xs))``: a guard may name any of them.
     unwrapped = {divisor, stripped}
     while re.fullmatch(r"\w+\s*\(.*\)", stripped):
-        m = re.match(r"\w+\s*\(\s*(.*)\s*\)\s*$", stripped)
-        if not m:
+        m = re.match(r"(\w+)\s*\(\s*(.*)\s*\)\s*$", stripped)
+        if not m or (
+            m.group(1) in _GO_NARROW_INT_CASTS
+            and not (m.group(1) in {"int32", "uint32"} and m.group(2).strip().startswith("len("))
+        ):
+            # ``uint8(len(xs))`` is zero when len(xs) is 256: a guard on the
+            # inner value says nothing about a narrowing cast of it. A 32-bit
+            # cast of a length would need 2^32 elements, so it keeps the guard.
             break
-        inner = m.group(1).strip()
+        inner = m.group(2).strip()
         if known_constants.get(inner, 0) != 0:
             return None
         if stripped == inner:
@@ -8488,8 +8513,20 @@ _SOLIDITY_CALLER_SCOPED_PATTERN = re.compile(
 _SOLIDITY_EMIT_STATEMENT = re.compile(r"\bemit\b[^;]*;")
 
 
+# A write to an owner/admin/role slot changes who controls the contract, so
+# a caller-scoped access elsewhere in the function does not excuse it.
+_SOLIDITY_PRIVILEGED_WRITE = re.compile(
+    r"\b_?(?:owner|admin|governance|governor|operator|minter|pauser|implementation)\w*\s*=(?!=)"
+    r"|\b_?(?:transferOwnership|setOwner|grantRole|revokeRole|setAdmin|upgradeTo)\w*\s*\(",
+    re.IGNORECASE,
+)
+
+
 def _solidity_function_is_caller_scoped(body: str) -> bool:
-    return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(_SOLIDITY_EMIT_STATEMENT.sub("", body)))
+    body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
+    if _SOLIDITY_PRIVILEGED_WRITE.search(body):
+        return False
+    return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(body))
 
 
 def _solidity_named_return_params(attrs: str) -> set[str]:

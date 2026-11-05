@@ -15,6 +15,8 @@ from agent.strategies.foreign_code_strategy import (
     to_mumei_atom,
 )
 from agent.strategies.foreign_code_strategy_helpers import (
+    _detect_python_safety_issues,
+    _detect_solidity_contract_issues,
     build_solidity_access_control_proof_certificate,
     build_solidity_cei_proof_certificate,
     build_solidity_guard_trace_proof_certificate,
@@ -7703,3 +7705,34 @@ def test_go_division_by_a_cast_length_respects_the_length_guard() -> None:
     ]
     assert errors(guarded) == []
     assert errors(unguarded)
+
+
+def test_go_guard_on_a_length_does_not_cover_an_8_bit_cast_of_it() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    src = (
+        "package main\n\nfunc avg(total uint8, xs []string) uint8 {\n"
+        "\tif len(xs) == 0 {\n\t\treturn 0\n\t}\n\treturn total / uint8(len(xs))\n}\n"
+    )
+    errors = [e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e]
+    assert errors
+
+
+def test_python_zero_guard_covers_only_returns_after_it_until_reassigned() -> None:
+    inside = "def f(a, d):\n    if d == 0:\n        return a / d\n    return a / d\n"
+    reassigned = "def f(a, d):\n    if d == 0:\n        return 0\n    d = 0\n    return a / d\n"
+    guarded = "def f(a, d):\n    if d == 0:\n        return 0\n    return a / d\n"
+    zero = lambda src: [i for i in _detect_python_safety_issues(src) if "zero" in i.message.lower()]  # noqa: E731
+    assert len(zero(inside)) == 1
+    assert zero(reassigned)
+    assert zero(guarded) == []
+
+
+def test_solidity_owner_change_is_flagged_despite_a_caller_scoped_access() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function setOwner(address next) external {\n"
+        "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
+    )
+    assert any("setOwner" == i.function_name for i in _detect_solidity_contract_issues(src))
