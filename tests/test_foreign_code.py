@@ -15,6 +15,8 @@ from agent.strategies.foreign_code_strategy import (
     to_mumei_atom,
 )
 from agent.strategies.foreign_code_strategy_helpers import (
+    _detect_python_safety_issues,
+    _detect_solidity_contract_issues,
     build_solidity_access_control_proof_certificate,
     build_solidity_cei_proof_certificate,
     build_solidity_guard_trace_proof_certificate,
@@ -910,8 +912,9 @@ def test_verifier_suppresses_solidity_reentrancy_when_guarded() -> None:
 
     result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "solidity")
 
-    assert result["success"] is False
-    assert any("no access-control guard" in error for error in result["errors"])
+    # Both withdrawals only move the caller's own balance, so they are not
+    # access-control findings either.
+    assert all("no access-control guard" not in error for error in result["errors"])
     assert all("may be vulnerable to reentrancy" not in error for error in result["errors"])
     assert "counterexample" not in result
     mumei.verify.assert_called_once()
@@ -7625,3 +7628,187 @@ def test_go_unreachable_counterexample_nested_literal_len(tmp_path) -> None:
         "var trailing = []int{1, 2,}\n"
     )
     assert lens == {"pts": 3, "empty": 0, "trailing": 2}
+
+
+def test_solidity_access_control_skips_functions_scoped_to_the_caller() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_solidity_contract_issues
+
+    source = """
+contract Token {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    address public feeRecipient;
+    uint256 public pool;
+    event Changed(address who, address to);
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        _move(from, to, amount);
+        return true;
+    }
+    function fund() external payable {
+        pool += msg.value;
+    }
+    function setFeeRecipient(address who) external {
+        feeRecipient = who;
+        emit Changed(msg.sender, who);
+    }
+    function _move(address from, address to, uint256 amount) internal {
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+    }
+}
+"""
+    flagged = {
+        issue.function_name
+        for issue in _detect_solidity_contract_issues(source)
+        if "no access-control guard" in issue.message
+    }
+    assert flagged == {"setFeeRecipient"}
+
+
+def test_division_guarded_by_an_early_return_is_not_flagged() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_python_safety_issues
+
+    guarded = (
+        "def share(part: int, whole: int) -> float:\n"
+        "    if whole == 0:\n        return 0.0\n    return part / whole\n"
+        "def per_day(total: int, days: int) -> int:\n"
+        "    if not days or total < 0:\n        raise ValueError\n    return total // days\n"
+    )
+    assert not [i for i in _detect_python_safety_issues(guarded) if "divide" in i.message]
+
+    unguarded = (
+        "def share(part: int, whole: int) -> float:\n"
+        "    if whole == 1:\n        return 0.0\n    return part / whole\n"
+        "def late(part: int, whole: int) -> float:\n"
+        "    return part / whole\n    if whole == 0:\n        return 0.0\n"
+    )
+    flagged = {i.function_name for i in _detect_python_safety_issues(unguarded) if "divide" in i.message}
+    assert flagged == {"share", "late"}
+
+
+def test_go_division_by_a_cast_length_respects_the_length_guard() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    guarded = (
+        "package main\n\nfunc reorderPoint(total int32, locations []string) int32 {\n"
+        "\tif len(locations) == 0 {\n\t\treturn 0\n\t}\n\treturn total / int32(len(locations))\n}\n"
+    )
+    unguarded = "package main\n\nfunc reorderPoint(total int32, locations []string) int32 {\n\treturn total / int32(len(locations))\n}\n"
+    errors = lambda src: [  # noqa: E731
+        e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e
+    ]
+    assert errors(guarded) == []
+    assert errors(unguarded)
+
+
+def test_go_guard_on_a_length_does_not_cover_an_8_bit_cast_of_it() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    src = (
+        "package main\n\nfunc avg(total uint8, xs []string) uint8 {\n"
+        "\tif len(xs) == 0 {\n\t\treturn 0\n\t}\n\treturn total / uint8(len(xs))\n}\n"
+    )
+    errors = [e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e]
+    assert errors
+
+
+def test_python_zero_guard_covers_only_returns_after_it_until_reassigned() -> None:
+    inside = "def f(a, d):\n    if d == 0:\n        return a / d\n    return a / d\n"
+    reassigned = "def f(a, d):\n    if d == 0:\n        return 0\n    d = 0\n    return a / d\n"
+    guarded = "def f(a, d):\n    if d == 0:\n        return 0\n    return a / d\n"
+    zero = lambda src: [i for i in _detect_python_safety_issues(src) if "zero" in i.message.lower()]  # noqa: E731
+    assert len(zero(inside)) == 1
+    assert zero(reassigned)
+    assert zero(guarded) == []
+
+
+def test_solidity_owner_change_is_flagged_despite_a_caller_scoped_access() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function setOwner(address next) external {\n"
+        "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
+    )
+    assert any("setOwner" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_go_narrow_cast_of_a_nonzero_literal_is_a_safe_divisor() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    src = "package main\n\nfunc half(total uint8) uint8 {\n\treturn total / uint8(1)\n}\n"
+    errors = [e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e]
+    assert errors == []
+
+
+def test_solidity_local_named_owner_keeps_the_caller_scoped_exemption() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function deposit() external payable {\n"
+        "        address owner = msg.sender;\n        balances[owner] += msg.value;\n    }\n}\n"
+    )
+    assert not any("deposit" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_go_call_with_a_nonzero_literal_argument_is_not_a_safe_divisor() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    src = (
+        "package main\n\nfunc zero(n int) int {\n\treturn 0\n}\n\n"
+        "func f(total int) int {\n\treturn total / zero(1)\n}\n"
+    )
+    errors = [e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e]
+    assert errors
+
+
+def test_solidity_inner_block_local_owner_does_not_hide_a_state_owner_write() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function take(address next) external {\n"
+        "        { address owner = msg.sender; }\n"
+        "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
+    )
+    assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_solidity_local_owner_in_a_block_or_after_a_brace_string_stays_local() -> None:
+    def scoped(body: str) -> bool:
+        src = (
+            "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+            "    mapping(address => uint256) public balances;\n"
+            f"    function deposit() external payable {{\n{body}    }}\n}}\n"
+        )
+        return not any("deposit" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+    assert scoped("        if (msg.value > 0) { address owner = msg.sender; balances[owner] += msg.value; }\n")
+    assert scoped('        string memory tag = "{";\n        address owner = msg.sender;\n'
+                  "        balances[owner] += msg.value;\n")
+
+
+def test_solidity_member_owner_write_is_not_excused_by_a_local_owner() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    struct S { address owner; }\n    S settings;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function take(address next) external {\n"
+        "        address owner = msg.sender;\n        balances[owner] += 1;\n"
+        "        settings.owner = next;\n    }\n}\n"
+    )
+    assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_solidity_brace_in_a_single_quoted_string_does_not_keep_a_block_local_live() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function take(address next) external {\n"
+        "        { address owner = msg.sender; string memory tag = 'a{b'; }\n"
+        "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
+    )
+    assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))

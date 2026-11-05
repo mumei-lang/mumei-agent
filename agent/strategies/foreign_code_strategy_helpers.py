@@ -3784,6 +3784,45 @@ def _first_counterexample_payload(
             }
     return {}
 
+_GO_NARROW_INT_CASTS = frozenset(
+    {"int8", "int16", "int32", "uint8", "uint16", "uint32", "byte", "rune"}
+)
+_NUMERIC_CAST_NAME = re.compile(r"u?int\d*|uintptr|byte|rune|float\d*")
+
+
+def _python_zero_exit_guards(func: ast.FunctionDef) -> list[tuple[int, str]]:
+    """``(line, expr)`` for each top-level ``if expr == 0: return/raise``.
+
+    Code after such a guard runs only when ``expr`` is non-zero. ``not expr``,
+    ``expr <= 0`` and ``or`` of these count too.
+    """
+
+    def zero_tests(test: ast.expr) -> list[ast.expr]:
+        if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+            return [e for value in test.values for e in zero_tests(value)]
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            return [test.operand]
+        if isinstance(test, ast.Compare) and len(test.ops) == 1:
+            left, op, right = test.left, test.ops[0], test.comparators[0]
+            is_zero = lambda e: isinstance(e, ast.Constant) and e.value == 0  # noqa: E731
+            if is_zero(right) and isinstance(op, (ast.Eq, ast.LtE)):
+                return [left]
+            if is_zero(left) and isinstance(op, (ast.Eq, ast.GtE)):
+                return [right]
+        return []
+
+    guards: list[tuple[int, str]] = []
+    for stmt in func.body:
+        if (
+            isinstance(stmt, ast.If)
+            and not stmt.orelse
+            and isinstance(stmt.body[-1], (ast.Return, ast.Raise))
+        ):
+            end = stmt.end_lineno or stmt.lineno
+            guards.extend((end, ast.unparse(e)) for e in zero_tests(stmt.test))
+    return guards
+
+
 def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
@@ -3793,12 +3832,31 @@ def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
-        for expr in [ret.value for ret in ast.walk(node) if isinstance(ret, ast.Return) and ret.value is not None]:
+        guards = _python_zero_exit_guards(node)
+        assigned = [
+            (stmt.lineno, target.id)
+            for stmt in ast.walk(node)
+            if isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+            for target in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target])
+            if isinstance(target, ast.Name)
+        ]
+        for ret in [ret for ret in ast.walk(node) if isinstance(ret, ast.Return) and ret.value is not None]:
             try:
-                text = ast.unparse(expr)
+                text = ast.unparse(ret.value)
             except ValueError:
                 continue
-            issues.extend(_issues_for_expression(_safe_identifier(node.name), text, "Python"))
+            # A guard covers returns after its block, until the name is reassigned.
+            nonzero = {
+                name
+                for line, name in guards
+                if line < ret.lineno
+                and not any(n == name and line < at <= ret.lineno for at, n in assigned)
+            }
+            issues.extend(
+                _issues_for_expression(
+                    _safe_identifier(node.name), text, "Python", guaranteed_nonzero=nonzero
+                )
+            )
         body_text = ast.get_source_segment(source, node)
         if body_text:
             issues.extend(
@@ -6176,17 +6234,32 @@ def _division_safety_issue(
     # ``uintptr(len(locktab))`` and similar casts of compile-time ``len(...)``
     # evaluate to the array's non-zero length.
     stripped = _strip_outer_parentheses(divisor)
+    # Every layer of a cast like ``int32(len(xs))``: a guard may name any of them.
+    unwrapped = {divisor, stripped}
     while re.fullmatch(r"\w+\s*\(.*\)", stripped):
-        m = re.match(r"\w+\s*\(\s*(.*)\s*\)\s*$", stripped)
-        if not m:
+        m = re.match(r"(\w+)\s*\(\s*(.*)\s*\)\s*$", stripped)
+        if not m or not _NUMERIC_CAST_NAME.fullmatch(m.group(1)):
+            # ``zero(1)`` is a call, not a cast: its argument says nothing about its value.
             break
-        inner = m.group(1).strip()
+        if re.fullmatch(r"0*[1-9][0-9_]*", m.group(2).strip()):
+            # ``uint8(1)``: Go rejects a constant that overflows the cast type.
+            return None
+        if (
+            m.group(1) in _GO_NARROW_INT_CASTS
+            and not (m.group(1) in {"int32", "uint32"} and m.group(2).strip().startswith("len("))
+        ):
+            # ``uint8(len(xs))`` is zero when len(xs) is 256: a guard on the
+            # inner value says nothing about a narrowing cast of it. A 32-bit
+            # cast of a length would need 2^32 elements, so it keeps the guard.
+            break
+        inner = m.group(2).strip()
         if known_constants.get(inner, 0) != 0:
             return None
         if stripped == inner:
             break
         stripped = inner
-    if guaranteed_nonzero and (divisor in guaranteed_nonzero or stripped in guaranteed_nonzero):
+        unwrapped.add(stripped)
+    if guaranteed_nonzero and unwrapped & guaranteed_nonzero:
         return None
     if float_variables and (divisor in float_variables or stripped in float_variables):
         # Go float division by zero produces +/-Inf or NaN, not a panic.
@@ -8398,9 +8471,10 @@ def _detect_solidity_contract_issues(
             maybe_cei_issue = _solidity_cei_issue(name, attrs, body)
             if maybe_cei_issue is not None:
                 issues.append(maybe_cei_issue)
-            if _solidity_function_is_externally_callable(attrs) and not _solidity_function_has_access_guard(
-                attrs,
-                body,
+            if (
+                _solidity_function_is_externally_callable(attrs)
+                and not _solidity_function_has_access_guard(attrs, body)
+                and not _solidity_function_is_caller_scoped(body)
             ):
                 issues.append(
                     ForeignSafetyIssue(
@@ -8432,6 +8506,59 @@ def _solidity_function_has_access_guard(attrs: str, body: str) -> bool:
     if _SOLIDITY_ACCESS_MODIFIER_PATTERN.search(attrs):
         return True
     return any(pattern.search(body) for pattern in _SOLIDITY_ACCESS_GUARD_PATTERNS)
+
+# A function that acts on the caller's own entry, address or payment is
+# meant to be callable by anyone: `balances[msg.sender]`,
+# `allowance[from][msg.sender]`, `_move(msg.sender, ...)`, `msg.value`.
+# `emit` arguments are left out, since logging the caller scopes nothing.
+_SOLIDITY_CALLER_SCOPED_PATTERN = re.compile(
+    r"\[\s*msg\.sender\s*\]"
+    r"|[(,]\s*msg\.sender\s*[,)]"
+    r"|\bmsg\.sender\s*\.\s*(?:call|transfer|send)\b"
+    r"|\bmsg\.value\b"
+)
+_SOLIDITY_EMIT_STATEMENT = re.compile(r"\bemit\b[^;]*;")
+
+
+# A write to an owner/admin/role slot changes who controls the contract, so
+# a caller-scoped access elsewhere in the function does not excuse it.
+_SOLIDITY_PRIVILEGED_WRITE = re.compile(
+    r"\b_?(?:owner|admin|governance|governor|operator|minter|pauser|implementation)\w*\s*=(?!=)"
+    r"|\b_?(?:transferOwnership|setOwner|grantRole|revokeRole|setAdmin|upgradeTo)\w*\s*\(",
+    re.IGNORECASE,
+)
+
+
+_SOLIDITY_LOCAL_DECLARATION = re.compile(
+    r"\b(?:address|bool|string|bytes\d*|u?int\d*)(?:\s+(?:payable|memory|storage|calldata))*\s+(\w+)\s*[=;]"
+)
+
+
+def _solidity_function_is_caller_scoped(body: str) -> bool:
+    body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
+    # Braces inside strings and comments are masked so they don't count as blocks.
+    masked = _strip_go_rust_literals_and_comments(body)
+    # Solidity also quotes strings with ``'``; the Go/Rust masker only knows char literals.
+    masked = re.sub(r"'(?:\\.|[^'\\\n])*'", lambda q: " " * len(q.group(0)), masked)
+    depth = [0]
+    for ch in masked:
+        depth.append(depth[-1] + (ch == "{") - (ch == "}"))
+    declarations = [(d.start(), d.group(1)) for d in _SOLIDITY_LOCAL_DECLARATION.finditer(masked)]
+
+    def declared_local(name: str, use: int) -> bool:
+        # The declaration's block must still be open at the use.
+        return any(
+            local == name and pos < use and min(depth[pos : use + 1]) >= depth[pos]
+            for pos, local in declarations
+        )
+
+    for m in _SOLIDITY_PRIVILEGED_WRITE.finditer(masked):
+        name = re.match(r"\w+", m.group(0))
+        member = masked[: m.start()].rstrip().endswith(".")
+        if name is None or member or not declared_local(name.group(0), m.start()):
+            return False
+    return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(body))
+
 
 def _solidity_named_return_params(attrs: str) -> set[str]:
     """Return the named return-parameter names declared in ``returns (...)``."""
