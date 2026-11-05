@@ -8536,18 +8536,23 @@ _SOLIDITY_LOCAL_DECLARATION = re.compile(
 
 def _solidity_function_is_caller_scoped(body: str) -> bool:
     body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
-    # Only a top-level declaration stays in scope for the rest of the body; a
-    # local declared in an inner block does not shadow a later state write.
-    top_level_locals = [
-        (d.start(), d.group(1))
-        for d in _SOLIDITY_LOCAL_DECLARATION.finditer(body)
-        if body.count("{", 0, d.start()) == body.count("}", 0, d.start())
-    ]
-    for m in _SOLIDITY_PRIVILEGED_WRITE.finditer(body):
+    # Braces inside strings and comments are masked so they don't count as blocks.
+    masked = _strip_go_rust_literals_and_comments(body)
+    depth = [0]
+    for ch in masked:
+        depth.append(depth[-1] + (ch == "{") - (ch == "}"))
+    declarations = [(d.start(), d.group(1)) for d in _SOLIDITY_LOCAL_DECLARATION.finditer(masked)]
+
+    def declared_local(name: str, use: int) -> bool:
+        # The declaration's block must still be open at the use.
+        return any(
+            local == name and pos < use and min(depth[pos : use + 1]) >= depth[pos]
+            for pos, local in declarations
+        )
+
+    for m in _SOLIDITY_PRIVILEGED_WRITE.finditer(masked):
         name = re.match(r"\w+", m.group(0))
-        if name is None or not any(
-            pos < m.start() and local == name.group(0) for pos, local in top_level_locals
-        ):
+        if name is None or not declared_local(name.group(0), m.start()):
             return False
     return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(body))
 

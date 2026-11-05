@@ -7776,3 +7776,17 @@ def test_solidity_inner_block_local_owner_does_not_hide_a_state_owner_write() ->
         "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
     )
     assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_solidity_local_owner_in_a_block_or_after_a_brace_string_stays_local() -> None:
+    def scoped(body: str) -> bool:
+        src = (
+            "pragma solidity ^0.8.0;\ncontract C {\n    address public owner;\n"
+            "    mapping(address => uint256) public balances;\n"
+            f"    function deposit() external payable {{\n{body}    }}\n}}\n"
+        )
+        return not any("deposit" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+    assert scoped("        if (msg.value > 0) { address owner = msg.sender; balances[owner] += msg.value; }\n")
+    assert scoped('        string memory tag = "{";\n        address owner = msg.sender;\n'
+                  "        balances[owner] += msg.value;\n")
