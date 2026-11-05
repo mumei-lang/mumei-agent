@@ -35,6 +35,25 @@ from agent.secret_redaction import redact_secrets, redact_value
 
 BodyPortOutcome = Literal["proven", "refuted", "inconclusive", "not_ported"]
 
+# Native integers in these languages are 64-bit two's complement, so their
+# ports are verified with mumei's fixed-width i64 arithmetic check.
+FIXED_WIDTH_I64_LANGUAGES = frozenset({"go", "rust"})
+CHECK_I64_OVERFLOW_FLAG = "--check-i64-overflow"
+# mumei checks each operation against its operands' declared type (`u64` for
+# the unsigned parameters the contract extraction emits, `i64` otherwise), so
+# a function that mixes signed and unsigned integers keeps both checks. Only
+# 128-bit integers have no mumei type and are verified unbounded.
+# Only type positions count, since Rust allows these words as names: a type
+# follows `:`, `->`, `<`, `[` or `&`.
+_WIDE_INT = {
+    "rust": re.compile(r"(?:[:<\[&]|->)\s*(?:mut\s+)?(?:u128|i128)\b"),
+}
+
+
+def _signature(native: str) -> str:
+    """The function's header: its source up to the opening brace of the body."""
+    return native.split("{", 1)[0]
+
 BODY_PORT_SYSTEM_PROMPT = (
     "You translate one function into the Mumei language so that it can be checked against a fixed contract. "
     "Translate the function as it is written, including any mistakes; do not repair it and do not change "
@@ -53,7 +72,7 @@ MAX_FUNCTION_CHARS = 12000
 _FORBIDDEN = re.compile(r"\b(atom|trusted|extern|import)\b|\b(requires|ensures|body)\s*:")
 _REFUTATION = re.compile(
     r"Verification Error: (Postcondition|Call to \S+: precondition|Potential |"
-    r"(Loop )?[Ii]nvariant|[Tt]ermination|[Dd]ecreases)"
+    r"(Loop )?[Ii]nvariant|[Tt]ermination|[Dd]ecreases|Integer arithmetic may overflow)"
 )
 _GO_TYPE_BRACE = re.compile(r"\b(struct|interface)\s*$")
 _TS_TYPE_BRACE = re.compile(r"(:|=>|\||&|<|,)\s*$")
@@ -344,11 +363,14 @@ class BodyPorter:
             path = Path(tmp) / "body_port.mm"
             path.write_text(module, encoding="utf-8")
             try:
-                verification = self.mumei_client.verify(str(path), report_dir=str(Path(tmp) / "report"))
+                verification, semantics = self._verify(
+                    str(path), str(Path(tmp) / "report"), language, native
+                )
             except (OSError, subprocess.SubprocessError) as exc:
                 entry["outcome"] = "inconclusive"
                 entry["reason"] = f"mumei verify failed to run: {type(exc).__name__}"
                 return entry
+        entry["integer_semantics"] = semantics
         outcome, message, counterexample = classify(verification)
         message = message.replace(str(path), path.name).replace(tmp, "")
         entry["outcome"] = outcome
@@ -356,6 +378,19 @@ class BodyPorter:
         if counterexample:
             entry["counterexample"] = redact_value(counterexample)
         return entry
+
+    def _verify(self, path: str, report_dir: str, language: str, native: str) -> tuple[dict, str]:
+        """The verification and the integer semantics it used: ``i64`` or ``unbounded``."""
+        wide = _WIDE_INT.get(language)
+        if language in FIXED_WIDTH_I64_LANGUAGES and not (wide and wide.search(_signature(native))):
+            verification = self.mumei_client.verify(
+                path, report_dir=report_dir, extra_args=[CHECK_I64_OVERFLOW_FLAG]
+            )
+            stderr = str(verification.get("stderr") or "")
+            # A mumei without the flag rejects the argument: verify unbounded instead.
+            if not ("unexpected argument" in stderr and CHECK_I64_OVERFLOW_FLAG in stderr):
+                return verification, "i64"
+        return self.mumei_client.verify(path, report_dir=report_dir), "unbounded"
 
     def _complete(self, messages: list[dict[str, str]]) -> str:
         tracer = telemetry.get_tracer(__name__)

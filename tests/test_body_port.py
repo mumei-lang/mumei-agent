@@ -255,7 +255,7 @@ def test_porter_does_not_verify_a_rejected_reply():
 def _recording_mumei(verification):
     mumei, seen = MagicMock(), []
 
-    def verify(path, report_dir=None):
+    def verify(path, report_dir=None, extra_args=None):
         seen.append(Path(path).read_text())
         return verification
 
@@ -291,7 +291,7 @@ def test_a_name_that_only_contains_a_callee_is_not_a_call():
 def test_reasons_do_not_carry_the_temporary_path():
     mumei, seen = MagicMock(), []
 
-    def verify(path, report_dir=None):
+    def verify(path, report_dir=None, extra_args=None):
         seen.append(path)
         return {"success": False, "report": {"status": "failed", "diagnostics": _diag(
             f"Syntax error(s) in atom bodies of '{path}': unexpected token")}}
@@ -588,3 +588,63 @@ def test_typescript_one_line_methods(source):
 
 def test_typescript_callback_calls_are_not_method_declarations():
     assert function_source("function g() {\n  f(x).then(() => {\n    h();\n  });\n}\n", "typescript", "f") is None
+
+
+# --- fixed-width integer profile ---------------------------------------------
+
+PY_CLAMP = "def clamp(x, hi):\n    return hi if x > hi else x\n"
+
+
+def test_go_and_rust_ports_use_the_i64_overflow_check():
+    mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
+    (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(GO_CLAMP, "go", {"atoms": [CLAMP]})
+    assert mumei.verify.call_args.kwargs["extra_args"] == ["--check-i64-overflow"]
+    assert entry["integer_semantics"] == "i64"
+
+
+def test_python_ports_keep_unbounded_integers():
+    mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
+    (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(PY_CLAMP, "python", {"atoms": [CLAMP]})
+    assert "extra_args" not in mumei.verify.call_args.kwargs
+    assert entry["integer_semantics"] == "unbounded"
+
+
+def test_a_mumei_without_the_flag_falls_back_to_unbounded_integers():
+    calls = []
+
+    def verify(path, report_dir=None, extra_args=None):
+        calls.append(extra_args)
+        if extra_args:
+            return {"success": False, "report": {},
+                    "stderr": "error: unexpected argument '--check-i64-overflow' found"}
+        return {"success": True, "report": {"status": "success"}}
+
+    mumei = MagicMock()
+    mumei.verify.side_effect = verify
+    (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(GO_CLAMP, "go", {"atoms": [CLAMP]})
+    assert calls == [["--check-i64-overflow"], None]
+    assert (entry["outcome"], entry["integer_semantics"]) == ("proven", "unbounded")
+
+
+def test_go_and_rust_ports_with_unsigned_or_mixed_integers_keep_the_check():
+    for language, native in (
+        ("rust", "fn bump(x: u64) -> u64 {\n    x + 1\n}\n"),
+        ("rust", "fn bump(x: i64, tag: u8) -> i64 {\n    x + 1\n}\n"),
+        ("go", "func bump(x uint64) int64 {\n\treturn 1\n}\n"),
+        ("go", "func bump(x []byte, n int) uint {\n\treturn 1\n}\n"),
+        ("go", "func bump(byte int64) int64 {\n\treturn byte + 1\n}\n"),
+    ):
+        mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
+        atom = {**CLAMP, "name": "bump"}
+        (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(native, language, {"atoms": [atom]})
+        assert mumei.verify.call_args.kwargs["extra_args"] == ["--check-i64-overflow"], native
+        assert entry["integer_semantics"] == "i64", native
+
+
+def test_a_rust_port_with_a_128_bit_integer_verifies_unbounded():
+    rust = "fn bump(x: u128) -> u128 {\n    x + 1\n}\n"
+    mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
+    atom = {**CLAMP, "name": "bump"}
+    (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(rust, "rust", {"atoms": [atom]})
+    assert "extra_args" not in mumei.verify.call_args.kwargs
+    assert entry["integer_semantics"] == "unbounded"

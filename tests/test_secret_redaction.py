@@ -99,7 +99,7 @@ class _Mumei:
     def __init__(self, verification):
         self.verification = verification
 
-    def verify(self, path, report_dir=None):
+    def verify(self, path, report_dir=None, extra_args=None):
         return self.verification
 
 
@@ -186,7 +186,7 @@ def test_body_port_never_writes_an_echoed_secret_to_the_module(monkeypatch):
     written = []
 
     class _Reading(_Mumei):
-        def verify(self, path, report_dir=None):
+        def verify(self, path, report_dir=None, extra_args=None):
             written.append(open(path, encoding="utf-8").read())
             return self.verification
 
