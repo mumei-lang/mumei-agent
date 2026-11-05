@@ -504,6 +504,7 @@ def _finding_counts(
     )
     return {
         "code": len(verification_violations),
+        "confirmed": sum(1 for v in verification_violations if _is_native_replay(v)),
         "spec": len(spec_health_issues)
         - model_limitations
         - malformed
@@ -511,6 +512,10 @@ def _finding_counts(
         "model_limitations": model_limitations,
         "errors": len(errors) + malformed,
     }
+
+
+def _is_native_replay(violation: str) -> bool:
+    return violation.startswith("native-replay:") or ": native-replay:" in violation
 
 
 def _is_encoding_gap(issue: str) -> bool:
@@ -804,6 +809,13 @@ def _directory_file_label(source_dir: str, source_file: str) -> str:
     except ValueError:
         return source_file
 
+def _native_replay_text(replay: dict) -> str:
+    native = replay.get("native") or {}
+    returned = f" -> {json.dumps(native['value'])}" if "value" in native else ""
+    text = f"  - {replay.get('function')} {json.dumps(replay.get('input'), sort_keys=True)}{returned}: {replay.get('verdict')}"
+    return text + (f" ({replay['reason']})" if replay.get("reason") else "")
+
+
 def _finding_counts_text(counts: dict[str, int]) -> str:
     return ", ".join(f"{key}={value}" for key, value in counts.items()) or "none"
 
@@ -835,6 +847,9 @@ def _build_report(result: AuditResult) -> str:
             + (f" ({port['reason']})" if port.get("reason") else "")
             for port in result.body_ports
         )
+    if result.native_replays:
+        lines.append("native_replays:")
+        lines.extend(_native_replay_text(r) for r in result.native_replays)
     if result.errors:
         lines.append(f"errors: {result.errors}")
     lines.append("migration_hints:")
@@ -917,6 +932,15 @@ def _file_result_to_markdown(result: AuditResult) -> str:
                         + (f" ({port['reason']})" if port.get("reason") else "")
                         for port in result.body_ports
                         if port.get("outcome") != "proven"
+                    ],
+                ),
+                (
+                    "⚠️",
+                    "native_replays",
+                    [
+                        _native_replay_text(r).removeprefix("  - ")
+                        for r in result.native_replays
+                        if r.get("verdict") not in ("meets", "outside_requires")
                     ],
                 ),
             ]

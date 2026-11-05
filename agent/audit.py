@@ -77,6 +77,7 @@ from agent.extract_spec_helpers import _is_test_file
 from agent.gap_rules import _TRUSTED_ATOM_RE
 from agent.lean_bridge_helpers import run_lean_bridge_and_merge_proof_cert
 from agent.body_port import BodyPorter, body_port_violations
+from agent.native_replay import NativeReplayer, native_replay_violations, reconcile_body_ports
 from agent.llm_provider import LLMProvider, openai_client_adapter
 from agent.mumei_client import create_mumei_client
 from agent.prompts.report_formatter import format_counterexample
@@ -213,12 +214,14 @@ class AuditPipeline:
         client: object | None = None,
         llm_provider: LLMProvider | None = None,
         body_porter: BodyPorter | None = None,
+        native_replayer: NativeReplayer | None = None,
     ) -> None:
         self.config = config or AgentConfig()
         if llm_provider is not None and client is None:
             client = openai_client_adapter(llm_provider)
         self._llm_client = client
         self._body_porter = body_porter
+        self._native_replayer = native_replayer
         self.mumei_client = mumei_client or create_mumei_client(self.config.mumei_bin)
         self.code_to_spec_extractor = code_to_spec_extractor or CodeToSpecExtractor(
             self.config, client=client, llm_provider=llm_provider,
@@ -240,6 +243,7 @@ class AuditPipeline:
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
+        enable_native_replay: bool = False,
         include_tests: bool = False,
     ) -> AuditResult | AuditDirectoryResult:
         source_path = Path(source_file).expanduser().resolve()
@@ -252,6 +256,7 @@ class AuditPipeline:
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
+                enable_native_replay=enable_native_replay,
                 include_tests=include_tests,
             )
         with telemetry.start_span(
@@ -266,6 +271,7 @@ class AuditPipeline:
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
+                enable_native_replay=enable_native_replay,
             )
             telemetry.set_span_attributes(
                 _span,
@@ -287,6 +293,7 @@ class AuditPipeline:
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
+        enable_native_replay: bool = False,
     ) -> AuditResult:
         source_label = str(source_path)
         normalized_language = _normalize_language(language)
@@ -461,6 +468,7 @@ class AuditPipeline:
                 verification_status = "unverifiable"
 
             body_ports: list[dict] = []
+            status_before_ports = verification_status
             if enable_body_port and spec_source and not malformed_extraction_issues:
                 body_ports = self._port_bodies(
                     source_code, audit_language, extraction.forge_task_spec
@@ -474,6 +482,26 @@ class AuditPipeline:
                 )
                 if refuted:
                     verification_status = "refuted"
+
+            native_replays: list[dict] = []
+            if enable_native_replay and spec_source and not malformed_extraction_issues:
+                replayer = self._native_replayer or NativeReplayer(self.mumei_client)
+                native_replays = replayer.replay(
+                    source_path, source_code, audit_language, extraction.forge_task_spec,
+                    body_ports, counterexample_values,
+                )
+                # A refuted port the native code does not reproduce is a
+                # translation error, not a finding against the code.
+                for name in reconcile_body_ports(body_ports, native_replays):
+                    verification_violations[:] = [
+                        v for v in verification_violations if not v.startswith(f"body-port: {name}:")
+                    ]
+                confirmed = native_replay_violations(native_replays)
+                verification_violations.extend(confirmed)
+                if confirmed or any(v.startswith("body-port: ") for v in verification_violations):
+                    verification_status = "refuted"
+                elif verification_status == "refuted" and enable_body_port:
+                    verification_status = status_before_ports
 
             if spec_source and not malformed_extraction_issues:
                 cross_report = self.cross_validator.validate_spec_vs_impl(
@@ -530,6 +558,7 @@ class AuditPipeline:
             lean_bridge=lean_bridge_result,
             trusted_atoms=trusted_atoms,
             body_ports=body_ports,
+            native_replays=native_replays,
         )
         if (auto_migrate or auto_heal) and (verification_violations or cross_validation_gaps):
             from agent.mm_migration_advisor import suggest_migration_for_file
@@ -574,6 +603,7 @@ class AuditPipeline:
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
+        enable_native_replay: bool = False,
         include_tests: bool = False,
     ) -> AuditDirectoryResult:
         """Audit all supported source files in a directory.
@@ -596,6 +626,7 @@ class AuditPipeline:
                 auto_heal=auto_heal,
                 enable_lean_bridge=enable_lean_bridge,
                 enable_body_port=enable_body_port,
+                enable_native_replay=enable_native_replay,
                 include_tests=include_tests,
             )
             telemetry.set_span_attributes(
@@ -618,6 +649,7 @@ class AuditPipeline:
         auto_heal: bool = False,
         enable_lean_bridge: bool = False,
         enable_body_port: bool = False,
+        enable_native_replay: bool = False,
         include_tests: bool = False,
     ) -> AuditDirectoryResult:
         source_path = Path(source_dir).expanduser().resolve()
@@ -692,6 +724,7 @@ class AuditPipeline:
                     auto_heal=auto_heal,
                     enable_lean_bridge=enable_lean_bridge,
                     enable_body_port=enable_body_port,
+                enable_native_replay=enable_native_replay,
                 )
             except Exception as exc:
                 file_result = AuditResult(
@@ -949,6 +982,16 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         ),
     )
     parser.add_argument(
+        "--enable-native-replay",
+        action="store_true",
+        help=(
+            "Run each extracted Python, TypeScript, Go or Rust function natively on its "
+            "counterexamples and a few boundary inputs, and check the extracted contract on "
+            "the result; a violation is a confirmed code finding, and a refuted body port "
+            "the native code does not reproduce is dropped. Executes the audited code locally."
+        ),
+    )
+    parser.add_argument(
         "--include-tests",
         action="store_true",
         help=(
@@ -970,6 +1013,7 @@ def main(args: argparse.Namespace | None = None) -> AuditResult | AuditDirectory
         enable_lean_bridge=bool(getattr(args, "enable_lean_bridge", False)),
         include_tests=bool(getattr(args, "include_tests", False)),
         enable_body_port=bool(getattr(args, "enable_body_port", False)),
+        enable_native_replay=bool(getattr(args, "enable_native_replay", False)),
     )
     output_format = "json" if args.json else args.format
     payload = _format_result(result, output_format)
