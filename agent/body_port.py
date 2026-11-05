@@ -41,7 +41,12 @@ FIXED_WIDTH_I64_LANGUAGES = frozenset({"go", "rust"})
 CHECK_I64_OVERFLOW_FLAG = "--check-i64-overflow"
 # An unsigned native integer has a different range than i64, so a function
 # that uses one is verified unbounded rather than checked against i64.
-_UNSIGNED_INT = re.compile(r"\b(?:u8|u16|u32|u64|u128|usize|uint|uint8|uint16|uint32|uint64|uintptr|byte)\b")
+# Only type positions count, since Go and Rust allow these words as names:
+# a Rust type follows `:`, `->`, `<`, `[` or `&`; a Go type ends a binder.
+_UNSIGNED_INT = {
+    "rust": re.compile(r"(?:[:<\[&]|->)\s*(?:mut\s+)?(?:u8|u16|u32|u64|u128|usize)\b"),
+    "go": re.compile(r"\b(?:uint|uint8|uint16|uint32|uint64|uintptr|byte)\s*(?=[,)\]]|$)"),
+}
 
 
 def _signature(native: str) -> str:
@@ -375,7 +380,7 @@ class BodyPorter:
 
     def _verify(self, path: str, report_dir: str, language: str, native: str) -> tuple[dict, str]:
         """The verification and the integer semantics it used: ``i64`` or ``unbounded``."""
-        if language in FIXED_WIDTH_I64_LANGUAGES and not _UNSIGNED_INT.search(_signature(native)):
+        if language in FIXED_WIDTH_I64_LANGUAGES and not _UNSIGNED_INT[language].search(_signature(native)):
             verification = self.mumei_client.verify(
                 path, report_dir=report_dir, extra_args=[CHECK_I64_OVERFLOW_FLAG]
             )
