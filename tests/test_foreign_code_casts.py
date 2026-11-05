@@ -704,3 +704,38 @@ def test_solidity_comment_phantom_no_finding() -> None:
         " return a; }"
     )
     assert not any("can underflow" in i.message for i in _detect_safety_issues(src, "solidity"))
+
+
+def _detect_truncations(src: str, language: str) -> list[str]:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    return [i.message for i in _detect_safety_issues(src, language) if "can truncate" in i.message]
+
+
+def test_rust_signed_to_unsigned_cast_under_a_positive_guard_is_safe() -> None:
+    inside = "fn f(x: i64) -> u64 { if x > 0 { return x as u64; } 0 }"
+    early = "fn f(x: i64) -> u64 { if x < 0 { return 0; } x as u64 }"
+    unguarded = "fn f(x: i64) -> u64 { x as u64 }"
+    wrong_side = "fn f(x: i64) -> u64 { if x > -5 { return x as u64; } 0 }"
+    assert _detect_truncations(inside, "rust") == []
+    assert _detect_truncations(early, "rust") == []
+    assert _detect_truncations(unguarded, "rust")
+    assert _detect_truncations(wrong_side, "rust")
+
+
+def test_solidity_cast_bounded_by_a_narrower_struct_field_is_safe() -> None:
+    def src(field_type: str, guard: str) -> str:
+        return (
+            "pragma solidity ^0.8.0;\ncontract C {\n"
+            f"    struct Position {{ {field_type} shares; }}\n"
+            "    mapping(address => Position) positions;\n"
+            "    function withdraw(uint256 shares) external {\n"
+            "        Position storage pos = positions[msg.sender];\n"
+            f"        {guard}\n"
+            "        pos.shares -= uint128(shares);\n    }\n}\n"
+        )
+
+    assert _detect_truncations(src("uint128", 'require(pos.shares >= shares, "low");'), "solidity") == []
+    assert _detect_truncations(src("uint128", "require(shares <= type(uint128).max);"), "solidity") == []
+    assert _detect_truncations(src("uint256", 'require(pos.shares >= shares, "low");'), "solidity")
+    assert _detect_truncations(src("uint128", ""), "solidity")
