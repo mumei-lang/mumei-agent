@@ -7736,3 +7736,21 @@ def test_solidity_owner_change_is_flagged_despite_a_caller_scoped_access() -> No
         "        balances[msg.sender] += 1;\n        owner = next;\n    }\n}\n"
     )
     assert any("setOwner" == i.function_name for i in _detect_solidity_contract_issues(src))
+
+
+def test_go_narrow_cast_of_a_nonzero_literal_is_a_safe_divisor() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    src = "package main\n\nfunc half(total uint8) uint8 {\n\treturn total / uint8(1)\n}\n"
+    errors = [e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e]
+    assert errors == []
+
+
+def test_solidity_local_named_owner_keeps_the_caller_scoped_exemption() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function deposit() external payable {\n"
+        "        address owner = msg.sender;\n        balances[owner] += msg.value;\n    }\n}\n"
+    )
+    assert not any("deposit" == i.function_name for i in _detect_solidity_contract_issues(src))

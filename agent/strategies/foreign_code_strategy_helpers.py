@@ -8525,10 +8525,18 @@ _SOLIDITY_PRIVILEGED_WRITE = re.compile(
 )
 
 
+_SOLIDITY_LOCAL_DECLARATION = re.compile(
+    r"\b(?:address|bool|string|bytes\d*|u?int\d*)(?:\s+(?:payable|memory|storage|calldata))*\s+(\w+)\s*[=;]"
+)
+
+
 def _solidity_function_is_caller_scoped(body: str) -> bool:
     body = _SOLIDITY_EMIT_STATEMENT.sub("", body)
-    if _SOLIDITY_PRIVILEGED_WRITE.search(body):
-        return False
+    locals_ = set(_SOLIDITY_LOCAL_DECLARATION.findall(body))
+    for m in _SOLIDITY_PRIVILEGED_WRITE.finditer(body):
+        name = re.match(r"\w+", m.group(0))
+        if name is None or name.group(0) not in locals_:
+            return False
     return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(body))
 
 
