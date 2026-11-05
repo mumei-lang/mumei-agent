@@ -3787,6 +3787,7 @@ def _first_counterexample_payload(
 _GO_NARROW_INT_CASTS = frozenset(
     {"int8", "int16", "int32", "uint8", "uint16", "uint32", "byte", "rune"}
 )
+_NUMERIC_CAST_NAME = re.compile(r"u?int\d*|uintptr|byte|rune|float\d*")
 
 
 def _python_zero_exit_guards(func: ast.FunctionDef) -> list[tuple[int, str]]:
@@ -6237,10 +6238,13 @@ def _division_safety_issue(
     unwrapped = {divisor, stripped}
     while re.fullmatch(r"\w+\s*\(.*\)", stripped):
         m = re.match(r"(\w+)\s*\(\s*(.*)\s*\)\s*$", stripped)
-        if m and re.fullmatch(r"0*[1-9][0-9_]*", m.group(2).strip()):
+        if not m or not _NUMERIC_CAST_NAME.fullmatch(m.group(1)):
+            # ``zero(1)`` is a call, not a cast: its argument says nothing about its value.
+            break
+        if re.fullmatch(r"0*[1-9][0-9_]*", m.group(2).strip()):
             # ``uint8(1)``: Go rejects a constant that overflows the cast type.
             return None
-        if not m or (
+        if (
             m.group(1) in _GO_NARROW_INT_CASTS
             and not (m.group(1) in {"int32", "uint32"} and m.group(2).strip().startswith("len("))
         ):
