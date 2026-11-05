@@ -8552,7 +8552,8 @@ def _solidity_function_is_caller_scoped(body: str) -> bool:
 
     for m in _SOLIDITY_PRIVILEGED_WRITE.finditer(masked):
         name = re.match(r"\w+", m.group(0))
-        if name is None or not declared_local(name.group(0), m.start()):
+        member = masked[: m.start()].rstrip().endswith(".")
+        if name is None or member or not declared_local(name.group(0), m.start()):
             return False
     return bool(_SOLIDITY_CALLER_SCOPED_PATTERN.search(body))
 

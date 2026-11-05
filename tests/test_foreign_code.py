@@ -7790,3 +7790,14 @@ def test_solidity_local_owner_in_a_block_or_after_a_brace_string_stays_local() -
     assert scoped("        if (msg.value > 0) { address owner = msg.sender; balances[owner] += msg.value; }\n")
     assert scoped('        string memory tag = "{";\n        address owner = msg.sender;\n'
                   "        balances[owner] += msg.value;\n")
+
+
+def test_solidity_member_owner_write_is_not_excused_by_a_local_owner() -> None:
+    src = (
+        "pragma solidity ^0.8.0;\ncontract C {\n    struct S { address owner; }\n    S settings;\n"
+        "    mapping(address => uint256) public balances;\n"
+        "    function take(address next) external {\n"
+        "        address owner = msg.sender;\n        balances[owner] += 1;\n"
+        "        settings.owner = next;\n    }\n}\n"
+    )
+    assert any("take" == i.function_name for i in _detect_solidity_contract_issues(src))
