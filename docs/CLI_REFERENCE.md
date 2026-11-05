@@ -24,7 +24,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `harness-ablation` | 3 | Compare harness_metrics aggregates across --harness-profile runs against a baseline (module ablation report). |
 | `scale-report` | 5 | Report large-scale composability and trust-surface measurements through the fixed verification_status / verification_violations / next_steps keys. |
 | `health` | 3 | Measure proof health metrics for the mumei std library (SI-5 Phase 3-A). |
-| `audit` | 13 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
+| `audit` | 14 | Audit existing code by extracting specs, verifying contracts, emitting cross_validation_gaps, and optionally producing migration_hints. |
 | `extract-spec` | 20 | Extract Mumei specifications from natural language text. Optionally generate and verify code in one step. |
 | `validate-spec` | 6 | Validate natural-language specifications for logical health. |
 | `validate-code` | 7 | Infer and verify contracts from existing code (Python, Rust, TypeScript, Go, Solidity). |
@@ -218,6 +218,7 @@ Audit existing code by extracting specs, verifying contracts, emitting cross_val
 | `--enable-lean-bridge` | — | no | — | Run the optional mumei-lean bridge for Solidity guard-trace certificates. |
 | `--mumei-lean-repo` | `<MUMEI_LEAN_REPO>` | no | — | Path to the mumei-lean checkout used by --enable-lean-bridge. |
 | `--enable-body-port` | — | no | — | Have the LLM port each function body to Mumei and verify it against the extracted contract; refuted ports count as code findings (needs an LLM). Sensitive environment values and credential-shaped literals are redacted from the source sent to the LLM and from the stored body, diagnostics and counterexamples; the redaction is pattern-based, so review code that holds unusual credentials before enabling it. |
+| `--enable-native-replay` | — | no | — | Run each extracted Python, TypeScript, Go or Rust function natively on its counterexamples and a few boundary inputs, and check the extracted contract on the result; a violation is a confirmed code finding, and a refuted body port the native code does not reproduce is dropped. Executes the audited code locally. |
 | `--include-tests` | — | no | — | Also audit test files (e.g. *_test.go, *.test.ts, test_*.py, tests/ dirs), which are skipped by default for directory audits. |
 
 

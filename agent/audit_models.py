@@ -34,8 +34,15 @@ class AuditResult:
     # (``enable_body_port``): function, outcome (proven / refuted /
     # inconclusive / not_ported), reason, body and any counterexample.
     body_ports: list[dict] = field(default_factory=list)
+    # One entry per native run when the audit replays inputs natively
+    # (``enable_native_replay``): function, input, source (body_port /
+    # counterexample / boundary), native result, verdict (violates / meets /
+    # outside_requires / raised / unexpressible / unsupported / inconclusive)
+    # and reason. ``violates`` entries are the confirmed code findings.
+    native_replays: list[dict] = field(default_factory=list)
     # Findings per level: ``code`` (verification_violations: evidence against
-    # the code), ``spec`` (spec health and spec/code cross-check diagnostics:
+    # the code), ``confirmed`` (the ``code`` findings reproduced on the native
+    # code by native replay), ``spec`` (spec health and spec/code cross-check diagnostics:
     # evidence against the extracted spec), ``model_limitations`` (spec
     # clauses mumei could not encode) and ``errors``. Only ``code`` and
     # ``errors`` make ``success`` false.

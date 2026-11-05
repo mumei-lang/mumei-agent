@@ -1688,7 +1688,7 @@ def test_audit_directory_summary_table(tmp_path: Path) -> None:
     assert "payment.py: 1 violation, 1 gap" in result.summary
     assert "transfer.py: 0 violations, 0 gaps" in result.summary
     assert "Summary: 2 files, 1 file with issues" in result.summary
-    assert "finding_counts: code=1, spec=1, model_limitations=0, errors=0" in result.summary
+    assert "finding_counts: code=1, confirmed=0, spec=1, model_limitations=0, errors=0" in result.summary
     assert "next_steps:" in result.summary
     assert "mumei-agent migrate-suggest --code-file <file>" in result.summary
 
@@ -1820,6 +1820,7 @@ def test_cli_audit_json_output(tmp_path: Path, capsys) -> None:
         enable_lean_bridge=False,
         include_tests=False,
         enable_body_port=False,
+        enable_native_replay=False,
     )
 
 
@@ -2578,6 +2579,7 @@ def test_audit_spec_gap_alone_passes_with_spec_diagnostics(tmp_path: Path) -> No
     assert result.success is True
     assert result.finding_counts == {
         "code": 0,
+        "confirmed": 0,
         "spec": len(result.cross_validation_gaps),
         "model_limitations": 0,
         "errors": 0,
@@ -2624,7 +2626,7 @@ def test_audit_clean_file_has_zero_finding_counts(tmp_path: Path) -> None:
     ).audit_file(source, "python")
 
     assert result.success is True
-    assert result.finding_counts == {"code": 0, "spec": 0, "model_limitations": 0, "errors": 0}
+    assert result.finding_counts == {"code": 0, "confirmed": 0, "spec": 0, "model_limitations": 0, "errors": 0}
     assert result.report.splitlines()[0].startswith("Audit passed: ")
 
 
@@ -2692,7 +2694,7 @@ def test_finding_counts_split_encoding_gaps_from_spec() -> None:
         ["spec stronger than impl: withdraw"],
         ["audit failed: boom"],
     )
-    assert counts == {"code": 1, "spec": 3, "model_limitations": 2, "errors": 1}
+    assert counts == {"code": 1, "confirmed": 0, "spec": 3, "model_limitations": 2, "errors": 1}
 
 
 def test_finding_counts_text_report_has_no_braces() -> None:
@@ -2705,18 +2707,18 @@ def test_finding_counts_text_report_has_no_braces() -> None:
     [
         (
             ["malformed-extraction: calc ensures: garbled comparison operators '<= >'"],
-            {"code": 0, "spec": 0, "model_limitations": 0, "errors": 1},
+            {"code": 0, "confirmed": 0, "spec": 0, "model_limitations": 0, "errors": 1},
         ),
         (
             [
                 "lib.py: malformed-extraction: calc requires: split hexadecimal literal '0 xFF'",
                 "contradiction: calc: ensures clauses are mutually inconsistent",
             ],
-            {"code": 0, "spec": 1, "model_limitations": 0, "errors": 1},
+            {"code": 0, "confirmed": 0, "spec": 1, "model_limitations": 0, "errors": 1},
         ),
         (
             ["over-constrained: calc mentions malformed-extraction: in its text"],
-            {"code": 0, "spec": 1, "model_limitations": 0, "errors": 0},
+            {"code": 0, "confirmed": 0, "spec": 1, "model_limitations": 0, "errors": 0},
         ),
     ],
 )
@@ -2782,6 +2784,7 @@ def test_audit_directory_early_errors_are_counted(
     assert len(result.errors) == errors
     assert result.finding_counts == {
         "code": 0,
+        "confirmed": 0,
         "spec": 0,
         "model_limitations": 0,
         "errors": errors,
