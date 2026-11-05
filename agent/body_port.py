@@ -39,13 +39,14 @@ BodyPortOutcome = Literal["proven", "refuted", "inconclusive", "not_ported"]
 # ports are verified with mumei's fixed-width i64 arithmetic check.
 FIXED_WIDTH_I64_LANGUAGES = frozenset({"go", "rust"})
 CHECK_I64_OVERFLOW_FLAG = "--check-i64-overflow"
-# An unsigned native integer has a different range than i64, so a function
-# that uses one is verified unbounded rather than checked against i64.
-# Only type positions count, since Go and Rust allow these words as names:
-# a Rust type follows `:`, `->`, `<`, `[` or `&`; a Go type ends a binder.
-_UNSIGNED_INT = {
-    "rust": re.compile(r"(?:[:<\[&]|->)\s*(?:mut\s+)?(?:u8|u16|u32|u64|u128|usize)\b"),
-    "go": re.compile(r"\b(?:uint|uint8|uint16|uint32|uint64|uintptr|byte)\s*(?=[,)\]]|$)"),
+# mumei checks each operation against its operands' declared type (`u64` for
+# the unsigned parameters the contract extraction emits, `i64` otherwise), so
+# a function that mixes signed and unsigned integers keeps both checks. Only
+# 128-bit integers have no mumei type and are verified unbounded.
+# Only type positions count, since Rust allows these words as names: a type
+# follows `:`, `->`, `<`, `[` or `&`.
+_WIDE_INT = {
+    "rust": re.compile(r"(?:[:<\[&]|->)\s*(?:mut\s+)?(?:u128|i128)\b"),
 }
 
 
@@ -380,7 +381,8 @@ class BodyPorter:
 
     def _verify(self, path: str, report_dir: str, language: str, native: str) -> tuple[dict, str]:
         """The verification and the integer semantics it used: ``i64`` or ``unbounded``."""
-        if language in FIXED_WIDTH_I64_LANGUAGES and not _UNSIGNED_INT[language].search(_signature(native)):
+        wide = _WIDE_INT.get(language)
+        if language in FIXED_WIDTH_I64_LANGUAGES and not (wide and wide.search(_signature(native))):
             verification = self.mumei_client.verify(
                 path, report_dir=report_dir, extra_args=[CHECK_I64_OVERFLOW_FLAG]
             )

@@ -626,27 +626,25 @@ def test_a_mumei_without_the_flag_falls_back_to_unbounded_integers():
     assert (entry["outcome"], entry["integer_semantics"]) == ("proven", "unbounded")
 
 
-def test_go_and_rust_ports_with_unsigned_integers_keep_unbounded_integers():
-    rust = "fn bump(x: u64) -> u64 {\n    x + 1\n}\n"
+def test_go_and_rust_ports_with_unsigned_or_mixed_integers_keep_the_check():
+    for language, native in (
+        ("rust", "fn bump(x: u64) -> u64 {\n    x + 1\n}\n"),
+        ("rust", "fn bump(x: i64, tag: u8) -> i64 {\n    x + 1\n}\n"),
+        ("go", "func bump(x uint64) int64 {\n\treturn 1\n}\n"),
+        ("go", "func bump(x []byte, n int) uint {\n\treturn 1\n}\n"),
+        ("go", "func bump(byte int64) int64 {\n\treturn byte + 1\n}\n"),
+    ):
+        mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
+        atom = {**CLAMP, "name": "bump"}
+        (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(native, language, {"atoms": [atom]})
+        assert mumei.verify.call_args.kwargs["extra_args"] == ["--check-i64-overflow"], native
+        assert entry["integer_semantics"] == "i64", native
+
+
+def test_a_rust_port_with_a_128_bit_integer_verifies_unbounded():
+    rust = "fn bump(x: u128) -> u128 {\n    x + 1\n}\n"
     mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
     atom = {**CLAMP, "name": "bump"}
     (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(rust, "rust", {"atoms": [atom]})
     assert "extra_args" not in mumei.verify.call_args.kwargs
     assert entry["integer_semantics"] == "unbounded"
-
-
-def test_a_go_parameter_named_like_an_unsigned_type_keeps_the_i64_check():
-    go = "func bump(byte int64) int64 {\n\treturn byte + 1\n}\n"
-    mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
-    atom = {**CLAMP, "name": "bump"}
-    (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(go, "go", {"atoms": [atom]})
-    assert mumei.verify.call_args.kwargs["extra_args"] == ["--check-i64-overflow"]
-    assert entry["integer_semantics"] == "i64"
-
-
-def test_a_go_unsigned_parameter_or_result_verifies_unbounded():
-    for go in ("func bump(x uint64) int64 {\n\treturn 1\n}\n", "func bump(x []byte, n int) uint {\n\treturn 1\n}\n"):
-        mumei = _stub_mumei({"success": True, "report": {"status": "success"}})
-        atom = {**CLAMP, "name": "bump"}
-        (entry,) = BodyPorter(ScriptedClient('{"body": "x"}'), "m", mumei).port(go, "go", {"atoms": [atom]})
-        assert entry["integer_semantics"] == "unbounded", go
