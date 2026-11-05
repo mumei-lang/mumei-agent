@@ -3784,6 +3784,38 @@ def _first_counterexample_payload(
             }
     return {}
 
+def _python_zero_exit_guards(func: ast.FunctionDef) -> list[tuple[int, str]]:
+    """``(line, expr)`` for each top-level ``if expr == 0: return/raise``.
+
+    Code after such a guard runs only when ``expr`` is non-zero. ``not expr``,
+    ``expr <= 0`` and ``or`` of these count too.
+    """
+
+    def zero_tests(test: ast.expr) -> list[ast.expr]:
+        if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+            return [e for value in test.values for e in zero_tests(value)]
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            return [test.operand]
+        if isinstance(test, ast.Compare) and len(test.ops) == 1:
+            left, op, right = test.left, test.ops[0], test.comparators[0]
+            is_zero = lambda e: isinstance(e, ast.Constant) and e.value == 0  # noqa: E731
+            if is_zero(right) and isinstance(op, (ast.Eq, ast.LtE)):
+                return [left]
+            if is_zero(left) and isinstance(op, (ast.Eq, ast.GtE)):
+                return [right]
+        return []
+
+    guards: list[tuple[int, str]] = []
+    for stmt in func.body:
+        if (
+            isinstance(stmt, ast.If)
+            and not stmt.orelse
+            and isinstance(stmt.body[-1], (ast.Return, ast.Raise))
+        ):
+            guards.extend((stmt.lineno, ast.unparse(e)) for e in zero_tests(stmt.test))
+    return guards
+
+
 def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
@@ -3793,12 +3825,18 @@ def _detect_python_safety_issues(source: str) -> list[ForeignSafetyIssue]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
-        for expr in [ret.value for ret in ast.walk(node) if isinstance(ret, ast.Return) and ret.value is not None]:
+        guards = _python_zero_exit_guards(node)
+        for ret in [ret for ret in ast.walk(node) if isinstance(ret, ast.Return) and ret.value is not None]:
             try:
-                text = ast.unparse(expr)
+                text = ast.unparse(ret.value)
             except ValueError:
                 continue
-            issues.extend(_issues_for_expression(_safe_identifier(node.name), text, "Python"))
+            nonzero = {name for line, name in guards if line < ret.lineno}
+            issues.extend(
+                _issues_for_expression(
+                    _safe_identifier(node.name), text, "Python", guaranteed_nonzero=nonzero
+                )
+            )
         body_text = ast.get_source_segment(source, node)
         if body_text:
             issues.extend(
@@ -6176,6 +6214,8 @@ def _division_safety_issue(
     # ``uintptr(len(locktab))`` and similar casts of compile-time ``len(...)``
     # evaluate to the array's non-zero length.
     stripped = _strip_outer_parentheses(divisor)
+    # Every layer of a cast like ``int32(len(xs))``: a guard may name any of them.
+    unwrapped = {divisor, stripped}
     while re.fullmatch(r"\w+\s*\(.*\)", stripped):
         m = re.match(r"\w+\s*\(\s*(.*)\s*\)\s*$", stripped)
         if not m:
@@ -6186,7 +6226,8 @@ def _division_safety_issue(
         if stripped == inner:
             break
         stripped = inner
-    if guaranteed_nonzero and (divisor in guaranteed_nonzero or stripped in guaranteed_nonzero):
+        unwrapped.add(stripped)
+    if guaranteed_nonzero and unwrapped & guaranteed_nonzero:
         return None
     if float_variables and (divisor in float_variables or stripped in float_variables):
         # Go float division by zero produces +/-Inf or NaN, not a panic.

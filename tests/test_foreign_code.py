@@ -7667,3 +7667,39 @@ contract Token {
         if "no access-control guard" in issue.message
     }
     assert flagged == {"setFeeRecipient"}
+
+
+def test_division_guarded_by_an_early_return_is_not_flagged() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_python_safety_issues
+
+    guarded = (
+        "def share(part: int, whole: int) -> float:\n"
+        "    if whole == 0:\n        return 0.0\n    return part / whole\n"
+        "def per_day(total: int, days: int) -> int:\n"
+        "    if not days or total < 0:\n        raise ValueError\n    return total // days\n"
+    )
+    assert not [i for i in _detect_python_safety_issues(guarded) if "divide" in i.message]
+
+    unguarded = (
+        "def share(part: int, whole: int) -> float:\n"
+        "    if whole == 1:\n        return 0.0\n    return part / whole\n"
+        "def late(part: int, whole: int) -> float:\n"
+        "    return part / whole\n    if whole == 0:\n        return 0.0\n"
+    )
+    flagged = {i.function_name for i in _detect_python_safety_issues(unguarded) if "divide" in i.message}
+    assert flagged == {"share", "late"}
+
+
+def test_go_division_by_a_cast_length_respects_the_length_guard() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "ok"}, "stdout": "{}", "stderr": ""}
+    guarded = (
+        "package main\n\nfunc reorderPoint(total int32, locations []string) int32 {\n"
+        "\tif len(locations) == 0 {\n\t\treturn 0\n\t}\n\treturn total / int32(len(locations))\n}\n"
+    )
+    unguarded = "package main\n\nfunc reorderPoint(total int32, locations []string) int32 {\n\treturn total / int32(len(locations))\n}\n"
+    errors = lambda src: [  # noqa: E731
+        e for e in ForeignCodeVerifier(mumei_client=mumei).verify(src, "go")["errors"] if "divide" in e
+    ]
+    assert errors(guarded) == []
+    assert errors(unguarded)

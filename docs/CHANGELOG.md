@@ -8,6 +8,10 @@
   `msg.value`); passing `msg.sender` to `emit` does not count. On the
   mumei-demo Solidity specimens this drops the advisory on the fixed contracts
   from 21 functions to 2, and keeps it on every access-control defect.
+- Division findings respect an early-exit guard on the divisor. Python now
+  treats `if d == 0: return ...` (also `not d`, `d <= 0`, `or`-chains) before a
+  `return x / d` as making `d` non-zero, and a Go guard on `len(xs)` now covers
+  a cast divisor such as `int32(len(xs))`.
 
 ## Unreleased: audit spec diagnostics
 
