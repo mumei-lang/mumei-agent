@@ -36,7 +36,7 @@ from agent.audit_reporting import (
     _string_value,
 )
 from agent.body_port import _calls, classify, function_source
-from agent.secret_redaction import redact_secrets
+from agent.secret_redaction import REDACTED, redact_secrets, redact_value
 
 ReplayVerdict = Literal[
     "violates", "meets", "outside_requires", "raised", "unexpressible", "unsupported", "inconclusive"
@@ -97,7 +97,7 @@ def coerce_value(raw: object, kind: str) -> object:
         text = str(raw).strip().lower()
         if text in ("true", "false"):
             return text == "true"
-        raise Unexpressible(f"{raw!r} is not a boolean")
+        raise Unexpressible("value is not a boolean")
     if kind == "int_array":
         if isinstance(raw, str):
             try:
@@ -108,7 +108,7 @@ def coerce_value(raw: object, kind: str) -> object:
             raise Unexpressible(f"array value is not a list of at most {MAX_ARRAY_LEN} integers")
         return [coerce_value(x, "int") for x in raw]
     if isinstance(raw, bool):
-        raise Unexpressible(f"{raw!r} is not an integer")
+        raise Unexpressible("value is not an integer")
     if isinstance(raw, int):
         return raw
     text = str(raw).strip().replace("_", "")
@@ -117,7 +117,7 @@ def coerce_value(raw: object, kind: str) -> object:
         return -int(neg.group(1))
     if re.fullmatch(r"-?\d+", text):
         return int(text)
-    raise Unexpressible(f"{raw!r} is not an integer")
+    raise Unexpressible("value is not an integer")
 
 
 def counterexample_input(params: list[Param], counterexample: dict[str, object]) -> dict[str, object]:
@@ -336,6 +336,9 @@ def _rust_literal(value: object, native_type: str) -> str:
     return f"({value}{t})" if int(value) < 0 else f"{value}{t}"
 
 
+_ERROR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,63}|unreadable harness output")
+
+
 def _parse_marked(stdout: str) -> list[dict[str, Any]]:
     rows = []
     # Not splitlines(): it also splits on the record separator in MARK.
@@ -343,9 +346,14 @@ def _parse_marked(stdout: str) -> list[dict[str, Any]]:
         idx = line.find(MARK)
         if idx >= 0:
             try:
-                rows.append(json.loads(line[idx + len(MARK):]))
+                row = json.loads(line[idx + len(MARK):])
             except json.JSONDecodeError:
-                rows.append({"ok": False, "error": "unreadable harness output"})
+                row = {"ok": False, "error": "unreadable harness output"}
+            if isinstance(row, dict) and not row.get("ok", False):
+                # Keep only a type name: otherwise the audited code picks the text.
+                error = row.get("error")
+                row["error"] = error if isinstance(error, str) and _ERROR_NAME.fullmatch(error) else "exception"
+            rows.append(row)
     return rows
 
 
@@ -410,6 +418,15 @@ def _go_bin() -> str | None:
 class NativeRunner:
     """Call one function of a source file on a batch of argument lists."""
 
+    def __init__(self) -> None:
+        self._cargo_target: tempfile.TemporaryDirectory[str] | None = None
+
+    def _cargo_env(self) -> dict[str, str]:
+        # One target directory per runner, so the crate's dependencies build once per audit.
+        if self._cargo_target is None:
+            self._cargo_target = tempfile.TemporaryDirectory(prefix="mumei-native-replay-target-")
+        return {**os.environ, "CARGO_TARGET_DIR": self._cargo_target.name}
+
     def run(
         self, language: str, source_path: Path, source_code: str, function: str, calls: list[list[object]]
     ) -> list[dict[str, Any]]:
@@ -450,6 +467,10 @@ class NativeRunner:
         with tempfile.TemporaryDirectory(prefix="mumei-native-replay-") as tmp:
             work = Path(tmp) / "src"
             shutil.copytree(source_path.parent, work, ignore=_IGNORE)
+            modules = _find_up(source_path.parent, "node_modules")
+            if modules is not None:
+                # Node looks for packages in the parent directories of the copy.
+                (Path(tmp) / "node_modules").symlink_to(modules / "node_modules", target_is_directory=True)
             target = work / source_path.name
             target.write_text(
                 target.read_text(encoding="utf-8") + f"\nexport {{ {function} as __mumeiNativeReplayTarget }};\n",
@@ -502,12 +523,15 @@ class NativeRunner:
             f"\tfmt.Println({json.dumps(MARK)} + string(out))\n}}\n\n"
             "func TestMumeiNativeReplay(t *testing.T) {\n" + "\n".join(lines) + "\n}\n"
         )
-        root = _find_up(source_path.parent, "go.mod") or source_path.parent
+        module_root = _find_up(source_path.parent, "go.mod")
+        root = module_root or source_path.parent
         if not lines:
             return _merge([], skipped)
         with tempfile.TemporaryDirectory(prefix="mumei-native-replay-") as tmp:
             work = Path(tmp) / "module"
             shutil.copytree(root, work, ignore=_IGNORE)
+            if module_root is None:
+                (work / "go.mod").write_text("module mumeinativereplay\n\ngo 1.18\n", encoding="utf-8")
             package_dir = work / source_path.parent.relative_to(root)
             (package_dir / "zz_mumei_native_replay_test.go").write_text(harness, encoding="utf-8")
             env = dict(os.environ)
@@ -553,7 +577,7 @@ class NativeRunner:
             proc = subprocess.run(
                 ["cargo", "test", "--release", "--offline", "-q", "mumei_native_replay", "--", "--nocapture",
                  "--test-threads=1"],
-                capture_output=True, text=True, cwd=work, timeout=BUILD_TIMEOUT,
+                capture_output=True, text=True, cwd=work, env=self._cargo_env(), timeout=BUILD_TIMEOUT,
             )
         rows = _parse_marked(proc.stdout)
         if len(rows) != len(lines):
@@ -622,11 +646,13 @@ class NativeReplayer:
         counterexample_values: list[dict[str, object]] = (),  # type: ignore[assignment]
     ) -> list[dict[str, object]]:
         atoms = _dict_list(forge_task_spec.get("atoms"))
+        if not atoms and forge_task_spec.get("name"):
+            atoms = [forge_task_spec]
         out: list[dict[str, object]] = []
         for atom in atoms:
             out.extend(self._replay_atom(source_path, source_code, language, atom, atoms, body_ports,
                                          counterexample_values))
-        return out
+        return [_redact_entry(e) for e in out]
 
     def _replay_atom(
         self,
@@ -757,6 +783,21 @@ def _is_bool(atom: dict[str, object]) -> bool:
     return _kind(_string_value(atom.get("return_type"), "i64")) == "bool"
 
 
+def _redact_scalars(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _redact_scalars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_scalars(v) for v in value]
+    if isinstance(value, int) and not isinstance(value, bool) and redact_secrets(str(value)) != str(value):
+        return REDACTED
+    return value
+
+
+def _redact_entry(entry: dict[str, object]) -> dict[str, object]:
+    """The entry with sensitive values removed, numbers included."""
+    return redact_value(_redact_scalars(entry))
+
+
 def _entry(function: str, values: object, source: str, verdict: str, reason: str) -> dict[str, object]:
     return {"function": function, "input": values, "source": source, "native": None, "verdict": verdict,
             "reason": reason}
@@ -769,11 +810,11 @@ def native_replay_violations(replays: list[dict[str, object]]) -> list[str]:
         if r.get("verdict") != "violates":
             continue
         native = r.get("native") or {}
-        out.append(
+        out.append(redact_secrets(
             f"native-replay: {r['function']}: the native function breaks the extracted contract on "
             f"{json.dumps(r['input'], sort_keys=True)} (returned {json.dumps(native.get('value'))}; "
             f"input from {r['source']})"
-        )
+        ))
     return out
 
 

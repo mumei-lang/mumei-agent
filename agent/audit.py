@@ -496,6 +496,13 @@ class AuditPipeline:
                     verification_violations[:] = [
                         v for v in verification_violations if not v.startswith(f"body-port: {name}:")
                     ]
+                    counterexample_values[:] = [
+                        c for c in counterexample_values
+                        if not (c.get("function_name") == name and any(
+                            p.get("function") == name and p.get("counterexample") == c.get("counterexample")
+                            for p in body_ports
+                        ))
+                    ]
                 confirmed = native_replay_violations(native_replays)
                 verification_violations.extend(confirmed)
                 if confirmed or any(v.startswith("body-port: ") for v in verification_violations):

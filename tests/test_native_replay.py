@@ -58,6 +58,8 @@ class FakeMumei:
         body = re.search(r"body: \{\s*(.+?)\s*\}", text, re.S).group(1)
         if "ensures: true;" in text:
             return PROVEN
+        if not re.fullmatch(r"-?\d+|\(0 - \d+\)|true|false", body):
+            return {"success": False, "report": {"status": "error"}}
         if "hi" in pins:
             return PROVEN if value(body) <= value(pins["hi"]) else REFUTED
         return PROVEN
@@ -279,3 +281,67 @@ def test_a_port_refutation_the_native_code_meets_is_dropped(tmp_path):
 def test_cli_flag():
     assert build_parser().parse_args(["--code-file", "f.py", "--enable-native-replay"]).enable_native_replay is True
     assert build_parser().parse_args(["--code-file", "f.py"]).enable_native_replay is False
+
+
+SENTINEL_NUMBER = "987654321012345"
+
+
+def test_unparsable_counterexample_values_are_not_echoed():
+    with pytest.raises(Unexpressible) as exc:
+        coerce_value("sk-FAKE-SENTINEL-not-a-number", "int")
+    assert "SENTINEL" not in str(exc.value)
+
+
+def test_native_error_text_is_reduced_to_a_type_name(tmp_path):
+    from agent.native_replay import MARK, _parse_marked
+
+    rows = _parse_marked(
+        f'{MARK}{{"ok": false, "error": "sk-FAKE-SENTINEL leaked here"}}\n{MARK}{{"ok": false, "error": "RangeError"}}\n'
+    )
+    assert rows == [{"ok": False, "error": "exception"}, {"ok": False, "error": "RangeError"}]
+
+
+def test_sensitive_values_are_redacted_from_native_results(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", SENTINEL_NUMBER)
+    out, _ = _replay(tmp_path, f"def clamp(x, hi):\n    return {SENTINEL_NUMBER}\n")
+    assert out and SENTINEL_NUMBER not in json.dumps(out)
+    assert all(SENTINEL_NUMBER not in v for v in native_replay_violations(out))
+
+
+def test_a_single_atom_spec_is_replayed(tmp_path):
+    source = tmp_path / "clamp.py"
+    source.write_text(PY_CLAMP, encoding="utf-8")
+    out = NativeReplayer(FakeMumei()).replay(source, PY_CLAMP, "python", dict(CLAMP))
+    assert any(r["verdict"] == "violates" for r in out)
+
+
+@pytest.mark.skipif(shutil.which("go") is None and not (Path.home() / ".local/go/bin/go").exists(),
+                    reason="go is not installed")
+def test_go_file_outside_a_module_is_replayed(tmp_path):
+    source = tmp_path / "calc.go"
+    source.write_text("package calc\n\nfunc Add(a int64, b int64) int64 {\n\treturn a + b\n}\n", encoding="utf-8")
+    rows = NativeRunner().run("go", source, source.read_text(), "Add", [[1, 2]])
+    assert rows == [{"ok": True, "value": 3}]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_typescript_copy_sees_the_project_node_modules(tmp_path):
+    pkg = tmp_path / "node_modules" / "mumei-fake-dep"
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text('{"name": "mumei-fake-dep", "type": "module", "main": "index.js"}')
+    (pkg / "index.js").write_text("export const one = 1;\n")
+    (tmp_path / "package.json").write_text('{"type": "module"}')
+    source = tmp_path / "calc.ts"
+    source.write_text('import { one } from "mumei-fake-dep";\nfunction inc(a: number): number {\n  return a + one;\n}\n')
+    assert NativeRunner().run("typescript", source, source.read_text(), "inc", [[1]]) == [{"ok": True, "value": 2}]
+
+
+def test_a_dropped_port_refutation_leaves_no_counterexample(tmp_path):
+    port = {"function": "clamp", "outcome": "refuted", "reason": "Postcondition violated", "body": "x",
+            "counterexample": {"x": "5", "hi": "2"}}
+    replayer = MagicMock()
+    replayer.replay.return_value = [{"function": "clamp", "input": {"x": 5, "hi": 2}, "source": "body_port",
+                                     "native": {"ok": True, "value": 2}, "verdict": "meets", "reason": ""}]
+    pipeline, source = _pipeline(tmp_path, replayer, _porter(port))
+    result = pipeline.audit_file(source, "python", enable_body_port=True, enable_native_replay=True)
+    assert result.counterexample_values == []
