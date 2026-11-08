@@ -36,6 +36,58 @@ and shared acceptance rules, not external-tool orchestration. Do not run Z3
 and all installed plugins in parallel by default: comparisons require a stated
 purpose, permitted user policy, budget and result-reconciliation rules.
 
+### C04/C11 first supported planning slice
+
+`agent.verification_planner` is an opt-in, in-memory, single-route planning API.
+`AdapterRegistry.register` accepts user descriptors and requires explicit
+replacement for an existing ID. `RouteRequirements` is a capability query,
+not a complete executable obligation. Profile/method/fragment/target constraints,
+protocol compatibility, caller-supplied availability/version observations,
+disable/location policy and exact tool-version pins filter candidates. Priority
+then adapter ID break ties deterministically. Registering a descriptor alone
+does not make it available or trusted; absent/unknown observations fail closed.
+
+Explicit selection overrides priority. An unavailable explicit choice produces
+no selection unless `allow_fallback=True`; any replacement must still satisfy
+the original profile, method and other query constraints. A plan selects at most
+one adapter, never all installed adapters. It exposes every candidate's reasons,
+planned replacement provenance and effective timeout/memory ceilings, capped by
+both user policy and descriptor limits. These are declared budgets, not resource
+enforcement or a promise of successful verification.
+
+`VerificationPlan.to_dict()` emits versioned, deterministic metadata only. It
+has no verifier verdict, grade, command, path-to-execute, environment, arbitrary
+options or endpoint channel. Metadata and runtime observations remain untrusted
+claims; selection cannot bypass Mumei's common evidence acceptance or Lean gates.
+
+This slice does **not** load plugins, discover/probe tools, launch processes,
+read configuration/environment/source files, enforce authorization/resources,
+perform runtime fallback, parse adapter results or change existing CLI/MCP/Z3
+routes. Source/obligation/evidence ingestion, scope/bounds/assumption-sensitive
+assurance policy, observation freshness and full execution/fallback history remain
+open C02/C03/C04/C11 work. The API is not a production verification dispatcher.
+No external verifier is adopted. Regression fixtures use synthetic descriptors.
+
+```python
+from agent.verification_planner import (
+    AdapterDescriptor, AdapterRegistry, PlannerPolicy, RouteRequirements,
+    RuntimeObservation,
+)
+
+registry = AdapterRegistry()
+registry.register(AdapterDescriptor(
+    "user.adapter", "1.0.0", frozenset({"user.approved-profile/v1"}),
+    frozenset({"deductive_proof"}),
+))
+plan = registry.plan(
+    RouteRequirements("user.approved-profile/v1", "deductive_proof"),
+    PlannerPolicy(selected_adapter="user.adapter"),
+    # An illustrative host observation, not an actual tool probe or proof.
+    (RuntimeObservation("user.adapter", "available", "1.0.0"),),
+)
+assert plan.selected is not None
+```
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
