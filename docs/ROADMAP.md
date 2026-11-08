@@ -158,6 +158,54 @@ external verifier is adopted. Project/import resolution, full Go and other
 language coverage, C07 interprocedural summaries and C09 LLVM translation
 validation remain open, in that order. C06 is **partially delivered**, not done.
 
+### C07 first scalar parameter-dependency summaries
+
+`agent/go_interprocedural.py` adds an opt-in, in-process consumer of trusted,
+reader-checked C06 Go snapshots. It joins source-mapped C05 CFGs and composes
+parameter dependencies through compiler-resolved local calls. Syntax comes from
+Tree-sitter, but identifier/callee resolution comes only from C06 bindings.
+It does not launch the compiler, install tools or change audit/CLI/MCP routes.
+
+The fragment is deliberately small: an ordinary function with scalar integer
+or Boolean parameters, one unnamed scalar result and a body containing exactly
+one explicit return expression. Supported expressions are parameter reads,
+integer/rune literals, unshadowed Boolean constants, parentheses, selected pure
+unary/binary operators and supported local calls. Named scalar types and target
+widths retain their compiler identity. For example, `Pick(a,b) = a` composed
+with `F(x,y) = Pick(y,x)` yields caller parameter dependency `{1}`. Nested calls
+record source-byte spans, target identities and formal-to-actual dependency
+sets. Every argument must be supported even if the callee ignores its value.
+
+This is a conservative dependency analysis, **not value evaluation, equality,
+correctness or proof**: `x*0` and `x-x` still depend on parameter `x` in the
+reported overapproximation. An empty dependency set means parameter-independent
+within the fragment, not a known constant. An unavailable result is `None`,
+never an empty set; failed functions retain gaps but no partial call transfers.
+
+Recursion/cycles, opaque/missing/external/indirect edges, methods, generics,
+variadics, named/multiple results, statements/branches/loops, closures,
+defer/concurrency, conversions/builtins, division/remainder/shifts, floats,
+global/constant reads, pointers, aliasing and resource operations are unsupported.
+Unsupported callees block their callers, not unrelated supported functions.
+The effect tag `none_in_supported_fragment` describes only the whitelisted
+function invocation; otherwise effects are `unknown`. It does not verify
+package initialization, the process/runtime, resource state or authority.
+
+Source/profile/language/target/compiler and the complete consumed snapshot
+contribute to the context key. `GoSummarySet.for_function` requires the current
+source and snapshot: any unit change, including a changed callee with unchanged
+caller text, invalidates reuse. These hashes are freshness/consistency identities,
+not authentication. There is no persistent cache or evidence acceptance route.
+The initial budgets are 128 functions, 48 levels of active expansion/syntax
+depth and 2,048 syntax/expression nodes per function. Limit exhaustion blocks
+analysis rather than supplying an effect-free or dependency-free result.
+
+C07 is **partially delivered**, not done. Statement-level/fixed-point summaries,
+cross-file dependencies, actual alias/resource semantics and production audit
+integration remain open; existing function-local dataflow stays authoritative.
+No verification grade, Lean trust gate or external verifier changes. C09 LLVM
+translation validation remains separate from these source-analysis summaries.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
