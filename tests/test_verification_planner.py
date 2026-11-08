@@ -15,6 +15,7 @@ from agent.verification_planner import (
     ResultContract,
     RouteRequirements,
     RuntimeObservation,
+    SettingSpec,
 )
 
 PROFILE = "mumei.pure-i64-comparison/v1"
@@ -541,3 +542,411 @@ def test_deterministic_contract_serialization_uses_only_approved_labels_and_no_i
     ]
     assert data["request"]["result_contract"] == data["selected"]["result_contract"]
     assert json.dumps(data) == json.dumps(result.to_dict())
+
+
+SPECS = (
+    SettingSpec("cache", "boolean", False),
+    SettingSpec("rounds", "integer", 3, minimum=1, maximum=10),
+    SettingSpec(
+        "strategy", "choice", "balanced", choices=frozenset({"balanced", "eager"})
+    ),
+)
+
+
+def configured(**changes):
+    return adapter(setting_specs=SPECS, **changes)
+
+
+def configured_policy(values=(), **changes):
+    return PlannerPolicy(adapter_settings=(("fixture", values),), **changes)
+
+
+def test_setting_defaults_and_overrides_resolve_only_approved_effective_projection():
+    defaults = plan(configured()).selected
+    explicit = plan(configured(), configured_policy((("rounds", 3),))).selected
+    assert dict(defaults.adapter_settings) == {
+        "cache": False,
+        "rounds": 3,
+        "strategy": "balanced",
+    }
+    assert defaults.configuration_fingerprint == explicit.configuration_fingerprint
+    assert len(defaults.configuration_fingerprint) == 64
+    result = plan(configured(), configured_policy((("rounds", 8), ("cache", True))))
+    data = result.to_dict()
+    assert data["selected"]["adapter_settings"] == {
+        "cache": True,
+        "rounds": 8,
+        "strategy": "balanced",
+    }
+    assert (
+        data["selected"]["configuration_fingerprint"]
+        != defaults.configuration_fingerprint
+    )
+    assert "adapter_settings" not in data["policy"]
+    assert json.loads(json.dumps(data))["selected"] == data["selected"]
+
+
+@pytest.mark.parametrize("value", [-10, 0, 10])
+def test_declared_integer_endpoints_and_negative_values_are_not_reinterpreted(value):
+    spec = SettingSpec("offset", "integer", value, minimum=-10, maximum=10)
+    assert plan(adapter(setting_specs=(spec,))).selected.adapter_settings == (
+        ("offset", value),
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"kind": "text"},
+        {"kind": []},
+        {"default": "true"},
+        {"default": 1},
+        {"minimum": 0},
+        {"choices": frozenset({"yes"})},
+        {"choices": []},
+    ],
+)
+def test_invalid_boolean_schema_is_rejected(changes):
+    with pytest.raises(ValueError):
+        replace(SPECS[0], **changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"minimum": None},
+        {"maximum": None},
+        {"minimum": True},
+        {"maximum": 1.0},
+        {"minimum": 11},
+        {"minimum": -(2**63) - 1},
+        {"maximum": 2**63},
+        {"default": True},
+        {"default": 0},
+        {"default": 11},
+        {"default": "3"},
+        {"choices": frozenset({"small"})},
+    ],
+)
+def test_invalid_integer_schema_is_rejected(changes):
+    with pytest.raises(ValueError):
+        replace(SPECS[1], **changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"choices": frozenset()},
+        {"choices": {"balanced"}},
+        {"choices": frozenset({1})},
+        {"choices": frozenset({"x" * 65})},
+        {"choices": frozenset({f"c{i}" for i in range(33)})},
+        {"default": "missing"},
+        {"default": True},
+        {"minimum": 0},
+    ],
+)
+def test_invalid_choice_schema_is_rejected(changes):
+    with pytest.raises(ValueError):
+        replace(SPECS[2], **changes)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "api_key",
+        "token",
+        "secret",
+        "password",
+        "credentials",
+        "auth",
+        "authorization",
+        "endpoint",
+        "url",
+        "path",
+        "command",
+        "argv",
+        "args",
+        "env",
+        "header",
+        "executable",
+        "",
+        "UpperCase",
+        "dotted.name",
+        "hyphen-name",
+        "x" * 65,
+    ],
+)
+def test_obvious_sensitive_or_invocation_channels_and_invalid_names_are_rejected(name):
+    with pytest.raises(ValueError):
+        replace(SPECS[0], name=name)
+
+
+@pytest.mark.parametrize(
+    "specs",
+    [
+        list(SPECS),
+        ("bad",),
+        (SPECS[0], SPECS[0]),
+        tuple(SettingSpec(f"s{i}", "boolean", False) for i in range(33)),
+    ],
+)
+def test_descriptor_schemas_are_immutable_unique_and_bounded(specs):
+    with pytest.raises(ValueError):
+        adapter(setting_specs=specs)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        [],
+        ([],),
+        (("fixture", []),),
+        (("fixture", ([],)),),
+        (("fixture", (("cache", True, False),)),),
+        (("fixture", (("cache", True), ("cache", False))),),
+        (("fixture", ()), ("fixture", ())),
+        (("fixture", (("cache", {}),)),),
+        (("fixture", (("api_key", "unused"),)),),
+        (("fixture", tuple((f"s{i}", True) for i in range(33))),),
+    ],
+)
+def test_malformed_override_collections_are_rejected(settings):
+    with pytest.raises(ValueError):
+        PlannerPolicy(adapter_settings=settings)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        (("unknown", True),),
+        (("cache", 1),),
+        (("cache", "true"),),
+        (("rounds", True),),
+        (("rounds", 0),),
+        (("rounds", 11),),
+        (("rounds", "3"),),
+        (("strategy", "other"),),
+        (("strategy", True),),
+    ],
+)
+def test_unknown_or_invalid_override_never_becomes_a_route_or_fallback(values):
+    with pytest.raises(ValueError):
+        plan(configured(), configured_policy(values, allow_fallback=True))
+
+
+def test_unknown_adapter_and_legacy_undeclared_option_are_not_wildcards():
+    with pytest.raises(ValueError):
+        plan(configured(), PlannerPolicy(adapter_settings=(("unknown", ()),)))
+    with pytest.raises(ValueError):
+        plan(adapter(), configured_policy((("cache", True),)))
+
+
+def test_invalid_disabled_adapter_setting_is_not_silently_ignored():
+    with pytest.raises(ValueError):
+        plan(configured(enabled=False), configured_policy((("rounds", 0),)))
+
+
+def test_fallback_resolves_its_own_settings_without_borrowing_from_selected_adapter():
+    registry = AdapterRegistry()
+    registry.register(configured(enabled=False))
+    registry.register(adapter("other", setting_specs=(replace(SPECS[1], default=6),)))
+    policy = configured_policy(
+        (("rounds", 9),), selected_adapter="fixture", allow_fallback=True
+    )
+    observations = (observed(), observed("other"))
+    result = registry.plan(REQUEST, policy, observations)
+    assert result.fallback_from == "fixture"
+    assert result.selected.adapter_id == "other"
+    assert result.selected.adapter_settings == (("rounds", 6),)
+    overridden = replace(
+        policy,
+        adapter_settings=policy.adapter_settings + (("other", (("rounds", 7),)),),
+    )
+    assert registry.plan(
+        REQUEST, overridden, observations
+    ).selected.adapter_settings == (("rounds", 7),)
+    assert (
+        registry.plan(
+            REQUEST, replace(policy, allow_fallback=False), observations
+        ).selected
+        is None
+    )
+
+
+def test_settings_do_not_weaken_exact_result_contract_requirement():
+    registry = AdapterRegistry()
+    registry.register(
+        configured(
+            result_contracts=(replace(CONTRACT, correspondence_status="unverified"),)
+        )
+    )
+    registry.register(
+        adapter("other", setting_specs=SPECS, result_contracts=(CONTRACT,))
+    )
+    result = registry.plan(
+        constrained_request(),
+        configured_policy(selected_adapter="fixture", allow_fallback=True),
+        (observed(), observed("other")),
+    )
+    assert result.selected.adapter_id == "other"
+    assert result.selected.result_contract == CONTRACT
+
+
+@pytest.mark.parametrize(
+    "changes,observation,policy",
+    [
+        ({"enabled": False}, observed(), PlannerPolicy()),
+        ({"protocol_version": "other/v2"}, observed(), PlannerPolicy()),
+        ({"location": "remote"}, observed(), PlannerPolicy()),
+        ({}, observed(availability="missing"), PlannerPolicy()),
+        ({}, observed(), PlannerPolicy(tool_version_pins=(("fixture", "4.12.0"),))),
+        ({}, observed(), PlannerPolicy(disabled_adapters=frozenset({"fixture"}))),
+    ],
+)
+def test_configured_candidates_still_obey_all_preflight_filters(
+    changes, observation, policy
+):
+    assert plan(configured(**changes), policy, observation).selected is None
+
+
+def test_fingerprint_is_independent_of_schema_choice_and_override_order():
+    a = plan(configured(), configured_policy((("rounds", 4), ("cache", True))))
+    b = plan(
+        adapter(setting_specs=tuple(reversed(SPECS))),
+        configured_policy((("cache", True), ("rounds", 4))),
+    )
+    assert a.selected.configuration_fingerprint == b.selected.configuration_fingerprint
+    assert a.to_dict()["selected"] == b.to_dict()["selected"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "schema",
+        "default",
+        "choice",
+        "adapter",
+        "tool",
+        "identity",
+        "location",
+        "budget",
+        "profile",
+        "contract",
+    ],
+)
+def test_fingerprint_binds_approved_schema_effective_settings_and_selected_context(
+    change,
+):
+    descriptor, policy, observation, request = (
+        configured(),
+        PlannerPolicy(),
+        observed(),
+        REQUEST,
+    )
+    original = plan(
+        descriptor, policy, observation, request
+    ).selected.configuration_fingerprint
+    if change == "schema":
+        descriptor = replace(
+            descriptor,
+            setting_specs=(replace(SPECS[1], maximum=11), SPECS[0], SPECS[2]),
+        )
+    elif change == "default":
+        descriptor = replace(
+            descriptor,
+            setting_specs=(replace(SPECS[0], default=True), SPECS[1], SPECS[2]),
+        )
+    elif change == "choice":
+        descriptor = replace(
+            descriptor,
+            setting_specs=(
+                *SPECS[:2],
+                replace(SPECS[2], choices=SPECS[2].choices | {"lazy"}),
+            ),
+        )
+    elif change == "adapter":
+        descriptor = replace(descriptor, adapter_version="1.0.1")
+    elif change == "tool":
+        observation = replace(observation, tool_version="4.13.1")
+    elif change == "identity":
+        descriptor = replace(descriptor, adapter_id="other")
+        observation = observed("other")
+    elif change == "location":
+        descriptor = replace(descriptor, location="container")
+        policy = replace(policy, allowed_locations=frozenset({"container"}))
+    elif change == "budget":
+        policy = replace(policy, timeout_ms=100)
+    elif change == "profile":
+        request = replace(request, profile="user.other/v1")
+        descriptor = replace(descriptor, profiles=frozenset({request.profile}))
+    else:
+        request = constrained_request()
+        descriptor = replace(descriptor, result_contracts=(CONTRACT,))
+    changed = plan(
+        descriptor, policy, observation, request
+    ).selected.configuration_fingerprint
+    assert changed != original
+
+
+def test_fingerprint_uses_effective_not_requested_budget():
+    a = plan(configured(max_timeout_ms=100), PlannerPolicy(timeout_ms=500))
+    b = plan(configured(max_timeout_ms=100), PlannerPolicy(timeout_ms=1000))
+    assert a.selected.configuration_fingerprint == b.selected.configuration_fingerprint
+
+
+def test_schema_replacement_invalidates_old_override_instead_of_silently_defaulting():
+    registry = AdapterRegistry()
+    registry.register(configured())
+    policy = configured_policy((("rounds", 8),))
+    assert registry.plan(REQUEST, policy, (observed(),)).selected is not None
+    registry.register(
+        adapter(setting_specs=(replace(SPECS[1], maximum=5),)), replace=True
+    )
+    with pytest.raises(ValueError):
+        registry.plan(REQUEST, policy, (observed(),))
+
+
+def test_legacy_json_has_no_silent_configuration_fields():
+    data = plan().to_dict()
+    assert "configuration_fingerprint" not in data["selected"]
+    assert "adapter_settings" not in data["selected"]
+    assert plan().selected.configuration_fingerprint is None
+
+
+def test_rejected_raw_value_is_neither_logged_serialized_fingerprinted_nor_repr_echoed(
+    monkeypatch, capsys
+):
+    sentinel = "FAKE_SETTING_DO_NOT_ECHO"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid setting must not reach the fingerprint")
+
+    monkeypatch.setattr("agent.verification_planner.hashlib.sha256", forbidden)
+    policy = configured_policy((("strategy", sentinel),))
+    assert sentinel not in repr(policy)
+    with pytest.raises(ValueError) as error:
+        plan(configured(), policy)
+    assert sentinel not in str(error.value)
+    output = capsys.readouterr()
+    assert sentinel not in output.out + output.err
+
+
+def test_settings_planning_is_pure_and_never_promotes_approval(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("settings planning must remain metadata-only")
+
+    monkeypatch.setattr(os, "getenv", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    data = plan(configured(), configured_policy((("cache", True),))).to_dict()
+    for key in (
+        "proved",
+        "verified",
+        "grade",
+        "environment",
+        "command",
+        "acceptance",
+        "permission",
+    ):
+        assert f'"{key}"' not in json.dumps(data)

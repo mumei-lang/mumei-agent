@@ -88,6 +88,57 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C04/C11 typed configuration follow-up
+
+The opt-in planner now accepts host-reviewed non-secret `SettingSpec` declarations
+per descriptor: strict Boolean, explicitly bounded signed-64-bit integer, or a
+closed set of approved identifier choices. Each declaration supplies a valid
+default. Schemas and overrides are immutable, unique by name and limited to 32
+settings; choice sets are also limited to 32. Names and choices are bounded.
+There is no free-text, file, environment or invocation-argument setting type.
+Obvious credential, endpoint, path and command-channel names are rejected.
+This is not a secret detector: the host must review every declared default and
+choice as non-secret metadata before registration.
+
+`PlannerPolicy.adapter_settings` supplies per-adapter explicit overrides after
+registered defaults. Unknown adapters/options, duplicate entries and invalid
+types/ranges/choices fail with static diagnostics before selection, including
+settings for disabled/ineligible adapters. They cannot silently trigger fallback
+or become a wildcard. Permitted preflight fallback resolves the destination's
+own schema, defaults and explicit overrides; it never copies the original
+adapter's values or relaxes the exact result contract.
+
+```python
+from agent.verification_planner import PlannerPolicy, SettingSpec
+
+mode = SettingSpec(
+    "search_mode", "choice", "balanced",
+    choices=frozenset({"balanced", "eager"}),
+)
+# Register a descriptor with setting_specs=(mode,), then plan explicitly:
+policy = PlannerPolicy(
+    adapter_settings=(("user.fixture", (("search_mode", "eager"),)),),
+)
+```
+
+For a selected descriptor with a nonempty schema, effective settings expose only
+the sorted approved values plus a SHA-256 `configuration_fingerprint` over a
+canonical `mumei.adapter-configuration/v1` projection. It binds the registered
+schema (including defaults/bounds/choices), effective values/budgets, selected
+adapter/protocol/tool-version/location and full capability/result-contract query.
+Explicitly restating a default, reordering declarations or requesting a budget
+above the same effective cap does not change it. Changed schemas/selected
+context do. Raw policy overrides are omitted from serialized policy and repr;
+invalid values never reach hashing. Schema-less legacy selected JSON stays
+unchanged. The fingerprint is not a Core Evidence configuration identity,
+authenticity check, source identity, execution receipt or acceptance decision.
+
+This is partial C04/C11 planning and C13 regression coverage. There is no config
+file/environment lookup, plugin discovery, tool installation/invocation, secret
+transport, permission grant, resource enforcement, runtime reconciliation or
+Evidence validation/acceptance. No production route, audit key, grade, Lean
+gate, LLVM/native guarantee or WASM policy changes.
+
 ### C04/C11 explicit result-contract routing
 
 `ResultContract` extends that metadata-only API with an optional, exact required
