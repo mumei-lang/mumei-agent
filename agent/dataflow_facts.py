@@ -51,7 +51,7 @@ import re
 from dataclasses import dataclass, field
 from fractions import Fraction
 
-from agent import tree_sitter_extract
+from agent import control_flow, tree_sitter_extract
 
 _MAX_I64 = 9_223_372_036_854_775_807
 _MIN_I64 = -9_223_372_036_854_775_808
@@ -1026,6 +1026,20 @@ class FunctionDataflow:
     return_facts: dict[str, PathFacts]
     # Facts holding at the fall-through end of the body (no explicit return).
     issues: tuple[DataflowIssue, ...] = ()
+    cfg: control_flow.ControlFlowGraph | None = None
+    cfg_gaps: tuple[control_flow.CFGGap, ...] = ()
+    return_site_facts: dict[int, PathFacts] = field(default_factory=dict)
+
+    def facts_for_return(self, node_id: int) -> PathFacts | None:
+        """Existing walker facts at one CFG return site, not a CFG-solver result."""
+        if self.cfg is None or not 0 <= node_id < len(self.cfg.nodes):
+            return None
+        if node_id not in self.cfg.reachable():
+            return None
+        node = self.cfg.nodes[node_id]
+        if node.kind != "return" or node.span is None:
+            return None
+        return self.return_site_facts.get(node.span.start)
 
     def facts_for_expression(self, expression: str) -> PathFacts | None:
         """Return the facts at the return(s) of ``expression`` or ``None`` when unknown."""
@@ -1069,6 +1083,7 @@ class _Walker:
         self.body = body
         self.unreliable = set(tree.closure_assigned) | set(tree.address_taken)
         self.return_facts: dict[str, list[_Env]] = {}
+        self.return_site_facts: dict[int, list[_Env]] = {}
         self.issues: list[DataflowIssue] = []
         # Contract-referenced outputs: named results and ``*T`` params named
         # by the function's ``ensures`` doc-comment contract.
@@ -1443,6 +1458,7 @@ class _Walker:
                     )
 
     def _on_return(self, statement: tree_sitter_extract.Statement, env: _Env) -> None:
+        self.return_site_facts.setdefault(statement.start, []).append(env.copy())
         keys = set()
         joined = _norm(", ".join(statement.values))
         if joined:
@@ -2332,7 +2348,6 @@ class _Walker:
                     DataflowIssue("unlock_of_unlocked", subject, value.strip(), offset)
                 )
             return
-        was_locked = ("lock", subject) in env.held
         was_unlocked = ("mutex_unlocked", subject) in env.held
         # ``Unlock``/``Close`` end the state but never initialise the variable
         # itself, so nil-able markers (``var f *os.File`` stays nil) survive.
@@ -2376,10 +2391,20 @@ class _Walker:
             for other in envs[1:]:
                 merged = merged.merge(other)
             return_facts[key] = _freeze(merged)
+        return_site_facts: dict[int, PathFacts] = {}
+        for offset, envs in self.return_site_facts.items():
+            merged = envs[0]
+            for other in envs[1:]:
+                merged = merged.merge(other)
+            return_site_facts[offset] = _freeze(merged)
+        construction = control_flow._from_tree(self.body, self.tree)
         return FunctionDataflow(
             constants=dict(self.constants),
             return_facts=return_facts,
             issues=tuple(self.issues),
+            cfg=construction.graph,
+            cfg_gaps=construction.gaps,
+            return_site_facts=return_site_facts,
         )
 
 
