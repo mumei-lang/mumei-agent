@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Callable
 
@@ -1048,6 +1048,7 @@ class Statement:
     orelse: tuple["Statement", ...] = ()
     post: tuple["Statement", ...] = ()
     has_tag: bool = False
+    labeled: bool = False
 
 
 _GO_TERMINATING_CALLS = re.compile(
@@ -1302,7 +1303,8 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
             if child.type != "label_name":
                 inner = child
         if inner is not None:
-            return _go_statement(source_bytes, inner, base, offsets)
+            statement = _go_statement(source_bytes, inner, base, offsets)
+            return replace(statement, labeled=True) if statement is not None else None
         return None
     if kind == "func_literal":
         return Statement(

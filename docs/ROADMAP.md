@@ -88,6 +88,32 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C05 first source-mapped Go CFG slice
+
+`agent.control_flow.build_go_cfg` builds the `mumei.go-explicit-normal-flow/v1`
+profile from the existing statement extractor: assignments/declarations, blocks,
+if/else and initializers, for/range loops, unlabeled break/continue and explicit
+returns. Guard edges preserve true/false alternatives; continue reaches the
+loop post clause and break reaches the following statement. Nodes bind to a
+body hash and half-open, body-relative Unicode-codepoint spans, not byte offsets
+or resolved source-file identities. Calls are opaque, normally-returning steps;
+this is not an interprocedural, exceptional-flow or concurrency model.
+
+Unsupported switch/select, defer/go, heuristic termination, labels/goto and
+other statements return explicit source-mapped gaps **without** a partial
+graph. Parse/parser unavailability also produces a gap. More language/type
+coverage, fixed-point CFG dataflow and full source provenance remain open
+C02/C05/C06 work.
+
+The existing Go walker still owns must/may facts and resource findings.
+`FunctionDataflow.cfg` and `cfg_gaps` expose the structural boundary;
+`facts_for_return(node_id)` connects a reachable CFG return site to the existing
+walker's facts without merging identical expressions at different locations.
+It is not a claim that the CFG computed or proved those facts. The legacy
+expression lookup remains conservative across all matching return expressions,
+and existing audit/CLI/MCP keys, grades and fallbacks are unchanged. These
+remain heuristic analysis facts, not backend-neutral proof evidence.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
