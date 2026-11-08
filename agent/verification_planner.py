@@ -20,6 +20,8 @@ METHODS = frozenset(
     }
 )
 LOCATIONS = frozenset({"local", "container", "remote"})
+SCOPES = frozenset({"unbounded", "bounded", "finite", "identity_only"})
+CORRESPONDENCE_STATUSES = frozenset({"validated", "assumed", "unverified"})
 
 
 def _label(value: str) -> None:
@@ -49,6 +51,52 @@ def _positive(value: int) -> None:
 
 
 @dataclass(frozen=True)
+class ResultContract:
+    """Host-declared routing metadata, not an Evidence record or acceptance rule.
+
+    Bounds, assumptions and relation are approved, versioned identifiers whose
+    meanings belong to the host/profile. Matching is exact: no implication,
+    scope ordering, assumption discharge or semantic translation is inferred.
+    """
+
+    profile: str
+    method: str
+    scope: str
+    correspondence_relation: str
+    correspondence_status: str
+    bounds: frozenset[str] = frozenset()
+    assumptions: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        _label(self.profile)
+        if not isinstance(self.method, str) or self.method not in METHODS:
+            raise ValueError("unsupported evidence method")
+        if not isinstance(self.scope, str) or self.scope not in SCOPES:
+            raise ValueError("unsupported result scope")
+        _labels(self.bounds, empty=True)
+        _labels(self.assumptions, empty=True)
+        if bool(self.bounds) != (self.scope in {"bounded", "finite"}):
+            raise ValueError("result scope and bounds disagree")
+        _label(self.correspondence_relation)
+        if (
+            not isinstance(self.correspondence_status, str)
+            or self.correspondence_status not in CORRESPONDENCE_STATUSES
+        ):
+            raise ValueError("unsupported correspondence status")
+
+    def to_dict(self) -> dict:
+        return {
+            "profile": self.profile,
+            "method": self.method,
+            "scope": self.scope,
+            "bounds": sorted(self.bounds),
+            "assumptions": sorted(self.assumptions),
+            "correspondence_relation": self.correspondence_relation,
+            "correspondence_status": self.correspondence_status,
+        }
+
+
+@dataclass(frozen=True)
 class RouteRequirements:
     """A capability query, not a complete executable obligation or assurance policy."""
 
@@ -56,6 +104,7 @@ class RouteRequirements:
     method: str
     logic_fragments: frozenset[str] = frozenset()
     target_triple: str | None = None
+    result_contract: ResultContract | None = None
 
     def __post_init__(self) -> None:
         _label(self.profile)
@@ -64,6 +113,14 @@ class RouteRequirements:
         _labels(self.logic_fragments, empty=True)
         if self.target_triple is not None:
             _label(self.target_triple)
+        if self.result_contract is not None:
+            if not isinstance(self.result_contract, ResultContract):
+                raise ValueError("invalid result contract")
+            if (self.result_contract.profile, self.result_contract.method) != (
+                self.profile,
+                self.method,
+            ):
+                raise ValueError("result contract does not match route requirements")
 
 
 @dataclass(frozen=True)
@@ -80,6 +137,7 @@ class AdapterDescriptor:
     location: str = "local"
     max_timeout_ms: int = 30_000
     max_memory_mb: int = 1024
+    result_contracts: tuple[ResultContract, ...] = ()
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -97,6 +155,20 @@ class AdapterDescriptor:
             raise ValueError("unsupported execution location")
         _positive(self.max_timeout_ms)
         _positive(self.max_memory_mb)
+        if not isinstance(self.result_contracts, tuple):
+            raise ValueError("expected immutable result contracts")
+        seen_contracts: set[ResultContract] = set()
+        for contract in self.result_contracts:
+            if not isinstance(contract, ResultContract):
+                raise ValueError("invalid result contract")
+            if contract in seen_contracts:
+                raise ValueError("duplicate result contract")
+            seen_contracts.add(contract)
+            if (
+                contract.profile not in self.profiles
+                or contract.method not in self.methods
+            ):
+                raise ValueError("result contract outside declared capabilities")
 
 
 @dataclass(frozen=True)
@@ -165,6 +237,7 @@ class EffectiveSettings:
     location: str
     timeout_ms: int
     memory_mb: int
+    result_contract: ResultContract | None = None
 
 
 @dataclass(frozen=True)
@@ -176,14 +249,23 @@ class VerificationPlan:
     decisions: tuple[AdapterDecision, ...]
 
     def to_dict(self) -> dict:
+        request: dict[str, object] = {
+            "profile": self.request.profile,
+            "method": self.request.method,
+            "logic_fragments": sorted(self.request.logic_fragments),
+            "target_triple": self.request.target_triple,
+        }
+        if self.request.result_contract is not None:
+            request["result_contract"] = self.request.result_contract.to_dict()
+        selected: dict[str, object] | None = None
+        if self.selected is not None:
+            selected = asdict(self.selected)
+            selected.pop("result_contract")
+            if self.selected.result_contract is not None:
+                selected["result_contract"] = self.selected.result_contract.to_dict()
         return {
             "schema_version": "mumei.verification-plan/v1",
-            "request": {
-                "profile": self.request.profile,
-                "method": self.request.method,
-                "logic_fragments": sorted(self.request.logic_fragments),
-                "target_triple": self.request.target_triple,
-            },
+            "request": request,
             "policy": {
                 "selected_adapter": self.policy.selected_adapter,
                 "allow_fallback": self.policy.allow_fallback,
@@ -193,7 +275,7 @@ class VerificationPlan:
                 "timeout_ms": self.policy.timeout_ms,
                 "memory_mb": self.policy.memory_mb,
             },
-            "selected": asdict(self.selected) if self.selected else None,
+            "selected": selected,
             "fallback_from": self.fallback_from,
             "decisions": [asdict(decision) for decision in self.decisions],
         }
@@ -243,6 +325,11 @@ class AdapterRegistry:
                 excluded.append("unsupported_semantic_profile")
             if request.method not in adapter.methods:
                 excluded.append("unsupported_evidence_method")
+            if request.result_contract is not None:
+                if not adapter.result_contracts:
+                    excluded.append("result_contract_not_declared")
+                elif request.result_contract not in adapter.result_contracts:
+                    excluded.append("unsupported_result_contract")
             if not request.logic_fragments <= adapter.logic_fragments:
                 excluded.append("unsupported_logic_fragments")
             if adapter.targets and request.target_triple is None:
@@ -315,6 +402,7 @@ class AdapterRegistry:
                 selected.location,
                 min(policy.timeout_ms, selected.max_timeout_ms),
                 min(policy.memory_mb, selected.max_memory_mb),
+                request.result_contract,
             )
         return VerificationPlan(
             request, policy, settings, fallback_from, tuple(decisions)

@@ -12,6 +12,7 @@ from agent.verification_planner import (
     AdapterDescriptor,
     AdapterRegistry,
     PlannerPolicy,
+    ResultContract,
     RouteRequirements,
     RuntimeObservation,
 )
@@ -270,3 +271,273 @@ def test_planning_never_reads_environment_files_or_executes_tools(monkeypatch):
     monkeypatch.setattr(Path, "read_text", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
     assert plan().selected is not None
+
+
+CONTRACT = ResultContract(
+    PROFILE,
+    "deductive_proof",
+    "unbounded",
+    "user.source-model/v1",
+    "assumed",
+    assumptions=frozenset({"user.model-trust/v1"}),
+)
+
+
+def constrained_request(contract=CONTRACT):
+    return RouteRequirements(
+        contract.profile, contract.method, frozenset({"lia"}), result_contract=contract
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "scope", "bounds"),
+    [
+        ("deductive_proof", "unbounded", frozenset()),
+        ("bounded_model_checking", "bounded", frozenset({"user.depth-8/v1"})),
+        ("finite_execution", "finite", frozenset({"user.cases-5/v1"})),
+        ("identity_check", "identity_only", frozenset()),
+    ],
+)
+@pytest.mark.parametrize("status", ["validated", "assumed", "unverified"])
+def test_exact_result_contracts_select_without_accepting_their_claims(
+    method, scope, bounds, status
+):
+    contract = replace(
+        CONTRACT,
+        method=method,
+        scope=scope,
+        bounds=bounds,
+        correspondence_status=status,
+    )
+    result = plan(
+        adapter(methods=frozenset({method}), result_contracts=(contract,)),
+        request=constrained_request(contract),
+    )
+    assert result.selected.result_contract == contract
+    assert result.to_dict()["selected"]["result_contract"] == contract.to_dict()
+    assert result.to_dict()["request"]["result_contract"] == contract.to_dict()
+    for key in ["result", "execution", "grade", "acceptance", "evidence"]:
+        assert f'"{key}"' not in json.dumps(result.to_dict())
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        replace(CONTRACT, profile="user.other-profile/v1"),
+        replace(
+            CONTRACT,
+            method="finite_execution",
+            scope="finite",
+            bounds=frozenset({"user.cases/v1"}),
+        ),
+        replace(CONTRACT, scope="bounded", bounds=frozenset({"user.depth/v1"})),
+        replace(CONTRACT, scope="identity_only"),
+        replace(CONTRACT, assumptions=frozenset()),
+        replace(CONTRACT, assumptions=frozenset({"user.extra-trust/v1"})),
+        replace(CONTRACT, assumptions=CONTRACT.assumptions | {"user.extra-trust/v1"}),
+        replace(CONTRACT, correspondence_relation="user.other-relation/v1"),
+        replace(CONTRACT, correspondence_status="validated"),
+        replace(CONTRACT, correspondence_status="unverified"),
+    ],
+)
+@pytest.mark.parametrize("allow_fallback", [False, True])
+def test_priority_explicit_and_permitted_fallback_cannot_relax_result_contract(
+    contract, allow_fallback
+):
+    descriptor = adapter(
+        priority=999,
+        profiles=frozenset({PROFILE, contract.profile}),
+        methods=frozenset({"deductive_proof", contract.method}),
+        result_contracts=(contract,),
+    )
+    result = plan(
+        descriptor,
+        PlannerPolicy(selected_adapter="fixture", allow_fallback=allow_fallback),
+        request=constrained_request(),
+    )
+    assert result.selected is None
+    assert "unsupported_result_contract" in reasons(result)
+
+
+def test_no_contract_is_not_a_wildcard_and_unconstrained_legacy_payload_is_unchanged():
+    result = plan(request=constrained_request())
+    assert result.selected is None
+    assert "result_contract_not_declared" in reasons(result)
+    legacy = plan(adapter(result_contracts=(CONTRACT,)))
+    assert legacy.selected is not None
+    assert legacy.selected.result_contract is None
+    assert "result_contract" not in legacy.to_dict()["request"]
+    assert "result_contract" not in legacy.to_dict()["selected"]
+    assert legacy.to_dict() == plan().to_dict()
+    assert legacy.to_dict()["schema_version"] == "mumei.verification-plan/v1"
+
+
+def test_contract_fields_cannot_be_borrowed_from_different_offers_or_adapters():
+    wrong_relation = replace(CONTRACT, correspondence_relation="user.other/v1")
+    wrong_assumptions = replace(CONTRACT, assumptions=frozenset())
+    for offers in [
+        (wrong_relation, wrong_assumptions),
+        (wrong_assumptions, wrong_relation),
+    ]:
+        result = plan(adapter(result_contracts=offers), request=constrained_request())
+        assert result.selected is None
+    registry = AdapterRegistry()
+    registry.register(adapter("a", result_contracts=(wrong_relation,)))
+    registry.register(adapter("b", result_contracts=(wrong_assumptions,)))
+    result = registry.plan(
+        constrained_request(), PlannerPolicy(), (observed("a"), observed("b"))
+    )
+    assert result.selected is None
+
+
+@pytest.mark.parametrize("allow_fallback", [False, True])
+def test_explicit_missing_contract_falls_back_only_to_an_exact_offer_when_allowed(
+    allow_fallback,
+):
+    registry = AdapterRegistry()
+    registry.register(adapter("selected", priority=30))
+    registry.register(
+        adapter(
+            "weaker",
+            priority=20,
+            result_contracts=(replace(CONTRACT, correspondence_status="unverified"),),
+        )
+    )
+    registry.register(adapter("exact", priority=10, result_contracts=(CONTRACT,)))
+    result = registry.plan(
+        constrained_request(),
+        PlannerPolicy(selected_adapter="selected", allow_fallback=allow_fallback),
+        tuple(observed(x) for x in ["selected", "weaker", "exact"]),
+    )
+    assert result.request.result_contract == CONTRACT
+    if allow_fallback:
+        assert result.selected.adapter_id == "exact"
+        assert result.fallback_from == "selected"
+        assert result.selected.result_contract == CONTRACT
+    else:
+        assert result.selected is None
+        assert result.fallback_from is None
+    assert reasons(result, "weaker") == ("unsupported_result_contract",)
+
+
+@pytest.mark.parametrize("scope", ["bounded", "finite"])
+def test_bounds_are_complete_exact_identifiers_not_an_inferred_numeric_order(scope):
+    contract = replace(
+        CONTRACT, scope=scope, bounds=frozenset({"user.depth-8/v1", "user.width-64/v1"})
+    )
+    for bounds in [
+        frozenset({"user.depth-4/v1", "user.width-64/v1"}),
+        frozenset({"user.depth-16/v1", "user.width-64/v1"}),
+        frozenset({"user.depth-8/v1"}),
+        contract.bounds | {"user.other/v1"},
+    ]:
+        result = plan(
+            adapter(result_contracts=(replace(contract, bounds=bounds),)),
+            request=constrained_request(contract),
+        )
+        assert result.selected is None
+    assert (
+        plan(
+            adapter(result_contracts=(contract,)), request=constrained_request(contract)
+        ).selected
+        is not None
+    )
+
+
+def test_contract_replacement_recomputes_eligibility_and_old_plans_remain_immutable():
+    registry = AdapterRegistry()
+    registry.register(adapter(result_contracts=(CONTRACT,)))
+    initial = registry.plan(constrained_request(), PlannerPolicy(), (observed(),))
+    registry.register(adapter(result_contracts=()), replace=True)
+    assert (
+        registry.plan(constrained_request(), PlannerPolicy(), (observed(),)).selected
+        is None
+    )
+    assert initial.selected.result_contract == CONTRACT
+    with pytest.raises(AttributeError):
+        initial.selected.result_contract.scope = "identity_only"
+    registry.register(adapter(result_contracts=(CONTRACT,)), replace=True)
+    assert (
+        registry.plan(constrained_request(), PlannerPolicy(), (observed(),)).selected
+        is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"scope": "FAKE_PRIVATE"},
+        {"scope": []},
+        {"scope": None},
+        {"method": "FAKE_PRIVATE"},
+        {"method": []},
+        {"profile": "https://FAKE_PRIVATE.invalid/?secret=FAKE"},
+        {"bounds": []},
+        {"assumptions": {"FAKE_PRIVATE"}},
+        {"assumptions": frozenset({"https://FAKE_PRIVATE.invalid"})},
+        {"bounds": frozenset({"user.limit/v1"})},
+        {"scope": "bounded"},
+        {"scope": "finite"},
+        {"correspondence_status": "FAKE_PRIVATE"},
+        {"correspondence_status": []},
+        {"correspondence_relation": "/FAKE_PRIVATE"},
+    ],
+)
+def test_invalid_contracts_fail_with_static_non_echoing_errors(changes):
+    with pytest.raises(ValueError) as error:
+        replace(CONTRACT, **changes)
+    assert "FAKE_PRIVATE" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"result_contracts": [CONTRACT]},
+        {"result_contracts": ("FAKE_PRIVATE",)},
+        {"result_contracts": (CONTRACT, CONTRACT)},
+        {"result_contracts": (replace(CONTRACT, profile="user.other/v1"),)},
+        {"result_contracts": (replace(CONTRACT, method="abstract_interpretation"),)},
+    ],
+)
+def test_descriptor_contracts_must_be_unique_immutable_and_inside_declared_capabilities(
+    changes,
+):
+    with pytest.raises(ValueError) as error:
+        adapter(**changes)
+    assert "FAKE_PRIVATE" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        "FAKE_PRIVATE",
+        replace(CONTRACT, profile="user.other/v1"),
+        replace(CONTRACT, method="abstract_interpretation"),
+    ],
+)
+def test_request_contract_profile_and_method_cannot_disagree_with_route(contract):
+    with pytest.raises(ValueError) as error:
+        replace(REQUEST, result_contract=contract)
+    assert "FAKE_PRIVATE" not in str(error.value)
+
+
+def test_deterministic_contract_serialization_uses_only_approved_labels_and_no_io(
+    monkeypatch,
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("contract planning must remain metadata-only")
+
+    monkeypatch.setattr(os, "getenv", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    contract = replace(CONTRACT, assumptions=frozenset({"user.z/v1", "user.a/v1"}))
+    result = plan(
+        adapter(result_contracts=(contract,)), request=constrained_request(contract)
+    )
+    data = result.to_dict()
+    assert data["selected"]["result_contract"]["assumptions"] == [
+        "user.a/v1",
+        "user.z/v1",
+    ]
+    assert data["request"]["result_contract"] == data["selected"]["result_contract"]
+    assert json.dumps(data) == json.dumps(result.to_dict())

@@ -63,8 +63,8 @@ claims; selection cannot bypass Mumei's common evidence acceptance or Lean gates
 This slice does **not** load plugins, discover/probe tools, launch processes,
 read configuration/environment/source files, enforce authorization/resources,
 perform runtime fallback, parse adapter results or change existing CLI/MCP/Z3
-routes. Source/obligation/evidence ingestion, scope/bounds/assumption-sensitive
-assurance policy, observation freshness and full execution/fallback history remain
+routes. Source/obligation/evidence ingestion, semantic assurance implication and
+acceptance policy, observation freshness and full execution/fallback history remain
 open C02/C03/C04/C11 work. The API is not a production verification dispatcher.
 No external verifier is adopted. Regression fixtures use synthetic descriptors.
 
@@ -87,6 +87,72 @@ plan = registry.plan(
 )
 assert plan.selected is not None
 ```
+
+### C04/C11 explicit result-contract routing
+
+`ResultContract` extends that metadata-only API with an optional, exact required
+result contract. A contract binds **one** semantic profile and method to scope
+(`unbounded`, `bounded`, `finite`, `identity_only`), complete bound identifiers,
+assumption identifiers and an explicit correspondence relation/status
+(`validated`, `assumed`, `unverified`). Bounded/finite scopes require nonempty
+bounds; unbounded/identity scopes forbid them. These are approved host/profile
+labels, not raw Evidence notes, arbitrary configuration or executable inputs.
+Their meanings must be defined by the host/profile; the planner does not invent
+their semantics or interpret numbers embedded in identifiers.
+
+Set `RouteRequirements.result_contract` and register a tuple of complete offers
+in `AdapterDescriptor.result_contracts`. The request's profile/method must agree
+with its enclosing query; each offer must belong to the descriptor's declared
+profiles/methods. Duplicate, mutable and malformed offers fail with static
+errors. No declaration is **not** a wildcard for a constrained request.
+
+An eligible candidate must advertise **one whole equal contract**. Fields from
+different offers, profiles, methods or adapters cannot be combined. Equality is
+deliberately conservative: no scope hierarchy, numeric-bound comparison,
+assumption discharge/subset inference, correspondence upgrade or semantic
+implication is inferred. Even an apparently stronger but unequal offer is not
+substituted automatically. Priority, explicit selection and permitted preflight
+fallback retain the original contract along with every existing constraint.
+`result_contract_not_declared` and `unsupported_result_contract` explain
+exclusions; authorization still does not make an incompatible route eligible.
+
+The effective settings and deterministic plan JSON carry the matched contract
+only for constrained requests, with sorted bounds/assumptions. Unconstrained
+queries retain the existing Python defaults and exact v1 serialized shape;
+they do **not** acquire an assurance policy implicitly. Runtime observations,
+budgets, tie-breaking, disable/location/version policy and single-route behavior
+remain unchanged.
+
+```python
+from agent.verification_planner import ResultContract
+
+required = ResultContract(
+    "user.approved-profile/v1", "deductive_proof", "unbounded",
+    "user.source-model/v1", "assumed",
+    assumptions=frozenset({"user.model-trust/v1"}),
+)
+registry.register(AdapterDescriptor(
+    "user.adapter", "1.0.0", frozenset({required.profile}),
+    frozenset({required.method}), result_contracts=(required,),
+), replace=True)
+plan = registry.plan(
+    RouteRequirements(required.profile, required.method, result_contract=required),
+    PlannerPolicy(selected_adapter="user.adapter"),
+    (RuntimeObservation("user.adapter", "available", "1.0.0"),),
+)
+assert plan.selected.result_contract == required
+```
+
+This is partial C04/C11 and C13 confusion-regression coverage, **not Evidence
+validation or acceptance**. An adapter can lie about a capability; matching
+host-declared `validated` metadata proves no correspondence. Real outputs still
+need independent identity, representation, scope, trust/freshness and acceptance
+checks owned by Mumei/the appropriate checker. The Core source producer/recheck
+is a separate, fresh-query path; this API neither consumes its records nor
+executes it. Plugin lifecycle, execution/cancellation/resource enforcement,
+runtime fallback/conflict reconciliation and common result ingestion remain
+open. No new verifier, CLI/MCP/default route, audit key, grade or Lean policy is
+introduced.
 
 ### C05 first source-mapped Go CFG slice
 
