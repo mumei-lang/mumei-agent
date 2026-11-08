@@ -147,6 +147,17 @@ func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	}
 }
 
+func TestFunctionValuesAreUnsupportedEvenWithoutACall(t *testing.T) {
+	out := checked(t, "package p; func F(f func()) { _ = f }", "amd64")
+	f := named(out, "f")[0]
+	for _, gap := range out.Gaps {
+		if gap.Reason == "unsupported_value_semantics" && gap.Span != nil && *gap.Span == f.Span {
+			return
+		}
+	}
+	t.Fatal("function-value binding has no unsupported-value gap")
+}
+
 func TestInvalidInputsNeverReturnPartialBindings(t *testing.T) {
 	for _, source := range []string{
 		"package p; func F() int { return unknown }",
