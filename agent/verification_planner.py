@@ -5,8 +5,10 @@ Profile identifiers must denote the complete required semantics, not a lossy sub
 No production CLI/MCP/default verification path uses this experimental API yet.
 """
 
+import hashlib
+import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 
 PROTOCOL_VERSION = "mumei.verifier-adapter/v1"
 METHODS = frozenset(
@@ -22,6 +24,9 @@ METHODS = frozenset(
 LOCATIONS = frozenset({"local", "container", "remote"})
 SCOPES = frozenset({"unbounded", "bounded", "finite", "identity_only"})
 CORRESPONDENCE_STATUSES = frozenset({"validated", "assumed", "unverified"})
+SettingValue = bool | int | str
+SettingValues = tuple[tuple[str, SettingValue], ...]
+MAX_SETTINGS = 32
 
 
 def _label(value: str) -> None:
@@ -48,6 +53,97 @@ def _version(value: str) -> None:
 def _positive(value: int) -> None:
     if type(value) is not int or value <= 0:
         raise ValueError("budget must be a positive integer")
+
+
+def _setting_name(value: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) > 64
+        or not re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", value)
+    ):
+        raise ValueError("invalid setting name")
+    if set(value.split("_")) & {
+        "key",
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "credentials",
+        "auth",
+        "authentication",
+        "authorization",
+        "cookie",
+        "endpoint",
+        "url",
+        "path",
+        "command",
+        "argv",
+        "args",
+        "env",
+        "environment",
+        "header",
+        "headers",
+        "executable",
+    }:
+        raise ValueError("setting channel is not permitted")
+
+
+@dataclass(frozen=True)
+class SettingSpec:
+    """Host-approved non-secret options only; no free text or invocation channels."""
+
+    name: str
+    kind: str
+    default: SettingValue
+    minimum: int | None = None
+    maximum: int | None = None
+    choices: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        _setting_name(self.name)
+        if not isinstance(self.kind, str) or self.kind not in {
+            "boolean",
+            "integer",
+            "choice",
+        }:
+            raise ValueError("unsupported setting kind")
+        if not isinstance(self.choices, frozenset) or len(self.choices) > MAX_SETTINGS:
+            raise ValueError("invalid setting choices")
+        if self.kind == "integer":
+            if type(self.minimum) is not int or type(self.maximum) is not int:
+                raise ValueError("integer settings require explicit bounds")
+            if not -(2**63) <= self.minimum <= self.maximum < 2**63:
+                raise ValueError("invalid integer setting bounds")
+        elif self.minimum is not None or self.maximum is not None:
+            raise ValueError("bounds require an integer setting")
+        if self.kind == "choice":
+            _labels(self.choices)
+            if any(len(choice) > 64 for choice in self.choices):
+                raise ValueError("invalid setting choice")
+        elif self.choices:
+            raise ValueError("choices require a choice setting")
+        self.validate(self.default)
+
+    def validate(self, value: SettingValue) -> None:
+        if self.kind == "boolean" and type(value) is bool:
+            return
+        if self.kind == "integer" and type(value) is int:
+            assert self.minimum is not None and self.maximum is not None
+            if self.minimum <= value <= self.maximum:
+                return
+        if self.kind == "choice" and type(value) is str and value in self.choices:
+            return
+        raise ValueError("setting value outside declared schema")
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "default": self.default,
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "choices": sorted(self.choices),
+        }
 
 
 @dataclass(frozen=True)
@@ -122,6 +218,17 @@ class RouteRequirements:
             ):
                 raise ValueError("result contract does not match route requirements")
 
+    def to_dict(self) -> dict:
+        request: dict[str, object] = {
+            "profile": self.profile,
+            "method": self.method,
+            "logic_fragments": sorted(self.logic_fragments),
+            "target_triple": self.target_triple,
+        }
+        if self.result_contract is not None:
+            request["result_contract"] = self.result_contract.to_dict()
+        return request
+
 
 @dataclass(frozen=True)
 class AdapterDescriptor:
@@ -138,6 +245,7 @@ class AdapterDescriptor:
     max_timeout_ms: int = 30_000
     max_memory_mb: int = 1024
     result_contracts: tuple[ResultContract, ...] = ()
+    setting_specs: tuple[SettingSpec, ...] = ()
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -169,6 +277,18 @@ class AdapterDescriptor:
                 or contract.method not in self.methods
             ):
                 raise ValueError("result contract outside declared capabilities")
+        if (
+            not isinstance(self.setting_specs, tuple)
+            or len(self.setting_specs) > MAX_SETTINGS
+        ):
+            raise ValueError("invalid setting schema")
+        names: set[str] = set()
+        for spec in self.setting_specs:
+            if not isinstance(spec, SettingSpec):
+                raise ValueError("invalid setting schema")
+            if spec.name in names:
+                raise ValueError("duplicate setting schema name")
+            names.add(spec.name)
 
 
 @dataclass(frozen=True)
@@ -196,6 +316,9 @@ class PlannerPolicy:
     tool_version_pins: tuple[tuple[str, str], ...] = ()
     timeout_ms: int = 30_000
     memory_mb: int = 1024
+    adapter_settings: tuple[tuple[str, SettingValues], ...] = field(
+        default=(), repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.selected_adapter is not None:
@@ -220,6 +343,30 @@ class PlannerPolicy:
             if adapter_id in seen:
                 raise ValueError("duplicate tool version pin")
             seen.add(adapter_id)
+        if not isinstance(self.adapter_settings, tuple):
+            raise ValueError("invalid adapter settings")
+        configured: set[str] = set()
+        for entry in self.adapter_settings:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValueError("invalid adapter settings")
+            adapter_id, values = entry
+            _label(adapter_id)
+            if adapter_id in configured:
+                raise ValueError("duplicate adapter settings")
+            configured.add(adapter_id)
+            if not isinstance(values, tuple) or len(values) > MAX_SETTINGS:
+                raise ValueError("invalid adapter setting values")
+            names: set[str] = set()
+            for pair in values:
+                if not isinstance(pair, tuple) or len(pair) != 2:
+                    raise ValueError("invalid adapter setting value")
+                name, value = pair
+                _setting_name(name)
+                if name in names:
+                    raise ValueError("duplicate adapter setting name")
+                names.add(name)
+                if type(value) not in {bool, int, str}:
+                    raise ValueError("unsupported adapter setting value")
 
 
 @dataclass(frozen=True)
@@ -238,6 +385,47 @@ class EffectiveSettings:
     timeout_ms: int
     memory_mb: int
     result_contract: ResultContract | None = None
+    adapter_settings: SettingValues = ()
+    configuration_fingerprint: str | None = None
+
+
+def _effective_options(
+    adapter: AdapterDescriptor, overrides: SettingValues
+) -> SettingValues:
+    specs = {spec.name: spec for spec in adapter.setting_specs}
+    values = {name: spec.default for name, spec in specs.items()}
+    for name, value in overrides:
+        if name not in specs:
+            raise ValueError("setting has no registered schema")
+        specs[name].validate(value)
+        values[name] = value
+    return tuple(sorted(values.items()))
+
+
+def _configuration_fingerprint(
+    adapter: AdapterDescriptor, request: RouteRequirements, settings: EffectiveSettings
+) -> str:
+    projection = {
+        "schema_version": "mumei.adapter-configuration/v1",
+        "adapter_id": settings.adapter_id,
+        "adapter_version": settings.adapter_version,
+        "protocol_version": settings.protocol_version,
+        "tool_version": settings.observed_tool_version,
+        "location": settings.location,
+        "timeout_ms": settings.timeout_ms,
+        "memory_mb": settings.memory_mb,
+        "request": request.to_dict(),
+        "setting_specs": [
+            spec.to_dict()
+            for spec in sorted(adapter.setting_specs, key=lambda spec: spec.name)
+        ],
+        "effective_settings": dict(settings.adapter_settings),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            projection, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode()
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -249,20 +437,20 @@ class VerificationPlan:
     decisions: tuple[AdapterDecision, ...]
 
     def to_dict(self) -> dict:
-        request: dict[str, object] = {
-            "profile": self.request.profile,
-            "method": self.request.method,
-            "logic_fragments": sorted(self.request.logic_fragments),
-            "target_triple": self.request.target_triple,
-        }
-        if self.request.result_contract is not None:
-            request["result_contract"] = self.request.result_contract.to_dict()
+        request = self.request.to_dict()
         selected: dict[str, object] | None = None
         if self.selected is not None:
             selected = asdict(self.selected)
             selected.pop("result_contract")
+            selected.pop("adapter_settings")
+            selected.pop("configuration_fingerprint")
             if self.selected.result_contract is not None:
                 selected["result_contract"] = self.selected.result_contract.to_dict()
+            if self.selected.configuration_fingerprint is not None:
+                selected["adapter_settings"] = dict(self.selected.adapter_settings)
+                selected["configuration_fingerprint"] = (
+                    self.selected.configuration_fingerprint
+                )
         return {
             "schema_version": "mumei.verification-plan/v1",
             "request": request,
@@ -310,6 +498,13 @@ class AdapterRegistry:
         pins = dict(policy.tool_version_pins)
         if any(key not in self._adapters for key in pins):
             raise ValueError("tool version pin has no registered adapter")
+        overrides = dict(policy.adapter_settings)
+        if any(key not in self._adapters for key in overrides):
+            raise ValueError("settings have no registered adapter")
+        options = {
+            key: _effective_options(adapter, overrides.get(key, ()))
+            for key, adapter in self._adapters.items()
+        }
         ordered = sorted(
             self._adapters.values(), key=lambda a: (-a.priority, a.adapter_id)
         )
@@ -403,7 +598,15 @@ class AdapterRegistry:
                 min(policy.timeout_ms, selected.max_timeout_ms),
                 min(policy.memory_mb, selected.max_memory_mb),
                 request.result_contract,
+                options[selected.adapter_id],
             )
+            if selected.setting_specs:
+                settings = replace(
+                    settings,
+                    configuration_fingerprint=_configuration_fingerprint(
+                        selected, request, settings
+                    ),
+                )
         return VerificationPlan(
             request, policy, settings, fallback_from, tuple(decisions)
         )
