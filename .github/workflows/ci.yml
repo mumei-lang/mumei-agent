@@ -33,6 +33,24 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra test --frozen
 
+      - name: Set up Go for the optional C06 compiler adapter regression gate
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Check the single-file Go type metadata producer
+        working-directory: tools/go-types
+        env:
+          GOTOOLCHAIN: local
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+          GOWORK: 'off'
+        run: |
+          test -z "$(gofmt -l .)"
+          go test ./...
+          go vet ./...
+
       # Regression gate for A1 stage 3 / L3: the Solidity guard-trace obligation
       # class must keep extracting guard-trace atoms and upgrading them through
       # the mumei-lean Lean bridge to `lean_verified`. Run these fail-fast
@@ -66,3 +84,21 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  go-types-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Check metadata producer on the previous maintained Go series
+        working-directory: tools/go-types
+        env:
+          GOTOOLCHAIN: local
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+          GOWORK: 'off'
+        run: go test ./...
