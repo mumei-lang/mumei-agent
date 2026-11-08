@@ -4,6 +4,38 @@
 >
 > 全体のクロスプロジェクトロードマップは [mumei-lang/mumei の docs/CROSS_PROJECT_ROADMAP.md](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md) を参照。
 
+## Verification-Native planner and analysis program
+
+Follow the [canonical implementation order](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md#verification-native-program-ordered-implementation)
+and [shared architecture contract](https://github.com/mumei-lang/mumei/blob/develop/docs/VERIFICATION_NATIVE.md).
+The Agent orchestrates verification; it does not define independent proof
+grades or make a backend self-report sufficient for acceptance.
+
+- [C04 planner](https://github.com/mumei-lang/mumei-agent/issues/649) and
+  [C11 plugin contract](https://github.com/mumei-lang/mumei-agent/issues/653):
+  users can register, select, configure, disable and replace adapters without
+  changing planner core. Capabilities, compatibility, budgets, selection and
+  exclusion reasons, effective non-secret settings and explicit fallback
+  policy are required. Test with existing paths and synthetic adapters first.
+- [C05 CFG](https://github.com/mumei-lang/mumei-agent/issues/650) extends existing
+  Go function-local must/may facts, then
+  [C06 language/type/symbol adapters](https://github.com/mumei-lang/mumei-agent/issues/651)
+  and [C07 resolved-call summaries](https://github.com/mumei-lang/mumei-agent/issues/652)
+  add coverage incrementally. Tree-sitter alone is not semantic resolution.
+- [C02 evidence](https://github.com/mumei-lang/mumei/issues/786) keeps body-port
+  proofs, finite native replay, bounded/abstract analysis and source/artifact
+  correspondence separate. Existing audit keys and Lean gates remain fixed.
+
+External tools are not selected for adoption now. Plugin design precedes and
+is independent of individual pilots. Missing/incompatible explicitly selected
+tools must report a reason, not silently substitute another tool; fallback
+requires user permission and cannot lower a required assurance level.
+Plugin execution and remote data access require user/admin authorization.
+Agent owns external-tool selection/execution; Mumei owns specification meaning
+and shared acceptance rules, not external-tool orchestration. Do not run Z3
+and all installed plugins in parallel by default: comparisons require a stated
+purpose, permitted user policy, budget and result-reconciliation rules.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
