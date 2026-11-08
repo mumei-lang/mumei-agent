@@ -100,7 +100,13 @@ func Direct(x int64) int64 { return (Callee)(x) }
 func Indirect(Callee func(int64) int64, x int64) int64 { return Callee(x) }
 func Alias(x int64) int64 { f := Callee; return f(x) }`
 	out := checked(t, source, "amd64")
-	if len(out.Calls) != 3 || out.Calls[0].Kind != "direct_local" || out.Calls[0].Target != named(out, "Callee")[0].ID {
+	calleeID := ""
+	for _, b := range named(out, "Callee") {
+		if b.Kind == "function" {
+			calleeID = b.ID
+		}
+	}
+	if len(out.Calls) != 3 || out.Calls[0].Kind != "direct_local" || out.Calls[0].Target != calleeID {
 		t.Fatal("a direct declaration reference was not resolved")
 	}
 	for _, call := range out.Calls[1:] {

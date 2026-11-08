@@ -313,6 +313,7 @@ func analyze(req request) (out snapshot) {
 	info := &types.Info{
 		Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object),
 		Implicits: make(map[ast.Node]types.Object), Types: make(map[ast.Expr]types.TypeAndValue),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 	}
 	conf := types.Config{GoVersion: languageVersion, Sizes: ix.sizes, Error: func(e error) {
 		if len(out.Gaps) < 16 {
