@@ -114,6 +114,50 @@ expression lookup remains conservative across all matching return expressions,
 and existing audit/CLI/MCP keys, grades and fallbacks are unchanged. These
 remain heuristic analysis facts, not backend-neutral proof evidence.
 
+### C06 first compiler-backed Go binding slice
+
+`tools/go-types` is an opt-in, standard-library-only metadata producer using
+`go/parser` and `go/types`, not Tree-sitter guesses. It checks one explicitly
+provided UTF-8 source unit under Go 1.23 language rules and `gc` sizes for an
+explicit `amd64`, `386` or `arm64` target. Stable Go 1.26+ builds the helper;
+the actual compiler version, language version, profile and full source SHA-256
+are recorded. Imports, build/line/compiler directives, parse/type errors and
+unknown targets yield no partial bindings. No importer, package loader,
+project/tool discovery, user-code execution or network operation is used.
+
+The `mumei.go-types-single-file/v1` report records lexical binding identities,
+declaration/scope spans, identifier references, named/alias type identities,
+integer signedness/width, logical Boolean width, function parameters/results
+and conservative call classification. Reassignment preserves a binding;
+shadowing and implicit type-switch case bindings do not merge. Binding IDs
+include the complete source hash, declaration position and scope, so any unit
+change invalidates the old IDs, including callers of a changed local callee.
+This is not SSA, alias/value-flow analysis or cross-file cache invalidation.
+
+Only ordinary calls resolved to an implemented, non-method, non-generic,
+non-variadic function declaration in this unit get a `direct_local` target.
+Function variables/aliases, selectors, methods, generic/variadic calls,
+bodyless declarations, builtins, conversions, defer/go and closure/initializer
+contexts stay explicit and opaque. A direct target says nothing about purity,
+termination, recursion, argument/return/effect transfer or proof. Non-scalar
+value semantics remain explicit gaps even when declaration lookup succeeds.
+
+`agent.go_type_snapshot.load_go_snapshot` is a pure, fail-closed reader with
+schema/profile/source/target/span/reference/type-width checks. It never launches
+the helper or chooses tools. `cfg_for_function` checks the full unit before
+joining the exact function body to the existing C05 CFG; report spans are
+file-relative UTF-8 bytes, while CFG spans remain body-relative Unicode
+codepoints. Neither typed metadata nor the CFG recomputes the legacy walker's
+must/may/resource facts or suppresses findings. Compiler reports require a
+trusted producer: source hashes detect staleness, not authenticity or semantic
+truth. No grade or common-evidence acceptance is added.
+
+See [build, protocol and limits](../tools/go-types/README.md). Existing audit,
+CLI/MCP, planner, Seal Grade and Lean freshness/trust gates are unchanged; no
+external verifier is adopted. Project/import resolution, full Go and other
+language coverage, C07 interprocedural summaries and C09 LLVM translation
+validation remain open, in that order. C06 is **partially delivered**, not done.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
