@@ -130,6 +130,24 @@ class AttemptRecord:
     def record(self, event: AttemptEvent) -> "AttemptRecord":
         return replace(self, events=(*self.events, event))
 
+    def reconcile(self, incoming: "AttemptRecord") -> "AttemptRecord":
+        """Extend this lineage only; identical reports are idempotent, not fresh.
+
+        No branch wins implicitly. Hosts must retain/atomically update their
+        current record; this does not authenticate reports or prevent replay.
+        """
+        if type(incoming) is not AttemptRecord:
+            raise ValueError("reconciliation requires an attempt record")
+        if (
+            incoming.request_fingerprint != self.request_fingerprint
+            or incoming.attempt_number != self.attempt_number
+            or incoming.timeout_ms != self.timeout_ms
+        ):
+            raise ValueError("attempt report binding mismatch")
+        if incoming.events[: len(self.events)] != self.events:
+            raise ValueError("attempt report cannot rewind or replace history")
+        return self if incoming.events == self.events else incoming
+
     def to_dict(self) -> dict:
         return {
             "schema_version": "mumei.verifier-attempt/v1",

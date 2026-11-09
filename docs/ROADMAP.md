@@ -88,6 +88,43 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 same-attempt report reconciliation
+
+`AttemptRecord.reconcile(incoming)` compares a host-reported snapshot to the
+caller's current immutable record. It accepts only an exact `AttemptRecord`
+with the same request fingerprint, attempt number and timeout, whose events
+contain the complete current event tuple as an exact prefix. Identical reports
+return the current object; a proper extension returns the incoming object.
+Either result retains the existing `mumei.verifier-attempt/v1` serialization.
+Reports can advance over multiple observations only when the incoming snapshot
+already contains the complete, valid bounded history; events are never inferred.
+
+```python
+current = AttemptRecord.from_prepared(prepared, 1)
+reported = current.record(AttemptEvent("started", 0))
+current = current.reconcile(reported)
+assert current.reconcile(reported) is current
+```
+
+Shorter/stale histories, changed elapsed counters/exit codes, divergent branches,
+terminal replacements and mismatched binding fields fail with static errors.
+Neither input changes on success or failure. A cancel/exit disagreement is not
+resolved by preferring code zero, a later elapsed counter or report arrival order;
+it is rejected against the current lineage. The caller must retain that current
+record, atomically publish any returned replacement and surface conflicts. This
+helper does not maintain a global ledger or arbitrate which independent branch
+was true; two callers starting from an older common prefix can still diverge.
+
+Exact duplicate reports are intentionally idempotent, **not fresh/authenticated
+observations or replay protection**. Fingerprints and attempt numbers remain
+untrusted metadata rather than authority tokens. Global identity allocation,
+durable/atomic storage, cross-attempt/backend result reconciliation, actual
+execution/cancellation/cleanup/resource enforcement and output/Evidence
+normalization/acceptance remain open. No parsing, I/O, clocks, plugins, new
+schema/dependency or default audit/CLI/MCP integration is added. This remains a
+partial C11/C13 lifecycle contract; Core meaning/acceptance, C12's demand gate,
+existing assurance/Lean/native/LLVM behavior and deferred WASM are unchanged.
+
 ### C11 bounded host-observed attempt lifecycle
 
 The opt-in `agent.verification_attempt` module provides `AttemptRecord` and
@@ -132,8 +169,9 @@ or resource enforcement. No clock is read, so missing host reports cannot be
 detected and timeouts do not fire automatically. A cancellation/exit race can be
 represented as `exited` before the deadline; it cannot rewrite an existing
 terminal record. Incomplete `ready`/`running`/`cancelling` histories remain
-nonterminal. Independent copies may conflict: host attempt-number uniqueness,
-cross-record reconciliation/replay protection, final preflight/authority checks,
+nonterminal. Same-attempt snapshots now have explicit prefix-only reconciliation
+above. Independent branches may still conflict: host attempt-number uniqueness,
+cross-attempt/backend arbitration/replay protection, final preflight/authority checks,
 actual execution/cancellation/cleanup/resource enforcement, output collection and
 Evidence normalization/acceptance are still open. There is no pre-start
 cancellation flow, retry/fallback scheduler or default CLI/MCP/audit integration.
