@@ -29,6 +29,15 @@ SettingValues = tuple[tuple[str, SettingValue], ...]
 MAX_SETTINGS = 32
 SOURCE_INPUT_FORMAT = "mumei.source-text/v1"
 MAX_SOURCE_BYTES = 1_048_576
+PERMISSIONS = frozenset(
+    {
+        "filesystem.read",
+        "filesystem.write",
+        "environment.read",
+        "network.connect",
+        "process.spawn",
+    }
+)
 
 
 def _label(value: str) -> None:
@@ -55,6 +64,11 @@ def _version(value: str) -> None:
 def _positive(value: int) -> None:
     if type(value) is not int or value <= 0:
         raise ValueError("budget must be a positive integer")
+
+
+def _permissions(values: frozenset[str]) -> None:
+    if not isinstance(values, frozenset) or not values <= PERMISSIONS:
+        raise ValueError("expected immutable supported permission categories")
 
 
 def _setting_name(value: str) -> None:
@@ -254,6 +268,7 @@ class AdapterDescriptor:
     result_contracts: tuple[ResultContract, ...] = ()
     setting_specs: tuple[SettingSpec, ...] = ()
     input_formats: frozenset[str] = frozenset()
+    required_permissions: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -298,6 +313,8 @@ class AdapterDescriptor:
                 raise ValueError("duplicate setting schema name")
             names.add(spec.name)
         _labels(self.input_formats, empty=True)
+        if self.required_permissions is not None:
+            _permissions(self.required_permissions)
 
 
 @dataclass(frozen=True)
@@ -328,8 +345,11 @@ class PlannerPolicy:
     adapter_settings: tuple[tuple[str, SettingValues], ...] = field(
         default=(), repr=False
     )
+    allowed_permissions: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
+        if self.allowed_permissions is not None:
+            _permissions(self.allowed_permissions)
         if self.selected_adapter is not None:
             _label(self.selected_adapter)
         if type(self.allow_fallback) is not bool:
@@ -397,6 +417,11 @@ class EffectiveSettings:
     adapter_settings: SettingValues = ()
     configuration_fingerprint: str | None = None
     input_format: str | None = None
+    required_permissions: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.required_permissions is not None:
+            _permissions(self.required_permissions)
 
 
 def _effective_options(
@@ -431,6 +456,8 @@ def _configuration_fingerprint(
         ],
         "effective_settings": dict(settings.adapter_settings),
     }
+    if settings.required_permissions is not None:
+        projection["required_permissions"] = sorted(settings.required_permissions)
     return hashlib.sha256(
         json.dumps(
             projection, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -455,6 +482,7 @@ class VerificationPlan:
             selected.pop("adapter_settings")
             selected.pop("configuration_fingerprint")
             selected.pop("input_format")
+            selected.pop("required_permissions")
             if self.selected.result_contract is not None:
                 selected["result_contract"] = self.selected.result_contract.to_dict()
             if self.selected.configuration_fingerprint is not None:
@@ -464,18 +492,25 @@ class VerificationPlan:
                 )
             if self.selected.input_format is not None:
                 selected["input_format"] = self.selected.input_format
+            if self.selected.required_permissions is not None:
+                selected["required_permissions"] = sorted(
+                    self.selected.required_permissions
+                )
+        policy = {
+            "selected_adapter": self.policy.selected_adapter,
+            "allow_fallback": self.policy.allow_fallback,
+            "disabled_adapters": sorted(self.policy.disabled_adapters),
+            "allowed_locations": sorted(self.policy.allowed_locations),
+            "tool_version_pins": dict(sorted(self.policy.tool_version_pins)),
+            "timeout_ms": self.policy.timeout_ms,
+            "memory_mb": self.policy.memory_mb,
+        }
+        if self.policy.allowed_permissions is not None:
+            policy["allowed_permissions"] = sorted(self.policy.allowed_permissions)
         return {
             "schema_version": "mumei.verification-plan/v1",
             "request": request,
-            "policy": {
-                "selected_adapter": self.policy.selected_adapter,
-                "allow_fallback": self.policy.allow_fallback,
-                "disabled_adapters": sorted(self.policy.disabled_adapters),
-                "allowed_locations": sorted(self.policy.allowed_locations),
-                "tool_version_pins": dict(sorted(self.policy.tool_version_pins)),
-                "timeout_ms": self.policy.timeout_ms,
-                "memory_mb": self.policy.memory_mb,
-            },
+            "policy": policy,
             "selected": selected,
             "fallback_from": self.fallback_from,
             "decisions": [asdict(decision) for decision in self.decisions],
@@ -506,6 +541,12 @@ class PreparedSourceRequest:
         ):
             raise ValueError(
                 "source preparation requires an explicit selected contract and format"
+            )
+        allowed = self.plan.policy.allowed_permissions
+        required = self.plan.selected.required_permissions
+        if allowed is not None and (required is None or not required <= allowed):
+            raise ValueError(
+                "source preparation requires compatible permission metadata"
             )
         if not isinstance(self.expected_source_sha256, str) or not re.fullmatch(
             r"[0-9a-f]{64}", self.expected_source_sha256
@@ -607,6 +648,11 @@ class AdapterRegistry:
         reasons: dict[str, list[str]] = {}
         for adapter in ordered:
             excluded = reasons[adapter.adapter_id] = []
+            if policy.allowed_permissions is not None:
+                if adapter.required_permissions is None:
+                    excluded.append("permission_requirements_not_declared")
+                elif not adapter.required_permissions <= policy.allowed_permissions:
+                    excluded.append("permissions_not_allowed")
             observed = runtime.get(adapter.adapter_id)
             if not adapter.enabled or adapter.adapter_id in policy.disabled_adapters:
                 excluded.append("disabled")
@@ -701,6 +747,11 @@ class AdapterRegistry:
                 request.result_contract,
                 options[selected.adapter_id],
                 input_format=request.input_format,
+                required_permissions=(
+                    selected.required_permissions
+                    if policy.allowed_permissions is not None
+                    else None
+                ),
             )
             if selected.setting_specs:
                 settings = replace(

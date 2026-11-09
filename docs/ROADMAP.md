@@ -88,6 +88,53 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C04/C11 declared permission-policy filtering
+
+The opt-in planner accepts `AdapterDescriptor.required_permissions` and
+`PlannerPolicy.allowed_permissions` as closed, immutable sets of coarse planning
+categories: `filesystem.read`, `filesystem.write`, `environment.read`,
+`network.connect` and `process.spawn`. These are host-reviewed declarations, not
+capability tokens, paths/endpoints, Mumei effects or an OS permission model.
+There are no wildcards, inheritance, implied rights or free-text channels.
+
+An explicit policy excludes adapters with missing declarations
+(`permission_requirements_not_declared`) or requirements outside the allowed
+set (`permissions_not_allowed`). An empty allowed set denies every nonempty
+declaration; an explicitly empty requirement set may still match. Priority and
+explicit selection cannot bypass the filter; permitted preflight fallback must
+meet the same policy, full result contract, input format and other filters using
+its own declaration/settings. Invalid metadata fails before selection or hashing.
+
+`None` is intentionally distinct from an empty set: an omitted policy keeps the
+legacy planning/JSON behavior, without asserting that no permissions are needed
+or implicitly approving execution. Explicit policies and selected requirements
+appear as sorted arrays in plan JSON. Selected configuration fingerprints bind
+the declared requirements when a settings schema is present; prepared-source
+manifest fingerprints also bind the allowed policy. Changing the registry
+declaration requires a fresh plan before source preparation.
+
+```python
+descriptor = AdapterDescriptor(
+    "user.adapter", "1.0.0", approved_profiles, approved_methods,
+    required_permissions=frozenset({"process.spawn"}),
+)
+policy = PlannerPolicy(allowed_permissions=frozenset())
+# This policy excludes the descriptor; explicit selection cannot override it.
+```
+
+This is partial C04/C11 pre-execution policy matching and C13 regression
+coverage, **not authorization or enforcement**. Declarations may be false or
+incomplete: the planner does not inspect adapter code, derive actual privileges
+from an execution location, authenticate a user/admin grant, or sandbox anything.
+Even a matching plan/prepared request is not an execution or data-egress permit.
+Future executors must independently establish authority, current preflight and
+actual resource/I/O/process/network enforcement. No file/environment reads,
+secret transport, tool/plugin probing/loading, process execution/cancellation,
+runtime fallback/reconciliation or default CLI/MCP/audit integration is added.
+Core retains specification meaning and Evidence acceptance; C12's demand-gated
+real-authority mapping, all assurance/Lean/native/LLVM policies and deferred WASM
+remain unchanged. No external verifier is adopted.
+
 ### C04/C11 bounded source-input preparation
 
 The opt-in planner can now require an explicit `RouteRequirements.input_format`
