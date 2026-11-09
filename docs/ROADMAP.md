@@ -88,6 +88,59 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C04/C11 bounded source-input preparation
+
+The opt-in planner can now require an explicit `RouteRequirements.input_format`
+against `AdapterDescriptor.input_formats`. Missing declarations are not wildcards:
+`input_format_not_declared` and `unsupported_input_format` explain exclusions.
+Existing priority, explicit selection, permitted fallback, exact result contract,
+settings, location/version/availability filters and budgets remain in force.
+Unconstrained legacy request/selected JSON gains no format field.
+
+`AdapterRegistry.prepare_source` is a separate in-memory preparation API. It
+requires `mumei.source-text/v1` plus an explicit exact result contract and calls
+the current registry planner itself, rather than consuming a saved plan. An
+eligible selection is required. It captures strict immutable `bytes`, checks a
+host-supplied expected lowercase SHA-256, and rejects empty/whitespace-only,
+NUL-containing, invalid UTF-8 or over-1-MiB input. No conversion, normalization,
+source/specification extraction or path lookup is performed. Well-formed text
+need not be a syntactically or semantically valid Mumei program.
+
+The frozen `PreparedSourceRequest` retains the exact bytes in memory for a later,
+separately authorized adapter boundary. Its explicit `to_dict()` emits only the
+plan and format/raw-byte digest/byte count, with a canonical SHA-256
+`request_fingerprint` over that manifest. The payload is excluded from repr and
+never interpolated into diagnostics or exception context. Use this serializer;
+do not log the `.source` payload or apply generic dataclass serialization to it.
+Changed input bytes, selected settings, result contract or observed context
+change the binding; even a whitespace-only source edit changes raw-byte identity.
+The host must approve metadata labels and input handling independently.
+
+```python
+from agent.verification_planner import SOURCE_INPUT_FORMAT, RouteRequirements
+
+# Register a descriptor with input_formats=frozenset({SOURCE_INPUT_FORMAT})
+# and an exact result-contract offer, then explicitly prepare host-held bytes.
+request = RouteRequirements(
+    required.profile, required.method, result_contract=required,
+    input_format=SOURCE_INPUT_FORMAT,
+)
+prepared = registry.prepare_source(
+    request, policy, observations, host_source_bytes, host_expected_sha256,
+)
+manifest = prepared.to_dict()
+```
+
+This remains partial C04/C11 and C13 regression coverage. Digests bind bytes and
+declared metadata, not normalized specification meaning, authenticity, actual
+tool execution, observation freshness or acceptance. A prepared record is not
+an execution permission/token; saved records remain historical metadata and any
+future executor must independently re-authorize/revalidate. Core retains parsing,
+semantic interpretation and Evidence acceptance. There is no file/environment
+access, import/artifact-path following, plugin loading, transport, execution,
+resource enforcement, runtime fallback/reconciliation or production CLI/MCP/audit
+integration. No external verifier, grade/Lean/native/LLVM/WASM policy changes.
+
 ### C04/C11 typed configuration follow-up
 
 The opt-in planner now accepts host-reviewed non-secret `SettingSpec` declarations
