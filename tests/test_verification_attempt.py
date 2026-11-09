@@ -3,6 +3,7 @@
 import builtins
 import hashlib
 import importlib
+import itertools
 import json
 import os
 import socket
@@ -376,3 +377,204 @@ def test_string_subclasses_cannot_override_closed_metadata_semantics(field):
             AttemptEvent(CustomString("started"), 0)
         else:
             replace(record(), request_fingerprint=CustomString(FINGERPRINT))
+
+
+@pytest.mark.parametrize("current_state", PREFIXES)
+@pytest.mark.parametrize("incoming_state", PREFIXES)
+def test_reconcile_complete_state_pair_matrix(current_state, incoming_state):
+    current = record(*PREFIXES[current_state])
+    incoming = record(*PREFIXES[incoming_state])
+    before = current.to_dict(), incoming.to_dict()
+    if incoming.events[: len(current.events)] != current.events:
+        with pytest.raises(ValueError):
+            current.reconcile(incoming)
+    else:
+        result = current.reconcile(incoming)
+        assert result is (current if current.events == incoming.events else incoming)
+        assert result.to_dict() == incoming.to_dict()
+    assert before == (current.to_dict(), incoming.to_dict())
+
+
+@pytest.mark.parametrize("current_state", PREFIXES)
+@pytest.mark.parametrize("incoming_state", PREFIXES)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("request_fingerprint", "b" * 64), ("attempt_number", 2), ("timeout_ms", 9)],
+)
+def test_reconcile_checks_all_binding_fields_before_history(
+    current_state, incoming_state, field, value
+):
+    current = replace(record(*PREFIXES[current_state]), **{field: value})
+    incoming = record(*PREFIXES[incoming_state])
+    with pytest.raises(ValueError, match="binding mismatch"):
+        current.reconcile(incoming)
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_reconcile_identical_detached_reports_return_the_current_record(state):
+    current = record(*PREFIXES[state])
+    duplicate = replace(current)
+    assert duplicate is not current
+    assert current.reconcile(duplicate) is current
+    assert current.reconcile(current) is current
+
+
+@pytest.mark.parametrize(
+    ("current_events", "incoming_events"),
+    [
+        ((START, CANCEL), (START, AttemptEvent("cancel_requested", 1))),
+        ((START, CANCEL), (START, AttemptEvent("cancel_requested", 3))),
+        ((START, CANCEL), (START, AttemptEvent("exited", 3, 0))),
+        ((START, AttemptEvent("exited", 3, 0)), (START, AttemptEvent("exited", 3, 1))),
+        ((START, AttemptEvent("exited", 3, 0)), (START, AttemptEvent("exited", 4, 0))),
+        ((START, AttemptEvent("failed", 3)), (START, AttemptEvent("failed", 4))),
+        (
+            (START, AttemptEvent("timed_out", 10)),
+            (START, AttemptEvent("timed_out", 11)),
+        ),
+        (
+            (START, CANCEL, AttemptEvent("cancelled", 2)),
+            (START, CANCEL, AttemptEvent("cancelled", 3)),
+        ),
+    ],
+)
+def test_reconcile_never_rewrites_existing_event_payloads(
+    current_events, incoming_events
+):
+    current = record(*current_events)
+    incoming = record(*incoming_events)
+    for left, right in ((current, incoming), (incoming, current)):
+        with pytest.raises(ValueError):
+            left.reconcile(right)
+
+
+@pytest.mark.parametrize(
+    "state", [s for s in PREFIXES if s not in {"ready", "running"}]
+)
+def test_reconcile_cannot_skip_or_synthesize_missing_history(state):
+    current = record(*PREFIXES[state])
+    for size in range(len(current.events)):
+        with pytest.raises(ValueError):
+            current.reconcile(record(*current.events[:size]))
+    assert record().reconcile(current) is current
+
+
+@pytest.mark.parametrize("state", ["exited", "failed", "timed_out", "cancelled"])
+def test_reconcile_out_of_order_delivery_only_advances_a_known_lineage(state):
+    events = PREFIXES[state]
+    reports = tuple(record(*events[:size]) for size in range(len(events) + 1))
+    for deliveries in itertools.permutations(reports):
+        current = record()
+        for incoming in deliveries:
+            if len(incoming.events) < len(current.events):
+                with pytest.raises(ValueError):
+                    current.reconcile(incoming)
+            else:
+                current = current.reconcile(incoming)
+        assert current == reports[-1]
+
+
+@pytest.mark.parametrize(
+    "incoming",
+    [None, False, 0, "FAKE_PRIVATE_REPORT", [], {}, object()],
+    ids=["none", "bool", "int", "private-str", "list", "dict", "object"],
+)
+def test_reconcile_rejects_non_records_without_payload_echo(incoming):
+    with pytest.raises(ValueError) as error:
+        record().reconcile(incoming)
+    assert "FAKE_PRIVATE_REPORT" not in str(error.value)
+
+
+def test_reconcile_rejects_record_subclasses_without_running_custom_behavior():
+    class CustomRecord(AttemptRecord):
+        def __getattribute__(self, name):
+            pytest.fail("incoming subclass behavior must not run")
+
+    incoming = object.__new__(CustomRecord)
+    with pytest.raises(ValueError):
+        record().reconcile(incoming)
+
+
+def test_reconcile_preserves_prepared_binding_and_does_not_accept_other_attempts():
+    prepared = prepared_source()
+    initial = AttemptRecord.from_prepared(prepared, 1)
+    running = initial.record(START)
+    exited = running.record(AttemptEvent("exited", 9, 0))
+    assert (
+        initial.reconcile(exited).request_fingerprint
+        == prepared.to_dict()["request_fingerprint"]
+    )
+    assert running.reconcile(exited).state == "exited"
+    with pytest.raises(ValueError):
+        initial.reconcile(AttemptRecord.from_prepared(prepared, 2))
+    other = prepared_source(
+        policy=PlannerPolicy(allowed_permissions=frozenset(), timeout_ms=9)
+    )
+    with pytest.raises(ValueError):
+        initial.reconcile(AttemptRecord.from_prepared(other, 1))
+
+
+@pytest.mark.parametrize("code", [-(1 << 63), -1, 0, 1, MAX_COUNTER])
+def test_reconcile_bounded_endpoints_and_exit_zero_still_have_no_success(code):
+    initial = replace(record(), attempt_number=MAX_COUNTER, timeout_ms=MAX_COUNTER)
+    exited = initial.record(START).record(AttemptEvent("exited", MAX_COUNTER - 1, code))
+    assert initial.reconcile(exited) is exited
+    assert exited.reconcile(replace(exited)) is exited
+    assert set(exited.to_dict()) == {
+        "schema_version",
+        "request_fingerprint",
+        "attempt_number",
+        "timeout_ms",
+        "state",
+        "events",
+    }
+    assert exited.to_dict()["schema_version"] == "mumei.verifier-attempt/v1"
+
+
+def test_reconcile_needs_no_io_clocks_authority_or_evidence(monkeypatch, capsys):
+    initial = AttemptRecord.from_prepared(prepared_source(), 1)
+    pending = initial.record(START).record(CANCEL)
+    cancelled = pending.record(AttemptEvent("cancelled", MAX_COUNTER))
+    exited = pending.record(AttemptEvent("exited", 3, 0))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("reconciliation must remain passive metadata")
+
+    for owner, name in (
+        (builtins, "open"),
+        (Path, "open"),
+        (Path, "read_text"),
+        (Path, "read_bytes"),
+        (os, "getenv"),
+        (socket, "socket"),
+        (subprocess, "run"),
+        (subprocess, "Popen"),
+        (importlib, "import_module"),
+        (time, "monotonic"),
+        (time, "time"),
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+    assert initial.reconcile(pending).reconcile(cancelled) is cancelled
+    assert pending.state == "cancelling" and not pending.is_terminal
+    with pytest.raises(ValueError):
+        cancelled.reconcile(exited)
+    with pytest.raises(ValueError):
+        exited.reconcile(cancelled)
+    detached = cancelled.to_dict()
+    detached["events"].clear()
+    assert cancelled.state == "cancelled"
+    assert SOURCE.decode() not in repr(cancelled) + json.dumps(cancelled.to_dict())
+    output = capsys.readouterr()
+    assert not output.out and not output.err
+
+
+def test_reconcile_does_not_claim_global_branch_arbitration_or_replay_protection():
+    common = record(START)
+    zero = common.record(AttemptEvent("exited", 3, 0))
+    nonzero = common.record(AttemptEvent("exited", 3, 1))
+    assert common.reconcile(zero) is zero
+    assert common.reconcile(nonzero) is nonzero
+    for current, conflict in ((zero, nonzero), (nonzero, zero)):
+        assert current.reconcile(replace(current)) is current
+        with pytest.raises(ValueError):
+            current.reconcile(conflict)
