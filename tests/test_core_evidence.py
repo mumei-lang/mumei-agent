@@ -175,13 +175,33 @@ def test_deadline_kills_and_reaps_direct_child(executable, monkeypatch, script):
 
 def test_closed_stdin_and_oversized_output_cannot_deadlock(executable):
     for script in [
-        f"import os, sys\nos.close(0)\nsys.stdout.buffer.write({VALID!r})\n",
         "import os\nwhile True:\n os.write(1, b'X' * 4096)\n",
         "import os\nwhile True:\n os.write(2, b'X' * 4096)\n",
     ]:
         start = time.monotonic()
         failed(snapshot(b"X" * 65536), executable(script), timeout_ms=500)
         assert time.monotonic() - start < 2
+
+
+def test_early_reader_close_fails_when_input_cannot_be_written(executable, monkeypatch):
+    processes = []
+    popen, write = subprocess.Popen, os.write
+
+    def launch(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def write_after_reader_exit(fd, data):
+        # Synchronize reader closure, rather than depending on pipe capacity.
+        processes[0].wait(timeout=2)
+        return write(fd, data)
+
+    path = executable(f"import os, sys\nos.close(0)\nsys.stdout.buffer.write({VALID!r})\n")
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", launch)
+    monkeypatch.setattr(core_evidence.os, "write", write_after_reader_exit)
+    failed(snapshot(b"X" * 65536), path)
+    assert processes[0].returncode is not None
 
 
 def test_stdout_before_reading_input_is_drained_without_deadlock(executable):
@@ -257,7 +277,7 @@ def real_core():
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("result", ["established", "refuted", "unknown"])
+@pytest.mark.parametrize("result", ["established", "counterexample", "unknown", "unsupported", "not_checked", "inconsistent"])
 def test_real_core_checks_representation_not_stored_result_truth(real_core, result):
     evidence = synthetic_evidence()
     evidence["result"] = result

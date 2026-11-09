@@ -130,7 +130,8 @@ Code zero alone, empty output, any stderr, malformed/duplicate/extra diagnostics
 unsupported diagnostic/schema versions, timeouts and I/O failures fail closed.
 The complete diagnostic must match the known v1 representation-only shape,
 including `acceptance: not_evaluated` and all six `checks_not_performed` entries.
-Only JSON whitespace/key order may differ. All failures expose fixed errors,
+JSON key order/whitespace and equivalent string escapes are immaterial.
+Check failures expose fixed errors,
 not commands, private bytes, child diagnostics, paths or underlying exceptions.
 
 The API returns `None`, not Evidence, a cached receipt or a new assurance record,
@@ -163,7 +164,7 @@ Input/decoder/I/O errors do not quote the private body or underlying errors.
 The interface consumes raw UTF-8 bytes from pipes/redirected files, not terminal
 text requiring encoding conversion (including Windows console code pages).
 
-This entry point is not invoked by the Agent: no process runner, stream capture,
+This Core entry-point slice does not itself invoke the Agent: no process runner, stream capture,
 normalization, request/result matching, authority enforcement, acceptance or
 grade promotion is added. Full C11 and Core-owned acceptance remain open; C12's
 demand gate and existing assurance/Lean/native/LLVM/deferred-WASM policies stay
