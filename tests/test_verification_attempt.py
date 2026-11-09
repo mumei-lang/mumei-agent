@@ -1268,3 +1268,48 @@ def test_output_json_decode_needs_no_io_clocks_plugins_authority_or_paths(monkey
     result = snapshot.decode_json_object()
     assert result["success"] is True and result["schema_version"] == "untrusted"
     assert "result" not in snapshot.to_dict()
+
+
+def test_output_json_decode_nonfinite_decimal_fallback_is_rejected(monkeypatch):
+    from decimal import Context
+    import agent.verification_attempt as attempt_module
+
+    monkeypatch.setattr(attempt_module, "Context", lambda: Context(traps=[]))
+    with pytest.raises(ValueError) as error:
+        output_snapshot(stdout=b'{"n":1e999999999999999999999999}').decode_json_object()
+    assert error.value.__context__ is None
+
+
+@pytest.mark.parametrize("error_type", [ValueError, RecursionError, ArithmeticError])
+def test_output_json_decode_hides_decoder_errors_without_chaining(
+    error_type, monkeypatch
+):
+    def failing_decoder(*args, **kwargs):
+        raise error_type("FAKE_PRIVATE_DECODER_PAYLOAD")
+
+    monkeypatch.setattr(json, "loads", failing_decoder)
+    with pytest.raises(ValueError) as error:
+        output_snapshot(stdout=b"{}").decode_json_object()
+    assert "FAKE_PRIVATE" not in str(error.value)
+    assert error.value.__context__ is None and error.value.__cause__ is None
+
+
+def test_output_json_decode_does_not_normalize_identity_or_merge_equivalent_trees():
+    current = output_snapshot(stdout=b'{"x":1}')
+    incoming = output_snapshot(stdout=b' {"x": 1}\n')
+    assert current.decode_json_object() == incoming.decode_json_object()
+    assert (
+        current.to_dict()["output_fingerprint"]
+        != incoming.to_dict()["output_fingerprint"]
+    )
+    with pytest.raises(ValueError, match="output report conflict"):
+        current.reconcile(incoming)
+
+
+@pytest.mark.parametrize("exit_code", [-1, 0, 1, MAX_COUNTER])
+def test_output_json_decode_is_not_success_classification_for_any_exit_code(exit_code):
+    attempt = record(START, AttemptEvent("exited", 3, exit_code))
+    snapshot = output_snapshot(attempt, b'{"result":"established"}')
+    assert snapshot.decode_json_object()["result"] == "established"
+    assert "result" not in snapshot.to_dict()
+    assert snapshot.attempt.events[-1].exit_code == exit_code

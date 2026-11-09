@@ -39,24 +39,24 @@ def _counter(value: int, *, positive: bool = False) -> None:
         raise ValueError("invalid bounded attempt counter")
 
 
-def _json_depth(data: bytes) -> None:
+def _json_depth(text: str) -> None:
     depth = 0
     quoted = escaped = False
-    for byte in data:
+    for char in text:
         if quoted:
             if escaped:
                 escaped = False
-            elif byte == 92:
+            elif char == "\\":
                 escaped = True
-            elif byte == 34:
+            elif char == '"':
                 quoted = False
-        elif byte == 34:
+        elif char == '"':
             quoted = True
-        elif byte in (91, 123):
+        elif char in "[{":
             depth += 1
             if depth > MAX_JSON_DEPTH:
                 raise ValueError("JSON nesting exceeds transport bound")
-        elif byte in (93, 125):
+        elif char in "]}":
             depth -= 1
             if depth < 0:
                 raise ValueError("invalid JSON nesting")
@@ -270,9 +270,10 @@ class AttemptOutput:
         """
         payload = None
         try:
-            _json_depth(self.stdout)
+            text = self.stdout.decode("utf-8")
+            _json_depth(text)
             payload = json.loads(
-                self.stdout.decode("utf-8"),
+                text,
                 object_pairs_hook=_json_pairs,
                 parse_int=_json_integer,
                 parse_float=_json_decimal,
