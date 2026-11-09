@@ -10,6 +10,7 @@ import socket
 import subprocess
 import time
 from dataclasses import FrozenInstanceError, replace
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,8 @@ from agent.verification_attempt import (
     EVENT_KINDS,
     MAX_COUNTER,
     MAX_EVENTS,
+    MAX_JSON_DEPTH,
+    MAX_JSON_NUMBER_CHARS,
     MAX_STDOUT_BYTES,
     AttemptEvent,
     AttemptOutput,
@@ -957,3 +960,356 @@ def test_output_max_attempt_counter_and_minimum_deadline_remain_metadata(timeout
     snapshot = output_snapshot(attempt)
     assert snapshot.attempt is attempt
     assert snapshot.reconcile(replace(snapshot)) is snapshot
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{}",
+        b' {"items":[true,false,null,"text",{"nested":[]}]}\r\n',
+        '{"日本語":"値","emoji":"😀"}'.encode(),
+        b'{"escaped":"\\"\\\\{}[]","control":"\\u0000"}',
+        b'{"scalar":"\\ud83d\\ude00"}',
+        b'{"e\\u0301":1,"\\u00e9":2}',
+    ],
+    ids=[
+        "empty-object",
+        "nested-values",
+        "utf8",
+        "escaped-structure",
+        "surrogate-pair",
+        "no-unicode-normalization",
+    ],
+)
+def test_output_json_decode_preserves_supported_objects(body):
+    output = output_snapshot(stdout=body)
+    before = output.to_dict()
+    assert output.decode_json_object() == json.loads(body)
+    assert output.to_dict() == before and output.stdout is body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b" \t\n",
+        b"null",
+        b"true",
+        b"42",
+        b'"text"',
+        b"[]",
+        b"{}{}",
+        b"{} log",
+        b"log {}",
+        b"```json\n{}\n```",
+        b"{",
+        b"}",
+        b"{]",
+        b'{"a":1,}',
+        b'{"a":}',
+        b"{a:1}",
+        b'{"a":/*comment*/1}',
+        b'{"a":"\x00"}',
+        b'{"a":"\\x41"}',
+        b'{"a":"\\u12"}',
+        b'{"a":"unterminated}',
+        b'{"a":01}',
+        b'{"a":+1}',
+        b'{"a":.1}',
+        b'{"a":1.}',
+        b'{"a":1e}',
+        b'{"a":NaN}',
+        b'{"a":Infinity}',
+        b'{"a":-Infinity}',
+        b"\xef\xbb\xbf{}",
+        b'{"a":"\xff"}',
+        b"\xff{}",
+        b"\xff\xfe{\x00}\x00",
+        b"\x00\x00\xfe\xff\x00\x00\x00{",
+        b'{"a":"\\ud800"}',
+        b'{"a":"\\udfff"}',
+        b'{"\\ud800":1}',
+        b'{"a":["\\ud800"]}',
+        b'{"a":"\\ud800\\ud800"}',
+    ],
+    ids=[
+        "empty",
+        "whitespace",
+        "null",
+        "bool",
+        "number",
+        "string",
+        "array",
+        "two-objects",
+        "trailing-log",
+        "leading-log",
+        "markdown",
+        "missing-close",
+        "extra-close",
+        "wrong-close",
+        "trailing-comma",
+        "missing-value",
+        "bare-key",
+        "comment",
+        "raw-nul",
+        "bad-escape",
+        "short-unicode",
+        "unterminated-string",
+        "leading-zero",
+        "plus-number",
+        "missing-integer",
+        "missing-fraction",
+        "missing-exponent",
+        "nan",
+        "infinity",
+        "negative-infinity",
+        "bom",
+        "invalid-utf8-value",
+        "invalid-utf8-prefix",
+        "utf16",
+        "utf32",
+        "unpaired-high",
+        "unpaired-low",
+        "unpaired-key",
+        "unpaired-array-value",
+        "two-high-surrogates",
+    ],
+)
+def test_output_json_decode_rejects_unsupported_transport_without_chained_payload(body):
+    snapshot = output_snapshot(stdout=body)
+    before = snapshot.to_dict()
+    with pytest.raises(ValueError) as error:
+        snapshot.decode_json_object()
+    assert str(error.value) == "stdout is not a supported bounded JSON object"
+    assert error.value.__context__ is None and error.value.__cause__ is None
+    assert snapshot.to_dict() == before and snapshot.stdout is body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"a":1,"a":2}',
+        b'{"a":1,"\\u0061":2}',
+        b'{"a":null,"a":null}',
+        b'{"nested":{"a":1,"a":2}}',
+        b'{"nested":[{"a":1,"a":2}]}',
+        b'{"a":{},"a":[]}',
+        b'{"a":1,"b":2,"a":3}',
+    ],
+    ids=[
+        "root",
+        "escaped-key",
+        "equal-values",
+        "nested-object",
+        "array-object",
+        "different-types",
+        "separated",
+    ],
+)
+def test_output_json_decode_rejects_duplicate_decoded_keys_at_every_level(body):
+    with pytest.raises(ValueError):
+        output_snapshot(stdout=body).decode_json_object()
+
+
+@pytest.mark.parametrize("depth", [1, 2, MAX_JSON_DEPTH - 1, MAX_JSON_DEPTH])
+@pytest.mark.parametrize("container", ["array", "object"])
+def test_output_json_decode_nesting_bound_is_exact(depth, container):
+    body = b"null"
+    for _ in range(depth - 1):
+        body = b"[" + body + b"]" if container == "array" else b'{"x":' + body + b"}"
+    body = b'{"x":' + body + b"}"
+    assert isinstance(output_snapshot(stdout=body).decode_json_object(), dict)
+
+
+@pytest.mark.parametrize("container", ["array", "object"])
+def test_output_json_decode_excess_nesting_is_rejected_before_parser(
+    container, monkeypatch
+):
+    body = b"null"
+    for _ in range(MAX_JSON_DEPTH):
+        body = b"[" + body + b"]" if container == "array" else b'{"x":' + body + b"}"
+    snapshot = output_snapshot(stdout=b'{"x":' + body + b"}")
+    monkeypatch.setattr(
+        json,
+        "loads",
+        lambda *args, **kwargs: pytest.fail(
+            "depth must be bounded before JSON parsing"
+        ),
+    )
+    with pytest.raises(ValueError):
+        snapshot.decode_json_object()
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "9007199254740993",
+        "-9007199254740993",
+        "9" * MAX_JSON_NUMBER_CHARS,
+        "-" + "9" * (MAX_JSON_NUMBER_CHARS - 1),
+        "0.12345678901234567890123456789",
+        "-0.0",
+        "1e400",
+        "1e-400",
+        "1." + "0" * (MAX_JSON_NUMBER_CHARS - 3) + "1",
+    ],
+)
+def test_output_json_decode_numbers_preserve_precision_without_float_or_context_changes(
+    token,
+):
+    snapshot = output_snapshot(stdout=('{"n":' + token + "}").encode())
+    with localcontext() as context:
+        context.prec = 2
+        context.clear_flags()
+        before = context.flags.copy()
+        number = snapshot.decode_json_object()["n"]
+        assert context.flags == before
+    expected = (
+        Decimal(token) if any(marker in token for marker in ".eE") else int(token)
+    )
+    assert number == expected and type(number) is type(expected)
+    if token == "-0.0":
+        assert number.is_signed()
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "9" * (MAX_JSON_NUMBER_CHARS + 1),
+        "-" + "9" * MAX_JSON_NUMBER_CHARS,
+        "0." + "1" * (MAX_JSON_NUMBER_CHARS - 1),
+        "1e" + "9" * 30,
+        "1e-" + "9" * 30,
+    ],
+    ids=[
+        "long-positive",
+        "long-negative",
+        "long-fraction",
+        "unrepresentable-exponent",
+        "unrepresentable-negative-exponent",
+    ],
+)
+def test_output_json_decode_rejects_unsupported_number_bounds(token):
+    with pytest.raises(ValueError) as error:
+        output_snapshot(stdout=('{"n":' + token + "}").encode()).decode_json_object()
+    assert error.value.__context__ is None
+
+
+def test_output_json_decode_large_string_is_not_nesting_and_limit_counts_bytes():
+    text = ('\\"\\\\{}[]' * 2000) + "FAKE_PRIVATE_JSON"
+    body = json.dumps({"value": text}).encode()
+    assert output_snapshot(stdout=body).decode_json_object() == {"value": text}
+    body = b'{"x":"' + b"a" * (MAX_STDOUT_BYTES - len(b'{"x":""}')) + b'"}'
+    assert len(body) == MAX_STDOUT_BYTES
+    assert (
+        len(output_snapshot(stdout=body).decode_json_object()["x"])
+        == MAX_STDOUT_BYTES - 8
+    )
+
+
+def test_output_json_decode_returns_fresh_private_tree_not_cached_or_authoritative(
+    capsys,
+):
+    body = b'{"result":"established","path":"FAKE_PRIVATE_PATH","nested":[{"secret":"FAKE_PRIVATE_JSON"}]}'
+    snapshot = output_snapshot(stdout=body)
+    before = snapshot.to_dict()
+    first = snapshot.decode_json_object()
+    first["nested"][0]["secret"] = "changed"
+    first["result"] = "changed"
+    assert snapshot.decode_json_object()["result"] == "established"
+    assert snapshot.decode_json_object()["nested"][0]["secret"] == "FAKE_PRIVATE_JSON"
+    assert snapshot.to_dict() == before and snapshot.stdout is body
+    assert "FAKE_PRIVATE" not in repr(snapshot) + json.dumps(snapshot.to_dict())
+    assert not capsys.readouterr().out
+
+
+def test_output_json_decode_invalid_body_is_absent_from_errors_and_traceback(capsys):
+    import traceback
+
+    for body in (
+        b'{"FAKE_PRIVATE_JSON":',
+        b'{"FAKE_PRIVATE_JSON":1,"FAKE_PRIVATE_JSON":2}',
+        b'{"x":"FAKE_PRIVATE_JSON\\ud800"}',
+    ):
+        try:
+            output_snapshot(stdout=body).decode_json_object()
+        except ValueError as error:
+            assert "FAKE_PRIVATE_JSON" not in str(error) + "".join(
+                traceback.format_exception(error)
+            )
+            assert error.__context__ is None and error.__cause__ is None
+        else:
+            pytest.fail("invalid private JSON must not decode")
+    captured = capsys.readouterr()
+    assert not captured.out and not captured.err
+
+
+def test_output_json_decode_needs_no_io_clocks_plugins_authority_or_paths(monkeypatch):
+    body = b'{"schema_version":"untrusted","success":true,"artifact_paths":["FAKE_PRIVATE_PATH"]}'
+    snapshot = output_snapshot(stdout=body)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("JSON decode must not read paths, run tools or query authority")
+
+    for owner, name in (
+        (builtins, "open"),
+        (Path, "open"),
+        (Path, "read_text"),
+        (Path, "read_bytes"),
+        (os, "getenv"),
+        (socket, "socket"),
+        (subprocess, "run"),
+        (subprocess, "Popen"),
+        (importlib, "import_module"),
+        (time, "monotonic"),
+        (time, "time"),
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+    result = snapshot.decode_json_object()
+    assert result["success"] is True and result["schema_version"] == "untrusted"
+    assert "result" not in snapshot.to_dict()
+
+
+def test_output_json_decode_nonfinite_decimal_fallback_is_rejected(monkeypatch):
+    from decimal import Context
+    import agent.verification_attempt as attempt_module
+
+    monkeypatch.setattr(attempt_module, "Context", lambda: Context(traps=[]))
+    with pytest.raises(ValueError) as error:
+        output_snapshot(stdout=b'{"n":1e999999999999999999999999}').decode_json_object()
+    assert error.value.__context__ is None
+
+
+@pytest.mark.parametrize("error_type", [ValueError, RecursionError, ArithmeticError])
+def test_output_json_decode_hides_decoder_errors_without_chaining(
+    error_type, monkeypatch
+):
+    def failing_decoder(*args, **kwargs):
+        raise error_type("FAKE_PRIVATE_DECODER_PAYLOAD")
+
+    monkeypatch.setattr(json, "loads", failing_decoder)
+    with pytest.raises(ValueError) as error:
+        output_snapshot(stdout=b"{}").decode_json_object()
+    assert "FAKE_PRIVATE" not in str(error.value)
+    assert error.value.__context__ is None and error.value.__cause__ is None
+
+
+def test_output_json_decode_does_not_normalize_identity_or_merge_equivalent_trees():
+    current = output_snapshot(stdout=b'{"x":1}')
+    incoming = output_snapshot(stdout=b' {"x": 1}\n')
+    assert current.decode_json_object() == incoming.decode_json_object()
+    assert (
+        current.to_dict()["output_fingerprint"]
+        != incoming.to_dict()["output_fingerprint"]
+    )
+    with pytest.raises(ValueError, match="output report conflict"):
+        current.reconcile(incoming)
+
+
+@pytest.mark.parametrize("exit_code", [-1, 0, 1, MAX_COUNTER])
+def test_output_json_decode_is_not_success_classification_for_any_exit_code(exit_code):
+    attempt = record(START, AttemptEvent("exited", 3, exit_code))
+    snapshot = output_snapshot(attempt, b'{"result":"established"}')
+    assert snapshot.decode_json_object()["result"] == "established"
+    assert "result" not in snapshot.to_dict()
+    assert snapshot.attempt.events[-1].exit_code == exit_code
