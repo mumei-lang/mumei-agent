@@ -88,6 +88,61 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 explicit local Core representation handoff
+
+`agent.core_evidence.check_evidence_representation` is an opt-in **POSIX-only**
+local Core invocation, not a general adapter runner. The host must independently
+authorize this process and choose a trusted absolute executable path; adapter
+permission declarations, prepared requests and stored fingerprints do not grant
+that authority. Path syntax does not authenticate the binary or prevent replacement.
+The API neither discovers a binary through PATH/environment nor accepts a command
+prefix, shell, arbitrary flags, container or remote endpoint.
+
+```python
+from agent.core_evidence import check_evidence_representation
+
+# The host first reconciles and retains its canonical attempt/output lineage.
+check_evidence_representation(
+    output, core_executable=trusted_core_path, timeout_ms=1000,
+)
+# Normal return means representation-valid only, never proof or acceptance.
+```
+
+Exactly the original `AttemptOutput.stdout` bytes are sent to fixed
+`evidence check --stdin --json`, without a decoded-tree round trip or temporary
+file. The Core subprocess receives an empty environment. Caller environment,
+credentials and TRACEPARENT are not forwarded; no telemetry or child output is
+published. The executable must run in that environment: there is no cargo/MCP/
+legacy-client fallback. Synthetic test executables stand in for a trusted Core
+only in tests, not as independent validators of Evidence meaning.
+
+The caller separately specifies a strict integer timeout of 1–60,000 ms; the
+adapter's historical timeout is not reused. Nonblocking concurrent pipe I/O avoids
+stdin/stdout/stderr backpressure deadlocks. Each diagnostic stream is limited to
+4,096 bytes plus one overflow-detection byte, with no oversized stream drain.
+The deadline includes I/O and child exit; OS process creation is not interruptible.
+Failure/interrupt cleanup closes pipes and kills/reaps the direct child with up
+to one additional second; it does not claim descendant cleanup or an OS sandbox.
+This is a small trusted-Core process boundary, not arbitrary plugin lifecycle,
+resource/authority enforcement, memory/CPU limiting or Windows support.
+
+Code zero alone, empty output, any stderr, malformed/duplicate/extra diagnostics,
+unsupported diagnostic/schema versions, timeouts and I/O failures fail closed.
+The complete diagnostic must match the known v1 representation-only shape,
+including `acceptance: not_evaluated` and all six `checks_not_performed` entries.
+Only JSON whitespace/key order may differ. All failures expose fixed errors,
+not commands, private bytes, child diagnostics, paths or underlying exceptions.
+
+The API returns `None`, not Evidence, a cached receipt or a new assurance record,
+and does not mutate the snapshot or its attempt. Even normal return depends on
+the host-trusted executable: the anonymous diagnostic is not authenticated or
+bound to this input by itself. Stored result truth, request/result-contract
+matching, freshness, authenticity, correspondence and Core Evidence acceptance
+remain unassessed. No new verifier, automatic audit/CLI/MCP route or grade
+promotion is added. General adapter execution/stream collection and normalization
+remain open; C11 is partial, C12 demand-gated, and existing assurance/Lean/native/
+LLVM/deferred-WASM policies unchanged.
+
 ### C11 original-byte Core stdin handoff entry point
 
 Core exposes explicit `mumei evidence check --stdin [--json]` so an authorized
