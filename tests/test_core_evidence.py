@@ -213,6 +213,69 @@ def test_stdout_before_reading_input_is_drained_without_deadlock(executable):
     check_evidence_representation(snapshot(b"X" * 65536), core_executable=executable(script), timeout_ms=2000)
 
 
+def test_partial_writes_and_transient_unready_pipes_preserve_input(executable, monkeypatch):
+    read, write = os.read, os.write
+    first_read = first_write = True
+
+    def read_once_unready(fd, count):
+        nonlocal first_read
+        if first_read:
+            first_read = False
+            raise BlockingIOError
+        return read(fd, count)
+
+    def write_once_unready(fd, data):
+        nonlocal first_write
+        if first_write:
+            first_write = False
+            raise BlockingIOError
+        return write(fd, data[:13])
+
+    body = b"FAKE_PRIVATE_BINARY\xff" * 128
+    path = executable(f"import sys\nassert sys.stdin.buffer.read() == {body!r}\nsys.stdout.buffer.write({VALID!r})\n")
+    # Leave Popen's own error-pipe read alone; perturb only registered pipes.
+    original_selector = core_evidence.selectors.DefaultSelector
+
+    class TransientSelector(original_selector):
+        def __enter__(self):
+            monkeypatch.setattr(core_evidence.os, "read", read_once_unready)
+            monkeypatch.setattr(core_evidence.os, "write", write_once_unready)
+            return super().__enter__()
+
+    monkeypatch.setattr(core_evidence.selectors, "DefaultSelector", TransientSelector)
+    check_evidence_representation(snapshot(body), core_executable=path, timeout_ms=2000)
+    assert not first_read and not first_write
+
+
+def test_keyboard_interrupt_closes_pipes_and_reaps_child(executable, monkeypatch):
+    processes = []
+    popen = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def interrupt(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", launch)
+    monkeypatch.setattr(core_evidence.selectors.DefaultSelector, "select", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        check_evidence_representation(
+            snapshot(), core_executable=executable("import time\ntime.sleep(60)\n"), timeout_ms=2000,
+        )
+    assert len(processes) == 1 and processes[0].returncode is not None
+    assert all(stream.closed for stream in [processes[0].stdin, processes[0].stdout, processes[0].stderr])
+
+
+def test_import_never_starts_core(monkeypatch):
+    import importlib
+
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("spawned"))
+    importlib.reload(core_evidence)
+
+
 @pytest.mark.parametrize("timeout_ms", [None, True, False, 0, -1, 1.5, "10", MAX_CHECK_TIMEOUT_MS + 1])
 def test_invalid_timeout_fails_before_spawn(monkeypatch, timeout_ms):
     monkeypatch.setattr(core_evidence.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("spawned"))
