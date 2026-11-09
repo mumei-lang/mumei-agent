@@ -164,9 +164,10 @@ Input/decoder/I/O errors do not quote the private body or underlying errors.
 The interface consumes raw UTF-8 bytes from pipes/redirected files, not terminal
 text requiring encoding conversion (including Windows console code pages).
 
-This Core entry-point slice does not itself invoke the Agent: no process runner, stream capture,
-normalization, request/result matching, authority enforcement, acceptance or
-grade promotion is added. Full C11 and Core-owned acceptance remain open; C12's
+This Core entry point does not automatically wire an Agent call. The separate
+opt-in local handoff above uses it, without adding a general adapter runner,
+stream capture, normalization, request/result matching, authority enforcement,
+acceptance or grade promotion. Full C11 and Core-owned acceptance remain open; C12's
 demand gate and existing assurance/Lean/native/LLVM/deferred-WASM policies stay
 unchanged. See the
 [canonical stdin milestone](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md#wave-2-original-byte-core-stdin-representation-checks).
