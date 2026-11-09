@@ -8,12 +8,15 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field, replace
+from decimal import Context, Decimal
 
 from agent.verification_planner import PreparedSourceRequest
 
 MAX_COUNTER = (1 << 63) - 1
 MAX_EVENTS = 3
 MAX_STDOUT_BYTES = 64 * 1024
+MAX_JSON_DEPTH = 32
+MAX_JSON_NUMBER_CHARS = 128
 EVENT_KINDS = frozenset(
     {"started", "cancel_requested", "exited", "failed", "timed_out", "cancelled"}
 )
@@ -34,6 +37,59 @@ _TRANSITIONS = {
 def _counter(value: int, *, positive: bool = False) -> None:
     if type(value) is not int or not (int(positive) <= value <= MAX_COUNTER):
         raise ValueError("invalid bounded attempt counter")
+
+
+def _json_depth(data: bytes) -> None:
+    depth = 0
+    quoted = escaped = False
+    for byte in data:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise ValueError("JSON nesting exceeds transport bound")
+        elif byte in (93, 125):
+            depth -= 1
+            if depth < 0:
+                raise ValueError("invalid JSON nesting")
+    if depth or quoted:
+        raise ValueError("incomplete JSON structure")
+
+
+def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _json_integer(token: str) -> int:
+    if len(token) > MAX_JSON_NUMBER_CHARS:
+        raise ValueError("JSON number exceeds transport bound")
+    return int(token)
+
+
+def _json_decimal(token: str) -> Decimal:
+    if len(token) > MAX_JSON_NUMBER_CHARS:
+        raise ValueError("JSON number exceeds transport bound")
+    number = Decimal(token, context=Context())
+    if not number.is_finite():
+        raise ValueError("nonfinite JSON number")
+    return number
+
+
+def _json_constant(token: str) -> None:
+    raise ValueError("non-JSON numeric constant")
 
 
 @dataclass(frozen=True)
@@ -205,6 +261,38 @@ class AttemptOutput:
         if self.attempt != incoming.attempt or self.stdout != incoming.stdout:
             raise ValueError("attempt output report conflict")
         return self
+
+    def decode_json_object(self) -> dict[str, object]:
+        """Explicit private-body access, not a Core representation/acceptance gate.
+
+        Return a fresh tree with exact int/Decimal numbers. Never log the tree or
+        reserialize it as authoritative Evidence; Core must check original bytes.
+        """
+        payload = None
+        try:
+            _json_depth(self.stdout)
+            payload = json.loads(
+                self.stdout.decode("utf-8"),
+                object_pairs_hook=_json_pairs,
+                parse_int=_json_integer,
+                parse_float=_json_decimal,
+                parse_constant=_json_constant,
+            )
+            pending = [payload]
+            while pending:
+                value = pending.pop()
+                if type(value) is str:
+                    value.encode("utf-8")
+                elif type(value) is dict:
+                    pending.extend(value.keys())
+                    pending.extend(value.values())
+                elif type(value) is list:
+                    pending.extend(value)
+        except (ValueError, UnicodeError, ArithmeticError, RecursionError):
+            payload = None
+        if type(payload) is not dict:
+            raise ValueError("stdout is not a supported bounded JSON object")
+        return payload
 
     def to_dict(self) -> dict:
         manifest = {

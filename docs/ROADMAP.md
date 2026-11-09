@@ -88,6 +88,35 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 bounded JSON stdout decoding
+
+`AttemptOutput.decode_json_object()` is explicit access to the private body,
+limited to a single UTF-8 JSON object. It rejects duplicate decoded keys at any
+depth, prefixes/trailing output, BOM/other encodings, malformed syntax, non-JSON
+numeric constants and unpaired surrogate escapes. Key spelling is not Unicode
+normalized. Nesting (objects and arrays, including the root) is bounded to 32
+before invoking the JSON parser; numeric literals are at most 128 characters,
+including sign/exponent, and decimal exponents must be representable by Python's
+`Decimal`. The existing 65,536-byte snapshot limit remains unchanged.
+
+Integer values use exact `int`; fractional/exponent values use finite exact
+`Decimal`, not rounded binary floats. Parsing does not change the caller's
+decimal context. Each call returns a fresh mutable tree; edits do not change the
+snapshot, its raw-byte identity, metadata or future decodes. The tree is private
+untrusted data and **must not be logged**. Returned values are not a canonical
+serialization or Core Evidence: downstream Core checks must consume the original
+`.stdout` bytes, not a reserialization of this tree. Syntax/encoding/bound errors
+raise one static message without the underlying decoder exception/context.
+
+An empty object or an object claiming success can decode without satisfying any
+Evidence schema or meaning. No schema/method/profile/result-contract matching,
+normalization, path following, process/stream collection, authority check or
+acceptance/grade promotion is performed. Opaque snapshot construction, lifecycle
+and output reconciliation, repr/manifest and default audit/CLI/MCP behavior are
+unchanged. Core owns Evidence checks/acceptance; adapter normalization, actual
+execution and full C11 remain open, with C12 still demand-gated and existing
+assurance/Lean/native/LLVM/deferred-WASM policies unchanged.
+
 ### C11 bounded opaque stdout snapshots
 
 `AttemptOutput` adds an opt-in, in-memory preparation boundary for **host-supplied
