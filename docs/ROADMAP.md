@@ -88,6 +88,59 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 bounded host-observed attempt lifecycle
+
+The opt-in `agent.verification_attempt` module provides `AttemptRecord` and
+`AttemptEvent` for a bounded **host-reported observation contract**, not a runner
+or alternative Evidence format. `AttemptRecord.from_prepared(prepared, n)` binds
+the prepared manifest fingerprint and selected timeout to a host-assigned
+positive attempt number. The helper requires an explicit permission policy;
+it does not establish authority, current registry state or observation freshness.
+The record retains no source bytes, plan, commands, stdout/stderr or free-text
+diagnostics. Fingerprints/numbers are identifiers, not authorization/replay tokens.
+
+| Current state | Accepted next observations |
+| --- | --- |
+| `ready` | `started` → `running` |
+| `running` | `cancel_requested` → `cancelling`; `exited`, `failed`, `timed_out` |
+| `cancelling` | `exited`, `failed`, `timed_out`, `cancelled` |
+| `exited`, `failed`, `timed_out`, `cancelled` | None |
+
+Histories are immutable, validated at construction and on append, with at most
+three events. Strings, event tuples and integers require exact primitive types,
+not subclasses with mutable/custom behavior. The recorded start defines elapsed zero; subsequent host-reported
+millisecond counters must be nonnegative and monotonic. Exit observations must
+precede the declared deadline; timeout observations must reach it. Failure or
+cancellation acknowledgement may be recorded after the deadline without becoming
+success. Only `exited` carries an integer exit code, and **zero does not mean
+verified, proved or accepted**. Counters/attempt numbers use bounded signed-i64
+nonnegative/positive ranges; exit codes use the full signed-i64 range.
+
+```python
+from agent.verification_attempt import AttemptEvent, AttemptRecord
+
+attempt = AttemptRecord.from_prepared(prepared, 1)
+running = attempt.record(AttemptEvent("started", 0))
+pending = running.record(AttemptEvent("cancel_requested", 5))
+assert not pending.is_terminal
+cancelled = pending.record(AttemptEvent("cancelled", 6))
+```
+
+The API records a reported cancellation request/acknowledgement; it does not send
+signals or prove that a process stopped. A timeout record does not prove cleanup
+or resource enforcement. No clock is read, so missing host reports cannot be
+detected and timeouts do not fire automatically. A cancellation/exit race can be
+represented as `exited` before the deadline; it cannot rewrite an existing
+terminal record. Incomplete `ready`/`running`/`cancelling` histories remain
+nonterminal. Independent copies may conflict: host attempt-number uniqueness,
+cross-record reconciliation/replay protection, final preflight/authority checks,
+actual execution/cancellation/cleanup/resource enforcement, output collection and
+Evidence normalization/acceptance are still open. There is no pre-start
+cancellation flow, retry/fallback scheduler or default CLI/MCP/audit integration.
+This is partial C11/C13, with Core meaning/acceptance, C12's demand gate, existing
+assurance/Lean/native/LLVM behavior and deferred WASM unchanged. No external
+verifier, dependency, file/environment/network access or plugin loading is added.
+
 ### C04/C11 declared permission-policy filtering
 
 The opt-in planner accepts `AdapterDescriptor.required_permissions` and
