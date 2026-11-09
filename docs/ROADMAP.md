@@ -88,6 +88,58 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 bounded opaque stdout snapshots
+
+`AttemptOutput` adds an opt-in, in-memory preparation boundary for **host-supplied
+stdout bytes**, not a stream collector or Evidence parser. The record must be
+exactly an `AttemptRecord` in `exited` state (including a reported exit before its
+deadline); failed, timed-out, cancelled and incomplete histories are rejected.
+Zero and nonzero exit codes are both transport metadata, never verification
+success. Exact immutable bytes of length 0 through 65,536 are accepted only when
+their raw SHA-256 matches a separately supplied lowercase digest. Oversized input
+is rejected before hashing, never truncated. Empty, binary, invalid JSON and even
+stored success claims remain uninterpreted bytes, **not well-formed Evidence**.
+
+```python
+from agent.verification_attempt import AttemptOutput
+
+current = current.reconcile(reported_exit)
+output = AttemptOutput.from_prepared(
+    prepared, 1, current, stdout_bytes, expected_stdout_sha256
+)
+assert output.reconcile(output) is output
+```
+
+The helper checks the separately specified attempt number, prepared-request
+fingerprint and selected timeout, and requires the existing explicit permission
+policy. Direct construction checks the exited record/body/digest only; it does
+not independently bind a prepared request. Neither path checks the live registry
+or grants authority. Reconcile the host's retained current attempt first: binding
+against a prepared request alone cannot detect an independently forked history.
+
+`repr` omits stdout; `to_dict()` emits only detached `mumei.verifier-output/v1`
+metadata: the full attempt manifest, stdout size/digest and a canonical SHA-256
+over that metadata (excluding the fingerprint itself). No source/plan, stderr,
+command, diagnostic or raw stdout is emitted. The snapshot retains stdout for
+explicit downstream access; reflection such as `dataclasses.asdict`, inspecting
+locals or accessing `.stdout` is **not redacted** and must not be logged. Digests
+are identity metadata, not secret detectors, authorization or declassification.
+
+`output.reconcile(incoming)` keeps the current object only for an exact duplicate
+snapshot. A different attempt binding, terminal event payload/history or raw
+stdout fails with static errors, even if size/exit code agree. It does not pick a
+winner, atomically publish updates or prevent independently captured conflicting
+snapshots. Hosts own the canonical output record, attempt identity and atomic
+storage. Duplicate acceptance is not freshness/authentication/replay protection.
+
+This helper performs no parsing, file/network/process/clock/plugin operations.
+The caller-supplied digest does not prove stream completeness, provenance or
+delivery timing. Real stream limits/collection, timeout/cancel cleanup, authority
+and resource enforcement, cross-attempt/backend arbitration and Core-owned common
+Evidence normalization/acceptance remain open. No default audit/CLI/MCP path or
+external verifier is added; C11 is partial, C12 remains demand-gated and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 same-attempt report reconciliation
 
 `AttemptRecord.reconcile(incoming)` compares a host-reported snapshot to the

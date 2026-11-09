@@ -1,16 +1,19 @@
-"""Bounded host-reported attempt observations, not execution or Evidence.
+"""Bounded host-reported attempts and opaque output, not execution or Evidence.
 
 Records cannot authorize a tool, prove observation freshness or establish that
 a process was stopped. No default verification path consumes these records.
 """
 
+import hashlib
+import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from agent.verification_planner import PreparedSourceRequest
 
 MAX_COUNTER = (1 << 63) - 1
 MAX_EVENTS = 3
+MAX_STDOUT_BYTES = 64 * 1024
 EVENT_KINDS = frozenset(
     {"started", "cancel_requested", "exited", "failed", "timed_out", "cancelled"}
 )
@@ -157,3 +160,64 @@ class AttemptRecord:
             "state": self.state,
             "events": [event.to_dict() for event in self.events],
         }
+
+
+@dataclass(frozen=True)
+class AttemptOutput:
+    """Host-supplied stdout snapshot, not parsed Evidence or a success claim.
+
+    Only repr/to_dict omit the body; explicit access to stdout exposes it.
+    Hosts own stream limits, completeness, origin and canonical-record storage.
+    """
+
+    attempt: AttemptRecord
+    stdout: bytes = field(repr=False)
+    expected_stdout_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.attempt) is not AttemptRecord or self.attempt.state != "exited":
+            raise ValueError("output requires an exited attempt record")
+        if type(self.stdout) is not bytes or len(self.stdout) > MAX_STDOUT_BYTES:
+            raise ValueError("stdout must be bounded immutable bytes")
+        if type(self.expected_stdout_sha256) is not str or not re.fullmatch(
+            r"[0-9a-f]{64}", self.expected_stdout_sha256
+        ):
+            raise ValueError("invalid expected stdout identity")
+        if hashlib.sha256(self.stdout).hexdigest() != self.expected_stdout_sha256:
+            raise ValueError("stdout identity mismatch")
+
+    @classmethod
+    def from_prepared(
+        cls,
+        prepared: PreparedSourceRequest,
+        attempt_number: int,
+        report: AttemptRecord,
+        stdout: bytes,
+        expected_stdout_sha256: str,
+    ) -> "AttemptOutput":
+        bound = AttemptRecord.from_prepared(prepared, attempt_number).reconcile(report)
+        return cls(bound, stdout, expected_stdout_sha256)
+
+    def reconcile(self, incoming: "AttemptOutput") -> "AttemptOutput":
+        """Keep one canonical snapshot; duplicates are idempotent, not fresh."""
+        if type(incoming) is not AttemptOutput:
+            raise ValueError("output reconciliation requires an output snapshot")
+        if self.attempt != incoming.attempt or self.stdout != incoming.stdout:
+            raise ValueError("attempt output report conflict")
+        return self
+
+    def to_dict(self) -> dict:
+        manifest = {
+            "schema_version": "mumei.verifier-output/v1",
+            "attempt": self.attempt.to_dict(),
+            "stdout": {
+                "sha256": self.expected_stdout_sha256,
+                "size_bytes": len(self.stdout),
+            },
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+        return {**manifest, "output_fingerprint": fingerprint}

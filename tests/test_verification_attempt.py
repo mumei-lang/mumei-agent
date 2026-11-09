@@ -18,7 +18,9 @@ from agent.verification_attempt import (
     EVENT_KINDS,
     MAX_COUNTER,
     MAX_EVENTS,
+    MAX_STDOUT_BYTES,
     AttemptEvent,
+    AttemptOutput,
     AttemptRecord,
 )
 from agent.verification_planner import (
@@ -578,3 +580,312 @@ def test_reconcile_does_not_claim_global_branch_arbitration_or_replay_protection
         assert current.reconcile(replace(current)) is current
         with pytest.raises(ValueError):
             current.reconcile(conflict)
+
+
+STDOUT = b"FAKE_PRIVATE_STDOUT_NOT_EVIDENCE"
+
+
+def output_snapshot(attempt=None, stdout=STDOUT):
+    return AttemptOutput(
+        record(*PREFIXES["exited"]) if attempt is None else attempt,
+        stdout,
+        hashlib.sha256(stdout).hexdigest(),
+    )
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+@pytest.mark.parametrize("stdout", [b"", STDOUT], ids=["empty", "private"])
+def test_output_requires_an_exited_record_not_just_a_terminal_state(state, stdout):
+    attempt = record(*PREFIXES[state])
+    if state == "exited":
+        assert output_snapshot(attempt, stdout).attempt is attempt
+    else:
+        with pytest.raises(ValueError, match="exited attempt record"):
+            output_snapshot(attempt, stdout)
+
+
+@pytest.mark.parametrize("cancel_requested", [False, True])
+@pytest.mark.parametrize("exit_code", [-MAX_COUNTER - 1, -1, 0, 1, MAX_COUNTER])
+@pytest.mark.parametrize("elapsed_ms", [0, 2, 9])
+def test_output_exit_is_not_success_and_does_not_acknowledge_cancel(
+    cancel_requested, exit_code, elapsed_ms
+):
+    events = (
+        (START, AttemptEvent("cancel_requested", 0)) if cancel_requested else (START,)
+    )
+    attempt = record(*events, AttemptEvent("exited", elapsed_ms, exit_code))
+    snapshot = output_snapshot(attempt)
+    assert snapshot.attempt.state == "exited"
+    assert snapshot.attempt.events[-1].exit_code == exit_code
+    assert not {"result", "success", "accepted", "evidence", "proved"} & (
+        snapshot.to_dict().keys() | vars(snapshot).keys()
+    )
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [b"", b"\xff\x00", b"{", b'{"success":true,"success":false}', STDOUT],
+    ids=["empty", "binary", "invalid-json", "duplicate-json", "private"],
+)
+def test_output_bytes_are_opaque_not_utf8_json_or_evidence(stdout):
+    snapshot = output_snapshot(stdout=stdout)
+    assert snapshot.stdout is stdout
+    assert snapshot.to_dict()["stdout"] == {
+        "sha256": hashlib.sha256(stdout).hexdigest(),
+        "size_bytes": len(stdout),
+    }
+
+
+@pytest.mark.parametrize("size", [0, 1, MAX_STDOUT_BYTES - 1, MAX_STDOUT_BYTES])
+def test_output_byte_bound_includes_empty_and_exact_limit(size):
+    assert len(output_snapshot(stdout=b"x" * size).stdout) == size
+
+
+def test_output_oversize_is_rejected_not_truncated_or_hashed(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("oversize stdout must be rejected before hashing")
+
+    monkeypatch.setattr(hashlib, "sha256", forbidden)
+    with pytest.raises(ValueError, match="bounded immutable bytes"):
+        AttemptOutput(
+            record(*PREFIXES["exited"]), b"x" * (MAX_STDOUT_BYTES + 1), "a" * 64
+        )
+
+
+@pytest.mark.parametrize(
+    "value", [None, STDOUT.decode(), bytearray(STDOUT), memoryview(STDOUT), (), True]
+)
+def test_output_rejects_non_bytes_without_echoing_payload(value):
+    with pytest.raises(ValueError) as error:
+        AttemptOutput(record(*PREFIXES["exited"]), value, "a" * 64)
+    assert STDOUT.decode() not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [None, True, "", "a" * 63, "a" * 65, "G" * 64, "A" * 64, STDOUT.decode(), "a" * 64],
+)
+def test_output_requires_exact_lowercase_and_matching_sha256(digest):
+    with pytest.raises(ValueError) as error:
+        AttemptOutput(record(*PREFIXES["exited"]), STDOUT, digest)
+    assert STDOUT.decode() not in str(error.value)
+
+
+def test_output_from_prepared_checks_external_attempt_number_and_manifest_binding():
+    prepared = prepared_source()
+    current = AttemptRecord.from_prepared(prepared, 7).record(START)
+    reported = current.record(AttemptEvent("exited", 3, 0))
+    current = current.reconcile(reported)
+    snapshot = AttemptOutput.from_prepared(
+        prepared, 7, current, STDOUT, hashlib.sha256(STDOUT).hexdigest()
+    )
+    assert snapshot.attempt is current
+    assert (
+        snapshot.attempt.request_fingerprint
+        == prepared.to_dict()["request_fingerprint"]
+    )
+    for conflicting in (
+        replace(current, request_fingerprint="b" * 64),
+        replace(current, attempt_number=8),
+        replace(current, timeout_ms=11),
+    ):
+        with pytest.raises(ValueError, match="binding mismatch"):
+            AttemptOutput.from_prepared(
+                prepared, 7, conflicting, STDOUT, hashlib.sha256(STDOUT).hexdigest()
+            )
+    other = prepared_source(
+        policy=PlannerPolicy(allowed_permissions=frozenset(), timeout_ms=11)
+    )
+    with pytest.raises(ValueError, match="binding mismatch"):
+        AttemptOutput.from_prepared(
+            other, 7, current, STDOUT, hashlib.sha256(STDOUT).hexdigest()
+        )
+
+
+@pytest.mark.parametrize(
+    "number", [None, False, True, 0, -1, 1.0, "1", MAX_COUNTER + 1]
+)
+def test_output_from_prepared_requires_a_bounded_external_attempt_number(number):
+    with pytest.raises(ValueError):
+        AttemptOutput.from_prepared(
+            prepared_source(),
+            number,
+            record(*PREFIXES["exited"]),
+            STDOUT,
+            hashlib.sha256(STDOUT).hexdigest(),
+        )
+
+
+def test_output_from_prepared_does_not_accept_an_unspecified_permission_policy():
+    with pytest.raises(ValueError, match="explicit permission policy"):
+        AttemptOutput.from_prepared(
+            prepared_source(policy=PlannerPolicy()),
+            1,
+            record(*PREFIXES["exited"]),
+            STDOUT,
+            hashlib.sha256(STDOUT).hexdigest(),
+        )
+
+
+@pytest.mark.parametrize("value", [None, {}, STDOUT, "a" * 64, True])
+def test_output_rejects_non_records_in_constructor_and_binding(value):
+    digest = hashlib.sha256(STDOUT).hexdigest()
+    with pytest.raises(ValueError):
+        AttemptOutput(value, STDOUT, digest)
+    with pytest.raises(ValueError):
+        AttemptOutput.from_prepared(prepared_source(), 1, value, STDOUT, digest)
+    with pytest.raises(ValueError):
+        AttemptOutput.from_prepared(
+            value, 1, record(*PREFIXES["exited"]), STDOUT, digest
+        )
+
+
+def test_output_exact_types_reject_subclasses_without_running_overrides():
+    class HostileBytes(bytes):
+        def __len__(self):
+            pytest.fail("bytes subclass length must not run")
+
+    class HostileDigest(str):
+        def __str__(self):
+            pytest.fail("digest subclass string conversion must not run")
+
+    class HostileRecord(AttemptRecord):
+        @property
+        def state(self):
+            pytest.fail("record subclass state must not run")
+
+    class HostileOutput(AttemptOutput):
+        def __eq__(self, other):
+            pytest.fail("output subclass equality must not run")
+
+    attempt = record(*PREFIXES["exited"])
+    digest = hashlib.sha256(STDOUT).hexdigest()
+    for args in (
+        (attempt, HostileBytes(STDOUT), digest),
+        (attempt, STDOUT, HostileDigest(digest)),
+        (HostileRecord("a" * 64, 1, 10, attempt.events), STDOUT, digest),
+    ):
+        with pytest.raises(ValueError):
+            AttemptOutput(*args)
+    with pytest.raises(ValueError):
+        output_snapshot().reconcile(HostileOutput(attempt, STDOUT, digest))
+
+
+def test_output_manifest_is_canonical_detached_and_body_free(capsys):
+    snapshot = output_snapshot()
+    manifest = snapshot.to_dict()
+    assert set(manifest) == {
+        "schema_version",
+        "attempt",
+        "stdout",
+        "output_fingerprint",
+    }
+    assert manifest["schema_version"] == "mumei.verifier-output/v1"
+    unsigned = {
+        key: value for key, value in manifest.items() if key != "output_fingerprint"
+    }
+    assert (
+        manifest["output_fingerprint"]
+        == hashlib.sha256(
+            json.dumps(
+                unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+    )
+    assert STDOUT.decode() not in repr(snapshot) + json.dumps(manifest)
+    assert SOURCE.decode() not in repr(snapshot) + json.dumps(manifest)
+    assert set(vars(snapshot)) == {"attempt", "stdout", "expected_stdout_sha256"}
+    manifest["attempt"]["events"].clear()
+    manifest["stdout"]["sha256"] = "b" * 64
+    assert snapshot.attempt.state == "exited"
+    assert snapshot.to_dict() == output_snapshot().to_dict()
+    with pytest.raises(FrozenInstanceError):
+        snapshot.stdout = b""
+    captured = capsys.readouterr()
+    assert not captured.out and not captured.err
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("request_fingerprint", "b" * 64),
+        ("attempt_number", 2),
+        ("timeout_ms", 11),
+        ("events", (START, AttemptEvent("exited", 4, 0))),
+        ("events", (START, AttemptEvent("exited", 3, 1))),
+        ("events", (START, CANCEL, AttemptEvent("exited", 3, 0))),
+    ],
+)
+def test_output_reconcile_and_fingerprint_cover_every_attempt_binding(field, value):
+    current = output_snapshot()
+    changed = output_snapshot(replace(current.attempt, **{field: value}))
+    assert (
+        current.to_dict()["output_fingerprint"]
+        != changed.to_dict()["output_fingerprint"]
+    )
+    for left, right in ((current, changed), (changed, current)):
+        with pytest.raises(ValueError, match="output report conflict"):
+            left.reconcile(right)
+
+
+@pytest.mark.parametrize("left", [b"", b"a", b"b", b"aa"])
+@pytest.mark.parametrize("right", [b"", b"a", b"b", b"aa"])
+def test_output_reconciliation_is_exactly_idempotent_not_last_writer_wins(left, right):
+    current, incoming = output_snapshot(stdout=left), output_snapshot(stdout=right)
+    before = current.to_dict(), incoming.to_dict()
+    if left == right:
+        assert current.reconcile(incoming) is current
+        assert incoming.reconcile(current) is incoming
+    else:
+        assert before[0]["output_fingerprint"] != before[1]["output_fingerprint"]
+        with pytest.raises(ValueError, match="output report conflict"):
+            current.reconcile(incoming)
+    assert (current.to_dict(), incoming.to_dict()) == before
+
+
+@pytest.mark.parametrize(
+    "incoming", [None, True, STDOUT, {}, (), "FAKE_PRIVATE_INCOMING"]
+)
+def test_output_reconcile_rejects_non_outputs_without_payload_echo(incoming):
+    with pytest.raises(ValueError) as error:
+        output_snapshot().reconcile(incoming)
+    assert "FAKE_PRIVATE" not in str(error.value)
+
+
+def test_output_preparation_and_reconciliation_need_no_io_clock_or_evidence(
+    monkeypatch, capsys
+):
+    prepared = prepared_source()
+    reported = (
+        AttemptRecord.from_prepared(prepared, 1)
+        .record(START)
+        .record(AttemptEvent("exited", 3, 0))
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail(
+            "output snapshots must not execute, parse bodies or query authority"
+        )
+
+    for owner, name in (
+        (builtins, "open"),
+        (Path, "open"),
+        (Path, "read_text"),
+        (Path, "read_bytes"),
+        (os, "getenv"),
+        (socket, "socket"),
+        (subprocess, "run"),
+        (subprocess, "Popen"),
+        (importlib, "import_module"),
+        (time, "monotonic"),
+        (time, "time"),
+        (json, "loads"),
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+    snapshot = AttemptOutput.from_prepared(
+        prepared, 1, reported, STDOUT, hashlib.sha256(STDOUT).hexdigest()
+    )
+    assert snapshot.reconcile(replace(snapshot)) is snapshot
+    snapshot.to_dict()
+    captured = capsys.readouterr()
+    assert not captured.out and not captured.err
