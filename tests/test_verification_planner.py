@@ -1014,7 +1014,9 @@ def test_source_snapshot_binds_actual_immutable_bytes_to_selected_contract_and_s
 
 
 @pytest.mark.parametrize(
-    "source", [b"", b" \r\n\t", b"x\x00y", b"\xff", b"x" * (MAX_SOURCE_BYTES + 1)]
+    "source",
+    [b"", b" \r\n\t", b"x\x00y", b"\xff", b"x" * (MAX_SOURCE_BYTES + 1)],
+    ids=("empty", "whitespace", "nul", "invalid-utf8", "over-limit"),
 )
 def test_invalid_source_shape_is_not_prepared(source):
     with pytest.raises(ValueError):
