@@ -105,6 +105,8 @@ silently select stdin, and a positional `-` remains a literal file. The existing
 and no oversized-stream drain. Byte bounds do not enforce a deadline: the host
 must close input, enforce timeouts/cancellation and handle early reader closure.
 Input/decoder/I/O errors do not quote the private body or underlying errors.
+The interface consumes raw UTF-8 bytes from pipes/redirected files, not terminal
+text requiring encoding conversion (including Windows console code pages).
 
 This entry point is not invoked by the Agent: no process runner, stream capture,
 normalization, request/result matching, authority enforcement, acceptance or
