@@ -135,8 +135,9 @@ storage. Duplicate acceptance is not freshness/authentication/replay protection.
 This helper performs no parsing, file/network/process/clock/plugin operations.
 The caller-supplied digest does not prove stream completeness, provenance or
 delivery timing. Real stream limits/collection, timeout/cancel cleanup, authority
-and resource enforcement, cross-attempt/backend arbitration and Core-owned common
-Evidence normalization/acceptance remain open. No default audit/CLI/MCP path or
+and resource enforcement, cross-attempt/backend arbitration, adapter result
+normalization and Core-owned common Evidence checks/acceptance remain open.
+No default audit/CLI/MCP path or
 external verifier is added; C11 is partial, C12 remains demand-gated and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 

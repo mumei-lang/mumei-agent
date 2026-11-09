@@ -889,3 +889,71 @@ def test_output_preparation_and_reconciliation_need_no_io_clock_or_evidence(
     snapshot.to_dict()
     captured = capsys.readouterr()
     assert not captured.out and not captured.err
+
+
+def test_output_reconciliation_compares_raw_bytes_even_with_equal_metadata(monkeypatch):
+    class SameDigest:
+        def hexdigest(self):
+            return "a" * 64
+
+    monkeypatch.setattr(hashlib, "sha256", lambda *args: SameDigest())
+    left = output_snapshot(stdout=b"a")
+    right = output_snapshot(stdout=b"b")
+    assert left.to_dict() == right.to_dict()
+    with pytest.raises(ValueError, match="output report conflict"):
+        left.reconcile(right)
+
+
+def test_output_different_source_snapshot_cannot_reuse_an_attempt():
+    prepared = prepared_source()
+    changed_source = b"FAKE_DIFFERENT_SOURCE"
+    changed = replace(
+        prepared,
+        source=changed_source,
+        expected_source_sha256=hashlib.sha256(changed_source).hexdigest(),
+    )
+    reported = (
+        AttemptRecord.from_prepared(prepared, 1)
+        .record(START)
+        .record(AttemptEvent("exited", 3, 0))
+    )
+    with pytest.raises(ValueError, match="binding mismatch"):
+        AttemptOutput.from_prepared(
+            changed, 1, reported, STDOUT, hashlib.sha256(STDOUT).hexdigest()
+        )
+
+
+def test_output_binding_rejects_hostile_report_and_prepared_subclasses_without_access():
+    from agent.verification_planner import PreparedSourceRequest
+
+    class HostileRecord(AttemptRecord):
+        def __getattribute__(self, name):
+            pytest.fail("report subclass attributes must not be read")
+
+    class HostilePrepared(PreparedSourceRequest):
+        def __getattribute__(self, name):
+            pytest.fail("prepared subclass attributes must not be read")
+
+    prepared = prepared_source()
+    hostile = object.__new__(HostileRecord)
+    digest = hashlib.sha256(STDOUT).hexdigest()
+    with pytest.raises(ValueError):
+        AttemptOutput(hostile, STDOUT, digest)
+    with pytest.raises(ValueError):
+        AttemptOutput.from_prepared(prepared, 1, hostile, STDOUT, digest)
+    with pytest.raises(ValueError):
+        AttemptOutput.from_prepared(
+            object.__new__(HostilePrepared), 1, record(), STDOUT, digest
+        )
+
+
+@pytest.mark.parametrize("timeout", [1, MAX_COUNTER])
+def test_output_max_attempt_counter_and_minimum_deadline_remain_metadata(timeout):
+    attempt = (
+        AttemptRecord("a" * 64, MAX_COUNTER, timeout)
+        .record(START)
+        .record(AttemptEvent("exited", timeout - 1, 0))
+    )
+    snapshot = output_snapshot(attempt)
+    assert snapshot.attempt is attempt
+    assert snapshot.reconcile(replace(snapshot)) is snapshot
