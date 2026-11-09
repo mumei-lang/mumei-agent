@@ -88,6 +88,31 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 original-byte Core stdin handoff entry point
+
+Core exposes explicit `mumei evidence check --stdin [--json]` so an authorized
+host can supply original `.stdout` bytes without writing a temporary input file
+or reserializing `decode_json_object()` results. It checks one common Evidence
+record using Core's existing representation decoder, not Agent-owned schema
+rules. A JSON transport object can still fail Core shape/combination checks;
+representation-valid counterexamples/unknown/timeout results are not verification
+success. Its anonymous diagnostic keeps acceptance `not_evaluated` and is not an
+acceptance receipt, proof of a Core run or binding to an Agent request/attempt.
+
+Explicit stdin and file input are mutually exclusive; absent input does not
+silently select stdin, and a positional `-` remains a literal file. The existing
+65,536-byte limit applies, with at most one extra byte read for overflow detection
+and no oversized-stream drain. Byte bounds do not enforce a deadline: the host
+must close input, enforce timeouts/cancellation and handle early reader closure.
+Input/decoder/I/O errors do not quote the private body or underlying errors.
+
+This entry point is not invoked by the Agent: no process runner, stream capture,
+normalization, request/result matching, authority enforcement, acceptance or
+grade promotion is added. Full C11 and Core-owned acceptance remain open; C12's
+demand gate and existing assurance/Lean/native/LLVM/deferred-WASM policies stay
+unchanged. See the
+[canonical stdin milestone](https://github.com/mumei-lang/mumei/blob/develop/docs/CROSS_PROJECT_ROADMAP.md#wave-2-original-byte-core-stdin-representation-checks).
+
 ### C11 bounded JSON stdout decoding
 
 `AttemptOutput.decode_json_object()` is explicit access to the private body,
