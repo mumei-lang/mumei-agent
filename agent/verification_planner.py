@@ -27,6 +27,8 @@ CORRESPONDENCE_STATUSES = frozenset({"validated", "assumed", "unverified"})
 SettingValue = bool | int | str
 SettingValues = tuple[tuple[str, SettingValue], ...]
 MAX_SETTINGS = 32
+SOURCE_INPUT_FORMAT = "mumei.source-text/v1"
+MAX_SOURCE_BYTES = 1_048_576
 
 
 def _label(value: str) -> None:
@@ -201,6 +203,7 @@ class RouteRequirements:
     logic_fragments: frozenset[str] = frozenset()
     target_triple: str | None = None
     result_contract: ResultContract | None = None
+    input_format: str | None = None
 
     def __post_init__(self) -> None:
         _label(self.profile)
@@ -217,6 +220,8 @@ class RouteRequirements:
                 self.method,
             ):
                 raise ValueError("result contract does not match route requirements")
+        if self.input_format is not None:
+            _label(self.input_format)
 
     def to_dict(self) -> dict:
         request: dict[str, object] = {
@@ -227,6 +232,8 @@ class RouteRequirements:
         }
         if self.result_contract is not None:
             request["result_contract"] = self.result_contract.to_dict()
+        if self.input_format is not None:
+            request["input_format"] = self.input_format
         return request
 
 
@@ -246,6 +253,7 @@ class AdapterDescriptor:
     max_memory_mb: int = 1024
     result_contracts: tuple[ResultContract, ...] = ()
     setting_specs: tuple[SettingSpec, ...] = ()
+    input_formats: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -289,6 +297,7 @@ class AdapterDescriptor:
             if spec.name in names:
                 raise ValueError("duplicate setting schema name")
             names.add(spec.name)
+        _labels(self.input_formats, empty=True)
 
 
 @dataclass(frozen=True)
@@ -387,6 +396,7 @@ class EffectiveSettings:
     result_contract: ResultContract | None = None
     adapter_settings: SettingValues = ()
     configuration_fingerprint: str | None = None
+    input_format: str | None = None
 
 
 def _effective_options(
@@ -444,6 +454,7 @@ class VerificationPlan:
             selected.pop("result_contract")
             selected.pop("adapter_settings")
             selected.pop("configuration_fingerprint")
+            selected.pop("input_format")
             if self.selected.result_contract is not None:
                 selected["result_contract"] = self.selected.result_contract.to_dict()
             if self.selected.configuration_fingerprint is not None:
@@ -451,6 +462,8 @@ class VerificationPlan:
                 selected["configuration_fingerprint"] = (
                     self.selected.configuration_fingerprint
                 )
+            if self.selected.input_format is not None:
+                selected["input_format"] = self.selected.input_format
         return {
             "schema_version": "mumei.verification-plan/v1",
             "request": request,
@@ -469,6 +482,70 @@ class VerificationPlan:
         }
 
 
+@dataclass(frozen=True)
+class PreparedSourceRequest:
+    """Opaque in-memory input binding, never an execution or acceptance token.
+
+    Use the registry preparation API to plan against current host declarations.
+    The digest is raw-byte identity, not normalized specification identity.
+    """
+
+    plan: VerificationPlan
+    source: bytes = field(repr=False)
+    expected_source_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan, VerificationPlan):
+            raise ValueError("invalid preparation plan")
+        if (
+            self.plan.selected is None
+            or self.plan.request.input_format != SOURCE_INPUT_FORMAT
+            or self.plan.request.result_contract is None
+            or self.plan.selected.input_format != SOURCE_INPUT_FORMAT
+            or self.plan.selected.result_contract != self.plan.request.result_contract
+        ):
+            raise ValueError(
+                "source preparation requires an explicit selected contract and format"
+            )
+        if not isinstance(self.expected_source_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", self.expected_source_sha256
+        ):
+            raise ValueError("invalid expected source identity")
+        if (
+            type(self.source) is not bytes
+            or not 0 < len(self.source) <= MAX_SOURCE_BYTES
+        ):
+            raise ValueError("source must be bounded immutable bytes")
+        text: str | None = None
+        try:
+            text = self.source.decode("utf-8")
+        except UnicodeError:
+            pass
+        if text is None:
+            raise ValueError("source must be UTF-8 text")
+        if not text.strip() or "\x00" in text:
+            raise ValueError("source must be nonempty text without NUL")
+        if hashlib.sha256(self.source).hexdigest() != self.expected_source_sha256:
+            raise ValueError("source identity mismatch")
+
+    def to_dict(self) -> dict:
+        manifest = {
+            "schema_version": "mumei.prepared-source-request/v1",
+            "plan": self.plan.to_dict(),
+            "input": {
+                "format": SOURCE_INPUT_FORMAT,
+                "sha256": self.expected_source_sha256,
+                "size_bytes": len(self.source),
+            },
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+        return {**manifest, "request_fingerprint": fingerprint}
+
+
 class AdapterRegistry:
     """Explicit data registration only: no plugin loading, imports or discovery."""
 
@@ -481,6 +558,25 @@ class AdapterRegistry:
         if adapter.adapter_id in self._adapters and not replace:
             raise ValueError("adapter already registered; replacement must be explicit")
         self._adapters[adapter.adapter_id] = adapter
+
+    def prepare_source(
+        self,
+        request: RouteRequirements,
+        policy: PlannerPolicy,
+        observations: tuple[RuntimeObservation, ...],
+        source: bytes,
+        expected_source_sha256: str,
+    ) -> PreparedSourceRequest:
+        if (
+            request.input_format != SOURCE_INPUT_FORMAT
+            or request.result_contract is None
+        ):
+            raise ValueError(
+                "source preparation requires an explicit contract and format"
+            )
+        return PreparedSourceRequest(
+            self.plan(request, policy, observations), source, expected_source_sha256
+        )
 
     def plan(
         self,
@@ -520,6 +616,11 @@ class AdapterRegistry:
                 excluded.append("unsupported_semantic_profile")
             if request.method not in adapter.methods:
                 excluded.append("unsupported_evidence_method")
+            if request.input_format is not None:
+                if not adapter.input_formats:
+                    excluded.append("input_format_not_declared")
+                elif request.input_format not in adapter.input_formats:
+                    excluded.append("unsupported_input_format")
             if request.result_contract is not None:
                 if not adapter.result_contracts:
                     excluded.append("result_contract_not_declared")
@@ -599,6 +700,7 @@ class AdapterRegistry:
                 min(policy.memory_mb, selected.max_memory_mb),
                 request.result_contract,
                 options[selected.adapter_id],
+                input_format=request.input_format,
             )
             if selected.setting_specs:
                 settings = replace(

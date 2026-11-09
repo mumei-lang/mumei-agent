@@ -1,8 +1,10 @@
 """Descriptor-only fixtures: no verifier adoption, probes or evidence acceptance."""
 
+import hashlib
 import json
 import os
 import subprocess
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,10 +14,13 @@ from agent.verification_planner import (
     AdapterDescriptor,
     AdapterRegistry,
     PlannerPolicy,
+    PreparedSourceRequest,
     ResultContract,
     RouteRequirements,
     RuntimeObservation,
     SettingSpec,
+    SOURCE_INPUT_FORMAT,
+    MAX_SOURCE_BYTES,
 )
 
 PROFILE = "mumei.pure-i64-comparison/v1"
@@ -950,3 +955,322 @@ def test_settings_planning_is_pure_and_never_promotes_approval(monkeypatch):
         "permission",
     ):
         assert f'"{key}"' not in json.dumps(data)
+
+
+SOURCE = b"atom f(x: i64) -> i64 requires: true; ensures: result == x; body: x;"
+
+
+def source_request(**changes):
+    return replace(constrained_request(), input_format=SOURCE_INPUT_FORMAT, **changes)
+
+
+def source_adapter(**changes):
+    return configured(
+        result_contracts=(CONTRACT,),
+        input_formats=frozenset({SOURCE_INPUT_FORMAT}),
+        **changes,
+    )
+
+
+def prepare(
+    source=SOURCE,
+    expected=None,
+    descriptor=None,
+    request=None,
+    policy=None,
+    observation=None,
+):
+    registry = AdapterRegistry()
+    registry.register(descriptor or source_adapter())
+    return registry.prepare_source(
+        request or source_request(),
+        policy or PlannerPolicy(),
+        (observation or observed(),),
+        source,
+        expected if expected is not None else hashlib.sha256(source).hexdigest(),
+    )
+
+
+def test_source_snapshot_binds_actual_immutable_bytes_to_selected_contract_and_settings():
+    prepared = prepare(policy=configured_policy((("rounds", 7),)))
+    assert prepared.source is SOURCE
+    assert prepared.plan.selected.result_contract == CONTRACT
+    assert dict(prepared.plan.selected.adapter_settings)["rounds"] == 7
+    data = prepared.to_dict()
+    assert data["schema_version"] == "mumei.prepared-source-request/v1"
+    assert data["input"] == {
+        "format": SOURCE_INPUT_FORMAT,
+        "sha256": hashlib.sha256(SOURCE).hexdigest(),
+        "size_bytes": len(SOURCE),
+    }
+    assert data["plan"]["selected"]["input_format"] == SOURCE_INPUT_FORMAT
+    assert data["plan"]["request"]["input_format"] == SOURCE_INPUT_FORMAT
+    assert len(data["request_fingerprint"]) == 64
+    assert json.dumps(data) == json.dumps(prepared.to_dict())
+    with pytest.raises(AttributeError):
+        prepared.source = b"other"
+    with pytest.raises(ValueError):
+        replace(prepared, source=SOURCE + b" ")
+
+
+@pytest.mark.parametrize(
+    "source", [b"", b" \r\n\t", b"x\x00y", b"\xff", b"x" * (MAX_SOURCE_BYTES + 1)]
+)
+def test_invalid_source_shape_is_not_prepared(source):
+    with pytest.raises(ValueError):
+        prepare(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["not bytes", bytearray(b"x"), memoryview(b"x"), Path("not-an-input-file"), None],
+)
+def test_mutable_or_nonbytes_source_never_becomes_a_path_or_input(source):
+    with pytest.raises(ValueError):
+        prepare(source, expected="0" * 64)
+
+
+@pytest.mark.parametrize(
+    "expected", ["", "0" * 63, "0" * 65, "A" * 64, "g" * 64, "0" * 64, 42, b"0" * 64]
+)
+def test_malformed_or_wrong_expected_identity_is_rejected(expected):
+    with pytest.raises(ValueError):
+        prepare(expected=expected)
+
+
+def test_source_limit_endpoint_and_utf8_byte_length_without_claiming_syntax_support():
+    assert (
+        prepare(b"x" * MAX_SOURCE_BYTES).to_dict()["input"]["size_bytes"]
+        == MAX_SOURCE_BYTES
+    )
+    text = "// 日本語\r\nnot a valid Mumei program"
+    raw = text.encode()
+    data = prepare(raw).to_dict()
+    assert data["input"]["size_bytes"] == len(raw) > len(text)
+    assert data["input"]["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert (
+        data["input"]["sha256"]
+        != hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+    )
+    for key in (
+        "success",
+        "proved",
+        "verified",
+        "acceptance",
+        "permission",
+        "command",
+        "artifact_paths",
+    ):
+        assert f'"{key}"' not in json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    "formats,reason",
+    [
+        (frozenset(), "input_format_not_declared"),
+        (frozenset({"user.other-input/v1"}), "unsupported_input_format"),
+    ],
+)
+def test_input_format_constraints_are_explicit_not_wildcards(formats, reason):
+    descriptor = replace(source_adapter(), input_formats=formats)
+    result = plan(descriptor, request=source_request())
+    assert result.selected is None
+    assert reason in reasons(result)
+    with pytest.raises(ValueError):
+        prepare(descriptor=descriptor)
+
+
+@pytest.mark.parametrize(
+    "formats", [[], {SOURCE_INPUT_FORMAT}, frozenset({"bad format"}), frozenset({1})]
+)
+def test_input_formats_are_immutable_valid_identifiers(formats):
+    with pytest.raises(ValueError):
+        replace(source_adapter(), input_formats=formats)
+
+
+@pytest.mark.parametrize("value", ["bad format", "file:///not-input", 42])
+def test_request_input_format_uses_the_metadata_identifier_gate(value):
+    with pytest.raises(ValueError):
+        replace(REQUEST, input_format=value)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        constrained_request(),
+        replace(REQUEST, input_format=SOURCE_INPUT_FORMAT),
+        replace(constrained_request(), input_format="user.other-input/v1"),
+    ],
+)
+def test_preparation_requires_both_exact_contract_and_supported_source_format(query):
+    with pytest.raises(ValueError):
+        prepare(request=query)
+
+
+@pytest.mark.parametrize(
+    "changes,observation,policy",
+    [
+        ({"enabled": False}, observed(), PlannerPolicy()),
+        ({"location": "remote"}, observed(), PlannerPolicy()),
+        ({"protocol_version": "user.other/v1"}, observed(), PlannerPolicy()),
+        ({}, observed(availability="unknown"), PlannerPolicy()),
+        ({}, observed(availability="missing"), PlannerPolicy()),
+        ({}, observed(), PlannerPolicy(tool_version_pins=(("fixture", "1.0.0"),))),
+        ({}, observed(), PlannerPolicy(selected_adapter="missing")),
+    ],
+)
+def test_source_preparation_does_not_bypass_existing_preflight_filters(
+    changes, observation, policy
+):
+    with pytest.raises(ValueError):
+        prepare(
+            descriptor=source_adapter(**changes), observation=observation, policy=policy
+        )
+
+
+def test_fallback_keeps_input_format_contract_and_destination_settings_and_no_input_retry():
+    registry = AdapterRegistry()
+    registry.register(configured(result_contracts=(CONTRACT,), priority=100))
+    registry.register(
+        replace(
+            source_adapter(),
+            adapter_id="other",
+            setting_specs=(replace(SPECS[1], default=6),),
+        )
+    )
+    observations = (observed(), observed("other"))
+    policy = configured_policy(
+        (("rounds", 9),), selected_adapter="fixture", allow_fallback=True
+    )
+    expected = hashlib.sha256(SOURCE).hexdigest()
+    prepared = registry.prepare_source(
+        source_request(), policy, observations, SOURCE, expected
+    )
+    assert prepared.plan.fallback_from == "fixture"
+    assert prepared.plan.selected.adapter_id == "other"
+    assert prepared.plan.selected.adapter_settings == (("rounds", 6),)
+    assert prepared.plan.selected.result_contract == CONTRACT
+    assert prepared.plan.selected.input_format == SOURCE_INPUT_FORMAT
+    with pytest.raises(ValueError):
+        registry.prepare_source(
+            source_request(),
+            replace(policy, allow_fallback=False),
+            observations,
+            SOURCE,
+            expected,
+        )
+    with pytest.raises(ValueError):
+        registry.prepare_source(
+            source_request(), policy, observations, SOURCE, "0" * 64
+        )
+    registry.register(
+        replace(
+            source_adapter(),
+            adapter_id="other",
+            result_contracts=(replace(CONTRACT, correspondence_status="unverified"),),
+        ),
+        replace=True,
+    )
+    with pytest.raises(ValueError):
+        registry.prepare_source(
+            source_request(), policy, observations, SOURCE, expected
+        )
+
+
+def test_preparation_replans_after_replacement_instead_of_consuming_saved_plan():
+    registry = AdapterRegistry()
+    registry.register(source_adapter())
+    args = (
+        source_request(),
+        PlannerPolicy(),
+        (observed(),),
+        SOURCE,
+        hashlib.sha256(SOURCE).hexdigest(),
+    )
+    first = registry.prepare_source(*args)
+    registry.register(source_adapter(enabled=False), replace=True)
+    with pytest.raises(ValueError):
+        registry.prepare_source(*args)
+    registry.register(source_adapter(adapter_version="1.0.1"), replace=True)
+    second = registry.prepare_source(*args)
+    assert first.plan.selected.adapter_version == "1.0.0"
+    assert second.plan.selected.adapter_version == "1.0.1"
+    assert (
+        first.to_dict()["request_fingerprint"]
+        != second.to_dict()["request_fingerprint"]
+    )
+
+
+@pytest.mark.parametrize("change", ["source", "settings", "contract", "tool"])
+def test_prepared_fingerprint_binds_input_plan_and_complete_contract(change):
+    first = prepare()
+    if change == "source":
+        other = prepare(SOURCE + b"\n")
+    elif change == "settings":
+        other = prepare(policy=configured_policy((("rounds", 7),)))
+    elif change == "tool":
+        other = prepare(observation=observed(tool_version="4.13.1"))
+    else:
+        contract = replace(CONTRACT, correspondence_status="unverified")
+        other = prepare(
+            request=replace(source_request(), result_contract=contract),
+            descriptor=replace(source_adapter(), result_contracts=(contract,)),
+        )
+    assert (
+        first.to_dict()["request_fingerprint"] != other.to_dict()["request_fingerprint"]
+    )
+
+
+@pytest.mark.parametrize("change", ["selection", "format", "contract"])
+def test_prepared_record_rejects_inconsistent_metadata_even_when_constructed_directly(
+    change,
+):
+    prepared = prepare()
+    if change == "selection":
+        invalid = replace(prepared.plan, selected=None)
+    elif change == "format":
+        invalid = replace(
+            prepared.plan, selected=replace(prepared.plan.selected, input_format=None)
+        )
+    else:
+        invalid = replace(
+            prepared.plan,
+            selected=replace(
+                prepared.plan.selected,
+                result_contract=replace(CONTRACT, correspondence_status="unverified"),
+            ),
+        )
+    with pytest.raises(ValueError):
+        PreparedSourceRequest(invalid, SOURCE, hashlib.sha256(SOURCE).hexdigest())
+
+
+def test_prepared_source_is_never_echoed_in_repr_json_or_static_errors(
+    monkeypatch, capsys
+):
+    source = b"FAKE_SOURCE_DO_NOT_ECHO"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("source preparation must remain in memory")
+
+    monkeypatch.setattr(os, "getenv", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    prepared = prepare(source)
+    sentinel = source.decode()
+    assert sentinel not in repr(prepared) + json.dumps(prepared.to_dict())
+    for raw in (source, source + b"\xff"):
+        with pytest.raises(ValueError) as error:
+            prepare(raw, expected="0" * 64)
+        assert sentinel not in str(error.value)
+        assert error.value.__context__ is None
+        assert sentinel not in "".join(traceback.format_exception(error.value))
+    output = capsys.readouterr()
+    assert sentinel not in output.out + output.err
+
+
+def test_legacy_routes_do_not_gain_input_format_fields_or_prepared_guarantees():
+    data = plan(source_adapter(), request=constrained_request()).to_dict()
+    assert "input_format" not in data["request"]
+    assert "input_format" not in data["selected"]
+    assert "request_fingerprint" not in data
