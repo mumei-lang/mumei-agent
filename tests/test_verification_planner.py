@@ -21,6 +21,7 @@ from agent.verification_planner import (
     SettingSpec,
     SOURCE_INPUT_FORMAT,
     MAX_SOURCE_BYTES,
+    PERMISSIONS,
 )
 
 PROFILE = "mumei.pure-i64-comparison/v1"
@@ -1276,3 +1277,271 @@ def test_legacy_routes_do_not_gain_input_format_fields_or_prepared_guarantees():
     assert "input_format" not in data["request"]
     assert "input_format" not in data["selected"]
     assert "request_fingerprint" not in data
+
+
+PERMISSION_CASES = tuple(
+    frozenset(name for bit, name in enumerate(sorted(PERMISSIONS)) if mask & (1 << bit))
+    for mask in range(1 << len(PERMISSIONS))
+)
+
+
+@pytest.mark.parametrize("required", PERMISSION_CASES)
+@pytest.mark.parametrize("allowed", PERMISSION_CASES)
+def test_all_permission_subsets_are_enforced_in_planning_and_source_preparation(
+    required, allowed
+):
+    descriptor = source_adapter(required_permissions=required)
+    policy = PlannerPolicy(allowed_permissions=allowed)
+    result = plan(descriptor, policy, request=source_request())
+    assert result.to_dict()["policy"]["allowed_permissions"] == sorted(allowed)
+    if required <= allowed:
+        assert result.selected.required_permissions == required
+        assert result.to_dict()["selected"]["required_permissions"] == sorted(required)
+        prepared = prepare(descriptor=descriptor, policy=policy)
+        assert prepared.plan.selected.result_contract == CONTRACT
+        assert prepared.source is SOURCE
+        json.dumps(prepared.to_dict())
+    else:
+        assert result.selected is None
+        assert "permissions_not_allowed" in reasons(result)
+        with pytest.raises(ValueError):
+            prepare(descriptor=descriptor, policy=policy)
+
+
+@pytest.mark.parametrize("allowed", PERMISSION_CASES)
+def test_explicit_permission_policy_rejects_missing_declarations_even_when_all_are_allowed(
+    allowed,
+):
+    policy = PlannerPolicy(allowed_permissions=allowed)
+    result = plan(source_adapter(), policy, request=source_request())
+    assert result.selected is None
+    assert "permission_requirements_not_declared" in reasons(result)
+    with pytest.raises(ValueError):
+        prepare(policy=policy)
+
+
+@pytest.mark.parametrize("required", (None, *PERMISSION_CASES))
+def test_omitted_permission_policy_preserves_legacy_json_and_is_not_implicit_approval(
+    required,
+):
+    result = plan(source_adapter(required_permissions=required))
+    baseline = plan(source_adapter())
+    assert result.to_dict() == baseline.to_dict()
+    assert result.selected.required_permissions is None
+    assert "required_permissions" not in result.to_dict()["selected"]
+    assert "allowed_permissions" not in result.to_dict()["policy"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        set(),
+        [],
+        (),
+        {},
+        "filesystem.read",
+        frozenset({"filesystem.*"}),
+        frozenset({"FAKE_PERMISSION_DO_NOT_ECHO"}),
+        frozenset({1}),
+        frozenset({True}),
+    ],
+    ids=(
+        "mutable-set",
+        "list",
+        "tuple",
+        "mapping",
+        "string",
+        "wildcard",
+        "unknown",
+        "integer",
+        "boolean",
+    ),
+)
+@pytest.mark.parametrize("model", ("descriptor", "policy", "effective"))
+def test_invalid_permission_values_are_rejected_statically_without_hashing_or_echoing(
+    value, model, monkeypatch, capsys
+):
+    selected = plan().selected
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid permission metadata must not be fingerprinted")
+
+    monkeypatch.setattr("agent.verification_planner.hashlib.sha256", forbidden)
+    with pytest.raises(ValueError) as error:
+        if model == "descriptor":
+            adapter(required_permissions=value)
+        elif model == "policy":
+            PlannerPolicy(allowed_permissions=value)
+        else:
+            replace(selected, required_permissions=value)
+    sentinel = "FAKE_PERMISSION_DO_NOT_ECHO"
+    assert sentinel not in str(error.value)
+    output = capsys.readouterr()
+    assert sentinel not in output.out + output.err
+
+
+def test_permission_filtered_fallback_uses_destination_requirements_without_weakening_contracts():
+    registry = AdapterRegistry()
+    registry.register(
+        source_adapter(
+            priority=100, required_permissions=frozenset({"network.connect"})
+        )
+    )
+    registry.register(
+        replace(source_adapter(), adapter_id="other", required_permissions=frozenset())
+    )
+    observations = (observed(), observed("other"))
+    policy = PlannerPolicy(
+        selected_adapter="fixture", allow_fallback=True, allowed_permissions=frozenset()
+    )
+    result = registry.plan(source_request(), policy, observations)
+    assert result.fallback_from == "fixture"
+    assert result.selected.adapter_id == "other"
+    assert result.selected.required_permissions == frozenset()
+    assert result.selected.result_contract == CONTRACT
+    assert result.selected.input_format == SOURCE_INPUT_FORMAT
+    assert "permissions_not_allowed" in reasons(result)
+    assert (
+        registry.plan(
+            source_request(), replace(policy, allow_fallback=False), observations
+        ).selected
+        is None
+    )
+    for replacement in (
+        replace(source_adapter(), adapter_id="other", required_permissions=None),
+        replace(
+            source_adapter(),
+            adapter_id="other",
+            required_permissions=frozenset({"process.spawn"}),
+        ),
+        replace(
+            source_adapter(),
+            adapter_id="other",
+            required_permissions=frozenset(),
+            result_contracts=(replace(CONTRACT, correspondence_status="unverified"),),
+        ),
+    ):
+        registry.register(replacement, replace=True)
+        assert registry.plan(source_request(), policy, observations).selected is None
+
+
+def test_permission_declaration_replacement_replans_and_cannot_reuse_prior_selection():
+    registry = AdapterRegistry()
+    descriptor = source_adapter(required_permissions=frozenset())
+    registry.register(descriptor)
+    args = (
+        source_request(),
+        PlannerPolicy(allowed_permissions=frozenset()),
+        (observed(),),
+        SOURCE,
+        hashlib.sha256(SOURCE).hexdigest(),
+    )
+    previous = registry.prepare_source(*args)
+    registry.register(
+        replace(descriptor, required_permissions=frozenset({"network.connect"})),
+        replace=True,
+    )
+    with pytest.raises(ValueError):
+        registry.prepare_source(*args)
+    assert previous.plan.selected.required_permissions == frozenset()
+
+
+def test_permission_bindings_change_fingerprints_but_never_become_grants():
+    empty = source_adapter(required_permissions=frozenset())
+    process = replace(empty, required_permissions=frozenset({"process.spawn"}))
+    all_allowed = PlannerPolicy(allowed_permissions=PERMISSIONS)
+    no_requirements = prepare(descriptor=empty, policy=all_allowed)
+    process_required = prepare(descriptor=process, policy=all_allowed)
+    assert (
+        no_requirements.plan.selected.configuration_fingerprint
+        != process_required.plan.selected.configuration_fingerprint
+    )
+    assert (
+        no_requirements.to_dict()["request_fingerprint"]
+        != process_required.to_dict()["request_fingerprint"]
+    )
+    less_allowed = prepare(
+        descriptor=process,
+        policy=PlannerPolicy(allowed_permissions=frozenset({"process.spawn"})),
+    )
+    assert (
+        less_allowed.plan.selected.configuration_fingerprint
+        == process_required.plan.selected.configuration_fingerprint
+    )
+    assert (
+        less_allowed.to_dict()["request_fingerprint"]
+        != process_required.to_dict()["request_fingerprint"]
+    )
+    data = json.dumps(process_required.to_dict())
+    for key in (
+        "authorized",
+        "grant",
+        "permission_token",
+        "success",
+        "proved",
+        "acceptance",
+        "command",
+        "environment",
+    ):
+        assert f'"{key}"' not in data
+
+
+@pytest.mark.parametrize("required", [None, frozenset({"network.connect"})])
+def test_prepared_record_rejects_permission_metadata_inconsistent_with_its_explicit_policy(
+    required,
+):
+    prepared = prepare(
+        descriptor=source_adapter(required_permissions=frozenset()),
+        policy=PlannerPolicy(allowed_permissions=frozenset()),
+    )
+    inconsistent = replace(
+        prepared.plan,
+        selected=replace(prepared.plan.selected, required_permissions=required),
+    )
+    with pytest.raises(ValueError):
+        PreparedSourceRequest(inconsistent, SOURCE, hashlib.sha256(SOURCE).hexdigest())
+
+
+@pytest.mark.parametrize(
+    "change", ["version", "availability", "settings", "format", "contract"]
+)
+def test_permission_match_does_not_bypass_other_preflight_constraints(change):
+    descriptor = source_adapter(required_permissions=frozenset())
+    observation = observed()
+    policy = PlannerPolicy(allowed_permissions=frozenset())
+    if change == "version":
+        policy = replace(policy, tool_version_pins=(("fixture", "1.0.0"),))
+    elif change == "availability":
+        observation = observed(availability="missing")
+    elif change == "settings":
+        policy = replace(policy, adapter_settings=(("fixture", (("rounds", 99999),)),))
+    elif change == "format":
+        descriptor = replace(descriptor, input_formats=frozenset())
+    else:
+        descriptor = replace(descriptor, result_contracts=())
+    with pytest.raises(ValueError):
+        prepare(descriptor=descriptor, policy=policy, observation=observation)
+
+
+def test_permission_metadata_is_pure_not_a_capability_truth_or_runtime_authorization_check(
+    monkeypatch,
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail(
+            "permission matching must not perform authority checks, I/O or execution"
+        )
+
+    monkeypatch.setattr(os, "getenv", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    # A host declaration is not proof of the privileges the adapter really needs.
+    descriptor = source_adapter(location="remote", required_permissions=frozenset())
+    policy = PlannerPolicy(
+        allowed_locations=frozenset({"remote"}), allowed_permissions=frozenset()
+    )
+    prepared = prepare(descriptor=descriptor, policy=policy)
+    assert prepared.plan.selected.location == "remote"
+    assert prepared.plan.selected.required_permissions == frozenset()
+    assert prepared.source is SOURCE
