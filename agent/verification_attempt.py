@@ -40,7 +40,7 @@ class AttemptEvent:
     exit_code: int | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.kind, str) or self.kind not in EVENT_KINDS:
+        if type(self.kind) is not str or self.kind not in EVENT_KINDS:
             raise ValueError("unsupported attempt event")
         _counter(self.elapsed_ms)
         if self.kind == "exited":
@@ -73,13 +73,13 @@ class AttemptRecord:
     events: tuple[AttemptEvent, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request_fingerprint, str) or not re.fullmatch(
+        if type(self.request_fingerprint) is not str or not re.fullmatch(
             r"[0-9a-f]{64}", self.request_fingerprint
         ):
             raise ValueError("invalid prepared request fingerprint")
         _counter(self.attempt_number, positive=True)
         _counter(self.timeout_ms, positive=True)
-        if not isinstance(self.events, tuple) or len(self.events) > MAX_EVENTS:
+        if type(self.events) is not tuple or len(self.events) > MAX_EVENTS:
             raise ValueError("attempt history must be bounded immutable events")
         self._state()
 

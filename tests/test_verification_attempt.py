@@ -348,3 +348,31 @@ def test_recording_does_not_read_clocks_files_env_plugins_network_or_execute(
     json.dumps(result.to_dict())
     output = capsys.readouterr()
     assert SOURCE.decode() not in output.out + output.err
+
+
+def test_tuple_subclasses_cannot_supply_mutable_or_executable_histories():
+    class MutableEvents(tuple):
+        def __len__(self):
+            pytest.fail("custom history length must not be consulted")
+
+        def __iter__(self):
+            pytest.fail("custom history iteration must not be executed")
+
+    with pytest.raises(ValueError):
+        replace(record(), events=MutableEvents((START,)))
+
+
+@pytest.mark.parametrize("field", ["kind", "request_fingerprint"])
+def test_string_subclasses_cannot_override_closed_metadata_semantics(field):
+    class CustomString(str):
+        def __hash__(self):
+            pytest.fail("custom metadata hashing must not be executed")
+
+        def __eq__(self, other):
+            pytest.fail("custom metadata equality must not be executed")
+
+    with pytest.raises(ValueError):
+        if field == "kind":
+            AttemptEvent(CustomString("started"), 0)
+        else:
+            replace(record(), request_fingerprint=CustomString(FINGERPRINT))

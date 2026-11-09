@@ -107,7 +107,8 @@ diagnostics. Fingerprints/numbers are identifiers, not authorization/replay toke
 | `exited`, `failed`, `timed_out`, `cancelled` | None |
 
 Histories are immutable, validated at construction and on append, with at most
-three events. The recorded start defines elapsed zero; subsequent host-reported
+three events. Strings, event tuples and integers require exact primitive types,
+not subclasses with mutable/custom behavior. The recorded start defines elapsed zero; subsequent host-reported
 millisecond counters must be nonnegative and monotonic. Exit observations must
 precede the declared deadline; timeout observations must reach it. Failure or
 cancellation acknowledgement may be recorded after the deadline without becoming
