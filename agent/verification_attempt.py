@@ -285,6 +285,15 @@ class AttemptSequence:
             attempts=(*self.attempts[:index], following, *self.attempts[index + 1 :]),
         )
 
+    def check_output_binding(self, output: "AttemptOutput") -> None:
+        """Require this value's current record, without reconciling either input.
+
+        This checks neither competing stdout snapshots nor global current state.
+        Hosts still own output conflicts and atomic publication/completion.
+        """
+        if type(output) is not AttemptOutput or output.attempt != self.current:
+            raise ValueError("output does not match the current sequence record")
+
     def to_dict(self) -> dict:
         return {
             "schema_version": "mumei.verifier-attempt-sequence/v1",

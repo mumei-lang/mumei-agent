@@ -104,9 +104,30 @@ from agent.core_evidence import check_evidence_representation
 # The host first reconciles and retains its canonical attempt/output lineage.
 check_evidence_representation(
     output, core_executable=trusted_core_path, timeout_ms=1000,
+    attempt_sequence=sequence,  # Optional explicit current-record precondition.
 )
 # Normal return means representation-valid only, never proof or acceptance.
 ```
+
+The optional `attempt_sequence` requires an exact `AttemptSequence` value and
+calls its `check_output_binding(output)` before any Core process/I/O. An exact
+`AttemptOutput` must match the supplied sequence's current record in request
+fingerprint, ordinal, timeout and complete event history. Empty sequences,
+unreconciled/non-exited current records, old/future outputs, different bindings
+or terminal histories fail with fixed, body-free errors. Equal metadata copies
+are allowed; object identity and exit code zero are not required. Omitting the
+argument or passing `None` preserves the earlier sequence-independent API.
+
+This compares only the two supplied immutable values. Reconcile/retain the
+host's canonical sequence first; a stale sequence can still match a stale output.
+The check neither reads/decodes stdout nor reconciles/selects competing bodies:
+different stdout snapshots with the same current attempt each pass binding.
+Use `AttemptOutput.reconcile()` and host-owned atomic storage to detect conflicts.
+There is no global freshness/replay protection, lock/CAS, completion-time
+revalidation, result winner, process cleanup proof or Evidence/request-contract
+matching. Hosts arbitrate concurrent updates and publication after the call.
+The helper returns `None`, not authority, a receipt or acceptance; schemas and
+default routes are unchanged.
 
 Exactly the original `AttemptOutput.stdout` bytes are sent to fixed
 `evidence check --stdin --json`, without a decoded-tree round trip or temporary
@@ -141,7 +162,8 @@ descendant cleanup. Checks also occur before diagnostic decoding and normal
 return; a signal after the last check can race with completion. A set/clear pulse
 between checks may be missed, so do not clear/reuse an event during the call.
 The API never sets/clears the event, creates an attempt cancellation report,
-mutates an existing attempt/output, or binds host lifecycle metadata to Core.
+mutates an existing attempt/output, or turns host lifecycle metadata into an
+authenticated Core receipt.
 The host separately reconciles its canonical lineage and completion/cancel race.
 
 Code zero alone, empty output, any stderr, malformed/duplicate/extra diagnostics,

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from agent.core_evidence import (
     MAX_DIAGNOSTIC_BYTES,
     check_evidence_representation,
 )
-from agent.verification_attempt import AttemptEvent, AttemptOutput, AttemptRecord
+from agent.verification_attempt import AttemptEvent, AttemptOutput, AttemptRecord, AttemptSequence
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX Core handoff pilot")
 
@@ -44,6 +45,11 @@ def snapshot(body=PRIVATE, exit_code=0):
     return AttemptOutput(attempt, body, hashlib.sha256(body).hexdigest())
 
 
+def matching_sequence(output):
+    attempt = output.attempt
+    return AttemptSequence(attempt.request_fingerprint, attempt.timeout_ms, (attempt,))
+
+
 @pytest.fixture
 def executable(tmp_path):
     def write(script):
@@ -64,9 +70,9 @@ def report_script(stdout=VALID, stderr=b"", code=0):
     )
 
 
-def failed(output, executable, timeout_ms=2000, cancel_event=None):
+def failed(output, executable, timeout_ms=2000, cancel_event=None, attempt_sequence=None):
     with pytest.raises(ValueError, match="^Core Evidence representation check failed$") as error:
-        check_evidence_representation(output, core_executable=executable, timeout_ms=timeout_ms, cancel_event=cancel_event)
+        check_evidence_representation(output, core_executable=executable, timeout_ms=timeout_ms, cancel_event=cancel_event, attempt_sequence=attempt_sequence)
     assert error.value.__suppress_context__
     assert "FAKE_PRIVATE" not in str(error.value)
 
@@ -74,8 +80,9 @@ def failed(output, executable, timeout_ms=2000, cancel_event=None):
 @pytest.mark.parametrize("size", [0, 1, 4095, 4096, 4097, 65535, 65536])
 @pytest.mark.parametrize("exit_code", [0, 7, -9])
 @pytest.mark.parametrize("cancellable", [False, True])
+@pytest.mark.parametrize("sequence_bound", [False, True])
 def test_original_bytes_fixed_argv_empty_environment_and_no_snapshot_mutation(
-    executable, monkeypatch, capsys, size, exit_code, cancellable,
+    executable, monkeypatch, capsys, size, exit_code, cancellable, sequence_bound,
 ):
     body = bytes(i % 256 for i in range(size))
     output = snapshot(body, exit_code)
@@ -92,6 +99,7 @@ def test_original_bytes_fixed_argv_empty_environment_and_no_snapshot_mutation(
     assert check_evidence_representation(
         output, core_executable=executable(script), timeout_ms=2000,
         cancel_event=threading.Event() if cancellable else None,
+        attempt_sequence=matching_sequence(output) if sequence_bound else None,
     ) is None
     assert output.to_dict() == before
     assert output.stdout == body
@@ -628,26 +636,216 @@ def real_core():
 @pytest.mark.integration
 @pytest.mark.parametrize("result", ["established", "counterexample", "unknown", "unsupported", "not_checked", "inconsistent"])
 @pytest.mark.parametrize("cancellable", [False, True])
-def test_real_core_checks_representation_not_stored_result_truth(real_core, result, cancellable):
+@pytest.mark.parametrize("sequence_bound", [False, True])
+def test_real_core_checks_representation_not_stored_result_truth(real_core, result, cancellable, sequence_bound):
     evidence = synthetic_evidence()
     evidence["result"] = result
     output = snapshot(json.dumps(evidence, ensure_ascii=False).encode())
     assert check_evidence_representation(
         output, core_executable=real_core, timeout_ms=2000,
         cancel_event=threading.Event() if cancellable else None,
+        attempt_sequence=matching_sequence(output) if sequence_bound else None,
     ) is None
 
 
 @pytest.mark.integration
-def test_real_core_raw_encoding_duplicates_and_boundaries(real_core):
+@pytest.mark.parametrize("sequence_bound", [False, True])
+def test_real_core_raw_encoding_duplicates_and_boundaries(real_core, sequence_bound):
     evidence = synthetic_evidence()
     evidence["exclusions"].append("Synthetic scalar Unicode: 日本語")
     raw = json.dumps(evidence, ensure_ascii=False).encode()
     for body in [raw, raw + b" " * (65536 - len(raw))]:
-        check_evidence_representation(snapshot(body), core_executable=real_core, timeout_ms=2000)
+        output = snapshot(body)
+        check_evidence_representation(
+            output, core_executable=real_core, timeout_ms=2000,
+            attempt_sequence=matching_sequence(output) if sequence_bound else None,
+        )
     for body in [
         b"", b"{}", b'{"success":true}', b"[]", b"\xff", b"\xef\xbb\xbf" + raw,
         raw + b"{}", raw[:-1] + b', "result": "established"}',
         raw.replace(b'"assumptions": []', b'"assumptions": ["\\ud800"]'), VALID,
     ]:
-        failed(snapshot(body), real_core)
+        output = snapshot(body)
+        failed(output, real_core, attempt_sequence=matching_sequence(output) if sequence_bound else None)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "empty",
+        "ready",
+        "running",
+        "cancelling",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "request",
+        "timeout",
+        "elapsed",
+        "code",
+        "history",
+        "next",
+    ],
+)
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_sequence_binding_mismatches_fail_before_core_io(
+    monkeypatch, capsys, state, cancelled
+):
+    output = snapshot()
+    known = output.attempt
+    variants = {
+        "empty": (),
+        "ready": (),
+        "running": (AttemptEvent("started", 0),),
+        "cancelling": (AttemptEvent("started", 0), AttemptEvent("cancel_requested", 0)),
+        "failed": (AttemptEvent("started", 0), AttemptEvent("failed", 1)),
+        "timed_out": (AttemptEvent("started", 0), AttemptEvent("timed_out", 1000)),
+        "cancelled": (
+            AttemptEvent("started", 0),
+            AttemptEvent("cancel_requested", 0),
+            AttemptEvent("cancelled", 1),
+        ),
+        "elapsed": (AttemptEvent("started", 0), AttemptEvent("exited", 2, 0)),
+        "code": (AttemptEvent("started", 0), AttemptEvent("exited", 1, 7)),
+        "history": (
+            AttemptEvent("started", 0),
+            AttemptEvent("cancel_requested", 0),
+            AttemptEvent("exited", 1, 0),
+        ),
+    }
+    record = replace(known, events=variants[state]) if state in variants else known
+    if state == "request":
+        record = replace(record, request_fingerprint="b" * 64)
+    if state == "timeout":
+        record = replace(record, timeout_ms=1001)
+    sequence = AttemptSequence(record.request_fingerprint, record.timeout_ms, (record,))
+    if state == "empty":
+        sequence = replace(sequence, attempts=())
+    if state == "next":
+        sequence = sequence.begin_attempt()
+    event = threading.Event()
+    if cancelled:
+        event.set()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a mismatched sequence reached Core I/O")
+
+    monkeypatch.setattr(core_evidence, "_run_check", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    before = sequence.to_dict(), output.to_dict()
+    with pytest.raises(ValueError) as error:
+        check_evidence_representation(
+            output,
+            core_executable="/FAKE_PRIVATE_CORE",
+            timeout_ms=2000,
+            cancel_event=event,
+            attempt_sequence=sequence,
+        )
+    assert type(error.value) is ValueError
+    assert str(error.value) == "output does not match the current sequence record"
+    assert (sequence.to_dict(), output.to_dict()) == before
+    assert event.is_set() is cancelled
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        True,
+        False,
+        0,
+        1,
+        "FAKE_PRIVATE_SEQUENCE",
+        [],
+        {},
+        snapshot().attempt,
+        snapshot(),
+    ],
+)
+def test_sequence_binding_requires_exact_sequence_type_before_spawn(monkeypatch, value):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid sequence reached a subprocess")
+
+    monkeypatch.setattr(core_evidence, "_run_check", forbidden)
+    with pytest.raises(
+        ValueError, match="^unsupported Core representation check request$"
+    ):
+        check_evidence_representation(
+            snapshot(),
+            core_executable="/FAKE_PRIVATE_CORE",
+            timeout_ms=2000,
+            attempt_sequence=value,
+        )
+
+
+def test_sequence_binding_rejects_subclasses_without_custom_behavior(monkeypatch):
+    class HostileSequence(AttemptSequence):
+        def __getattribute__(self, name):
+            pytest.fail("custom sequence behavior was called")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid sequence reached a subprocess")
+
+    monkeypatch.setattr(core_evidence, "_run_check", forbidden)
+    with pytest.raises(
+        ValueError, match="^unsupported Core representation check request$"
+    ):
+        check_evidence_representation(
+            snapshot(),
+            core_executable="/FAKE_PRIVATE_CORE",
+            timeout_ms=2000,
+            attempt_sequence=object.__new__(HostileSequence),
+        )
+
+
+def test_sequence_binding_is_a_snapshot_not_an_atomic_completion_guard(monkeypatch):
+    output = snapshot()
+    retained = matching_sequence(output)
+    host = {"sequence": retained}
+    before = output.to_dict(), retained.to_dict()
+
+    def run(body, executable, timeout_ms, cancel_event):
+        assert body is output.stdout and timeout_ms == 2000
+        host["sequence"] = retained.begin_attempt()
+        return VALID
+
+    monkeypatch.setattr(core_evidence, "_run_check", run)
+    assert (
+        check_evidence_representation(
+            output,
+            core_executable="/FAKE_PRIVATE_CORE",
+            timeout_ms=2000,
+            attempt_sequence=retained,
+        )
+        is None
+    )
+    assert host["sequence"].current.attempt_number == 2
+    assert retained.check_output_binding(output) is None
+    with pytest.raises(ValueError):
+        host["sequence"].check_output_binding(output)
+    assert (output.to_dict(), retained.to_dict()) == before
+
+
+def test_matching_sequence_does_not_change_timeout_cancel_or_error_protocol(executable):
+    output = snapshot()
+    sequence = matching_sequence(output)
+    event = threading.Event()
+    event.set()
+    with pytest.raises(core_evidence.CoreCheckCancelled):
+        check_evidence_representation(
+            output,
+            core_executable="/FAKE_PRIVATE_NONEXISTENT_CORE",
+            timeout_ms=2000,
+            cancel_event=event,
+            attempt_sequence=sequence,
+        )
+    failed(output, executable(report_script(stderr=PRIVATE)), attempt_sequence=sequence)
+    failed(output, executable(report_script(code=7)), attempt_sequence=sequence)
+    failed(output, executable(report_script(b"{}")), attempt_sequence=sequence)
+    failed(
+        output,
+        executable("import time\ntime.sleep(60)\n"),
+        timeout_ms=50,
+        attempt_sequence=sequence,
+    )
+    assert sequence.check_output_binding(output) is None

@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 
-from agent.verification_attempt import AttemptOutput
+from agent.verification_attempt import AttemptOutput, AttemptSequence
 
 MAX_DIAGNOSTIC_BYTES = 4096
 MAX_CHECK_TIMEOUT_MS = 60_000
@@ -42,6 +42,7 @@ def check_evidence_representation(
     core_executable: str,
     timeout_ms: int,
     cancel_event: threading.Event | None = None,
+    attempt_sequence: AttemptSequence | None = None,
 ) -> None:
     """Send original bytes to Core; return None only for its known v1 diagnostic.
 
@@ -54,6 +55,9 @@ def check_evidence_representation(
     spawn and normal return. Keep it set: set/clear pulses may not be observed.
     Observed cancellation raises CoreCheckCancelled after direct-child cleanup.
     Cancellation is not an atomic completion handshake or an attempt report.
+    An optional sequence requires an exact current-record/output binding before
+    spawn; the host still owns canonical values, stdout conflicts and locking.
+    It is a snapshot precondition, not freshness or a completion-time guarantee.
     """
     if (
         os.name != "posix"
@@ -64,8 +68,14 @@ def check_evidence_representation(
         or type(timeout_ms) is not int
         or not 1 <= timeout_ms <= MAX_CHECK_TIMEOUT_MS
         or (cancel_event is not None and type(cancel_event) is not threading.Event)
+        or (
+            attempt_sequence is not None
+            and type(attempt_sequence) is not AttemptSequence
+        )
     ):
         raise ValueError("unsupported Core representation check request")
+    if attempt_sequence is not None:
+        attempt_sequence.check_output_binding(output)
     try:
         stdout = _run_check(output.stdout, core_executable, timeout_ms, cancel_event)
         _check_cancelled(cancel_event)
@@ -86,7 +96,9 @@ def check_evidence_representation(
 
 def _check_cancelled(cancel_event: threading.Event | None) -> None:
     if cancel_event is not None and cancel_event.is_set():
-        raise CoreCheckCancelled("Core Evidence representation check cancelled") from None
+        raise CoreCheckCancelled(
+            "Core Evidence representation check cancelled"
+        ) from None
 
 
 def _wait_timeout(deadline: float, cancel_event: threading.Event | None) -> float:
@@ -110,7 +122,11 @@ def _run_check(
         bufsize=0,
         env={},
     )
-    streams = {"stdin": process.stdin, "stdout": process.stdout, "stderr": process.stderr}
+    streams = {
+        "stdin": process.stdin,
+        "stdout": process.stdout,
+        "stderr": process.stderr,
+    }
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     offset = 0
     try:
@@ -146,7 +162,9 @@ def _run_check(
                     else:
                         buffer = buffers[name]
                         try:
-                            chunk = os.read(key.fd, MAX_DIAGNOSTIC_BYTES + 1 - len(buffer))
+                            chunk = os.read(
+                                key.fd, MAX_DIAGNOSTIC_BYTES + 1 - len(buffer)
+                            )
                         except BlockingIOError:
                             continue
                         if not chunk:

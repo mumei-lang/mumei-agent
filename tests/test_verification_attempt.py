@@ -1677,3 +1677,125 @@ def test_sequence_is_passive_without_io_clocks_plugins_or_evidence(monkeypatch, 
         assert current.reconcile_report(terminal) is current
         assert current.current.state == "ready"
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("current_ordinal", range(1, MAX_ATTEMPTS + 1))
+@pytest.mark.parametrize("output_ordinal", range(1, MAX_ATTEMPTS + 2))
+@pytest.mark.parametrize("state", PREFIXES)
+def test_sequence_output_binding_checks_current_state_and_ordinal(
+    current_ordinal, output_ordinal, state
+):
+    previous = tuple(sequence_record("exited", n) for n in range(1, current_ordinal))
+    sequence = AttemptSequence(
+        FINGERPRINT, 10, (*previous, sequence_record(state, current_ordinal))
+    )
+    output = output_snapshot(sequence_record("exited", output_ordinal), b"\xff")
+    before = sequence.to_dict(), output.to_dict()
+    if state == "exited" and current_ordinal == output_ordinal:
+        assert sequence.check_output_binding(output) is None
+    else:
+        with pytest.raises(
+            ValueError, match="^output does not match the current sequence record$"
+        ):
+            sequence.check_output_binding(output)
+    assert (sequence.to_dict(), output.to_dict()) == before
+
+
+@pytest.mark.parametrize("ordinal", [1, 8, MAX_ATTEMPTS])
+@pytest.mark.parametrize("change", ["request", "timeout", "elapsed", "code", "history"])
+def test_sequence_output_binding_requires_the_exact_known_history(ordinal, change):
+    known = sequence_record("exited", ordinal)
+    previous = tuple(sequence_record("failed", n) for n in range(1, ordinal))
+    sequence = AttemptSequence(FINGERPRINT, 10, (*previous, known))
+    alternate = {
+        "request": lambda: replace(known, request_fingerprint="b" * 64),
+        "timeout": lambda: replace(known, timeout_ms=11),
+        "elapsed": lambda: replace(known, events=(START, AttemptEvent("exited", 4, 0))),
+        "code": lambda: replace(known, events=(START, AttemptEvent("exited", 3, 1))),
+        "history": lambda: replace(
+            known, events=(START, CANCEL, AttemptEvent("exited", 3, 0))
+        ),
+    }[change]()
+    with pytest.raises(ValueError):
+        sequence.check_output_binding(output_snapshot(alternate))
+    assert sequence.current is known
+
+
+def test_sequence_output_binding_requires_explicit_reconciliation_first():
+    prepared = prepared_source()
+    reserved = AttemptSequence.from_prepared(prepared).begin_attempt()
+    report = reserved.current.record(START).record(AttemptEvent("exited", 3, 0))
+    output = AttemptOutput.from_prepared(
+        prepared, 1, report, b"{}", hashlib.sha256(b"{}").hexdigest()
+    )
+    for sequence in (AttemptSequence.from_prepared(prepared), reserved):
+        with pytest.raises(ValueError):
+            sequence.check_output_binding(output)
+    reconciled = reserved.reconcile_report(report)
+    assert reconciled.check_output_binding(output) is None
+    copied = replace(output, attempt=replace(report))
+    assert reconciled.check_output_binding(copied) is None
+    with pytest.raises(ValueError):
+        reconciled.begin_attempt().check_output_binding(output)
+    assert reconciled.check_output_binding(output) is None
+    assert reserved.current.state == "ready"
+
+
+@pytest.mark.parametrize(
+    "value", [None, True, 0, {}, [], record(), "FAKE_PRIVATE_BINDING"]
+)
+def test_sequence_output_binding_rejects_non_snapshots_without_echo(value):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(ValueError) as error:
+        sequence.check_output_binding(value)
+    assert str(error.value) == "output does not match the current sequence record"
+
+
+def test_sequence_output_binding_rejects_subclasses_before_custom_behavior():
+    class HostileOutput(AttemptOutput):
+        def __getattribute__(self, name):
+            pytest.fail("custom output behavior was called")
+
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(ValueError):
+        sequence.check_output_binding(object.__new__(HostileOutput))
+
+
+def test_sequence_output_binding_does_not_resolve_stdout_conflicts():
+    attempt = sequence_record("exited")
+    sequence = AttemptSequence(FINGERPRINT, 10, (attempt,))
+    left, right = output_snapshot(attempt, b"{}"), output_snapshot(attempt, b"[]")
+    assert sequence.check_output_binding(left) is None
+    assert sequence.check_output_binding(right) is None
+    with pytest.raises(ValueError, match="output report conflict"):
+        left.reconcile(right)
+
+
+def test_sequence_output_binding_has_no_io_decode_or_clock_effects(monkeypatch, capsys):
+    attempt = sequence_record("exited")
+    sequence = AttemptSequence(FINGERPRINT, 10, (attempt,))
+    output = output_snapshot(attempt, b"FAKE_PRIVATE_BINDING_BODY")
+    before = sequence.to_dict(), output.to_dict()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("output binding must remain passive exact metadata comparison")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (time, "monotonic"),
+            (time, "time"),
+            (AttemptOutput, "decode_json_object"),
+            (json, "loads"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        assert sequence.check_output_binding(output) is None
+        with pytest.raises(ValueError):
+            sequence.begin_attempt().check_output_binding(output)
+    assert (sequence.to_dict(), output.to_dict()) == before
+    assert capsys.readouterr() == ("", "")
