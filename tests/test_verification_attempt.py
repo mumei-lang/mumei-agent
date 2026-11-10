@@ -1326,8 +1326,8 @@ def test_sequence_from_prepared_starts_empty_without_retaining_private_source():
     sequence = AttemptSequence.from_prepared(prepared)
     assert sequence.current is None
     assert sequence.attempts == ()
-    assert sequence.request_fingerprint == prepared.request_fingerprint
-    assert sequence.timeout_ms == prepared.plan.timeout_ms
+    assert sequence.request_fingerprint == prepared.to_dict()["request_fingerprint"]
+    assert sequence.timeout_ms == prepared.plan.policy.timeout_ms
     assert SOURCE.decode() not in repr(sequence) + json.dumps(sequence.to_dict())
     assert not hasattr(sequence, "source") and not hasattr(sequence, "plan")
     assert set(sequence.to_dict()) == {
@@ -1478,7 +1478,7 @@ def test_sequence_reports_cannot_rebind_a_reserved_attempt(state, field):
     sequence = AttemptSequence(FINGERPRINT, 10).begin_attempt()
     incoming = sequence_record(state)
     incoming = replace(
-        incoming, **{field: "b" * 64 if field == "request_fingerprint" else 11}
+        incoming, **{field: "b" * 64 if field == "request_fingerprint" else 9}
     )
     with pytest.raises(ValueError):
         sequence.reconcile_report(incoming)
