@@ -14,6 +14,7 @@ from agent.verification_planner import PreparedSourceRequest
 
 MAX_COUNTER = (1 << 63) - 1
 MAX_EVENTS = 3
+MAX_ATTEMPTS = 16
 MAX_STDOUT_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 32
 MAX_JSON_NUMBER_CHARS = 128
@@ -37,6 +38,11 @@ _TRANSITIONS = {
 def _counter(value: int, *, positive: bool = False) -> None:
     if type(value) is not int or not (int(positive) <= value <= MAX_COUNTER):
         raise ValueError("invalid bounded attempt counter")
+
+
+def _fingerprint(value: str) -> None:
+    if type(value) is not str or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("invalid prepared request fingerprint")
 
 
 def _json_depth(text: str) -> None:
@@ -132,10 +138,7 @@ class AttemptRecord:
     events: tuple[AttemptEvent, ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.request_fingerprint) is not str or not re.fullmatch(
-            r"[0-9a-f]{64}", self.request_fingerprint
-        ):
-            raise ValueError("invalid prepared request fingerprint")
+        _fingerprint(self.request_fingerprint)
         _counter(self.attempt_number, positive=True)
         _counter(self.timeout_ms, positive=True)
         if type(self.events) is not tuple or len(self.events) > MAX_EVENTS:
@@ -215,6 +218,79 @@ class AttemptRecord:
             "timeout_ms": self.timeout_ms,
             "state": self.state,
             "events": [event.to_dict() for event in self.events],
+        }
+
+
+@dataclass(frozen=True)
+class AttemptSequence:
+    """Bounded sequential host records for one request, not a retry scheduler.
+
+    Terminal metadata does not prove cleanup or prevent physical overlap.
+    Hosts retain/atomically advance their canonical sequence and own execution,
+    global numbering, replay protection and all result/Evidence decisions.
+    """
+
+    request_fingerprint: str
+    timeout_ms: int
+    attempts: tuple[AttemptRecord, ...] = ()
+
+    def __post_init__(self) -> None:
+        _fingerprint(self.request_fingerprint)
+        _counter(self.timeout_ms, positive=True)
+        if type(self.attempts) is not tuple or len(self.attempts) > MAX_ATTEMPTS:
+            raise ValueError("attempt sequence must be bounded immutable records")
+        for ordinal, attempt in enumerate(self.attempts, 1):
+            if type(attempt) is not AttemptRecord:
+                raise ValueError("attempt sequence requires exact attempt records")
+            if (
+                attempt.request_fingerprint != self.request_fingerprint
+                or attempt.timeout_ms != self.timeout_ms
+                or attempt.attempt_number != ordinal
+            ):
+                raise ValueError("attempt sequence binding or ordinal mismatch")
+            if ordinal < len(self.attempts) and not attempt.is_terminal:
+                raise ValueError(
+                    "attempt sequence cannot contain nonterminal predecessors"
+                )
+
+    @classmethod
+    def from_prepared(cls, prepared: PreparedSourceRequest) -> "AttemptSequence":
+        bound = AttemptRecord.from_prepared(prepared, 1)
+        return cls(bound.request_fingerprint, bound.timeout_ms)
+
+    @property
+    def current(self) -> AttemptRecord | None:
+        return self.attempts[-1] if self.attempts else None
+
+    def begin_attempt(self) -> "AttemptSequence":
+        """Reserve the next ready record; do not authorize or start a process."""
+        attempt = AttemptRecord(
+            self.request_fingerprint, len(self.attempts) + 1, self.timeout_ms
+        )
+        return replace(self, attempts=(*self.attempts, attempt))
+
+    def reconcile_report(self, incoming: AttemptRecord) -> "AttemptSequence":
+        """Extend a known report only; old terminal duplicates are idempotent."""
+        if type(incoming) is not AttemptRecord:
+            raise ValueError("sequence reconciliation requires an attempt record")
+        if incoming.attempt_number > len(self.attempts):
+            raise ValueError("attempt report has no reserved sequence ordinal")
+        index = incoming.attempt_number - 1
+        current = self.attempts[index]
+        following = current.reconcile(incoming)
+        if following is current:
+            return self
+        return replace(
+            self,
+            attempts=(*self.attempts[:index], following, *self.attempts[index + 1 :]),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": "mumei.verifier-attempt-sequence/v1",
+            "request_fingerprint": self.request_fingerprint,
+            "timeout_ms": self.timeout_ms,
+            "attempts": [attempt.to_dict() for attempt in self.attempts],
         }
 
 

@@ -17,6 +17,7 @@ import pytest
 
 from agent.verification_attempt import (
     EVENT_KINDS,
+    MAX_ATTEMPTS,
     MAX_COUNTER,
     MAX_EVENTS,
     MAX_JSON_DEPTH,
@@ -25,6 +26,7 @@ from agent.verification_attempt import (
     AttemptEvent,
     AttemptOutput,
     AttemptRecord,
+    AttemptSequence,
 )
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
@@ -1313,3 +1315,365 @@ def test_output_json_decode_is_not_success_classification_for_any_exit_code(exit
     assert snapshot.decode_json_object()["result"] == "established"
     assert "result" not in snapshot.to_dict()
     assert snapshot.attempt.events[-1].exit_code == exit_code
+
+
+def sequence_record(state, ordinal=1):
+    return AttemptRecord(FINGERPRINT, ordinal, 10, PREFIXES[state])
+
+
+def test_sequence_from_prepared_starts_empty_without_retaining_private_source():
+    prepared = prepared_source()
+    sequence = AttemptSequence.from_prepared(prepared)
+    assert sequence.current is None
+    assert sequence.attempts == ()
+    assert sequence.request_fingerprint == prepared.to_dict()["request_fingerprint"]
+    assert sequence.timeout_ms == prepared.plan.selected.timeout_ms
+    assert SOURCE.decode() not in repr(sequence) + json.dumps(sequence.to_dict())
+    assert not hasattr(sequence, "source") and not hasattr(sequence, "plan")
+    assert set(sequence.to_dict()) == {
+        "schema_version",
+        "request_fingerprint",
+        "timeout_ms",
+        "attempts",
+    }
+    assert sequence.to_dict()["schema_version"] == "mumei.verifier-attempt-sequence/v1"
+
+
+@pytest.mark.parametrize("value", [None, {}, FINGERPRINT, record()])
+def test_sequence_from_prepared_rejects_non_prepared_values(value):
+    with pytest.raises(ValueError):
+        AttemptSequence.from_prepared(value)
+
+
+def test_sequence_from_prepared_requires_explicit_permission_metadata():
+    with pytest.raises(ValueError):
+        AttemptSequence.from_prepared(prepared_source(policy=PlannerPolicy()))
+
+
+@pytest.mark.parametrize("policy_timeout", [1, 10, 30_000, MAX_COUNTER])
+@pytest.mark.parametrize("adapter_timeout", [1, 5, 30_000, MAX_COUNTER])
+def test_sequence_binds_selected_timeout_not_unclamped_policy(
+    policy_timeout, adapter_timeout
+):
+    registry = AdapterRegistry()
+    registry.register(
+        AdapterDescriptor(
+            "fixture",
+            "1.0.0",
+            frozenset({PROFILE}),
+            frozenset({CONTRACT.method}),
+            result_contracts=(CONTRACT,),
+            input_formats=frozenset({SOURCE_INPUT_FORMAT}),
+            required_permissions=frozenset(),
+            max_timeout_ms=adapter_timeout,
+        )
+    )
+    prepared = prepared_source(
+        policy=PlannerPolicy(
+            allowed_permissions=frozenset(), timeout_ms=policy_timeout
+        ),
+        registry=registry,
+    )
+    sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+    assert sequence.timeout_ms == min(policy_timeout, adapter_timeout)
+    assert sequence.current == AttemptRecord.from_prepared(prepared, 1)
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_sequence_begin_requires_a_terminal_predecessor(state):
+    prior = sequence_record(state)
+    current = AttemptSequence(FINGERPRINT, 10, (prior,))
+    before = current.to_dict()
+    if prior.is_terminal:
+        following = current.begin_attempt()
+        assert following.current == AttemptRecord(FINGERPRINT, 2, 10)
+        assert following.attempts[0] is prior
+        assert following.current.state == "ready"
+    else:
+        with pytest.raises(ValueError):
+            current.begin_attempt()
+    assert current.to_dict() == before
+
+
+@pytest.mark.parametrize("first", PREFIXES)
+@pytest.mark.parametrize("second", PREFIXES)
+def test_sequence_constructor_enforces_logical_nonoverlap(first, second):
+    records = (sequence_record(first), sequence_record(second, 2))
+    if records[0].is_terminal:
+        assert AttemptSequence(FINGERPRINT, 10, records).current is records[1]
+    else:
+        with pytest.raises(ValueError):
+            AttemptSequence(FINGERPRINT, 10, records)
+
+
+@pytest.mark.parametrize("count", range(MAX_ATTEMPTS + 1))
+def test_sequence_capacity_and_contiguous_reservations(count):
+    sequence = AttemptSequence(FINGERPRINT, 10)
+    records = []
+    for ordinal in range(1, count + 1):
+        reserved = sequence.begin_attempt()
+        assert reserved.current == AttemptRecord(FINGERPRINT, ordinal, 10)
+        report = reserved.current.record(START).record(AttemptEvent("failed", 3))
+        sequence = reserved.reconcile_report(report)
+        records.append(report)
+        assert reserved.current.state == "ready"
+    assert sequence.attempts == tuple(records)
+    assert sequence.current == (records[-1] if records else None)
+    if count == MAX_ATTEMPTS:
+        with pytest.raises(ValueError):
+            sequence.begin_attempt()
+    else:
+        assert sequence.begin_attempt().current.attempt_number == count + 1
+
+
+def test_sequence_constructor_rejects_overflow_without_truncation():
+    attempts = tuple(sequence_record("failed", n) for n in range(1, MAX_ATTEMPTS + 2))
+    with pytest.raises(ValueError):
+        AttemptSequence(FINGERPRINT, 10, attempts)
+    assert len(attempts) == MAX_ATTEMPTS + 1
+
+
+@pytest.mark.parametrize("numbers", [(2,), (MAX_COUNTER,), (1, 1), (1, 3), (2, 1)])
+def test_sequence_constructor_rejects_nonconsecutive_or_repeated_ordinals(numbers):
+    with pytest.raises(ValueError):
+        AttemptSequence(
+            FINGERPRINT, 10, tuple(sequence_record("failed", n) for n in numbers)
+        )
+
+
+@pytest.mark.parametrize("ordinal", [1, 2, MAX_ATTEMPTS])
+@pytest.mark.parametrize("field", ["request_fingerprint", "timeout_ms"])
+def test_sequence_constructor_checks_every_record_binding(ordinal, field):
+    records = [sequence_record("failed", n) for n in range(1, MAX_ATTEMPTS + 1)]
+    changes = {field: "b" * 64 if field == "request_fingerprint" else 11}
+    records[ordinal - 1] = replace(records[ordinal - 1], **changes)
+    with pytest.raises(ValueError):
+        AttemptSequence(FINGERPRINT, 10, tuple(records))
+
+
+@pytest.mark.parametrize("known_state", PREFIXES)
+@pytest.mark.parametrize("incoming_state", PREFIXES)
+def test_sequence_report_reconciliation_preserves_known_prefix(
+    known_state, incoming_state
+):
+    known = sequence_record(known_state)
+    incoming = sequence_record(incoming_state)
+    sequence = AttemptSequence(FINGERPRINT, 10, (known,))
+    before = sequence.to_dict()
+    if incoming.events[: len(known.events)] == known.events:
+        result = sequence.reconcile_report(incoming)
+        if incoming == known:
+            assert result is sequence
+        else:
+            assert result.current is incoming
+            assert result is not sequence
+    else:
+        with pytest.raises(ValueError):
+            sequence.reconcile_report(incoming)
+    assert sequence.to_dict() == before
+
+
+@pytest.mark.parametrize("known_state", ["exited", "failed", "timed_out", "cancelled"])
+@pytest.mark.parametrize("incoming_state", PREFIXES)
+def test_sequence_late_reports_cannot_rewrite_an_old_terminal(
+    known_state, incoming_state
+):
+    known = sequence_record(known_state)
+    sequence = AttemptSequence(FINGERPRINT, 10, (known,)).begin_attempt()
+    incoming = sequence_record(incoming_state)
+    before = sequence.to_dict()
+    if incoming == known:
+        assert sequence.reconcile_report(incoming) is sequence
+    else:
+        with pytest.raises(ValueError):
+            sequence.reconcile_report(incoming)
+    assert sequence.to_dict() == before
+
+
+@pytest.mark.parametrize("ordinal", [1, 2, MAX_ATTEMPTS, MAX_COUNTER])
+def test_sequence_reports_never_reserve_unseen_ordinals(ordinal):
+    report = sequence_record("failed", ordinal)
+    empty = AttemptSequence(FINGERPRINT, 10)
+    with pytest.raises(ValueError):
+        empty.reconcile_report(report)
+    if ordinal != 1:
+        with pytest.raises(ValueError):
+            empty.begin_attempt().reconcile_report(report)
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+@pytest.mark.parametrize("field", ["request_fingerprint", "timeout_ms"])
+def test_sequence_reports_cannot_rebind_a_reserved_attempt(state, field):
+    sequence = AttemptSequence(FINGERPRINT, 10).begin_attempt()
+    incoming = sequence_record(state)
+    incoming = replace(
+        incoming, **{field: "b" * 64 if field == "request_fingerprint" else 9}
+    )
+    with pytest.raises(ValueError):
+        sequence.reconcile_report(incoming)
+    assert sequence.current.state == "ready"
+
+
+@pytest.mark.parametrize("value", [None, [], {}, record(), "FAKE_PRIVATE_SEQUENCE"])
+def test_sequence_requires_an_exact_immutable_tuple(value):
+    with pytest.raises(ValueError) as error:
+        AttemptSequence(FINGERPRINT, 10, value)
+    assert "FAKE_PRIVATE_SEQUENCE" not in str(error.value)
+
+
+@pytest.mark.parametrize("value", [None, [], {}, START, "FAKE_PRIVATE_SEQUENCE"])
+def test_sequence_requires_exact_records_in_constructor_and_reports(value):
+    sequence = AttemptSequence(FINGERPRINT, 10).begin_attempt()
+    for operation in (
+        lambda: AttemptSequence(FINGERPRINT, 10, (value,)),
+        lambda: sequence.reconcile_report(value),
+    ):
+        with pytest.raises(ValueError) as error:
+            operation()
+        assert "FAKE_PRIVATE_SEQUENCE" not in str(error.value)
+
+
+def test_sequence_rejects_subclasses_without_consulting_their_behavior():
+    class HostileTuple(tuple):
+        def __iter__(self):
+            pytest.fail("untrusted tuple behavior was called")
+
+        def __len__(self):
+            pytest.fail("untrusted tuple behavior was called")
+
+    class HostileRecord(AttemptRecord):
+        def __getattribute__(self, name):
+            pytest.fail("untrusted record behavior was called")
+
+    with pytest.raises(ValueError):
+        AttemptSequence(FINGERPRINT, 10, HostileTuple())
+    hostile = object.__new__(HostileRecord)
+    with pytest.raises(ValueError):
+        AttemptSequence(FINGERPRINT, 10, (hostile,))
+    with pytest.raises(ValueError):
+        AttemptSequence(FINGERPRINT, 10).begin_attempt().reconcile_report(hostile)
+
+
+def test_sequence_rejects_primitive_subclasses_before_custom_behavior():
+    class HostileString(str):
+        def __str__(self):
+            pytest.fail("custom fingerprint behavior was called")
+
+    class HostileInt(int):
+        def __le__(self, other):
+            pytest.fail("custom timeout behavior was called")
+
+    with pytest.raises(ValueError):
+        AttemptSequence(HostileString(FINGERPRINT), 10)
+    with pytest.raises(ValueError):
+        AttemptSequence(FINGERPRINT, HostileInt(10))
+
+
+@pytest.mark.parametrize(
+    "value", [None, 0, False, "a" * 63, "A" * 64, "FAKE_PRIVATE_SEQUENCE"]
+)
+def test_sequence_rejects_invalid_fingerprints_without_echo(value):
+    with pytest.raises(ValueError) as error:
+        AttemptSequence(value, 10)
+    assert str(error.value) == "invalid prepared request fingerprint"
+
+
+@pytest.mark.parametrize(
+    "value", [None, False, True, 0, -1, MAX_COUNTER + 1, "FAKE_PRIVATE_SEQUENCE"]
+)
+def test_sequence_rejects_invalid_timeout_without_echo(value):
+    with pytest.raises(ValueError) as error:
+        AttemptSequence(FINGERPRINT, value)
+    assert str(error.value) == "invalid bounded attempt counter"
+
+
+@pytest.mark.parametrize("timeout", [1, 10, MAX_COUNTER])
+def test_sequence_keeps_the_same_reported_budget_for_every_attempt(timeout):
+    sequence = AttemptSequence(FINGERPRINT, timeout)
+    for _ in range(MAX_ATTEMPTS):
+        reserved = sequence.begin_attempt()
+        terminal = reserved.current.record(START).record(
+            AttemptEvent("failed", MAX_COUNTER)
+        )
+        sequence = reserved.reconcile_report(terminal)
+    assert all(attempt.timeout_ms == timeout for attempt in sequence.attempts)
+    assert all(
+        attempt.events[-1].elapsed_ms == MAX_COUNTER for attempt in sequence.attempts
+    )
+
+
+def test_sequence_is_immutable_and_serialization_is_detached():
+    sequence = AttemptSequence(
+        FINGERPRINT, 10, (sequence_record("exited"),)
+    ).begin_attempt()
+    before = sequence.to_dict()
+    data = sequence.to_dict()
+    data["attempts"][0]["events"][1]["exit_code"] = 42
+    data["attempts"].clear()
+    data["request_fingerprint"] = "b" * 64
+    assert sequence.to_dict() == before
+    assert json.loads(json.dumps(before)) == before
+    with pytest.raises(FrozenInstanceError):
+        sequence.attempts = ()
+
+
+@pytest.mark.parametrize("code", [-1, 0, 1])
+def test_sequence_does_not_select_success_or_invalidate_old_output(code):
+    prepared = prepared_source()
+    initial = AttemptSequence.from_prepared(prepared).begin_attempt()
+    exited = initial.current.record(START).record(AttemptEvent("exited", 3, code))
+    sequence = initial.reconcile_report(exited)
+    stdout = b'{"result":"established"}'
+    output = AttemptOutput.from_prepared(
+        prepared, 1, exited, stdout, hashlib.sha256(stdout).hexdigest()
+    )
+    before = output.to_dict()
+    following = sequence.begin_attempt()
+    assert following.current.state == "ready"
+    assert sequence.current.state == "exited"
+    assert sequence.reconcile_report(exited) is sequence
+    assert output.to_dict() == before and output.stdout == stdout
+    assert all(
+        key not in following.to_dict()
+        for key in ("result", "accepted", "winner", "grade", "stdout")
+    )
+
+
+def test_sequence_does_not_claim_global_uniqueness_or_atomic_branch_arbitration():
+    initial = AttemptSequence(FINGERPRINT, 10).begin_attempt()
+    left = initial.reconcile_report(sequence_record("exited"))
+    right = initial.reconcile_report(sequence_record("failed"))
+    assert left != right
+    assert left.begin_attempt().current == right.begin_attempt().current
+    with pytest.raises(ValueError):
+        left.reconcile_report(right.current)
+    assert initial.current.state == "ready"
+
+
+def test_sequence_is_passive_without_io_clocks_plugins_or_evidence(monkeypatch, capsys):
+    prepared = prepared_source()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("attempt sequence must remain passive metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (Path, "read_bytes"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (importlib, "import_module"),
+            (time, "monotonic"),
+            (time, "time"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        sequence = AttemptSequence.from_prepared(prepared)
+        reserved = sequence.begin_attempt()
+        terminal = reserved.current.record(START).record(AttemptEvent("timed_out", 10))
+        current = reserved.reconcile_report(terminal).begin_attempt()
+        assert current.reconcile_report(terminal) is current
+        assert current.current.state == "ready"
+    assert capsys.readouterr() == ("", "")

@@ -272,6 +272,60 @@ No default audit/CLI/MCP path or
 external verifier is added; C11 is partial, C12 remains demand-gated and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 
+### C11 bounded sequential attempt records
+
+`AttemptSequence` is an opt-in immutable ledger value for **one prepared request**,
+not a retry runner or a result-selection policy. `from_prepared(prepared)` requires
+the same explicit permission metadata as `AttemptRecord.from_prepared` and starts
+empty. Direct construction checks representation only; neither form grants
+authority or proves freshness. All records retain the same request fingerprint
+and selected per-attempt timeout. A different plan/settings/timeout needs a new
+prepared request and separate sequence, not weakened binding or fallback reuse.
+
+`begin_attempt()` reserves the next `ready` record numbered contiguously from 1,
+up to a fixed **16 attempts**. It fails while the current record is nonterminal
+or at capacity, without truncation, renumbering or mutation. Constructor checks
+also reject gaps, duplicates, reordering, mixed bindings and nonterminal
+predecessors. Exact tuple/record types exclude custom mutable subclass behavior.
+`current` is the last reserved record (or `None`), **not a verification winner**.
+
+```python
+from agent.verification_attempt import AttemptEvent, AttemptSequence
+
+sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+reported = sequence.current.record(AttemptEvent("started", 0))
+reported = reported.record(AttemptEvent("failed", 3))
+sequence = sequence.reconcile_report(reported)
+sequence = sequence.begin_attempt()  # Reserves metadata only; no process starts.
+assert sequence.current.attempt_number == 2
+assert sequence.reconcile_report(reported) is sequence  # Old terminal duplicate.
+```
+
+`reconcile_report(report)` uses existing same-attempt prefix reconciliation for
+an already reserved ordinal. Unknown ordinals cannot create attempts. Exact
+duplicates, including old terminal reports, return the current sequence unchanged;
+rewinds, branches, changed timeout/identity and terminal replacements fail with
+static errors. It never attaches a report to the newest attempt implicitly.
+The metadata-only `mumei.verifier-attempt-sequence/v1` dictionary contains the
+request fingerprint, timeout and ordered existing attempt dictionaries; no
+source, stdout, diagnostics, success/acceptance/grade or result is retained.
+Existing attempt/output serialization and explicit Core-call behavior are unchanged.
+
+This is bounded **local logical ordering**, not global identity allocation,
+locking/CAS/durable publication, report authentication/freshness/replay protection
+or cross-attempt/backend result arbitration. Hosts must retain and atomically
+advance their canonical sequence; independent values can still fork. A terminal
+timeout/cancel/failure/exit report does **not** prove a process stopped or that
+physical execution cannot overlap: cleanup and authorization remain host duties.
+Elapsed counters reset for each record; no wall clock, total retry deadline,
+backoff, retry eligibility or aggregate resource budget is enforced. Code zero
+does not stop retries or establish success. Existing outputs are not invalidated,
+selected or made canonical by reserving a new attempt; hosts still own their
+output lineage. There is no stream collection, runner/scheduler, Evidence
+normalization/acceptance, new external verifier/dependency, or default
+audit/CLI/MCP route. C11/C13 remain partial, Core meaning/acceptance, C12's demand
+gate and existing assurance/Lean/native/LLVM/deferred-WASM policies unchanged.
+
 ### C11 same-attempt report reconciliation
 
 `AttemptRecord.reconcile(incoming)` compares a host-reported snapshot to the
