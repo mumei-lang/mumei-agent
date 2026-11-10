@@ -1327,7 +1327,7 @@ def test_sequence_from_prepared_starts_empty_without_retaining_private_source():
     assert sequence.current is None
     assert sequence.attempts == ()
     assert sequence.request_fingerprint == prepared.to_dict()["request_fingerprint"]
-    assert sequence.timeout_ms == prepared.plan.policy.timeout_ms
+    assert sequence.timeout_ms == prepared.plan.selected.timeout_ms
     assert SOURCE.decode() not in repr(sequence) + json.dumps(sequence.to_dict())
     assert not hasattr(sequence, "source") and not hasattr(sequence, "plan")
     assert set(sequence.to_dict()) == {
@@ -1348,6 +1348,35 @@ def test_sequence_from_prepared_rejects_non_prepared_values(value):
 def test_sequence_from_prepared_requires_explicit_permission_metadata():
     with pytest.raises(ValueError):
         AttemptSequence.from_prepared(prepared_source(policy=PlannerPolicy()))
+
+
+@pytest.mark.parametrize("policy_timeout", [1, 10, 30_000, MAX_COUNTER])
+@pytest.mark.parametrize("adapter_timeout", [1, 5, 30_000, MAX_COUNTER])
+def test_sequence_binds_selected_timeout_not_unclamped_policy(
+    policy_timeout, adapter_timeout
+):
+    registry = AdapterRegistry()
+    registry.register(
+        AdapterDescriptor(
+            "fixture",
+            "1.0.0",
+            frozenset({PROFILE}),
+            frozenset({CONTRACT.method}),
+            result_contracts=(CONTRACT,),
+            input_formats=frozenset({SOURCE_INPUT_FORMAT}),
+            required_permissions=frozenset(),
+            max_timeout_ms=adapter_timeout,
+        )
+    )
+    prepared = prepared_source(
+        policy=PlannerPolicy(
+            allowed_permissions=frozenset(), timeout_ms=policy_timeout
+        ),
+        registry=registry,
+    )
+    sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+    assert sequence.timeout_ms == min(policy_timeout, adapter_timeout)
+    assert sequence.current == AttemptRecord.from_prepared(prepared, 1)
 
 
 @pytest.mark.parametrize("state", PREFIXES)
@@ -1523,6 +1552,21 @@ def test_sequence_rejects_subclasses_without_consulting_their_behavior():
         AttemptSequence(FINGERPRINT, 10, (hostile,))
     with pytest.raises(ValueError):
         AttemptSequence(FINGERPRINT, 10).begin_attempt().reconcile_report(hostile)
+
+
+def test_sequence_rejects_primitive_subclasses_before_custom_behavior():
+    class HostileString(str):
+        def __str__(self):
+            pytest.fail("custom fingerprint behavior was called")
+
+    class HostileInt(int):
+        def __le__(self, other):
+            pytest.fail("custom timeout behavior was called")
+
+    with pytest.raises(ValueError):
+        AttemptSequence(HostileString(FINGERPRINT), 10)
+    with pytest.raises(ValueError):
+        AttemptSequence(FINGERPRINT, HostileInt(10))
 
 
 @pytest.mark.parametrize(
