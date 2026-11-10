@@ -126,6 +126,24 @@ to one additional second; it does not claim descendant cleanup or an OS sandbox.
 This is a small trusted-Core process boundary, not arbitrary plugin lifecycle,
 resource/authority enforcement, memory/CPU limiting or Windows support.
 
+The optional `cancel_event` accepts only a standard `threading.Event` (not a
+subclass or callback). The host owns it and keeps it set until the call returns.
+An already-set event prevents process creation. With an event supplied, pipe
+and child-exit waits use at most 50 ms polling intervals without resetting the
+original deadline. Observed cancellation closes pipes and kills/reaps the direct
+child, then raises `CoreCheckCancelled` with a fixed, body-free message instead
+of returning a representation result. Cleanup failures remain check failures.
+Without an event, existing calls keep their original deadline-sized waits.
+
+This is cooperative cancellation of this one Core invocation, not preemptive
+interruption of process creation, a hard real-time response guarantee or
+descendant cleanup. Checks also occur before diagnostic decoding and normal
+return; a signal after the last check can race with completion. A set/clear pulse
+between checks may be missed, so do not clear/reuse an event during the call.
+The API never sets/clears the event, creates an attempt cancellation report,
+mutates an existing attempt/output, or binds host lifecycle metadata to Core.
+The host separately reconciles its canonical lineage and completion/cancel race.
+
 Code zero alone, empty output, any stderr, malformed/duplicate/extra diagnostics,
 unsupported diagnostic/schema versions, timeouts and I/O failures fail closed.
 The complete diagnostic must match the known v1 representation-only shape,

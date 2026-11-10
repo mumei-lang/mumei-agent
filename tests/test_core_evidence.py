@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -72,8 +73,9 @@ def failed(output, executable, timeout_ms=2000):
 
 @pytest.mark.parametrize("size", [0, 1, 4095, 4096, 4097, 65535, 65536])
 @pytest.mark.parametrize("exit_code", [0, 7, -9])
+@pytest.mark.parametrize("cancellable", [False, True])
 def test_original_bytes_fixed_argv_empty_environment_and_no_snapshot_mutation(
-    executable, monkeypatch, capsys, size, exit_code,
+    executable, monkeypatch, capsys, size, exit_code, cancellable,
 ):
     body = bytes(i % 256 for i in range(size))
     output = snapshot(body, exit_code)
@@ -89,6 +91,7 @@ def test_original_bytes_fixed_argv_empty_environment_and_no_snapshot_mutation(
     )
     assert check_evidence_representation(
         output, core_executable=executable(script), timeout_ms=2000,
+        cancel_event=threading.Event() if cancellable else None,
     ) is None
     assert output.to_dict() == before
     assert output.stdout == body
@@ -274,6 +277,212 @@ def test_import_never_starts_core(monkeypatch):
 
     monkeypatch.setattr(core_evidence.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("spawned"))
     importlib.reload(core_evidence)
+
+
+@pytest.fixture
+def child_processes(monkeypatch):
+    processes = []
+    popen = subprocess.Popen
+
+    class ChildProcess(popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            processes.append(self)
+
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", ChildProcess)
+    yield processes
+    for process in processes:
+        assert process.returncode is not None
+        assert all(stream.closed for stream in [process.stdin, process.stdout, process.stderr])
+
+
+def cancelled(output, executable, event):
+    with pytest.raises(core_evidence.CoreCheckCancelled, match="^Core Evidence representation check cancelled$") as error:
+        check_evidence_representation(output, core_executable=executable, timeout_ms=2000, cancel_event=event)
+    assert error.value.__suppress_context__
+    assert event.is_set()
+
+
+@pytest.mark.parametrize("size", [0, 1, 4095, 4096, 4097, 65535, 65536])
+@pytest.mark.parametrize("exit_code", [0, 7, -9])
+def test_pre_cancelled_never_spawns_or_changes_lineage(monkeypatch, capsys, size, exit_code):
+    output = snapshot(b"x" * size, exit_code)
+    before = output.to_dict()
+    event = threading.Event()
+    event.set()
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("spawned"))
+    cancelled(output, "/FAKE_PRIVATE_unread_core", event)
+    assert output.to_dict() == before
+    assert output.stdout == b"x" * size
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+class EventSubclass(threading.Event):
+    def is_set(self):
+        pytest.fail("untrusted cancellation hook called")
+
+
+@pytest.mark.parametrize("event", [True, False, 0, 1, "FAKE_PRIVATE", {}, [], object(), threading.Event, EventSubclass()])
+def test_invalid_cancellation_event_fails_before_spawn(monkeypatch, event):
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("spawned"))
+    with pytest.raises(ValueError, match="^unsupported Core representation check request$"):
+        check_evidence_representation(snapshot(), core_executable="/core", timeout_ms=100, cancel_event=event)
+
+
+@pytest.mark.parametrize("size", [0, 1, 65536])
+def test_cancel_after_spawn_reaps_direct_child(executable, monkeypatch, child_processes, size):
+    event = threading.Event()
+    launch = core_evidence.subprocess.Popen
+
+    def launch_then_cancel(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        event.set()
+        return process
+
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", launch_then_cancel)
+    cancelled(snapshot(b"x" * size), executable("import time\ntime.sleep(60)\n"), event)
+    assert len(child_processes) == 1
+
+
+@pytest.mark.parametrize("size", [0, 1, 65536])
+def test_cancel_during_selector_wait_has_bounded_poll(executable, monkeypatch, child_processes, size):
+    event = threading.Event()
+    select = core_evidence.selectors.DefaultSelector.select
+    waits = []
+
+    def select_then_cancel(self, timeout):
+        waits.append(timeout)
+        events = select(self, timeout)
+        event.set()
+        return events
+
+    monkeypatch.setattr(core_evidence.selectors.DefaultSelector, "select", select_then_cancel)
+    cancelled(snapshot(b"x" * size), executable("import time\ntime.sleep(60)\n"), event)
+    assert waits and all(0 < timeout <= 0.05 for timeout in waits)
+    assert len(child_processes) == 1
+
+
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("size", [1, 4097, 65536])
+def test_cancel_during_pipe_io_closes_pipes(executable, monkeypatch, child_processes, operation, size):
+    event = threading.Event()
+    original = getattr(core_evidence.os, operation)
+    selector = core_evidence.selectors.DefaultSelector
+
+    def io_then_cancel(*args):
+        result = original(*args)
+        event.set()
+        return result
+
+    class CancellingSelector(selector):
+        def __enter__(self):
+            monkeypatch.setattr(core_evidence.os, operation, io_then_cancel)
+            return super().__enter__()
+
+    monkeypatch.setattr(core_evidence.selectors, "DefaultSelector", CancellingSelector)
+    cancelled(snapshot(b"x" * size), executable(report_script()), event)
+    assert len(child_processes) == 1
+
+
+def test_cancel_while_waiting_for_exit_is_not_held_until_deadline(executable, monkeypatch, child_processes):
+    event = threading.Event()
+    wait = subprocess.Popen.wait
+    waits = []
+
+    def wait_then_cancel(self, timeout):
+        if self.poll() is None and not event.is_set():
+            waits.append(timeout)
+            try:
+                return wait(self, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                event.set()
+                raise
+        return wait(self, timeout=timeout)
+
+    monkeypatch.setattr(core_evidence.subprocess.Popen, "wait", wait_then_cancel)
+    script = "import os, time\nfor fd in (0, 1, 2):\n    os.close(fd)\ntime.sleep(60)\n"
+    cancelled(snapshot(b""), executable(script), event)
+    assert waits and all(0 < timeout <= 0.05 for timeout in waits)
+    assert len(child_processes) == 1
+
+
+@pytest.mark.parametrize("code", [0, 7])
+def test_cancel_observed_at_exit_prevents_normal_result(executable, monkeypatch, child_processes, code):
+    event = threading.Event()
+    wait = subprocess.Popen.wait
+
+    def wait_then_cancel(self, timeout):
+        result = wait(self, timeout=timeout)
+        event.set()
+        return result
+
+    monkeypatch.setattr(core_evidence.subprocess.Popen, "wait", wait_then_cancel)
+    cancelled(snapshot(), executable(report_script(code=code)), event)
+    assert len(child_processes) == 1
+
+
+def test_cancel_between_handoff_and_decode_skips_json(executable, monkeypatch, child_processes):
+    event = threading.Event()
+    run_check = core_evidence._run_check
+
+    def run_then_cancel(*args):
+        result = run_check(*args)
+        event.set()
+        return result
+
+    monkeypatch.setattr(core_evidence, "_run_check", run_then_cancel)
+    monkeypatch.setattr(core_evidence.json, "loads", lambda *args, **kwargs: pytest.fail("decoded after cancellation"))
+    cancelled(snapshot(), executable(report_script()), event)
+    assert len(child_processes) == 1
+
+
+def test_cancel_during_diagnostic_decode_prevents_normal_result(executable, monkeypatch, child_processes):
+    event = threading.Event()
+    loads = json.loads
+
+    def decode_then_cancel(*args, **kwargs):
+        result = loads(*args, **kwargs)
+        event.set()
+        return result
+
+    monkeypatch.setattr(core_evidence.json, "loads", decode_then_cancel)
+    cancelled(snapshot(), executable(report_script()), event)
+    assert len(child_processes) == 1
+
+
+@pytest.mark.parametrize("remaining", [0.001, 0.05, 0.1, 60.0])
+@pytest.mark.parametrize("cancellable", [False, True])
+def test_polling_keeps_original_deadline(monkeypatch, remaining, cancellable):
+    monkeypatch.setattr(core_evidence.time, "monotonic", lambda: 100.0)
+    event = threading.Event() if cancellable else None
+    timeout = core_evidence._wait_timeout(100.0 + remaining, event)
+    assert timeout == pytest.approx(min(remaining, 0.05) if cancellable else remaining)
+
+
+@pytest.mark.parametrize("remaining", [0, -1, -60])
+@pytest.mark.parametrize("cancellable", [False, True])
+def test_polling_cannot_extend_expired_deadline(monkeypatch, remaining, cancellable):
+    monkeypatch.setattr(core_evidence.time, "monotonic", lambda: 100.0)
+    with pytest.raises(TimeoutError):
+        core_evidence._wait_timeout(100.0 + remaining, threading.Event() if cancellable else None)
+
+
+def test_host_owns_event_and_clears_it_only_between_calls(executable, child_processes):
+    event = threading.Event()
+    path = executable(report_script())
+    output = snapshot()
+    before = output.to_dict()
+    event.set()
+    cancelled(output, path, event)
+    assert not child_processes
+    event.clear()
+    assert check_evidence_representation(output, core_executable=path, timeout_ms=2000, cancel_event=event) is None
+    assert not event.is_set()
+    event.set()
+    cancelled(output, path, event)
+    assert len(child_processes) == 1
+    assert output.to_dict() == before and output.stdout == PRIVATE
 
 
 @pytest.mark.parametrize("timeout_ms", [None, True, False, 0, -1, 1.5, "10", MAX_CHECK_TIMEOUT_MS + 1])
