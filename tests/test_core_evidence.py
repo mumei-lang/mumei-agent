@@ -64,9 +64,9 @@ def report_script(stdout=VALID, stderr=b"", code=0):
     )
 
 
-def failed(output, executable, timeout_ms=2000):
+def failed(output, executable, timeout_ms=2000, cancel_event=None):
     with pytest.raises(ValueError, match="^Core Evidence representation check failed$") as error:
-        check_evidence_representation(output, core_executable=executable, timeout_ms=timeout_ms)
+        check_evidence_representation(output, core_executable=executable, timeout_ms=timeout_ms, cancel_event=cancel_event)
     assert error.value.__suppress_context__
     assert "FAKE_PRIVATE" not in str(error.value)
 
@@ -160,7 +160,8 @@ def test_exact_diagnostic_bound_and_one_byte_overflow(executable, padding):
     "import sys, time\nsys.stdin.buffer.read()\ntime.sleep(60)\n",
     "import os, time\nos.close(0)\nos.close(1)\nos.close(2)\ntime.sleep(60)\n",
 ])
-def test_deadline_kills_and_reaps_direct_child(executable, monkeypatch, script):
+@pytest.mark.parametrize("cancellable", [False, True])
+def test_deadline_kills_and_reaps_direct_child(executable, monkeypatch, script, cancellable):
     processes = []
     popen = subprocess.Popen
 
@@ -171,7 +172,10 @@ def test_deadline_kills_and_reaps_direct_child(executable, monkeypatch, script):
 
     monkeypatch.setattr(core_evidence.subprocess, "Popen", launch)
     start = time.monotonic()
-    failed(snapshot(b"X" * 65536), executable(script), timeout_ms=100)
+    failed(
+        snapshot(b"X" * 65536), executable(script), timeout_ms=100,
+        cancel_event=threading.Event() if cancellable else None,
+    )
     assert time.monotonic() - start < 2
     assert len(processes) == 1 and processes[0].returncode is not None
 
@@ -345,6 +349,28 @@ def test_cancel_after_spawn_reaps_direct_child(executable, monkeypatch, child_pr
     assert len(child_processes) == 1
 
 
+@pytest.mark.parametrize("error", [OSError("FAKE_PRIVATE_WAIT_ERROR"), subprocess.TimeoutExpired("FAKE_PRIVATE_COMMAND", 1)])
+def test_cancel_cleanup_failure_is_a_private_check_failure(executable, monkeypatch, child_processes, capsys, error):
+    event = threading.Event()
+    launch, wait = core_evidence.subprocess.Popen, subprocess.Popen.wait
+
+    def launch_then_cancel(*args, **kwargs):
+        process = launch(*args, **kwargs)
+        event.set()
+        return process
+
+    def reap_then_fail(self, timeout):
+        wait(self, timeout=timeout)
+        raise error
+
+    monkeypatch.setattr(launch, "wait", reap_then_fail)
+    monkeypatch.setattr(core_evidence.subprocess, "Popen", launch_then_cancel)
+    failed(snapshot(), executable("import time\ntime.sleep(60)\n"), cancel_event=event)
+    assert len(child_processes) == 1
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
 @pytest.mark.parametrize("size", [0, 1, 65536])
 def test_cancel_during_selector_wait_has_bounded_poll(executable, monkeypatch, child_processes, size):
     event = threading.Event()
@@ -485,6 +511,57 @@ def test_host_owns_event_and_clears_it_only_between_calls(executable, child_proc
     assert output.to_dict() == before and output.stdout == PRIVATE
 
 
+@pytest.mark.parametrize("phase", ["pipe", "exit"])
+def test_host_thread_can_cancel_blocked_wait(executable, monkeypatch, child_processes, phase):
+    event, waiting = threading.Event(), threading.Event()
+    if phase == "pipe":
+        select = core_evidence.selectors.DefaultSelector.select
+
+        def select_and_notify(self, timeout):
+            waiting.set()
+            return select(self, timeout)
+
+        monkeypatch.setattr(core_evidence.selectors.DefaultSelector, "select", select_and_notify)
+        script = "import time\ntime.sleep(60)\n"
+    else:
+        wait = subprocess.Popen.wait
+
+        def wait_and_notify(self, timeout):
+            waiting.set()
+            return wait(self, timeout=timeout)
+
+        monkeypatch.setattr(core_evidence.subprocess.Popen, "wait", wait_and_notify)
+        script = "import os, time\nfor fd in (0, 1, 2):\n    os.close(fd)\ntime.sleep(60)\n"
+
+    def request_cancel():
+        if waiting.wait(timeout=2):
+            event.set()
+
+    host = threading.Thread(target=request_cancel)
+    host.start()
+    try:
+        cancelled(snapshot(b""), executable(script), event)
+    finally:
+        waiting.set()
+        host.join(timeout=2)
+    assert not host.is_alive()
+    assert len(child_processes) == 1
+
+
+@pytest.mark.parametrize("diagnostic", BAD_DIAGNOSTICS, ids=[f"case-{i}" for i in range(len(BAD_DIAGNOSTICS))])
+def test_unset_cancellation_event_does_not_relax_diagnostic_checks(executable, diagnostic):
+    failed(snapshot(), executable(report_script(diagnostic)), cancel_event=threading.Event())
+
+
+@pytest.mark.parametrize("remaining", [-1, 0, 1])
+def test_observed_cancellation_prevents_a_wait_even_at_deadline(monkeypatch, remaining):
+    event = threading.Event()
+    event.set()
+    monkeypatch.setattr(core_evidence.time, "monotonic", lambda: 100.0)
+    with pytest.raises(core_evidence.CoreCheckCancelled):
+        core_evidence._wait_timeout(100.0 + remaining, event)
+
+
 @pytest.mark.parametrize("timeout_ms", [None, True, False, 0, -1, 1.5, "10", MAX_CHECK_TIMEOUT_MS + 1])
 def test_invalid_timeout_fails_before_spawn(monkeypatch, timeout_ms):
     monkeypatch.setattr(core_evidence.subprocess, "Popen", lambda *args, **kwargs: pytest.fail("spawned"))
@@ -550,11 +627,15 @@ def real_core():
 
 @pytest.mark.integration
 @pytest.mark.parametrize("result", ["established", "counterexample", "unknown", "unsupported", "not_checked", "inconsistent"])
-def test_real_core_checks_representation_not_stored_result_truth(real_core, result):
+@pytest.mark.parametrize("cancellable", [False, True])
+def test_real_core_checks_representation_not_stored_result_truth(real_core, result, cancellable):
     evidence = synthetic_evidence()
     evidence["result"] = result
     output = snapshot(json.dumps(evidence, ensure_ascii=False).encode())
-    assert check_evidence_representation(output, core_executable=real_core, timeout_ms=2000) is None
+    assert check_evidence_representation(
+        output, core_executable=real_core, timeout_ms=2000,
+        cancel_event=threading.Event() if cancellable else None,
+    ) is None
 
 
 @pytest.mark.integration

@@ -52,6 +52,7 @@ def check_evidence_representation(
     additional second to kill/reap the direct child, not a descendant sandbox.
     An optional host-owned Event is sampled cooperatively, including before
     spawn and normal return. Keep it set: set/clear pulses may not be observed.
+    Observed cancellation raises CoreCheckCancelled after direct-child cleanup.
     Cancellation is not an atomic completion handshake or an attempt report.
     """
     if (
