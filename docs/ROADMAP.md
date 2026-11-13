@@ -88,6 +88,47 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 monotonic report stamps for replay detection
+
+`AttemptSequence.reconcile_report` accepts an optional `report_stamp`: a
+host-declared monotonic counter bound to the lineage's report stream. A stamp
+must be an exact positive `int` within the bounded counter range. Once a stamp
+is accepted, every later report must carry one; unstamped calls keep the
+earlier behavior while the lineage has no stamp. The sequence retains the
+last accepted stamp and serializes it as detached `report_stamp` metadata
+under the existing `mumei.verifier-attempt-sequence/v1` schema — no report
+content, source or stdout is retained.
+
+```python
+from agent.verification_attempt import AttemptEvent, AttemptSequence
+
+sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+reported = sequence.current.record(AttemptEvent("started", 0))
+sequence = sequence.reconcile_report(reported, report_stamp=1)
+reported = reported.record(AttemptEvent("exited", 3, 0))
+sequence = sequence.reconcile_report(reported, report_stamp=2)
+assert sequence.report_stamp == 2
+```
+
+A stamp must strictly increase across **distinct** deliveries: a smaller
+stamp fails as stale, and reusing the last stamp only reconciles an identical
+report — a reused stamp on changed content fails as stale too. A fresh stamp
+on identical content still advances the counter, so replays delivered after
+newer reports are detected. Stamps are delivery counters, not clocks: gaps
+are allowed and no ordering between independent sequences is implied.
+`begin_attempt`, `select_result` and existing idempotent reconciliations keep
+the counter, and `AttemptSequenceStore` lineage updates may never regress it.
+
+This is a replay/reorder **detection** contract, not a clock, freshness
+proof, authentication or authorization: a host assigns stamps itself, so a
+host can always mint a higher one. Delivery integrity, sender identity,
+durable storage, global counters across lineages and acceptance of any
+content remain host duties. No I/O, clocks, plugins, runner/scheduler, stream
+collection, execution/cancellation, Evidence normalization/acceptance,
+external verifier, dependency or default audit/CLI/MCP route is added.
+C11/C13 stay partial; Core meaning and acceptance, C12's demand gate and
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 atomic canonical-lineage publication
 
 `AttemptSequenceStore` is an opt-in **in-process** compare-and-set publication

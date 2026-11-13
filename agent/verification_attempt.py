@@ -231,13 +231,16 @@ class AttemptSequence:
     global numbering, replay protection and all result/Evidence decisions.
     A selected result is host-declared canonical metadata for the current
     record only: it is not truth, acceptance, a Core check receipt or a
-    cross-sequence arbitration outcome.
+    cross-sequence arbitration outcome. A report stamp is a host-declared
+    monotonic counter detecting replays/reordering only: it is not a clock,
+    freshness proof or authentication.
     """
 
     request_fingerprint: str
     timeout_ms: int
     attempts: tuple[AttemptRecord, ...] = ()
     selected_result: tuple[int, str] | None = None
+    report_stamp: int | None = None
 
     def __post_init__(self) -> None:
         _fingerprint(self.request_fingerprint)
@@ -274,6 +277,15 @@ class AttemptSequence:
                 raise ValueError(
                     "selected result requires an exited current attempt"
                 )
+        if self.report_stamp is not None:
+            if type(self.report_stamp) is not int or not (
+                1 <= self.report_stamp <= MAX_COUNTER
+            ):
+                raise ValueError("invalid attempt report stamp")
+            if not self.attempts:
+                raise ValueError(
+                    "attempt report stamp requires a reserved attempt"
+                )
 
     @classmethod
     def from_prepared(cls, prepared: PreparedSourceRequest) -> "AttemptSequence":
@@ -293,21 +305,50 @@ class AttemptSequence:
         )
         return replace(self, attempts=(*self.attempts, attempt))
 
-    def reconcile_report(self, incoming: AttemptRecord) -> "AttemptSequence":
-        """Extend a known report only; old terminal duplicates are idempotent."""
+    def reconcile_report(
+        self, incoming: AttemptRecord, report_stamp: int | None = None
+    ) -> "AttemptSequence":
+        """Extend a known report only; old terminal duplicates are idempotent.
+
+        When supplied, `report_stamp` is a host-declared monotonic counter: it
+        must strictly increase across distinct deliveries, a reused stamp only
+        reconciles an identical report and a smaller stamp fails as stale.
+        Stamps detect replays/reordering only; once a stamp is accepted every
+        later report must carry one. Unstamped calls keep legacy behavior.
+        """
         if type(incoming) is not AttemptRecord:
             raise ValueError("sequence reconciliation requires an attempt record")
+        if report_stamp is not None and (
+            type(report_stamp) is not int
+            or not 1 <= report_stamp <= MAX_COUNTER
+        ):
+            raise ValueError("invalid attempt report stamp")
+        if self.report_stamp is not None and report_stamp is None:
+            raise ValueError("attempt report requires a report stamp")
+        if (
+            report_stamp is not None
+            and self.report_stamp is not None
+            and report_stamp < self.report_stamp
+        ):
+            raise ValueError("attempt report stamp is not fresh")
         if incoming.attempt_number > len(self.attempts):
             raise ValueError("attempt report has no reserved sequence ordinal")
         index = incoming.attempt_number - 1
         current = self.attempts[index]
         following = current.reconcile(incoming)
         if following is current:
-            return self
-        return replace(
+            if report_stamp is None or report_stamp == self.report_stamp:
+                return self
+            return replace(self, report_stamp=report_stamp)
+        if report_stamp is not None and report_stamp == self.report_stamp:
+            raise ValueError("attempt report stamp is not fresh")
+        result = replace(
             self,
             attempts=(*self.attempts[:index], following, *self.attempts[index + 1 :]),
         )
+        if report_stamp is None:
+            return result
+        return replace(result, report_stamp=report_stamp)
 
     def check_output_binding(self, output: "AttemptOutput") -> None:
         """Require this value's current record, without reconciling either input.
@@ -349,6 +390,8 @@ class AttemptSequence:
                 "attempt_number": self.selected_result[0],
                 "output_fingerprint": self.selected_result[1],
             }
+        if self.report_stamp is not None:
+            result["report_stamp"] = self.report_stamp
         return result
 
 
@@ -365,6 +408,13 @@ def _is_lineage_extension(
         or expected.timeout_ms != updated.timeout_ms
         or len(updated.attempts) < len(expected.attempts)
         or expected.selected_result is not None
+        or (
+            expected.report_stamp is not None
+            and (
+                updated.report_stamp is None
+                or updated.report_stamp < expected.report_stamp
+            )
+        )
     ):
         return False
     for prior, following in zip(expected.attempts, updated.attempts):

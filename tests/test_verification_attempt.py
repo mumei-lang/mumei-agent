@@ -2421,3 +2421,226 @@ def test_store_is_passive_without_io_clock_or_decode(monkeypatch, capsys):
         store.compare_and_set(updated, updated)
     assert store.current is updated
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+@pytest.mark.parametrize("stamp", [None, 1, 2, MAX_COUNTER])
+def test_report_stamp_constructor_matrix(count, stamp):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    if count or stamp is None:
+        sequence = AttemptSequence(FINGERPRINT, 10, attempts, None, stamp)
+        assert sequence.report_stamp == stamp
+    else:
+        with pytest.raises(
+            ValueError, match="^attempt report stamp requires a reserved attempt$"
+        ):
+            AttemptSequence(FINGERPRINT, 10, attempts, None, stamp)
+
+
+@pytest.mark.parametrize(
+    "stamp", [True, "1", 0, -1, 1.5, b"1", MAX_COUNTER + 1, (1,), [1]]
+)
+def test_report_stamp_rejects_invalid_metadata(stamp):
+    attempts = (sequence_record("exited"),)
+    with pytest.raises(ValueError, match="^invalid attempt report stamp$"):
+        AttemptSequence(FINGERPRINT, 10, attempts, None, stamp)
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_reconcile_stamped_reports_extend_the_lineage(count):
+    attempts = tuple(
+        sequence_record("exited" if n < count else "running", n)
+        for n in range(1, count + 1)
+    )
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    report = attempts[-1].record(AttemptEvent("exited", 1, 0))
+    stamped = sequence.reconcile_report(report, report_stamp=1)
+    assert stamped.report_stamp == 1
+    assert stamped.current.state == "exited"
+    assert sequence.report_stamp is None
+    again = stamped.reconcile_report(report, report_stamp=2)
+    assert again.report_stamp == 2
+    assert again.attempts == stamped.attempts
+    assert stamped.reconcile_report(report, report_stamp=1) is stamped
+
+
+@pytest.mark.parametrize("first", [1, 2, 100])
+@pytest.mark.parametrize("later", [1, 2, 100])
+def test_reconcile_rejects_stale_report_stamps(first, later):
+    attempts = (sequence_record("running"),)
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    report = attempts[0].record(AttemptEvent("exited", 1, 0))
+    stamped = sequence.reconcile_report(report, report_stamp=first)
+    if later < first:
+        with pytest.raises(
+            ValueError, match="^attempt report stamp is not fresh$"
+        ):
+            stamped.reconcile_report(report, report_stamp=later)
+    elif later == first:
+        assert stamped.reconcile_report(report, report_stamp=later) is stamped
+    else:
+        advanced = stamped.reconcile_report(report, report_stamp=later)
+        assert advanced.report_stamp == later
+    assert stamped.report_stamp == first
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_reconcile_reused_stamp_rejects_changed_content(count):
+    attempts = tuple(
+        sequence_record("exited" if n < count else "running", n)
+        for n in range(1, count + 1)
+    )
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    first_report = attempts[-1].record(CANCEL)
+    stamped = sequence.reconcile_report(first_report, report_stamp=7)
+    assert stamped.reconcile_report(first_report, report_stamp=7) is stamped
+    second_report = first_report.record(AttemptEvent("exited", 3, 0))
+    with pytest.raises(
+        ValueError, match="^attempt report stamp is not fresh$"
+    ):
+        stamped.reconcile_report(second_report, report_stamp=7)
+    adopted = sequence.reconcile_report(second_report, report_stamp=7)
+    assert adopted.report_stamp == 7
+    assert stamped.report_stamp == 7
+    assert stamped.current.state == "cancelling"
+
+
+@pytest.mark.parametrize(
+    "stamp", [True, "1", 0, -1, 1.5, b"1", MAX_COUNTER + 1, (1,), [1]]
+)
+def test_reconcile_rejects_invalid_stamp_values(stamp):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    report = sequence_record("exited")
+    with pytest.raises(ValueError, match="^invalid attempt report stamp$"):
+        sequence.reconcile_report(report, report_stamp=stamp)
+    assert sequence.report_stamp is None
+
+
+def test_reconcile_stamped_then_unstamped_is_rejected():
+    attempts = (sequence_record("running"),)
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    stamped = sequence.reconcile_report(
+        attempts[0].record(AttemptEvent("exited", 1, 0)), report_stamp=1
+    )
+    with pytest.raises(
+        ValueError, match="^attempt report requires a report stamp$"
+    ):
+        stamped.reconcile_report(stamped.current)
+    assert stamped.report_stamp == 1
+
+
+def test_reconcile_unstamped_then_stamped_adopts_stamping():
+    attempts = (sequence_record("running"),)
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    stamped = sequence.reconcile_report(
+        attempts[0].record(AttemptEvent("exited", 1, 0)), report_stamp=3
+    )
+    assert stamped.report_stamp == 3
+    with pytest.raises(
+        ValueError, match="^attempt report stamp is not fresh$"
+    ):
+        stamped.reconcile_report(stamped.current, report_stamp=1)
+    assert stamped.reconcile_report(stamped.current, report_stamp=4).report_stamp == 4
+
+
+def test_report_stamps_are_delivery_counters_not_clocks():
+    attempts = (sequence_record("running"),)
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    report = attempts[0].record(AttemptEvent("exited", 1, 0))
+    stamped = sequence.reconcile_report(report, report_stamp=1)
+    advanced = stamped.reconcile_report(report, report_stamp=MAX_COUNTER)
+    assert advanced.report_stamp == MAX_COUNTER
+    with pytest.raises(ValueError, match="^invalid attempt report stamp$"):
+        advanced.reconcile_report(report, report_stamp=MAX_COUNTER + 1)
+
+
+def test_report_stamp_survives_begin_and_select():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    stamped = sequence.reconcile_report(output.attempt, report_stamp=5)
+    assert stamped.report_stamp == 5
+    reserved = stamped.begin_attempt()
+    assert reserved.report_stamp == 5
+    assert stamped.select_result(output).report_stamp == 5
+    with pytest.raises(
+        ValueError, match="^attempt report requires a report stamp$"
+    ):
+        stamped.reconcile_report(stamped.current)
+
+
+def test_report_stamp_serialization_is_metadata_only():
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), body=b"FAKE_PRIVATE_STAMPED_BODY"
+    )
+    stamped = sequence.reconcile_report(output.attempt, report_stamp=42)
+    data = stamped.to_dict()
+    assert data["report_stamp"] == 42
+    data["report_stamp"] = 7
+    assert stamped.to_dict()["report_stamp"] == 42
+    encoded = json.dumps(stamped.to_dict())
+    assert "FAKE_PRIVATE_STAMPED_BODY" not in encoded
+    assert "stdout" not in data
+    with pytest.raises(FrozenInstanceError):
+        stamped.report_stamp = 7
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_store_lineage_rejects_report_stamp_regression(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    stamped = AttemptSequence(FINGERPRINT, 10, attempts, None, 5)
+    regressed = AttemptSequence(FINGERPRINT, 10, attempts, None, 4)
+    unstamped = AttemptSequence(FINGERPRINT, 10, attempts)
+    advanced = AttemptSequence(FINGERPRINT, 10, attempts, None, 6)
+    store = AttemptSequenceStore()
+    store.publish(stamped)
+    for updated in (regressed, unstamped):
+        with pytest.raises(
+            ValueError,
+            match="^updated sequence does not extend the canonical lineage$",
+        ):
+            store.compare_and_set(stamped, updated)
+    assert store.compare_and_set(stamped, advanced) is advanced
+    assert store.current.report_stamp == 6
+
+
+def test_report_stamps_do_not_cross_independent_sequences():
+    first = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    foreign = AttemptRecord("b" * 64, 1, 10, PREFIXES["running"])
+    second = AttemptSequence("b" * 64, 10, (foreign,))
+    report = first.current.record(AttemptEvent("exited", 1, 0))
+    stamped = first.reconcile_report(report, report_stamp=9)
+    assert stamped.report_stamp == 9
+    assert second.report_stamp is None
+    other_report = AttemptRecord("b" * 64, 1, 10, PREFIXES["exited"])
+    assert second.reconcile_report(other_report).report_stamp is None
+
+
+def test_stamped_reconcile_is_passive_without_io_or_clock(monkeypatch, capsys):
+    attempts = (sequence_record("running"),)
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    report = attempts[0].record(AttemptEvent("exited", 1, 0))
+    before = sequence.to_dict(), report.to_dict()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("report stamps must remain passive exact metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (time, "monotonic"),
+            (time, "time"),
+            (AttemptOutput, "decode_json_object"),
+            (AttemptOutput, "reconcile"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        stamped = sequence.reconcile_report(report, report_stamp=1)
+        advanced = stamped.reconcile_report(report, report_stamp=2)
+        assert advanced.reconcile_report(report, report_stamp=2) is advanced
+        with pytest.raises(ValueError):
+            advanced.reconcile_report(report, report_stamp=1)
+    assert (sequence.to_dict(), report.to_dict()) == before
+    assert capsys.readouterr() == ("", "")
