@@ -892,3 +892,16 @@ def test_labelled_loop_facts_and_hints_still_bind():
     assert cfg is not None
     hint_names = {use.name for use in control_flow.flow_hints(body, cfg).unassigned}
     assert "x" not in hint_names
+
+
+def test_labelled_range_break_and_continue():
+    result = control_flow.build_go_cfg(
+        "outer: for _, x := range xs { if skip { continue outer }; if done { break outer }; use(x) }; after()"
+    )
+    cfg = result.graph
+    assert result.gaps == ()
+    (jump,) = nodes(cfg, "break")
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"expr"}
+    (jump,) = nodes(cfg, "continue")
+    # A range has no update clause: continue re-enters the loop header.
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"range"}
