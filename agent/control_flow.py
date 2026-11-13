@@ -3,7 +3,9 @@
 Calls are opaque and assumed to return normally. Panic/recovery, concurrency,
 deferred execution, ``select``/type-switches and ``goto`` are not
 modelled; expression switches are exclusive alternatives with implicit
-break, labelled ``break``/``continue`` resolve only against enclosing
+break, a terminal ``fallthrough`` in a non-final case clause edges into
+the next clause's body (any other position stays a declared gap),
+labelled ``break``/``continue`` resolve only against enclosing
 labelled loops, and ``panic``/``os.Exit``-style terminating calls end
 normal flow at the exit (deferred calls and ``recover`` stay
 unmodelled). Unsupported
@@ -146,11 +148,21 @@ def _gaps(
             gaps.append(CFGGap(f"unsupported_{kind}", span))
         gaps.extend(_gaps(body, statement.init, in_loop, in_break, labels))
         if kind == "switch":
-            for case in statement.body:
+            cases = statement.body
+            for index, case in enumerate(cases):
                 # Case bodies may break the switch; continue still
-                # needs an enclosing loop.
+                # needs an enclosing loop. A terminal fallthrough in a
+                # non-final clause is modelled, so it is not walked as
+                # an unsupported statement.
+                stmts = case.body
+                if (
+                    stmts
+                    and stmts[-1].kind == "fallthrough"
+                    and index < len(cases) - 1
+                ):
+                    stmts = stmts[:-1]
                 gaps.extend(
-                    _gaps(body, case.body, in_loop, True, labels)
+                    _gaps(body, stmts, in_loop, True, labels)
                 )
         else:
             in_loop_body = in_loop or kind in {"for", "range"}
@@ -225,14 +237,34 @@ class _Builder:
                 # switch's following; break inside one exits the switch
                 # while continue still targets an enclosing loop.
                 inner = (following, loop[1] if loop else following)
-                for case in statement.body:
+                cases = statement.body
+                # Build case bodies back-to-front so a terminal
+                # `fallthrough` in a non-final clause can edge into the
+                # next clause's body entry.
+                entries = [0] * len(cases)
+                for index in range(len(cases) - 1, -1, -1):
+                    stmts = cases[index].body
+                    if (
+                        stmts
+                        and stmts[-1].kind == "fallthrough"
+                        and index < len(cases) - 1
+                    ):
+                        jump = self.node(stmts[-1].kind, stmts[-1])
+                        self.edge(
+                            jump, entries[index + 1], "fallthrough"
+                        )
+                        entries[index] = self.sequence(
+                            stmts[:-1], jump, inner, labels
+                        )
+                    else:
+                        entries[index] = self.sequence(
+                            stmts, following, inner, labels
+                        )
+                for index, case in enumerate(cases):
                     case_node = self.node(case.kind, case)
                     self.edge(node, case_node, "case")
-                    self.edge(
-                        case_node,
-                        self.sequence(case.body, following, inner, labels),
-                    )
-                if not any(case.kind == "default" for case in statement.body):
+                    self.edge(case_node, entries[index])
+                if not any(case.kind == "default" for case in cases):
                     self.edge(node, following)
             elif kind in {"for", "range"}:
                 post = self.sequence(statement.post, node, loop, labels)

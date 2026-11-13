@@ -1402,6 +1402,21 @@ over-counted as reads (a conservative miss for `unused`, never a
 false "assigned" claim), and pointer/field aliasing beyond the
 unreliable-name set stays unmodelled.
 
+### C05 terminal fallthrough in expression switches
+
+A `fallthrough` statement that is the final statement of a non-final
+case clause (including a non-final `default:`) now edges into the next
+clause's body instead of producing `unsupported_fallthrough`. Case
+bodies are built back-to-front so the jump resolves to the next
+clause's entry; `break` inside such a clause still exits the switch
+and `continue` still targets an enclosing loop.
+
+`fallthrough` anywhere else — the last clause, a non-terminal position,
+outside a switch — remains the declared `unsupported_fallthrough` gap.
+The model is positional, not a Go type check: a fallthrough the compiler
+would reject can still be graphed, and select/type-switches stay
+unmodelled entirely.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
