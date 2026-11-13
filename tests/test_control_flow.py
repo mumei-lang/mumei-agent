@@ -192,3 +192,134 @@ def test_gap_does_not_discard_existing_resource_findings() -> None:
 
 def test_non_go_analysis_remains_unsupported() -> None:
     assert dataflow_facts.analyze_function("return 1", "python") is None
+
+
+# ---- bounded fixed-point assignment facts ----
+
+
+def facts(body: str):
+    cfg = graph(body)
+    return cfg, control_flow.assignment_facts(body, cfg)
+
+
+def facts_at(cfg, results, kind, index=0):
+    node = nodes(cfg, kind)[index]
+    return results[node.node_id]
+
+
+def test_assignment_facts_require_the_matching_body():
+    cfg = graph("x := 1")
+    with pytest.raises(ValueError, match="graph source digest"):
+        control_flow.assignment_facts("y := 1", cfg)
+
+
+def test_assignment_facts_are_linearly_flow_sensitive():
+    cfg, result = facts("x := 1\ny := 2\nreturn y")
+    assert facts_at(cfg, result, "define", 0) == control_flow.AssignmentFacts(
+        frozenset({"x"}), frozenset({"x"})
+    )
+    assert facts_at(cfg, result, "define", 1) == control_flow.AssignmentFacts(
+        frozenset({"x", "y"}), frozenset({"x", "y"})
+    )
+    assert result[cfg.exit].all_paths == frozenset({"x", "y"})
+    assert result[cfg.entry] == control_flow.AssignmentFacts(
+        frozenset(), frozenset()
+    )
+
+
+def test_assignment_facts_join_branches_per_path():
+    cfg, result = facts("x := 1\nif c { y = 1 } else { z = 1 }\nreturn x")
+    join = facts_at(cfg, result, "return")
+    assert join.all_paths == frozenset({"x"})
+    assert join.some_path == frozenset({"x", "y", "z"})
+
+
+def test_assignment_facts_merge_when_every_branch_assigns():
+    cfg, result = facts("if c { y = 1 } else { y = 2 }\nreturn y")
+    join = facts_at(cfg, result, "return")
+    assert join.all_paths == frozenset({"y"})
+    assert join.some_path == frozenset({"y"})
+
+
+def test_assignment_facts_loop_body_is_may_only():
+    cfg, result = facts("x := 0\nfor c { x = 1 }\nreturn x")
+    join = facts_at(cfg, result, "return")
+    assert join.all_paths == frozenset({"x"})
+    assert "i" not in join.some_path
+
+
+def test_assignment_facts_for_init_and_post_flow_through():
+    cfg, result = facts("for i := 0; i < n; i++ { x = i }\nreturn x")
+    join = facts_at(cfg, result, "return")
+    assert join.all_paths == frozenset({"i"})
+    assert join.some_path == frozenset({"i", "x"})
+
+
+def test_assignment_facts_unbounded_loop_body_still_assigns():
+    cfg, result = facts("for { x = 1 }\nreturn x")
+    body_node = nodes(cfg, "assign")[0]
+    assert result[body_node.node_id].all_paths == frozenset({"x"})
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "x := f()",
+        "x = f()",
+        "x += 1",
+        "x -= 1",
+        "x *= 2",
+        "x /= 2",
+        "x %= 2",
+        "x <<= 1",
+        "x >>= 1",
+        "x &= 1",
+        "x |= 1",
+        "x ^= 1",
+        "x &^= 1",
+        "x++",
+        "x--",
+        "var x int",
+        "var x = 1",
+        "var x, y int",
+        "const x = 1",
+        "x, y := f()",
+        "x, y = swap()",
+    ],
+)
+def test_assignment_facts_recognize_assignment_forms(statement):
+    cfg, result = facts(f"{statement}\nreturn")
+    assert "x" in result[cfg.exit].some_path
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "s.f = 1",
+        "arr[0] = 1",
+        "_ = f()",
+        "f(x)",
+        "if c { }",
+        "for c { }",
+    ],
+)
+def test_assignment_facts_ignore_non_name_targets(statement):
+    cfg, result = facts(f"{statement}\nreturn")
+    assert result[cfg.exit].some_path == frozenset()
+
+
+def test_assignment_facts_blank_identifier_is_not_a_name():
+    cfg, result = facts("_, b := f()\nreturn b")
+    assert result[cfg.exit].all_paths == frozenset({"b"})
+
+
+def test_assignment_facts_range_targets_assign():
+    cfg, result = facts("for _, v := range xs { }\nreturn v")
+    assert result[cfg.exit].all_paths == frozenset({"v"})
+
+
+def test_assignment_facts_unreachable_nodes_hold_vacuous_all_paths():
+    cfg, result = facts("return\nx := 1")
+    dead = nodes(cfg, "define")[0]
+    assert result[dead.node_id].all_paths == frozenset({"x"})
+    assert result[dead.node_id].some_path == frozenset({"x"})

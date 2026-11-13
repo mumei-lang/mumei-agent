@@ -1120,6 +1120,34 @@ expression lookup remains conservative across all matching return expressions,
 and existing audit/CLI/MCP keys, grades and fallbacks are unchanged. These
 remain heuristic analysis facts, not backend-neutral proof evidence.
 
+### C05 fixed-point assignment facts over the explicit CFG
+
+`agent.control_flow.assignment_facts(body, graph)` runs the first bounded
+fixed-point dataflow over the `mumei.go-explicit-normal-flow/v1` graph:
+per-node `AssignmentFacts` with `all_paths` (identifiers textually
+assigned on every path from entry) and `some_path` (assigned on at least
+one path). `all_paths` descends from the name universe by intersection,
+`some_path` ascends from empty by union — both monotone on a finite
+lattice with a defensive iteration bound, so the analysis always
+terminates on the finite graph. Facts attach to the same body digest and
+spans as the CFG; a mismatched body or unparsed source is a static error.
+
+```python
+facts = control_flow.assignment_facts(body, graph)
+facts[node_id].all_paths  # assigned on every path reaching the node
+facts[node_id].some_path  # assigned on some path reaching the node
+```
+
+This is **declared textual assignment, not memory truth**: only simple
+identifier targets of `define`/`assign`/`inc`/`dec`/`const`/`var`/`range`
+statements count — selectors, indexes, the blank `_`, scoping/shadowing
+and mutation through opaque calls (including `&x` arguments) are excluded.
+Unreachable nodes hold the vacuous `all_paths` universe and only their own
+`some_path` targets; facts read "if this node is reached". Interprocedural
+flow, use/defect detection, fields and proof-grade semantics remain open
+C05/C06 work. The existing walker still owns must/may resource facts;
+audit/CLI/MCP keys, grades and fallbacks are unchanged.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
