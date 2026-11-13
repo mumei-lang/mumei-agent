@@ -88,6 +88,38 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 dispatch-boundary checks for declared requests
+
+`AttemptSequence.next_dispatch()` derives the single outstanding
+dispatchable intent: a `ready` current record yields its
+`AttemptExecutionRequest`, and anything else — nothing reserved, a running
+attempt still in flight, a cancelling or terminal record — yields `None`.
+`None` does not mean nothing may run: an in-flight attempt continues and
+host-initiated cancellations are declared separately. `check_dispatch` is
+the static counterpart for host-built requests: an
+`AttemptExecutionRequest` must name this value's current ready record
+(including its declared timeout) and an `AttemptCancelRequest` the current
+running one — wrong types, foreign fingerprints, stale ordinals and
+unserved states are static errors, never silent drops.
+
+```python
+from agent.verification_attempt import AttemptSequence
+
+sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+request = sequence.next_dispatch()      # or None when nothing is ready
+sequence.check_dispatch(request)        # raises for stale/foreign requests
+```
+
+These are **boundary checks, not a runner or scheduler**: nothing is
+dispatched, delivered, queued, ordered across sequences or confirmed —
+dispatch, delivery integrity, ordering policy and process control remain
+host duties, and a request that passes today is just a description the host
+must re-check against the canonical value at send time. No I/O, clocks,
+plugins, runner/scheduler, Evidence normalization/acceptance, external
+verifier, dependency or default audit/CLI/MCP route is added. C11 stays
+partial; Core meaning and acceptance, C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 evidence-candidate handoff descriptors
 
 `AttemptSequence.evidence_candidate()` returns an `AttemptEvidenceCandidate`

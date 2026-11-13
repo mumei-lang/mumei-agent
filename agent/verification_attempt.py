@@ -386,6 +386,54 @@ class AttemptSequence:
             self.request_fingerprint, current.attempt_number
         )
 
+    def next_dispatch(self) -> "AttemptExecutionRequest | None":
+        """The single outstanding dispatchable intent, or None; not a schedule.
+
+        A `ready` current record yields its execution request; anything else —
+        including nothing reserved, a running attempt still in flight and a
+        terminal record — yields None. None does not mean nothing may run:
+        an in-flight attempt continues and host-initiated cancellations are
+        declared separately. Ordering between sequences stays a host duty.
+        """
+        current = self.current
+        if current is None or current.state != "ready":
+            return None
+        return self.request_execution()
+
+    def check_dispatch(
+        self, request: "AttemptExecutionRequest | AttemptCancelRequest"
+    ) -> None:
+        """Require a declared request be deliverable against this value's state.
+
+        An execution request must name the current ready record and a
+        cancellation request the current running one; wrong types, foreign
+        bindings, stale ordinals and unserved states are static errors. This
+        checks the described boundary only — it never dispatches, delivers
+        or confirms anything.
+        """
+        if type(request) is AttemptExecutionRequest:
+            current = self.current
+            if current is None or current.state != "ready":
+                raise ValueError("attempt execution is not dispatchable")
+            if (
+                request.request_fingerprint != self.request_fingerprint
+                or request.attempt_number != current.attempt_number
+                or request.timeout_ms != self.timeout_ms
+            ):
+                raise ValueError("attempt dispatch binding mismatch")
+            return
+        if type(request) is AttemptCancelRequest:
+            current = self.current
+            if current is None or current.state != "running":
+                raise ValueError("attempt cancellation is not dispatchable")
+            if (
+                request.request_fingerprint != self.request_fingerprint
+                or request.attempt_number != current.attempt_number
+            ):
+                raise ValueError("attempt dispatch binding mismatch")
+            return
+        raise ValueError("attempt dispatch requires a declared request")
+
     def check_output_binding(self, output: "AttemptOutput") -> None:
         """Require this value's current record, without reconciling either input.
 

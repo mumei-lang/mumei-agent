@@ -3242,3 +3242,195 @@ def test_evidence_candidate_is_passive_without_io_or_decode(
         assert selected.evidence_candidate().attempt_number == 1
     assert (selected.to_dict(), output.to_dict()) == before
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_next_dispatch_matrix(count):
+    attempts = tuple(
+        sequence_record("exited", n) for n in range(1, count)
+    ) + ((sequence_record("ready", count),) if count else ())
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    dispatch = sequence.next_dispatch()
+    if count == 0:
+        assert dispatch is None
+    else:
+        assert dispatch == sequence.request_execution()
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_next_dispatch_only_serves_ready_currents(state):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record(state),))
+    dispatch = sequence.next_dispatch()
+    if state == "ready":
+        assert dispatch == AttemptExecutionRequest(FINGERPRINT, 1, 10)
+    else:
+        assert dispatch is None
+
+
+def test_next_dispatch_is_pure_and_repeatable():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    before = sequence.to_dict()
+    first = sequence.next_dispatch()
+    assert sequence.next_dispatch() == first
+    assert sequence.next_dispatch() is not first
+    assert sequence.to_dict() == before
+    closed, output = exited_sequence_and_output(prepared_source())
+    assert closed.select_result(output).next_dispatch() is None
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_check_dispatch_execution_matrix(state):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record(state),))
+    request = AttemptExecutionRequest(FINGERPRINT, 1, 10)
+    if state == "ready":
+        sequence.check_dispatch(request)
+    else:
+        with pytest.raises(
+            ValueError, match="^attempt execution is not dispatchable$"
+        ):
+            sequence.check_dispatch(request)
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_check_dispatch_cancellation_matrix(state):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record(state),))
+    request = AttemptCancelRequest(FINGERPRINT, 1)
+    if state == "running":
+        sequence.check_dispatch(request)
+    else:
+        with pytest.raises(
+            ValueError, match="^attempt cancellation is not dispatchable$"
+        ):
+            sequence.check_dispatch(request)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("request_fingerprint", "b" * 64),
+        ("attempt_number", 2),
+        ("timeout_ms", 11),
+    ],
+)
+def test_check_dispatch_execution_rejects_foreign_bindings(field, value):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    request = AttemptExecutionRequest(
+        value if field == "request_fingerprint" else FINGERPRINT,
+        value if field == "attempt_number" else 1,
+        value if field == "timeout_ms" else 10,
+    )
+    with pytest.raises(
+        ValueError, match="^attempt dispatch binding mismatch$"
+    ):
+        sequence.check_dispatch(request)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("request_fingerprint", "b" * 64), ("attempt_number", 2)],
+)
+def test_check_dispatch_cancellation_rejects_foreign_bindings(field, value):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    request = AttemptCancelRequest(
+        value if field == "request_fingerprint" else FINGERPRINT,
+        value if field == "attempt_number" else 1,
+    )
+    with pytest.raises(
+        ValueError, match="^attempt dispatch binding mismatch$"
+    ):
+        sequence.check_dispatch(request)
+
+
+def test_check_dispatch_rejects_stale_ordinals_after_extension():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    request = sequence.request_execution()
+    started = sequence.reconcile_report(sequence.current.record(START))
+    exited = started.reconcile_report(
+        started.current.record(AttemptEvent("exited", 3, 0))
+    )
+    extended = exited.begin_attempt()
+    assert extended.request_execution().attempt_number == 2
+    extended.check_dispatch(extended.request_execution())
+    with pytest.raises(
+        ValueError, match="^attempt dispatch binding mismatch$"
+    ):
+        extended.check_dispatch(request)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "request",
+        1,
+        AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),)),
+    ],
+)
+def test_check_dispatch_rejects_non_requests_without_echo(value):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    with pytest.raises(
+        ValueError, match="^attempt dispatch requires a declared request$"
+    ):
+        sequence.check_dispatch(value)
+
+
+def test_check_dispatch_swapped_request_kinds_are_static_errors():
+    ready = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    running = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    with pytest.raises(
+        ValueError, match="^attempt cancellation is not dispatchable$"
+    ):
+        ready.check_dispatch(AttemptCancelRequest(FINGERPRINT, 1))
+    with pytest.raises(
+        ValueError, match="^attempt execution is not dispatchable$"
+    ):
+        running.check_dispatch(AttemptExecutionRequest(FINGERPRINT, 1, 10))
+
+
+def test_dispatch_boundary_tracks_stamps_and_the_store():
+    sequence = AttemptSequence(
+        FINGERPRINT, 10, (sequence_record("ready"),), None, 4
+    )
+    assert sequence.next_dispatch() is not None
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    dispatch = store.current.next_dispatch()
+    assert dispatch == AttemptExecutionRequest(FINGERPRINT, 1, 10)
+    store.current.check_dispatch(dispatch)
+    foreign = AttemptSequence(
+        "b" * 64, 10, (AttemptRecord("b" * 64, 1, 10),)
+    )
+    assert foreign.next_dispatch() == AttemptExecutionRequest("b" * 64, 1, 10)
+    with pytest.raises(
+        ValueError, match="^attempt dispatch binding mismatch$"
+    ):
+        foreign.check_dispatch(dispatch)
+
+
+def test_dispatch_boundary_is_passive_without_io_or_clock(monkeypatch, capsys):
+    ready = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    running = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    before = ready.to_dict(), running.to_dict()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("dispatch checks must remain passive exact metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (os, "kill"),
+            (time, "monotonic"),
+            (time, "time"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        ready.check_dispatch(ready.next_dispatch())
+        with pytest.raises(ValueError):
+            ready.check_dispatch(AttemptCancelRequest(FINGERPRINT, 1))
+        assert running.next_dispatch() is None
+    assert (ready.to_dict(), running.to_dict()) == before
+    assert capsys.readouterr() == ("", "")
