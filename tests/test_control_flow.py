@@ -954,3 +954,47 @@ def test_terminate_keeps_assignment_facts_correct_on_live_paths():
     assert cfg is not None
     (term,) = nodes(cfg, "terminate")
     assert "x" in result[term.node_id].all_paths
+
+
+def test_closure_assigned_names_are_never_definite():
+    # x is written inside a closure literal; a call to f (unmodelled)
+    # could deliver x to use(x), so the use must not be "definite".
+    body = "f := func() { x = 2 }; use(x); if true { x := 3 }"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    uses = [use for use in hints.unassigned if use.name == "x"]
+    assert uses and all(not use.definite for use in uses)
+    assert "x" in hints.unreliable
+
+
+def test_address_taken_names_are_never_definite():
+    body = "use(x); p := &x; if true { x := 3 }"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    uses = [use for use in hints.unassigned if use.name == "x"]
+    assert uses and all(not use.definite for use in uses)
+    assert "x" in hints.unreliable
+
+
+def test_reliable_names_still_get_definite_marks():
+    body = "use(x); if true { x := 3 }"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    uses = [use for use in hints.unassigned if use.name == "x"]
+    assert uses and uses[0].definite
+    assert hints.unreliable == frozenset()
+
+
+def test_unreliable_names_stay_hintable_not_definite():
+    # The weaker class still fires: x misses all_paths at the use.
+    body = "f := func() { x = 2 }; if c { use(x) }; x := 3"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    uses = [use for use in hints.unassigned if use.name == "x"]
+    assert uses and not uses[0].definite
+
+
+def test_flow_hints_declares_empty_unreliable_for_plain_bodies():
+    body = "x := 1; use(x)"
+    cfg = graph(body)
+    assert control_flow.flow_hints(body, cfg).unreliable == frozenset()

@@ -1351,6 +1351,23 @@ semantics are not modelled (defer remains `unsupported_defer`), and a
 stops. Recognised callees are the declared `panic`/`os.Exit`/
 `log.Fatal*`/`log.Panic*`/`runtime.Goexit` set only.
 
+### C05 declared unreliable names over flow hints
+
+`flow_hints` now carries `unreliable` — the names the extractor already
+declares unsafe for path facts (`closure_assigned`: written inside a
+nested function literal; `address_taken`: aliased by `&`). Such names
+can still appear in `unassigned` findings but are never promoted to
+`definite`: a closure call or an aliased write sits outside the
+modelled paths, so "no modelled path can deliver it" would overclaim.
+The weaker possibly-unassigned class still fires, and the declared set
+is exported on the report so the host can see which findings were
+suppressed rather than infer it.
+
+Boundaries: the unreliable set comes from syntax (`func` literals and
+`&` occurrences), not from call-graph or escape analysis — a name may
+be marked unreliable even when no closure ever runs, and a name missed
+by the syntactic scan gets no protection.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
