@@ -162,7 +162,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(x int64) int64 {return 1%x}",
         "func F(x int64) int64 {return x<<1}",
         "func F(x int64) int64 {return x>>1}",
-        "func F(x int64) int64 { x++; return x }",
         "func F(x int64) (r int64) {return}",
         "func F(x int64) (int64,int64) {return x,x}",
         "func F(x int64) float64 {return 1.0}",
@@ -313,8 +312,6 @@ def test_for_bodies_union_return_dependencies(
         # Range clauses are outside the fragment.
         "func F(x int64) int64 { for i:=range 10 { _ = i }; return x }",
         # break/continue are not modelled.
-        "func F(x int64) int64 { for x>0 { break }; return x }",
-        "func F(x int64) int64 { for x>0 { continue }; return x }",
         # Non-inc/dec updates stay unsupported.
         "func F(x int64) int64 { for i:=x; i>0; i=i-1 {}; return x }",
         # Assignment updates are not inc/dec.
@@ -513,6 +510,75 @@ def test_var_declaration_shapes_stay_unsupported(
 
 
 @pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # inc/dec statements preserve the operand's dependencies.
+        (
+            "func F(x int64) int64 { x++; x--; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { y:=x; y++; return y }",
+            frozenset({0}),
+        ),
+        # Unlabelled break/continue inside a loop are effect-free.
+        (
+            "func F(x int64) int64 { for i:=x; i>0; i-- { if i>0 { break }; continue }; return x }",
+            frozenset({0}),
+        ),
+        # break inside a switch clause is unlabelled control flow too.
+        (
+            "func F(x int64) int64 { switch x { case 1: break }; return x }",
+            frozenset({0}),
+        ),
+        # inc on a var-declared binding.
+        (
+            "func F(x int64) int64 { var y int64; y++; y = x; y++; return y }",
+            frozenset({0}),
+        ),
+        # Blank assignment evaluates and discards — no deps reach the result.
+        (
+            "func F(x, y int64) int64 { _ = y; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, y int64) int64 { _ = x+y; return y }",
+            frozenset({1}),
+        ),
+    ],
+)
+def test_effect_free_control_statements(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Labelled jumps stay unmodelled.
+        "func F(x int64) int64 { L: for i:=x; i>0; i-- { break L }; return x }",
+        "func F(x int64) int64 { L: for i:=x; i>0; i-- { continue L }; return x }",
+        # goto is unmodelled.
+        "func F(x int64) int64 { goto L; L: return x }",
+        # defer/go are effect-bearing and stay outside the fragment.
+        "func F(x int64) int64 { defer F(0); return x }",
+        "func F(x int64) int64 { go F(0); return x }",
+        # inc/dec on a non-identifier operand is outside the fragment.
+        "func F(x int64) int64 { a := [1]int64{x}; a[0]++; return x }",
+    ],
+)
+def test_control_statement_shapes_stay_unsupported(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # An if initializer is outside the fragment.
@@ -520,7 +586,6 @@ def test_var_declaration_shapes_stay_unsupported(
         # A for loop is not modelled.
         "func F(x int64) int64 { for i:=int64(0); i<x; i++ {}; return x }",
         # A branch with an unsupported statement blocks the summary.
-        "func F(x int64) int64 { if x>0 {x++}; return x }",
     ],
 )
 def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
@@ -535,9 +600,7 @@ def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
         # Tuple declarations are outside the fragment.
         "func F(x int64) int64 { y,z:=x,x; return y+z }",
         # An increment is a statement, not a let binding.
-        "func F(x int64) int64 { y:=x; y++; return y }",
         # A non-identifier left side is not a let binding.
-        "func F(x int64) int64 { _=x; return x }",
         # A call used only for effects is a statement, not a let binding.
         "func G(){}; func F(x int64) int64 { G(); return x }",
         # Unsupported initializer propagates the gap.

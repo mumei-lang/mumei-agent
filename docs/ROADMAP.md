@@ -1597,6 +1597,21 @@ Multi-name specs, non-scalar bindings, `const` declarations and grouped
 `var (...)` forms (a tree-sitter parser gap) stay
 `unsupported_statement` / `syntax_or_parser_unavailable`.
 
+### C07 effect-free control statements
+
+`x++`/`x--` join the fragment as dependency-preserving statements: the
+operand must be a single identifier resolving to a bound scalar —
+incrementing changes the value, never which parameters it derives from.
+Unlabelled `break`/`continue` are accepted as effect-free control flow
+(syntactic returns are unioned regardless — reachability is not proven),
+and `_ = expression` evaluates-and-discards like a condition.
+`labeled_statement` unwraps to its inner statement — a label without
+labelled jumps is inert syntax, and a label that IS used requires a
+jump, which stays `unsupported_statement`.
+
+Labelled `break`/`continue`, `goto`, `defer`, `go`, and non-identifier
+inc/dec operands stay `unsupported_statement`/`binding_unavailable`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

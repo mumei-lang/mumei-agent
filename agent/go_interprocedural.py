@@ -16,9 +16,13 @@ modelled). Expression ``switch`` statements with neither initializer nor
 evaluated (effect-free), each clause body runs in its own scope and its
 reassignments union back. ``var`` declarations bind like lets — one name
 per ``var_spec`` with at most one value; ``var x T`` is the dep-free zero
-value (grouped ``var (...)`` forms are a parser gap). Type switches,
-``select``, ``const`` declarations and every other statement shape stay
-unsupported. Compiler-resolved
+value (grouped ``var (...)`` forms are a parser gap). ``x++``/``x--`` and
+unlabelled ``break``/``continue`` are effect-free for dependency purposes
+(the inc/dec operand must resolve to a bound scalar; labelled jumps,
+``goto``, ``defer`` and ``go`` stay unmodelled), and ``_ = expression``
+evaluates-and-discards like a condition. Type switches, ``select``,
+``const`` declarations and every other statement shape stay unsupported.
+Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -403,6 +407,13 @@ class _Builder:
                 or len(rights) != 1
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
+            if lefts[0].text == b"_":
+                # `_ = e` evaluates the expression and discards it — like a
+                # condition, its dependencies cannot reach the result.
+                self.expression(
+                    rights[0], fn, params, locals_, transfers, count, 0
+                )
+                return
             ref = self.references.get(_span(lefts[0]))
             if ref is None or (
                 ref.binding_id not in locals_ and ref.binding_id not in params
@@ -535,6 +546,35 @@ class _Builder:
                             count, deps, saw_return,
                         )
                     self._join(locals_, branch, params)
+            return
+        if kind == "labeled_statement":
+            inner = [c for c in node.named_children if c.type != "label_name"]
+            if len(inner) != 1:
+                raise _Unsupported("unsupported_statement", _span(node))
+            # A label with no labelled jumps is inert syntax — the wrapped
+            # statement is processed normally; `break L`/`continue L`
+            # inside it stay unsupported via the label check below.
+            self.statement(
+                inner[0], fn, params, locals_, transfers, count, deps,
+                saw_return,
+            )
+            return
+        if kind in {"inc_statement", "dec_statement"}:
+            operands = _children(node)
+            if len(operands) != 1 or operands[0].type != "identifier":
+                raise _Unsupported("unsupported_statement", _span(node))
+            ref = self.references.get(_span(operands[0]))
+            if ref is None or (
+                ref.binding_id not in locals_ and ref.binding_id not in params
+            ):
+                raise _Unsupported("binding_unavailable", _span(node))
+            # x++ / x-- change the value, never its dependencies.
+            return
+        if kind in {"break_statement", "continue_statement"}:
+            if any(c.type == "label_name" for c in node.named_children):
+                raise _Unsupported("unsupported_statement", _span(node))
+            # Control-flow-only statements carry no dependencies; syntactic
+            # returns are unioned regardless — reachability is not proven.
             return
         raise _Unsupported("unsupported_statement", _span(node))
 
