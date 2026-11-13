@@ -511,3 +511,106 @@ def flow_hints(body: str, graph: ControlFlowGraph) -> FlowHints:
         unused_assignments(body, graph),
         unreachable_statements(graph),
     )
+
+
+@dataclass(frozen=True)
+class HintExpectations:
+    """Host-declared expectations keyed exactly like `FlowHints`.
+
+    `unassigned` and `unused` hold `(node_id, name)` pairs;
+    `unreachable` holds bare `node_id`s. Expectations are declarations a
+    host computes itself — they are not ground truth, and matching them
+    only measures agreement between two declarations.
+    """
+
+    unassigned: tuple[tuple[int, str], ...] = ()
+    unused: tuple[tuple[int, str], ...] = ()
+    unreachable: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class FamilyMetrics:
+    """Agreement counts for one hint family.
+
+    `matched` expectations found, `missed` expected-but-unreported and
+    `unexpected` reported-but-unexpected findings — three separate
+    counts, never a single quality score.
+    """
+
+    matched: int
+    missed: int
+    unexpected: int
+
+
+@dataclass(frozen=True)
+class HintMetrics:
+    """Per-family agreement metrics between hints and expectations."""
+
+    unassigned: FamilyMetrics
+    unused: FamilyMetrics
+    unreachable: FamilyMetrics
+
+
+def _check_name_key(entry: tuple[int, str]) -> tuple[int, str]:
+    if (
+        not isinstance(entry, tuple)
+        or len(entry) != 2
+        or not isinstance(entry[0], int)
+        or isinstance(entry[0], bool)
+        or not isinstance(entry[1], str)
+    ):
+        raise ValueError("invalid hint expectation")
+    return entry
+
+
+def _check_node_key(entry: int) -> int:
+    if not isinstance(entry, int) or isinstance(entry, bool):
+        raise ValueError("invalid hint expectation")
+    return entry
+
+
+def _family_metrics(
+    actual: set[tuple[int, ...]], expected: frozenset[tuple[int, ...]]
+) -> FamilyMetrics:
+    matched = len(actual & expected)
+    return FamilyMetrics(
+        matched, len(expected) - matched, len(actual) - matched
+    )
+
+
+def evaluate_flow_hints(
+    hints: FlowHints, expected: HintExpectations
+) -> HintMetrics:
+    """Compare a `FlowHints` report against host-declared expectations.
+
+    Counts agreement per family as `FamilyMetrics`: matched,
+    expected-but-unreported (`missed`) and reported-but-unexpected
+    (`unexpected`) — false positives and missed defects kept separate as
+    the C05 acceptance criteria require. Expectations are host
+    declarations, not ground truth: agreement measures consistency
+    between two declarations, not correctness of either, and metric
+    equality proves nothing about the underlying analysis.
+    """
+    expected_unassigned = frozenset(
+        _check_name_key(entry) for entry in expected.unassigned
+    )
+    expected_unused = frozenset(
+        _check_name_key(entry) for entry in expected.unused
+    )
+    expected_unreachable = frozenset(
+        _check_node_key(entry) for entry in expected.unreachable
+    )
+    return HintMetrics(
+        _family_metrics(
+            {(use.node_id, use.name) for use in hints.unassigned},
+            expected_unassigned,
+        ),
+        _family_metrics(
+            {(use.node_id, use.name) for use in hints.unused},
+            expected_unused,
+        ),
+        _family_metrics(
+            {use.node_id for use in hints.unreachable},
+            expected_unreachable,
+        ),
+    )
