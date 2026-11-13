@@ -7,6 +7,7 @@ a process was stopped. No default verification path consumes these records.
 import hashlib
 import json
 import re
+import threading
 from dataclasses import dataclass, field, replace
 from decimal import Context, Decimal
 
@@ -349,6 +350,87 @@ class AttemptSequence:
                 "output_fingerprint": self.selected_result[1],
             }
         return result
+
+
+def _is_lineage_extension(
+    expected: AttemptSequence, updated: AttemptSequence
+) -> bool:
+    """Whether updated keeps every retained record and may only grow/select.
+
+    Shared request binding, per-record equality or report extension and the
+    selected-result closure are required; this is lineage order, not freshness.
+    """
+    if (
+        expected.request_fingerprint != updated.request_fingerprint
+        or expected.timeout_ms != updated.timeout_ms
+        or len(updated.attempts) < len(expected.attempts)
+        or expected.selected_result is not None
+    ):
+        return False
+    for prior, following in zip(expected.attempts, updated.attempts):
+        try:
+            prior.reconcile(following)
+        except ValueError:
+            return False
+    return True
+
+
+class AttemptSequenceStore:
+    """In-process atomic publication point for one canonical lineage.
+
+    Compare-and-set linearizes forks on this object only; it is not durable
+    storage, cross-process locking, freshness or authentication. Hosts still
+    own authority, boundary replay protection and all result/Evidence
+    decisions. The store holds values, never source or stdout bodies.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._current: AttemptSequence | None = None
+
+    @property
+    def current(self) -> AttemptSequence | None:
+        """The last published canonical value, or None before publication."""
+        return self._current
+
+    def publish(self, sequence: AttemptSequence) -> AttemptSequence:
+        """Publish the first canonical value; equal re-publication is a no-op."""
+        if type(sequence) is not AttemptSequence:
+            raise ValueError("canonical publication requires an attempt sequence")
+        with self._lock:
+            if self._current is None:
+                self._current = sequence
+            elif self._current != sequence:
+                raise ValueError("canonical sequence publication conflict")
+            return self._current
+
+    def compare_and_set(
+        self, expected: AttemptSequence, updated: AttemptSequence
+    ) -> AttemptSequence:
+        """Atomically replace the canonical value with a lineage extension.
+
+        `expected` must equal the stored value: a mismatch reports a fork and
+        changes nothing. `updated` must preserve the lineage — same request
+        binding, every retained record equal or a valid report extension, and
+        no change after a selected result. Equal updates are idempotent.
+        """
+        if (
+            type(expected) is not AttemptSequence
+            or type(updated) is not AttemptSequence
+        ):
+            raise ValueError(
+                "canonical compare-and-set requires attempt sequences"
+            )
+        with self._lock:
+            if self._current != expected:
+                raise ValueError("canonical sequence compare failed")
+            if updated == expected or _is_lineage_extension(expected, updated):
+                self._current = updated
+            else:
+                raise ValueError(
+                    "updated sequence does not extend the canonical lineage"
+                )
+            return self._current
 
 
 @dataclass(frozen=True)

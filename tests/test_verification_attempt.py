@@ -27,6 +27,7 @@ from agent.verification_attempt import (
     AttemptOutput,
     AttemptRecord,
     AttemptSequence,
+    AttemptSequenceStore,
 )
 from agent.verification_planner import (
     SOURCE_INPUT_FORMAT,
@@ -2087,4 +2088,336 @@ def test_sequence_result_selection_is_passive_without_io_clock_or_decode(
         with pytest.raises(ValueError):
             selected.begin_attempt()
     assert (sequence.to_dict(), output.to_dict()) == before
+    assert capsys.readouterr() == ("", "")
+
+
+def test_store_publish_starts_empty_and_exposes_only_the_canonical_value():
+    store = AttemptSequenceStore()
+    assert store.current is None
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    assert store.publish(sequence) is sequence
+    assert store.current is sequence
+
+
+@pytest.mark.parametrize(
+    "value", [None, True, 0, {}, [], record(), "FAKE_PRIVATE_RESULT"]
+)
+def test_store_publish_rejects_non_sequences_without_echo(value):
+    store = AttemptSequenceStore()
+    with pytest.raises(
+        ValueError, match="^canonical publication requires an attempt sequence$"
+    ):
+        store.publish(value)
+    assert store.current is None
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_store_publish_matrix_accepts_any_valid_value(state, count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count)) + (
+        (sequence_record(state, count),) if count else ()
+    )
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    store = AttemptSequenceStore()
+    assert store.publish(sequence) is sequence
+    assert store.current is sequence
+    assert store.publish(sequence) is sequence
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_store_publish_is_idempotent_only_for_equal_values(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    first = AttemptSequence(FINGERPRINT, 10, attempts)
+    equal = AttemptSequence(FINGERPRINT, 10, attempts)
+    store = AttemptSequenceStore()
+    store.publish(first)
+    assert store.publish(equal) is first
+    if count:
+        other = AttemptSequence(
+            FINGERPRINT, 10, (*attempts[:-1], sequence_record("failed", count))
+        )
+    else:
+        other = AttemptSequence("b" * 64, 10, ())
+    with pytest.raises(
+        ValueError, match="^canonical sequence publication conflict$"
+    ):
+        store.publish(other)
+    assert store.current is first
+
+
+def test_store_compare_and_set_requires_a_published_value():
+    store = AttemptSequenceStore()
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(
+        ValueError, match="^canonical sequence compare failed$"
+    ):
+        store.compare_and_set(sequence, sequence)
+    assert store.current is None
+
+
+@pytest.mark.parametrize(
+    "value", [None, True, 0, {}, [], record(), "FAKE_PRIVATE_RESULT"]
+)
+def test_store_compare_and_set_rejects_non_sequences_without_echo(value):
+    store = AttemptSequenceStore()
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    store.publish(sequence)
+    for expected, updated in ((value, sequence), (sequence, value)):
+        with pytest.raises(
+            ValueError,
+            match="^canonical compare-and-set requires attempt sequences$",
+        ):
+            store.compare_and_set(expected, updated)
+    assert store.current is sequence
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_store_compare_and_set_detects_expected_mismatch(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    stale = AttemptSequence(
+        FINGERPRINT, 10, attempts[:-1] if count else (sequence_record("exited"),)
+    )
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    with pytest.raises(ValueError, match="^canonical sequence compare failed$"):
+        store.compare_and_set(stale, stale)
+    assert store.current is stored
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_store_compare_and_set_is_idempotent_for_equal_updates(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    assert store.compare_and_set(stored, stored) is stored
+    assert store.current is stored
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_store_compare_and_set_accepts_report_extensions(count):
+    attempts = tuple(
+        sequence_record("exited" if n < count else "running", n)
+        for n in range(1, count + 1)
+    )
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    report = attempts[-1].record(
+        AttemptEvent("exited", PREFIXES["running"][-1].elapsed_ms + 1, 0)
+    )
+    updated = stored.reconcile_report(report)
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    assert store.compare_and_set(stored, updated) is updated
+    assert store.current is updated
+    assert updated.current.state == "exited"
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS))
+def test_store_compare_and_set_accepts_new_reservations(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    updated = stored.begin_attempt()
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    assert store.compare_and_set(stored, updated) is updated
+    assert store.current is updated
+
+
+def test_store_compare_and_set_accepts_result_selection():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    updated = sequence.select_result(output)
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    assert store.compare_and_set(sequence, updated) is updated
+    assert store.current.selected_result == updated.selected_result
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_store_compare_and_set_rejects_changed_bindings(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    foreign = AttemptSequence(
+        "b" * 64,
+        10,
+        tuple(
+            AttemptRecord("b" * 64, n, 10, PREFIXES["exited"])
+            for n in range(1, count + 1)
+        ),
+    )
+    retimed = AttemptSequence(
+        FINGERPRINT,
+        20,
+        tuple(
+            AttemptRecord(FINGERPRINT, n, 20, PREFIXES["exited"])
+            for n in range(1, count + 1)
+        ),
+    )
+    for updated in (foreign, retimed):
+        with pytest.raises(
+            ValueError,
+            match="^updated sequence does not extend the canonical lineage$",
+        ):
+            store.compare_and_set(stored, updated)
+    assert store.current is stored
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_store_compare_and_set_rejects_removed_records(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    shortened = AttemptSequence(FINGERPRINT, 10, attempts[:-1])
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    with pytest.raises(
+        ValueError, match="^updated sequence does not extend the canonical lineage$"
+    ):
+        store.compare_and_set(stored, shortened)
+    assert store.current is stored
+
+
+@pytest.mark.parametrize("ordinal", range(1, 5))
+def test_store_compare_and_set_rejects_replaced_records(ordinal):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, 5))
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    replaced = (
+        *attempts[: ordinal - 1],
+        sequence_record("failed", ordinal),
+        *attempts[ordinal:],
+    )
+    updated = AttemptSequence(FINGERPRINT, 10, replaced)
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    with pytest.raises(
+        ValueError, match="^updated sequence does not extend the canonical lineage$"
+    ):
+        store.compare_and_set(stored, updated)
+    assert store.current is stored
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_store_compare_and_set_rejects_diverged_branches(count):
+    attempts = tuple(
+        sequence_record("exited" if n < count else "running", n)
+        for n in range(1, count + 1)
+    )
+    stored = AttemptSequence(FINGERPRINT, 10, attempts)
+    elapsed = PREFIXES["running"][-1].elapsed_ms + 1
+    exited = stored.reconcile_report(
+        attempts[-1].record(AttemptEvent("exited", elapsed, 0))
+    )
+    failed = stored.reconcile_report(
+        attempts[-1].record(AttemptEvent("failed", elapsed))
+    )
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    store.compare_and_set(stored, exited)
+    with pytest.raises(ValueError, match="^canonical sequence compare failed$"):
+        store.compare_and_set(stored, failed)
+    with pytest.raises(
+        ValueError, match="^updated sequence does not extend the canonical lineage$"
+    ):
+        store.compare_and_set(exited, failed)
+    assert store.current is exited
+
+
+def test_store_compare_and_set_keeps_selected_lineages_closed():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    stored = sequence.select_result(output)
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    assert store.compare_and_set(stored, stored) is stored
+    changed = AttemptSequence(
+        stored.request_fingerprint,
+        stored.timeout_ms,
+        stored.attempts,
+        (1, "b" * 64),
+    )
+    with pytest.raises(
+        ValueError, match="^updated sequence does not extend the canonical lineage$"
+    ):
+        store.compare_and_set(stored, changed)
+    assert store.current is stored
+
+
+def test_store_linearizes_competing_extensions_from_one_prefix():
+    stored = AttemptSequence(FINGERPRINT, 10, ())
+    left = stored.begin_attempt()
+    right = stored.begin_attempt()
+    assert left == right
+    diverged = replace(
+        right, attempts=(sequence_record("exited", 1),)
+    )
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    store.compare_and_set(stored, left)
+    with pytest.raises(ValueError, match="^canonical sequence compare failed$"):
+        store.compare_and_set(stored, diverged)
+    assert store.current is left
+
+
+def test_stores_do_not_arbitrate_each_other():
+    first = AttemptSequenceStore()
+    second = AttemptSequenceStore()
+    a = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    b = AttemptSequence("b" * 64, 10, ())
+    first.publish(a)
+    second.publish(b)
+    assert first.current is a
+    assert second.current is b
+
+
+def test_store_holds_values_without_source_or_stdout_bodies():
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), body=b"FAKE_PRIVATE_STORED_BODY"
+    )
+    stored = sequence.select_result(output)
+    store = AttemptSequenceStore()
+    store.publish(stored)
+    encoded = json.dumps(store.current.to_dict())
+    assert "FAKE_PRIVATE_STORED_BODY" not in encoded
+    assert SOURCE.decode() not in encoded
+    assert store.current is stored
+
+
+def test_store_operations_do_not_mutate_either_value():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    updated = sequence.select_result(output)
+    before = sequence.to_dict(), updated.to_dict()
+    store = AttemptSequenceStore()
+    store.publish(sequence)
+    store.compare_and_set(sequence, updated)
+    assert (sequence.to_dict(), updated.to_dict()) == before
+
+
+def test_store_is_passive_without_io_clock_or_decode(monkeypatch, capsys):
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), body=b"FAKE_PRIVATE_STORE_BODY"
+    )
+    updated = sequence.select_result(output)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("canonical publication must remain passive exact metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (time, "monotonic"),
+            (time, "time"),
+            (AttemptOutput, "decode_json_object"),
+            (AttemptOutput, "reconcile"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        store = AttemptSequenceStore()
+        store.publish(sequence)
+        store.compare_and_set(sequence, updated)
+        store.compare_and_set(updated, updated)
+    assert store.current is updated
     assert capsys.readouterr() == ("", "")
