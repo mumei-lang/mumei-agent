@@ -389,6 +389,67 @@ def test_scalar_reassignment_dependencies(
 
 
 @pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # Expression switch: clause bodies join as may-execute alternatives.
+        (
+            "func F(x int64) int64 { y:=x; switch x { case 1: y = y+1; case 2: y = y }; return y }",
+            frozenset({0}),
+        ),
+        # No tag at all — guards only.
+        (
+            "func F(x, y int64) int64 { switch { case x>0: x = y }; return x }",
+            frozenset({0, 1}),
+        ),
+        # Reassignment in one clause, default clause, param from guard space.
+        (
+            "func F(x, y int64) int64 { switch x { case 1, 2: x = y; default: x = x }; return x }",
+            frozenset({0, 1}),
+        ),
+        # A clause-local let does not escape to siblings or after the switch.
+        (
+            "func F(x int64) int64 { switch x { case 1: z:=x; x = z }; return x }",
+            frozenset({0}),
+        ),
+        # Return inside a clause unions like any other syntactic return.
+        (
+            "func F(x, y int64) int64 { switch x { case 1: return y }; return x }",
+            frozenset({0, 1}),
+        ),
+        # Switch nested inside a loop body joins through the fixed point.
+        (
+            "func F(p int) int { x := 0; y := 0; for i := p; i > 0; i-- { switch i { case 1: x = y; default: y = p } }; return x }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_expression_switch_dependencies(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Switch initializer statements stay outside the fragment.
+        "func F(x int64) int64 { switch v:=x; v { case 1: return v }; return x }",
+        "func F(x int64) int64 { switch x++; x { case 1: return x }; return x }",
+        # fallthrough is unmodelled control flow.
+        "func F(x int64) int64 { switch x { case 1: fallthrough; default: return x }; return x }",
+        # select is unmodelled concurrency.
+        "func F(x int64) int64 { select {}; return x }",
+        # A switch with an unsupported statement inside a clause is a gap.
+        "func F(x int64) int64 { switch x { case 1: y := 0; _ = y; x += 1 }; return x }",
+    ],
+)
+def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # An if initializer is outside the fragment.

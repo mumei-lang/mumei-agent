@@ -1571,6 +1571,18 @@ Compound operators (`+=`, `-=`, ...), tuple targets, and assignments to
 names outside the parameter/let scope stay `unsupported_statement` /
 `binding_unavailable`.
 
+### C07 expression switches in bodies
+
+An `expression_switch_statement` with no `initializer` and no
+`fallthrough` joins the fragment: the tag and every case guard are
+evaluated (effect-free, like `if`/`for` conditions) and each clause body
+runs in its own scope, with reassignments joining back by union because
+exactly one clause — or none — may execute. `return` inside a clause
+unions into the result like any syntactic return.
+
+Switch initializers, `fallthrough`, type switches, `select` and every
+other statement shape stay `unsupported_statement`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
