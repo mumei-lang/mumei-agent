@@ -88,6 +88,48 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 atomic canonical-lineage publication
+
+`AttemptSequenceStore` is an opt-in **in-process** compare-and-set publication
+point for one canonical `AttemptSequence` lineage — the atomic storage hosts
+were previously told to own. `publish(sequence)` stores the first canonical
+value; `compare_and_set(expected, updated)` atomically swaps the stored value
+when `expected` equals it. A mismatch means a competing writer already moved
+the lineage and raises a static error without changing anything, so two
+callers extending the same prefix can no longer silently fork. Equal updates
+and re-publications are idempotent no-ops, not freshness or authentication.
+
+```python
+from agent.verification_attempt import AttemptSequenceStore
+
+store = AttemptSequenceStore()
+store.publish(sequence)
+stored = store.current
+following = stored.reconcile_report(reported)  # Or begin/select transitions.
+store.compare_and_set(stored, following)       # Atomic check + publish.
+assert store.current is following
+```
+
+An update must be a **lineage extension** of the expected value: same request
+fingerprint and timeout, every retained record equal or a valid same-attempt
+report extension, and no change after a selected result (a closed lineage
+accepts only the identical value). Removed, replaced, rewound, rebound or
+diverged updates are rejected. Any number of valid transitions may be batched
+between one `expected`/`updated` pair; the store neither replays operations
+nor infers them.
+
+The store holds immutable values only — never source bytes, stdout bodies,
+plans or diagnostics — and has no serialization surface of its own. It
+linearizes callers on **this object**: it is not durable storage, a
+cross-process/OS lock, a replay-protected boundary or an authenticated
+channel. Stale `expected` values are detected by equality, not freshness
+proof; hosts still own distribution, crash recovery and any cross-attempt/
+backend arbitration. No runner/scheduler, stream collection, execution/
+cancellation, Evidence normalization/acceptance, external verifier,
+dependency or default audit/CLI/MCP route is added. C11/C13 stay partial;
+Core meaning and acceptance, C12's demand gate and existing assurance/Lean/
+native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 canonical result selection for sequential attempts
 
 `AttemptSequence.select_result(output)` declares one bound `AttemptOutput` the
