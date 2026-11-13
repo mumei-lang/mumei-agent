@@ -1387,6 +1387,21 @@ non-evaluating profile as `if` — no ordering, overlap or exhaustiveness
 claims beyond "a default catches the no-match path"; `switch` says
 nothing about the guard's value.
 
+### C05 compound targets as reads, not assignments
+
+`_use_text` now treats compound assignment targets (`x.f`, `a[i]`,
+`*p`) as *reads* of every identifier inside them: the root object and
+index/key operands must exist before the write, so `x := 1; x.f = 2`
+no longer flags `x` as an unused store, and `a[i] = 2` keeps `a` and
+`i` live. Compound targets still never *assign* their root — `x.f = 2`
+puts nothing into `assignment_facts` for `x`, and a name whose only
+writes are compound stays outside the declared universe.
+
+Boundaries: the scan is textual — field names in a target may be
+over-counted as reads (a conservative miss for `unused`, never a
+false "assigned" claim), and pointer/field aliasing beyond the
+unreliable-name set stays unmodelled.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
