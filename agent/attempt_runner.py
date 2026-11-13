@@ -195,7 +195,7 @@ class AttemptRunner:
                     else None
                 ),
             )
-        except OSError:
+        except (OSError, subprocess.SubprocessError):
             return AttemptRunResult(
                 record.record(AttemptEvent("started", 0)).record(
                     AttemptEvent("failed", 0)

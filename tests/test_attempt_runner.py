@@ -401,3 +401,15 @@ def test_run_memory_bound_still_honors_cancellation():
     cancel.set()
     thread.join(timeout=10)
     assert not thread.is_alive()
+
+
+def test_run_memory_bound_failure_reports_failed(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    def boom(limit):
+        raise OSError("rlimit refused")
+
+    monkeypatch.setattr(runner_mod.resource, "setrlimit", boom)
+    result = AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
+    assert result.record.state == "failed"
+    assert result.stdout == b""
