@@ -1121,3 +1121,46 @@ def test_switch_inside_case_body_and_unreachable_after():
     switches = nodes(cfg, "switch")
     assert len(switches) == 2
     assert len(cfg.reachable()) == len(cfg.nodes)
+
+
+@pytest.mark.parametrize(
+    "body,name",
+    [
+        ("x := 1; x.f = 2", "x"),
+        ("a := []int{0}; a[i] = 2", "a"),
+        ("i := 0; a[i] = 2", "i"),
+        ("p := new(int); *p = 3", "p"),
+        ("s := S{}; s.f.g = 2", "s"),
+        ("x := 1; y := 0; y.f = x", "y"),
+    ],
+)
+def test_compound_targets_count_as_reads(body, name):
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    assert name not in {use.name for use in hints.unused}
+
+
+def test_plain_assign_target_is_not_a_self_read():
+    cfg = graph("x = 1")
+    hints = control_flow.flow_hints("x = 1", cfg)
+    assert {use.name for use in hints.unused} == {"x"}
+
+
+def test_compound_write_to_unassigned_root_still_universe_gated():
+    # x.f writes read x but do not assign it; without a textual
+    # assignment anywhere, x stays outside the declared universe.
+    cfg = graph("x.f = 1")
+    hints = control_flow.flow_hints("x.f = 1", cfg)
+    assert [use.name for use in hints.unassigned] == []
+
+
+def test_compound_assign_does_not_assign_the_root():
+    # x.f = 2 never puts x into the assignment facts — only the
+    # plain-identifier write later does.
+    body = "x.f = 2; y := 1"
+    cfg = graph(body)
+    facts_map = control_flow.assignment_facts(body, cfg)
+    (write,) = by_text(cfg, body, "x.f")
+    (after,) = by_text(cfg, body, "y :=")
+    assert "x" not in facts_map[write.node_id].all_paths
+    assert "x" not in facts_map[after.node_id].all_paths
