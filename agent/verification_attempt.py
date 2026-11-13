@@ -669,6 +669,75 @@ class AttemptEvidenceCandidate:
 
 
 @dataclass(frozen=True)
+class AttemptNormalizedResult:
+    """Detached normalization of one observed run; not a verdict or Evidence.
+
+    Maps one observed terminal run into a stable detached shape — request
+    binding, the terminal outcome, the observed elapsed counter and the
+    bounded-output manifest — so hosts can consume every outcome uniformly
+    without reading event histories or raw bytes. Normalization covers
+    agent-side observations only: the stdout digest binds bytes, not
+    meaning, an exit code is transport metadata, and `complete` records
+    only that collection stayed within the bound. Acceptance, verdict
+    interpretation and canonical publication remain host/Core duties.
+    """
+
+    request_fingerprint: str
+    attempt_number: int
+    timeout_ms: int
+    outcome: str
+    elapsed_ms: int
+    exit_code: int | None
+    stdout_size: int
+    stdout_sha256: str
+    complete: bool
+
+    def __post_init__(self) -> None:
+        _fingerprint(self.request_fingerprint)
+        _counter(self.attempt_number, positive=True)
+        _counter(self.timeout_ms, positive=True)
+        if type(self.outcome) is not str or self.outcome not in TERMINAL_STATES:
+            raise ValueError("attempt normalized result requires a terminal outcome")
+        _counter(self.elapsed_ms)
+        if self.outcome == "exited":
+            if (
+                type(self.exit_code) is not int
+                or not -MAX_COUNTER - 1 <= self.exit_code <= MAX_COUNTER
+            ):
+                raise ValueError("normalized exit code requires a bounded integer")
+        elif self.exit_code is not None:
+            raise ValueError("only exited outcomes carry exit codes")
+        _counter(self.stdout_size)
+        if self.stdout_size > MAX_STDOUT_BYTES:
+            raise ValueError("normalized stdout exceeds the byte bound")
+        if type(self.stdout_sha256) is not str or not re.fullmatch(
+            r"[0-9a-f]{64}", self.stdout_sha256
+        ):
+            raise ValueError("invalid normalized stdout identity")
+        if type(self.complete) is not bool:
+            raise ValueError("invalid normalized completeness declaration")
+
+    def to_dict(self) -> dict:
+        manifest = {
+            "schema_version": "mumei.verifier-run-result/v1",
+            "request_fingerprint": self.request_fingerprint,
+            "attempt_number": self.attempt_number,
+            "timeout_ms": self.timeout_ms,
+            "outcome": self.outcome,
+            "elapsed_ms": self.elapsed_ms,
+            "stdout": {
+                "sha256": self.stdout_sha256,
+                "size_bytes": self.stdout_size,
+            },
+        }
+        if self.outcome == "exited":
+            manifest["exit_code"] = self.exit_code
+        if not self.complete:
+            manifest["stdout"]["complete"] = False
+        return manifest
+
+
+@dataclass(frozen=True)
 class AttemptOutput:
     """Host-supplied stdout snapshot, not parsed Evidence or a success claim.
 

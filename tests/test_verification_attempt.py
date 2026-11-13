@@ -28,6 +28,7 @@ from agent.verification_attempt import (
     AttemptEvent,
     AttemptEvidenceCandidate,
     AttemptExecutionRequest,
+    AttemptNormalizedResult,
     AttemptOutput,
     AttemptRecord,
     AttemptSequence,
@@ -3434,3 +3435,154 @@ def test_dispatch_boundary_is_passive_without_io_or_clock(monkeypatch, capsys):
         assert running.next_dispatch() is None
     assert (ready.to_dict(), running.to_dict()) == before
     assert capsys.readouterr() == ("", "")
+
+
+# --- C11 normalized run-result descriptors -------------------------------------
+
+
+def normalized_result(**overrides):
+    values = {
+        "request_fingerprint": FINGERPRINT,
+        "attempt_number": 1,
+        "timeout_ms": 10,
+        "outcome": "exited",
+        "elapsed_ms": 7,
+        "exit_code": 0,
+        "stdout_size": 4,
+        "stdout_sha256": "b" * 64,
+        "complete": True,
+    }
+    values.update(overrides)
+    return AttemptNormalizedResult(**values)
+
+
+@pytest.mark.parametrize("outcome", ["exited", "failed", "timed_out", "cancelled"])
+def test_normalized_result_accepts_terminal_outcomes(outcome):
+    code = 0 if outcome == "exited" else None
+    result = normalized_result(outcome=outcome, exit_code=code)
+    assert result.outcome == outcome
+    manifest = result.to_dict()
+    assert manifest["schema_version"] == "mumei.verifier-run-result/v1"
+    assert manifest["outcome"] == outcome
+    if outcome == "exited":
+        assert manifest["exit_code"] == 0
+    else:
+        assert "exit_code" not in manifest
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["ready", "running", "cancelling", "started", "", "EXITED", None, 0],
+)
+def test_normalized_result_rejects_nonterminal_outcomes(outcome):
+    with pytest.raises(
+        ValueError, match="^attempt normalized result requires a terminal outcome$"
+    ):
+        normalized_result(outcome=outcome, exit_code=None)
+
+
+@pytest.mark.parametrize(
+    "exit_code",
+    [None, "0", 1.5, True, MAX_COUNTER + 1, -MAX_COUNTER - 2],
+)
+def test_normalized_result_rejects_invalid_exit_codes(exit_code):
+    with pytest.raises(
+        ValueError, match="^normalized exit code requires a bounded integer$"
+    ):
+        normalized_result(exit_code=exit_code)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "timed_out", "cancelled"])
+@pytest.mark.parametrize("exit_code", [0, 1, -1])
+def test_normalized_result_rejects_codes_on_nonexit_outcomes(outcome, exit_code):
+    with pytest.raises(
+        ValueError, match="^only exited outcomes carry exit codes$"
+    ):
+        normalized_result(outcome=outcome, exit_code=exit_code)
+
+
+@pytest.mark.parametrize(
+    "size",
+    [0, 1, MAX_STDOUT_BYTES],
+)
+def test_normalized_result_accepts_bounded_sizes(size):
+    assert normalized_result(stdout_size=size).stdout_size == size
+
+
+@pytest.mark.parametrize(
+    "size",
+    [MAX_STDOUT_BYTES + 1, MAX_COUNTER],
+)
+def test_normalized_result_rejects_oversized_output(size):
+    with pytest.raises(ValueError, match="^normalized stdout exceeds the byte bound$"):
+        normalized_result(stdout_size=size)
+
+
+@pytest.mark.parametrize("size", [-1, "4", 4.0, True, MAX_COUNTER + 1])
+def test_normalized_result_rejects_invalid_sizes(size):
+    with pytest.raises(ValueError, match="^invalid bounded attempt counter$"):
+        normalized_result(stdout_size=size)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    ["", "b" * 63, "b" * 65, "B" * 64, "g" * 64, 0, None],
+)
+def test_normalized_result_rejects_invalid_digests(digest):
+    with pytest.raises(ValueError, match="^invalid normalized stdout identity$"):
+        normalized_result(stdout_sha256=digest)
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", None])
+def test_normalized_result_rejects_nonbool_completeness(value):
+    with pytest.raises(
+        ValueError, match="^invalid normalized completeness declaration$"
+    ):
+        normalized_result(complete=value)
+
+
+@pytest.mark.parametrize(
+    "field_name,bad_values",
+    [
+        ("request_fingerprint", ["", "a" * 63, "A" * 64, None, 0]),
+        ("attempt_number", [0, -1, "1", MAX_COUNTER + 1]),
+        ("timeout_ms", [0, -1, "10", MAX_COUNTER + 1]),
+        ("elapsed_ms", [-1, "7", MAX_COUNTER + 1]),
+    ],
+)
+def test_normalized_result_rejects_invalid_counters(field_name, bad_values):
+    for bad in bad_values:
+        with pytest.raises(ValueError):
+            normalized_result(**{field_name: bad})
+
+
+def test_normalized_result_manifest_is_detached_and_body_free():
+    result = normalized_result(complete=False)
+    manifest = result.to_dict()
+    assert manifest == {
+        "schema_version": "mumei.verifier-run-result/v1",
+        "request_fingerprint": FINGERPRINT,
+        "attempt_number": 1,
+        "timeout_ms": 10,
+        "outcome": "exited",
+        "elapsed_ms": 7,
+        "exit_code": 0,
+        "stdout": {
+            "sha256": "b" * 64,
+            "size_bytes": 4,
+            "complete": False,
+        },
+    }
+    encoded = json.dumps(manifest)
+    assert "events" not in encoded
+    assert "body" not in encoded
+
+
+def test_normalized_result_is_frozen_and_passive():
+    result = normalized_result()
+    with pytest.raises(FrozenInstanceError):
+        result.outcome = "failed"
+    before = result.to_dict()
+    again = normalized_result()
+    assert result == again
+    assert result.to_dict() == before == again.to_dict()

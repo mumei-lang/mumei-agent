@@ -260,3 +260,61 @@ def test_run_result_manifest_is_body_free():
     encoded = json.dumps(data)
     assert "FAKE_PRIVATE_RESULT_BODY" not in encoded
     assert "stdout" not in encoded
+
+
+def test_normalized_maps_a_real_exit_to_detached_metadata():
+    body = b"normalized-observation"
+    result = AttemptRunner().run(
+        request(number=2, timeout_ms=30_000),
+        argv(f"import sys; sys.stdout.buffer.write({body!r}); sys.exit(3)"),
+    )
+    normalized = result.normalized()
+    assert type(normalized).__name__ == "AttemptNormalizedResult"
+    assert normalized.request_fingerprint == FINGERPRINT
+    assert normalized.attempt_number == 2
+    assert normalized.timeout_ms == 30_000
+    assert normalized.outcome == "exited"
+    assert normalized.exit_code == 3
+    assert normalized.elapsed_ms == result.record.events[-1].elapsed_ms
+    assert normalized.stdout_size == len(body)
+    assert normalized.stdout_sha256 == hashlib.sha256(body).hexdigest()
+    assert normalized.complete is True
+    manifest = normalized.to_dict()
+    assert manifest["schema_version"] == "mumei.verifier-run-result/v1"
+    assert "normalized-observation" not in json.dumps(manifest)
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [("import sys; sys.exit(0)", "exited"), ("import sys; sys.exit(42)", "exited")],
+)
+def test_normalized_outcome_matches_terminal_state(code, expected):
+    result = AttemptRunner().run(request(), argv(code))
+    assert result.normalized().outcome == expected
+
+
+def test_normalized_timeout_and_spawn_failure_carry_no_exit_code():
+    runner = AttemptRunner()
+    timed_out = runner.run(
+        request(timeout_ms=150), argv("import time; time.sleep(60)")
+    ).normalized()
+    assert timed_out.outcome == "timed_out"
+    assert timed_out.exit_code is None
+    assert "exit_code" not in timed_out.to_dict()
+    failed = runner.run(request(), ("/nonexistent-devin-binary-9f2e",)).normalized()
+    assert failed.outcome == "failed"
+    assert failed.exit_code is None
+    assert failed.stdout_size == 0
+
+
+def test_normalized_marks_truncated_collection():
+    size = MAX_STDOUT_BYTES + 10_000
+    result = AttemptRunner().run(
+        request(timeout_ms=30_000),
+        argv(f"import sys; sys.stdout.buffer.write(b'x'*{size})"),
+    )
+    normalized = result.normalized()
+    assert normalized.complete is False
+    assert normalized.stdout_size == MAX_STDOUT_BYTES
+    assert normalized.stdout_sha256 == hashlib.sha256(result.stdout).hexdigest()
+    assert normalized.to_dict()["stdout"]["complete"] is False

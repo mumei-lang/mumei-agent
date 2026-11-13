@@ -88,6 +88,36 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 normalized run-result descriptors
+
+`AttemptRunResult.normalized()` maps one observed terminal run into
+`AttemptNormalizedResult` — detached metadata under
+`mumei.verifier-run-result/v1` naming only the request binding
+(fingerprint, ordinal, declared timeout), the terminal outcome
+(`exited`/`failed`/`timed_out`/`cancelled`), the terminal event's elapsed
+counter, the exit code when and only when the outcome is `exited`, and the
+bounded-output manifest (size, SHA-256, `complete`). Hosts can consume every
+outcome through one stable shape without reading event histories or raw
+bytes; non-terminal outcomes, foreign exit codes, oversize declarations and
+non-bool completeness are static errors.
+
+```python
+result = AttemptRunner().run(request, argv)
+normalized = result.normalized()
+assert normalized.to_dict()["outcome"] == "exited"
+```
+
+Normalization covers **agent-side observations only**: the digest binds
+bytes, not meaning; an exit code is transport metadata, never a
+verification verdict; `complete` records only that collection stayed within
+the bound, not how much was missed. No parsing, verdict interpretation,
+acceptance, canonical publication, retry policy or scheduling is added —
+Core still owns Evidence checks and meaning, and hosts still bind snapshots
+with `AttemptOutput` and publish via `AttemptSequenceStore`. No default
+CLI/MCP/audit route, external verifier or dependency is added. C11 stays
+partial; C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 real process control for declared execution requests
 
 `agent/attempt_runner.py` is the first **effectful** boundary in this
