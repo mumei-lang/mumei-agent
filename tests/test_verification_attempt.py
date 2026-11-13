@@ -1799,3 +1799,292 @@ def test_sequence_output_binding_has_no_io_decode_or_clock_effects(monkeypatch, 
             sequence.begin_attempt().check_output_binding(output)
     assert (sequence.to_dict(), output.to_dict()) == before
     assert capsys.readouterr() == ("", "")
+
+
+def exited_sequence_and_output(prepared, body=b"{}", code=0):
+    """Reconcile one exited attempt and bind a snapshot to it."""
+    reserved = AttemptSequence.from_prepared(prepared).begin_attempt()
+    report = reserved.current.record(START).record(AttemptEvent("exited", 3, code))
+    sequence = reserved.reconcile_report(report)
+    output = AttemptOutput.from_prepared(
+        prepared, 1, report, body, hashlib.sha256(body).hexdigest()
+    )
+    return sequence, output
+
+
+@pytest.mark.parametrize("code", [-1, 0, 1])
+def test_sequence_result_selection_binds_current_exited_output(code):
+    sequence, output = exited_sequence_and_output(prepared_source(), code=code)
+    before = sequence.to_dict(), output.to_dict()
+    selected = sequence.select_result(output)
+    assert selected is not sequence
+    assert selected.selected_result == (
+        1,
+        output.to_dict()["output_fingerprint"],
+    )
+    assert sequence.selected_result is None
+    data = selected.to_dict()
+    assert data["selected_result"] == {
+        "attempt_number": 1,
+        "output_fingerprint": output.to_dict()["output_fingerprint"],
+    }
+    assert "stdout" not in data and "result" not in data
+    assert (sequence.to_dict(), output.to_dict()) == before
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+@pytest.mark.parametrize("ordinal", range(1, MAX_ATTEMPTS + 1))
+def test_sequence_result_selection_only_binds_the_current_attempt(count, ordinal):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    bound = (
+        attempts[ordinal - 1]
+        if ordinal <= count
+        else sequence_record("exited", ordinal)
+    )
+    output = output_snapshot(bound, b"body-%d" % ordinal)
+    if ordinal == count:
+        selected = sequence.select_result(output)
+        assert selected.selected_result == (
+            count,
+            output.to_dict()["output_fingerprint"],
+        )
+        assert sequence.selected_result is None
+    else:
+        with pytest.raises(ValueError):
+            sequence.select_result(output)
+        assert sequence.selected_result is None
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+@pytest.mark.parametrize("ordinal", range(0, MAX_ATTEMPTS + 2))
+def test_sequence_selected_result_constructor_matrix(state, count, ordinal):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count)) + (
+        (sequence_record(state, count),) if count else ()
+    )
+    marker = (ordinal, "b" * 64)
+    if state == "exited" and ordinal == count and count:
+        sequence = AttemptSequence(FINGERPRINT, 10, attempts, marker)
+        assert sequence.selected_result == marker
+    else:
+        with pytest.raises(ValueError):
+            AttemptSequence(FINGERPRINT, 10, attempts, marker)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "result",
+        1,
+        [1, "b" * 64],
+        {"attempt_number": 1, "output_fingerprint": "b" * 64},
+        (1,),
+        (1, "b" * 64, 1),
+        ("1", "b" * 64),
+        (1, 0),
+        (1, "B" * 64),
+        (1, "b" * 63),
+        (1, "b" * 65),
+        (1, "g" * 64),
+    ],
+)
+def test_sequence_selected_result_rejects_invalid_metadata(marker):
+    attempts = (sequence_record("exited"),)
+    with pytest.raises(ValueError, match="^invalid selected result metadata$"):
+        AttemptSequence(FINGERPRINT, 10, attempts, marker)
+
+
+@pytest.mark.parametrize("left", [b"{}", b"[]", b""])
+@pytest.mark.parametrize("right", [b"{}", b"[]", b""])
+def test_sequence_result_selection_is_idempotent_only_for_the_same_output(
+    left, right
+):
+    sequence, first = exited_sequence_and_output(prepared_source(), body=left)
+    selected = sequence.select_result(first)
+    second = output_snapshot(first.attempt, right)
+    if left == right:
+        assert selected.select_result(second) is selected
+    else:
+        with pytest.raises(
+            ValueError, match="^attempt sequence already has a selected result$"
+        ):
+            selected.select_result(second)
+    assert selected.selected_result == (
+        1,
+        first.to_dict()["output_fingerprint"],
+    )
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+def test_sequence_result_selection_closes_reservation(count):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    selected = sequence.select_result(
+        output_snapshot(attempts[-1], b"chosen")
+    )
+    before = selected.to_dict()
+    with pytest.raises(
+        ValueError, match="^a selected result closes the attempt sequence$"
+    ):
+        selected.begin_attempt()
+    assert selected.to_dict() == before
+    assert len(selected.attempts) == count
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_sequence_result_selection_requires_a_current_exited_record(count):
+    attempts = tuple(
+        sequence_record("exited" if n < count else "failed", n)
+        for n in range(1, count + 1)
+    )
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    output = output_snapshot(sequence_record("exited", count or 1), b"x")
+    with pytest.raises(ValueError):
+        sequence.select_result(output)
+    assert sequence.selected_result is None
+
+
+def test_sequence_result_selection_requires_explicit_reconciliation():
+    prepared = prepared_source()
+    reserved = AttemptSequence.from_prepared(prepared).begin_attempt()
+    report = reserved.current.record(START).record(AttemptEvent("exited", 3, 0))
+    output = AttemptOutput.from_prepared(
+        prepared, 1, report, b"{}", hashlib.sha256(b"{}").hexdigest()
+    )
+    for sequence in (AttemptSequence.from_prepared(prepared), reserved):
+        with pytest.raises(ValueError):
+            sequence.select_result(output)
+    reconciled = reserved.reconcile_report(report)
+    assert reconciled.select_result(output).selected_result is not None
+    assert reserved.current.state == "ready"
+
+
+@pytest.mark.parametrize(
+    "value", [None, True, 0, {}, [], record(), "FAKE_PRIVATE_RESULT"]
+)
+def test_sequence_result_selection_rejects_non_snapshots_without_echo(value):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(
+        ValueError, match="^output does not match the current sequence record$"
+    ):
+        sequence.select_result(value)
+    assert sequence.selected_result is None
+
+
+def test_sequence_result_selection_rejects_subclasses_before_custom_behavior():
+    class HostileOutput(AttemptOutput):
+        def __getattribute__(self, name):
+            pytest.fail("custom output behavior was called")
+
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    with pytest.raises(ValueError):
+        sequence.select_result(object.__new__(HostileOutput))
+
+
+def test_sequence_result_selection_does_not_arbitrate_independent_sequences():
+    first = AttemptSequence(FINGERPRINT, 10, (sequence_record("exited"),))
+    second = AttemptSequence(FINGERPRINT, 10, (sequence_record("failed"),))
+    output = output_snapshot(first.current, b"one")
+    selected = first.select_result(output)
+    assert selected.selected_result is not None
+    assert second.selected_result is None
+    foreign = AttemptRecord("b" * 64, 1, 10, PREFIXES["exited"])
+    other = AttemptSequence("b" * 64, 10, (foreign,))
+    assert other.selected_result is None
+
+
+def test_sequence_result_selection_keeps_terminal_reports_idempotent():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    selected = sequence.select_result(output)
+    assert selected.reconcile_report(output.attempt) is selected
+    with pytest.raises(ValueError):
+        selected.reconcile_report(sequence_record("exited", 2))
+    assert selected.selected_result is not None
+
+
+def test_sequence_result_selection_is_not_truth_or_acceptance():
+    prepared = prepared_source()
+    for body in (b"{}", b"[]", b"", b"not json", b'{"success":true}'):
+        sequence, output = exited_sequence_and_output(prepared, body=body)
+        selected = sequence.select_result(output)
+        data = selected.to_dict()
+        assert data["selected_result"]["attempt_number"] == 1
+        assert json.dumps(data)
+        for forbidden in ("accept", "grade", "verified", "winner", "truth"):
+            assert forbidden not in data
+
+
+def test_sequence_result_selection_serialization_is_detached_and_body_free():
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), body=b"FAKE_PRIVATE_RESULT_BODY"
+    )
+    selected = sequence.select_result(output)
+    before = selected.to_dict()
+    data = selected.to_dict()
+    data["selected_result"]["output_fingerprint"] = "0" * 64
+    data["selected_result"].clear()
+    assert selected.to_dict() == before
+    assert json.loads(json.dumps(before)) == before
+    encoded = json.dumps(before)
+    assert "FAKE_PRIVATE_RESULT_BODY" not in encoded
+    with pytest.raises(FrozenInstanceError):
+        selected.selected_result = None
+
+
+@pytest.mark.parametrize("count", range(1, MAX_ATTEMPTS + 1))
+@pytest.mark.parametrize("ordinal", range(1, MAX_ATTEMPTS + 1))
+def test_sequence_result_selection_matrix_over_attempt_positions(count, ordinal):
+    attempts = tuple(sequence_record("exited", n) for n in range(1, count + 1))
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    outputs = {
+        n: output_snapshot(attempts[n - 1], b"body-%d" % n)
+        for n in range(1, count + 1)
+    }
+    selected = sequence.select_result(outputs[count])
+    if ordinal <= count:
+        competing = outputs[ordinal]
+    else:
+        competing = output_snapshot(attempts[count - 1], b"alt-%d" % ordinal)
+    if ordinal == count:
+        assert selected.select_result(competing) is selected
+    else:
+        with pytest.raises(ValueError):
+            selected.select_result(competing)
+    assert selected.selected_result == (
+        count,
+        outputs[count].to_dict()["output_fingerprint"],
+    )
+
+
+def test_sequence_result_selection_is_passive_without_io_clock_or_decode(
+    monkeypatch, capsys
+):
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), body=b"FAKE_PRIVATE_SELECTED_BODY"
+    )
+    before = sequence.to_dict(), output.to_dict()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("result selection must remain passive exact metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (time, "monotonic"),
+            (time, "time"),
+            (AttemptOutput, "decode_json_object"),
+            (AttemptOutput, "reconcile"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        selected = sequence.select_result(output)
+        assert selected.select_result(output) is selected
+        with pytest.raises(ValueError):
+            selected.begin_attempt()
+    assert (sequence.to_dict(), output.to_dict()) == before
+    assert capsys.readouterr() == ("", "")
