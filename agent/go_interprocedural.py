@@ -6,8 +6,12 @@ explicit scalar return expressions; the result unions every syntactic return's
 dependencies (unreachable returns included — reachability is not proven). A
 ``for`` clause may hold one let-binding initializer, a supported condition and
 an inc/dec update on a bound scalar; ``range``, ``break``/``continue``,
-reassignment, tuples, ``if`` initializers and every other statement shape stay
-unsupported. Compiler-resolved
+compound operators, tuples, ``if`` initializers and every other statement shape
+stay unsupported. A scalar ``x = expression`` reassignment replaces the
+binding's dependencies — it never declares a new variable. Loop bodies are
+joined to a widening fixed point so dependencies propagating across
+iterations are captured (joins, not unrolls — trip counts are never
+modelled). Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -316,24 +320,56 @@ class _Builder:
             )
             # Branch-local bindings never escape their scope, matching the
             # compiler — a later reference simply would not resolve.
+            # Reassignments of existing names join back by union: the
+            # branch may not execute.
+            branch = dict(locals_)
             for child in _children(consequence):
                 self.statement(
-                    child, fn, params, dict(locals_), transfers, count, deps,
+                    child, fn, params, branch, transfers, count, deps,
                     saw_return,
                 )
+            self._join(locals_, branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
+                branch = dict(locals_)
                 if alternative.type == "if_statement":
                     self.statement(
-                        alternative, fn, params, dict(locals_), transfers,
+                        alternative, fn, params, branch, transfers,
                         count, deps, saw_return,
                     )
                 else:
                     for child in _children(alternative):
                         self.statement(
-                            child, fn, params, dict(locals_), transfers,
+                            child, fn, params, branch, transfers,
                             count, deps, saw_return,
                         )
+                self._join(locals_, branch, params)
+            return
+        if kind == "assignment_statement":
+            operator = node.child_by_field_name("operator")
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            lefts = _children(left) if left is not None else []
+            rights = _children(right) if right is not None else []
+            if (
+                operator is None
+                or operator.type != "="
+                or len(lefts) != 1
+                or lefts[0].type != "identifier"
+                or len(rights) != 1
+            ):
+                raise _Unsupported("unsupported_statement", _span(node))
+            ref = self.references.get(_span(lefts[0]))
+            if ref is None or (
+                ref.binding_id not in locals_ and ref.binding_id not in params
+            ):
+                raise _Unsupported("binding_unavailable", _span(lefts[0]))
+            # Reassignment replaces the binding's dependencies; it never
+            # declares a new variable. Inside a branch the caller's join
+            # unions the new value back as a may-assignment.
+            locals_[ref.binding_id] = self.expression(
+                rights[0], fn, params, locals_, transfers, count, 0
+            )
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")
@@ -381,12 +417,65 @@ class _Builder:
             elif clause is not None:
                 # `for <expression> { ... }` — a condition-only loop.
                 self.expression(clause, fn, params, scope, transfers, count, 0)
-            for child in _children(body_node):
-                self.statement(
-                    child, fn, params, scope, transfers, count, deps, saw_return
-                )
+            # Iterate the body to a fixed point: a reassignment made on one
+            # pass seeds the next, so dependencies propagating across
+            # iterations are captured (this is a join, not an unroll — trip
+            # counts are never modelled). Every widened entry only gains
+            # parameter indexes, so widening is monotone over a bounded
+            # universe; the pass cap is a defensive analysis limit.
+            passes = 0
+            while True:
+                mark = len(transfers)
+                inner = dict(scope)
+                for child in _children(body_node):
+                    self.statement(
+                        child, fn, params, inner, transfers, count, deps,
+                        saw_return,
+                    )
+                changed = False
+                for binding_id, binding_deps in inner.items():
+                    if binding_id in scope:
+                        if not binding_deps <= scope[binding_id]:
+                            scope[binding_id] |= binding_deps
+                            changed = True
+                    elif binding_id in params:
+                        scope[binding_id] = (
+                            frozenset({params[binding_id]}) | binding_deps
+                        )
+                        changed = True
+                if not changed:
+                    break
+                # Keep only the last pass's transfers: argument dependency
+                # sets widen across passes and earlier copies are stale.
+                del transfers[mark:]
+                passes += 1
+                if passes > len(scope) * (len(params) + 1):
+                    raise _Unsupported("analysis_limit", _span(node))
+            # Loop-body reassignments join back by union: the loop may
+            # execute zero or many times.
+            self._join(locals_, scope, params)
             return
         raise _Unsupported("unsupported_statement", _span(node))
+
+    @staticmethod
+    def _join(
+        outer: dict[str, frozenset[int]],
+        inner: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> None:
+        """Union inner-scope reassignments back into the outer environment.
+
+        Bindings created inside the inner scope never escape — only names
+        that existed outside (lets or parameters) merge, and their
+        dependencies union because the inner code path may not run.
+        """
+        for binding_id, deps in inner.items():
+            if binding_id in outer:
+                outer[binding_id] |= deps
+            elif binding_id in params:
+                # A reassigned parameter keeps its own dependency — the
+                # branch may not run.
+                outer[binding_id] = frozenset({params[binding_id]}) | deps
 
     def expression(
         self,
@@ -407,10 +496,12 @@ class _Builder:
             return frozenset()
         if kind in {"identifier", "true", "false"}:
             ref = self.references.get(_span(node))
-            if ref is not None and ref.binding_id in params:
-                return frozenset({params[ref.binding_id]})
+            # Reassigned names (including parameters) resolve through
+            # `locals_` first — their latest dependencies live there.
             if ref is not None and ref.binding_id in locals_:
                 return locals_[ref.binding_id]
+            if ref is not None and ref.binding_id in params:
+                return frozenset({params[ref.binding_id]})
             if ref is not None and ref.kind == "universe" and kind in {"true", "false"}:
                 return frozenset()
             raise _Unsupported("non_parameter_reference", _span(node))
