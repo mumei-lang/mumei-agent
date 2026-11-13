@@ -1,8 +1,10 @@
 """Opt-in parameter-dependency summaries, not proofs or audit-grade inputs.
 
 Bodies are let bindings — single-name ``name := expression`` declarations —
-followed by one explicit scalar return expression; reassignment, tuples and
-every other statement stay unsupported. Compiler-resolved
+and ``if``/``else`` statements followed by one or more explicit scalar return
+expressions; the result unions every syntactic return's dependencies (unreachable
+returns included — reachability is not proven). Reassignment, tuples, ``if``
+initializers and every other statement shape stay unsupported. Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -227,22 +229,59 @@ class _Builder:
         statements = _children(block)
         if len(statements) == 1 and statements[0].type == "statement_list":
             statements = _children(statements[0])
-        if not statements or statements[-1].type != "return_statement":
+        if not statements:
             raise _Unsupported("unsupported_body", fn.body)
-        expressions = _children(statements[-1])
-        if len(expressions) == 1 and expressions[0].type == "expression_list":
-            expressions = _children(expressions[0])
-        if len(expressions) != 1:
-            raise _Unsupported("unsupported_return", fn.body)
         params = {p.binding_id: i for i, p in enumerate(fn.parameters) if p.binding_id}
         transfers: list[CallTransfer] = []
         count = [0]
         locals_: dict[str, frozenset[int]] = {}
-        for statement in statements[:-1]:
-            if statement.type != "short_var_declaration":
-                raise _Unsupported("unsupported_statement", _span(statement))
-            left = statement.child_by_field_name("left")
-            right = statement.child_by_field_name("right")
+        deps: list[frozenset[int]] = [frozenset()]
+        saw_return = [False]
+        for statement in statements:
+            self.statement(
+                statement, fn, params, locals_, transfers, count, deps, saw_return
+            )
+        if not saw_return[0]:
+            raise _Unsupported("unsupported_body", fn.body)
+        return self.result(
+            fn, deps[0], tuple(sorted(transfers, key=lambda c: (c.span.start, c.span.end)))
+        )
+
+    def statement(
+        self,
+        node: Any,
+        fn: Function,
+        params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: list[int],
+        deps: list[frozenset[int]],
+        saw_return: list[bool],
+    ) -> None:
+        count[0] += 1
+        if count[0] > MAX_EXPRESSION_NODES:
+            raise _Unsupported("analysis_limit", _span(node))
+        kind = node.type
+        if kind in {"block", "statement_list"}:
+            for child in _children(node):
+                self.statement(
+                    child, fn, params, locals_, transfers, count, deps, saw_return
+                )
+            return
+        if kind == "return_statement":
+            expressions = _children(node)
+            if len(expressions) == 1 and expressions[0].type == "expression_list":
+                expressions = _children(expressions[0])
+            if len(expressions) != 1:
+                raise _Unsupported("unsupported_return", _span(node))
+            deps[0] |= self.expression(
+                expressions[0], fn, params, locals_, transfers, count, 0
+            )
+            saw_return[0] = True
+            return
+        if kind == "short_var_declaration":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
             lefts = _children(left) if left is not None else []
             rights = _children(right) if right is not None else []
             if (
@@ -250,19 +289,50 @@ class _Builder:
                 or lefts[0].type != "identifier"
                 or len(rights) != 1
             ):
-                raise _Unsupported("unsupported_statement", _span(statement))
+                raise _Unsupported("unsupported_statement", _span(node))
             binding = self.bindings_by_span.get(_span(lefts[0]))
             if binding is None or binding.type.kind not in {"integer", "boolean"}:
-                raise _Unsupported("binding_unavailable", _span(statement))
+                raise _Unsupported("binding_unavailable", _span(node))
             locals_[binding.id] = self.expression(
                 rights[0], fn, params, locals_, transfers, count, 0
             )
-        deps = self.expression(
-            expressions[0], fn, params, locals_, transfers, count, 0
-        )
-        return self.result(
-            fn, deps, tuple(sorted(transfers, key=lambda c: (c.span.start, c.span.end)))
-        )
+            return
+        if kind == "if_statement":
+            condition = node.child_by_field_name("condition")
+            consequence = node.child_by_field_name("consequence")
+            if (
+                node.child_by_field_name("initializer") is not None
+                or condition is None
+                or consequence is None
+            ):
+                raise _Unsupported("unsupported_statement", _span(node))
+            # The condition is evaluated but its dependencies cannot reach
+            # the result: every fragment statement is effect-free.
+            self.expression(
+                condition, fn, params, locals_, transfers, count, 0
+            )
+            # Branch-local bindings never escape their scope, matching the
+            # compiler — a later reference simply would not resolve.
+            for child in _children(consequence):
+                self.statement(
+                    child, fn, params, dict(locals_), transfers, count, deps,
+                    saw_return,
+                )
+            alternative = node.child_by_field_name("alternative")
+            if alternative is not None:
+                if alternative.type == "if_statement":
+                    self.statement(
+                        alternative, fn, params, dict(locals_), transfers,
+                        count, deps, saw_return,
+                    )
+                else:
+                    for child in _children(alternative):
+                        self.statement(
+                            child, fn, params, dict(locals_), transfers,
+                            count, deps, saw_return,
+                        )
+            return
+        raise _Unsupported("unsupported_statement", _span(node))
 
     def expression(
         self,
