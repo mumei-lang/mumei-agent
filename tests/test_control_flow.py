@@ -118,8 +118,9 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
 @pytest.mark.parametrize(
     "body,reason",
     [
-        ("switch x { case 0: return 1 }; return 0", "unsupported_switch"),
-        ("select { default: return 0 }", "unsupported_switch"),
+        ("select { default: return 0 }", "unsupported_select_switch"),
+        ("select { case x := <-ch: return x }", "unsupported_select_switch"),
+        ("switch v := x.(type) { case int: return 1 }", "unsupported_type_switch"),
         ("defer f(); return 0", "unsupported_defer"),
         ("go f(); return 0", "unsupported_go"),
         ("goto done; done: return 0", "unsupported_goto"),
@@ -819,6 +820,15 @@ def test_function_body_declaration_without_body_rejected():
         control_flow.function_body(source, result, result.functions[0])
 
 
+def by_text(cfg, body: str, needle: str):
+    return [
+        node
+        for node in cfg.nodes
+        if node.span is not None
+        and body[node.span.start : node.span.end].startswith(needle)
+    ]
+
+
 def edges_to(cfg, source: int):
     return {edge.target for edge in cfg.edges if edge.source == source}
 
@@ -998,3 +1008,116 @@ def test_flow_hints_declares_empty_unreliable_for_plain_bodies():
     body = "x := 1; use(x)"
     cfg = graph(body)
     assert control_flow.flow_hints(body, cfg).unreliable == frozenset()
+
+
+def test_expression_switch_builds_case_alternatives():
+    result = control_flow.build_go_cfg(
+        "switch x { case 0: a(); case 1, 2: b(); default: c() }; return 0"
+    )
+    cfg = result.graph
+    assert result.gaps == ()
+    (switch,) = nodes(cfg, "switch")
+    cases = nodes(cfg, "case") + nodes(cfg, "default")
+    assert len(cases) == 3
+    assert edges_to(cfg, switch.node_id) == {c.node_id for c in cases}
+    # No default-less fallback edge when a default exists.
+    assert len(cfg.reachable()) == len(cfg.nodes)
+
+
+def test_switch_without_default_edges_to_following():
+    cfg = graph("switch x { case 0: a(); case 1: b() }; after()")
+    (switch,) = nodes(cfg, "switch")
+    targets = edges_to(cfg, switch.node_id)
+    (after,) = by_text(cfg, "switch x { case 0: a(); case 1: b() }; after()", "after()")
+    assert after.node_id in targets
+
+
+def test_case_bodies_exit_to_following_not_each_other():
+    body = "switch x { case 0: a(); case 1: b() }; after()"
+    cfg = graph(body)
+    body = "switch x { case 0: a(); case 1: b() }; after()"
+    exprs = nodes(cfg, "expr")
+    assert len(exprs) == 3  # a(), b(), after()
+    (after,) = by_text(cfg, body, "after()")
+    for e in exprs:
+        if e.node_id != after.node_id:
+            assert edges_to(cfg, e.node_id) == {after.node_id}
+
+
+def test_break_inside_switch_exits_the_switch_not_the_loop():
+    cfg = graph(
+        "for { switch x { case 0: break; case 1: c() }; after() }; done()"
+    )
+    (jump,) = nodes(cfg, "break")
+    body = "for { switch x { case 0: break; case 1: c() }; after() }; done()"
+    exprs = nodes(cfg, "expr")
+    assert len(exprs) == 3  # c(), after(), done()
+    (after,) = by_text(cfg, body, "after()")
+    assert edges_to(cfg, jump.node_id) == {after.node_id}
+
+
+def test_continue_inside_switch_targets_enclosing_loop():
+    cfg = graph(
+        "for i := 0; i < 9; i++ { switch x { case 0: continue } }; done()"
+    )
+    (jump,) = nodes(cfg, "continue")
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"inc"}
+
+
+def test_unlabelled_break_in_switch_without_loop_is_allowed():
+    result = control_flow.build_go_cfg("switch x { case 0: break }; after()")
+    assert result.gaps == ()
+    assert result.graph is not None
+
+
+def test_switch_init_is_modelled():
+    cfg, result = facts("switch i := 0; i { case 0: use(i) }; after()")
+    assert cfg is not None
+
+
+def test_case_guard_identifiers_count_as_uses():
+    body = "x := 1; y := 2; switch x { case y: a() }; after()"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    # x (tag) and y (case guard) are both reads — neither is unused.
+    assert hints.unused == ()
+
+
+def test_switch_all_cases_return_marks_following_unreachable():
+    body = "switch x { case 0: return 1; default: return 2 }; z := 1"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    assert {use.kind for use in hints.unreachable} == {"define"}
+
+
+def test_labelled_break_through_switch_targets_the_loop():
+    cfg = graph(
+        "outer: for { switch x { case 0: break outer } }; after()"
+    )
+    (jump,) = nodes(cfg, "break")
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"expr"}
+
+
+def test_labelled_switch_statement_remains_a_gap():
+    result = control_flow.build_go_cfg(
+        "outer: switch x { case 0: break }; after()"
+    )
+    assert result.graph is None
+    assert "labelled_statement" in {gap.reason for gap in result.gaps}
+
+
+def test_fallthrough_remains_a_declared_gap():
+    result = control_flow.build_go_cfg(
+        "switch x { case 0: fallthrough; case 1: a() }"
+    )
+    assert result.graph is None
+    assert {gap.reason for gap in result.gaps} == {"unsupported_fallthrough"}
+
+
+def test_switch_inside_case_body_and_unreachable_after():
+    cfg = graph(
+        "switch x { case 0: switch y { case 1: a() } }; after()"
+    )
+    switches = nodes(cfg, "switch")
+    assert len(switches) == 2
+    assert len(cfg.reachable()) == len(cfg.nodes)

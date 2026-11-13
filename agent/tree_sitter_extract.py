@@ -1213,6 +1213,15 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
             text=text,
             start=start,
             condition=_decode(source_bytes, value_node).strip() if value_node is not None else "",
+            # ``expression`` | ``type`` | ``select`` — callers modelling
+            # only expression switches reject the other two operators.
+            operator=(
+                "select"
+                if kind == "select_statement"
+                else "type"
+                if kind == "type_switch_statement"
+                else "expression"
+            ),
             init=(init_stmt,) if init_stmt is not None else (),
             body=tuple(cases),
             has_tag=value_node is not None or kind != "expression_switch_statement",

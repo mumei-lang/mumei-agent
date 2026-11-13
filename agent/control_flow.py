@@ -1,10 +1,12 @@
 """Source-mapped explicit normal flow for a deliberately limited Go profile.
 
 Calls are opaque and assumed to return normally. Panic/recovery, concurrency,
-deferred execution, switches and ``goto`` are not modelled; labelled
-``break``/``continue`` resolve only against enclosing labelled loops;
-``panic``/``os.Exit``-style terminating calls end normal flow at the
-exit (deferred calls and ``recover`` stay unmodelled). Unsupported
+deferred execution, ``select``/type-switches and ``goto`` are not
+modelled; expression switches are exclusive alternatives with implicit
+break, labelled ``break``/``continue`` resolve only against enclosing
+labelled loops, and ``panic``/``os.Exit``-style terminating calls end
+normal flow at the exit (deferred calls and ``recover`` stay
+unmodelled). Unsupported
 syntax produces gaps instead of a misleading partial graph. This is neither a
 proof of source semantics nor a full analysis framework.
 
@@ -90,7 +92,9 @@ class CFGConstruction:
 
 
 _SIMPLE = frozenset({"define", "assign", "inc", "dec", "const", "var", "expr"})
-_STRUCTURED = frozenset({"if", "for", "range", "block", "return", "terminate"})
+_STRUCTURED = frozenset(
+    {"if", "for", "range", "block", "return", "terminate", "switch"}
+)
 
 
 def _span(statement: tree_sitter_extract.Statement) -> SourceSpan:
@@ -101,6 +105,7 @@ def _gaps(
     body: str,
     statements: tuple[tree_sitter_extract.Statement, ...],
     in_loop: bool = False,
+    in_break: bool = False,
     labels: frozenset[str] = frozenset(),
 ) -> list[CFGGap]:
     gaps: list[CFGGap] = []
@@ -119,26 +124,51 @@ def _gaps(
         if kind in {"break", "continue"}:
             parts = statement.text.split()
             if len(parts) == 1:
-                if not in_loop:
+                if kind == "continue" and not in_loop:
+                    gaps.append(CFGGap("jump_without_loop", span))
+                elif kind == "break" and not (in_loop or in_break):
                     gaps.append(CFGGap("jump_without_loop", span))
             elif len(parts) == 2 and _IDENTIFIER.fullmatch(parts[1]):
                 if parts[1] not in labels:
                     gaps.append(CFGGap("unresolved_label", span))
             else:
                 gaps.append(CFGGap("labelled_jump", span))
+        elif kind == "switch":
+            if statement.operator in {"type", "select"}:
+                gaps.append(CFGGap(f"unsupported_{statement.operator}_switch", span))
+            else:
+                for case in statement.body:
+                    if case.kind == "case" and not case.values:
+                        # A value-less case the extractor could not
+                        # classify — never silently modelled.
+                        gaps.append(CFGGap("unsupported_case", _span(case)))
         elif kind not in _SIMPLE | _STRUCTURED:
             gaps.append(CFGGap(f"unsupported_{kind}", span))
-        gaps.extend(_gaps(body, statement.init, in_loop, labels))
-        gaps.extend(
-            _gaps(
-                body,
-                statement.body,
-                in_loop or kind in {"for", "range"},
-                body_labels,
+        gaps.extend(_gaps(body, statement.init, in_loop, in_break, labels))
+        if kind == "switch":
+            for case in statement.body:
+                # Case bodies may break the switch; continue still
+                # needs an enclosing loop.
+                gaps.extend(
+                    _gaps(body, case.body, in_loop, True, labels)
+                )
+        else:
+            in_loop_body = in_loop or kind in {"for", "range"}
+            gaps.extend(
+                _gaps(
+                    body,
+                    statement.body,
+                    in_loop_body,
+                    in_break or kind in {"for", "range"},
+                    body_labels,
+                )
             )
+        gaps.extend(
+            _gaps(body, statement.orelse, in_loop, in_break, labels)
         )
-        gaps.extend(_gaps(body, statement.orelse, in_loop, labels))
-        gaps.extend(_gaps(body, statement.post, in_loop, labels))
+        gaps.extend(
+            _gaps(body, statement.post, in_loop, in_break, labels)
+        )
     return gaps
 
 
@@ -190,6 +220,20 @@ class _Builder:
                     self.sequence(statement.orelse, following, loop, labels),
                     "false",
                 )
+            elif kind == "switch":
+                # Case bodies are exclusive alternatives ending at the
+                # switch's following; break inside one exits the switch
+                # while continue still targets an enclosing loop.
+                inner = (following, loop[1] if loop else following)
+                for case in statement.body:
+                    case_node = self.node(case.kind, case)
+                    self.edge(node, case_node, "case")
+                    self.edge(
+                        case_node,
+                        self.sequence(case.body, following, inner, labels),
+                    )
+                if not any(case.kind == "default" for case in statement.body):
+                    self.edge(node, following)
             elif kind in {"for", "range"}:
                 post = self.sequence(statement.post, node, loop, labels)
                 target = (following, post)
@@ -375,8 +419,10 @@ class UnassignedUse:
 
 
 def _use_text(statement: tree_sitter_extract.Statement) -> str:
-    if statement.kind in {"if", "for"}:
+    if statement.kind in {"if", "for", "switch"}:
         return statement.condition
+    if statement.kind == "case":
+        return " ".join(statement.values)
     if statement.kind in {"range", "return", "expr", "define", "assign", "const", "var"}:
         return " ".join(statement.values)
     if statement.kind in {"inc", "dec"}:
