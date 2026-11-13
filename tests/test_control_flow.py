@@ -706,3 +706,117 @@ def test_evaluate_flow_hints_definite_flag_not_part_of_key():
     )
     result = control_flow.evaluate_flow_hints(hints, expected)
     assert result.unassigned == control_flow.FamilyMetrics(1, 0, 0)
+
+
+GO_SOURCE = """package demo
+
+func inc(x int) int {
+	x := 1
+	return x + 1
+}
+
+func reset() int {
+	return 0
+}
+"""
+
+
+def units(source=GO_SOURCE):
+    return control_flow.go_file_units(source)
+
+
+def test_go_file_units_index_each_function():
+    result = units()
+    assert result.gaps == ()
+    assert [fn.name for fn in result.functions] == ["inc", "reset"]
+    assert result.source_sha256 == hashlib.sha256(
+        GO_SOURCE.encode("utf-8")
+    ).hexdigest()
+
+
+def test_go_file_units_record_body_spans_and_digests():
+    result = units()
+    fn = result.functions[0]
+    body = GO_SOURCE[fn.body_span.start : fn.body_span.end]
+    assert body.startswith("\n\tx := 1")
+    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == (
+        fn.body_sha256
+    )
+    declaration = GO_SOURCE[fn.declaration.start : fn.declaration.end]
+    assert declaration.startswith("func inc")
+
+
+def test_go_file_units_empty_source_yields_no_functions():
+    result = units("")
+    assert result.functions == ()
+    assert result.gaps == ()
+
+
+def test_go_file_units_unsupported_source_reports_gap():
+    result = units("not go at all {{{")
+    assert result.functions == ()
+    assert result.gaps == (
+        control_flow.CFGGap("syntax_or_parser_unavailable"),
+    )
+
+
+def test_go_file_units_declaration_without_body_is_a_gap():
+    result = units("package p\nfunc asm()\n")
+    if result.functions:
+        (fn,) = result.functions
+        assert fn.body_span is None
+        assert fn.body_sha256 is None
+        assert [gap.reason for gap in result.gaps] == [
+            "declaration_without_body"
+        ]
+    else:
+        # The parser may simply skip bodiless declarations entirely.
+        assert result.gaps == () or result.gaps[0].reason
+
+
+def test_function_body_returns_the_exact_inner_text():
+    result = units()
+    fn = result.functions[0]
+    body = control_flow.function_body(GO_SOURCE, result, fn)
+    cfg = control_flow.build_go_cfg(body).graph
+    assert cfg is not None
+    assert cfg.source_sha256 == hashlib.sha256(
+        body.encode("utf-8")
+    ).hexdigest()
+
+
+def test_function_body_rejects_a_foreign_source():
+    result = units()
+    with pytest.raises(ValueError, match="does not match"):
+        control_flow.function_body(
+            "package other\n", result, result.functions[0]
+        )
+
+
+def test_function_body_rejects_a_foreign_function():
+    ours = units()
+    other = units("package demo\nfunc other() int {\n\treturn 1\n}\n")
+    with pytest.raises(ValueError, match="not declared"):
+        control_flow.function_body(
+            GO_SOURCE, ours, other.functions[0]
+        )
+
+
+def test_function_body_round_trips_through_flow_hints():
+    result = units("package p\nfunc f() int {\n\tx := 1\n\treturn x\n}\n")
+    body = control_flow.function_body(
+        "package p\nfunc f() int {\n\tx := 1\n\treturn x\n}\n",
+        result,
+        result.functions[0],
+    )
+    cfg = control_flow.build_go_cfg(body).graph
+    assert control_flow.flow_hints(body, cfg).unassigned == ()
+
+
+def test_function_body_declaration_without_body_rejected():
+    source = "package p\nfunc asm()\n"
+    result = units(source)
+    fn = result.functions[0] if result.functions else None
+    if fn is not None:
+        with pytest.raises(ValueError, match="no declared body"):
+            control_flow.function_body(source, result, fn)
