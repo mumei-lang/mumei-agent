@@ -124,8 +124,11 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
         ("go f(); return 0", "unsupported_go"),
         ("panic(x); return 0", "unsupported_terminate"),
         ("goto done; done: return 0", "unsupported_goto"),
-        ("outer: for { break outer }", "labelled_statement"),
-        ("for { continue outer }", "labelled_jump"),
+        ("outer: x := 1; return x", "labelled_statement"),
+        ("outer: if true { return 1 }", "labelled_statement"),
+        ("for { continue outer }", "unresolved_label"),
+        ("for { break missing }", "unresolved_label"),
+        ("outer: for { break missing }", "unresolved_label"),
         ("break", "jump_without_loop"),
         ("continue", "jump_without_loop"),
         ("ch <- x", "unsupported_other"),
@@ -815,3 +818,77 @@ def test_function_body_declaration_without_body_rejected():
     result = units(source)
     with pytest.raises(ValueError, match="no declared body"):
         control_flow.function_body(source, result, result.functions[0])
+
+
+def edges_to(cfg, source: int):
+    return {edge.target for edge in cfg.edges if edge.source == source}
+
+
+def kinds_at(cfg, targets):
+    return {cfg.nodes[t].kind for t in targets}
+
+
+def test_labelled_break_targets_the_labelled_loop():
+    result = control_flow.build_go_cfg(
+        "outer: for { if done { break outer }; work() }; after()"
+    )
+    cfg = result.graph
+    assert result.gaps == ()
+    (jump,) = nodes(cfg, "break")
+    # The labelled break exits the outer loop to after(), not the if's
+    # fallthrough.
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"expr"}
+
+
+def test_labelled_continue_targets_the_labelled_loop_post():
+    result = control_flow.build_go_cfg(
+        "outer: for i := 0; i < 9; i++ { continue outer }; after()"
+    )
+    cfg = result.graph
+    (jump,) = nodes(cfg, "continue")
+    # continue outer re-enters the loop update, not the exit.
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"inc"}
+
+
+def test_unlabelled_jumps_inside_labelled_loops_still_bind_innermost():
+    result = control_flow.build_go_cfg(
+        "outer: for { for { break }; after_inner() }; after()"
+    )
+    cfg = result.graph
+    (jump,) = nodes(cfg, "break")
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"expr"}
+
+
+def test_labelled_break_through_nested_unlabelled_loop():
+    result = control_flow.build_go_cfg(
+        "outer: for { for { break outer }; x() }; after()"
+    )
+    cfg = result.graph
+    (jump,) = nodes(cfg, "break")
+    assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"expr"}
+
+
+def test_labelled_continue_keeps_everything_reachable():
+    body = "outer: for x := 0; x < 9; x++ { continue outer }"
+    cfg = control_flow.build_go_cfg(body).graph
+    assert cfg is not None
+    hints = control_flow.flow_hints(body, cfg)
+    assert hints.unassigned == ()
+    assert hints.unreachable == ()
+
+
+def test_labelled_break_marks_the_post_unreachable():
+    body = "outer: for x := 0; x < 9; x++ { break outer }"
+    cfg = control_flow.build_go_cfg(body).graph
+    assert cfg is not None
+    hints = control_flow.flow_hints(body, cfg)
+    assert hints.unassigned == ()
+    assert {use.kind for use in hints.unreachable} == {"inc"}
+
+
+def test_labelled_loop_facts_and_hints_still_bind():
+    body = "outer: for x := 0; x < 9; x++ { if big { break outer }; y := x }"
+    cfg = control_flow.build_go_cfg(body).graph
+    assert cfg is not None
+    hint_names = {use.name for use in control_flow.flow_hints(body, cfg).unassigned}
+    assert "x" not in hint_names

@@ -1049,6 +1049,10 @@ class Statement:
     post: tuple["Statement", ...] = ()
     has_tag: bool = False
     labeled: bool = False
+    # The label name when ``labeled`` is set (e.g. ``outer`` in
+    # ``outer: for ...``); ``""`` otherwise. Callers that model labelled
+    # jumps resolve names against enclosing labelled statements.
+    label: str = ""
 
 
 _GO_TERMINATING_CALLS = re.compile(
@@ -1299,12 +1303,19 @@ def _go_statement(source_bytes: bytes, node, base: int, offsets: list[int]) -> S
         return Statement(kind="block", text=text, start=start, body=_go_statements(source_bytes, node, base, offsets))
     if kind == "labeled_statement":
         inner = None
+        label = ""
         for child in node.named_children:
-            if child.type != "label_name":
+            if child.type == "label_name":
+                label = _decode(source_bytes, child)
+            else:
                 inner = child
         if inner is not None:
             statement = _go_statement(source_bytes, inner, base, offsets)
-            return replace(statement, labeled=True) if statement is not None else None
+            return (
+                replace(statement, labeled=True, label=label)
+                if statement is not None
+                else None
+            )
         return None
     if kind == "func_literal":
         return Statement(

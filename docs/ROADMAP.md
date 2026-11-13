@@ -1311,6 +1311,27 @@ and a digest match says nothing about the body being correct.
 File units are not symbol resolution, module indexing or cross-file
 linking; parsed-here does not imply compiled or linked elsewhere.
 
+### C05 labelled loop jumps over the explicit CFG
+
+`build_go_cfg` now models Go's labelled `break`/`continue`: a label on a
+`for`/`range` statement registers a jump target for that loop's body,
+and `break L` / `continue L` edge to the labelled loop's exit or
+update exactly like their unlabelled forms — including a labelled jump
+through nested unlabelled loops. `Statement.label` carries the label
+name from the syntax tree. Labels on non-loop statements stay a
+`labelled_statement` gap, a labelled jump whose name matches no
+enclosing labelled loop is an `unresolved_label` gap, and `goto`
+remains `unsupported_goto` — every limitation still a declared gap,
+never a partial graph. Existing analyses (`assignment_facts`,
+`flow_hints`, `evaluate_flow_hints`) work unchanged over the new
+edges: a labelled break that skips the loop update correctly reports
+the update statement as unreachable.
+
+Modelling boundaries: label names come from syntax, not scope
+resolution — the checker only verifies the name matches an enclosing
+labelled loop; Go's function-scoped label namespace and duplicate-label
+rejection are not modelled.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
