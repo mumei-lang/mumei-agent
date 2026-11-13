@@ -1148,6 +1148,30 @@ flow, use/defect detection, fields and proof-grade semantics remain open
 C05/C06 work. The existing walker still owns must/may resource facts;
 audit/CLI/MCP keys, grades and fallbacks are unchanged.
 
+### C05 possibly-unassigned use hints over assignment facts
+
+`agent.control_flow.unassigned_uses(body, graph)` connects the fixed-point
+facts to reads: it reports `UnassignedUse(node_id, name, span)` when a
+simple identifier is textually assigned somewhere in the body yet absent
+from that node's `all_paths` pre-state — a possibly-unassigned read, e.g.
+a name assigned in only one branch or inside a loop and then returned.
+Checks run against the pre-state, so a statement's own targets never
+count as uses, and `if x := f(); x > 0` initializers flow correctly into
+their conditions.
+
+```python
+uses = control_flow.unassigned_uses(body, graph)
+# -> tuple[UnassignedUse, ...], sorted by node then name
+```
+
+A finding is a **hint for the host's own analysis, not a defect verdict**:
+only recognized simple identifiers are considered — names never textually
+assigned anywhere are ignored, fields/elements, calls, shadowing and
+closures are not modelled, and the normal-flow profile's gaps still apply.
+Both directions still say nothing about memory truth or proof grades.
+The existing walker owns must/may resource facts; audit/CLI/MCP keys,
+grades and fallbacks are unchanged.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using

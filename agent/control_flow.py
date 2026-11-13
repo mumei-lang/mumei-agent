@@ -309,3 +309,71 @@ def assignment_facts(
                 for node in graph.nodes
             }
     raise ValueError("assignment facts did not converge")
+
+
+@dataclass(frozen=True)
+class UnassignedUse:
+    """A name used at a node that is not assigned on every path reaching it.
+
+    A heuristic hint over `assignment_facts`, not a defect verdict: the
+    name is flagged only when it is a simple identifier assigned somewhere
+    in the body but missing from the node's `all_paths` pre-state.
+    """
+
+    node_id: int
+    name: str
+    span: SourceSpan | None
+
+
+def _use_text(statement: tree_sitter_extract.Statement) -> str:
+    if statement.kind in {"if", "for"}:
+        return statement.condition
+    if statement.kind in {"range", "return", "expr", "define", "assign", "const", "var"}:
+        return " ".join(statement.values)
+    if statement.kind in {"inc", "dec"}:
+        return " ".join(statement.targets)
+    return ""
+
+
+def unassigned_uses(
+    body: str, graph: ControlFlowGraph
+) -> tuple[UnassignedUse, ...]:
+    """Names used at a node without a definite assignment reaching it.
+
+    Reports `name` at `node` when `name` is textually assigned somewhere in
+    the body yet absent from the node's `all_paths` pre-state — a possibly-
+    unassigned read, conservatively limited to recognized identifiers. It
+    does not model fields, elements, calls, shadowing or closures, and a
+    finding is a hint for the host's own dataflow, not a defect verdict.
+    """
+    facts = assignment_facts(body, graph)
+    tree = tree_sitter_extract.extract_statements(body, "go")
+    assert tree is not None  # assignment_facts already re-parsed the body
+    by_span = {
+        (stmt.start, stmt.start + len(stmt.text)): stmt
+        for stmt in _walk(tree.statements)
+    }
+    universe = frozenset().union(
+        *(fact.some_path for fact in facts.values())
+    )
+    predecessors: dict[int, list[int]] = defaultdict(list)
+    for edge in graph.edges:
+        predecessors[edge.target].append(edge.source)
+    findings: list[UnassignedUse] = []
+    for node in graph.nodes:
+        if node.span is None:
+            continue
+        statement = by_span.get((node.span.start, node.span.end))
+        if statement is None:
+            continue
+        incoming = predecessors.get(node.node_id, ())
+        if node.node_id == graph.entry or not incoming:
+            pre = frozenset() if node.node_id == graph.entry else universe
+        else:
+            pre = frozenset.intersection(
+                *(facts[p].all_paths for p in incoming)
+            )
+        for name in sorted(_IDENTIFIER.findall(_use_text(statement))):
+            if name in universe and name not in pre:
+                findings.append(UnassignedUse(node.node_id, name, node.span))
+    return tuple(findings)
