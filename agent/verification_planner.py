@@ -974,6 +974,62 @@ class AdapterRegistry:
         del self._history[: max(0, len(self._history) - MAX_PLAN_HISTORY)]
         return plan
 
+    def replan(
+        self,
+        plan: VerificationPlan,
+        exclude: tuple[str, ...] = (),
+        observations: tuple[RuntimeObservation, ...] | None = None,
+    ) -> VerificationPlan:
+        """Re-route a recorded plan after a host-declared runtime failure.
+
+        Produces a new plan over the same request and policy constraints
+        with the previously selected adapter — plus every registered id
+        in `exclude` — treated as disabled, and explicit selection
+        cleared. Requires the plan to come from this registry's recorded
+        history, to have selected an adapter, and to permit routing
+        (automatic selection or `allow_fallback`): an explicit
+        non-fallback selection stays a hard boundary even at replan.
+
+        When `observations` is `None` the registry reuses its last
+        accepted stamped observations; pass `()` explicitly for no
+        runtime availability, or a fresh tuple for newer declarations.
+
+        This is a declared re-selection only — it records that the host
+        observed a failure; it does not prove the excluded adapter
+        actually failed or that the newly selected one will work, and it
+        carries no runtime verdict, no attempt outcome and no Evidence.
+        """
+        if plan not in self._history:
+            raise ValueError("runtime fallback requires a recorded plan")
+        if plan.selected is None:
+            raise ValueError("runtime fallback requires a selected plan")
+        if (
+            plan.policy.selected_adapter is not None
+            and not plan.policy.allow_fallback
+        ):
+            raise ValueError("runtime fallback requires permissive routing")
+        excluded_ids = set(exclude)
+        if any(
+            adapter_id not in self._adapters for adapter_id in excluded_ids
+        ):
+            raise ValueError(
+                "runtime fallback exclusion has no registered adapter"
+            )
+        policy = replace(
+            plan.policy,
+            selected_adapter=None,
+            disabled_adapters=frozenset(
+                plan.policy.disabled_adapters | excluded_ids | {plan.selected.adapter_id}
+            ),
+        )
+        return self.plan(
+            plan.request,
+            policy,
+            tuple(self._observations.values())
+            if observations is None
+            else observations,
+        )
+
     def history(self) -> tuple[VerificationPlan, ...]:
         """Snapshot of recorded plans, oldest first; never a verdict record."""
         return tuple(self._history)
