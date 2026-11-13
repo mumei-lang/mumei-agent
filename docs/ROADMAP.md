@@ -88,6 +88,32 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 declared memory bounds for attempted executions
+
+`AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`
+accepts an optional host-declared memory ceiling (an integer in
+`1..=MAX_MEMORY_BOUND_MB`, validated statically). When declared, the child
+is spawned under POSIX `RLIMIT_AS`, capping its whole address space — the
+declared `memory_mb` budget a plan produces now reaches the execution
+boundary instead of stopping at the plan manifest. The bound applies to
+the child only; the runner process is never constrained, and a non-POSIX
+host rejects a declared bound with a static error.
+
+```python
+result = AttemptRunner().run(request, argv, memory_bound_mb=256)
+```
+
+A declared bound is **best-effort resource enforcement, not a sandbox**:
+it covers no CPU, I/O, network or permission policy, and the runner never
+diagnoses why a child ended — exceeding the bound surfaces only as an
+ordinary observed outcome (`exited` with its code, `failed` or
+`timed_out`), indistinguishable from a natural exit. Timeout, cancel,
+collector and record semantics are unchanged. Authorization, scheduling,
+output interpretation, Evidence acceptance and any further isolation stay
+host duties and open work. No default CLI/MCP/audit route, external
+verifier or dependency is added. C11 stays partial; C12's demand gate and
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 monotonic observation stamps for replay detection
 
 `RuntimeObservation` carries an optional host-declared `stamp` — a bounded

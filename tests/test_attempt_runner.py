@@ -318,3 +318,98 @@ def test_normalized_marks_truncated_collection():
     assert normalized.stdout_size == MAX_STDOUT_BYTES
     assert normalized.stdout_sha256 == hashlib.sha256(result.stdout).hexdigest()
     assert normalized.to_dict()["stdout"]["complete"] is False
+
+
+# ---- declared memory bound (POSIX RLIMIT_AS) ----
+
+
+@pytest.mark.parametrize(
+    "bad_bound",
+    [True, 0, -1, 1_048_577, "64", 64.0, b"64", (64,)],
+)
+def test_run_rejects_invalid_memory_bounds(bad_bound):
+    with pytest.raises(ValueError, match="^invalid attempt run memory bound$"):
+        AttemptRunner().run(request(), argv("pass"), memory_bound_mb=bad_bound)
+
+
+@pytest.mark.parametrize("bound", [256, 512, 1_048_576])
+def test_run_accepts_declared_memory_bounds(bound):
+    result = AttemptRunner().run(
+        request(), argv("pass"), memory_bound_mb=bound
+    )
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+
+
+def test_run_reports_allocation_past_declared_bound_as_exit():
+    code = "x = b' ' * (256 * 1024 * 1024); print(len(x))"
+    result = AttemptRunner().run(
+        request(timeout_ms=30_000), argv(code), memory_bound_mb=96
+    )
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code != 0
+
+
+def test_run_bound_does_not_diagnose_or_extend_outcomes():
+    code = "x = b' ' * (256 * 1024 * 1024); print(len(x))"
+    result = AttemptRunner().run(
+        request(timeout_ms=30_000), argv(code), memory_bound_mb=96
+    )
+    assert result.normalized().outcome == "exited"
+    assert result.complete is True
+
+
+def test_run_under_bound_can_still_allocate():
+    code = "x = b' ' * (32 * 1024 * 1024); print(len(x))"
+    result = AttemptRunner().run(
+        request(), argv(code), memory_bound_mb=256
+    )
+    assert result.record.state == "exited"
+    assert result.record.events[-1].exit_code == 0
+    assert result.stdout.strip() == str(32 * 1024 * 1024).encode()
+
+
+def test_run_memory_bound_leaves_parent_unbound():
+    runner = AttemptRunner()
+    runner.run(request(), argv("pass"), memory_bound_mb=96)
+    _ = b" " * (256 * 1024 * 1024)  # parent is not constrained
+
+
+def test_run_memory_bound_still_times_out():
+    result = AttemptRunner().run(
+        request(timeout_ms=150),
+        argv("import time; time.sleep(60)"),
+        memory_bound_mb=256,
+    )
+    assert result.record.state == "timed_out"
+
+
+def test_run_memory_bound_still_honors_cancellation():
+    cancel = threading.Event()
+    runner = AttemptRunner()
+    thread = threading.Thread(
+        target=lambda: runner.run(
+            request(timeout_ms=30_000),
+            argv("import time; time.sleep(60)"),
+            cancel,
+            256,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.2)
+    cancel.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+
+def test_run_memory_bound_failure_reports_failed(monkeypatch):
+    import agent.attempt_runner as runner_mod
+
+    def boom(limit):
+        raise OSError("rlimit refused")
+
+    monkeypatch.setattr(runner_mod.resource, "setrlimit", boom)
+    result = AttemptRunner().run(request(), argv("pass"), memory_bound_mb=64)
+    assert result.record.state == "failed"
+    assert result.stdout == b""
