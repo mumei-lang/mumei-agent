@@ -1984,3 +1984,168 @@ def test_prepare_source_records_one_plan():
         hashlib.sha256(SOURCE).hexdigest(),
     )
     assert len(registry.history()) == 1
+
+
+# ---- runtime fallback replan ----
+
+
+def two_adapters():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.register(adapter("backup", priority=-1))
+    return registry
+
+
+def stamped_pair():
+    return (
+        stamped(stamp=1, availability="available", tool_version="4.13.0"),
+        stamped("backup", stamp=1, availability="available", tool_version="4.13.0"),
+    )
+
+
+def test_replan_requires_a_recorded_plan():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    other = plan()
+    with pytest.raises(ValueError, match="requires a recorded plan"):
+        registry.replan(other)
+    assert registry.history() == ()
+
+
+def test_replan_requires_a_selected_plan():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    result = registry.plan(
+        REQUEST, PlannerPolicy(), (observed(availability="missing"),)
+    )
+    assert result.selected is None
+    with pytest.raises(ValueError, match="requires a selected plan"):
+        registry.replan(result)
+
+
+def test_replan_routes_to_the_next_adapter():
+    registry = two_adapters()
+    first = registry.plan(REQUEST, PlannerPolicy(), stamped_pair())
+    assert first.selected.adapter_id == "fixture"
+    second = registry.replan(first)
+    assert second.selected.adapter_id == "backup"
+    assert second.request == first.request
+    assert registry.history() == (first, second)
+
+
+def test_replan_preserves_request_constraints():
+    registry = two_adapters()
+    first = registry.plan(REQUEST, PlannerPolicy(), stamped_pair())
+    second = registry.replan(first)
+    assert second.request == first.request
+    assert "disabled" in reasons(second)
+    assert reasons(second, "backup") == ("selected_priority",)
+
+
+def test_replan_marks_no_route_when_nothing_remains():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    first = registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=1, availability="available", tool_version="4.13.0"),))
+    second = registry.replan(first)
+    assert second.selected is None
+    assert registry.history() == (first, second)
+
+
+def test_replan_respects_explicit_selection_without_fallback():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    first = registry.plan(
+        REQUEST,
+        PlannerPolicy(selected_adapter="fixture"),
+        (observed(),),
+    )
+    with pytest.raises(ValueError, match="requires permissive routing"):
+        registry.replan(first)
+
+
+def test_replan_allows_explicit_selection_with_fallback():
+    registry = two_adapters()
+    first = registry.plan(
+        REQUEST,
+        PlannerPolicy(selected_adapter="fixture", allow_fallback=True),
+        stamped_pair(),
+    )
+    second = registry.replan(first)
+    assert second.selected.adapter_id == "backup"
+
+
+def test_replan_exclude_additional_adapters():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.register(adapter("backup"))
+    registry.register(adapter("third"))
+    first = registry.plan(
+        REQUEST,
+        PlannerPolicy(),
+        (
+            stamped(stamp=1, availability="available", tool_version="4.13.0"),
+            stamped("backup", stamp=1, availability="available", tool_version="4.13.0"),
+            stamped("third", stamp=1, availability="available", tool_version="4.13.0"),
+        ),
+    )
+    assert first.selected.adapter_id == "backup"
+    second = registry.replan(first, exclude=("fixture",))
+    assert second.selected.adapter_id == "third"
+
+
+def test_replan_rejects_unregistered_exclusions():
+    registry = two_adapters()
+    first = registry.plan(REQUEST, PlannerPolicy(), stamped_pair())
+    with pytest.raises(ValueError, match="no registered adapter"):
+        registry.replan(first, exclude=("typo",))
+
+
+def test_replan_uses_fresh_observations():
+    registry = two_adapters()
+    first = registry.plan(REQUEST, PlannerPolicy(), stamped_pair())
+    second = registry.replan(
+        first,
+        observations=(
+            stamped(stamp=2, availability="available", tool_version="4.13.1"),
+            stamped("backup", stamp=2, availability="available", tool_version="4.13.1"),
+        ),
+    )
+    assert second.selected.adapter_id == "backup"
+    assert second.selected.observed_tool_version == "4.13.1"
+
+
+def test_replan_explicit_empty_observations_marks_tools_missing():
+    registry = two_adapters()
+    first = registry.plan(REQUEST, PlannerPolicy(), stamped_pair())
+    second = registry.replan(first, observations=())
+    assert second.selected is None
+    assert "availability_unknown" in reasons(second, "backup")
+
+
+def test_replan_reuses_last_stamped_observations():
+    registry = two_adapters()
+    first = registry.plan(REQUEST, PlannerPolicy(), stamped_pair())
+    second = registry.replan(first)
+    assert second.selected.adapter_id == "backup"
+    assert second.selected.observed_tool_version == "4.13.0"
+
+
+def test_replan_keeps_policy_budgets_and_permissions():
+    registry = AdapterRegistry()
+    perms = frozenset({"filesystem.read"})
+    registry.register(adapter(required_permissions=perms))
+    registry.register(adapter("backup", priority=-1, required_permissions=perms))
+    policy = PlannerPolicy(
+        timeout_ms=123,
+        memory_mb=64,
+        allowed_permissions=perms,
+    )
+    first = registry.plan(REQUEST, policy, stamped_pair())
+    assert first.selected.adapter_id == "fixture"
+    second = registry.replan(first)
+    assert second.selected.adapter_id == "backup"
+    assert second.policy.timeout_ms == 123
+    assert second.policy.memory_mb == 64
+    assert second.policy.allowed_permissions == frozenset({"filesystem.read"})
+    assert second.policy.selected_adapter is None
+    assert first.selected.adapter_id in second.policy.disabled_adapters

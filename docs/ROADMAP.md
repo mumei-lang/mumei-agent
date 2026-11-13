@@ -88,6 +88,33 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C04/C11 declared runtime fallback replanning
+
+`AdapterRegistry.replan(plan, exclude=(), observations=None)` re-routes
+a recorded plan after a host-declared runtime failure — the runtime
+fallback the plan history was recorded for. It produces a new plan over
+the same request and policy constraints with the previously selected
+adapter — plus every registered id in `exclude` — treated as disabled
+and explicit selection cleared; the new plan is recorded like any other.
+
+```python
+second = registry.replan(first)  # same constraints, new route
+```
+
+Three static preconditions keep the contract honest: the plan must come
+from this registry's recorded `history()`, must have selected an
+adapter, and must permit routing — an explicit non-fallback selection
+(`selected_adapter` without `allow_fallback`) stays a hard boundary even
+at replan. When `observations` is `None` the registry reuses its last
+accepted stamped observations; pass `()` for no availability or a fresh
+tuple for newer declarations.
+
+Replanning is a **declared re-selection, not a runtime verdict**: it
+records that the host observed a failure — it does not prove the
+excluded adapter actually failed or that the new route will work, and it
+carries no attempt outcome or Evidence. C04/C11 stay partial; source/
+evidence ingestion, acceptance and default routes remain open.
+
 ### C11 bounded plan history for runtime fallback records
 
 `AdapterRegistry.plan()` now appends every successful `VerificationPlan`
