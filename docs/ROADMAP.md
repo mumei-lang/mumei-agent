@@ -88,6 +88,39 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 declared stream identity and completeness
+
+`AttemptOutput` declares the collection boundary of its snapshot with two
+optional metadata fields: `stream` names the declared stream the captured
+bytes came from (the `STREAM_KINDS` vocabulary supports only `"stdout"`
+today — other stream names are rejected outright rather than aliased), and
+`complete` is an exact `bool` declaring whether the capture is the whole
+stream. `AttemptOutput.from_prepared` accepts both as keyword arguments.
+`reconcile` compares the claims too, so identical bytes carrying different
+stream or completeness claims conflict instead of silently merging. The
+`mumei.verifier-output/v1` manifest emits `stream`/`complete` only when
+non-default, keeping default declarations' `output_fingerprint` unchanged.
+
+```python
+from agent.verification_attempt import AttemptOutput
+
+output = AttemptOutput(
+    exited_record, captured, sha256_of_captured,
+    stream="stdout", complete=False,
+)
+assert output.to_dict()["stdout"]["complete"] is False
+```
+
+Both fields are **host declarations, not proven observations**: a declared
+`complete=True` does not establish completeness and `False` does not measure
+what was missed — only the SHA-256 binds the captured bytes. No streams are
+read, pipes are opened or truncation is detected; capture mechanics, the
+producer's true byte count and multi-stream capture remain host duties. No
+I/O, clocks, plugins, runner/scheduler, Evidence normalization/acceptance,
+external verifier, dependency or default audit/CLI/MCP route is added. C11
+stays partial; Core meaning and acceptance, C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 declared execution and cancellation requests
 
 `AttemptSequence.request_execution()` returns an `AttemptExecutionRequest`

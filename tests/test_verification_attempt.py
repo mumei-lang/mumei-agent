@@ -23,6 +23,7 @@ from agent.verification_attempt import (
     MAX_JSON_DEPTH,
     MAX_JSON_NUMBER_CHARS,
     MAX_STDOUT_BYTES,
+    STREAM_KINDS,
     AttemptCancelRequest,
     AttemptEvent,
     AttemptExecutionRequest,
@@ -593,11 +594,12 @@ def test_reconcile_does_not_claim_global_branch_arbitration_or_replay_protection
 STDOUT = b"FAKE_PRIVATE_STDOUT_NOT_EVIDENCE"
 
 
-def output_snapshot(attempt=None, stdout=STDOUT):
+def output_snapshot(attempt=None, stdout=STDOUT, **kwargs):
     return AttemptOutput(
         record(*PREFIXES["exited"]) if attempt is None else attempt,
         stdout,
         hashlib.sha256(stdout).hexdigest(),
+        **kwargs,
     )
 
 
@@ -802,7 +804,13 @@ def test_output_manifest_is_canonical_detached_and_body_free(capsys):
     )
     assert STDOUT.decode() not in repr(snapshot) + json.dumps(manifest)
     assert SOURCE.decode() not in repr(snapshot) + json.dumps(manifest)
-    assert set(vars(snapshot)) == {"attempt", "stdout", "expected_stdout_sha256"}
+    assert set(vars(snapshot)) == {
+        "attempt",
+        "stdout",
+        "expected_stdout_sha256",
+        "stream",
+        "complete",
+    }
     manifest["attempt"]["events"].clear()
     manifest["stdout"]["sha256"] = "b" * 64
     assert snapshot.attempt.state == "exited"
@@ -2886,4 +2894,177 @@ def test_requests_are_passive_without_io_clock_or_spawn(monkeypatch, capsys):
         assert ready.request_execution().attempt_number == 1
         assert running.request_cancellation().attempt_number == 1
     assert (ready.to_dict(), running.to_dict()) == before
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("stream", sorted(STREAM_KINDS))
+@pytest.mark.parametrize("complete", [True, False])
+def test_output_stream_collection_constructor_matrix(stream, complete):
+    snapshot = output_snapshot(stream=stream, complete=complete)
+    assert snapshot.stream == stream
+    assert snapshot.complete is complete
+    manifest = snapshot.to_dict()
+    if complete:
+        assert manifest["stdout"] == {
+            "sha256": hashlib.sha256(STDOUT).hexdigest(),
+            "size_bytes": len(STDOUT),
+        }
+    else:
+        assert manifest["stdout"]["complete"] is False
+
+
+@pytest.mark.parametrize(
+    "stream",
+    ["stderr", "STDOUT", "out", "", 1, True, b"stdout", None, ("stdout",)],
+)
+def test_output_stream_rejects_unsupported_names(stream):
+    with pytest.raises(
+        ValueError, match="^unsupported attempt output stream$"
+    ):
+        output_snapshot(stream=stream)
+
+
+@pytest.mark.parametrize("complete", [0, 1, "true", "false", None, 1.0, b"1"])
+def test_output_completeness_requires_an_exact_bool(complete):
+    with pytest.raises(
+        ValueError,
+        match="^invalid attempt output completeness declaration$",
+    ):
+        output_snapshot(complete=complete)
+
+
+@pytest.mark.parametrize("size", [0, 1, MAX_STDOUT_BYTES])
+def test_output_incomplete_snapshots_stay_bounded_and_hashed(size):
+    body = b"x" * size
+    snapshot = output_snapshot(stdout=body, complete=False)
+    assert snapshot.complete is False
+    assert len(snapshot.stdout) == size
+    assert (
+        snapshot.expected_stdout_sha256 == hashlib.sha256(body).hexdigest()
+    )
+    with pytest.raises(ValueError, match="^stdout must be bounded"):
+        AttemptOutput(
+            record(*PREFIXES["exited"]),
+            b"x" * (MAX_STDOUT_BYTES + 1),
+            "a" * 64,
+            "stdout",
+            False,
+        )
+
+
+@pytest.mark.parametrize("left", [True, False])
+@pytest.mark.parametrize("right", [True, False])
+def test_output_reconcile_covers_completeness_claims(left, right):
+    first = output_snapshot(complete=left)
+    second = output_snapshot(complete=right)
+    if left == right:
+        assert first.reconcile(second) is first
+    else:
+        for pair in ((first, second), (second, first)):
+            with pytest.raises(
+                ValueError, match="attempt output report conflict"
+            ):
+                pair[0].reconcile(pair[1])
+
+
+def test_output_default_manifest_and_fingerprint_are_unchanged():
+    default = output_snapshot()
+    explicit = output_snapshot(stream="stdout", complete=True)
+    assert default == explicit
+    assert default.to_dict() == explicit.to_dict()
+    manifest = default.to_dict()
+    assert "stream" not in manifest["stdout"]
+    assert "complete" not in manifest["stdout"]
+    changed = output_snapshot(complete=False)
+    assert (
+        changed.to_dict()["output_fingerprint"]
+        != manifest["output_fingerprint"]
+    )
+    assert changed.to_dict()["stdout"]["complete"] is False
+
+
+def test_output_from_prepared_declares_collection_metadata():
+    prepared = prepared_source()
+    sequence, _ = exited_sequence_and_output(prepared, body=STDOUT)
+    report = sequence.current
+    output = AttemptOutput.from_prepared(
+        prepared,
+        1,
+        report,
+        STDOUT,
+        hashlib.sha256(STDOUT).hexdigest(),
+        stream="stdout",
+        complete=False,
+    )
+    assert output.stream == "stdout"
+    assert output.complete is False
+    with pytest.raises(
+        ValueError, match="^unsupported attempt output stream$"
+    ):
+        AttemptOutput.from_prepared(
+            prepared,
+            1,
+            report,
+            STDOUT,
+            hashlib.sha256(STDOUT).hexdigest(),
+            stream="stderr",
+        )
+
+
+def test_output_completeness_is_a_declaration_not_a_proof():
+    partial = output_snapshot(stdout=b"x" * 10, complete=False)
+    full_claim = output_snapshot(stdout=b"x" * 10, complete=True)
+    assert partial.stdout == full_claim.stdout
+    assert partial.to_dict()["output_fingerprint"] != full_claim.to_dict()[
+        "output_fingerprint"
+    ]
+    with pytest.raises(ValueError, match="attempt output report conflict"):
+        partial.reconcile(full_claim)
+    assert output_snapshot(stdout=b"", complete=True).complete is True
+
+
+def test_selected_result_marks_incomplete_snapshots():
+    prepared = prepared_source()
+    sequence, output = exited_sequence_and_output(prepared, body=STDOUT)
+    incomplete = AttemptOutput(
+        output.attempt,
+        STDOUT,
+        hashlib.sha256(STDOUT).hexdigest(),
+        "stdout",
+        False,
+    )
+    selected = sequence.select_result(incomplete)
+    assert selected.selected_result[1] == incomplete.to_dict()[
+        "output_fingerprint"
+    ]
+    with pytest.raises(
+        ValueError, match="attempt sequence already has a selected result"
+    ):
+        selected.select_result(output)
+
+
+def test_output_stream_metadata_is_passive_without_io_or_clock(
+    monkeypatch, capsys
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("stream declarations must remain passive exact metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (time, "monotonic"),
+            (time, "time"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        snapshot = output_snapshot(stdout=b"partial", complete=False)
+        assert snapshot.reconcile(snapshot) is snapshot
+        snapshot.to_dict()
+    assert snapshot.to_dict() == output_snapshot(
+        stdout=b"partial", complete=False
+    ).to_dict()
     assert capsys.readouterr() == ("", "")
