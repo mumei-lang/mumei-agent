@@ -1172,6 +1172,27 @@ Both directions still say nothing about memory truth or proof grades.
 The existing walker owns must/may resource facts; audit/CLI/MCP keys,
 grades and fallbacks are unchanged.
 
+### C05 definite unassigned-use classes over the same facts
+
+`UnassignedUse` gains a `definite` flag over the same fixed-point facts:
+a finding is definite when the name is textually assigned somewhere in
+the body yet absent from the node's `some_path` pre-state too — no
+remaining path can deliver it (assignment only after the use, or only in
+a sibling the use's path never takes). `definite = False` keeps the
+earlier class: some path may deliver the value.
+
+```python
+uses = control_flow.unassigned_uses(body, graph)
+# UnassignedUse.definite distinguishes unreachable-assignment uses
+```
+
+The class is still a **hint, not a defect verdict**: a definite finding
+means no modelled path delivers a textual assignment, which is a
+stronger suspicion the host must still confirm — fields/elements, calls,
+shadowing and closures remain unmodelled, and unreachable uses produce
+no findings at all. The flag defaults to `False` for compatibility with
+the previous slice's construction.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using

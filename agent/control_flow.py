@@ -318,11 +318,15 @@ class UnassignedUse:
     A heuristic hint over `assignment_facts`, not a defect verdict: the
     name is flagged only when it is a simple identifier assigned somewhere
     in the body but missing from the node's `all_paths` pre-state.
+    `definite` is true when the name is also missing from the node's
+    `some_path` pre-state — assigned somewhere in the body, yet no path
+    can deliver it to this use.
     """
 
     node_id: int
     name: str
     span: SourceSpan | None
+    definite: bool = False
 
 
 def _use_text(statement: tree_sitter_extract.Statement) -> str:
@@ -342,9 +346,12 @@ def unassigned_uses(
 
     Reports `name` at `node` when `name` is textually assigned somewhere in
     the body yet absent from the node's `all_paths` pre-state — a possibly-
-    unassigned read, conservatively limited to recognized identifiers. It
-    does not model fields, elements, calls, shadowing or closures, and a
-    finding is a hint for the host's own dataflow, not a defect verdict.
+    unassigned read, conservatively limited to recognized identifiers. The
+    `definite` flag marks the stronger class: the name is assigned
+    somewhere but absent from the `some_path` pre-state too, so no
+    remaining path can deliver it. It does not model fields, elements,
+    calls, shadowing or closures, and a finding is a hint for the host's
+    own dataflow, not a defect verdict.
     """
     facts = assignment_facts(body, graph)
     tree = tree_sitter_extract.extract_statements(body, "go")
@@ -369,11 +376,22 @@ def unassigned_uses(
         incoming = predecessors.get(node.node_id, ())
         if node.node_id == graph.entry or not incoming:
             pre = frozenset() if node.node_id == graph.entry else universe
+            pre_some = frozenset()
         else:
             pre = frozenset.intersection(
                 *(facts[p].all_paths for p in incoming)
             )
+            pre_some = frozenset().union(
+                *(facts[p].some_path for p in incoming)
+            )
         for name in sorted(_IDENTIFIER.findall(_use_text(statement))):
             if name in universe and name not in pre:
-                findings.append(UnassignedUse(node.node_id, name, node.span))
+                findings.append(
+                    UnassignedUse(
+                        node.node_id,
+                        name,
+                        node.span,
+                        definite=name not in pre_some,
+                    )
+                )
     return tuple(findings)

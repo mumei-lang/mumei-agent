@@ -390,3 +390,76 @@ def test_unassigned_uses_report_node_and_span():
     node = nodes(cfg, "return")[0]
     assert use.node_id == node.node_id
     assert use.span == node.span
+
+
+def test_unassigned_uses_definite_when_assignment_comes_later():
+    cfg, result = uses("print(x)\nx := 1")
+    node = nodes(cfg, "expr")[0]
+    assert result == (
+        control_flow.UnassignedUse(
+            node.node_id, "x", node.span, definite=True
+        ),
+    )
+
+
+def test_unassigned_uses_definite_when_only_unreachable_assignment():
+    cfg, result = uses("if c { return x }\nreturn 0\nx := 1")
+    (use,) = result
+    assert use.name == "x"
+    assert use.definite is True
+
+
+def test_unassigned_uses_definite_in_untaken_branch():
+    cfg, result = uses("if c { x = 1 } else { print(x) }\nreturn 0")
+    (use,) = result
+    assert use.name == "x"
+    assert use.definite is True
+
+
+def test_unassigned_uses_maybe_when_one_branch_assigns():
+    cfg, result = uses("if c { y = 1 }\nreturn y")
+    (use,) = result
+    assert use.name == "y"
+    assert use.definite is False
+
+
+def test_unassigned_uses_maybe_via_loop_back_edge():
+    cfg, result = uses("for c { y = 1 }\nreturn y")
+    (use,) = result
+    assert use.definite is False
+
+
+def test_unassigned_uses_mix_definite_and_maybe():
+    cfg, result = uses("if c { x = 1 } else { print(x) }\nreturn x")
+    assert len(result) == 2
+    maybe, definite = sorted(result, key=lambda use: use.definite)
+    assert maybe.definite is False
+    assert definite.definite is True
+    assert {use.name for use in result} == {"x"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "print(x)\nx := 1",
+        "return x\nx := 1",
+        "if x > 0 { y = 1 }\nx := 1",
+        "for x > 0 { y = 1 }\nx := 1",
+        "z := x\nx := 1",
+    ],
+)
+def test_unassigned_uses_definite_across_use_kinds(body):
+    cfg, result = uses(body)
+    assert len(result) == 1
+    assert result[0].name == "x"
+    assert result[0].definite is True
+
+
+def test_unassigned_uses_ignore_unreachable_uses():
+    cfg, result = uses("x := 1\nreturn 0\nprint(x)")
+    assert result == ()
+
+
+def test_unassigned_uses_never_assigned_not_marked_definite():
+    cfg, result = uses("return q")
+    assert result == ()
