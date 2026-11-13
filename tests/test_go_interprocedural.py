@@ -361,6 +361,18 @@ def test_for_shapes_stay_unsupported(go_types_helper, declarations):
             "func F(x, y int64) int64 { for i:=x; i>0; i-- { x = y }; return x }",
             frozenset({0, 1}),
         ),
+        # Cross-iteration propagation: the loop-body fixed point carries
+        # deps assigned on pass N into pass N+1 (Devin Review on PR #702:
+        # a single pass left this as the empty set).
+        (
+            "func F(p int) int { x := 0; y := 0; for i := p; i > 0; i-- { x = y; y = p }; return x }",
+            frozenset({0}),
+        ),
+        # Longer transitive chains converge too.
+        (
+            "func F(p int) int { a := 0; b := 0; c := 0; for i := p; i > 0; i-- { a = b; b = c; c = p }; return a }",
+            frozenset({0}),
+        ),
         # A branch-local let still does not escape.
         (
             "func F(x int64) int64 { if x>0 { y:=x; x = y }; return x }",

@@ -1563,7 +1563,9 @@ binding — never a declaration. At top level the reassignment replaces
 the binding's dependencies (the old value is gone); inside a branch or
 loop body the caller joins the new value back by *union*, because the
 inner path may not execute — a may-analysis, still a conservative
-overapproximation, never equality.
+overapproximation, never equality. Loop bodies are joined to a widening
+fixed point so dependencies propagating across iterations are captured
+(a join, not an unroll — trip counts are never modelled).
 
 Compound operators (`+=`, `-=`, ...), tuple targets, and assignments to
 names outside the parameter/let scope stay `unsupported_statement` /

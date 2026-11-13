@@ -8,7 +8,10 @@ dependencies (unreachable returns included — reachability is not proven). A
 an inc/dec update on a bound scalar; ``range``, ``break``/``continue``,
 compound operators, tuples, ``if`` initializers and every other statement shape
 stay unsupported. A scalar ``x = expression`` reassignment replaces the
-binding's dependencies — it never declares a new variable. Compiler-resolved
+binding's dependencies — it never declares a new variable. Loop bodies are
+joined to a widening fixed point so dependencies propagating across
+iterations are captured (joins, not unrolls — trip counts are never
+modelled). Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -414,10 +417,40 @@ class _Builder:
             elif clause is not None:
                 # `for <expression> { ... }` — a condition-only loop.
                 self.expression(clause, fn, params, scope, transfers, count, 0)
-            for child in _children(body_node):
-                self.statement(
-                    child, fn, params, scope, transfers, count, deps, saw_return
-                )
+            # Iterate the body to a fixed point: a reassignment made on one
+            # pass seeds the next, so dependencies propagating across
+            # iterations are captured (this is a join, not an unroll — trip
+            # counts are never modelled). Every widened entry only gains
+            # parameter indexes, so widening is monotone over a bounded
+            # universe; the pass cap is a defensive analysis limit.
+            passes = 0
+            while True:
+                mark = len(transfers)
+                inner = dict(scope)
+                for child in _children(body_node):
+                    self.statement(
+                        child, fn, params, inner, transfers, count, deps,
+                        saw_return,
+                    )
+                changed = False
+                for binding_id, binding_deps in inner.items():
+                    if binding_id in scope:
+                        if not binding_deps <= scope[binding_id]:
+                            scope[binding_id] |= binding_deps
+                            changed = True
+                    elif binding_id in params:
+                        scope[binding_id] = (
+                            frozenset({params[binding_id]}) | binding_deps
+                        )
+                        changed = True
+                if not changed:
+                    break
+                # Keep only the last pass's transfers: argument dependency
+                # sets widen across passes and earlier copies are stale.
+                del transfers[mark:]
+                passes += 1
+                if passes > len(scope) * (len(params) + 1):
+                    raise _Unsupported("analysis_limit", _span(node))
             # Loop-body reassignments join back by union: the loop may
             # execute zero or many times.
             self._join(locals_, scope, params)
