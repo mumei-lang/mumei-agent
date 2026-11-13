@@ -22,6 +22,7 @@ MAX_JSON_NUMBER_CHARS = 128
 EVENT_KINDS = frozenset(
     {"started", "cancel_requested", "exited", "failed", "timed_out", "cancelled"}
 )
+STREAM_KINDS = frozenset({"stdout"})
 TERMINAL_STATES = frozenset({"exited", "failed", "timed_out", "cancelled"})
 _TRANSITIONS = {
     ("ready", "started"): "running",
@@ -577,11 +578,17 @@ class AttemptOutput:
 
     Only repr/to_dict omit the body; explicit access to stdout exposes it.
     Hosts own stream limits, completeness, origin and canonical-record storage.
+    `stream` names the declared stream the bytes came from and `complete`
+    declares whether the capture is the whole stream; both are host claims,
+    not proven observations — a declared `complete=True` does not establish
+    completeness and `False` does not measure what was missed.
     """
 
     attempt: AttemptRecord
     stdout: bytes = field(repr=False)
     expected_stdout_sha256: str
+    stream: str = "stdout"
+    complete: bool = True
 
     def __post_init__(self) -> None:
         if type(self.attempt) is not AttemptRecord or self.attempt.state != "exited":
@@ -594,6 +601,10 @@ class AttemptOutput:
             raise ValueError("invalid expected stdout identity")
         if hashlib.sha256(self.stdout).hexdigest() != self.expected_stdout_sha256:
             raise ValueError("stdout identity mismatch")
+        if type(self.stream) is not str or self.stream not in STREAM_KINDS:
+            raise ValueError("unsupported attempt output stream")
+        if type(self.complete) is not bool:
+            raise ValueError("invalid attempt output completeness declaration")
 
     @classmethod
     def from_prepared(
@@ -603,15 +614,22 @@ class AttemptOutput:
         report: AttemptRecord,
         stdout: bytes,
         expected_stdout_sha256: str,
+        stream: str = "stdout",
+        complete: bool = True,
     ) -> "AttemptOutput":
         bound = AttemptRecord.from_prepared(prepared, attempt_number).reconcile(report)
-        return cls(bound, stdout, expected_stdout_sha256)
+        return cls(bound, stdout, expected_stdout_sha256, stream, complete)
 
     def reconcile(self, incoming: "AttemptOutput") -> "AttemptOutput":
         """Keep one canonical snapshot; duplicates are idempotent, not fresh."""
         if type(incoming) is not AttemptOutput:
             raise ValueError("output reconciliation requires an output snapshot")
-        if self.attempt != incoming.attempt or self.stdout != incoming.stdout:
+        if (
+            self.attempt != incoming.attempt
+            or self.stdout != incoming.stdout
+            or self.stream != incoming.stream
+            or self.complete != incoming.complete
+        ):
             raise ValueError("attempt output report conflict")
         return self
 
@@ -657,6 +675,10 @@ class AttemptOutput:
                 "size_bytes": len(self.stdout),
             },
         }
+        if self.stream != "stdout":
+            manifest["stdout"]["stream"] = self.stream
+        if not self.complete:
+            manifest["stdout"]["complete"] = False
         fingerprint = hashlib.sha256(
             json.dumps(
                 manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True
