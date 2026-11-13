@@ -3574,7 +3574,6 @@ def test_normalized_result_manifest_is_detached_and_body_free():
         },
     }
     encoded = json.dumps(manifest)
-    assert "stdout" not in result.__dataclass_fields__ or True
     assert "events" not in encoded
     assert "body" not in encoded
 
