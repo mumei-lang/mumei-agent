@@ -11,7 +11,11 @@ stay unsupported. A scalar ``x = expression`` reassignment replaces the
 binding's dependencies — it never declares a new variable. Loop bodies are
 joined to a widening fixed point so dependencies propagating across
 iterations are captured (joins, not unrolls — trip counts are never
-modelled). Compiler-resolved
+modelled). Expression ``switch`` statements with neither initializer nor
+``fallthrough`` join the same way: the tag and every case guard are
+evaluated (effect-free), each clause body runs in its own scope and its
+reassignments union back. Type switches, ``select`` and every other
+statement shape stay unsupported. Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -454,6 +458,43 @@ class _Builder:
             # Loop-body reassignments join back by union: the loop may
             # execute zero or many times.
             self._join(locals_, scope, params)
+            return
+        if kind == "expression_switch_statement":
+            if node.child_by_field_name("initializer") is not None:
+                raise _Unsupported("unsupported_statement", _span(node))
+            value = node.child_by_field_name("value")
+            if value is not None:
+                # The tag is evaluated but its dependencies cannot reach the
+                # result: every fragment statement is effect-free.
+                self.expression(
+                    value, fn, params, locals_, transfers, count, 0
+                )
+            for clause in node.named_children:
+                if clause.type == "expression_case":
+                    for sub in clause.named_children:
+                        if sub.type == "expression_list":
+                            # Case guards are evaluated like the tag.
+                            for guard in _children(sub):
+                                self.expression(
+                                    guard, fn, params, locals_, transfers,
+                                    count, 0,
+                                )
+                        elif sub.type == "statement_list":
+                            branch = dict(locals_)
+                            for stmt in _children(sub):
+                                self.statement(
+                                    stmt, fn, params, branch, transfers,
+                                    count, deps, saw_return,
+                                )
+                            self._join(locals_, branch, params)
+                elif clause.type == "default_case":
+                    branch = dict(locals_)
+                    for stmt in _children(clause):
+                        self.statement(
+                            stmt, fn, params, branch, transfers,
+                            count, deps, saw_return,
+                        )
+                    self._join(locals_, branch, params)
             return
         raise _Unsupported("unsupported_statement", _span(node))
 
