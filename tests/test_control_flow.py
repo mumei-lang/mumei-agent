@@ -122,7 +122,6 @@ def test_returns_after_unconditional_return_are_disconnected() -> None:
         ("select { default: return 0 }", "unsupported_switch"),
         ("defer f(); return 0", "unsupported_defer"),
         ("go f(); return 0", "unsupported_go"),
-        ("panic(x); return 0", "unsupported_terminate"),
         ("goto done; done: return 0", "unsupported_goto"),
         ("outer: x := 1; return x", "labelled_statement"),
         ("outer: if true { return 1 }", "labelled_statement"),
@@ -905,3 +904,53 @@ def test_labelled_range_break_and_continue():
     (jump,) = nodes(cfg, "continue")
     # A range has no update clause: continue re-enters the loop header.
     assert kinds_at(cfg, edges_to(cfg, jump.node_id)) == {"range"}
+
+
+def test_terminating_call_edges_to_exit():
+    result = control_flow.build_go_cfg("panic(x); return 0")
+    cfg = result.graph
+    assert result.gaps == ()
+    (term,) = nodes(cfg, "terminate")
+    assert edges_to(cfg, term.node_id) == {cfg.exit}
+    (ret,) = nodes(cfg, "return")
+    assert ret.node_id not in cfg.reachable()
+
+
+@pytest.mark.parametrize(
+    "call",
+    ["panic(x)", "os.Exit(1)", "log.Fatal(err)", 'log.Fatalf("%s", err)',
+     "logger.Fatal(err)", 'log.Panicf("%s", err)', "runtime.Goexit()"],
+)
+def test_terminating_call_variants_end_normal_flow(call):
+    body = f"x := 1; {call}; x := 2"
+    result = control_flow.build_go_cfg(body)
+    cfg = result.graph
+    assert result.gaps == ()
+    (term,) = nodes(cfg, "terminate")
+    assert edges_to(cfg, term.node_id) == {cfg.exit}
+
+
+def test_terminate_inside_branches_leaves_other_paths_reachable():
+    result = control_flow.build_go_cfg(
+        "if bad { panic(x) }; work(); return 0"
+    )
+    cfg = result.graph
+    (term,) = nodes(cfg, "terminate")
+    assert edges_to(cfg, term.node_id) == {cfg.exit}
+    kinds = {node.kind for node in cfg.nodes}
+    assert {"if", "terminate", "expr", "return"} <= kinds
+    assert len(cfg.reachable()) == len(cfg.nodes)
+
+
+def test_terminate_unreachable_hint_after_panic():
+    body = "panic(x); y := 1; return y"
+    cfg = control_flow.build_go_cfg(body).graph
+    hints = control_flow.flow_hints(body, cfg)
+    assert {use.kind for use in hints.unreachable} == {"define", "return"}
+
+
+def test_terminate_keeps_assignment_facts_correct_on_live_paths():
+    cfg, result = facts("x := 1; panic(x)")
+    assert cfg is not None
+    (term,) = nodes(cfg, "terminate")
+    assert "x" in result[term.node_id].all_paths

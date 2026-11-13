@@ -2,8 +2,9 @@
 
 Calls are opaque and assumed to return normally. Panic/recovery, concurrency,
 deferred execution, switches and ``goto`` are not modelled; labelled
-``break``/``continue`` resolve only against enclosing labelled loops.
-Unsupported
+``break``/``continue`` resolve only against enclosing labelled loops;
+``panic``/``os.Exit``-style terminating calls end normal flow at the
+exit (deferred calls and ``recover`` stay unmodelled). Unsupported
 syntax produces gaps instead of a misleading partial graph. This is neither a
 proof of source semantics nor a full analysis framework.
 
@@ -89,7 +90,7 @@ class CFGConstruction:
 
 
 _SIMPLE = frozenset({"define", "assign", "inc", "dec", "const", "var", "expr"})
-_STRUCTURED = frozenset({"if", "for", "range", "block", "return"})
+_STRUCTURED = frozenset({"if", "for", "range", "block", "return", "terminate"})
 
 
 def _span(statement: tree_sitter_extract.Statement) -> SourceSpan:
@@ -167,6 +168,8 @@ class _Builder:
             node = self.node(kind, statement)
             if kind == "return":
                 self.edge(node, 1, "return")
+            elif kind == "terminate":
+                self.edge(node, 1, "terminate")
             elif kind in {"break", "continue"}:
                 parts = statement.text.split()
                 target = (

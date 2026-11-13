@@ -1332,6 +1332,25 @@ resolution — the checker only verifies the name matches an enclosing
 labelled loop; Go's function-scoped label namespace and duplicate-label
 rejection are not modelled.
 
+### C05 terminating calls as exit edges
+
+`build_go_cfg` now models Go's terminating calls: expression statements
+matching `panic(...)`, `os.Exit(...)`, `log.Fatal*`/`log.Panic*` and
+`runtime.Goexit()` build `terminate` nodes that edge straight to the
+CFG exit — normal flow after such a call is genuinely unreachable and
+`unreachable_statements` now reports it (previously the whole body was
+refused with an `unsupported_terminate` gap). Calls inside branches
+leave sibling paths reachable; a trailing statement after `panic` is
+reported dead, and the call's arguments still count as reads for
+unused-assignment hints.
+
+Modelling boundaries: termination means *exit of the modelled
+function's normal flow* — deferred calls, `recover` and unwinding
+semantics are not modelled (defer remains `unsupported_defer`), and a
+`terminate` edge asserts nothing about whether the process actually
+stops. Recognised callees are the declared `panic`/`os.Exit`/
+`log.Fatal*`/`log.Panic*`/`runtime.Goexit` set only.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
