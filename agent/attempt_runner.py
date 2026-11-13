@@ -24,6 +24,7 @@ from agent.verification_attempt import (
 POLL_SECONDS = 0.005
 CANCEL_GRACE_MS = 1000
 READ_CHUNK = 65_536
+COLLECTOR_JOIN_SECONDS = 5.0
 
 
 class _BoundedCollector:
@@ -43,8 +44,16 @@ class _BoundedCollector:
     def start(self) -> None:
         self._thread.start()
 
-    def join(self) -> None:
-        self._thread.join()
+    def join(self, timeout: float) -> None:
+        """Wait for the drain to finish; a live thread means a stuck pipe.
+
+        A grandchild can keep stdout open after the child exits, so the join
+        is bounded: when the thread outlives the budget the kept bytes are
+        still returned and `truncated` marks the collection incomplete.
+        """
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            self.truncated = True
 
     def _drain(self) -> None:
         while True:
@@ -183,7 +192,7 @@ class AttemptRunner:
                 process.wait(timeout=POLL_SECONDS)
             except subprocess.TimeoutExpired:
                 pass
-        collector.join()
+        collector.join(COLLECTOR_JOIN_SECONDS)
         for event in events:
             record = record.record(event)
         return AttemptRunResult(record, collector.data, not collector.truncated)

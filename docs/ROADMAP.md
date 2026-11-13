@@ -101,7 +101,8 @@ exit with its real code), `failed` (spawn refused by the OS), `timed_out`
 killed after `cancel_requested` + terminate). Captured stdout is drained on
 a side thread so writers past the pipe buffer cannot deadlock the wait,
 bounded to `MAX_STDOUT_BYTES`, and returned on `AttemptRunResult` with a
-`complete` declaration recording only whether truncation occurred.
+`complete` declaration that is `False` whenever truncation occurred or the
+bounded drain could not finish (e.g. a grandchild holding the pipe open).
 
 ```python
 from agent.attempt_runner import AttemptRunner

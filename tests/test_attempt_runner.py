@@ -9,13 +9,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from agent.attempt_runner import (
-    CANCEL_GRACE_MS,
-    AttemptRunner,
-    AttemptRunResult,
-)
+from agent.attempt_runner import AttemptRunner, AttemptRunResult
 from agent.verification_attempt import (
-    MAX_COUNTER,
     MAX_STDOUT_BYTES,
     AttemptEvent,
     AttemptExecutionRequest,
