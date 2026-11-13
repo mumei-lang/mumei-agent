@@ -762,16 +762,13 @@ def test_go_file_units_unsupported_source_reports_gap():
 
 def test_go_file_units_declaration_without_body_is_a_gap():
     result = units("package p\nfunc asm()\n")
-    if result.functions:
-        (fn,) = result.functions
-        assert fn.body_span is None
-        assert fn.body_sha256 is None
-        assert [gap.reason for gap in result.gaps] == [
-            "declaration_without_body"
-        ]
-    else:
-        # The parser may simply skip bodiless declarations entirely.
-        assert result.gaps == () or result.gaps[0].reason
+    (fn,) = result.functions
+    assert fn.body_span is None
+    assert fn.body_sha256 is None
+    assert [gap.reason for gap in result.gaps] == [
+        "declaration_without_body"
+    ]
+    assert result.gaps[0].span == fn.declaration
 
 
 def test_function_body_returns_the_exact_inner_text():
@@ -816,7 +813,5 @@ def test_function_body_round_trips_through_flow_hints():
 def test_function_body_declaration_without_body_rejected():
     source = "package p\nfunc asm()\n"
     result = units(source)
-    fn = result.functions[0] if result.functions else None
-    if fn is not None:
-        with pytest.raises(ValueError, match="no declared body"):
-            control_flow.function_body(source, result, fn)
+    with pytest.raises(ValueError, match="no declared body"):
+        control_flow.function_body(source, result, result.functions[0])
