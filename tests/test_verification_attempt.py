@@ -26,6 +26,7 @@ from agent.verification_attempt import (
     STREAM_KINDS,
     AttemptCancelRequest,
     AttemptEvent,
+    AttemptEvidenceCandidate,
     AttemptExecutionRequest,
     AttemptOutput,
     AttemptRecord,
@@ -3067,4 +3068,177 @@ def test_output_stream_metadata_is_passive_without_io_or_clock(
     assert snapshot.to_dict() == output_snapshot(
         stdout=b"partial", complete=False
     ).to_dict()
+    assert capsys.readouterr() == ("", "")
+
+
+def test_evidence_candidate_rejects_invalid_metadata():
+    for kwargs in (
+        {"request_fingerprint": "a" * 63},
+        {"request_fingerprint": "G" * 64},
+        {"request_fingerprint": 1},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": 0},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": True},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": MAX_COUNTER + 1},
+        {
+            "request_fingerprint": FINGERPRINT,
+            "output_fingerprint": "z" * 64,
+        },
+        {"request_fingerprint": FINGERPRINT, "output_fingerprint": "a" * 63},
+        {"request_fingerprint": FINGERPRINT, "output_fingerprint": 0},
+        {"request_fingerprint": FINGERPRINT, "output_fingerprint": None},
+    ):
+        with pytest.raises(ValueError):
+            AttemptEvidenceCandidate(
+                kwargs.get("request_fingerprint", FINGERPRINT),
+                kwargs.get("attempt_number", 1),
+                kwargs.get("output_fingerprint", "b" * 64),
+            )
+    candidate = AttemptEvidenceCandidate(FINGERPRINT, 1, "b" * 64)
+    assert candidate.output_fingerprint == "b" * 64
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_evidence_candidate_requires_a_selected_result(count):
+    attempts = tuple(
+        sequence_record("exited" if n < count else "ready", n)
+        for n in range(1, count + 1)
+    )
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    with pytest.raises(
+        ValueError, match="^evidence candidate requires a selected result$"
+    ):
+        sequence.evidence_candidate()
+
+
+def test_evidence_candidate_names_the_selected_result():
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), body=b"{" + b'"a":1}'
+    )
+    selected = sequence.select_result(output)
+    candidate = selected.evidence_candidate()
+    assert candidate.request_fingerprint == sequence.request_fingerprint
+    assert candidate.attempt_number == output.attempt.attempt_number
+    assert candidate.output_fingerprint == output.to_dict()[
+        "output_fingerprint"
+    ]
+    assert candidate == AttemptEvidenceCandidate(
+        sequence.request_fingerprint,
+        1,
+        output.to_dict()["output_fingerprint"],
+    )
+    assert selected.evidence_candidate() == candidate
+    assert selected.evidence_candidate() is not candidate
+
+
+def test_evidence_candidate_binds_the_selected_attempt_ordinal():
+    prepared = prepared_source()
+    first = (
+        AttemptSequence.from_prepared(prepared)
+        .begin_attempt()
+        .reconcile_report(
+            AttemptRecord.from_prepared(prepared, 1).reconcile(
+                AttemptRecord.from_prepared(prepared, 1)
+                .record(START)
+                .record(AttemptEvent("timed_out", 10))
+            )
+        )
+        .begin_attempt()
+    )
+    report = first.current.record(START).record(AttemptEvent("exited", 2, 0))
+    second = first.reconcile_report(report)
+    output = AttemptOutput.from_prepared(
+        prepared, 2, report, b"{}", hashlib.sha256(b"{}").hexdigest()
+    )
+    selected = second.select_result(output)
+    candidate = selected.evidence_candidate()
+    assert candidate.attempt_number == 2
+
+
+def test_evidence_candidate_is_pure_and_body_free():
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), body=b"FAKE_PRIVATE_EVIDENCE_BODY"
+    )
+    selected = sequence.select_result(output)
+    before = selected.to_dict()
+    candidate = selected.evidence_candidate()
+    data = candidate.to_dict()
+    assert data == {
+        "schema_version": "mumei.verifier-evidence-candidate/v1",
+        "request_fingerprint": sequence.request_fingerprint,
+        "attempt_number": 1,
+        "output_fingerprint": output.to_dict()["output_fingerprint"],
+    }
+    encoded = json.dumps(data)
+    for forbidden in ("stdout", "FAKE_PRIVATE_EVIDENCE_BODY", "stream"):
+        assert forbidden not in encoded
+    data["attempt_number"] = 9
+    assert candidate.to_dict()["attempt_number"] == 1
+    assert selected.to_dict() == before
+    with pytest.raises(FrozenInstanceError):
+        candidate.attempt_number = 9
+
+
+@pytest.mark.parametrize("code", [-1, 0, 1])
+def test_evidence_candidate_covers_any_exit_code(code):
+    sequence, output = exited_sequence_and_output(
+        prepared_source(), code=code
+    )
+    candidate = sequence.select_result(output).evidence_candidate()
+    assert candidate.attempt_number == 1
+
+
+def test_evidence_candidate_survives_stamps_and_the_store():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    stamped = sequence.reconcile_report(output.attempt, report_stamp=3)
+    selected = stamped.select_result(output)
+    candidate = selected.evidence_candidate()
+    store = AttemptSequenceStore()
+    store.publish(selected)
+    assert store.current.evidence_candidate() == candidate
+    assert selected.report_stamp == 3
+
+
+def test_evidence_candidates_do_not_arbitrate_independent_sequences():
+    prepared = prepared_source()
+    sequence, output = exited_sequence_and_output(prepared)
+    selected = sequence.select_result(output)
+    foreign_record = AttemptRecord("b" * 64, 1, 10, PREFIXES["exited"])
+    foreign_output = AttemptOutput(
+        foreign_record,
+        STDOUT,
+        hashlib.sha256(STDOUT).hexdigest(),
+    )
+    foreign = AttemptSequence("b" * 64, 10, (foreign_record,))
+    foreign_selected = foreign.select_result(foreign_output)
+    assert (
+        selected.evidence_candidate().request_fingerprint
+        != foreign_selected.evidence_candidate().request_fingerprint
+    )
+
+
+def test_evidence_candidate_is_passive_without_io_or_decode(
+    monkeypatch, capsys
+):
+    sequence, output = exited_sequence_and_output(prepared_source())
+    selected = sequence.select_result(output)
+    before = selected.to_dict(), output.to_dict()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("evidence candidates must remain passive exact metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (time, "monotonic"),
+            (time, "time"),
+            (AttemptOutput, "decode_json_object"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        assert selected.evidence_candidate().attempt_number == 1
+    assert (selected.to_dict(), output.to_dict()) == before
     assert capsys.readouterr() == ("", "")
