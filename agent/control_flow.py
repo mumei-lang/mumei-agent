@@ -395,3 +395,59 @@ def unassigned_uses(
                     )
                 )
     return tuple(findings)
+
+
+@dataclass(frozen=True)
+class UnusedAssignment:
+    """A name textually assigned at a node but never read anywhere.
+
+    A heuristic hint, not a defect verdict: "read" is the same
+    conservative identifier scan `unassigned_uses` performs, so a name
+    mentioned only inside its own initializer still counts as read.
+    """
+
+    node_id: int
+    name: str
+    span: SourceSpan | None
+
+
+def unused_assignments(
+    body: str, graph: ControlFlowGraph
+) -> tuple[UnusedAssignment, ...]:
+    """Recognized assignment targets that are never textually read.
+
+    Reports `name` at `node` when `name` is a simple identifier target of
+    a recognized assignment statement and appears in no use position
+    anywhere in the body — the dead-store hint at name granularity. It
+    does not model fields, elements, calls, shadowing or closures, does
+    not check which assignment is dead when several write the same name,
+    and counts reads in unreachable code like any other. A finding is a
+    hint for the host's own analysis, not a defect verdict.
+    """
+    if hashlib.sha256(body.encode("utf-8")).hexdigest() != graph.source_sha256:
+        raise ValueError("body does not match the graph source digest")
+    tree = tree_sitter_extract.extract_statements(body, "go")
+    if tree is None:
+        raise ValueError("unused assignments require a parsed Go body")
+    walked = _walk(tree.statements)
+    used = {
+        name
+        for statement in walked
+        for name in _IDENTIFIER.findall(_use_text(statement))
+    }
+    by_span = {
+        (stmt.start, stmt.start + len(stmt.text)): stmt for stmt in walked
+    }
+    findings: list[UnusedAssignment] = []
+    for node in graph.nodes:
+        if node.span is None:
+            continue
+        statement = by_span.get((node.span.start, node.span.end))
+        if statement is None:
+            continue
+        for name in sorted(_assigned_names(statement)):
+            if name not in used:
+                findings.append(
+                    UnusedAssignment(node.node_id, name, node.span)
+                )
+    return tuple(findings)

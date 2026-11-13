@@ -1193,6 +1193,26 @@ shadowing and closures remain unmodelled, and unreachable uses produce
 no findings at all. The flag defaults to `False` for compatibility with
 the previous slice's construction.
 
+### C05 unused-assignment hints at name granularity
+
+`agent.control_flow.unused_assignments(body, graph)` reports
+`UnusedAssignment(node_id, name, span)` when a recognized assignment
+statement targets a simple identifier that appears in no use position
+anywhere in the body — the dead-store hint at name granularity, over the
+same conservative identifier scan `unassigned_uses` performs.
+
+```python
+unread = control_flow.unused_assignments(body, graph)
+# -> tuple[UnusedAssignment, ...], ordered by node then name
+```
+
+Still a **hint, not a defect verdict**: "read" means any textual
+occurrence in a use position, so a name mentioned inside its own
+initializer counts as read, `x++` reads `x`, and reads in unreachable
+code count like any other. The check does not decide which of several
+writers is dead — every writer of an unread name is flagged — and
+fields/elements, calls, shadowing and closures remain unmodelled.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
