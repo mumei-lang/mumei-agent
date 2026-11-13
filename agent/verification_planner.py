@@ -29,6 +29,7 @@ SettingValues = tuple[tuple[str, SettingValue], ...]
 MAX_SETTINGS = 32
 SOURCE_INPUT_FORMAT = "mumei.source-text/v1"
 MAX_SOURCE_BYTES = 1_048_576
+MAX_STAMP = (1 << 63) - 1
 PERMISSIONS = frozenset(
     {
         "filesystem.read",
@@ -476,11 +477,18 @@ class AdapterDescriptor:
 
 @dataclass(frozen=True)
 class RuntimeObservation:
-    """A host's preflight observation; freshness and actual probing are not implemented."""
+    """A host's preflight observation; actual probing is not implemented.
+
+    `stamp` is an optional host-declared monotonic counter: it detects
+    replayed or reordered deliveries at the registry boundary, nothing more
+    — a larger stamp is not a freshness proof, and the observed values stay
+    untrusted claims either way.
+    """
 
     adapter_id: str
     availability: str = "unknown"
     tool_version: str | None = None
+    stamp: int | None = None
 
     def __post_init__(self) -> None:
         _label(self.adapter_id)
@@ -488,6 +496,10 @@ class RuntimeObservation:
             raise ValueError("invalid availability observation")
         if self.tool_version is not None:
             _version(self.tool_version)
+        if self.stamp is not None and (
+            type(self.stamp) is not int or not 1 <= self.stamp <= MAX_STAMP
+        ):
+            raise ValueError("invalid adapter observation stamp")
 
 
 @dataclass(frozen=True)
@@ -745,10 +757,19 @@ class PreparedSourceRequest:
 
 
 class AdapterRegistry:
-    """Explicit data registration only: no plugin loading, imports or discovery."""
+    """Explicit data registration only: no plugin loading, imports or discovery.
+
+    `plan()` additionally records accepted stamped observations per adapter
+    id: once a stamp is accepted every later observation for that adapter
+    must carry one, a smaller stamp is a static stale error, a reused stamp
+    only tolerates an identical observation and a larger one advances the
+    boundary. Stamps detect replays/reordering at this registry — they are
+    not freshness proofs and unstamped calls keep legacy behavior.
+    """
 
     def __init__(self) -> None:
         self._adapters: dict[str, AdapterDescriptor] = {}
+        self._observations: dict[str, RuntimeObservation] = {}
 
     def register(self, adapter: AdapterDescriptor, *, replace: bool = False) -> None:
         if type(replace) is not bool:
@@ -792,11 +813,22 @@ class AdapterRegistry:
         observations: tuple[RuntimeObservation, ...] = (),
     ) -> VerificationPlan:
         runtime: dict[str, RuntimeObservation] = {}
+        stamped_updates: dict[str, RuntimeObservation] = {}
         for observation in observations:
             if observation.adapter_id in runtime:
                 raise ValueError("duplicate runtime observation")
             if observation.adapter_id not in self._adapters:
                 raise ValueError("runtime observation has no registered adapter")
+            last = self._observations.get(observation.adapter_id)
+            if last is not None and observation.stamp is None:
+                raise ValueError("adapter observation requires a stamp")
+            if observation.stamp is not None:
+                if last is not None:
+                    if observation.stamp < last.stamp:
+                        raise ValueError("adapter observation stamp is not fresh")
+                    if observation.stamp == last.stamp and observation != last:
+                        raise ValueError("adapter observation stamp conflict")
+                stamped_updates[observation.adapter_id] = observation
             runtime[observation.adapter_id] = observation
         pins = dict(policy.tool_version_pins)
         if any(key not in self._adapters for key in pins):
@@ -926,6 +958,7 @@ class AdapterRegistry:
                         selected, request, settings
                     ),
                 )
+        self._observations.update(stamped_updates)
         return VerificationPlan(
             request, policy, settings, fallback_from, tuple(decisions)
         )
