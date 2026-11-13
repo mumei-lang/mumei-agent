@@ -1555,6 +1555,20 @@ textual reachability, not trip counts.
 update operands stay `unsupported_statement`/`binding_unavailable`.
 Still a conservative overapproximation — never equality or proof.
 
+### C07 scalar reassignment
+
+A scalar `x = expression` reassignment joins the fragment: a single
+identifier left-hand side resolving to a parameter or an in-scope let
+binding — never a declaration. At top level the reassignment replaces
+the binding's dependencies (the old value is gone); inside a branch or
+loop body the caller joins the new value back by *union*, because the
+inner path may not execute — a may-analysis, still a conservative
+overapproximation, never equality.
+
+Compound operators (`+=`, `-=`, ...), tuple targets, and assignments to
+names outside the parameter/let scope stay `unsupported_statement` /
+`binding_unavailable`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

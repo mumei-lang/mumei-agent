@@ -319,12 +319,61 @@ def test_for_bodies_union_return_dependencies(
         "func F(x int64) int64 { for i:=x; i>0; i=i-1 {}; return x }",
         # Assignment updates are not inc/dec.
         "func F(x int64) int64 { for i:=x; i>0; i=x {}; return x }",
+        # Compound assignment operators are not `=`.
+        "func F(x int64) int64 { x += 1; return x }",
+        "func F(x int64) int64 { x, x = x, x; return x }",
     ],
 )
 def test_for_shapes_stay_unsupported(go_types_helper, declarations):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available and result.return_dependencies is None
     assert result.effects == "unknown" and result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # Reassignment replaces the binding's dependencies.
+        (
+            "func F(x int64) int64 { x = x+1; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { y:=x; y=y+1; return y }",
+            frozenset({0}),
+        ),
+        # A parameter reassigned from another parameter picks it up.
+        (
+            "func F(x, y int64) int64 { x = y; return x }",
+            frozenset({1}),
+        ),
+        # Branch reassignments join back as may-assignments (union).
+        (
+            "func F(x, y int64) int64 { if x>0 { x = y }; return x }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { if x>0 { x = y } else { x = x }; return x }",
+            frozenset({0, 1}),
+        ),
+        # Loop-body reassignments join back too (zero or many trips).
+        (
+            "func F(x, y int64) int64 { for i:=x; i>0; i-- { x = y }; return x }",
+            frozenset({0, 1}),
+        ),
+        # A branch-local let still does not escape.
+        (
+            "func F(x int64) int64 { if x>0 { y:=x; x = y }; return x }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_scalar_reassignment_dependencies(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
 
 
 @pytest.mark.parametrize(
@@ -347,8 +396,6 @@ def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
 @pytest.mark.parametrize(
     "declarations",
     [
-        # Reassignment is not a let binding.
-        "func F(x int64) int64 { y:=x; y=1; return y }",
         # Tuple declarations are outside the fragment.
         "func F(x int64) int64 { y,z:=x,x; return y+z }",
         # An increment is a statement, not a let binding.
