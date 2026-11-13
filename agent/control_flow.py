@@ -451,3 +451,63 @@ def unused_assignments(
                     UnusedAssignment(node.node_id, name, node.span)
                 )
     return tuple(findings)
+
+
+@dataclass(frozen=True)
+class UnreachableStatement:
+    """A mapped statement no normal-flow path from the entry reaches.
+
+    A structural hint over the explicit CFG, not dead-code proof: the
+    normal-flow profile's gaps still apply, and reachability says nothing
+    about whether the code would have executed had it been reachable.
+    """
+
+    node_id: int
+    kind: str
+    span: SourceSpan | None
+
+
+def unreachable_statements(
+    graph: ControlFlowGraph,
+) -> tuple[UnreachableStatement, ...]:
+    """Statements unreachable from the entry under normal-flow edges.
+
+    Flags every span-carrying node outside `graph.reachable()`. Syntactic
+    only — it cannot see unsupported syntax the profile already drops,
+    and reachability over explicit normal flow is not dead-code proof.
+    """
+    reached = graph.reachable()
+    return tuple(
+        UnreachableStatement(node.node_id, node.kind, node.span)
+        for node in graph.nodes
+        if node.span is not None and node.node_id not in reached
+    )
+
+
+@dataclass(frozen=True)
+class FlowHints:
+    """One pass over the bounded flow hints this module exports.
+
+    Every member keeps its own boundary: each is a hint for the host's
+    own analysis, not a defect verdict or a proof of source semantics.
+    """
+
+    unassigned: tuple[UnassignedUse, ...]
+    unused: tuple[UnusedAssignment, ...]
+    unreachable: tuple[UnreachableStatement, ...]
+
+
+def flow_hints(body: str, graph: ControlFlowGraph) -> FlowHints:
+    """Single entry point returning every bounded flow hint together.
+
+    Aggregates `unassigned_uses`, `unused_assignments` and
+    `unreachable_statements` into one immutable report over the same
+    digest-checked body and graph. It adds no analysis of its own: the
+    same profiles, gaps and modelling limits apply, and the report is a
+    hint surface for the host, not a defect list or a proof.
+    """
+    return FlowHints(
+        unassigned_uses(body, graph),
+        unused_assignments(body, graph),
+        unreachable_statements(graph),
+    )
