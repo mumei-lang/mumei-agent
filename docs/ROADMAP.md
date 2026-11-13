@@ -1583,6 +1583,20 @@ unions into the result like any syntactic return.
 Switch initializers, `fallthrough`, type switches, `select` and every
 other statement shape stay `unsupported_statement`.
 
+### C07 var declarations in bodies
+
+`var_declaration` joins the fragment under the same binding contract as
+lets: every `var_spec` declares exactly one name with at most one value;
+the binding is taken
+from `bindings_by_span` and must be scalar (integer/boolean), else
+`binding_unavailable`. `var x T` without a value binds the dep-free zero
+value — honestly dep-free, not an approximation. Vars scope like lets:
+branch/loop-local declarations never escape.
+
+Multi-name specs, non-scalar bindings, `const` declarations and grouped
+`var (...)` forms (a tree-sitter parser gap) stay
+`unsupported_statement` / `syntax_or_parser_unavailable`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

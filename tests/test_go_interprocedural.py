@@ -450,6 +450,69 @@ def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
 
 
 @pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # var with an explicit scalar type and one value.
+        (
+            "func F(x int64) int64 { var y int64 = x+1; return y }",
+            frozenset({0}),
+        ),
+        # var with inferred scalar type.
+        (
+            "func F(x int64) int64 { var y = x; return y }",
+            frozenset({0}),
+        ),
+        # var without a value binds the dep-free zero value.
+        (
+            "func F(x int64) int64 { var y int64; return y }",
+            frozenset(),
+        ),
+        # Zero value then reassigned — replace, like lets.
+        (
+            "func F(x int64) int64 { var y int64; y = x; return y }",
+            frozenset({0}),
+        ),
+        # A var declared in a branch does not escape.
+        (
+            "func F(x int64) int64 { if x>0 { var y int64 = x; x = y }; return x }",
+            frozenset({0}),
+        ),
+        # Boolean vars bind too.
+        (
+            "func F(x int64, b bool) bool { var c bool = b; return c }",
+            frozenset({1}),
+        ),
+    ],
+)
+def test_var_declaration_dependencies(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Multi-name specs stay outside the fragment.
+        "func F(x int64) int64 { var a, b int64 = x, x; return a+b }",
+        # Non-scalar var bindings are unavailable.
+        "func F(x int64) int64 { var s string; _ = s; return x }",
+        "func F(x int64) int64 { var f func(); _ = f; return x }",
+        # Grouped `var (...)` is a parser gap (tree-sitter has_error).
+        "func F(x int64) int64 { var ( a int64 = x; b = x ); return a+b }",
+        # const declarations are not var bindings.
+        "func F(x int64) int64 { const c int64 = 1; return c }",
+    ],
+)
+def test_var_declaration_shapes_stay_unsupported(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # An if initializer is outside the fragment.

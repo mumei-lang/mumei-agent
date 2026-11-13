@@ -14,8 +14,11 @@ iterations are captured (joins, not unrolls — trip counts are never
 modelled). Expression ``switch`` statements with neither initializer nor
 ``fallthrough`` join the same way: the tag and every case guard are
 evaluated (effect-free), each clause body runs in its own scope and its
-reassignments union back. Type switches, ``select`` and every other
-statement shape stay unsupported. Compiler-resolved
+reassignments union back. ``var`` declarations bind like lets — one name
+per ``var_spec`` with at most one value; ``var x T`` is the dep-free zero
+value (grouped ``var (...)`` forms are a parser gap). Type switches,
+``select``, ``const`` declarations and every other statement shape stay
+unsupported. Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -307,6 +310,43 @@ class _Builder:
             locals_[binding.id] = self.expression(
                 rights[0], fn, params, locals_, transfers, count, 0
             )
+            return
+        if kind == "var_declaration":
+            # Grouped `var (...)` declarations never reach here — the
+            # grammar marks them has_error and the source is rejected as
+            # `syntax_or_parser_unavailable` before statement dispatch.
+            specs = [
+                c
+                for c in node.named_children
+                if c.type == "var_spec"
+            ]
+            if not specs:
+                raise _Unsupported("unsupported_statement", _span(node))
+            for spec in specs:
+                names: list[Any] = []
+                values: list[Any] = []
+                for i, child in enumerate(spec.children):
+                    field = spec.field_name_for_child(i)
+                    if field == "name":
+                        names.append(child)
+                    elif field == "value":
+                        values.extend(_children(child))
+                if len(names) != 1 or len(values) > 1:
+                    raise _Unsupported("unsupported_statement", _span(spec))
+                binding = self.bindings_by_span.get(_span(names[0]))
+                if binding is None or binding.type.kind not in {
+                    "integer",
+                    "boolean",
+                }:
+                    raise _Unsupported("binding_unavailable", _span(spec))
+                # `var x T` without a value is the zero value — dep-free.
+                locals_[binding.id] = (
+                    self.expression(
+                        values[0], fn, params, locals_, transfers, count, 0
+                    )
+                    if values
+                    else frozenset()
+                )
             return
         if kind == "if_statement":
             condition = node.child_by_field_name("condition")
