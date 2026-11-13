@@ -614,3 +614,104 @@ def evaluate_flow_hints(
             expected_unreachable,
         ),
     )
+
+
+@dataclass(frozen=True)
+class FileFunction:
+    """Declared provenance of one function in a Go source unit.
+
+    `declaration` and `body_span` are Unicode-codepoint offsets into the
+    source the units were built from; `body_sha256` binds the extracted
+    inner body text. A declaration with no body (`func f()` without an
+    implementation) keeps `body_span`/`body_sha256` empty. Provenance is
+    declared metadata only — hashes bind bytes, not semantics.
+    """
+
+    name: str
+    declaration: SourceSpan
+    body_span: SourceSpan | None
+    body_sha256: str | None
+
+
+@dataclass(frozen=True)
+class GoFileUnits:
+    """Function-level provenance index for one Go source unit."""
+
+    source_sha256: str
+    functions: tuple[FileFunction, ...]
+    gaps: tuple[CFGGap, ...] = ()
+
+
+def go_file_units(source: str) -> GoFileUnits:
+    """Index function declarations in one Go source unit.
+
+    Maps each function's raw name, declaration span and inner-body span
+    to source-relative Unicode-codepoint offsets plus a SHA-256 of the
+    extracted body — the file-level provenance the body-scoped CFG
+    slices were missing. Declarations without a body get `None` spans;
+    unparseable or unsupported input yields a `CFGGap` and no units —
+    never a partial index. Names are reported raw and may repeat across
+    methods; provenance is declared metadata, not symbol resolution.
+    """
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    tree, _ = tree_sitter_extract.parse(source, "go")
+    if tree is None or tree.root_node.has_error:
+        return GoFileUnits(
+            digest, (), (CFGGap("syntax_or_parser_unavailable"),)
+        )
+    functions = tree_sitter_extract.extract_functions(
+        source, "go", lambda name: name
+    )
+    if functions is None:
+        return GoFileUnits(
+            digest, (), (CFGGap("syntax_or_parser_unavailable"),)
+        )
+    gaps: list[CFGGap] = []
+    units: list[FileFunction] = []
+    for function in functions:
+        declaration = SourceSpan(function.start_char, function.end_char)
+        if not function.has_body:
+            gaps.append(CFGGap("declaration_without_body", declaration))
+        units.append(
+            FileFunction(
+                function.raw_name or function.name,
+                declaration,
+                SourceSpan(
+                    function.body_start_char, function.body_end_char
+                )
+                if function.has_body
+                else None,
+                hashlib.sha256(function.body.encode("utf-8")).hexdigest()
+                if function.has_body
+                else None,
+            )
+        )
+    return GoFileUnits(digest, tuple(units), tuple(gaps))
+
+
+def function_body(
+    source: str, units: GoFileUnits, function: FileFunction
+) -> str:
+    """Re-extract one function's body under digest verification.
+
+    The source must hash to `units.source_sha256`, the function must be
+    one of `units.functions` and the sliced text must match
+    `function.body_sha256` — every check is a static `ValueError`, so a
+    body is returned only when the declared provenance still binds the
+    bytes. The returned text is exactly what `build_go_cfg` consumes.
+    """
+    if (
+        hashlib.sha256(source.encode("utf-8")).hexdigest()
+        != units.source_sha256
+    ):
+        raise ValueError("source does not match the file units digest")
+    if function not in units.functions:
+        raise ValueError("function is not declared in these file units")
+    if function.body_span is None:
+        raise ValueError("function has no declared body")
+    body = source[function.body_span.start : function.body_span.end]
+    if hashlib.sha256(body.encode("utf-8")).hexdigest() != (
+        function.body_sha256 or ""
+    ):
+        raise ValueError("function body does not match the declared digest")
+    return body

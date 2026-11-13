@@ -1282,6 +1282,35 @@ either — a metric says nothing about the analysis being right, only
 about whether two declarations disagree. Invalid expectation shapes are
 static `ValueError`s (`invalid hint expectation`).
 
+### C05 file-level provenance over Go source units
+
+`agent.control_flow.go_file_units(source)` indexes every function
+declaration in one Go source unit into `GoFileUnits`: the unit's
+SHA-256 plus one `FileFunction` per function carrying its raw name, a
+declaration `SourceSpan` and an inner-body `SourceSpan` (both
+codepoint offsets into that source) and the body's SHA-256 — the
+file-level provenance the body-scoped CFG slices were missing.
+Declarations without a body keep empty spans and surface a
+`declaration_without_body` gap; an unparseable unit yields a
+`syntax_or_parser_unavailable` gap and no units — never a partial
+index. `function_body(source, units, function)` re-extracts one body
+only when the source still hashes to `units.source_sha256`, the
+function is one of the declared units and the sliced text matches the
+declared digest — every check a static `ValueError`, so callers reach
+`build_go_cfg` only on bytes the provenance still binds.
+
+```python
+units = control_flow.go_file_units(source)
+body = control_flow.function_body(source, units, units.functions[0])
+cfg = control_flow.build_go_cfg(body).graph
+```
+
+Provenance is **declared metadata, not semantic identity**: digests
+bind bytes, not meaning — identical names may repeat across methods
+and a digest match says nothing about the body being correct.
+File units are not symbol resolution, module indexing or cross-file
+linking; parsed-here does not imply compiled or linked elsewhere.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
