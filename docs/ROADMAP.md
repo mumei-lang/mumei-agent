@@ -1509,6 +1509,21 @@ integration remain open; existing function-local dataflow stays authoritative.
 No verification grade, Lean trust gate or external verifier changes. C09 LLVM
 translation validation remains separate from these source-analysis summaries.
 
+### C07 let bindings before the single return
+
+The body fragment now admits `name := expression` declarations ahead of
+the single scalar return. Each let binding records its compiler-resolved
+binding identity, requires a scalar (`integer`/`boolean`) declared type,
+and contributes its initializer's dependencies to later expressions and
+the return — `F(x,y) { z:=x+y; return z }` reports `{0,1}` and
+`z:=y` ignores `x` (`{1}`).
+
+Reassignment (`y=1`), tuple declarations, increments, effect-only calls
+and every other statement shape produce `unsupported_statement`; a
+left-hand identifier with no compiler binding or a non-scalar declared
+type yields `binding_unavailable`. The overapproximation is unchanged:
+dependencies are conservative, never equality or proof.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

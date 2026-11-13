@@ -162,7 +162,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(x int64) int64 {return 1%x}",
         "func F(x int64) int64 {return x<<1}",
         "func F(x int64) int64 {return x>>1}",
-        "func F(x int64) int64 { y:=x; return y }",
         "func F(x int64) int64 { x++; return x }",
         "func F(x int64) int64 { if x>0 {return x}; return 0 }",
         "func F(x int64) (r int64) {return}",
@@ -189,6 +188,58 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
     result = named(*unit(go_types_helper, declarations))
     assert not result.available and result.return_dependencies is None
     assert result.effects == "unknown" and result.gaps and not result.calls
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A let binding propagates its initializer's dependencies.
+        ("func F(x int64) int64 { y:=x; return y }", frozenset({0})),
+        ("func F(x int64) int64 { y:=x+1; return y }", frozenset({0})),
+        ("func F(x, y int64) int64 { z:=x+y; return z }", frozenset({0, 1})),
+        # An initializer that ignores one parameter keeps it out.
+        ("func F(x, y int64) int64 { z:=y; return z }", frozenset({1})),
+        # Chained bindings resolve transitively.
+        ("func F(x int64) int64 { y:=x; z:=y; return z }", frozenset({0})),
+        # A let-bound name may shadow nothing and still propagate.
+        ("func F(x int64) int64 { y:=x; return y+1 }", frozenset({0})),
+        # Boolean let bindings are in the scalar fragment.
+        ("func F(x bool) bool { y:=x; return y }", frozenset({0})),
+        # Calls inside an initializer keep their transfers.
+        (
+            "func Leaf(a int64)int64{return a}; "
+            "func F(x int64)int64{ y:=Leaf(x); return y }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_let_bindings_propagate_dependencies(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Reassignment is not a let binding.
+        "func F(x int64) int64 { y:=x; y=1; return y }",
+        # Tuple declarations are outside the fragment.
+        "func F(x int64) int64 { y,z:=x,x; return y+z }",
+        # An increment is a statement, not a let binding.
+        "func F(x int64) int64 { y:=x; y++; return y }",
+        # A non-identifier left side is not a let binding.
+        "func F(x int64) int64 { _=x; return x }",
+        # A call used only for effects is a statement, not a let binding.
+        "func G(){}; func F(x int64) int64 { G(); return x }",
+        # Unsupported initializer propagates the gap.
+        "func F(x int64) int { y:=len(\"s\"); return y }",
+    ],
+)
+def test_non_let_statements_stay_unsupported(go_types_helper, declarations):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available and result.return_dependencies is None
+    assert result.effects == "unknown" and result.gaps
 
 
 def test_unused_argument_is_still_evaluated_for_unsupported_effects(go_types_helper):
