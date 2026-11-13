@@ -1545,3 +1545,228 @@ def test_permission_metadata_is_pure_not_a_capability_truth_or_runtime_authoriza
     assert prepared.plan.selected.location == "remote"
     assert prepared.plan.selected.required_permissions == frozenset()
     assert prepared.source is SOURCE
+
+
+# --- C11 declarative adapter manifests ---------------------------------------
+
+
+def manifest(**overrides):
+    base = {
+        "schema_version": "mumei.verifier-adapter/v1",
+        "adapter_id": "fixture",
+        "adapter_version": "1.0.0",
+        "profiles": [PROFILE],
+        "methods": ["deductive_proof"],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_manifest_parses_minimal_descriptor_with_defaults():
+    descriptor = AdapterDescriptor.from_manifest(manifest())
+    assert descriptor.adapter_id == "fixture"
+    assert descriptor.adapter_version == "1.0.0"
+    assert descriptor.profiles == frozenset({PROFILE})
+    assert descriptor.methods == frozenset({"deductive_proof"})
+    assert descriptor.protocol_version == "mumei.verifier-adapter/v1"
+    assert descriptor.priority == 0
+    assert descriptor.enabled is True
+    assert descriptor.location == "local"
+    assert descriptor.max_timeout_ms == 30_000
+    assert descriptor.max_memory_mb == 1024
+    assert descriptor.result_contracts == ()
+    assert descriptor.setting_specs == ()
+    assert descriptor.required_permissions is None
+
+
+def test_manifest_parses_full_descriptor():
+    descriptor = AdapterDescriptor.from_manifest(
+        manifest(
+            logic_fragments=["lia"],
+            targets=["x86_64-unknown-linux-gnu"],
+            priority=5,
+            enabled=False,
+            location="container",
+            max_timeout_ms=1000,
+            max_memory_mb=64,
+            input_formats=["mumei.source-text/v1"],
+            required_permissions=["process.spawn"],
+            result_contracts=[
+                {
+                    "profile": PROFILE,
+                    "method": "deductive_proof",
+                    "scope": "bounded",
+                    "bounds": ["lia"],
+                    "assumptions": ["pure"],
+                    "correspondence_relation": "exact",
+                    "correspondence_status": "validated",
+                }
+            ],
+            setting_specs=[
+                {
+                    "name": "depth",
+                    "kind": "integer",
+                    "default": 4,
+                    "minimum": 1,
+                    "maximum": 16,
+                }
+            ],
+        )
+    )
+    assert descriptor.priority == 5
+    assert descriptor.enabled is False
+    assert descriptor.location == "container"
+    assert descriptor.required_permissions == frozenset({"process.spawn"})
+    assert descriptor.result_contracts[0].scope == "bounded"
+    assert descriptor.setting_specs[0].default == 4
+
+
+def test_manifest_round_trip_preserves_the_descriptor():
+    descriptor = adapter(
+        logic_fragments=frozenset({"lia"}),
+        result_contracts=(
+            ResultContract(
+                PROFILE,
+                "deductive_proof",
+                "bounded",
+                "exact",
+                "validated",
+                frozenset({"lia"}),
+            ),
+        ),
+        setting_specs=(
+            SettingSpec("depth", "integer", 4, 1, 16),
+            SettingSpec("mode", "choice", "fast", choices=frozenset({"fast"})),
+            SettingSpec("strict", "boolean", True),
+        ),
+        input_formats=frozenset({"mumei.source-text/v1"}),
+        required_permissions=frozenset({"process.spawn"}),
+    )
+    reparsed = AdapterDescriptor.from_manifest(descriptor.to_dict())
+    assert reparsed == descriptor
+
+
+@pytest.mark.parametrize("bad", [None, "x", 1, [], True])
+def test_manifest_rejects_non_objects(bad):
+    with pytest.raises(ValueError, match="^adapter manifest must be an object$"):
+        AdapterDescriptor.from_manifest(bad)
+
+
+@pytest.mark.parametrize(
+    "schema", ["other/v1", "mumei.verifier-adapter/v2", "", None]
+)
+def test_manifest_rejects_foreign_schemas(schema):
+    with pytest.raises(
+        ValueError, match="^unsupported adapter manifest schema$"
+    ):
+        AdapterDescriptor.from_manifest(manifest(schema_version=schema))
+
+
+@pytest.mark.parametrize("field_name", ["command", "entrypoint", "argv", "env"])
+def test_manifest_rejects_unknown_fields(field_name):
+    with pytest.raises(
+        ValueError, match="^unsupported adapter manifest field$"
+    ):
+        AdapterDescriptor.from_manifest(manifest(**{field_name: "x"}))
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["adapter_id", "adapter_version", "profiles", "methods"],
+)
+def test_manifest_rejects_missing_required_fields(field_name):
+    base = manifest()
+    del base[field_name]
+    with pytest.raises(ValueError, match="^adapter manifest field missing$"):
+        AdapterDescriptor.from_manifest(base)
+
+
+@pytest.mark.parametrize(
+    "field_name,value",
+    [
+        ("profiles", "x"),
+        ("profiles", [1]),
+        ("methods", {"deductive_proof"}),
+        ("logic_fragments", "lia"),
+        ("targets", None),
+        ("input_formats", ["ok", 2]),
+        ("required_permissions", "process.spawn"),
+    ],
+)
+def test_manifest_rejects_malformed_label_lists(field_name, value):
+    with pytest.raises(ValueError, match="^invalid adapter manifest labels$"):
+        AdapterDescriptor.from_manifest(manifest(**{field_name: value}))
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["x", {"profile": PROFILE}, {"unknown": 1}],
+)
+def test_manifest_rejects_malformed_contracts(entry):
+    with pytest.raises(
+        ValueError, match="^invalid adapter manifest result contract$"
+    ):
+        AdapterDescriptor.from_manifest(manifest(result_contracts=[entry]))
+
+
+def test_manifest_rejects_non_list_contracts_and_specs():
+    with pytest.raises(
+        ValueError, match="^invalid adapter manifest result contract$"
+    ):
+        AdapterDescriptor.from_manifest(manifest(result_contracts="x"))
+    with pytest.raises(
+        ValueError, match="^invalid adapter manifest setting spec$"
+    ):
+        AdapterDescriptor.from_manifest(manifest(setting_specs="x"))
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["x", {"name": "depth"}, {"name": "depth", "kind": "integer", "bogus": 1}],
+)
+def test_manifest_rejects_malformed_setting_specs(entry):
+    with pytest.raises(
+        ValueError, match="^invalid adapter manifest setting spec$"
+    ):
+        AdapterDescriptor.from_manifest(manifest(setting_specs=[entry]))
+
+
+def test_manifest_errors_stay_static_inside_the_constructor():
+    with pytest.raises(ValueError, match="^unsupported evidence method$"):
+        AdapterDescriptor.from_manifest(manifest(methods=["magic"]))
+    with pytest.raises(ValueError, match="^invalid metadata identifier$"):
+        AdapterDescriptor.from_manifest(manifest(adapter_id="no space"))
+
+
+def test_register_manifest_adds_and_replaces_without_core_edits():
+    registry = AdapterRegistry()
+    registry.register_manifest(manifest(adapter_id="user.test-adapter"))
+    registry.register_manifest(manifest(adapter_id="other"))
+    with pytest.raises(
+        ValueError, match="^adapter already registered; replacement must be explicit$"
+    ):
+        registry.register_manifest(manifest(adapter_id="user.test-adapter"))
+    registry.register_manifest(
+        manifest(adapter_id="user.test-adapter", priority=7), replace=True
+    )
+    request = RouteRequirements(PROFILE, "deductive_proof")
+    observation = RuntimeObservation("user.test-adapter", "available", "1.0.0")
+    result = registry.plan(request, PlannerPolicy(), (observation,))
+    assert result.selected.adapter_id == "user.test-adapter"
+
+
+def test_register_manifest_rejects_nonbool_replace():
+    registry = AdapterRegistry()
+    with pytest.raises(
+        ValueError, match="^replacement must be explicit Boolean policy$"
+    ):
+        registry.register_manifest(manifest(), replace="yes")
+
+
+def test_manifest_values_carry_no_code_or_authority():
+    descriptor = AdapterDescriptor.from_manifest(manifest())
+    manifest_dict = descriptor.to_dict()
+    encoded = json.dumps(manifest_dict)
+    for field in ("command", "argv", "env", "endpoint", "entrypoint", "code"):
+        assert f'"{field}"' not in encoded
+    assert manifest_dict["schema_version"] == "mumei.verifier-adapter/v1"

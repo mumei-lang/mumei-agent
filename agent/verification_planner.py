@@ -40,6 +40,88 @@ PERMISSIONS = frozenset(
 )
 
 
+_MANIFEST_FIELDS = frozenset(
+    {
+        "adapter_id",
+        "adapter_version",
+        "profiles",
+        "methods",
+        "logic_fragments",
+        "targets",
+        "protocol_version",
+        "priority",
+        "enabled",
+        "location",
+        "max_timeout_ms",
+        "max_memory_mb",
+        "result_contracts",
+        "setting_specs",
+        "input_formats",
+        "required_permissions",
+    }
+)
+_MANIFEST_REQUIRED = frozenset(
+    {"adapter_id", "adapter_version", "profiles", "methods"}
+)
+_CONTRACT_FIELDS = frozenset(
+    {
+        "profile",
+        "method",
+        "scope",
+        "bounds",
+        "assumptions",
+        "correspondence_relation",
+        "correspondence_status",
+    }
+)
+_CONTRACT_REQUIRED = _CONTRACT_FIELDS - {"bounds", "assumptions"}
+_SPEC_FIELDS = frozenset(
+    {"name", "kind", "default", "minimum", "maximum", "choices"}
+)
+_SPEC_REQUIRED = frozenset({"name", "kind", "default"})
+
+
+def _manifest_strings(value: object) -> frozenset[str]:
+    if type(value) is not list or any(type(item) is not str for item in value):
+        raise ValueError("invalid adapter manifest labels")
+    return frozenset(value)
+
+
+def _contract_from_manifest(entry: object) -> "ResultContract":
+    if (
+        type(entry) is not dict
+        or set(entry) - _CONTRACT_FIELDS
+        or _CONTRACT_REQUIRED - set(entry)
+    ):
+        raise ValueError("invalid adapter manifest result contract")
+    return ResultContract(
+        profile=entry["profile"],
+        method=entry["method"],
+        scope=entry["scope"],
+        bounds=_manifest_strings(entry.get("bounds", [])),
+        assumptions=_manifest_strings(entry.get("assumptions", [])),
+        correspondence_relation=entry["correspondence_relation"],
+        correspondence_status=entry["correspondence_status"],
+    )
+
+
+def _spec_from_manifest(entry: object) -> "SettingSpec":
+    if (
+        type(entry) is not dict
+        or set(entry) - _SPEC_FIELDS
+        or _SPEC_REQUIRED - set(entry)
+    ):
+        raise ValueError("invalid adapter manifest setting spec")
+    return SettingSpec(
+        name=entry["name"],
+        kind=entry["kind"],
+        default=entry["default"],
+        minimum=entry.get("minimum"),
+        maximum=entry.get("maximum"),
+        choices=_manifest_strings(entry.get("choices", [])),
+    )
+
+
 def _label(value: str) -> None:
     if not isinstance(value, str) or not re.fullmatch(
         r"[A-Za-z][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.-]+)*", value
@@ -315,6 +397,81 @@ class AdapterDescriptor:
         _labels(self.input_formats, empty=True)
         if self.required_permissions is not None:
             _permissions(self.required_permissions)
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": PROTOCOL_VERSION,
+            "adapter_id": self.adapter_id,
+            "adapter_version": self.adapter_version,
+            "profiles": sorted(self.profiles),
+            "methods": sorted(self.methods),
+            "logic_fragments": sorted(self.logic_fragments),
+            "targets": sorted(self.targets),
+            "protocol_version": self.protocol_version,
+            "priority": self.priority,
+            "enabled": self.enabled,
+            "location": self.location,
+            "max_timeout_ms": self.max_timeout_ms,
+            "max_memory_mb": self.max_memory_mb,
+            "result_contracts": [
+                contract.to_dict() for contract in self.result_contracts
+            ],
+            "setting_specs": [spec.to_dict() for spec in self.setting_specs],
+            "input_formats": sorted(self.input_formats),
+            "required_permissions": (
+                sorted(self.required_permissions)
+                if self.required_permissions is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_manifest(cls, manifest: dict) -> "AdapterDescriptor":
+        """Static parse of a declared adapter manifest, not plugin loading.
+
+        A manifest is detached host-supplied metadata: it names capabilities,
+        budgets and schemas but carries no code, grants no authority and
+        proves nothing about availability. Unknown or missing fields and
+        malformed entries are static errors; nothing is imported, probed or
+        discovered here.
+        """
+        if type(manifest) is not dict:
+            raise ValueError("adapter manifest must be an object")
+        if manifest.get("schema_version") != PROTOCOL_VERSION:
+            raise ValueError("unsupported adapter manifest schema")
+        if set(manifest) - _MANIFEST_FIELDS - {"schema_version"}:
+            raise ValueError("unsupported adapter manifest field")
+        if _MANIFEST_REQUIRED - set(manifest):
+            raise ValueError("adapter manifest field missing")
+        contracts = manifest.get("result_contracts", [])
+        if type(contracts) is not list:
+            raise ValueError("invalid adapter manifest result contract")
+        specs = manifest.get("setting_specs", [])
+        if type(specs) is not list:
+            raise ValueError("invalid adapter manifest setting spec")
+        permissions = manifest.get("required_permissions")
+        return cls(
+            adapter_id=manifest["adapter_id"],
+            adapter_version=manifest["adapter_version"],
+            profiles=_manifest_strings(manifest["profiles"]),
+            methods=_manifest_strings(manifest["methods"]),
+            logic_fragments=_manifest_strings(manifest.get("logic_fragments", [])),
+            targets=_manifest_strings(manifest.get("targets", [])),
+            protocol_version=manifest.get("protocol_version", PROTOCOL_VERSION),
+            priority=manifest.get("priority", 0),
+            enabled=manifest.get("enabled", True),
+            location=manifest.get("location", "local"),
+            max_timeout_ms=manifest.get("max_timeout_ms", 30_000),
+            max_memory_mb=manifest.get("max_memory_mb", 1024),
+            result_contracts=tuple(
+                _contract_from_manifest(entry) for entry in contracts
+            ),
+            setting_specs=tuple(_spec_from_manifest(entry) for entry in specs),
+            input_formats=_manifest_strings(manifest.get("input_formats", [])),
+            required_permissions=(
+                None if permissions is None else _manifest_strings(permissions)
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -599,6 +756,15 @@ class AdapterRegistry:
         if adapter.adapter_id in self._adapters and not replace:
             raise ValueError("adapter already registered; replacement must be explicit")
         self._adapters[adapter.adapter_id] = adapter
+
+    def register_manifest(self, manifest: dict, *, replace: bool = False) -> None:
+        """Register a declared manifest; parsing is static, no code is loaded.
+
+        This is the declarative add/replace path: a test user adapter can be
+        described in a manifest and registered without editing core code.
+        Loading, discovery, probing and execution stay host duties.
+        """
+        self.register(AdapterDescriptor.from_manifest(manifest), replace=replace)
 
     def prepare_source(
         self,

@@ -88,6 +88,33 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 declarative adapter manifests
+
+`AdapterDescriptor.from_manifest(manifest)` statically parses a detached,
+host-supplied manifest (`schema_version` `mumei.verifier-adapter/v1`) into
+a validated descriptor, and `AdapterRegistry.register_manifest(manifest,
+replace=...)` registers it — a test user adapter can now be described and
+added or replaced **without editing core code**. `to_dict()` round-trips
+losslessly: required fields are `adapter_id`, `adapter_version`,
+`profiles`, `methods`; every other field defaults exactly as the
+constructor does. Wrong schemas, unknown or missing fields, malformed
+label lists, contracts or setting specs are static errors.
+
+```python
+registry.register_manifest(manifest)                # declared add
+registry.register_manifest(manifest, replace=True)  # explicit replace
+```
+
+A manifest is **metadata, not a plugin**: it names capabilities, budgets
+and schemas but carries no code, grants no authority and proves nothing
+about availability — nothing is imported, discovered, probed or executed
+on registration, and registration is still not an availability proof or
+acceptance. Actual plugin loading, adapter code execution, resource
+enforcement and Evidence acceptance remain host duties and open work. No
+default CLI/MCP/audit route, external verifier or dependency is added. C11
+stays partial; C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 normalized run-result descriptors
 
 `AttemptRunResult.normalized()` maps one observed terminal run into
