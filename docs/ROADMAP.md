@@ -88,6 +88,32 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 monotonic observation stamps for replay detection
+
+`RuntimeObservation` carries an optional host-declared `stamp` — a bounded
+monotonic counter, the planner-side analogue of attempt `report_stamp`.
+`AdapterRegistry.plan()` records accepted stamped observations per adapter
+id: once one is accepted every later observation for that adapter must
+carry a stamp, a smaller stamp is a static stale error (`adapter
+observation stamp is not fresh`), a reused stamp only tolerates an
+identical observation (`adapter observation stamp conflict` otherwise) and
+a larger one advances the boundary. Stamp tracking only updates when the
+whole plan succeeds, and unstamped tuples keep legacy behavior.
+
+```python
+registry.plan(request, policy, (RuntimeObservation("a", "available", "1.0", 5),))
+registry.plan(request, policy, (RuntimeObservation("a", "missing", "1.0", 6),))
+```
+
+A stamp is a **delivery counter, not freshness proof, authenticity or
+acceptance**: the host can always mint a larger one, observed availability
+and tool versions stay untrusted claims, and a stale result detects reorder
+or replay only at this registry. Probing, clock checks, delivery
+completeness, cross-registry ordering and Evidence acceptance remain host
+duties and open work. No default CLI/MCP/audit route, external verifier or
+dependency is added. C11 stays partial; C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 declarative adapter manifests
 
 `AdapterDescriptor.from_manifest(manifest)` statically parses a detached,

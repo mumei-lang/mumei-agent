@@ -1770,3 +1770,133 @@ def test_manifest_values_carry_no_code_or_authority():
     for field in ("command", "argv", "env", "endpoint", "entrypoint", "code"):
         assert f'"{field}"' not in encoded
     assert manifest_dict["schema_version"] == "mumei.verifier-adapter/v1"
+
+
+# --- C11 monotonic observation stamps ------------------------------------------
+
+
+def stamped(adapter_id="fixture", stamp=1, **kwargs):
+    return RuntimeObservation(adapter_id, stamp=stamp, **kwargs)
+
+
+@pytest.mark.parametrize("bad", [0, -1, "1", 1.5, True, (1 << 63)])
+def test_observation_stamp_requires_a_bounded_positive_int(bad):
+    with pytest.raises(
+        ValueError, match="^invalid adapter observation stamp$"
+    ):
+        RuntimeObservation("fixture", "available", "1.0.0", bad)
+
+
+@pytest.mark.parametrize("good", [1, 2, (1 << 63) - 1])
+def test_observation_stamp_accepts_bounded_positive_ints(good):
+    assert stamped(stamp=good).stamp == good
+
+
+def test_registry_accepts_first_stamped_observation():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    result = registry.plan(
+        REQUEST, PlannerPolicy(), (stamped(stamp=1, availability="available", tool_version="4.13.0"),)
+    )
+    assert result.selected is not None
+
+
+def test_registry_detects_stale_observation_stamps():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=7),))
+    with pytest.raises(
+        ValueError, match="^adapter observation stamp is not fresh$"
+    ):
+        registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=6),))
+
+
+def test_registry_tolerates_identical_stamp_replay():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    observation = stamped(stamp=3, availability="available", tool_version="4.13.0")
+    registry.plan(REQUEST, PlannerPolicy(), (observation,))
+    result = registry.plan(REQUEST, PlannerPolicy(), (observation,))
+    assert result.selected is not None
+
+
+def test_registry_rejects_same_stamp_with_changed_content():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=3, availability="missing"),))
+    with pytest.raises(
+        ValueError, match="^adapter observation stamp conflict$"
+    ):
+        registry.plan(
+            REQUEST, PlannerPolicy(), (stamped(stamp=3, availability="available"),)
+        )
+
+
+def test_registry_advances_stamp_on_identical_content():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    observation = stamped(stamp=3)
+    registry.plan(REQUEST, PlannerPolicy(), (observation,))
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=4),))
+    with pytest.raises(
+        ValueError, match="^adapter observation stamp is not fresh$"
+    ):
+        registry.plan(REQUEST, PlannerPolicy(), (observation,))
+
+
+def test_registry_requires_stamps_once_one_is_accepted():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=1),))
+    with pytest.raises(
+        ValueError, match="^adapter observation requires a stamp$"
+    ):
+        registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+
+
+def test_unstamped_observations_keep_legacy_behavior():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    registry.plan(REQUEST, PlannerPolicy(), (observed(availability="missing"),))
+    registry.plan(REQUEST, PlannerPolicy())
+
+
+def test_stamps_are_tracked_per_adapter():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.register(adapter(adapter_id="other", priority=1))
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=9),))
+    registry.plan(
+        REQUEST, PlannerPolicy(), (stamped("other", stamp=2), stamped(stamp=10))
+    )
+
+
+def test_failed_plans_do_not_advance_stamps():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=5),))
+    with pytest.raises(ValueError, match="^runtime observation has no registered adapter$"):
+        registry.plan(
+            REQUEST,
+            PlannerPolicy(),
+            (stamped(stamp=6), stamped("ghost", stamp=1)),
+        )
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=6),))
+
+
+def test_stamp_boundary_is_not_a_freshness_or_acceptance_proof():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (stamped(stamp=1, availability="missing"),))
+    registry.plan(
+        REQUEST,
+        PlannerPolicy(),
+        (stamped(stamp=2, availability="available", tool_version="4.13.0"),),
+    )
+    result = registry.plan(
+        REQUEST,
+        PlannerPolicy(),
+        (stamped(stamp=3, availability="available", tool_version="4.13.0"),),
+    )
+    assert result.selected is not None
