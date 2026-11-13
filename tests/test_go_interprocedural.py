@@ -163,7 +163,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(x int64) int64 {return x<<1}",
         "func F(x int64) int64 {return x>>1}",
         "func F(x int64) int64 { x++; return x }",
-        "func F(x int64) int64 { if x>0 {return x}; return 0 }",
         "func F(x int64) (r int64) {return}",
         "func F(x int64) (int64,int64) {return x,x}",
         "func F(x int64) float64 {return 1.0}",
@@ -217,6 +216,70 @@ def test_let_bindings_propagate_dependencies(go_types_helper, declarations, expe
     result = named(*unit(go_types_helper, declarations))
     assert result.available and result.return_dependencies == expected
     assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # Branch returns union their dependencies.
+        (
+            "func F(x int64) int64 { if x>0 {return x}; return 0 }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, y int64) int64 { if x>0 {return x} else {return y} }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { if x>0 {return y}; return 0 }",
+            frozenset({1}),
+        ),
+        # Branch-local lets feed returns inside their own branch only.
+        (
+            "func F(x int64) int64 { if x>0 {y:=x; return y}; return 0 }",
+            frozenset({0}),
+        ),
+        # else-if chains are nested branches.
+        (
+            "func F(x, y int64) int64 { if x>0 {return x} else if y>0 {return y}; return 0 }",
+            frozenset({0, 1}),
+        ),
+        # A condition is evaluated but contributes no result dependency.
+        (
+            "func F(x, y int64) int64 { if x>0 {return y}; return y }",
+            frozenset({1}),
+        ),
+        # Calls inside branches keep their transfers.
+        (
+            "func Leaf(a int64)int64{return a}; "
+            "func F(x int64)int64{ if x>0 {return Leaf(x)}; return 0 }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_branched_bodies_union_return_dependencies(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # An if initializer is outside the fragment.
+        "func F(x int64) int64 { if y:=x; y>0 {return y}; return 0 }",
+        # A for loop is not modelled.
+        "func F(x int64) int64 { for i:=int64(0); i<x; i++ {}; return x }",
+        # A branch with an unsupported statement blocks the summary.
+        "func F(x int64) int64 { if x>0 {x++}; return x }",
+    ],
+)
+def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available and result.return_dependencies is None
+    assert result.effects == "unknown" and result.gaps
 
 
 @pytest.mark.parametrize(

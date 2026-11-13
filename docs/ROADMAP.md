@@ -1524,6 +1524,21 @@ left-hand identifier with no compiler binding or a non-scalar declared
 type yields `binding_unavailable`. The overapproximation is unchanged:
 dependencies are conservative, never equality or proof.
 
+### C07 branched bodies and multiple returns
+
+The body fragment now admits `if`/`else` statements and more than one
+return: dependencies union every syntactic return (`F(x,y) { if x>0
+{return x} else {return y} }` reports `{0,1}`). A condition is evaluated
+— it must be a supported expression — but contributes no result
+dependency because every fragment statement is effect-free. Branch-local
+let bindings feed only their own scope, matching the compiler: a
+reference outside the branch simply does not resolve.
+
+Unreachable returns still contribute — reachability is not proven.
+`if` initializers, `for` loops and every other statement shape stay
+`unsupported_statement`. The union is still a conservative
+overapproximation, never equality or proof.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
