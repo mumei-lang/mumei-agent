@@ -9,6 +9,7 @@ bytes are truncated at `MAX_STDOUT_BYTES`; `complete` only declares whether
 truncation happened, not that the producer stopped writing.
 """
 
+import hashlib
 import subprocess
 import threading
 import time
@@ -18,6 +19,7 @@ from agent.verification_attempt import (
     MAX_STDOUT_BYTES,
     AttemptEvent,
     AttemptExecutionRequest,
+    AttemptNormalizedResult,
     AttemptRecord,
 )
 
@@ -92,6 +94,26 @@ class AttemptRunResult:
             raise ValueError("attempt run result requires bounded bytes")
         if type(self.complete) is not bool:
             raise ValueError("invalid attempt run completeness declaration")
+
+    def normalized(self) -> AttemptNormalizedResult:
+        """Normalize this observation into detached metadata; never a verdict.
+
+        The result names the request binding, the terminal outcome and the
+        bounded-output manifest — no raw bytes, no success claim, no
+        acceptance. Hosts still own interpretation and publication.
+        """
+        last = self.record.events[-1]
+        return AttemptNormalizedResult(
+            self.record.request_fingerprint,
+            self.record.attempt_number,
+            self.record.timeout_ms,
+            self.record.state,
+            last.elapsed_ms,
+            last.exit_code,
+            len(self.stdout),
+            hashlib.sha256(self.stdout).hexdigest(),
+            self.complete,
+        )
 
 
 class AttemptRunner:
