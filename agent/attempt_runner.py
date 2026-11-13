@@ -23,10 +23,24 @@ from agent.verification_attempt import (
     AttemptRecord,
 )
 
+try:  # POSIX-only; a declared memory bound is unavailable elsewhere.
+    import resource
+except ImportError:  # pragma: no cover - exercised only off POSIX
+    resource = None
+
 POLL_SECONDS = 0.005
 CANCEL_GRACE_MS = 1000
 READ_CHUNK = 65_536
 COLLECTOR_JOIN_SECONDS = 5.0
+MAX_MEMORY_BOUND_MB = 1_048_576
+
+
+def _memory_bound_preexec(bound_mb: int):
+    def _apply() -> None:
+        limit = bound_mb * 1_048_576
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+    return _apply
 
 
 class _BoundedCollector:
@@ -130,6 +144,7 @@ class AttemptRunner:
         request: AttemptExecutionRequest,
         argv: tuple[str, ...],
         cancel_event: "threading.Event | None" = None,
+        memory_bound_mb: int | None = None,
     ) -> AttemptRunResult:
         """Spawn `argv`, observe one attempt and return a terminal record.
 
@@ -138,6 +153,12 @@ class AttemptRunner:
         On the declared deadline the child is killed and `timed_out` is
         reported; a set `cancel_event` triggers `cancel_requested` then a
         terminate-then-kill sequence ending in `exited` or `cancelled`.
+        `memory_bound_mb` applies a declared POSIX `RLIMIT_AS` ceiling to
+        the child's whole address space — a best-effort bound, not a
+        sandbox: it covers no CPU, I/O, network or permission policy, and
+        exceeding it surfaces only as an ordinary observed outcome (`exited`
+        with its code, `failed` or `timed_out`), never diagnosed as a
+        resource violation.
         """
         if type(request) is not AttemptExecutionRequest:
             raise ValueError("attempt run requires an execution request")
@@ -149,6 +170,15 @@ class AttemptRunner:
             raise ValueError("attempt run requires a nonempty immutable argv")
         if cancel_event is not None and type(cancel_event) is not threading.Event:
             raise ValueError("attempt run cancellation requires an event")
+        if memory_bound_mb is not None and (
+            type(memory_bound_mb) is not int
+            or not 1 <= memory_bound_mb <= MAX_MEMORY_BOUND_MB
+        ):
+            raise ValueError("invalid attempt run memory bound")
+        if memory_bound_mb is not None and resource is None:
+            raise ValueError(
+                "attempt run memory bound requires a POSIX resource boundary"
+            )
         record = AttemptRecord(
             request.request_fingerprint,
             request.attempt_number,
@@ -159,6 +189,11 @@ class AttemptRunner:
                 list(argv),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                preexec_fn=(
+                    _memory_bound_preexec(memory_bound_mb)
+                    if memory_bound_mb is not None
+                    else None
+                ),
             )
         except OSError:
             return AttemptRunResult(
