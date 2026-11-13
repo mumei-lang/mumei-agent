@@ -1106,12 +1106,73 @@ def test_labelled_switch_statement_remains_a_gap():
     assert "labelled_statement" in {gap.reason for gap in result.gaps}
 
 
-def test_fallthrough_remains_a_declared_gap():
+def test_terminal_fallthrough_edges_into_the_next_case_body():
+    # `case 0: fallthrough` falls into case 1's body, so `a()` is
+    # reached through the case-0 alternative too.
+    body = "switch x { case 0: fallthrough; case 1: a(); default: b() }"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "fallthrough")
+    (call,) = by_text(cfg, body, "a()")
+    assert edges_to(cfg, jump.node_id) == {call.node_id}
+    assert {edge.kind for edge in cfg.edges if edge.source == jump.node_id} == {
+        "fallthrough"
+    }
+
+
+def test_terminal_fallthrough_in_a_mid_case_is_modelled():
+    cfg = graph(
+        "switch x { case 0: a(); case 1: fallthrough; case 2: b() }"
+    )
+    (jump,) = nodes(cfg, "fallthrough")
+    assert {edge.kind for edge in cfg.edges if edge.source == jump.node_id} == {
+        "fallthrough"
+    }
+
+
+def test_fallthrough_in_the_last_case_remains_a_declared_gap():
     result = control_flow.build_go_cfg(
-        "switch x { case 0: fallthrough; case 1: a() }"
+        "switch x { case 0: a(); case 1: fallthrough }"
     )
     assert result.graph is None
     assert {gap.reason for gap in result.gaps} == {"unsupported_fallthrough"}
+
+
+def test_fallthrough_outside_a_switch_remains_a_declared_gap():
+    result = control_flow.build_go_cfg("fallthrough")
+    assert result.graph is None
+    assert {gap.reason for gap in result.gaps} == {"unsupported_fallthrough"}
+
+
+def test_nonterminal_fallthrough_remains_a_declared_gap():
+    result = control_flow.build_go_cfg(
+        "switch x { case 0: fallthrough; a(); case 1: b() }"
+    )
+    assert result.graph is None
+    assert {gap.reason for gap in result.gaps} == {"unsupported_fallthrough"}
+
+
+def test_terminal_default_clause_fallthrough_is_modelled():
+    # A non-final `default:` clause may also fall through.
+    body = "switch x { default: fallthrough; case 0: a() }"
+    cfg = graph(body)
+    (jump,) = nodes(cfg, "fallthrough")
+    (call,) = by_text(cfg, body, "a()")
+    assert edges_to(cfg, jump.node_id) == {call.node_id}
+
+
+def test_fallthrough_body_still_allows_break():
+    body = (
+        "switch x { case 0: if y { break }; fallthrough; case 1: a() }"
+    )
+    cfg = graph(body)
+    (brk,) = nodes(cfg, "break")
+    (after_target,) = (cfg.exit,)
+    assert edges_to(cfg, brk.node_id) == {after_target}
+    (jump,) = nodes(cfg, "fallthrough")
+    (call,) = by_text(cfg, body, "a()")
+    assert edges_to(cfg, jump.node_id) == {call.node_id}
+
+
 
 
 def test_switch_inside_case_body_and_unreachable_after():
