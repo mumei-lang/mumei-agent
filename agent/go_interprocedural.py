@@ -1,6 +1,8 @@
 """Opt-in parameter-dependency summaries, not proofs or audit-grade inputs.
 
-Only a single explicit scalar return expression is modelled. Compiler-resolved
+Bodies are let bindings — single-name ``name := expression`` declarations —
+followed by one explicit scalar return expression; reassignment, tuples and
+every other statement stay unsupported. Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -140,6 +142,7 @@ class _Builder:
         self.references = {r.span: r for r in snapshot.references}
         self.calls = {c.span: c for c in snapshot.calls}
         self.blocks: dict[ByteSpan, Any] = {}
+        self.bindings_by_span = {b.span: b for b in snapshot.bindings}
         self.cache: dict[str, FunctionSummary] = {}
         self.active: set[str] = set()
         root = _syntax(raw)
@@ -224,9 +227,9 @@ class _Builder:
         statements = _children(block)
         if len(statements) == 1 and statements[0].type == "statement_list":
             statements = _children(statements[0])
-        if len(statements) != 1 or statements[0].type != "return_statement":
+        if not statements or statements[-1].type != "return_statement":
             raise _Unsupported("unsupported_body", fn.body)
-        expressions = _children(statements[0])
+        expressions = _children(statements[-1])
         if len(expressions) == 1 and expressions[0].type == "expression_list":
             expressions = _children(expressions[0])
         if len(expressions) != 1:
@@ -234,7 +237,29 @@ class _Builder:
         params = {p.binding_id: i for i, p in enumerate(fn.parameters) if p.binding_id}
         transfers: list[CallTransfer] = []
         count = [0]
-        deps = self.expression(expressions[0], fn, params, transfers, count, 0)
+        locals_: dict[str, frozenset[int]] = {}
+        for statement in statements[:-1]:
+            if statement.type != "short_var_declaration":
+                raise _Unsupported("unsupported_statement", _span(statement))
+            left = statement.child_by_field_name("left")
+            right = statement.child_by_field_name("right")
+            lefts = _children(left) if left is not None else []
+            rights = _children(right) if right is not None else []
+            if (
+                len(lefts) != 1
+                or lefts[0].type != "identifier"
+                or len(rights) != 1
+            ):
+                raise _Unsupported("unsupported_statement", _span(statement))
+            binding = self.bindings_by_span.get(_span(lefts[0]))
+            if binding is None or binding.type.kind not in {"integer", "boolean"}:
+                raise _Unsupported("binding_unavailable", _span(statement))
+            locals_[binding.id] = self.expression(
+                rights[0], fn, params, locals_, transfers, count, 0
+            )
+        deps = self.expression(
+            expressions[0], fn, params, locals_, transfers, count, 0
+        )
         return self.result(
             fn, deps, tuple(sorted(transfers, key=lambda c: (c.span.start, c.span.end)))
         )
@@ -244,6 +269,7 @@ class _Builder:
         node: Any,
         fn: Function,
         params: dict[str, int],
+        locals_: dict[str, frozenset[int]],
         transfers: list[CallTransfer],
         count: list[int],
         depth: int,
@@ -259,11 +285,15 @@ class _Builder:
             ref = self.references.get(_span(node))
             if ref is not None and ref.binding_id in params:
                 return frozenset({params[ref.binding_id]})
+            if ref is not None and ref.binding_id in locals_:
+                return locals_[ref.binding_id]
             if ref is not None and ref.kind == "universe" and kind in {"true", "false"}:
                 return frozenset()
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "parenthesized_expression" and len(children) == 1:
-            return self.expression(children[0], fn, params, transfers, count, depth + 1)
+            return self.expression(
+                children[0], fn, params, locals_, transfers, count, depth + 1
+            )
         if kind in {"binary_expression", "unary_expression"}:
             operator = node.child_by_field_name("operator")
             allowed = _BINARY if kind == "binary_expression" else _UNARY
@@ -271,7 +301,9 @@ class _Builder:
                 raise _Unsupported("unsupported_operator", _span(node))
             deps: frozenset[int] = frozenset()
             for child in children:
-                deps |= self.expression(child, fn, params, transfers, count, depth + 1)
+                deps |= self.expression(
+                    child, fn, params, locals_, transfers, count, depth + 1
+                )
             return deps
         if kind == "call_expression":
             call = self.calls.get(_span(node))
@@ -290,7 +322,9 @@ class _Builder:
                 raise _Unsupported("callee_unavailable", _span(node), call.target)
             # Even unused arguments are evaluated and must have supported effects.
             actual = tuple(
-                self.expression(arg, fn, params, transfers, count, depth + 1)
+                self.expression(
+                    arg, fn, params, locals_, transfers, count, depth + 1
+                )
                 for arg in arguments
             )
             callee = self.summarize(call.target)
