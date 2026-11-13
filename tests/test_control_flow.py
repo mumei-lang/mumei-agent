@@ -463,3 +463,74 @@ def test_unassigned_uses_ignore_unreachable_uses():
 def test_unassigned_uses_never_assigned_not_marked_definite():
     cfg, result = uses("return q")
     assert result == ()
+
+
+def unuses(body):
+    cfg = graph(body)
+    return cfg, control_flow.unused_assignments(body, cfg)
+
+
+def test_unused_assignments_flag_never_read_name():
+    cfg, result = unuses("x := 1")
+    node = nodes(cfg, "define")[0]
+    assert result == (
+        control_flow.UnusedAssignment(node.node_id, "x", node.span),
+    )
+
+
+def test_unused_assignments_clear_when_read():
+    cfg, result = unuses("x := 1\nreturn x")
+    assert result == ()
+
+
+def test_unused_assignments_flag_each_unread_name():
+    cfg, result = unuses("x := 1\ny = 2")
+    assert {use.name for use in result} == {"x", "y"}
+    assert len(result) == 2
+
+
+def test_unused_assignments_flag_unused_range_targets():
+    cfg, result = unuses("for i, v := range xs { print(i) }")
+    assert [use.name for use in result] == ["v"]
+
+
+def test_unused_assignments_inc_dec_count_as_read():
+    cfg, result = unuses("x := 1\nx++")
+    assert result == ()
+
+
+def test_unused_assignments_self_rhs_counts_as_read():
+    cfg, result = unuses("x = x + 1")
+    assert result == ()
+
+
+def test_unused_assignments_rhs_read_clears_name():
+    cfg, result = unuses("y := x")
+    assert [use.name for use in result] == ["y"]
+
+
+def test_unused_assignments_count_unreachable_reads():
+    cfg, result = unuses("x := 1\nreturn 0\nprint(x)")
+    assert result == ()
+
+
+def test_unused_assignments_ignore_blank_and_selector_targets():
+    cfg, result = unuses("_ := f()\na.b = 1")
+    assert result == ()
+
+
+def test_unused_assignments_read_in_condition_counts():
+    cfg, result = unuses("x := 1\nif x > 0 { y = 2 }")
+    assert [use.name for use in result] == ["y"]
+
+
+def test_unused_assignments_flag_every_writer_of_unread_name():
+    cfg, result = unuses("x := 1\nx = 2")
+    assert [use.name for use in result] == ["x", "x"]
+    assert len({use.node_id for use in result}) == 2
+
+
+def test_unused_assignments_require_matching_digest():
+    cfg = graph("x := 1")
+    with pytest.raises(ValueError, match="does not match"):
+        control_flow.unused_assignments("y := 2", cfg)
