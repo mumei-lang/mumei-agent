@@ -88,6 +88,45 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 real process control for declared execution requests
+
+`agent/attempt_runner.py` is the first **effectful** boundary in this
+cluster: `AttemptRunner.run(request, argv, cancel_event=None)` spawns one
+real child process for one declared `AttemptExecutionRequest`, waits bounded
+by the request's declared timeout, terminates runaways and honors a single
+`threading.Event` cancellation. What the runner observes is reported as
+`AttemptRecord` events — `started`, then exactly one of `exited` (natural
+exit with its real code), `failed` (spawn refused by the OS), `timed_out`
+(deadline reached, child killed) or `cancelled` (cancel grace expired, child
+killed after `cancel_requested` + terminate). Captured stdout is drained on
+a side thread so writers past the pipe buffer cannot deadlock the wait,
+bounded to `MAX_STDOUT_BYTES`, and returned on `AttemptRunResult` with a
+`complete` declaration that is `False` whenever truncation occurred or the
+bounded drain could not finish (e.g. a grandchild holding the pipe open).
+
+```python
+from agent.attempt_runner import AttemptRunner
+from agent.verification_attempt import AttemptOutput
+
+result = AttemptRunner().run(request, ("mumei", "verify", path))
+output = AttemptOutput(
+    result.record, result.stdout, digest, "stdout", result.complete
+)
+```
+
+`run` is deliberately small: it performs **no** authorization, scheduling,
+dispatch decision, output interpretation or canonical publication — the
+host still decides via `check_dispatch`, binds snapshots with
+`AttemptOutput` and publishes through `AttemptSequenceStore`. The record is
+only what was observed this call: `complete=False` records observed
+truncation, not how much was lost, and an `exited` code is a fact about
+process exit, never a verification verdict. Wall-clock reads stay inside
+this module; `verification_attempt.py` remains passive. No default
+CLI/MCP/audit route, Evidence normalization/acceptance, cross-attempt
+scheduling, retry policy, plugin, external verifier or dependency is added.
+C11 stays partial; Core meaning and acceptance, C12's demand gate and
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 dispatch-boundary checks for declared requests
 
 `AttemptSequence.next_dispatch()` derives the single outstanding
