@@ -394,13 +394,17 @@ def unassigned_uses(
     unassigned read, conservatively limited to recognized identifiers. The
     `definite` flag marks the stronger class: the name is assigned
     somewhere but absent from the `some_path` pre-state too, so no
-    remaining path can deliver it. It does not model fields, elements,
-    calls, shadowing or closures, and a finding is a hint for the host's
-    own dataflow, not a defect verdict.
+    modelled path can deliver it. It does not model fields, elements,
+    calls, shadowing or closures; names the extractor marks unreliable
+    (assigned inside a closure or address-taken) can still be flagged
+    but are never promoted to `definite`, because a closure call or an
+    aliased write sits outside the modelled paths. A finding is a hint
+    for the host's own dataflow, not a defect verdict.
     """
     facts = assignment_facts(body, graph)
     tree = tree_sitter_extract.extract_statements(body, "go")
     assert tree is not None  # assignment_facts already re-parsed the body
+    unreliable = tree.closure_assigned | tree.address_taken
     by_span = {
         (stmt.start, stmt.start + len(stmt.text)): stmt
         for stmt in _walk(tree.statements)
@@ -436,7 +440,8 @@ def unassigned_uses(
                         node.node_id,
                         name,
                         node.span,
-                        definite=name not in pre_some,
+                        definite=name not in pre_some
+                        and name not in unreliable,
                     )
                 )
     return tuple(findings)
@@ -540,6 +545,10 @@ class FlowHints:
     unassigned: tuple[UnassignedUse, ...]
     unused: tuple[UnusedAssignment, ...]
     unreachable: tuple[UnreachableStatement, ...]
+    # Names the extractor declares unreliable for path facts — assigned
+    # inside a nested function literal or address-taken. Declared so the
+    # host can see which findings were suppressed, not inferred.
+    unreliable: frozenset[str] = frozenset()
 
 
 def flow_hints(body: str, graph: ControlFlowGraph) -> FlowHints:
@@ -551,10 +560,14 @@ def flow_hints(body: str, graph: ControlFlowGraph) -> FlowHints:
     same profiles, gaps and modelling limits apply, and the report is a
     hint surface for the host, not a defect list or a proof.
     """
+    tree = tree_sitter_extract.extract_statements(body, "go")
+    if tree is None:
+        raise ValueError("flow hints require a parsed Go body")
     return FlowHints(
         unassigned_uses(body, graph),
         unused_assignments(body, graph),
         unreachable_statements(graph),
+        tree.closure_assigned | tree.address_taken,
     )
 
 
