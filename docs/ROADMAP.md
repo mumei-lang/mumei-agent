@@ -1233,6 +1233,28 @@ dead-code proof, and each finding stays a **hint for the host, not a
 defect verdict**. Unsupported syntax the profile already drops remains
 invisible, and the same gaps and modelling limits apply throughout.
 
+### C05 independent hint metrics over declared expectations
+
+`agent.control_flow.evaluate_flow_hints(hints, expected)` compares a
+`FlowHints` report against host-declared `HintExpectations` — the same
+keys the report uses (`(node_id, name)` for unassigned and unused,
+`node_id` for unreachable). Each family returns `FamilyMetrics` with
+three separate counts: `matched`, expected-but-unreported (`missed`)
+and reported-but-unexpected (`unexpected`) — false positives and
+missed defects kept independent, as the C05 acceptance criteria
+require.
+
+```python
+metrics = control_flow.evaluate_flow_hints(hints, expectations)
+# HintMetrics(unassigned=FamilyMetrics, unused=..., unreachable=...)
+```
+
+Expectations are **host declarations, not ground truth**: agreement
+measures consistency between two declarations, not correctness of
+either — a metric says nothing about the analysis being right, only
+about whether two declarations disagree. Invalid expectation shapes are
+static `ValueError`s (`invalid hint expectation`).
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using

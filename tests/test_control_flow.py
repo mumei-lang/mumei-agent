@@ -603,3 +603,106 @@ def test_flow_hints_definite_class_preserved():
     cfg, hints = flow("print(x)\nx := 1")
     (use,) = hints.unassigned
     assert use.definite is True
+
+
+def metrics(body, expected):
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    return control_flow.evaluate_flow_hints(hints, expected)
+
+
+def test_evaluate_flow_hints_all_matched():
+    cfg = graph("return 0\nx := 1")
+    hints = control_flow.flow_hints("return 0\nx := 1", cfg)
+    node = nodes(cfg, "define")[0]
+    expected = control_flow.HintExpectations(
+        unused=((node.node_id, "x"),),
+        unreachable=(node.node_id,),
+    )
+    result = control_flow.evaluate_flow_hints(hints, expected)
+    assert result.unused == control_flow.FamilyMetrics(1, 0, 0)
+    assert result.unreachable == control_flow.FamilyMetrics(1, 0, 0)
+    assert result.unassigned == control_flow.FamilyMetrics(0, 0, 0)
+
+
+def test_evaluate_flow_hints_missed_expected():
+    cfg = graph("x := 1\nreturn x")
+    hints = control_flow.flow_hints("x := 1\nreturn x", cfg)
+    expected = control_flow.HintExpectations(unassigned=((2, "x"),))
+    result = control_flow.evaluate_flow_hints(hints, expected)
+    assert result.unassigned == control_flow.FamilyMetrics(0, 1, 0)
+
+
+def test_evaluate_flow_hints_unexpected_findings():
+    cfg = graph("print(x)\nx := 1")
+    hints = control_flow.flow_hints("print(x)\nx := 1", cfg)
+    result = control_flow.evaluate_flow_hints(
+        hints, control_flow.HintExpectations()
+    )
+    assert result.unassigned == control_flow.FamilyMetrics(0, 0, 1)
+    assert result.unused == control_flow.FamilyMetrics(0, 0, 0)
+
+
+def test_evaluate_flow_hints_mixed_per_family():
+    cfg, hints = flow("if c { x = 1 }\nreturn x\ny := 2\nz := 3")
+    unreach = [
+        use.node_id for use in hints.unreachable
+    ]
+    expected = control_flow.HintExpectations(
+        unassigned=tuple(
+            (use.node_id, "x") for use in hints.unassigned
+        ),
+        unused=((hints.unused[0].node_id, "z"),),
+        unreachable=tuple(unreach[:1]),
+    )
+    result = control_flow.evaluate_flow_hints(hints, expected)
+    assert result.unassigned.matched == 1
+    assert result.unassigned.missed == 0
+    assert result.unassigned.unexpected == 0
+    assert result.unused.matched == 1
+    assert result.unused.missed == 0
+    assert result.unused.unexpected == 1
+    assert result.unreachable == control_flow.FamilyMetrics(1, 0, 1)
+
+
+def test_evaluate_flow_hints_empty_report_and_expectations():
+    cfg, hints = flow("x := 1\nreturn x")
+    result = control_flow.evaluate_flow_hints(
+        hints, control_flow.HintExpectations()
+    )
+    assert result == control_flow.HintMetrics(
+        control_flow.FamilyMetrics(0, 0, 0),
+        control_flow.FamilyMetrics(0, 0, 0),
+        control_flow.FamilyMetrics(0, 0, 0),
+    )
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        control_flow.HintExpectations(unassigned=(("x", 2),)),
+        control_flow.HintExpectations(unassigned=((2, 3),)),
+        control_flow.HintExpectations(unassigned=((True, "x"),)),
+        control_flow.HintExpectations(unassigned=((2, "x", 9),)),
+        control_flow.HintExpectations(unassigned=("x",)),
+        control_flow.HintExpectations(unused=((2.0, "x"),)),
+        control_flow.HintExpectations(unreachable=("x",)),
+        control_flow.HintExpectations(unreachable=(True,)),
+        control_flow.HintExpectations(unreachable=(2.5,)),
+    ],
+)
+def test_evaluate_flow_hints_rejects_invalid_expectations(expected):
+    cfg, hints = flow("x := 1\nreturn x")
+    with pytest.raises(ValueError, match="invalid hint expectation"):
+        control_flow.evaluate_flow_hints(hints, expected)
+
+
+def test_evaluate_flow_hints_definite_flag_not_part_of_key():
+    cfg = graph("print(x)\nx := 1")
+    hints = control_flow.flow_hints("print(x)\nx := 1", cfg)
+    use = hints.unassigned[0]
+    expected = control_flow.HintExpectations(
+        unassigned=((use.node_id, "x"),)
+    )
+    result = control_flow.evaluate_flow_hints(hints, expected)
+    assert result.unassigned == control_flow.FamilyMetrics(1, 0, 0)
