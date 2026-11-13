@@ -1539,6 +1539,22 @@ Unreachable returns still contribute — reachability is not proven.
 `unsupported_statement`. The union is still a conservative
 overapproximation, never equality or proof.
 
+### C07 bounded for statements
+
+`for` statements join the fragment under a narrow clause contract: the
+`for_clause` initializer is one let binding, the condition is a
+supported expression (evaluated, effect-free) and the update is an
+inc/dec on a bound scalar identifier — or the clause is absent
+(`for {}`, `for cond {}`). The loop variable and every binding inside
+the body stay scoped to the loop, matching the compiler. Returns inside
+the body union into the result like any other syntactic return;
+iteration itself is never unrolled or counted — dependencies describe
+textual reachability, not trip counts.
+
+`range` clauses, `break`/`continue`, assignment updates and non-identifier
+update operands stay `unsupported_statement`/`binding_unavailable`.
+Still a conservative overapproximation — never equality or proof.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
