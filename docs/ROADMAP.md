@@ -1213,6 +1213,26 @@ code count like any other. The check does not decide which of several
 writers is dead — every writer of an unread name is flagged — and
 fields/elements, calls, shadowing and closures remain unmodelled.
 
+### C05 one-pass flow-hint report and unreachable-statement hints
+
+`agent.control_flow.flow_hints(body, graph)` returns `FlowHints` —
+the three bounded hint families in one immutable report:
+`unassigned_uses`, `unused_assignments` and the new
+`unreachable_statements(graph)`, which flags every span-carrying node
+outside `graph.reachable()` as `UnreachableStatement(node_id, kind,
+span)` — statements no normal-flow path from the entry reaches.
+
+```python
+hints = control_flow.flow_hints(body, graph)
+# FlowHints(unassigned=..., unused=..., unreachable=...)
+```
+
+The aggregate adds no analysis of its own: every member keeps its own
+boundary — syntactic reachability over explicit normal flow is not
+dead-code proof, and each finding stays a **hint for the host, not a
+defect verdict**. Unsupported syntax the profile already drops remains
+invisible, and the same gaps and modelling limits apply throughout.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using

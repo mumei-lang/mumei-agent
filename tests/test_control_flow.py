@@ -534,3 +534,72 @@ def test_unused_assignments_require_matching_digest():
     cfg = graph("x := 1")
     with pytest.raises(ValueError, match="does not match"):
         control_flow.unused_assignments("y := 2", cfg)
+
+
+def test_unreachable_statements_flag_after_return():
+    cfg = graph("return 0\nx := 1")
+    result = control_flow.unreachable_statements(cfg)
+    node = nodes(cfg, "define")[0]
+    assert result == (
+        control_flow.UnreachableStatement(node.node_id, "define", node.span),
+    )
+
+
+def test_unreachable_statements_empty_when_all_reached():
+    cfg = graph("x := 1\nif c { x = 2 } else { x = 3 }\nreturn x")
+    assert control_flow.unreachable_statements(cfg) == ()
+
+
+def test_unreachable_statements_skip_entry_and_exit():
+    cfg = graph("return 0")
+    result = control_flow.unreachable_statements(cfg)
+    assert all(use.kind not in {"entry", "exit"} for use in result)
+
+
+def test_unreachable_statements_flag_each_dead_node():
+    cfg = graph("return 0\nx := 1\nprint(x)")
+    kinds = [use.kind for use in control_flow.unreachable_statements(cfg)]
+    assert kinds == ["expr", "define"]
+
+
+def test_unreachable_statements_reachable_after_break():
+    cfg = graph("for { break }\nreturn 1")
+    assert control_flow.unreachable_statements(cfg) == ()
+
+
+def flow(body):
+    cfg = graph(body)
+    return cfg, control_flow.flow_hints(body, cfg)
+
+
+def test_flow_hints_aggregate_all_families():
+    cfg, hints = flow("if c { x = 1 }\nreturn x\ny := 2\nz := 3")
+    assert [use.name for use in hints.unassigned] == ["x"]
+    assert [use.name for use in hints.unused] == ["z", "y"]
+    assert [use.kind for use in hints.unreachable] == ["define", "define"]
+
+
+def test_flow_hints_empty_body_is_empty_report():
+    cfg, hints = flow("")
+    assert hints == control_flow.FlowHints((), (), ())
+
+
+def test_flow_hints_match_individual_calls():
+    body = "x := 1\nreturn x\ny := 2"
+    cfg = graph(body)
+    hints = control_flow.flow_hints(body, cfg)
+    assert hints.unassigned == control_flow.unassigned_uses(body, cfg)
+    assert hints.unused == control_flow.unused_assignments(body, cfg)
+    assert hints.unreachable == control_flow.unreachable_statements(cfg)
+
+
+def test_flow_hints_require_matching_digest():
+    cfg = graph("x := 1")
+    with pytest.raises(ValueError, match="does not match"):
+        control_flow.flow_hints("y := 2", cfg)
+
+
+def test_flow_hints_definite_class_preserved():
+    cfg, hints = flow("print(x)\nx := 1")
+    (use,) = hints.unassigned
+    assert use.definite is True
