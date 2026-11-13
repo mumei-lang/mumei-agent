@@ -88,6 +88,56 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 canonical result selection for sequential attempts
+
+`AttemptSequence.select_result(output)` declares one bound `AttemptOutput` the
+canonical result of **the current record only**, closing the sequence. The
+output must be an exact `AttemptOutput` satisfying the existing
+`check_output_binding` precondition against the sequence's current record —
+same request fingerprint, ordinal, timeout and complete event history — and
+that record must be `exited`. Selection binds the exit observation, not a
+Core check: an `exited` record with any reported exit code can be selected.
+Exit code zero is transport metadata, never verification success.
+
+```python
+from agent.verification_attempt import AttemptOutput, AttemptSequence
+
+sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+reported = sequence.current.record(AttemptEvent("started", 0))
+reported = reported.record(AttemptEvent("exited", 3, 0))
+sequence = sequence.reconcile_report(reported)
+output = AttemptOutput.from_prepared(
+    prepared, 1, reported, stdout_bytes, expected_stdout_sha256
+)
+sequence = sequence.select_result(output)
+assert sequence.select_result(output) is sequence  # Same marker: idempotent.
+```
+
+A selected sequence rejects `begin_attempt()` and every different output with
+static errors; re-selecting the same output is a no-op returning the same
+object. The selected marker is the immutable `(attempt_number,
+output_fingerprint)` pair — detached metadata, not a copy of stdout, a
+diagnostic or a receipt. `to_dict()` adds a matching `selected_result` entry
+under the existing `mumei.verifier-attempt-sequence/v1` schema; it retains no
+raw bytes, source, plan or diagnostics.
+
+This is **host-declared canonical metadata for this sequence value only** —
+not truth, verification acceptance, a Core representation-check receipt or
+cross-sequence arbitration. Two independently captured snapshots bound to the
+same attempt both satisfy binding; the first selection wins on this value and
+the host must still detect conflicting captures with `AttemptOutput.reconcile`
+and host-owned atomic storage. Independent sequence values can still select
+independent results; there is no global ordering, locking/CAS, replay
+protection or freshness claim. A selection does not revalidate the output,
+run Core, or mutate the output/record; serializers stay body-free.
+
+No parsing, I/O, clocks, plugins, external verifier, dependency or default
+audit/CLI/MCP route is added. Runner/scheduler, stream collection, Evidence
+normalization/acceptance, cross-attempt/backend arbitration and actual
+execution/cancellation remain open. C11/C13 stay partial; Core meaning and
+acceptance, C12's demand gate, and existing assurance/Lean/native/LLVM/
+deferred-WASM policies are unchanged.
+
 ### C11 explicit local Core representation handoff
 
 `agent.core_evidence.check_evidence_representation` is an opt-in **POSIX-only**

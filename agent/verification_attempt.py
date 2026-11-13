@@ -228,11 +228,15 @@ class AttemptSequence:
     Terminal metadata does not prove cleanup or prevent physical overlap.
     Hosts retain/atomically advance their canonical sequence and own execution,
     global numbering, replay protection and all result/Evidence decisions.
+    A selected result is host-declared canonical metadata for the current
+    record only: it is not truth, acceptance, a Core check receipt or a
+    cross-sequence arbitration outcome.
     """
 
     request_fingerprint: str
     timeout_ms: int
     attempts: tuple[AttemptRecord, ...] = ()
+    selected_result: tuple[int, str] | None = None
 
     def __post_init__(self) -> None:
         _fingerprint(self.request_fingerprint)
@@ -252,6 +256,23 @@ class AttemptSequence:
                 raise ValueError(
                     "attempt sequence cannot contain nonterminal predecessors"
                 )
+        if self.selected_result is not None:
+            if (
+                type(self.selected_result) is not tuple
+                or len(self.selected_result) != 2
+                or type(self.selected_result[0]) is not int
+                or type(self.selected_result[1]) is not str
+                or not re.fullmatch(r"[0-9a-f]{64}", self.selected_result[1])
+            ):
+                raise ValueError("invalid selected result metadata")
+            if not self.attempts or self.selected_result[0] != len(self.attempts):
+                raise ValueError(
+                    "selected result must reference the current attempt"
+                )
+            if self.attempts[-1].state != "exited":
+                raise ValueError(
+                    "selected result requires an exited current attempt"
+                )
 
     @classmethod
     def from_prepared(cls, prepared: PreparedSourceRequest) -> "AttemptSequence":
@@ -264,6 +285,8 @@ class AttemptSequence:
 
     def begin_attempt(self) -> "AttemptSequence":
         """Reserve the next ready record; do not authorize or start a process."""
+        if self.selected_result is not None:
+            raise ValueError("a selected result closes the attempt sequence")
         attempt = AttemptRecord(
             self.request_fingerprint, len(self.attempts) + 1, self.timeout_ms
         )
@@ -294,13 +317,38 @@ class AttemptSequence:
         if type(output) is not AttemptOutput or output.attempt != self.current:
             raise ValueError("output does not match the current sequence record")
 
+    def select_result(self, output: "AttemptOutput") -> "AttemptSequence":
+        """Declare one output the canonical result, closing the sequence.
+
+        The output must still bind to this value's current record. Selection is
+        a host declaration, not a Core check receipt, truth, acceptance or
+        arbitration between independent sequences; an already selected result
+        rejects competing snapshots and is idempotent only for the same output.
+        """
+        self.check_output_binding(output)
+        marker = (
+            output.attempt.attempt_number,
+            output.to_dict()["output_fingerprint"],
+        )
+        if self.selected_result is not None:
+            if self.selected_result == marker:
+                return self
+            raise ValueError("attempt sequence already has a selected result")
+        return replace(self, selected_result=marker)
+
     def to_dict(self) -> dict:
-        return {
+        result = {
             "schema_version": "mumei.verifier-attempt-sequence/v1",
             "request_fingerprint": self.request_fingerprint,
             "timeout_ms": self.timeout_ms,
             "attempts": [attempt.to_dict() for attempt in self.attempts],
         }
+        if self.selected_result is not None:
+            result["selected_result"] = {
+                "attempt_number": self.selected_result[0],
+                "output_fingerprint": self.selected_result[1],
+            }
+        return result
 
 
 @dataclass(frozen=True)
