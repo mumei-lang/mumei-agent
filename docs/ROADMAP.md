@@ -88,6 +88,29 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 bounded plan history for runtime fallback records
+
+`AdapterRegistry.plan()` now appends every successful `VerificationPlan`
+to a bounded in-memory `history()` — the runtime fallback/selection
+record the C04/C11 gap list called for. Entries are appended in call
+order and evicted oldest-first past `MAX_PLAN_HISTORY`; failed plans are
+never recorded, `prepare_source` records exactly the plan it ran, and
+adapter replacement does not clear the record. `history()` returns a
+detached immutable snapshot.
+
+```python
+registry.plan(request, policy, observations)
+registry.history()  # -> tuple[VerificationPlan, ...], oldest first
+```
+
+History is a **declared record, not a durable audit or Evidence**: it is
+lost with the registry, evicts silently past the bound, and says nothing
+about whether a plan was dispatched or accepted. Persistence, tamper
+evidence, cross-registry ordering and Evidence acceptance remain host
+duties and open work. No default CLI/MCP/audit route, external verifier
+or dependency is added. C11 stays partial; C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 declared memory bounds for attempted executions
 
 `AttemptRunner.run(request, argv, cancel_event=None, memory_bound_mb=None)`

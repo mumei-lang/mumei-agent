@@ -30,6 +30,7 @@ MAX_SETTINGS = 32
 SOURCE_INPUT_FORMAT = "mumei.source-text/v1"
 MAX_SOURCE_BYTES = 1_048_576
 MAX_STAMP = (1 << 63) - 1
+MAX_PLAN_HISTORY = 256
 PERMISSIONS = frozenset(
     {
         "filesystem.read",
@@ -765,11 +766,18 @@ class AdapterRegistry:
     only tolerates an identical observation and a larger one advances the
     boundary. Stamps detect replays/reordering at this registry — they are
     not freshness proofs and unstamped calls keep legacy behavior.
+
+    `plan()` also appends each successful plan to a bounded in-memory
+    `history()` — a declared fallback/selection record for the host's
+    runtime, not a durable audit or Evidence: oldest entries are evicted
+    past `MAX_PLAN_HISTORY`, failed plans are never recorded and the record
+    is lost with the registry.
     """
 
     def __init__(self) -> None:
         self._adapters: dict[str, AdapterDescriptor] = {}
         self._observations: dict[str, RuntimeObservation] = {}
+        self._history: list[VerificationPlan] = []
 
     def register(self, adapter: AdapterDescriptor, *, replace: bool = False) -> None:
         if type(replace) is not bool:
@@ -959,6 +967,13 @@ class AdapterRegistry:
                     ),
                 )
         self._observations.update(stamped_updates)
-        return VerificationPlan(
+        plan = VerificationPlan(
             request, policy, settings, fallback_from, tuple(decisions)
         )
+        self._history.append(plan)
+        del self._history[: max(0, len(self._history) - MAX_PLAN_HISTORY)]
+        return plan
+
+    def history(self) -> tuple[VerificationPlan, ...]:
+        """Snapshot of recorded plans, oldest first; never a verdict record."""
+        return tuple(self._history)

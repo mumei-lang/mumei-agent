@@ -20,6 +20,7 @@ from agent.verification_planner import (
     RuntimeObservation,
     SettingSpec,
     SOURCE_INPUT_FORMAT,
+    MAX_PLAN_HISTORY,
     MAX_SOURCE_BYTES,
     PERMISSIONS,
 )
@@ -1900,3 +1901,86 @@ def test_stamp_boundary_is_not_a_freshness_or_acceptance_proof():
         (stamped(stamp=3, availability="available", tool_version="4.13.0"),),
     )
     assert result.selected is not None
+
+
+# ---- bounded plan history ----
+
+
+def test_history_starts_empty():
+    registry = AdapterRegistry()
+    assert registry.history() == ()
+    registry.register(adapter())
+    assert registry.history() == ()
+
+
+def test_history_records_successful_plans_in_order():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    first = registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    second = registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    assert registry.history() == (first, second)
+
+
+def test_history_never_records_failed_plans():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    with pytest.raises(ValueError, match="no registered adapter"):
+        registry.plan(REQUEST, PlannerPolicy(), (observed("unregistered"),))
+    with pytest.raises(ValueError, match="duplicate runtime observation"):
+        registry.plan(REQUEST, PlannerPolicy(), (observed(), observed()))
+    with pytest.raises(ValueError, match="no registered adapter"):
+        registry.plan(REQUEST, PlannerPolicy(tool_version_pins=(("typo", "1"),)))
+    assert registry.history() == ()
+
+
+def test_history_records_plans_with_no_selection():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    result = registry.plan(
+        REQUEST, PlannerPolicy(), (observed(availability="missing"),)
+    )
+    assert result.selected is None
+    assert registry.history() == (result,)
+
+
+def test_history_is_bounded_and_evicts_oldest():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    first = registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    for _ in range(MAX_PLAN_HISTORY):
+        registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    history = registry.history()
+    assert len(history) == MAX_PLAN_HISTORY
+    assert all(entry is not first for entry in history)
+
+
+def test_history_snapshot_is_detached_from_later_plans():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    snapshot = registry.history()
+    assert type(snapshot) is tuple
+    registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    assert len(snapshot) == 1
+    assert len(registry.history()) == 2
+
+
+def test_history_survives_adapter_replacement():
+    registry = AdapterRegistry()
+    registry.register(adapter())
+    registry.plan(REQUEST, PlannerPolicy(), (observed(),))
+    registry.register(adapter(adapter_version="2.0.0"), replace=True)
+    assert len(registry.history()) == 1
+
+
+def test_prepare_source_records_one_plan():
+    registry = AdapterRegistry()
+    registry.register(source_adapter())
+    registry.prepare_source(
+        source_request(),
+        PlannerPolicy(),
+        (observed(),),
+        SOURCE,
+        hashlib.sha256(SOURCE).hexdigest(),
+    )
+    assert len(registry.history()) == 1
