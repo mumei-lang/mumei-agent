@@ -1,10 +1,13 @@
 """Opt-in parameter-dependency summaries, not proofs or audit-grade inputs.
 
 Bodies are let bindings — single-name ``name := expression`` declarations —
-and ``if``/``else`` statements followed by one or more explicit scalar return
-expressions; the result unions every syntactic return's dependencies (unreachable
-returns included — reachability is not proven). Reassignment, tuples, ``if``
-initializers and every other statement shape stay unsupported. Compiler-resolved
+plus ``if``/``else`` and bounded ``for`` statements followed by one or more
+explicit scalar return expressions; the result unions every syntactic return's
+dependencies (unreachable returns included — reachability is not proven). A
+``for`` clause may hold one let-binding initializer, a supported condition and
+an inc/dec update on a bound scalar; ``range``, ``break``/``continue``,
+reassignment, tuples, ``if`` initializers and every other statement shape stay
+unsupported. Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -331,6 +334,57 @@ class _Builder:
                             child, fn, params, dict(locals_), transfers,
                             count, deps, saw_return,
                         )
+            return
+        if kind == "for_statement":
+            body_node = node.child_by_field_name("body")
+            clause = next(
+                (
+                    child
+                    for child in node.named_children
+                    if child != body_node
+                ),
+                None,
+            )
+            if body_node is None or (
+                clause is not None and clause.type == "range_clause"
+            ):
+                raise _Unsupported("unsupported_statement", _span(node))
+            # The loop variable and every binding made inside the body are
+            # scoped to the loop — none of them escape, matching the compiler.
+            scope = dict(locals_)
+            if clause is not None and clause.type == "for_clause":
+                init = clause.child_by_field_name("initializer")
+                if init is not None:
+                    self.statement(
+                        init, fn, params, scope, transfers, count, deps,
+                        saw_return,
+                    )
+                condition = clause.child_by_field_name("condition")
+                if condition is not None:
+                    self.expression(
+                        condition, fn, params, scope, transfers, count, 0
+                    )
+                update = clause.child_by_field_name("update")
+                if update is not None:
+                    operands = _children(update)
+                    if update.type not in {
+                        "inc_statement",
+                        "dec_statement",
+                    } or len(operands) != 1 or operands[0].type != "identifier":
+                        raise _Unsupported("unsupported_statement", _span(update))
+                    ref = self.references.get(_span(operands[0]))
+                    if ref is None or (
+                        ref.binding_id not in scope
+                        and ref.binding_id not in params
+                    ):
+                        raise _Unsupported("binding_unavailable", _span(update))
+            elif clause is not None:
+                # `for <expression> { ... }` — a condition-only loop.
+                self.expression(clause, fn, params, scope, transfers, count, 0)
+            for child in _children(body_node):
+                self.statement(
+                    child, fn, params, scope, transfers, count, deps, saw_return
+                )
             return
         raise _Unsupported("unsupported_statement", _span(node))
 

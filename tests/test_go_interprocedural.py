@@ -266,6 +266,68 @@ def test_branched_bodies_union_return_dependencies(
 
 
 @pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A bounded for-clause: let init, supported condition, dec update.
+        (
+            "func F(x int64) int64 { for i:=x; i>0; i-- {}; return x }",
+            frozenset({0}),
+        ),
+        # Loop-scoped bindings feed returns inside the body only.
+        (
+            "func F(x, y int64) int64 { for i:=x; i>0; i-- { return y }; return x }",
+            frozenset({0, 1}),
+        ),
+        # A condition-only loop evaluates its condition, effect-free.
+        (
+            "func F(x, y int64) int64 { for x>0 { return y }; return y }",
+            frozenset({1}),
+        ),
+        # An empty infinite loop is a valid terminator shape.
+        (
+            "func F(x int64) int64 { for {}; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { for { return x } }",
+            frozenset({0}),
+        ),
+        # Inc updates on parameters are allowed; deps are unchanged.
+        (
+            "func F(x, y int64) int64 { for ; x>0; x++ {}; return y }",
+            frozenset({1}),
+        ),
+    ],
+)
+def test_for_bodies_union_return_dependencies(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Range clauses are outside the fragment.
+        "func F(x int64) int64 { for i:=range 10 { _ = i }; return x }",
+        # break/continue are not modelled.
+        "func F(x int64) int64 { for x>0 { break }; return x }",
+        "func F(x int64) int64 { for x>0 { continue }; return x }",
+        # Non-inc/dec updates stay unsupported.
+        "func F(x int64) int64 { for i:=x; i>0; i=i-1 {}; return x }",
+        # Assignment updates are not inc/dec.
+        "func F(x int64) int64 { for i:=x; i>0; i=x {}; return x }",
+    ],
+)
+def test_for_shapes_stay_unsupported(go_types_helper, declarations):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available and result.return_dependencies is None
+    assert result.effects == "unknown" and result.gaps
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # An if initializer is outside the fragment.
