@@ -1,7 +1,9 @@
 """Source-mapped explicit normal flow for a deliberately limited Go profile.
 
 Calls are opaque and assumed to return normally. Panic/recovery, concurrency,
-deferred execution, switches and labelled jumps are not modelled. Unsupported
+deferred execution, switches and ``goto`` are not modelled; labelled
+``break``/``continue`` resolve only against enclosing labelled loops.
+Unsupported
 syntax produces gaps instead of a misleading partial graph. This is neither a
 proof of source semantics nor a full analysis framework.
 
@@ -98,26 +100,44 @@ def _gaps(
     body: str,
     statements: tuple[tree_sitter_extract.Statement, ...],
     in_loop: bool = False,
+    labels: frozenset[str] = frozenset(),
 ) -> list[CFGGap]:
     gaps: list[CFGGap] = []
     for statement in statements:
         span = _span(statement)
         if span.start < 0 or body[span.start : span.end] != statement.text:
             gaps.append(CFGGap("source_span_mismatch", span))
-        if statement.labeled:
-            gaps.append(CFGGap("labelled_statement", span))
         kind = statement.kind
+        body_labels = labels
+        if statement.labeled:
+            if kind in {"for", "range"} and statement.label:
+                # A label on a loop is a jump target for its body.
+                body_labels = labels | {statement.label}
+            else:
+                gaps.append(CFGGap("labelled_statement", span))
         if kind in {"break", "continue"}:
-            if statement.text != kind:
+            parts = statement.text.split()
+            if len(parts) == 1:
+                if not in_loop:
+                    gaps.append(CFGGap("jump_without_loop", span))
+            elif len(parts) == 2 and _IDENTIFIER.fullmatch(parts[1]):
+                if parts[1] not in labels:
+                    gaps.append(CFGGap("unresolved_label", span))
+            else:
                 gaps.append(CFGGap("labelled_jump", span))
-            elif not in_loop:
-                gaps.append(CFGGap("jump_without_loop", span))
         elif kind not in _SIMPLE | _STRUCTURED:
             gaps.append(CFGGap(f"unsupported_{kind}", span))
-        gaps.extend(_gaps(body, statement.init, in_loop))
-        gaps.extend(_gaps(body, statement.body, in_loop or kind in {"for", "range"}))
-        gaps.extend(_gaps(body, statement.orelse, in_loop))
-        gaps.extend(_gaps(body, statement.post, in_loop))
+        gaps.extend(_gaps(body, statement.init, in_loop, labels))
+        gaps.extend(
+            _gaps(
+                body,
+                statement.body,
+                in_loop or kind in {"for", "range"},
+                body_labels,
+            )
+        )
+        gaps.extend(_gaps(body, statement.orelse, in_loop, labels))
+        gaps.extend(_gaps(body, statement.post, in_loop, labels))
     return gaps
 
 
@@ -139,31 +159,53 @@ class _Builder:
         statements: tuple[tree_sitter_extract.Statement, ...],
         following: int,
         loop: tuple[int, int] | None = None,
+        labels: dict[str, tuple[int, int]] | None = None,
     ) -> int:
+        labels = {} if labels is None else labels
         for statement in reversed(statements):
             kind = statement.kind
             node = self.node(kind, statement)
             if kind == "return":
                 self.edge(node, 1, "return")
             elif kind in {"break", "continue"}:
-                assert loop is not None
-                self.edge(node, loop[0 if kind == "break" else 1], kind)
+                parts = statement.text.split()
+                target = (
+                    loop
+                    if len(parts) == 1
+                    else labels.get(parts[1])
+                )
+                assert target is not None
+                self.edge(node, target[0 if kind == "break" else 1], kind)
             elif kind == "if":
-                self.edge(node, self.sequence(statement.body, following, loop), "true")
                 self.edge(
-                    node, self.sequence(statement.orelse, following, loop), "false"
+                    node,
+                    self.sequence(statement.body, following, loop, labels),
+                    "true",
+                )
+                self.edge(
+                    node,
+                    self.sequence(statement.orelse, following, loop, labels),
+                    "false",
                 )
             elif kind in {"for", "range"}:
-                post = self.sequence(statement.post, node, loop)
-                entry = self.sequence(statement.body, post, (following, post))
+                post = self.sequence(statement.post, node, loop, labels)
+                target = (following, post)
+                body_labels = labels
+                if statement.labeled and statement.label:
+                    body_labels = {**labels, statement.label: target}
+                entry = self.sequence(
+                    statement.body, post, target, body_labels
+                )
                 self.edge(node, entry, "true")
                 if statement.condition or kind == "range":
                     self.edge(node, following, "false")
             elif kind == "block":
-                self.edge(node, self.sequence(statement.body, following, loop))
+                self.edge(
+                    node, self.sequence(statement.body, following, loop, labels)
+                )
             else:
                 self.edge(node, following)
-            following = self.sequence(statement.init, node, loop)
+            following = self.sequence(statement.init, node, loop, labels)
         return following
 
 
