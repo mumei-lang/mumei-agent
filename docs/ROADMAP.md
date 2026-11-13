@@ -1368,6 +1368,25 @@ Boundaries: the unreliable set comes from syntax (`func` literals and
 be marked unreliable even when no closure ever runs, and a name missed
 by the syntactic scan gets no protection.
 
+### C05 expression switches as exclusive alternatives
+
+`build_go_cfg` now models Go expression switches: a `switch` node edges
+to one `case`/`default` node per arm (implicit-break semantics — each
+arm's body exits to the switch's following, never to the next arm), and
+edges straight to following when no `default` exists. `break` inside a
+case body exits the *switch* — not an enclosing loop — while `continue`
+still targets the enclosing loop; labelled jumps keep resolving to
+enclosing labelled loops. Switch initializers (`switch i := 0; x`) are
+modelled, and tag/case-guard identifiers count as reads for the hint
+families. `select` and type switches are rejected up front
+(`unsupported_select_switch`/`unsupported_type_switch`), `fallthrough`
+and labels on non-loop statements stay declared gaps.
+
+Modelling boundaries: arms are alternatives under the same
+non-evaluating profile as `if` — no ordering, overlap or exhaustiveness
+claims beyond "a default catches the no-match path"; `switch` says
+nothing about the guard's value.
+
 ### C06 first compiler-backed Go binding slice
 
 `tools/go-types` is an opt-in, standard-library-only metadata producer using
