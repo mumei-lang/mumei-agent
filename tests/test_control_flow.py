@@ -323,3 +323,70 @@ def test_assignment_facts_unreachable_nodes_hold_vacuous_all_paths():
     dead = nodes(cfg, "define")[0]
     assert result[dead.node_id].all_paths == frozenset({"x"})
     assert result[dead.node_id].some_path == frozenset({"x"})
+
+
+# ---- possibly-unassigned use hints over the fixed-point facts ----
+
+
+def uses(body: str):
+    cfg = graph(body)
+    return cfg, control_flow.unassigned_uses(body, cfg)
+
+
+def test_unassigned_uses_flag_one_sided_branch_assignment():
+    cfg, result = uses("x := 1\nif c { y = 1 }\nreturn y")
+    node = nodes(cfg, "return")[0]
+    assert result == (
+        control_flow.UnassignedUse(node.node_id, "y", node.span),
+    )
+
+
+def test_unassigned_uses_clear_when_every_branch_assigns():
+    cfg, result = uses("if c { y = 1 } else { y = 2 }\nreturn y")
+    assert result == ()
+
+
+def test_unassigned_uses_flag_loop_gated_assignment():
+    cfg, result = uses("for c { y = 1 }\nreturn y")
+    assert [use.name for use in result] == ["y"]
+
+
+def test_unassigned_uses_flag_completely_unassigned_name():
+    cfg, result = uses("if c { y = 1 }\nreturn y\nz := y")
+    names = {use.name for use in result}
+    assert "y" in names
+
+
+def test_unassigned_uses_ignore_names_never_assigned_anywhere():
+    cfg, result = uses("return q")
+    assert result == ()
+
+
+def test_unassigned_uses_respect_init_before_condition():
+    cfg, result = uses("if x := f(); x > 0 { return x }\nreturn 0")
+    assert result == ()
+
+
+def test_unassigned_uses_do_not_count_the_assignment_itself():
+    cfg, result = uses("x := f()\nreturn x")
+    assert result == ()
+
+
+def test_unassigned_uses_check_rhs_before_target():
+    cfg, result = uses("if c { x = 1 }\ny := x\nreturn y")
+    names = {use.name for use in result}
+    assert "x" in names
+    assert "y" not in names
+
+
+def test_unassigned_uses_empty_when_nothing_is_used():
+    cfg, result = uses("x := 1\ny = 2")
+    assert result == ()
+
+
+def test_unassigned_uses_report_node_and_span():
+    cfg, result = uses("if c { y = 1 }\nreturn y")
+    (use,) = result
+    node = nodes(cfg, "return")[0]
+    assert use.node_id == node.node_id
+    assert use.span == node.span
