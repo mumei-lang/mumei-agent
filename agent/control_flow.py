@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
 from collections import defaultdict
+from dataclasses import dataclass
 
 from agent import tree_sitter_extract
 
