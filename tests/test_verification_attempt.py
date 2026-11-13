@@ -23,7 +23,9 @@ from agent.verification_attempt import (
     MAX_JSON_DEPTH,
     MAX_JSON_NUMBER_CHARS,
     MAX_STDOUT_BYTES,
+    AttemptCancelRequest,
     AttemptEvent,
+    AttemptExecutionRequest,
     AttemptOutput,
     AttemptRecord,
     AttemptSequence,
@@ -2643,4 +2645,245 @@ def test_stamped_reconcile_is_passive_without_io_or_clock(monkeypatch, capsys):
         with pytest.raises(ValueError):
             advanced.reconcile_report(report, report_stamp=1)
     assert (sequence.to_dict(), report.to_dict()) == before
+    assert capsys.readouterr() == ("", "")
+
+
+def test_execution_request_rejects_invalid_metadata():
+    for kwargs in (
+        {"request_fingerprint": "a" * 63},
+        {"request_fingerprint": "A" * 64},
+        {"request_fingerprint": "g" * 64},
+        {"request_fingerprint": 1},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": 0},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": True},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": MAX_COUNTER + 1},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": 1, "timeout_ms": 0},
+        {"request_fingerprint": FINGERPRINT, "attempt_number": 1, "timeout_ms": True},
+        {
+            "request_fingerprint": FINGERPRINT,
+            "attempt_number": 1,
+            "timeout_ms": MAX_COUNTER + 1,
+        },
+    ):
+        with pytest.raises(ValueError):
+            AttemptExecutionRequest(
+                kwargs.get("request_fingerprint", FINGERPRINT),
+                kwargs.get("attempt_number", 1),
+                kwargs.get("timeout_ms", 10),
+            )
+    request = AttemptExecutionRequest(FINGERPRINT, MAX_COUNTER, MAX_COUNTER)
+    assert request.attempt_number == MAX_COUNTER
+
+
+def test_cancel_request_rejects_invalid_metadata():
+    for fingerprint, number in (
+        ("a" * 63, 1),
+        ("A" * 64, 1),
+        ("g" * 64, 1),
+        (1, 1),
+        (FINGERPRINT, 0),
+        (FINGERPRINT, True),
+        (FINGERPRINT, MAX_COUNTER + 1),
+    ):
+        with pytest.raises(ValueError):
+            AttemptCancelRequest(fingerprint, number)
+    request = AttemptCancelRequest(FINGERPRINT, MAX_COUNTER)
+    assert request.attempt_number == MAX_COUNTER
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_request_execution_state_matrix(count):
+    attempts = tuple(
+        sequence_record("exited", n) for n in range(1, count)
+    ) + ((sequence_record("ready", count),) if count else ())
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    if count == 0:
+        with pytest.raises(
+            ValueError, match="^attempt execution requires a reserved attempt$"
+        ):
+            sequence.request_execution()
+        return
+    request = sequence.request_execution()
+    assert request.request_fingerprint == FINGERPRINT
+    assert request.attempt_number == count
+    assert request.timeout_ms == 10
+    assert sequence.request_execution() == request
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_request_execution_requires_a_ready_current(state):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record(state),))
+    if state == "ready":
+        assert sequence.request_execution().attempt_number == 1
+    else:
+        with pytest.raises(
+            ValueError, match="^attempt execution requires a ready attempt$"
+        ):
+            sequence.request_execution()
+
+
+def test_request_execution_is_pure_and_repeatable():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    before = sequence.to_dict()
+    first = sequence.request_execution()
+    second = sequence.request_execution()
+    assert first == second
+    assert first is not second
+    assert sequence.to_dict() == before
+    assert sequence.current.state == "ready"
+    with pytest.raises(FrozenInstanceError):
+        first.attempt_number = 2
+
+
+def test_request_execution_rejects_a_closed_sequence():
+    sequence, output = exited_sequence_and_output(prepared_source())
+    closed = sequence.select_result(output)
+    with pytest.raises(
+        ValueError, match="^attempt execution requires a ready attempt$"
+    ):
+        closed.request_execution()
+
+
+def test_request_execution_serialization_is_metadata_only():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    request = sequence.request_execution()
+    data = request.to_dict()
+    assert data == {
+        "schema_version": "mumei.verifier-attempt-execution/v1",
+        "request_fingerprint": FINGERPRINT,
+        "attempt_number": 1,
+        "timeout_ms": 10,
+    }
+    encoded = json.dumps(data)
+    assert "stdout" not in encoded
+    data["attempt_number"] = 9
+    assert request.to_dict()["attempt_number"] == 1
+
+
+@pytest.mark.parametrize("count", range(0, MAX_ATTEMPTS + 1))
+def test_request_cancellation_state_matrix(count):
+    attempts = tuple(
+        sequence_record("exited", n) for n in range(1, count)
+    ) + ((sequence_record("running", count),) if count else ())
+    sequence = AttemptSequence(FINGERPRINT, 10, attempts)
+    if count == 0:
+        with pytest.raises(
+            ValueError, match="^attempt cancellation requires a reserved attempt$"
+        ):
+            sequence.request_cancellation()
+        return
+    request = sequence.request_cancellation()
+    assert request.request_fingerprint == FINGERPRINT
+    assert request.attempt_number == count
+    assert sequence.request_cancellation() == request
+
+
+@pytest.mark.parametrize("state", PREFIXES)
+def test_request_cancellation_requires_a_running_current(state):
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record(state),))
+    if state == "running":
+        assert sequence.request_cancellation().attempt_number == 1
+    else:
+        with pytest.raises(
+            ValueError, match="^attempt cancellation requires a running attempt$"
+        ):
+            sequence.request_cancellation()
+
+
+def test_request_cancellation_is_pure_and_repeatable():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    before = sequence.to_dict()
+    first = sequence.request_cancellation()
+    second = sequence.request_cancellation()
+    assert first == second
+    assert first is not second
+    assert sequence.to_dict() == before
+    assert sequence.current.state == "running"
+    with pytest.raises(FrozenInstanceError):
+        first.attempt_number = 2
+
+
+def test_request_cancellation_cannot_be_declared_twice():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    request = sequence.request_cancellation()
+    assert request.attempt_number == 1
+    cancelling = sequence.reconcile_report(sequence.current.record(CANCEL))
+    assert cancelling.current.state == "cancelling"
+    with pytest.raises(
+        ValueError, match="^attempt cancellation requires a running attempt$"
+    ):
+        cancelling.request_cancellation()
+
+
+def test_request_cancellation_serialization_is_metadata_only():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    request = sequence.request_cancellation()
+    data = request.to_dict()
+    assert data == {
+        "schema_version": "mumei.verifier-attempt-cancel/v1",
+        "request_fingerprint": FINGERPRINT,
+        "attempt_number": 1,
+    }
+    encoded = json.dumps(data)
+    assert "stdout" not in encoded
+    data["attempt_number"] = 9
+    assert request.to_dict()["attempt_number"] == 1
+
+
+def test_requests_track_the_current_attempt_across_reports():
+    sequence = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    execution = sequence.request_execution()
+    started = sequence.reconcile_report(sequence.current.record(START))
+    with pytest.raises(
+        ValueError, match="^attempt execution requires a ready attempt$"
+    ):
+        started.request_execution()
+    cancellation = started.request_cancellation()
+    assert cancellation.attempt_number == execution.attempt_number == 1
+    cancelled = started.reconcile_report(
+        started.current.record(CANCEL).record(AttemptEvent("cancelled", 4))
+    )
+    resumed = cancelled.begin_attempt()
+    assert resumed.request_execution().attempt_number == 2
+
+
+def test_requests_are_independent_of_stamps_and_the_store():
+    attempts = (sequence_record("running"),)
+    stamped = AttemptSequence(FINGERPRINT, 10, attempts, None, 5)
+    assert stamped.request_cancellation().attempt_number == 1
+    store = AttemptSequenceStore()
+    store.publish(stamped)
+    assert store.current.request_cancellation() == AttemptCancelRequest(
+        FINGERPRINT, 1
+    )
+    with pytest.raises(
+        ValueError, match="^attempt execution requires a ready attempt$"
+    ):
+        store.current.request_execution()
+
+
+def test_requests_are_passive_without_io_clock_or_spawn(monkeypatch, capsys):
+    ready = AttemptSequence(FINGERPRINT, 10, (sequence_record("ready"),))
+    running = AttemptSequence(FINGERPRINT, 10, (sequence_record("running"),))
+    before = ready.to_dict(), running.to_dict()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("attempt requests must remain passive exact metadata")
+
+    with monkeypatch.context() as patch:
+        for owner, name in (
+            (builtins, "open"),
+            (Path, "open"),
+            (os, "getenv"),
+            (socket, "socket"),
+            (subprocess, "Popen"),
+            (subprocess, "run"),
+            (os, "kill"),
+            (time, "monotonic"),
+            (time, "time"),
+        ):
+            patch.setattr(owner, name, forbidden)
+        assert ready.request_execution().attempt_number == 1
+        assert running.request_cancellation().attempt_number == 1
+    assert (ready.to_dict(), running.to_dict()) == before
     assert capsys.readouterr() == ("", "")

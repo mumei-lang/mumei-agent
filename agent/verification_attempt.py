@@ -233,7 +233,9 @@ class AttemptSequence:
     record only: it is not truth, acceptance, a Core check receipt or a
     cross-sequence arbitration outcome. A report stamp is a host-declared
     monotonic counter detecting replays/reordering only: it is not a clock,
-    freshness proof or authentication.
+    freshness proof or authentication. Execution and cancellation requests
+    declared from this value describe intent only: they never spawn, signal or
+    confirm a process.
     """
 
     request_fingerprint: str
@@ -349,6 +351,39 @@ class AttemptSequence:
         if report_stamp is None:
             return result
         return replace(result, report_stamp=report_stamp)
+
+    def request_execution(self) -> "AttemptExecutionRequest":
+        """Declare the current reserved attempt runnable; does not start it.
+
+        The request describes which record a host intends to execute; spawning
+        a process, authorizing a tool and confirming a start remain host
+        duties. A closed sequence cannot produce a new request.
+        """
+        current = self.current
+        if current is None:
+            raise ValueError("attempt execution requires a reserved attempt")
+        if current.state != "ready":
+            raise ValueError("attempt execution requires a ready attempt")
+        return AttemptExecutionRequest(
+            self.request_fingerprint, current.attempt_number, self.timeout_ms
+        )
+
+    def request_cancellation(self) -> "AttemptCancelRequest":
+        """Declare the running attempt should stop; does not stop it.
+
+        The request describes which running record a host intends to cancel;
+        delivering the signal and confirming the stop remain host duties. A
+        ready, already-cancelling or terminal record cannot produce one, so a
+        cancellation intent cannot be declared twice or for nothing running.
+        """
+        current = self.current
+        if current is None:
+            raise ValueError("attempt cancellation requires a reserved attempt")
+        if current.state != "running":
+            raise ValueError("attempt cancellation requires a running attempt")
+        return AttemptCancelRequest(
+            self.request_fingerprint, current.attempt_number
+        )
 
     def check_output_binding(self, output: "AttemptOutput") -> None:
         """Require this value's current record, without reconciling either input.
@@ -481,6 +516,59 @@ class AttemptSequenceStore:
                     "updated sequence does not extend the canonical lineage"
                 )
             return self._current
+
+
+@dataclass(frozen=True)
+class AttemptExecutionRequest:
+    """Host-declared intent to run the described reserved attempt; not a spawn.
+
+    This value only describes which record should be executed next. It does
+    not start a process, authorize a tool, reserve resources, deliver the
+    request to a runner or prove anything ran — dispatch and observation of
+    the start remain host duties.
+    """
+
+    request_fingerprint: str
+    attempt_number: int
+    timeout_ms: int
+
+    def __post_init__(self) -> None:
+        _fingerprint(self.request_fingerprint)
+        _counter(self.attempt_number, positive=True)
+        _counter(self.timeout_ms, positive=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": "mumei.verifier-attempt-execution/v1",
+            "request_fingerprint": self.request_fingerprint,
+            "attempt_number": self.attempt_number,
+            "timeout_ms": self.timeout_ms,
+        }
+
+
+@dataclass(frozen=True)
+class AttemptCancelRequest:
+    """Host-declared intent to stop the described running attempt; not a kill.
+
+    This value only describes which running record should be cancelled. It
+    does not signal a process, confirm delivery, prove a stop or order itself
+    against other requests — dispatch and stop observation remain host
+    duties.
+    """
+
+    request_fingerprint: str
+    attempt_number: int
+
+    def __post_init__(self) -> None:
+        _fingerprint(self.request_fingerprint)
+        _counter(self.attempt_number, positive=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": "mumei.verifier-attempt-cancel/v1",
+            "request_fingerprint": self.request_fingerprint,
+            "attempt_number": self.attempt_number,
+        }
 
 
 @dataclass(frozen=True)
