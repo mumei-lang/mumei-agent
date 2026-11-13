@@ -88,6 +88,45 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 declared execution and cancellation requests
+
+`AttemptSequence.request_execution()` returns an `AttemptExecutionRequest`
+value declaring which reserved record a host intends to run next: the request
+binding (request fingerprint, attempt number, declared timeout) is taken from
+the current record, and only a `ready` current record can produce one — no
+reserved attempt, an already-started, cancelling or terminal record, and a
+sequence closed by a selected result all fail with a static error.
+`AttemptSequence.request_cancellation()` likewise returns an
+`AttemptCancelRequest` for the running current record only, so a cancellation
+intent cannot be declared for nothing running or twice (a `cancelling` record
+already carries the intent). Both values serialize as detached metadata under
+`mumei.verifier-attempt-execution/v1` and `mumei.verifier-attempt-cancel/v1`
+— no source, stdout, environment or process state is carried.
+
+```python
+from agent.verification_attempt import AttemptEvent, AttemptSequence
+
+sequence = AttemptSequence.from_prepared(prepared).begin_attempt()
+execution = sequence.request_execution()
+sequence = sequence.reconcile_report(
+    sequence.current.record(AttemptEvent("started", 0))
+)
+cancellation = sequence.request_cancellation()
+assert cancellation.attempt_number == execution.attempt_number
+```
+
+These are **declarations of intent only**: producing a request never spawns
+a process, signals a running one, delivers anything to a runner, reserves
+resources or confirms an outcome — dispatch, delivery integrity, process
+control and observation of the start/stop remain host duties. Both calls are
+pure: the sequence is unchanged, and a request bound to a stale sequence
+value is just a stale description the host must discard. No I/O, clocks,
+plugins, runner/scheduler, stream collection, Evidence
+normalization/acceptance, external verifier, dependency or default
+audit/CLI/MCP route is added. C11 stays partial; Core meaning and acceptance,
+C12's demand gate and existing assurance/Lean/native/LLVM/deferred-WASM
+policies are unchanged.
+
 ### C11 monotonic report stamps for replay detection
 
 `AttemptSequence.reconcile_report` accepts an optional `report_stamp`: a
