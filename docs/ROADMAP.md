@@ -88,6 +88,36 @@ plan = registry.plan(
 assert plan.selected is not None
 ```
 
+### C11 evidence-candidate handoff descriptors
+
+`AttemptSequence.evidence_candidate()` returns an `AttemptEvidenceCandidate`
+naming the declared canonical snapshot for a host to hand to Core: the
+request fingerprint, the selected attempt ordinal and the output manifest
+fingerprint — nothing else. Only a sequence closed by `select_result` can
+produce one; unclosed sequences fail with a static error. The value
+serializes as detached metadata under
+`mumei.verifier-evidence-candidate/v1`.
+
+```python
+from agent.verification_attempt import AttemptSequence
+
+selected = sequence.select_result(output)
+candidate = selected.evidence_candidate()
+assert candidate.output_fingerprint == output.to_dict()["output_fingerprint"]
+```
+
+This is a **handoff descriptor, not Evidence**: the fingerprint binds the
+manifest, not content correctness — hashing a manifest is not semantic
+correctness and naming a candidate is not acceptance. The value carries no
+bytes, makes no validity claim and grants no authority; it performs no
+normalization and asserts no acceptance — Core owns the meaning and
+acceptance of the original bytes, which the host must still deliver over its
+own channel. No I/O, clocks, plugins, runner/scheduler, Evidence
+normalization/acceptance, external verifier, dependency or default
+audit/CLI/MCP route is added. C11 stays partial; Core meaning and
+acceptance, C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+
 ### C11 declared stream identity and completeness
 
 `AttemptOutput` declares the collection boundary of its snapshot with two

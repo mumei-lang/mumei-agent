@@ -414,6 +414,22 @@ class AttemptSequence:
             raise ValueError("attempt sequence already has a selected result")
         return replace(self, selected_result=marker)
 
+    def evidence_candidate(self) -> "AttemptEvidenceCandidate":
+        """Describe the selected result as an Evidence handoff candidate.
+
+        The returned value only names the declared canonical snapshot for a
+        host to hand to Core: the fingerprint binds a manifest, not content
+        correctness. It performs no normalization and asserts no acceptance —
+        Core owns the meaning and acceptance of the original bytes.
+        """
+        if self.selected_result is None:
+            raise ValueError("evidence candidate requires a selected result")
+        return AttemptEvidenceCandidate(
+            self.request_fingerprint,
+            self.selected_result[0],
+            self.selected_result[1],
+        )
+
     def to_dict(self) -> dict:
         result = {
             "schema_version": "mumei.verifier-attempt-sequence/v1",
@@ -569,6 +585,38 @@ class AttemptCancelRequest:
             "schema_version": "mumei.verifier-attempt-cancel/v1",
             "request_fingerprint": self.request_fingerprint,
             "attempt_number": self.attempt_number,
+        }
+
+
+@dataclass(frozen=True)
+class AttemptEvidenceCandidate:
+    """Detached handoff descriptor for a declared selected result; not Evidence.
+
+    This value names which canonical snapshot a host proposes to submit for
+    Core's normalization and acceptance check: a request fingerprint, the
+    attempt ordinal and the output manifest fingerprint. It carries no bytes,
+    makes no validity claim and grants no authority — hashing a manifest is
+    not semantic correctness, and naming a candidate is not acceptance.
+    """
+
+    request_fingerprint: str
+    attempt_number: int
+    output_fingerprint: str
+
+    def __post_init__(self) -> None:
+        _fingerprint(self.request_fingerprint)
+        _counter(self.attempt_number, positive=True)
+        if type(self.output_fingerprint) is not str or not re.fullmatch(
+            r"[0-9a-f]{64}", self.output_fingerprint
+        ):
+            raise ValueError("invalid output fingerprint")
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": "mumei.verifier-evidence-candidate/v1",
+            "request_fingerprint": self.request_fingerprint,
+            "attempt_number": self.attempt_number,
+            "output_fingerprint": self.output_fingerprint,
         }
 
 
