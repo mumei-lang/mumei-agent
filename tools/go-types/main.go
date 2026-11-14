@@ -113,6 +113,11 @@ type call struct {
 	// it is greater than one — the consumer needs it to admit tuple
 	// unpacking `a, b := lib.F(x)`. Single/zero-result calls omit it.
 	Results int `json:"results,omitempty"`
+	// TypeArgTypeIDs pins the named/alias identities an instantiated
+	// callee's type arguments resolve to — `lib.G[lib.T](x)` pins `lib.T`
+	// at this call site alone, where the member record's signature pins
+	// could never cover a substitution declared nowhere.
+	TypeArgTypeIDs []string `json:"type_arg_type_ids,omitempty"`
 }
 
 type gap struct {
@@ -270,77 +275,119 @@ func (ix *indexer) directImportMethodID(f *types.Func) (string, int, bool) {
 }
 
 // directImportInstantiation admits an explicit instantiation of an imported
-// generic function `lib.G[int64](...)` only when every type argument is a
-// basic type, every instantiated parameter is basic-underlying, and every
-// instantiated result is scalar — arity rides on the record like any other
-// `direct_import`. A substituted type-parameter identity is
-// declared nowhere, so a named/alias type argument could never be covered by
-// the member record's signature pins; a *declared* named parameter type
+// generic function `lib.G[int64](...)` when every type argument is basic,
+// named or alias, every instantiated parameter is basic-underlying, and
+// every instantiated result is scalar — arity rides on the record like any
+// other `direct_import`. A named/alias type argument's identity rides on
+// the record as `type_arg_type_ids` — substituted type-parameter
+// identities are declared nowhere, so the member record's signature pins
+// could never cover them; a *declared* named parameter type
 // (`func G[T any](v T2)`) is already pinned by `signature_type_ids`, while a
 // composite instantiated parameter (`[]T`) is outside the scalar fragment
 // anyway. The dependency model is the same opaque `direct_import` shape —
 // the result depends on every evaluated argument. Inferred calls `lib.G(x)`
 // reach the same gate through `importedInstantiationID`, which looks up
 // `info.Instances` for inferred and explicit instantiations alike.
-func (ix *indexer) directImportInstantiation(x ast.Expr) (string, int, bool) {
+func (ix *indexer) directImportInstantiation(x ast.Expr) (string, int, []string, bool) {
 	sel, ok := unparen(x).(*ast.SelectorExpr)
 	if !ok {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
 	if !ok {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	if _, isPkg := ix.info.Uses[pkg].(*types.PkgName); !isPkg {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	f, ok := ix.info.Uses[sel.Sel].(*types.Func)
 	if !ok {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	return ix.importedInstantiationID(f, sel.Sel)
 }
 
-// importedInstantiationID admits an instantiated generic function call only
-// when every type argument is basic, every instantiated parameter is
-// basic-underlying, and every instantiated result is scalar — the same rule
-// `directImportInstantiation` applies to `lib.G[int64](...)`. It covers
-// *inferred* instantiations `lib.G(x)`/`G(x)` too: `info.Instances` records
-// the inferred type arguments either way, and the basic-type-argument gate
-// rejects an argument inferred to a named type (`lib.G(t)` with `t` of
-// declared type `lib.T`) exactly like an explicit `lib.G[lib.T](x)`. It is
-// used for unqualified (dot-imported or plain) instantiation callees too:
-// checking the *declared* signature there would let a named type argument
-// through with no pin covering its identity. The result arity is returned
-// alongside so a multi-valued instantiation declares it like any
-// `direct_import` callee.
-func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (string, int, bool) {
+// importedInstantiationID admits an instantiated generic function call
+// when every type argument is basic, named or alias, every instantiated
+// parameter is basic-underlying (one `*T` layer unwraps, matching the
+// declared-signature pointer rule), and every instantiated result is
+// scalar — the same rule `directImportInstantiation` applies to
+// `lib.G[int64](...)`. It covers *inferred* instantiations
+// `lib.G(x)`/`G(x)` too: `info.Instances` records the inferred type
+// arguments either way, so `lib.G(t)` with `t` declared `lib.T` behaves
+// exactly like an explicit `lib.G[lib.T](x)`. It is used for
+// unqualified (dot-imported or plain) instantiation callees too:
+// checking the *declared* signature there would let a named type
+// argument through with no pin covering its identity. The result arity
+// is returned alongside so a multi-valued instantiation declares it
+// like any `direct_import` callee. A named/alias type argument's
+// identity travels on the call record as `type_arg_type_ids` so the
+// consumer pins the substituted type exactly like a declared named
+// signature type; a type argument with no declared identity (`error`,
+// `any`) needs no pin and contributes nothing.
+func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (string, int, []string, bool) {
 	inst, ok := ix.info.Instances[ident]
 	if !ok {
-		return "", 0, false
+		return "", 0, nil, false
 	}
+	var typeArgIDs []string
+	seenArg := map[string]bool{}
 	for i := 0; i < inst.TypeArgs.Len(); i++ {
-		if _, ok := inst.TypeArgs.At(i).(*types.Basic); !ok {
-			return "", 0, false
+		var obj *types.TypeName
+		switch t := inst.TypeArgs.At(i).(type) {
+		case *types.Basic:
+			// Basic arguments are declared nowhere — nothing to pin.
+		case *types.Named:
+			obj = t.Obj()
+		case *types.Alias:
+			obj = t.Obj()
+		default:
+			return "", 0, nil, false
+		}
+		if obj == nil {
+			continue
+		}
+		id := ix.typeID(obj)
+		if id == "" {
+			// A universe type (`error`, `any`) is declared nowhere and
+			// needs no pin — but a packaged named type from a unit the
+			// host never declared could not be pinned either, so the
+			// call must stay closed rather than admit unpinned.
+			if obj.Pkg() != nil {
+				return "", 0, nil, false
+			}
+			continue
+		}
+		if !seenArg[id] {
+			seenArg[id] = true
+			typeArgIDs = append(typeArgIDs, id)
 		}
 	}
 	isig, ok := inst.Type.(*types.Signature)
 	if !ok {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	for i := 0; i < isig.Params().Len(); i++ {
-		if _, ok := isig.Params().At(i).Type().Underlying().(*types.Basic); !ok {
-			return "", 0, false
+		pt := isig.Params().At(i).Type()
+		// `*T` names its pointee as surely as a declared `*lib.T`
+		// signature type does — the pointee's identity rides on
+		// `type_arg_type_ids` (substituted) or `signature_type_ids`
+		// (declared), so one pointer layer unwraps here too.
+		if ptr, ok := pt.(*types.Pointer); ok {
+			pt = ptr.Elem()
+		}
+		if _, ok := pt.Underlying().(*types.Basic); !ok {
+			return "", 0, nil, false
 		}
 	}
 	if !allScalarResults(isig) {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	id := ix.importedID(f)
 	if id == "" {
-		return "", 0, false
+		return "", 0, nil, false
 	}
-	return id, isig.Results().Len(), true
+	return id, isig.Results().Len(), typeArgIDs, true
 }
 
 // Import implements types.Importer against the host-declared import map.
@@ -717,27 +764,28 @@ func unparen(e ast.Expr) ast.Expr {
 	}
 }
 
-func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (string, string, bool, int) {
+func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (string, string, bool, int, []string) {
 	if ix.info.Types[c.Fun].IsType() {
-		return "conversion", "", false, 0
+		return "conversion", "", false, 0, nil
 	}
 	fun := unparen(c.Fun)
 	var instIdent *ast.Ident
 	switch e := fun.(type) {
 	case *ast.IndexExpr:
-		if id, arity, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id, false, arity
+		if id, arity, ids, ok := ix.directImportInstantiation(e.X); ok {
+			return "direct_import", id, false, arity, ids
 		}
 		// An unqualified instantiation (`G[T](x)`, dot-imported or plain)
 		// still needs the instantiation-aware check below — the declared
-		// signature alone would admit a named type argument no pin covers.
+		// signature's basic-type-argument gate must not see a named type
+		// argument before its `type_arg_type_ids` pin is recorded.
 		if i, ok := unparen(e.X).(*ast.Ident); ok {
 			instIdent = i
 		}
 		fun = unparen(e.X)
 	case *ast.IndexListExpr:
-		if id, arity, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id, false, arity
+		if id, arity, ids, ok := ix.directImportInstantiation(e.X); ok {
+			return "direct_import", id, false, arity, ids
 		}
 		if i, ok := unparen(e.X).(*ast.Ident); ok {
 			instIdent = i
@@ -759,11 +807,11 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 						// so the plain `direct_import` result-depends-
 						// on-every-argument model covers it; no `method`
 						// flag is needed.
-						return "direct_import", id, selection.Kind() == types.MethodVal, arity
+						return "direct_import", id, selection.Kind() == types.MethodVal, arity, nil
 					}
 				}
 			}
-			return "method_generic_or_variadic", "", false, 0
+			return "method_generic_or_variadic", "", false, 0, nil
 		}
 		// A package-qualified call `lib.G(...)`: the callee is declared in
 		// a resolved imported unit. The target is that unit's own binding
@@ -772,58 +820,58 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 			if _, isPkg := ix.info.Uses[x].(*types.PkgName); isPkg {
 				if f, ok := ix.info.Uses[e.Sel].(*types.Func); ok {
 					if id, arity, ok := ix.directImportID(f); ok {
-						return "direct_import", id, false, arity
+						return "direct_import", id, false, arity, nil
 					}
 					// `lib.G(x)` — an inferred instantiation. The
 					// declared signature fails the scalar-parameter
-					// rule, so admit through the instantiation gate:
-					// every inferred type argument must be basic.
-					if id, arity, ok := ix.importedInstantiationID(f, e.Sel); ok {
-						return "direct_import", id, false, arity
+					// rule, so admit through the instantiation gate,
+					// which also records each named type argument's pin.
+					if id, arity, ids, ok := ix.importedInstantiationID(f, e.Sel); ok {
+						return "direct_import", id, false, arity, ids
 					}
-					return "external_or_bodyless", "", false, 0
+					return "external_or_bodyless", "", false, 0, nil
 				}
-				return "indirect_or_selector", "", false, 0
+				return "indirect_or_selector", "", false, 0, nil
 			}
 		}
 	}
 	ident, ok := fun.(*ast.Ident)
 	if !ok {
-		return "indirect_or_selector", "", false, 0
+		return "indirect_or_selector", "", false, 0, nil
 	}
 	obj := ix.info.Uses[ident]
 	if _, ok := obj.(*types.Builtin); ok {
-		return "builtin", "", false, 0
+		return "builtin", "", false, 0, nil
 	}
 	f, ok := obj.(*types.Func)
 	if !ok {
-		return "indirect_or_selector", "", false, 0
+		return "indirect_or_selector", "", false, 0, nil
 	}
 	fn, ok := functions[ix.id(f)]
 	if !ok || fn.Body == nil {
 		if instIdent != nil {
-			if id, arity, ok := ix.importedInstantiationID(f, instIdent); ok {
-				return "direct_import", id, false, arity
+			if id, arity, ids, ok := ix.importedInstantiationID(f, instIdent); ok {
+				return "direct_import", id, false, arity, ids
 			}
-			return "external_or_bodyless", "", false, 0
+			return "external_or_bodyless", "", false, 0, nil
 		}
 		// A dot-imported inferred instantiation `G(x)` reaches the
 		// same gate as `lib.G(x)` — the callee ident keys
 		// `info.Instances`.
-		if id, arity, ok := ix.importedInstantiationID(f, ident); ok {
-			return "direct_import", id, false, arity
+		if id, arity, ids, ok := ix.importedInstantiationID(f, ident); ok {
+			return "direct_import", id, false, arity, ids
 		}
 		// Dot-imported names reach here: the func is not local but its
 		// imported identity is still stable and reportable.
 		if id, arity, ok := ix.directImportID(f); ok {
-			return "direct_import", id, false, arity
+			return "direct_import", id, false, arity, nil
 		}
-		return "external_or_bodyless", "", false, 0
+		return "external_or_bodyless", "", false, 0, nil
 	}
 	if fn.Method || fn.Generic || fn.Variadic {
-		return "method_generic_or_variadic", "", false, 0
+		return "method_generic_or_variadic", "", false, 0, nil
 	}
-	return "direct_local", fn.BindingID, false, 0
+	return "direct_local", fn.BindingID, false, 0, nil
 }
 
 func spanFile(s *span) int {
@@ -1056,9 +1104,9 @@ func analyze(req request) (out snapshot) {
 			case *ast.DeferStmt:
 				special[node.Call] = "deferred"
 			case *ast.CallExpr:
-				kind, target, method, results := ix.classify(node, functions)
+				kind, target, method, results, typeArgIDs := ix.classify(node, functions)
 				if override, ok := special[node]; ok {
-					kind, target, method, results = override, "", false, 0
+					kind, target, method, results, typeArgIDs = override, "", false, 0, nil
 				}
 				// `results` only travels on a `direct_import` record
 				// whose callee returns more than one value — the
@@ -1075,7 +1123,7 @@ func analyze(req request) (out snapshot) {
 				for _, arg := range node.Args {
 					args = append(args, ix.nodeSpan(arg))
 				}
-				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results})
+				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results, typeArgIDs})
 				if owner == "" {
 					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
 				}

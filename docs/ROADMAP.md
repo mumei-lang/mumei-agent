@@ -2103,35 +2103,36 @@ every evaluated argument, and the member record's
 including its type-parameter identities — pin the call site as with
 any other imported call.
 
-The basic-type restriction keeps the admitted surface inside the
-member record's pin coverage: a substituted type-parameter identity
-is declared nowhere, so a named/alias type argument
-(`lib.G[lib.T](v)`) could never be pinned and stays
-`indirect_or_selector`. A *declared* named parameter
+The basic-or-named restriction keeps the admitted surface pinnable:
+a substituted type-parameter identity is declared nowhere, so a
+named/alias type argument (`lib.G[lib.T](v)`) carries its identity
+on the call record as `type_arg_type_ids` — pinning `lib.T` at this
+call site alone, where the member record's signature pins could
+never reach. A *declared* named parameter
 (`func G[T any](v T2)`) is already pinned by `signature_type_ids`;
 only composite instantiated parameters (`[]T`) are rejected, as
-outside the scalar fragment. The consumer admits the call through the
+outside the scalar fragment, and a pointer type argument
+(`G[*lib.T](v)`) has no pin channel either. The consumer admits the call through the
 same `direct_import` path — tree-sitter parses the single-type-arg
 form `lib.G[T](x)` as `type_conversion_expression`, so a dedicated
 arm maps that node shape onto the recorded call; multi-type-arg
 forms already arrive as `call_expression`. An *inferred*
 instantiation `lib.G(x)` or `G(x)` arrives as an ordinary
 `call_expression` and takes the same gate through `info.Instances`:
-the call is admitted when every inferred type argument is basic —
-no explicit `[T]` syntax is required.
+the call is admitted when every inferred type argument is basic,
+named or alias — no explicit `[T]` syntax is required.
 
 Boundaries: inferred calls `lib.G(x)`/`G(x)` take the same gate —
 `info.Instances` records the inferred type arguments either way,
-so an all-basic inferred instance admits the call at its
+so a basic-or-named inferred instance admits the call at its
 instantiated arity (partial explicit forms `lib.G[int64](x, c)`
 with inferred rest-arguments follow too). An argument inferred to a
-named type — `lib.G(t)` with `t` declared `lib.T` — still stays
-`external_or_bodyless`, exactly like the explicit `lib.G[lib.T]`
-form. A dot-imported instantiation `G[int64](x)` follows the
-same rule through the unqualified-callee path — admitted only with
-basic type arguments (`G[lib.T](v)` stays `external_or_bodyless`,
-since the declared-signature check alone would let a named type
-argument through unpinned). Instantiated generic *types*
+named type — `lib.G(t)` with `t` declared `lib.T` — admits with the
+`lib.T` pin recorded on the call, exactly like the explicit
+`lib.G[lib.T]` form. A dot-imported instantiation `G[int64](x)`
+follows the same rule through the unqualified-callee path —
+admitted with basic or named type arguments alike (`G[lib.T](v)`
+pins `lib.T` on its record). Instantiated generic *types*
 (`lib.S[int64](x)`), local generics and methods
 are unchanged and closed. A multi-valued instantiated callee
 (`a, b := lib.G[int64](x)`) unpacks at its declared `results`

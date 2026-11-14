@@ -2716,10 +2716,10 @@ def test_partial_explicit_instantiation_unpacks(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
-def test_inferred_named_type_argument_stays_closed(go_types_helper):
+def test_inferred_named_type_argument_is_pinned(go_types_helper):
     # `lib.Id(t)` with `t` declared `lib.NT` infers the *named* type
-    # argument `lib.NT` — no pin declares it, so the call stays
-    # closed exactly like an explicit `lib.Id[lib.NT](t)`.
+    # argument `lib.NT` — its identity rides on the call record as
+    # `type_arg_type_ids` exactly like an explicit `lib.Id[lib.NT](t)`.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t lib.NT) lib.NT {\n"
@@ -2731,12 +2731,14 @@ def test_inferred_named_type_argument_stays_closed(go_types_helper):
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] != "direct_import"
+    assert call["kind"] == "direct_import"
+    nt = next(m for m in report["imported_members"] if m["name"] == "NT")
+    assert call["type_arg_type_ids"] == [nt["id"]]
     snapshot = _multi_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset({0})
 
 
 def test_inferred_composite_result_stays_closed(go_types_helper):
@@ -3897,7 +3899,7 @@ def test_imported_generic_instantiation_void_result(go_types_helper):
     assert transfer.imported and transfer.arguments == (frozenset({0}),)
 
 
-def test_imported_generic_named_type_argument_stays_closed(go_types_helper):
+def test_imported_generic_named_type_argument_is_pinned(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { return int64(lib.GI[lib.T](lib.T(x))) }\n"
@@ -3906,10 +3908,11 @@ def test_imported_generic_named_type_argument_stays_closed(go_types_helper):
         package_report_imports(go_types_helper, files, GENERIC_LIB)
     )
     assert report["status"] == "ok"
-    kinds = {c["kind"] for c in report["calls"]}
-    # The instantiation is not admitted: a named type argument adds a
-    # type identity the declared signature pins cannot cover.
-    assert "direct_import" not in kinds
+    # The named type argument's identity rides on the call record as
+    # `type_arg_type_ids`, pinning `lib.T` at this call site alone.
+    gi = next(c for c in report["calls"] if c["kind"] == "direct_import")
+    t = next(m for m in report["imported_members"] if m["name"] == "T")
+    assert gi["type_arg_type_ids"] == [t["id"]]
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, GENERIC_LIB),
         files,
@@ -3918,7 +3921,7 @@ def test_imported_generic_named_type_argument_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset({0})
 
 
 def test_imported_generic_inferred_call_is_admitted(go_types_helper):
@@ -4036,7 +4039,9 @@ def test_dot_imported_generic_basic_instantiation_is_admitted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
-def test_dot_imported_generic_named_type_argument_stays_closed(go_types_helper):
+def test_dot_imported_generic_named_type_argument_is_pinned(
+    go_types_helper,
+):
     files = {
         "a.go": "package p\nimport . \"lib\"\n"
         "func F(x int64) int64 { return int64(GI[T](T(x))) }\n"
@@ -4045,10 +4050,11 @@ def test_dot_imported_generic_named_type_argument_stays_closed(go_types_helper):
         package_report_imports(go_types_helper, files, GENERIC_LIB)
     )
     assert report["status"] == "ok"
-    # The unqualified instantiation must not ride the declared-signature
-    # check — `T` as a type argument is a named identity no pin covers.
-    kinds = {c["kind"] for c in report["calls"]}
-    assert "direct_import" not in kinds and "external_or_bodyless" in kinds
+    # The unqualified instantiation admits the same way — `T` as a type
+    # argument is a named identity carried on `type_arg_type_ids`.
+    gi = next(c for c in report["calls"] if c["kind"] == "direct_import")
+    t = next(m for m in report["imported_members"] if m["name"] == "T")
+    assert gi["type_arg_type_ids"] == [t["id"]]
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, GENERIC_LIB),
         files,
@@ -4057,7 +4063,7 @@ def test_dot_imported_generic_named_type_argument_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset({0})
 
 
 METHOD_LIB = {
@@ -4681,10 +4687,14 @@ def test_pointer_result_generic_cannot_bypass_instantiation_gate(
     }
     report = json.loads(package_report_imports(go_types_helper, files, lib))
     assert report["status"] == "ok"
-    by_span = {c["span"]["start"]: c["kind"] for c in report["calls"]}
-    # `lib.S(t)` infers P=lib.T — a named type argument — closed too.
-    # `lib.G(t)` must not slip through the declared-signature path.
-    assert all(k != "direct_import" for k in by_span.values())
+    calls = report["calls"]
+    assert len(calls) == 2
+    # Both calls infer P=lib.T — a named type argument admitted through
+    # the instantiation gate with the `lib.T` pin on the record; the
+    # `*P` result never slipped through the declared-signature path.
+    t = next(m for m in report["imported_members"] if m["name"] == "T")
+    assert all(c["kind"] == "direct_import" for c in calls)
+    assert all(c["type_arg_type_ids"] == [t["id"]] for c in calls)
 
 
 def test_pointer_arg_escape_unions_callee_args(go_types_helper):
@@ -4705,6 +4715,95 @@ def test_pointer_arg_escape_unions_callee_args(go_types_helper):
     }
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_named_type_arg_pin_flags_stale_dependents(go_types_helper):
+    # `lib.GI[lib.T](t)` — `lib.T` appears only in the signature and the
+    # type argument, never in an expression, so only the call record's
+    # `type_arg_type_ids` can pin it (a `lib.T(x)` conversion or a var
+    # read would pin it through the member-read path instead).
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T) int64 { return int64(lib.GI[lib.T](t)) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = {
+        "g.go": "package lib\ntype T2 int64\nfunc GI[T any](v T) T { return v }\n"
+        "func G2[A any, B any](a A, b B) A { return a }\n"
+        "func GV[T any](v T) {}\n"
+        "func GN[T any](v T2) int64 { return 0 }\n",
+        # Redeclaring `T` churns the pinned type-arg identity while
+        # `GI`'s own declaration is byte-identical.
+        "t.go": "package lib\ntype T int32\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_named_type_arg_from_second_unit_is_pinned(go_types_helper):
+    # `lib.GI[other.U](t)` — the type argument's identity lives in a
+    # third unit's coordinate space; it still pins at the call site.
+    lib = dict(GENERIC_LIB)
+    lib["other"] = {"u.go": "package other\ntype U int64\n"}
+    files = {
+        "a.go": "package p\nimport \"lib\"\nimport \"other\"\n"
+        "func F(t other.U) int64 { return int64(lib.GI[other.U](t)) }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    assert report["status"] == "ok"
+    (call,) = [c for c in report["calls"] if c["kind"] == "direct_import"]
+    u = next(m for m in report["imported_members"] if m["name"] == "U")
+    assert call["type_arg_type_ids"] == [u["id"]]
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_mixed_basic_named_type_args_pin_only_named(go_types_helper):
+    # `lib.G2[int64, lib.T](x, t)` — the basic argument contributes
+    # nothing; only `lib.T` lands on `type_arg_type_ids`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, t lib.T) int64 {"
+        " return int64(lib.G2[int64, lib.T](x, t)) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, GENERIC_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = [c for c in report["calls"] if c["kind"] == "direct_import"]
+    t = next(m for m in report["imported_members"] if m["name"] == "T")
+    assert call["type_arg_type_ids"] == [t["id"]]
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
         files,
         target_arch="amd64",
     )

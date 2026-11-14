@@ -1689,6 +1689,11 @@ class _Builder:
         member = self.members.get(call.target)
         if member is not None:
             self.pinned.update(member.signature_type_ids)
+        # An instantiated callee's named/alias type arguments pin their
+        # substituted identities at this call site — `lib.G[lib.T](x)`
+        # goes stale when `lib.T` is redeclared even though the member
+        # record's declared signature names only the type parameter.
+        self.pinned.update(getattr(call, "type_arg_type_ids", ()))
         return result
 
 
