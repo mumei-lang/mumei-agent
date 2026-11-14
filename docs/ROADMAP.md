@@ -2371,6 +2371,62 @@ for any non-`direct_import` call, for arity below two, and for a
 non-integer value. A forged arity that still validates is caught at
 the consumer: the left-hand width must equal it.
 
+### C06 TypeScript scalar interprocedural summaries (slice 0)
+
+`agent/ts_interprocedural.py` mirrors the Go consumer's *model* — not
+its code — for self-contained TypeScript/JavaScript units: it classifies
+the admitted fragment conservatively and records declared gaps rather
+than failing. A unit is a single source string; every top-level node
+that is not a `function_declaration` or comment (imports/exports,
+ambient `declare`, classes, namespaces, top-level statements) closes
+the whole unit with `unsupported_unit`. `summarize_typescript(source)`
+returns a `TsSummarySet` whose `functions` carry the same vocabulary
+as the Go summaries — `available`, `parameters`,
+`return_dependencies`, `calls`, `gaps`, `pinned` (reserved, always
+empty in slice 0) and `effects` — plus a `context_key` digest of the
+unit.
+
+A function admits only when its signature is fully concrete: a named
+`function` declaration whose parameters are all `required_parameter`
+nodes with an identifier pattern, a `number`/`boolean`
+`predefined_type` annotation and no default value, with a declared
+scalar return type and a `statement_block` body. `async`, generators,
+optional/rest/default/destructured parameters and any non-scalar
+annotation close the signature with `unsupported_signature`.
+
+The admitted statement fragment covers expression statements
+(assignments, compound assignments `+= -= *= &= |= ^=`, and `++`/`--`
+updates), `let`/`const`/`var` bindings with an identifier name, an
+optional scalar annotation and a required scalar initializer, `if`/`else`
+(branches join by union — a name bound in a branch does not escape it),
+`while` loops, `for` loops and `break`/`continue` inside them. Loops
+evaluate to a fixed point — the pass cap scales with the scope size so
+a widening body cannot spin. `return` unions over every return in the
+body; a bare `return` contributes nothing.
+
+Expressions admit identifiers bound in scope, numeric and boolean
+literals, parenthesized expressions, unary `! - + ~`, binary
+`+ - * < <= > >= == === != !== && || & | ^` (division, modulo,
+exponentiation, shifts and `??` stay closed), `update_expression` reads,
+and calls to a same-unit named function — each records a `TsCall`
+transfer whose `arguments` hold the argument dependency sets, and the
+result is the union of all of them (the opaque-callee model: the callee
+body is not composed). Everything else closes: `unsupported_expression`
+covers member access/calls, subscripts, `new`, arrow/function values,
+ternary, `await`, template strings, sequences and any other node;
+`binding_unavailable` covers reads or stores to names never bound;
+`call_unresolved` covers callees not defined in the unit.
+
+Boundaries: there is no type checker, no module resolution and no
+imported-member model — every cross-unit reference closes; labels,
+`switch`, `try`, `throw`, `do`/`while`, `for..of`/`for..in`, nested
+function declarations, classes and `this` close with
+`unsupported_statement`/`unsupported_expression`. Later slices can
+open units (import/export wiring), member calls, arrow values and
+composite parameter types along the same line the Go slices opened:
+declare the new fact kinds on the record, gate admission on them, and
+keep every unlisted shape closed.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
