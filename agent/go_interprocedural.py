@@ -474,8 +474,9 @@ class _Builder:
         node: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
-    ) -> tuple[tuple[PackageMember, ...], PackageMember] | None:
-        """The `(pointee members, field member)` pair `t.F` names.
+    ) -> tuple[tuple[PackageMember, ...], PackageMember, Any] | None:
+        """The `(pointee members, field member, root ref)` triple
+        `t.F` names.
 
         `t.F` on a bound `*S` auto-dereferences a field of caller
         state — external like `lib.VS.F`, so the read is dep-free and
@@ -495,9 +496,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         field = node.child_by_field_name("field")
         if operand is None or field is None:
             return None
-        pointees = self._bound_selector_pointees(operand, locals_, params)
-        if pointees is None:
+        resolved = self._bound_selector_pointees(operand, locals_, params)
+        if resolved is None:
             return None
+        pointees, root_ref = resolved
         field_ref = self.references.get(self.node_key(field))
         field_member = (
             self.members.get(field_ref.binding_id)
@@ -511,25 +513,27 @@ member, or one explicit dereference of one (`(*t).F` — the same
             or field_member.type.kind not in {"integer", "boolean", "pointer"}
         ):
             return None
-        return pointees, field_member
+        return pointees, field_member, root_ref
 
     def _bound_selector_pointees(
         self,
         operand: Any,
         locals_: dict[str, frozenset[int]],
         params: dict[str, int],
-    ) -> tuple[PackageMember, ...] | None:
-        """Every member the operand's pointer chain traverses.
+    ) -> tuple[tuple[PackageMember, ...], Any] | None:
+        """Every member the operand's pointer chain traverses, and
+        the root bound identifier's reference.
 
         A bound identifier (`t`) or one explicit dereference (`*t`,
         with parentheses either side) contributes its pointee `type`
-        member; a nested selection (`t.W`) recurses through
-        `_bound_field_read` and extends the chain with the field's
-        own member — pinned so redeclaring `W` flags the summary —
-        followed by the field's pointee `type` member when the field
-        is pointer-typed. The tuple's last element is always the
-        deepest pointee. Anything else — a computed base, a double
-        deref, a non-pointer field — returns None.
+        member and supplies the root reference; a nested selection
+        (`t.W`) recurses through `_bound_field_read` and extends the
+        chain with the field's own member — pinned so redeclaring
+        `W` flags the summary — followed by the field's pointee
+        `type` member when the field is pointer-typed. The tuple's
+        last element is always the deepest pointee. Anything else —
+        a computed base, a double deref, a non-pointer field —
+        returns None.
         """
         while operand.type == "parenthesized_expression":
             operand = next(
@@ -557,7 +561,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             inner = self._bound_field_read(operand, locals_, params)
             if inner is None:
                 return None
-            inner_pointees, inner_field = inner
+            inner_pointees, inner_field, root_ref = inner
             if (
                 inner_field.type.kind != "pointer"
                 or not inner_field.type.type_id
@@ -566,7 +570,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
             pointee = self.members.get(inner_field.type.type_id)
             if pointee is None or pointee.kind != "type":
                 return None
-            return (*inner_pointees, inner_field, pointee)
+            return (*inner_pointees, inner_field, pointee), root_ref
         if operand.type != "identifier" or operand.text == b"_":
             return None
         ref = self.references.get(self.node_key(operand))
@@ -584,7 +588,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
         pointee = self.members.get(binding.type.type_id)
         if pointee is None or pointee.kind != "type":
             return None
-        return (pointee,)
+        return (pointee,), ref
 
     def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` qualified type names, or None.
@@ -803,6 +807,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
             index, fn, params, locals_, transfers, count, depth + 1
         )
 
+    def _bound_receiver_root(
+        self,
+        receiver: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> Any | None:
+        """The bound identifier at the root of a nested-selector
+        receiver — `t` in `t.W` — or None. A single-level receiver
+        (`t`, `lib.VS`) evaluates its own deps directly; only a
+        chain resolved through `_bound_field_read` needs the root's
+        accumulated write deps."""
+        inner = receiver
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "selector_expression":
+            return None
+        resolved = self._bound_field_read(inner, locals_, params)
+        if resolved is None:
+            return None
+        return resolved[2]
+
     def _imported_member_write(
         self, node: Any
     ) -> tuple[PackageMember, tuple[Any, ...], bool] | None:
@@ -1005,7 +1033,10 @@ member, or one explicit dereference of one (`(*t).F` — the same
         recorded write target, and the base's reference is returned
         with it so the caller can fold the stored value's dependencies
         back into the base binding (a later `t.M()` can observe the
-        write). An imported member, a package var, an unbound name, or
+        write). A nested selection `t.W.f` walks the operand chain
+        through pointer-typed field members like the bound field
+        read: every traversed member pins and the deepest pointee
+        records the transfer. An imported member, a package var, an unbound name, or
         a base whose type declares no identity keeps the statement
         closed, matching the bare-identifier gate. A `(*t).f` base
         admits the same way — the explicit dereference spells out
@@ -1043,6 +1074,21 @@ member, or one explicit dereference of one (`(*t).F` — the same
                     (c for c in base.named_children if c.type != "comment"),
                     None,
                 )
+        if base is not None and base.type == "selector_expression":
+            # `t.W.f = v` — the store lands a level deeper into
+            # caller state: the operand chain resolves through
+            # pointer-typed field members, every traversed member
+            # pins, and the deepest pointee's identity records the
+            # mutation. The root identifier's reference still takes
+            # the stored value's dependencies.
+            resolved = self._bound_selector_pointees(
+                base, locals_, params
+            )
+            if resolved is None:
+                return None
+            pointees, ref = resolved
+            self.pinned.update(p.id for p in pointees)
+            return pointees[-1].id, ref
         if base is None or base.type != "identifier" or base.text == b"_":
             return None
         ref = self.references.get(self.node_key(base))
@@ -2389,7 +2435,7 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # field's type flags the summary.
                 bound = self._bound_field_read(node, locals_, params)
                 if bound is not None:
-                    pointees, field_member = bound
+                    pointees, field_member, _root_ref = bound
                     self.pinned.update(p.id for p in pointees)
                     self._pin_member_type(field_member)
                     transfers.append(
@@ -2765,6 +2811,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if receiver is not None
             else frozenset()
         )
+        # `t.W.Get()` — a nested-selector receiver reads dep-free like
+        # any field read, but a `t.W.f = v` write folded the value's
+        # deps into the chain's root binding and a method call on the
+        # chain can observe them, so the root binding's deps join the
+        # receiver's.
+        if receiver is not None:
+            root_ref = self._bound_receiver_root(receiver, locals_, params)
+            if root_ref is not None:
+                binding_id = root_ref.binding_id
+                if binding_id in locals_:
+                    receiver_deps |= locals_[binding_id]
+                elif binding_id in params:
+                    receiver_deps |= frozenset({params[binding_id]})
         actual = tuple(
             self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1

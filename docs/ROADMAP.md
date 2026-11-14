@@ -2299,8 +2299,14 @@ zero-argument imported transfer against the base's declared type
 identity — `effects` reports `unknown` like an imported var read,
 and a redeclaration of that type flags the summary via
 `stale_dependents`. A `(*t).f = v` base spells the same auto-deref
-out and admits identically; `(**t).f` stays closed. A `*t = v`
-dereference store admits too, routed
+out and admits identically; `(**t).f` stays closed. A nested
+selection `t.W.f = v` walks the same
+way the field read does: the operand chain resolves through
+pointer-typed field members (`W *W2`), every traversed
+member pins, the deepest pointee's identity records the transfer,
+and the stored value's dependencies still accumulate into the root
+binding `t`. A struct-valued intermediate (`t.A.B = v` on `A S3`)
+or a double deref (`**t`) keeps the write closed. A `*t = v` dereference store admits too, routed
 through the escaped-binding fold: `p := &x` may aim the pointer at
 any tracked local, and dep sets carry indices, not identities, so
 the store cannot be proven to miss one — unioning the stored
