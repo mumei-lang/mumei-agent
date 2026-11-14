@@ -30,7 +30,9 @@ reassignments union back. ``var`` declarations bind like lets —
 binds name-wise like ``:=`` (grouped ``var (...)`` forms are a parser
 gap). ``x++``/``x--`` on a
 bound scalar are dependency-preserving, and ``_ = expression``
-evaluates-and-discards like a condition. An unlabelled
+evaluates-and-discards like a condition. Expression statements — only
+calls are legal — evaluate for their recorded transfer and discard the
+result. An unlabelled
 ``break``/``continue`` marks its innermost loop or switch construct as
 exited — every later statement in that body is a may-assignment whose
 writes union instead of replace, because the jump may have skipped them
@@ -800,6 +802,19 @@ class _Builder:
                         break
                 else:
                     raise _Unsupported("unsupported_statement", _span(node))
+            return
+        if kind == "expression_statement":
+            # A call (or receive) evaluated for its side channel and
+            # discarded — only those are legal expression statements.
+            # The call's transfer still records normally; receives can
+            # never appear in-fragment, so the inner expression fails
+            # closed on its own if it isn't a supported call.
+            inner = _children(node)
+            if len(inner) != 1:
+                raise _Unsupported("unsupported_statement", _span(node))
+            self.expression(
+                inner[0], fn, params, locals_, transfers, count, 0
+            )
             return
         raise _Unsupported("unsupported_statement", _span(node))
 
