@@ -5173,7 +5173,8 @@ def test_deref_write_is_admitted(go_types_helper):
     # `*t = v` on a bound `*T` parameter — the store lands in memory
     # the dep model does not track, so only the external mutation
     # records against the declared pointee identity (`effects`
-    # reports `unknown`) and the stored value's deps drop with it.
+    # reports `unknown`); the stored value's deps accumulate for any
+    # later dereference read to observe.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.T, v int64) int64 {\n"
@@ -5260,6 +5261,48 @@ def test_deref_write_unnamed_pointee_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_deref_write_then_deref_read_keeps_stored_deps(go_types_helper):
+    # `*t = v; return *t` — the store lands in memory no binding
+    # tracks, but the read may observe exactly that value: deps stored
+    # through any pointer write union back into a dereference read
+    # even when no `&x` escaped.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, v lib.T) lib.T {\n"
+        "\t*t = v\n"
+        "\treturn *t\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_deref_write_through_local_call_keeps_arg_deps(go_types_helper):
+    # `Set(&x, y); return x` — the local callee's `*p = v` store has
+    # unbounded effects, so `x` conservatively gains every argument's
+    # deps like an imported call's `&x` rule.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func Set(p *lib.T, v lib.T) int64 {\n"
+        "\t*p = v\n"
+        "\treturn 0\n}\n"
+        "func F(x lib.T, y lib.T) lib.T {\n"
+        "\tSet(&x, y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
 
 
 def test_double_deref_write_stays_closed(go_types_helper):

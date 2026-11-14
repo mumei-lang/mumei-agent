@@ -356,6 +356,12 @@ class _Builder:
         # one of them, so deref member stores union the stored
         # value's dependencies into every escaped binding.
         self.escaped: set[str] = set()
+        # Dependencies stored through any pointer write — `*p = v` or
+        # `*lib.PV = v`. The pointee is untracked memory, but a later
+        # dereference read may observe the stored value, so every
+        # `*t`/`*lib.PV` read unions this set back in (the escaped set
+        # alone drops the deps when nothing took `&x`).
+        self.indirect_writes: frozenset[int] = frozenset()
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -1094,6 +1100,11 @@ class _Builder:
                 result |= locals_[escaped_id]
             elif escaped_id in params:
                 result |= {params[escaped_id]}
+        # A `*p = v` store lands in memory no binding tracks, but this
+        # read may observe exactly that stored value — union every
+        # dependency ever stored through a pointer so the write is not
+        # dropped when no `&x` escaped (`*t = v; return *t`).
+        result |= self.indirect_writes
         return result
 
     def summarize(self, binding_id: str) -> FunctionSummary:
@@ -1177,9 +1188,11 @@ class _Builder:
         saved_frames = self.frames
         saved_pinned = self.pinned
         saved_escaped = self.escaped
+        saved_indirect = self.indirect_writes
         self.frames = []
         self.pinned = set()
         self.escaped = set()
+        self.indirect_writes = frozenset()
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -1199,6 +1212,7 @@ class _Builder:
             self.frames = saved_frames
             self.pinned = saved_pinned
             self.escaped = saved_escaped
+            self.indirect_writes = saved_indirect
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -1677,7 +1691,11 @@ class _Builder:
                     # earlier `&x` may have aimed at a tracked binding:
                     # any escaped binding might be the pointee, so the
                     # stored value's dependencies union into all of
-                    # them rather than dropping with the write.
+                    # them rather than dropping with the write. They
+                    # also accumulate into `indirect_writes` — a later
+                    # dereference read may observe this exact value
+                    # even when no `&x` escaped.
+                    self.indirect_writes |= value
                     for escaped_id in self.escaped:
                         self._store(
                             locals_, params, escaped_id, value, True
@@ -2473,6 +2491,17 @@ class _Builder:
                     imported=callee.effects == "unknown",
                 )
             )
+            if callee.effects == "unknown":
+                # An effectful local callee may store through an `&x`
+                # argument — its `*p = v` writes land in memory no
+                # binding points back at, so `x` conservatively gains
+                # every argument's deps like an imported call's.
+                self._store_call_writes(
+                    arguments,
+                    frozenset().union(*actual) if actual else frozenset(),
+                    locals_,
+                    params,
+                )
             return result
         if kind == "type_conversion_expression":
             # tree-sitter parses `lib.G[T](args)` — an explicit
@@ -2584,6 +2613,33 @@ class _Builder:
         # opaque callee may write through it, so afterwards the binding
         # conservatively depends on every argument (its own old deps are
         # already inside `result` because `&x` contributed them).
+        self._store_call_writes(arguments, result, locals_, params)
+        # The callee's declared named/alias signature types are pinned
+        # the same way a member read's declared type is: redeclaring one
+        # flags this summary even when the callee's own identity is
+        # unchanged.
+        member = self.members.get(call.target)
+        if member is not None:
+            self.pinned.update(member.signature_type_ids)
+        # An instantiated callee's named/alias type arguments pin their
+        # substituted identities at this call site — `lib.G[lib.T](x)`
+        # goes stale when `lib.T` is redeclared even though the member
+        # record's declared signature names only the type parameter.
+        self.pinned.update(getattr(call, "type_arg_type_ids", ()))
+        return result
+
+    def _store_call_writes(
+        self,
+        arguments: list[Any],
+        stored: frozenset[int],
+        locals_: dict[Any, Any],
+        params: dict[Any, int],
+    ) -> None:
+        # `&x` hands the callee an alias of a local/param binding — an
+        # effectful callee may write through it, so afterwards the
+        # binding conservatively depends on `stored` (every argument's
+        # deps at an opaque call; the same approximation at a local
+        # callee with unknown effects).
         for arg_node in arguments:
             # `&` is an anonymous child — `_children` only yields the
             # named operand, so check the raw first child.
@@ -2606,20 +2662,7 @@ class _Builder:
                         if ref.binding_id in locals_
                         else frozenset({params[ref.binding_id]})
                     )
-                    locals_[ref.binding_id] = base | result
-        # The callee's declared named/alias signature types are pinned
-        # the same way a member read's declared type is: redeclaring one
-        # flags this summary even when the callee's own identity is
-        # unchanged.
-        member = self.members.get(call.target)
-        if member is not None:
-            self.pinned.update(member.signature_type_ids)
-        # An instantiated callee's named/alias type arguments pin their
-        # substituted identities at this call site — `lib.G[lib.T](x)`
-        # goes stale when `lib.T` is redeclared even though the member
-        # record's declared signature names only the type parameter.
-        self.pinned.update(getattr(call, "type_arg_type_ids", ()))
-        return result
+                    locals_[ref.binding_id] = base | stored
 
 
 def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:

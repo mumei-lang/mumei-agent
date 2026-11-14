@@ -2000,7 +2000,10 @@ a `*A` pointer can alias an `A2 = T` binding even though the facts
 record distinct type_id's for the aliases — `p := &x; x = y; *p`
 reads x's updated
 value, and the same may-read covers `*lib.PV` once `lib.PV = &x`
-could have pointed it there. The pointee's
+could have pointed it there. The read also unions every dependency
+ever stored through a pointer write — `*t = v; return *t` reports
+`v`'s deps even when no `&x` escaped — because the store lands in
+untracked memory this read may observe. The pointee's
 identity resolves only through `imported_members`, so `*T` on a
 local `type T` stays closed too. An unnamed-pointee
 binding (`p := &x` on a builtin `int64`), a computed pointer
@@ -2289,7 +2292,10 @@ the store cannot be proven to miss one — unioning the stored
 value's dependencies into every escaped binding is the same
 over-approximation `*lib.PV = v` uses, and the pointee's declared
 identity records the external mutation (`effects` reports
-`unknown`). The gate classifies the pointee exactly like the
+`unknown`). Beyond the escaped fold the stored deps also accumulate
+into the indirect-write set every dereference read unions back —
+`*t = v; return *t` reports `v`'s dependencies. The gate classifies
+the pointee exactly like the
 `*lib.PV` read: the operand must be a bound identifier whose
 pointer names a scalar or pointer pointee, so `p := &b` on a
 builtin `int64` (unnamed `*int64`), `**t = v`, and a computed
@@ -2319,9 +2325,10 @@ flag. A deref store can also alias a tracked binding — `lib.PV =
 &x` aims the member at `x` — so any binding `&x` escaped marks the
 binding, and a `*lib.PV = v` write unions the stored value's
 dependencies into every escaped binding (`return x` then reports
-the stored value's dependencies too). The stored value's
-dependencies otherwise drop with the
-write because no binding tracks member contents, and a nested index
+the stored value's dependencies too) and into the same
+indirect-write set dereference reads observe (`*lib.PV = v; return
+*lib.PV` reports them too). Member reads stay dep-free — no binding
+tracks member contents — and a nested index
 expression still evaluates whenever it could record something — a
 call (`lib.VA[f()]`), a conversion, or an imported member read
 (`lib.VA[lib.V]`, whose pin `stale_dependents` needs) — while a
