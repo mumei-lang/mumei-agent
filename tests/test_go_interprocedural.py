@@ -379,6 +379,31 @@ def test_branched_bodies_union_return_dependencies(
             "func F(x, y int64) int64 { for ; x>0; x++ {}; return y }",
             frozenset({1}),
         ),
+        # Assignment updates seed the next pass: `i = x - 1` keeps `i`
+        # (and anything the body writes from it) dependent on `x`.
+        (
+            "func F(x int64) int64 { var y int64; for i:=x; i>0; i=i-1 { y = i }; return y }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, z int64) int64 { y := x; for ; y>0; y=y+z { _ = y }; return y }",
+            frozenset({0, 1}),
+        ),
+        # Compound and tuple updates run through the same dispatch.
+        (
+            "func F(x, z int64) int64 { y := x; for ; y>0; y += z { _ = y }; return y }",
+            frozenset({0, 1}),
+        ),
+        # A call in update position records its transfer each pass.
+        (
+            "func G(v int64) int64 { return v }\nfunc F(x int64) int64 { y := x; for ; y>0; y=G(y) { _ = y }; return y }",
+            frozenset({0}),
+        ),
+        # A tuple update widens through the fixed point like the body.
+        (
+            "func F(x, z int64) int64 { y := x; w := z; for ; y>0; y, w = w, y { _ = w }; return y }",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_for_bodies_union_return_dependencies(
@@ -452,10 +477,6 @@ def test_range_int_dependencies(go_types_helper, declarations, expected):
         # result never passes a binding check inside a range clause).
         "func F(x int64) int64 { for i:=range \"ab\" { _ = i }; return x }",
         "func F(x int64) int64 { for i:=range string(x) { _ = i }; return x }",
-        # Non-inc/dec updates stay unsupported.
-        "func F(x int64) int64 { for i:=x; i>0; i=i-1 {}; return x }",
-        # Assignment updates are not inc/dec.
-        "func F(x int64) int64 { for i:=x; i>0; i=x {}; return x }",
         # Multi-valued call results stay outside the fragment.
         "func G(a int64) (int64, int64) { return a, a }\nfunc F(x int64) int64 { var y int64; x, y = G(x); return y }",
     ],

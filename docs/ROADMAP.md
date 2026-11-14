@@ -1771,6 +1771,25 @@ clause and a non-terminal one upstream at the type check (a defensive
 shapes anyway). Type switches, `select`, labelled jumps and `goto`
 stay outside the fragment.
 
+### C07 general for updates
+
+A for-clause update no longer requires the `i++`/`i--` inc/dec shapes:
+the update statement runs through the same `statement` dispatch as the
+body, once per fixed-point pass after the body sequence, so assignments
+(`i = i - 1`), compound updates (`y += z`), tuple updates
+(`y, w = w, y`) and calls (`y = G(y)`) all admit — inc/dec keep their
+dependency-preserving no-op semantics while assignment updates widen
+their RHS dependencies into the loop fixed point exactly like a body
+statement would.
+
+Boundaries: the update is replayed inside the widening pass, so it is
+evaluated as a may-assignment per pass — dependency sets converge by
+union, and update shapes the fragment rejects anywhere else (defer,
+go, select, type switches, multi-valued call results, unsupported
+expression forms) still surface as the same declared gaps. Condition
+evaluation stays a once-per-loop approximation, and trip counts remain
+unmodelled.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
