@@ -1721,6 +1721,7 @@ parameters and `&x` aliases, slice/map/channel resource state, package
 globals read or written by a callee, `new`/`make`-style constructor
 state, bound function values and literal closures all fail closed —
 every one lands as a declared gap (`unsupported_signature`,
+`unsupported_operator`, `unsupported_expression`,
 `binding_unavailable`, `non_parameter_reference`,
 `unresolved_or_opaque_call` or `callee_unsupported`) and never as a
 summary that silently misses the alias or mutation. Some producer-level

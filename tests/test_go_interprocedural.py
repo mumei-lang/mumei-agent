@@ -221,7 +221,7 @@ def test_interprocedural_alias_and_resource_state_stay_unsupported(
 ):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available and result.return_dependencies is None
-    assert result.effects == "unknown" and result.gaps
+    assert result.effects == "unknown" and result.gaps and not result.calls
 
 
 @pytest.mark.parametrize(
