@@ -1597,6 +1597,26 @@ Multi-name specs, non-scalar bindings, `const` declarations and grouped
 `var (...)` forms (a tree-sitter parser gap) stay
 `unsupported_statement` / `syntax_or_parser_unavailable`.
 
+### C07 effect-free control statements
+
+`x++`/`x--` join the fragment as dependency-preserving statements: the
+operand must be a single identifier resolving to a bound scalar —
+incrementing changes the value, never which parameters it derives from.
+`_ = expression` evaluates-and-discards like a condition, and
+`labeled_statement` unwraps to its inner statement — a label without
+labelled jumps is inert syntax, and a label that IS used requires a
+jump, which stays `unsupported_statement`.
+
+Unlabelled `break`/`continue` mark their innermost loop-or-switch
+construct as exited (a `continue` inside a `switch` clause still reaches
+the enclosing loop); every later statement in that construct's body is
+then a may-assignment — its writes union instead of replace, because the
+jump may have skipped them. This is the same over-approximation the
+branch and loop joins already use; reachability is still not proven.
+
+Labelled `break`/`continue`, `goto`, `defer`, `go`, and non-identifier
+inc/dec operands stay `unsupported_statement`/`binding_unavailable`.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
