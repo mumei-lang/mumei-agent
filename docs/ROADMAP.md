@@ -1730,6 +1730,24 @@ earlier, at the snapshot boundary — still closed, just not a summary
 gap. Admitting any of these is a deliberate future slice, not an
 accident of the fragment.
 
+### C07 dependent invalidation
+
+`GoSummarySet.stale_dependents(known)` closes the acceptance criterion
+that callee replacement invalidates dependent summaries: a recorded
+`CallTransfer.target` is a source-anchored binding identity — it embeds
+the producing unit's source digest — so a replaced or deleted callee
+never reuses it. Given the currently known binding identities, the set
+of summaries that recorded a call to anything outside it is exactly the
+re-derive set, and the walk is pure metadata. `FunctionSummary.call_targets`
+exposes each summary's recorded callee identities for the same join.
+
+Boundaries: this is detection, not recomputation — the host decides what
+to rebuild, no persistent cache or evidence acceptance is implied, and
+an unavailable summary that recorded no transfer is never flagged (it
+was already unusable). True cross-file calls still cannot be made at
+all (single-unit snapshots); this maps invalidation for whatever calls
+the fragment does resolve.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

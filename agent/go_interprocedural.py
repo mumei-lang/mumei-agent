@@ -46,7 +46,10 @@ arguments' dependencies; every other builtin stays opaque
 (``len``/``cap`` can only take values no supported binding can hold).
 Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
-Reports require the trusted producer and reader described in go_type_snapshot.
+``stale_dependents`` maps callee replacement to the summaries that must be
+re-derived — recorded targets are source-anchored identities, so a replaced
+callee never reuses its identity. Reports require the trusted producer and
+reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
 """
 
@@ -54,6 +57,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -122,6 +126,11 @@ class FunctionSummary:
     def effects(self) -> str:
         return "none_in_supported_fragment" if self.available else "unknown"
 
+    @property
+    def call_targets(self) -> frozenset[str]:
+        """Callee identities the recorded calls were resolved against."""
+        return frozenset(call.target for call in self.calls)
+
 
 def _context(source: str, snapshot: GoTypeSnapshot) -> tuple[bytes, str]:
     try:
@@ -160,6 +169,21 @@ class GoSummarySet:
         if result is None:
             raise SnapshotError("Go function summary unavailable")
         return result
+
+    def stale_dependents(self, known: Iterable[str]) -> frozenset[str]:
+        """Summaries that recorded a call to a callee identity outside `known`.
+
+        Binding identities carry the producing unit's source digest, so a
+        replaced callee never reuses its identity: every summary that
+        recorded a call to a target absent from `known` must be
+        re-derived. Detection only — what to recompute is the host's call.
+        """
+        live = frozenset(known)
+        return frozenset(
+            f.binding_id
+            for f in self.functions
+            if any(target not in live for target in f.call_targets)
+        )
 
 
 class _Unsupported(Exception):
