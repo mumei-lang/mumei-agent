@@ -1970,6 +1970,16 @@ keep `binding_unavailable`; generic instantiations `lib.T[int](e)`
 fail even earlier, since an `index_expression` callee is not an
 admitted expression.
 
+Dot-imported names take the same path: the producer records `import`
+references (and member declarations) for a `. "lib"` import's objects,
+so a bare `K`/`V`/`T(e)` in the source classifies by the declared
+member exactly like `lib.K`/`lib.V`/`lib.T(e)` — a scalar const read
+is dep-free, a scalar `var` read records the same opaque state-read
+transfer (with the same staleness propagation), and a scalar `type`
+member admits the conversion. The member name must still match the
+source token; function values, non-scalars, generic instantiations
+and reads without a matching record stay closed.
+
 Boundaries: member types carry no `type_id` into the imported unit
 (type fact emission is producer-side; `ix.id` yields no identity for
 non-root objects, so `type_id` is empty) — imported type
@@ -1979,9 +1989,7 @@ reads are dependency-free but their *values* are not modelled —
 the fragment tracks what a result depends on, not what a constant
 equals. Selector reads remain limited to a plain package-qualified
 name: nested selectors, method values and field accesses on values
-stay unsupported, and a dot-imported name is a plain identifier —
-it keeps `non_parameter_reference` rather than consulting member
-declarations.
+stay unsupported.
 
 ## Roadmap authority and vocabulary
 

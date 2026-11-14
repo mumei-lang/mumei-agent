@@ -2685,20 +2685,209 @@ def test_malformed_member_records_fail_closed(go_types_helper):
         )
 
 
-def test_dot_imported_const_read_fails_closed(go_types_helper):
-    # A dot-imported name is a plain identifier, not a package-qualified
-    # selector — it stays unmodelled even for a scalar constant.
+def test_dot_imported_const_read_is_dep_free(go_types_helper):
+    # A dot-imported `K` resolves through the same member record as
+    # `lib.K` — a scalar constant read is dep-free.
     files = {
         "a.go": "package p\nimport . \"lib\"\n"
         "func F(x int64) int64 { return x + K }\n"
     }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_dot_imported_typed_const_read_is_dep_free(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return x + L }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_dot_imported_var_read_is_an_opaque_state_read(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return x + V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    # The value derives from package state, not from a parameter — but
+    # the read is not purity-proof, so effects stay `unknown`.
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    (transfer,) = result.calls
+    assert transfer.imported and transfer.arguments == () and transfer.result == frozenset()
+    member_ids = {m.id for m in snapshot.imported_members}
+    assert transfer.target in member_ids
+
+
+def test_dot_imported_var_read_flags_stale_dependents(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return x + V }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    # Regenerating the imported unit churns V's identity, so the reader
+    # is flagged stale through the recorded transfer target.
+    lib2 = dict(IMPORTED_MEMBERS_LIB)
+    lib2["lib"] = {
+        "m.go": "package lib\nconst K = 2\nconst L int64 = 3\nconst S = \"s\"\n"
+        "var V int64 = 8\nvar VS = \"s\"\ntype T int64\ntype F64 float64\n"
+        "type A = int64\ntype GT[N int64 | int32] int64\n"
+        "func G(y int64) int64 { return y }\n"
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]), lib2["lib"], target_arch="amd64"
+    )
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_dot_imported_const_inside_imported_call(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return G(x + K) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_dot_imported_scalar_type_conversion_is_dep_preserving(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { y := T(x); return int64(y) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_dot_imported_alias_type_conversion_is_dep_preserving(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return A(x) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_dot_imported_function_read_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { _ = G; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_dot_imported_string_const_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { _ = S; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_dot_imported_nonscalar_var_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { _ = VS; return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_dot_imported_nonscalar_conversion_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { _ = F64(x); return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "binding_unavailable"
+
+
+def test_dot_imported_member_name_must_match(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return x + K }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    for m in report["imported_members"]:
+        if m["name"] == "K":
+            m["name"] = "Other"
     snapshot = load_go_package_snapshot(
-        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
-        files,
-        target_arch="amd64",
+        json.dumps(report).encode(), files, target_arch="amd64"
     )
     result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
     assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_dot_imported_conversion_needs_a_type_member(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { _ = T(x); return x }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    for m in report["imported_members"]:
+        if m["name"] == "T":
+            m["kind"] = "const"
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "binding_unavailable"
+
+
+def test_dot_imported_read_without_member_section_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return x + K }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    report.pop("imported_members", None)
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "non_parameter_reference"
+
+
+def test_dot_imported_generic_instantiation_fails_closed(go_types_helper):
+    # `GT[int64](x)` reaches the report as a conversion whose callee is
+    # an `index_expression` — instantiated generics stay closed.
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { _ = GT[int64](x); return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason in {
+        "binding_unavailable",
+        "unsupported_expression",
+    }
 
 
 def test_imported_const_read_inside_imported_call(go_types_helper):
