@@ -812,7 +812,10 @@ def load_go_package_snapshot(
             type_arg_ids = _list(c.get("type_arg_type_ids", []))
             _require(
                 (not type_arg_ids or kind == "direct_import")
-                and all(type(i) is str and i for i in type_arg_ids)
+                and all(
+                    type(i) is str and _IMPORTED_ID.fullmatch(i) is not None
+                    for i in type_arg_ids
+                )
             )
             if kind == "direct_local":
                 _require(target in fn_by_id)
