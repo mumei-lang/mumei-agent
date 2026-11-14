@@ -398,6 +398,90 @@ class _Builder:
             return None
         return member
 
+    def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
+        """The imported member a `pkg.Name` qualified type names, or None.
+
+        Same contract as `_package_member`, for the `qualified_type`
+        shape (`package: pkg`, `name: T`) a `generic_type` instantiation
+        uses instead of `selector_expression`.
+        """
+        if qualified_node is None or qualified_node.type != "qualified_type":
+            return None
+        package = qualified_node.child_by_field_name("package")
+        name = qualified_node.child_by_field_name("name")
+        ref = (
+            self.references.get(self.node_key(name))
+            if name is not None
+            else None
+        )
+        member = (
+            self.members.get(ref.binding_id)
+            if ref is not None and ref.kind == "import"
+            else None
+        )
+        if (
+            package is None
+            or package.type != "package_identifier"
+            or self.references.get(self.node_key(package)) is not None
+            or name is None
+            or member is None
+            or member.name.encode("utf-8") != name.text
+        ):
+            return None
+        return member
+
+    def _pin_type_node(self, node: Any) -> bool:
+        """Pin every named identity a type expression names.
+
+        Returns False for a composite constructor (`*T`, `[]T`, maps,
+        channels, …) or an unresolvable name — the admitting caller
+        keeps the expression closed rather than admit an unpinned
+        identity. Predeclared and universe names pin nothing.
+        """
+        if node is None:
+            return False
+        if node.type in {"type_elem", "parenthesized_type"}:
+            inner = next(iter(node.named_children), None)
+            return inner is not None and self._pin_type_node(inner)
+        if node.type == "qualified_type":
+            member = self._qualified_type_member(node)
+            if member is None:
+                return False
+            self._pin_member_type(member)
+            return True
+        if node.type == "generic_type":
+            inner = node.child_by_field_name("type")
+            if inner is None or not self._pin_type_node(inner):
+                return False
+            type_args = node.child_by_field_name("type_arguments")
+            if type_args is None:
+                return True
+            return all(
+                self._pin_type_node(elem)
+                for elem in type_args.named_children
+            )
+        if node.type == "type_identifier":
+            ref = self.references.get(self.node_key(node))
+            if ref is None or ref.kind == "universe":
+                # `int64`, `error`, `any`, … — declared nowhere, nothing
+                # to pin.
+                return True
+            if ref.kind == "import":
+                member = self.members.get(ref.binding_id)
+                if member is None or member.name.encode("utf-8") != node.text:
+                    return False
+                self._pin_member_type(member)
+                return True
+            binding = (
+                self.bindings.get(ref.binding_id) if ref.binding_id else None
+            )
+            if binding is None or binding.kind != "type":
+                return False
+            if binding.type.type_id:
+                self.pinned.add(binding.type.type_id)
+            return True
+        return False
+
     def result(
         self,
         fn: Function,
@@ -1585,16 +1669,18 @@ class _Builder:
         if kind == "type_conversion_expression":
             # tree-sitter parses `lib.G[T](args)` — an explicit
             # instantiation of an imported generic function — in a
-            # conversion shape. The producer's call classification is
-            # authoritative: only a `direct_import` record (concrete
-            # basic instantiation of an imported generic function)
-            # admits it; an instantiated generic *type* conversion such
-            # as `lib.S[int64](x)` stays opaque.
+            # conversion shape, and `lib.S[T](x)` — an instantiated
+            # generic *type* conversion — the same way. The producer's
+            # call classification is authoritative: a `direct_import`
+            # record admits the instantiated callee, a `conversion`
+            # record admits the instantiated type conversion when the
+            # target names a scalar imported member and every named
+            # identity inside its type arguments pins.
             call = self.calls.get(self.node_key(node))
             if (
                 call is None
                 or call.owner != fn.binding_id
-                or call.kind != "direct_import"
+                or call.kind not in {"direct_import", "conversion"}
             ):
                 raise _Unsupported("unsupported_expression", _span(node))
             operand = node.child_by_field_name("operand")
@@ -1611,9 +1697,40 @@ class _Builder:
                 raise _Unsupported(
                     "call_mapping_unavailable", _span(node), call.target
                 )
-            return self._direct_import_call(
-                call, arguments, fn, params, locals_, transfers,
-                count, depth,
+            if call.kind == "direct_import":
+                return self._direct_import_call(
+                    call, arguments, fn, params, locals_, transfers,
+                    count, depth,
+                )
+            # `lib.S[T…](x)` — an instantiated type conversion, which is
+            # effect-free like any `T(e)`: the result inherits the
+            # operand's dependencies. The conversion target must name a
+            # scalar imported member (`type S[A any] int64`); a
+            # composite underlying or an unpinnable name anywhere in the
+            # type expression keeps it closed.
+            type_node = node.child_by_field_name("type")
+            member = (
+                self._qualified_type_member(
+                    type_node.child_by_field_name("type")
+                )
+                if type_node is not None
+                and type_node.type == "generic_type"
+                else None
+            )
+            if (
+                member is None
+                or member.kind != "type"
+                or member.type.kind not in {"integer", "boolean"}
+                or not self._pin_type_node(type_node)
+            ):
+                raise _Unsupported("binding_unavailable", _span(node))
+            if len(arguments) != 1:
+                raise _Unsupported(
+                    "unsupported_expression", _span(node)
+                )
+            return self.expression(
+                arguments[0], fn, params, locals_, transfers, count,
+                depth + 1,
             )
         raise _Unsupported("unsupported_expression", _span(node))
 

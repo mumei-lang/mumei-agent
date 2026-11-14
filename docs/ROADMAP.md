@@ -2134,9 +2134,16 @@ named type — `lib.G(t)` with `t` declared `lib.T` — admits with the
 `lib.G[lib.T]` form. A dot-imported instantiation `G[int64](x)`
 follows the same rule through the unqualified-callee path —
 admitted with basic or named type arguments alike (`G[lib.T](v)`
-pins `lib.T` on its record). Instantiated generic *types*
-(`lib.S[int64](x)`), local generics and methods
-are unchanged and closed. A multi-valued instantiated callee
+pins `lib.T` on its record). Instantiated generic *type*
+conversions are admitted too — `lib.S[int64](x)` and
+`lib.S[lib.T](x)` behave like any scalar `T(e)` conversion
+(operand deps flow through) when the target member declares a
+scalar underlying (`type S[A any] int64`); the consumer walks the
+whole type expression and pins every named identity it contains —
+`lib.S[other.N[lib.T]](x)` pins `S`, `N` and `T`. A composite
+underlying (`type C[A any] *A`) or an unpinnable constructor inside
+the type arguments (`lib.S[*lib.T](x)`) stays closed. Local
+generics and methods are unchanged and closed. A multi-valued instantiated callee
 (`a, b := lib.G[int64](x)`) unpacks at its declared `results`
 arity through the same tuple rule as any `direct_import` call —
 including the single-type-arg `type_conversion_expression` shape
