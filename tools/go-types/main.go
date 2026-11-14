@@ -704,8 +704,9 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 			// `recv.M(args)`: admit a concrete-receiver method declared
 			// in a resolved imported unit as a `direct_import` marked
 			// `method`, so the consumer evaluates the receiver too.
-			// Method expressions `T.M` stay closed — their receiver
-			// becomes a leading parameter, a different call shape.
+			// A method expression `T.M` takes the same gate — its
+			// receiver is already the leading argument, so the plain
+			// `direct_import` shape needs no flag.
 			if selection.Kind() == types.MethodVal || selection.Kind() == types.MethodExpr {
 				if f, ok := selection.Obj().(*types.Func); ok {
 					if id, ok := ix.directImportMethodID(f); ok {
