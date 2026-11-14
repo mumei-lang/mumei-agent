@@ -2019,6 +2019,38 @@ Selector reads remain limited to a plain package-qualified name:
 nested selectors, method values and field accesses on values stay
 unsupported.
 
+### C06 call signature type-identity pins
+
+A function member record now declares the named and alias type
+identities its signature's parameters and results mention, as
+`signature_type_ids` — the same imported-unit coordinate space the
+member ids themselves use, deduplicated and sorted (receiver types
+are not signature types here). The validator admits the key only on
+`kind == "function"` members and requires every entry to match the
+imported-identity shape *and* sit outside the report's own bindings,
+so a tampered entry cannot name a local binding — local ids share
+that sha256 shape — nor borrow a non-imported identity.
+
+An admitted call pins the callee's declared signature type
+identities in `FunctionSummary.pinned` exactly like a member read's
+declared type: `direct_import` unions the member's
+`signature_type_ids`, and a resolved local call pins its callee's
+declared parameter and result `type_id`s — a local `func G(y lib.T)`
+parameter names an imported identity a bare `call_targets` edge can
+never reach, while a local type's identity already churns with its
+declaring file so pinning it is harmless. `stale_dependents`
+therefore flags a caller of `lib.Z` — `func Z() T` — when `T` is
+redeclared even though `Z`'s own identity and the call's member
+record stay byte-identical.
+
+Boundaries: pins name *declared* signature types at top level — a
+type nested inside a composite (`[]lib.T`, `map[string]lib.T`)
+records no entry, and a signature naming no named/alias type carries
+no key. A callee's own summary never pins its signature — pins are
+recorded by the caller's analysis at each admitted call site. The
+multi-valued / non-scalar-result admissibility rules are unchanged,
+so the pin only ever covers calls the fragment already summarises.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
