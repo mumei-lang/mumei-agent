@@ -2233,7 +2233,8 @@ so redeclaring `T` still flags every admitted caller.
 An *instantiated* receiver admits through the same gate: `x.GM(y)`
 with `x: lib.GT[lib.T]`, and the method expression `lib.GT[lib.T].GM`,
 classify as `direct_import` when every type argument of the receiver
-is basic, named or alias — the collected identities ride on the call
+is basic, named, alias or a composite constructor of those — the
+collected identities ride on the call
 record's `type_arg_type_ids`, the same wire key an instantiated callee
 uses, so a type-argument redeclare stales every admitted caller.
 Boundaries: interface receivers stay `method_generic_or_variadic`
