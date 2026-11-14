@@ -109,6 +109,10 @@ type call struct {
 	// named type of an imported unit — the consumer must also evaluate
 	// the receiver expression (`recv.M(args)`), not just the arguments.
 	Method bool `json:"method,omitempty"`
+	// Results declares the result arity of a `direct_import` callee when
+	// it is greater than one — the consumer needs it to admit tuple
+	// unpacking `a, b := lib.F(x)`. Single/zero-result calls omit it.
+	Results int `json:"results,omitempty"`
 }
 
 type gap struct {
@@ -179,15 +183,12 @@ type indexer struct {
 
 var errUnresolvedImport = fmt.Errorf("unresolved import")
 
-// scalarResults admits a signature only when it returns zero results or a
-// single scalar (integer/boolean) result.
-func scalarResults(sig *types.Signature) bool {
+// allScalarResults admits a signature when every result is a scalar
+// (integer/boolean), at any arity — including zero.
+func allScalarResults(sig *types.Signature) bool {
 	res := sig.Results()
-	if res.Len() > 1 {
-		return false
-	}
-	if res.Len() == 1 {
-		b, ok := res.At(0).Type().Underlying().(*types.Basic)
+	for i := 0; i < res.Len(); i++ {
+		b, ok := res.At(i).Type().Underlying().(*types.Basic)
 		if !ok || (b.Info()&types.IsInteger == 0 && b.Kind() != types.Bool) {
 			return false
 		}
@@ -195,40 +196,47 @@ func scalarResults(sig *types.Signature) bool {
 	return true
 }
 
-// directImportID admits an imported call only when it is summarizable: zero
-// results, or a single scalar (integer/boolean) result. Composite or
-// multi-valued imported results stay `external_or_bodyless` — a `range` over
-// a composite would break the fragment's integer-only range model, and
-// multi-valued results are out of scope.
-func (ix *indexer) directImportID(f *types.Func) (string, bool) {
+// scalarResults admits a signature only when it returns zero results or a
+// single scalar (integer/boolean) result.
+func scalarResults(sig *types.Signature) bool {
+	return sig.Results().Len() <= 1 && allScalarResults(sig)
+}
+
+// directImportID admits an imported call only when it is summarizable:
+// every result must be scalar (integer/boolean), at any arity. Composite
+// results stay `external_or_bodyless` — a `range` over a composite would
+// break the fragment's integer-only range model. A multi-valued callee
+// declares its arity on the call record so the consumer can admit the
+// tuple unpacking `a, b := lib.F(x)`.
+func (ix *indexer) directImportID(f *types.Func) (string, int, bool) {
 	id := ix.importedID(f)
 	if id == "" {
-		return "", false
+		return "", 0, false
 	}
 	sig, ok := f.Type().(*types.Signature)
-	if !ok || !scalarResults(sig) {
-		return "", false
+	if !ok || !allScalarResults(sig) {
+		return "", 0, false
 	}
-	return id, true
+	return id, sig.Results().Len(), true
 }
 
 // directImportMethodID admits an imported method call `recv.M(...)` only
 // when the method is declared in a resolved imported unit on a concrete
-// named receiver type and returns zero or a single scalar result. The
-// dependency model is the same opaque `direct_import` shape — the result
-// may depend on the receiver and every argument; the consumer evaluates
-// the receiver expression for a `method` call. Interface receivers stay
+// named receiver type and every result is scalar. The dependency model
+// is the same opaque `direct_import` shape — each result may depend on
+// the receiver and every argument; the consumer evaluates the receiver
+// expression for a `method` call. Interface receivers stay
 // `method_generic_or_variadic`: dispatch there is dynamic, and the
 // pinned method identity would not cover the implementations actually
 // reached.
-func (ix *indexer) directImportMethodID(f *types.Func) (string, bool) {
+func (ix *indexer) directImportMethodID(f *types.Func) (string, int, bool) {
 	id := ix.importedID(f)
 	if id == "" {
-		return "", false
+		return "", 0, false
 	}
 	sig, ok := f.Type().(*types.Signature)
-	if !ok || sig.Recv() == nil || !scalarResults(sig) {
-		return "", false
+	if !ok || sig.Recv() == nil || !allScalarResults(sig) {
+		return "", 0, false
 	}
 	rt := sig.Recv().Type()
 	if ptr, ok := rt.(*types.Pointer); ok {
@@ -236,21 +244,21 @@ func (ix *indexer) directImportMethodID(f *types.Func) (string, bool) {
 	}
 	named, ok := rt.(*types.Named)
 	if !ok {
-		return "", false
+		return "", 0, false
 	}
 	if _, ok := named.Underlying().(*types.Interface); ok {
-		return "", false
+		return "", 0, false
 	}
 	// A generic or instantiated receiver (`T[P]`, `lib.T[lib.U]`) names
 	// more types than the member records pin — redeclaring a type
 	// argument would churn no recorded identity, so it stays closed.
 	if named.TypeParams() != nil && named.TypeParams().Len() > 0 {
-		return "", false
+		return "", 0, false
 	}
 	if named.TypeArgs() != nil && named.TypeArgs().Len() > 0 {
-		return "", false
+		return "", 0, false
 	}
-	return id, true
+	return id, sig.Results().Len(), true
 }
 
 // directImportInstantiation admits an explicit instantiation of an imported
@@ -673,16 +681,16 @@ func unparen(e ast.Expr) ast.Expr {
 	}
 }
 
-func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (string, string, bool) {
+func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (string, string, bool, int) {
 	if ix.info.Types[c.Fun].IsType() {
-		return "conversion", "", false
+		return "conversion", "", false, 0
 	}
 	fun := unparen(c.Fun)
 	var instIdent *ast.Ident
 	switch e := fun.(type) {
 	case *ast.IndexExpr:
 		if id, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id, false
+			return "direct_import", id, false, 0
 		}
 		// An unqualified instantiation (`G[T](x)`, dot-imported or plain)
 		// still needs the instantiation-aware check below — the declared
@@ -693,7 +701,7 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		fun = unparen(e.X)
 	case *ast.IndexListExpr:
 		if id, ok := ix.directImportInstantiation(e.X); ok {
-			return "direct_import", id, false
+			return "direct_import", id, false, 0
 		}
 		if i, ok := unparen(e.X).(*ast.Ident); ok {
 			instIdent = i
@@ -709,17 +717,17 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 			// `direct_import` shape needs no flag.
 			if selection.Kind() == types.MethodVal || selection.Kind() == types.MethodExpr {
 				if f, ok := selection.Obj().(*types.Func); ok {
-					if id, ok := ix.directImportMethodID(f); ok {
+					if id, arity, ok := ix.directImportMethodID(f); ok {
 						// `lib.T.M(recv, args)` — a method expression:
 						// the receiver is already the leading argument,
 						// so the plain `direct_import` result-depends-
 						// on-every-argument model covers it; no `method`
 						// flag is needed.
-						return "direct_import", id, selection.Kind() == types.MethodVal
+						return "direct_import", id, selection.Kind() == types.MethodVal, arity
 					}
 				}
 			}
-			return "method_generic_or_variadic", "", false
+			return "method_generic_or_variadic", "", false, 0
 		}
 		// A package-qualified call `lib.G(...)`: the callee is declared in
 		// a resolved imported unit. The target is that unit's own binding
@@ -727,46 +735,46 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		if x, ok := e.X.(*ast.Ident); ok {
 			if _, isPkg := ix.info.Uses[x].(*types.PkgName); isPkg {
 				if f, ok := ix.info.Uses[e.Sel].(*types.Func); ok {
-					if id, ok := ix.directImportID(f); ok {
-						return "direct_import", id, false
+					if id, arity, ok := ix.directImportID(f); ok {
+						return "direct_import", id, false, arity
 					}
-					return "external_or_bodyless", "", false
+					return "external_or_bodyless", "", false, 0
 				}
-				return "indirect_or_selector", "", false
+				return "indirect_or_selector", "", false, 0
 			}
 		}
 	}
 	ident, ok := fun.(*ast.Ident)
 	if !ok {
-		return "indirect_or_selector", "", false
+		return "indirect_or_selector", "", false, 0
 	}
 	obj := ix.info.Uses[ident]
 	if _, ok := obj.(*types.Builtin); ok {
-		return "builtin", "", false
+		return "builtin", "", false, 0
 	}
 	f, ok := obj.(*types.Func)
 	if !ok {
-		return "indirect_or_selector", "", false
+		return "indirect_or_selector", "", false, 0
 	}
 	fn, ok := functions[ix.id(f)]
 	if !ok || fn.Body == nil {
 		if instIdent != nil {
 			if id, ok := ix.importedInstantiationID(f, instIdent); ok {
-				return "direct_import", id, false
+				return "direct_import", id, false, 0
 			}
-			return "external_or_bodyless", "", false
+			return "external_or_bodyless", "", false, 0
 		}
 		// Dot-imported names reach here: the func is not local but its
 		// imported identity is still stable and reportable.
-		if id, ok := ix.directImportID(f); ok {
-			return "direct_import", id, false
+		if id, arity, ok := ix.directImportID(f); ok {
+			return "direct_import", id, false, arity
 		}
-		return "external_or_bodyless", "", false
+		return "external_or_bodyless", "", false, 0
 	}
 	if fn.Method || fn.Generic || fn.Variadic {
-		return "method_generic_or_variadic", "", false
+		return "method_generic_or_variadic", "", false, 0
 	}
-	return "direct_local", fn.BindingID, false
+	return "direct_local", fn.BindingID, false, 0
 }
 
 func spanFile(s *span) int {
@@ -999,9 +1007,16 @@ func analyze(req request) (out snapshot) {
 			case *ast.DeferStmt:
 				special[node.Call] = "deferred"
 			case *ast.CallExpr:
-				kind, target, method := ix.classify(node, functions)
+				kind, target, method, results := ix.classify(node, functions)
 				if override, ok := special[node]; ok {
-					kind, target, method = override, "", false
+					kind, target, method, results = override, "", false, 0
+				}
+				// `results` only travels on a `direct_import` record
+				// whose callee returns more than one value — the
+				// consumer needs the declared arity to admit tuple
+				// unpacking.
+				if kind != "direct_import" || results <= 1 {
+					results = 0
 				}
 				sp := ix.nodeSpan(node)
 				if fn, ok := functions[owner]; !ok || fn.Body == nil || sp.Start < fn.Body.Start || sp.End > fn.Body.End || spanFile(&sp) != spanFile(fn.Body) {
@@ -1011,7 +1026,7 @@ func analyze(req request) (out snapshot) {
 				for _, arg := range node.Args {
 					args = append(args, ix.nodeSpan(arg))
 				}
-				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method})
+				out.Calls = append(out.Calls, call{sp, args, owner, target, kind, method, results})
 				if owner == "" {
 					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
 				}

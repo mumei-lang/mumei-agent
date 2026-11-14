@@ -258,6 +258,10 @@ class PackageCall:
     # named type of an imported unit: the consumer evaluates the receiver
     # expression too, so `recv.M(args)` unions the receiver's deps.
     method: bool = False
+    # `results` declares the result arity of a `direct_import` callee
+    # when it is greater than one — the consumer needs it to admit the
+    # tuple unpacking `a, b := lib.F(x)`. 0 means zero or one result.
+    results: int = 0
 
 
 @dataclass(frozen=True)
@@ -764,7 +768,15 @@ def load_go_package_snapshot(
                 and {"span", "arguments", "owner", "target", "kind"}
                 <= set(item)
                 and set(item)
-                <= {"span", "arguments", "owner", "target", "kind", "method"}
+                <= {
+                    "span",
+                    "arguments",
+                    "owner",
+                    "target",
+                    "kind",
+                    "method",
+                    "results",
+                }
             )
             c = item
             sp, owner, target = (
@@ -778,6 +790,15 @@ def load_go_package_snapshot(
             # `method` only travels on an imported method call — a local
             # callee with a receiver never becomes `direct_import`.
             _require(not method or kind == "direct_import")
+            # `results` declares an imported callee's arity when it
+            # exceeds one — a 0/1-result callee omits it, and no other
+            # kind carries it.
+            results = c.get("results", 0)
+            _require(
+                type(results) is int
+                and (results == 0 or results >= 2)
+                and (not results or kind == "direct_import")
+            )
             if kind == "direct_local":
                 _require(target in fn_by_id)
                 callee = fn_by_id[target]
@@ -801,7 +822,9 @@ def load_go_package_snapshot(
                     for a in args
                 )
             )
-            calls.append(PackageCall(sp, args, owner, target, kind, method))
+            calls.append(
+                PackageCall(sp, args, owner, target, kind, method, results)
+            )
         gaps = []
         for item in _list(v["gaps"]):
             g = _record(item, "reason", "span")

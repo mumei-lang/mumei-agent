@@ -1663,9 +1663,11 @@ side evaluates against the pre-state before any store lands, so
 evaluate-and-discard. Because initializers dispatch through the same
 statement path, `for`/`if`/`switch` initializers accept the new forms
 too. Left-hand sides stay bound identifiers or `_` — selector/index
-targets and multi-valued call results (a count mismatch against the
-left-hand side) stay `unsupported_statement` /
-`binding_unavailable`.
+targets and a right-hand side count mismatch stay
+`unsupported_statement` / `binding_unavailable`. A count mismatch is
+admitted only for a lone multi-valued imported call whose declared
+arity matches the left-hand width (`a, b = lib.F(x)` — see the C06
+multi-valued imported results slice).
 
 ### C07 integer range loops
 
@@ -1695,9 +1697,11 @@ assignment.
 
 Every name still must resolve to a compiler-reported integer or
 boolean binding — a non-scalar name anywhere in the list is
-`binding_unavailable`. Multi-valued calls stay outside: one right-hand
-expression can never supply two names (`a, b := f(x)`), so the count
-mismatch is `unsupported_statement`. Redeclaration inside a nested
+`binding_unavailable`. Multi-valued calls take one right-hand
+expression supplying every name (`a, b := lib.F(x)`) — admitted only
+for an imported callee whose record declares the matching arity (see
+the C06 multi-valued imported results slice); every other count
+mismatch stays `unsupported_statement`. Redeclaration inside a nested
 block still produces a fresh, branch-scoped binding that cannot escape
 its scope, matching the compiler.
 
@@ -1789,8 +1793,8 @@ statement would.
 Boundaries: the update is replayed inside the widening pass, so it is
 evaluated as a may-assignment per pass — dependency sets converge by
 union, and update shapes the fragment rejects anywhere else (defer,
-go, select, type switches, multi-valued call results, unsupported
-expression forms) still surface as the same declared gaps. Condition
+go, select, type switches, unsupported expression forms) still
+surface as the same declared gaps. Condition
 evaluation stays a once-per-loop approximation, and trip counts remain
 unmodelled.
 
@@ -1912,10 +1916,12 @@ argument — a documented over-approximation, since the callee body is
 opaque and package-level state is not modelled — and records the
 transfer so staleness propagates. `call_not_summarized_direct_import`
 is therefore not a gap a resolved report emits. `direct_import` is only
-classified for zero-result or single-scalar-result callees — composite
-or multi-valued imported results stay `external_or_bodyless` and fail
-closed (a `range` over a composite operand would break the integer-only
-range model). A summary recording a `direct_import` transfer reports
+classified for callees whose results are all scalar — a composite
+result at any arity stays `external_or_bodyless` and fails closed (a
+`range` over a composite operand would break the integer-only range
+model). A multi-valued scalar callee is admitted and declares its
+arity on the call record; see the C06 multi-valued imported results
+slice below. A summary recording a `direct_import` transfer reports
 `effects` as `unknown` — the imported callee's side effects are outside
 the fragment. Imported sources honour the same no-directive contract as
 the root unit (`//go:`, `// +build`, `//line` markers fail resolution).
@@ -2052,7 +2058,7 @@ type nested inside a composite (`[]lib.T`, `map[string]lib.T`)
 records no entry, and a signature naming no named/alias type carries
 no key. Callers pin the callee's signature at each admitted call
 site. The
-multi-valued / non-scalar-result admissibility rules are unchanged,
+non-scalar-result admissibility rules are unchanged,
 so the pin only ever covers calls the fragment already summarises.
 
 ### C07 transitive staleness and own-signature pins
@@ -2116,16 +2122,20 @@ same rule through the unqualified-callee path — admitted only with
 basic type arguments (`G[lib.T](v)` stays `external_or_bodyless`,
 since the declared-signature check alone would let a named type
 argument through unpinned). Instantiated generic *types*
-(`lib.S[int64](x)`), local generics, methods and multi-valued results
-are unchanged and closed. A void instantiated callee records its
+(`lib.S[int64](x)`), local generics and methods
+are unchanged and closed — as are multi-valued instantiated results
+(the instantiation gate keeps the single-result rule; non-generic
+multi-valued callees are admitted at declared arity). A void
+instantiated callee records its
 argument-dependency union like any other `direct_import` transfer.
 
 ### C06 imported method calls on concrete named types
 
 A method call `recv.M(args)` now classifies as `direct_import` when
 the method is declared in a resolved imported unit on a concrete
-named receiver type (`lib.T`, or a pointer to one) and returns zero
-or a single scalar result. The producer resolves the selection
+named receiver type (`lib.T`, or a pointer to one) and whose results
+are all scalar — arity travels on the record like a plain function's.
+The producer resolves the selection
 through `types.Info.Selections` (field selections keep the existing
 classification) and marks a method value `method: true`, so the
 consumer also evaluates the receiver expression: the result depends
@@ -2149,13 +2159,52 @@ Boundaries: interface receivers stay `method_generic_or_variadic`
 — dispatch there is dynamic, and the recorded method identity would
 not cover the implementations actually reached (this covers both
 method values `i.M(x)` and method expressions `lib.I.M`). Local
-methods, multi-valued method results and generic methods are
+methods and generic methods are
 unchanged and closed — as are generic or instantiated receiver types
 (`lib.T[lib.U]`, or `lib.GT[lib.T].GM`): the member records pin the
 receiver's named type but not the instantiation's type arguments, so
-redeclaring one would churn no recorded identity. The `method` key is optional on the wire:
+redeclaring one would churn no recorded identity. Multi-valued method
+results are admitted like plain function results when every result is
+scalar. The `method` key is optional on the wire:
 reports predating it keep validating, and it is rejected on any
 non-`direct_import` call.
+
+### C06 multi-valued imported results
+
+A `direct_import` callee whose results are all scalar now classifies
+at any arity — the producer's gate moved from `scalarResults` (zero
+or one result) to `allScalarResults` (every result integer/boolean)
+for plain functions, methods and method expressions. The call record
+declares the arity on an optional `results` key — emitted only for a
+`direct_import` callee with more than one result — so the consumer
+can admit tuple unpacking `a, b := lib.F(x)` only when the declared
+arity matches the left-hand width. Each result carries the same
+over-approximated dependency set (the union of the receiver's and
+every argument's dependencies), so a single call evaluation stores to
+every name — per-result distinction is impossible inside the opaque-
+callee model and unnecessary for dependency purposes.
+
+The unpack positions are exactly the compile-valid ones: short
+variable declarations, multi-name `var` specs (`var a, b = lib.F(x)`)
+and plain tuple assignments (`a, b = lib.F(x)`) — which also means
+`for`/`if`/`switch` initializers admit the shape through the same
+statement path, and `_` slots still evaluate-and-discard. A spread
+call `lib.W(lib.G(x))` needs no arity check: the inner call's unioned
+dependencies already cover the outer result in the `direct_import`
+model, while a spread into a *local* callee stays `callee_unavailable`
+via the parameter-count check. A multi-valued call evaluated and
+discarded (`lib.G(x)`) was always an admitted `expression_statement`.
+
+Boundaries: a composite result anywhere in the tuple keeps the call
+`external_or_bodyless`; an arity mismatch between the record and the
+left-hand width stays `unsupported_statement`, as does a parenthesized
+RHS unwrapping to anything but a matching call. The instantiation
+gate (`lib.G[T](x)`) keeps its single-result rule — a multi-valued
+instantiated callee stays closed. The `results` key is optional on
+the wire — reports predating it keep validating — and it is rejected
+for any non-`direct_import` call, for arity below two, and for a
+non-integer value. A forged arity that still validates is caught at
+the consumer: the left-hand width must equal it.
 
 ## Roadmap authority and vocabulary
 
