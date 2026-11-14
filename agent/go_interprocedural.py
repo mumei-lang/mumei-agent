@@ -26,8 +26,9 @@ reference simply never resolves). ``switch`` without ``fallthrough``
 joins the same way: the tag and every case guard are evaluated
 (effect-free), each clause body runs in its own scope and its
 reassignments union back. ``var`` declarations bind like lets —
-``var a, b T`` is the dep-free zero value and ``var a, b = x, y`` binds
-name-wise like ``:=`` (grouped ``var (...)`` forms are a parser gap). ``x++``/``x--`` on a
+``var a, b T`` is the dep-free zero value and ``var a, b = x, y``
+binds name-wise like ``:=`` (grouped ``var (...)`` forms are a parser
+gap). ``x++``/``x--`` on a
 bound scalar are dependency-preserving, and ``_ = expression``
 evaluates-and-discards like a condition. An unlabelled
 ``break``/``continue`` marks its innermost loop or switch construct as
