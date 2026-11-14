@@ -673,13 +673,71 @@ def test_scalar_conversion_dependencies(
         # Converting to an unsupported target type fails closed at the
         # binding, not the conversion.
         "func F(x int64) int64 { var s string = string(0); _ = s; return x }",
-        # A builtin call is still an opaque call, even under a conversion.
-        "func F(x int64) int64 { return int64(len(\"\")) }",
+        # An impure builtin is still an opaque call.
+        "func G() int64 { return 0 }\nfunc F(x int64) int64 { panic(0); return x }",
     ],
 )
 def test_scalar_conversion_shapes_stay_unsupported(
     go_types_helper, declarations
 ):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # min/max union every argument's dependencies.
+        (
+            "func F(x, y int64) int64 { return min(x, y) }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { return max(x, 0, y) }",
+            frozenset({0, 1}),
+        ),
+        # A nested call inside min keeps the callee's deps.
+        (
+            "func G(a int64) int64 { return a }\nfunc F(x, y int64) int64 { return min(G(x), y) }",
+            frozenset({0, 1}),
+        ),
+        # min inside a statement initializer.
+        (
+            "func F(x, y int64) int64 { if v := min(x, y); v > 0 { return v }; return 0 }",
+            frozenset({0, 1}),
+        ),
+        # Parenthesized callees are still the same builtin.
+        (
+            "func F(x, y int64) int64 { return (min)(x, y) }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { return ((max))(x, y) }",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_pure_builtin_dependencies(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # panic and other impure/effectful builtins stay opaque.
+        "func F(x int64) int64 { panic(x); return x }",
+        "func F(x int64) int64 { return int64(real(1)) }",
+        # len/cap are not in the admitted set — their operands cannot be
+        # bound in the scalar fragment anyway.
+        "func F(x int64) int64 { return int64(len(\"ab\")) + x }",
+        "func F(x int64) int64 { return int64(cap([3]int64{1, 2, 3})) }",
+        # make/new are allocation, not pure reads.
+        "func F(x int64) int64 { _ = new(int64); return x }",
+    ],
+)
+def test_impure_builtins_stay_opaque(go_types_helper, declarations):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available
     assert result.gaps

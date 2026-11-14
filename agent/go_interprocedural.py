@@ -30,7 +30,10 @@ switches, ``select``,
 ``const`` declarations and every other statement shape stay unsupported.
 Scalar conversions ``T(e)`` are effect-free — the result inherits the
 operand's dependencies; the type change itself (truncation, widening)
-is not modelled. Compiler-resolved
+is not modelled. The pure builtins ``min``/``max`` union their
+arguments' dependencies; every other builtin stays opaque
+(``len``/``cap`` can only take values no supported binding can hold).
+Compiler-resolved
 bindings/calls supply identity; tree-sitter supplies syntax, never resolution.
 Reports require the trusted producer and reader described in go_type_snapshot.
 No processes, imports, persistent caches or existing audit routes are invoked.
@@ -766,7 +769,7 @@ class _Builder:
             if (
                 call is None
                 or call.owner != fn.binding_id
-                or call.kind not in {"direct_local", "conversion"}
+                or call.kind not in {"direct_local", "conversion", "builtin"}
             ):
                 raise _Unsupported("unresolved_or_opaque_call", _span(node))
             arguments_node = node.child_by_field_name("arguments")
@@ -785,6 +788,32 @@ class _Builder:
                     arguments[0], fn, params, locals_, transfers, count,
                     depth + 1,
                 )
+            if call.kind == "builtin":
+                # Only the pure builtins reachable in a scalar fragment
+                # are admitted — the result unions every argument's
+                # dependencies; `panic`, `len`, `cap`, `append` and the
+                # rest stay opaque (`len`/`cap` can only take values no
+                # supported binding can hold).
+                function_node = node.child_by_field_name("function")
+                while (
+                    function_node is not None
+                    and function_node.type == "parenthesized_expression"
+                ):
+                    function_node = next(
+                        iter(function_node.named_children), None
+                    )
+                name = function_node.text if function_node is not None else b""
+                if name not in {b"min", b"max"}:
+                    raise _Unsupported("unresolved_or_opaque_call", _span(node))
+                if not arguments:
+                    raise _Unsupported("unsupported_expression", _span(node))
+                deps = frozenset()
+                for arg in arguments:
+                    deps |= self.expression(
+                        arg, fn, params, locals_, transfers, count,
+                        depth + 1,
+                    )
+                return deps
             target = self.functions.get(call.target)
             if target is None or len(arguments) != len(target.parameters):
                 raise _Unsupported("callee_unavailable", _span(node), call.target)
