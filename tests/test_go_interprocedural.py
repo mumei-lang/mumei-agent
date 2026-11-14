@@ -157,7 +157,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "var global int64; func F(x int64) int64 {return global}",
         "const N int64 = 1; func F(x int64) int64 { return N }",
         "var true bool; func F() bool {return true}",
-        "func F(x int64) uint64 {return uint64(x)}",
         "func F(x int64) int64 {return 1/x}",
         "func F(x int64) int64 {return 1%x}",
         "func F(x int64) int64 {return x<<1}",
@@ -617,6 +616,76 @@ def test_statement_initializers(go_types_helper, declarations, expected):
 
 
 @pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A same-width conversion is dep-preserving.
+        (
+            "func F(x int64) int64 { return int64(x) }",
+            frozenset({0}),
+        ),
+        # A widening conversion keeps the operand's deps.
+        (
+            "func F(x int64, y int32) int64 { return x + int64(y) }",
+            frozenset({0, 1}),
+        ),
+        # Signedness changes too.
+        (
+            "func F(x int64) uint64 { return uint64(x) }",
+            frozenset({0}),
+        ),
+        # A converted value flows through a let binding.
+        (
+            "func F(x int64) int64 { y := int32(x); return int64(y) }",
+            frozenset({0}),
+        ),
+        # Nested conversions.
+        (
+            "func F(x int64) int64 { return int64(int32(x)) }",
+            frozenset({0}),
+        ),
+        # A conversion of a call result keeps the call's deps.
+        (
+            "func G(a int64) int64 { return a }\nfunc F(x int64) int64 { return int64(G(x)) }",
+            frozenset({0}),
+        ),
+        # Conversion inside a statement initializer.
+        (
+            "func F(x int64, y int32) int64 { if v := int64(y); v > 0 { return v }; return x }",
+            frozenset({1, 0}),
+        ),
+        # A conversion inside a for-clause initializer.
+        (
+            "func F(x int64) int64 { for i:=int64(0); i<x; i++ {}; return x }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_scalar_conversion_dependencies(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "declarations",
+    [
+        # Converting to an unsupported target type fails closed at the
+        # binding, not the conversion.
+        "func F(x int64) int64 { var s string = string(0); _ = s; return x }",
+        # A builtin call is still an opaque call, even under a conversion.
+        "func F(x int64) int64 { return int64(len(\"\")) }",
+    ],
+)
+def test_scalar_conversion_shapes_stay_unsupported(
+    go_types_helper, declarations
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available
+    assert result.gaps
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
         # Labelled jumps stay unmodelled.
@@ -722,8 +791,8 @@ def test_callee_summary_is_not_polluted_by_caller_exit_state(
         "func F(x int64) int64 { if y,z:=x,x; y>0 {return z}; return 0 }",
         # An expression-statement initializer is a declared gap.
         "func G(v int64) int64 { return v }\nfunc F(x int64) int64 { if G(x); x>0 {return x}; return 0 }",
-        # A for loop is not modelled.
-        "func F(x int64) int64 { for i:=int64(0); i<x; i++ {}; return x }",
+        # A for loop with a multi-name init is not modelled.
+        "func F(x int64) int64 { for i,j:=x,x; i<x; i++ { _ = j }; return x }",
         # A branch with an unsupported statement blocks the summary.
     ],
 )
