@@ -6668,12 +6668,171 @@ def test_imported_field_read_method_member_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_bound_base_field_read_stays_closed(go_types_helper):
-    # `t.F` — a field read through a bound parameter names no imported
-    # member: bound-base field reads stay closed like `return *t`.
+def test_bound_base_field_read_is_admitted(go_types_helper):
+    # `t.N` — a scalar field read through a bound `*S2` is dep-free
+    # caller state like `lib.VS2.N`: the transfer records the field's
+    # identity and `effects` reports `unknown`.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { return t.N }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    members = {m.name: m for m in snapshot.imported_members}
+    calls = [c for c in result.calls if c.imported]
+    assert len(calls) == 1
+    assert calls[0].target == members["N"].id
+
+
+def test_bound_base_field_read_pointer_field_is_admitted(go_types_helper):
+    # `t.P` — a pointer-typed field admits the same way.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2) int64 { p := t.P\n\t_ = p\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    members = {m.name: m for m in snapshot.imported_members}
+    calls = [c for c in result.calls if c.imported]
+    assert any(c.target == members["P"].id for c in calls)
+
+
+def test_bound_base_field_read_parenthesized_base_is_admitted(
+    go_types_helper,
+):
+    # `(t).N` — parentheses around the base change nothing.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2) int64 { return (t).N }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_bound_base_field_read_local_pointer_is_admitted(go_types_helper):
+    # `q := t; q.N` — a bound local `*S2` admits the same way.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2) int64 { q := t\n\treturn q.N }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_bound_base_field_read_no_escaped_union(go_types_helper):
+    # A `*S` pointee is a struct — it can never alias a tracked
+    # scalar binding, so escaped bindings do NOT union into the
+    # dep-free result (unlike `*t` scalar derefs).
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2, x lib.T, y lib.T) int64 {\n"
+        "\t_ = &x\n\tx = y\n\treturn t.N }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_bound_base_field_read_flags_stale_dependents(go_types_helper):
+    # Redeclaring `S2` flags `F` — `t.N` pinned the pointee's declared
+    # type identity.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2) int64 { return t.N }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(METHOD_LIB["lib"])
+    lib2["m.go"] = lib2["m.go"].replace(
+        "type S2 struct{ N int64", "type S2 struct{ N int32"
+    )
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_bound_base_field_read_deref_base_stays_closed(go_types_helper):
+    # `(*t).N` — the operand is a dereference, not an identifier.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2) int64 { return (*t).N }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_base_field_read_nested_stays_closed(go_types_helper):
+    # `t.W.N` — the operand is itself a selection, not an identifier.
+    lib = {
+        "lib": {
+            "m.go": "package lib\ntype T int64\n"
+            "type W2 struct{ N int64 }\ntype S2 struct{ W *W2 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2) int64 { return t.W.N }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_base_field_read_string_field_stays_closed(go_types_helper):
+    # `t.G` — a non-scalar field keeps the read closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2) int64 { return int64(len(t.G)) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_base_field_read_method_value_stays_closed(go_types_helper):
+    # `t.PF` selects a method member — method values keep their own
+    # gate; only calls admit.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S) int64 { _ = t.PF\n\treturn 0 }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(

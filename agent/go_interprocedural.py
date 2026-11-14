@@ -463,6 +463,67 @@ class _Builder:
             return None
         return base, field_member
 
+    def _bound_field_read(
+        self,
+        node: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> tuple[PackageMember, PackageMember] | None:
+        """The `(pointee member, field member)` pair `t.F` names.
+
+        `t.F` on a bound `*S` auto-dereferences a field of caller
+        state — external like `lib.VS.F`, so the read is dep-free and
+        records against the field's identity. The operand must be a
+        bound identifier (`(*t).F`, `t.F.G` and computed bases stay
+        closed) whose pointer fact names the pointee `type` member;
+        the field resolves through its own `import` reference to a
+        scalar-or-pointer `var` member, like the imported-struct-var
+        path. A promoted method's `func` member, a non-scalar field,
+        or any unresolvable name returns None.
+        """
+        operand = node.child_by_field_name("operand")
+        field = node.child_by_field_name("field")
+        if operand is None or field is None:
+            return None
+        while operand.type == "parenthesized_expression":
+            operand = next(
+                (c for c in operand.named_children if c.type != "comment"),
+                None,
+            )
+            if operand is None:
+                return None
+        if operand.type != "identifier" or operand.text == b"_":
+            return None
+        ref = self.references.get(self.node_key(operand))
+        if ref is None or (
+            ref.binding_id not in locals_ and ref.binding_id not in params
+        ):
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if (
+            binding is None
+            or binding.type.kind != "pointer"
+            or not binding.type.type_id
+        ):
+            return None
+        pointee = self.members.get(binding.type.type_id)
+        if pointee is None or pointee.kind != "type":
+            return None
+        field_ref = self.references.get(self.node_key(field))
+        field_member = (
+            self.members.get(field_ref.binding_id)
+            if field_ref is not None and field_ref.kind == "import"
+            else None
+        )
+        if (
+            field_member is None
+            or field_member.name.encode("utf-8") != field.text
+            or field_member.kind != "var"
+            or field_member.type.kind not in {"integer", "boolean", "pointer"}
+        ):
+            return None
+        return pointee, field_member
+
     def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` qualified type names, or None.
 
@@ -2094,6 +2155,32 @@ class _Builder:
                     # `VS` in its own file still flags the summary.
                     self.pinned.add(base.id)
                     self._pin_member_type(base)
+                    self._pin_member_type(field_member)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            field_member.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return frozenset()
+                # `t.F` — a field read through a bound `*S`. Same
+                # dep-free external-state model: the field's value is
+                # caller memory the dep model never tracks (struct-
+                # typed bindings cannot exist, so the pointee can
+                # never alias one — no union needed), the transfer
+                # marks `effects` unknown, and redeclaring `S` or the
+                # field's type flags the summary.
+                bound = self._bound_field_read(node, locals_, params)
+                if bound is not None:
+                    pointee, field_member = bound
+                    self.pinned.add(pointee.id)
                     self._pin_member_type(field_member)
                     transfers.append(
                         CallTransfer(
