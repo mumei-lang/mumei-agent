@@ -868,7 +868,7 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	ix.out.Bindings = append(ix.out.Bindings, binding{
 		id, obj.Name(), kind, sp, ix.scope(obj), tf,
 	})
-	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "function" && kind != "function" {
+	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" {
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }
