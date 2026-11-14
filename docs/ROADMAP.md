@@ -1683,10 +1683,26 @@ multi-valued imported results slice).
 operand's dependencies, `for i = range e` reuses an existing binding,
 and `for _ = range e` / bare `for range e` just evaluate. Body
 may-assignments join back exactly like clause loops, and unlabelled
-`break`/`continue` use the same frame machinery. Composite ranges
-(slice, map, string, channel, array) are unreachable in-fragment —
-their operands cannot be produced by any supported binding or literal —
-and multi-variable ranges stay `unsupported_statement`.
+`break`/`continue` use the same frame machinery.
+
+A `range` clause over an imported container member —
+`for i := range lib.VA`, `for k, v := range lib.VMK`, or a
+`.`-imported operand — admits when the operand names a `var` member
+whose `type` is a `slice`, `array` or `map` fact, with up to two
+identifier left-hand names. The member read transfers on the member's
+identity and marks `effects` `unknown` (iterating external state),
+pins the member's `type_id` plus a named map `key.type_id` / container
+`elem.type_id`, and binds each left-hand name dependency-free — the
+yielded values are external, like any other imported read. A `_` slot
+skips binding; the `:=` form binds fresh identifiers and the `=` form
+stores through `_store`. The clause stays closed when the operand is
+not an imported container member (local bindings, computed operands,
+member `func`/`type`/`const`, non-container member types like
+`lib.VStr`), when a bound name's type is not `integer`, `boolean` or
+`pointer` (a `map[string]` key or struct element), or when there are
+more than two left-hand names or a non-identifier slot. Composite
+ranges over any other operand shape remain unreachable in-fragment —
+their operands cannot be produced by any supported binding or literal.
 
 ### C07 multi-name declarations
 

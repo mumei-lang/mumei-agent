@@ -806,6 +806,84 @@ member, or one explicit dereference of one (`(*t).F` — the same
             index, fn, params, locals_, transfers, count, depth + 1
         )
 
+    def _imported_container_member(
+        self, node: Any
+    ) -> PackageMember | None:
+        """The imported `var` member a range/index operand names.
+
+        A package-qualified name, a dot-imported name, or parentheses
+        around either — and only a slice, array or map kind. Anything
+        else (a computed operand, a member of another kind, a
+        non-container var) resolves to no member and the caller falls
+        back to the ordinary expression gate.
+        """
+        inner = node
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        member = None
+        if inner is not None and inner.type == "selector_expression":
+            member = self._package_member(inner)
+        elif inner is not None and inner.type == "identifier":
+            ref = self.references.get(self.node_key(inner))
+            if ref is not None and ref.kind == "import":
+                candidate = self.members.get(ref.binding_id)
+                if (
+                    candidate is not None
+                    and candidate.name.encode("utf-8") == inner.text
+                ):
+                    member = candidate
+        if (
+            member is not None
+            and member.kind == "var"
+            and member.type.kind in {"slice", "array", "map"}
+        ):
+            return member
+        return None
+
+    def _bind_range_names(
+        self,
+        names: list[Any],
+        scope: dict[str, frozenset[int]],
+        params: dict[str, int],
+        conditional: bool,
+    ) -> None:
+        """Bind `for` range names to dep-free (external-state) values.
+
+        `_` slots skip; a fresh `:=` name uses the compiler's binding
+        record (its declared type must be scalar-or-pointer — a map's
+        string key or a struct element stays closed); an `=` name
+        reuses the referenced binding through `_store`.
+        """
+        for name in names:
+            if name.text == b"_":
+                continue
+            binding = self.bindings_by_span.get(self.node_key(name))
+            if binding is not None:
+                if binding.type.kind not in {
+                    "integer",
+                    "boolean",
+                    "pointer",
+                }:
+                    raise _Unsupported(
+                        "binding_unavailable", _span(name)
+                    )
+                scope[binding.id] = frozenset()
+            else:
+                ref = self.references.get(self.node_key(name))
+                if ref is None or (
+                    ref.binding_id not in scope
+                    and ref.binding_id not in params
+                ):
+                    raise _Unsupported(
+                        "binding_unavailable", _span(name)
+                    )
+                self._store(
+                    scope, params, ref.binding_id, frozenset(), conditional,
+                )
+
     def _bound_receiver_root(
         self,
         receiver: Any,
@@ -1987,45 +2065,95 @@ member, or one explicit dereference of one (`(*t).F` — the same
             scope = dict(locals_)
             update = None
             if clause is not None and clause.type == "range_clause":
-                # Only integer ranges are reachable in-fragment — a
-                # composite operand (slice, map, string, channel, array)
-                # cannot be produced by any supported binding or literal,
-                # so the operand is an integer and the range yields one
-                # index variable. `for i := range e` binds a fresh scoped
-                # name; `for i = range e` reuses an existing binding;
-                # `_` slots and the bare `for range e` form just evaluate.
+                # Two operand families are reachable: an integer
+                # (`for i := range e` yields one index variable) and
+                # an imported container var (`for i := range lib.VA`,
+                # `for k, v := range lib.VM` — the container lives in
+                # package state, so iteration yields dep-free values
+                # the loop body joins). Every other composite operand
+                # cannot be produced by a supported binding. `for i :=`
+                # binds a fresh scoped name; `for i =` reuses an
+                # existing binding; `_` slots and the bare `for range`
+                # form just evaluate.
                 left = clause.child_by_field_name("left")
                 right = clause.child_by_field_name("right")
                 lefts = _children(left) if left is not None else []
-                if right is None or len(lefts) > 1 or (
-                    lefts and lefts[0].type != "identifier"
-                ):
-                    raise _Unsupported(
-                        "unsupported_statement", _span(clause)
-                    )
-                rdeps = self.expression(
-                    right, fn, params, scope, transfers, count, 0
+                member = (
+                    self._imported_container_member(right)
+                    if right is not None
+                    else None
                 )
-                if lefts and lefts[0].text != b"_":
-                    binding = self.bindings_by_span.get(self.node_key(lefts[0]))
-                    if binding is not None:
-                        if binding.type.kind not in {"integer", "boolean", "pointer"}:
-                            raise _Unsupported(
-                                "binding_unavailable", _span(lefts[0])
-                            )
-                        scope[binding.id] = rdeps
-                    else:
-                        ref = self.references.get(self.node_key(lefts[0]))
-                        if ref is None or (
-                            ref.binding_id not in scope
-                            and ref.binding_id not in params
-                        ):
-                            raise _Unsupported(
-                                "binding_unavailable", _span(lefts[0])
-                            )
-                        self._store(
-                            scope, params, ref.binding_id, rdeps, conditional,
+                if member is not None:
+                    # Ranging an imported container reads package state:
+                    # the values (index/key and element) carry no
+                    # parameter deps — like an index read — while the
+                    # read still records the imported transfer and pins
+                    # the container, key and element identities. At
+                    # most two names bind; the second (element) and a
+                    # map's key must each hold a modelled type.
+                    if len(lefts) > 2 or any(
+                        l.type != "identifier" for l in lefts
+                    ):
+                        raise _Unsupported(
+                            "unsupported_statement", _span(clause)
                         )
+                    self._pin_member_type(member)
+                    key = member.type.key
+                    if key is not None and key.type_id:
+                        self.pinned.add(key.type_id)
+                    elem = member.type.elem
+                    if elem is not None and elem.type_id:
+                        self.pinned.add(elem.type_id)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                right.start_byte,
+                                right.end_byte,
+                            ),
+                            member.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    # Each name's declared type comes from the
+                    # compiler's binding — scalar-or-pointer, matching
+                    # the index-read rule (a struct element or a
+                    # string map key stays closed).
+                    self._bind_range_names(
+                        lefts, scope, params, conditional
+                    )
+                else:
+                    if right is None or len(lefts) > 1 or (
+                        lefts and lefts[0].type != "identifier"
+                    ):
+                        raise _Unsupported(
+                            "unsupported_statement", _span(clause)
+                        )
+                    rdeps = self.expression(
+                        right, fn, params, scope, transfers, count, 0
+                    )
+                    if lefts and lefts[0].text != b"_":
+                        binding = self.bindings_by_span.get(self.node_key(lefts[0]))
+                        if binding is not None:
+                            if binding.type.kind not in {"integer", "boolean", "pointer"}:
+                                raise _Unsupported(
+                                    "binding_unavailable", _span(lefts[0])
+                                )
+                            scope[binding.id] = rdeps
+                        else:
+                            ref = self.references.get(self.node_key(lefts[0]))
+                            if ref is None or (
+                                ref.binding_id not in scope
+                                and ref.binding_id not in params
+                            ):
+                                raise _Unsupported(
+                                    "binding_unavailable", _span(lefts[0])
+                                )
+                            self._store(
+                                scope, params, ref.binding_id, rdeps, conditional,
+                            )
             elif clause is not None and clause.type == "for_clause":
                 init = clause.child_by_field_name("initializer")
                 if init is not None:

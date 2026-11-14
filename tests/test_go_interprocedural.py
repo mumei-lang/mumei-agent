@@ -6205,6 +6205,173 @@ def test_imported_nested_index_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_imported_range_slice_index_is_admitted(go_types_helper):
+    # `for i := range lib.VA` — ranging the imported slice reads
+    # package state: `i` carries no parameter deps (the values are
+    # external), and the read records the imported transfer.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        "\tfor i := range lib.VA { x = int64(i) }\n\treturn x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    members = {
+        m["name"]: m
+        for m in json.loads(
+            package_report_imports(go_types_helper, files, METHOD_LIB)
+        )["imported_members"]
+    }
+    (read,) = [c for c in result.calls if c.imported]
+    assert read.target == members["VA"]["id"]
+
+
+@pytest.mark.parametrize(
+    "lhs",
+    ["i, v :=", "_, v :=", "i, _ :="],
+    ids=["index_and_element", "blank_index", "blank_element"],
+)
+def test_imported_range_two_vars_is_admitted(go_types_helper, lhs):
+    # `for i, v := range lib.VA` — the element slot binds like the
+    # index does: dep-free external values; `_` slots skip binding.
+    body = {
+        "i, v :=": "x = int64(i) + v",
+        "_, v :=": "x = v",
+        "i, _ :=": "x = int64(i)",
+    }[lhs]
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        f"\tfor {lhs} range lib.VA {{ {body} }}\n\treturn x }}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_imported_range_map_key_value_is_admitted(go_types_helper):
+    # `for k, v := range lib.VMK` — the named key `MK` is scalar, so
+    # both slots bind; `MK`'s identity pins alongside the member's.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        "\tfor k, v := range lib.VMK { x = int64(k) + v }\n"
+        "\treturn x }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    # `MK` is only named inside `VMK`'s type — it has no member record;
+    # its identity lives on the member fact's `key.type_id`.
+    mk_id = members["VMK"]["type"]["key"]["type_id"]
+    assert mk_id
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert mk_id in result.pinned
+
+
+def test_imported_range_dot_import_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        "\tfor i := range VA { x = int64(i) }\n\treturn x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_imported_range_bare_is_admitted(go_types_helper):
+    # `for range lib.VA` — no names bind; the read still records.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        "\tfor range lib.VA { x++ }\n\treturn x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert any(c.imported for c in result.calls)
+
+
+def test_imported_range_assigns_existing_binding(go_types_helper):
+    # `for i = range lib.VA` — the `=` form reuses the outer binding
+    # through `_store` like the integer range does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { i := 0\n"
+        "\tfor i = range lib.VA {}\n\treturn int64(i) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+
+
+def test_imported_range_string_key_stays_closed(go_types_helper):
+    # `for k := range lib.VM` — `map[string]` keys are strings, a
+    # type the fragment cannot bind.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        "\tfor k := range lib.VM { _ = k }\n\treturn x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_range_struct_elem_stays_closed(go_types_helper):
+    # `for _, s := range lib.VSS` — the element is a struct.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        "\tfor _, s := range lib.VSS { _ = s.F }\n\treturn x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_range_string_member_stays_closed(go_types_helper):
+    # `for i := range lib.VStr` — a string member is not a container
+    # fact, so the ordinary member-read gate stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { x := int64(0)\n"
+        "\tfor i := range lib.VStr { _ = i }\n\treturn x }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+    assert not result.available
+
+
 def test_imported_map_index_shadowed_true_reads_binding_deps(
     go_types_helper,
 ):
