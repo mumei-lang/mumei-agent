@@ -1636,9 +1636,11 @@ Conversion calls `T(e)` — reported by the producer as call kind
 inherits the operand's dependencies. The type change itself
 (truncation, widening, signedness) is not modelled; dependency is about
 value provenance, not representation. Conversions to types outside the
-scalar fragment still fail closed where the converted value is bound
-(the `binding_unavailable` check), and builtin calls inside a
-conversion stay `unresolved_or_opaque_call`.
+scalar fragment fail closed at the conversion itself — the target
+type's binding (or the fixed predeclared scalar set for universe type
+names) must be integer or boolean, so a non-scalar result can never
+flow into a context that doesn't bind it (`binding_unavailable`).
+Builtin calls inside a conversion stay `unresolved_or_opaque_call`.
 
 ### C07 pure builtins in expressions
 

@@ -343,6 +343,15 @@ def test_for_bodies_union_return_dependencies(
             "func F(x, y int64) int64 { for i := range x { if i > 0 { break }; y = i }; return y }",
             frozenset({0, 1}),
         ),
+        # Scalar conversions stay valid range operands.
+        (
+            "func F(x int64) int64 { for i := range int(x) { _ = i }; return x }",
+            frozenset({0}),
+        ),
+        (
+            "type N int64\nfunc F(x int64) int64 { for i := range N(x) { _ = i }; return x }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_range_int_dependencies(go_types_helper, declarations, expected):
@@ -355,8 +364,10 @@ def test_range_int_dependencies(go_types_helper, declarations, expected):
     "declarations",
     [
         # Composite ranges are outside the fragment (the operand itself
-        # cannot be expressed).
+        # cannot be expressed — including through a conversion, whose
+        # result never passes a binding check inside a range clause).
         "func F(x int64) int64 { for i:=range \"ab\" { _ = i }; return x }",
+        "func F(x int64) int64 { for i:=range string(x) { _ = i }; return x }",
         # Non-inc/dec updates stay unsupported.
         "func F(x int64) int64 { for i:=x; i>0; i=i-1 {}; return x }",
         # Assignment updates are not inc/dec.

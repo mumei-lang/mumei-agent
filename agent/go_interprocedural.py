@@ -75,6 +75,13 @@ _UNARY = frozenset({"+", "-", "!", "^"})
 _COMPOUND_ASSIGN = frozenset(
     {"+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^="}
 )
+_SCALAR_BASIC_TYPES = frozenset(
+    {
+        b"bool", b"int", b"int8", b"int16", b"int32", b"int64",
+        b"uint", b"uint8", b"uint16", b"uint32", b"uint64", b"uintptr",
+        b"byte", b"rune",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -847,6 +854,41 @@ class _Builder:
                 # `T(e)` is effect-free for dependency purposes — the
                 # result inherits the operand's dependencies; the type
                 # change itself (truncation, widening) is not modelled.
+                # The target must be a scalar type too: a conversion to
+                # a non-scalar (e.g. `string(x)`) would let the result
+                # flow into contexts that never bind it — like a `range`
+                # operand — without ever hitting a binding check.
+                # Declared types resolve through their binding's type;
+                # universe type names carry no binding_id, so they are
+                # matched against Go's fixed predeclared scalar set.
+                function_node = node.child_by_field_name("function")
+                while (
+                    function_node is not None
+                    and function_node.type == "parenthesized_expression"
+                ):
+                    function_node = next(
+                        iter(function_node.named_children), None
+                    )
+                ref = (
+                    self.references.get(_span(function_node))
+                    if function_node is not None
+                    else None
+                )
+                if ref is not None and ref.binding_id:
+                    binding = self.bindings.get(ref.binding_id)
+                    scalar = binding is not None and binding.type.kind in {
+                        "integer",
+                        "boolean",
+                    }
+                else:
+                    scalar = (
+                        ref is not None
+                        and ref.kind == "universe"
+                        and function_node is not None
+                        and function_node.text in _SCALAR_BASIC_TYPES
+                    )
+                if not scalar:
+                    raise _Unsupported("binding_unavailable", _span(node))
                 if len(arguments) != 1:
                     raise _Unsupported(
                         "unsupported_expression", _span(node)
