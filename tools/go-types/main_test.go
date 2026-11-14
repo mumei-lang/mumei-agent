@@ -321,6 +321,77 @@ func TestSignatureTypeArgumentStaysClosed(t *testing.T) {
 	}
 }
 
+func TestPointerVarDeclaresPointeeMember(t *testing.T) {
+	// A pointer-typed `var` member must declare its named pointee:
+	// the consumer needs the pointee's own fact to classify a
+	// `*lib.V` dereference read. An unnamed pointee (`*int64`) and a
+	// nested pointer (`**T`) contribute no extra member.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { _ = lib.PS\n\t_ = lib.PPV\n\treturn int64(*lib.PV) + *lib.PU }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\nvar PV *T\nvar PU *int64\nvar PPV **T\ntype S struct{ F int64 }\nvar PS *S"},
+			{"t.go", "package lib\ntype T int64"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	members := map[string]member{}
+	for _, m := range out.ImportedMembers {
+		members[m.Name] = m
+	}
+	pv, ok := members["PV"]
+	if !ok || pv.Kind != "var" || pv.Type.Kind != "pointer" {
+		t.Fatalf("the pointer var member is missing or misclassified: %+v", pv)
+	}
+	tm, ok := members["T"]
+	if !ok || tm.Kind != "type" || tm.Type.Kind != "integer" {
+		t.Fatalf("the pointee type member is missing or misclassified: %+v", tm)
+	}
+	if pv.Type.TypeID != tm.ID {
+		t.Fatal("the pointer fact does not name the declared pointee member")
+	}
+	if ppv, ok := members["PPV"]; !ok || ppv.Type.Kind != "pointer" || ppv.Type.TypeID != "" {
+		t.Fatalf("a nested pointer pointee must contribute no identity: %+v", ppv)
+	}
+	sm, ok := members["S"]
+	if !ok || sm.Kind != "type" {
+		t.Fatalf("a struct pointee must still be declared: %+v", sm)
+	}
+}
+func TestErrorPointerVarRecordsNoEmptyMember(t *testing.T) {
+	// `var PE *error` — `error` is a universe object with no imported
+	// identity, so the pointee emits no member; a member with an
+	// empty id would fail the loader outright.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { _ = lib.PE\n\treturn 0 }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\nvar PE *error"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	for _, m := range out.ImportedMembers {
+		if m.ID == "" {
+			t.Fatalf("a member was recorded with an empty id: %+v", m)
+		}
+	}
+	pe, ok := func() (member, bool) {
+		for _, m := range out.ImportedMembers {
+			if m.Name == "PE" {
+				return m, true
+			}
+		}
+		return member{}, false
+	}()
+	if !ok || pe.Kind != "var" || pe.Type.Kind != "pointer" || pe.Type.TypeID != "" {
+		t.Fatalf("the *error var member is missing or misclassified: %+v", pe)
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {
