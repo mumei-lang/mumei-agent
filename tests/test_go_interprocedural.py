@@ -227,6 +227,12 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
             "func F(x, y int64) int64 { a := x; a, b := a, y; return b }",
             frozenset({1}),
         ),
+        # ...and a swapped RHS proves it: `b` reads the pre-state `a`
+        # ({0}), not the value `a` is about to take ({1}).
+        (
+            "func F(x, y int64) int64 { a := x; a, b := y, a; _ = a; return b }",
+            frozenset({0}),
+        ),
         # `_` discards its value — the RHS is still evaluated.
         (
             "func F(x, y int64) int64 { a, _ := x, y; return a }",
