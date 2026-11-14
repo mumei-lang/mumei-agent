@@ -2056,12 +2056,13 @@ field member stays closed: a method selection (`lib.VS.PF`) names a
 field. A bound base admits through the same dep-free model: `t.F`
 on a `*S` parameter or local is an auto-deref read of caller state
 — the operand must be a bound identifier whose pointer names a `type`
-member, the field resolves through its `import` reference to a
-scalar-or-pointer `var` member, and the pointee identity pins for
-`stale_dependents`. The pointee is struct-typed, so it can never
+member (one explicit dereference, `(*t).F`, spells the same
+auto-deref out), the field resolves through its `import` reference
+to a scalar-or-pointer `var` member, and the pointee identity pins
+for `stale_dependents`. The pointee is struct-typed, so it can never
 alias a tracked scalar binding — no escaped union is needed. A
-derefed base (`(*t).F`), a nested selection (`t.W.N`), a method
-value (`t.PF`) and a composite-typed field stay closed.
+doubly-derefed base (`(**t).F`), a nested selection (`t.W.N`), a
+method value (`t.PF`) and a composite-typed field stay closed.
 
 ### C06 imported member type identities
 

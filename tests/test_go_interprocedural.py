@@ -6934,11 +6934,28 @@ def test_bound_base_field_read_flags_stale_dependents(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
-def test_bound_base_field_read_deref_base_stays_closed(go_types_helper):
-    # `(*t).N` — the operand is a dereference, not an identifier.
+def test_bound_base_field_read_deref_base_is_admitted(go_types_helper):
+    # `(*t).N` — an explicit dereference of the bound pointer before
+    # the selection, the same auto-deref spelled out.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.S2) int64 { return (*t).N }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+
+
+def test_bound_base_field_read_double_deref_stays_closed(go_types_helper):
+    # `(**t).N` — one deref leaves a `*S2` operand, not an identifier,
+    # and the `**S2` fact names no named pointee anyway.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t **lib.S2) int64 { return (**t).N }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
