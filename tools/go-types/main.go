@@ -736,6 +736,10 @@ func (ix *indexer) id(obj types.Object) string {
 }
 
 func (ix *indexer) typeOf(t types.Type) typeFact {
+	return ix.typeOfRec(t, map[types.Type]bool{})
+}
+
+func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 	f := typeFact{Kind: "unsupported"}
 	if t == nil {
 		return f
@@ -761,17 +765,26 @@ func (ix *indexer) typeOf(t types.Type) typeFact {
 		}
 		return f
 	}
+	// A named container type can name itself — `type R []R` is valid
+	// Go — so a type already being expanded stops at its identity:
+	// the element fact reads `unsupported`, which keeps index reads
+	// of it closed like every unmodelled element.
+	if seen[t] {
+		return f
+	}
+	seen[t] = true
+	defer delete(seen, t)
 	if s, ok := t.Underlying().(*types.Slice); ok {
 		// `[]T` — or a named/alias type whose underlying is a slice,
 		// which keeps the identity the switch above already set.
 		f.Kind = "slice"
-		e := ix.typeOf(s.Elem())
+		e := ix.typeOfRec(s.Elem(), seen)
 		f.Elem = &e
 		return f
 	}
 	if a, ok := t.Underlying().(*types.Array); ok {
 		f.Kind = "array"
-		e := ix.typeOf(a.Elem())
+		e := ix.typeOfRec(a.Elem(), seen)
 		f.Elem = &e
 		return f
 	}

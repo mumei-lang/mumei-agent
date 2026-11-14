@@ -435,6 +435,31 @@ func TestSliceMemberDeclaresElemFact(t *testing.T) {
 	}
 }
 
+func TestRecursiveSliceTypeTerminates(t *testing.T) {
+	// `type R []R` is valid Go — the element fact must stop at the
+	// type's own identity instead of recursing forever.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { _ = lib.VR\n\treturn 0 }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\ntype R []R\nvar VR R"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	var vr *member
+	for i := range out.ImportedMembers {
+		if out.ImportedMembers[i].Name == "VR" {
+			vr = &out.ImportedMembers[i]
+		}
+	}
+	if vr == nil || vr.Type.Kind != "slice" || vr.Type.Elem == nil ||
+		vr.Type.Elem.Kind != "unsupported" || vr.Type.Elem.TypeID == "" {
+		t.Fatalf("a recursive slice must stop at its identity: %+v", vr)
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {
