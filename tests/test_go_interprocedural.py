@@ -6129,3 +6129,39 @@ def test_member_write_inner_indices_evaluate_first(go_types_helper):
     )
     assert h_call.arguments == (frozenset({0, 1}),)
 
+
+
+def test_member_write_nested_elem_pin_flags_stale(go_types_helper):
+    # `lib.VTT` is `[][]T` — the named element sits two `elem` hops
+    # down, so only a recursive element pin lets `T`'s redeclaration
+    # flag the summary stale.
+    lib = {
+        "lib": {
+            "s.go": "package lib\nvar VTT [][]T\n",
+            "t.go": "package lib\ntype T int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { lib.VTT[0][0] = lib.T(v)\n\treturn 0 }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(lib["lib"])
+    lib2["t.go"] = "package lib\ntype T int32\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})

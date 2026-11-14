@@ -704,8 +704,13 @@ class _Builder:
             raise _Unsupported("unsupported_statement", _span(lhs))
         self._pin_member_type(member)
         elem = member.type.elem
-        if elem is not None and elem.type_id:
-            self.pinned.add(elem.type_id)
+        while elem is not None:
+            # `[][]T` names its element type two levels down — every
+            # level's identity pins so a redeclared `T` still flags
+            # the summary stale.
+            if elem.type_id:
+                self.pinned.add(elem.type_id)
+            elem = elem.elem
         transfers.append(
             CallTransfer(
                 FileSpan(self.current_file, lhs.start_byte, lhs.end_byte),
