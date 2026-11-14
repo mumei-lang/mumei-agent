@@ -2254,9 +2254,11 @@ zero-argument imported transfer against the member's own identity
 identity — plus a container element's — pins for
 `stale_dependents`). The stored value's dependencies drop with the
 write because no binding tracks member contents, and a nested index
-expression still evaluates for its calls — a call-free index
-(`lib.VM["k"]`) needs no evaluation while `lib.VA[f()] = v` keeps
-`f()`'s transfer. Compilable closed cases: a computed operand
+expression still evaluates whenever it could record something — a
+call (`lib.VA[f()]`), a conversion, or an imported member read
+(`lib.VA[lib.V]`, whose pin `stale_dependents` needs) — while a
+literal or plain-name index (`lib.VM["k"]`) needs no evaluation.
+Compilable closed cases: a computed operand
 (`g()[0] = v`) names no member, a `const`, `func` or `type`
 member names no writable storage, and inc/dec statements
 (`lib.V++`) keep their own gate.

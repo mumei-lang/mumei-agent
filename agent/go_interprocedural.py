@@ -305,14 +305,6 @@ def _children(node: Any) -> list[Any]:
     return [c for c in node.named_children if c.type != "comment"]
 
 
-def _contains_call(node: Any) -> bool:
-    """Whether a subtree holds a call/conversion — the only index
-    sub-expressions whose evaluation records something."""
-    if node.type == "call_expression":
-        return True
-    return any(_contains_call(c) for c in _children(node))
-
-
 def _syntax(raw: bytes) -> Any:
     try:
         from tree_sitter import Language, Parser
@@ -724,15 +716,36 @@ class _Builder:
         )
         for extra in extras:
             # The index value is unused — the write lands in package
-            # state — so only its calls matter. A call-free index
-            # (a literal, a plain name) needs no evaluation at all;
-            # one that contains a call evaluates through the normal
-            # expression gate and keeps the statement closed when the
-            # call's shape is unmodelled.
-            if _contains_call(extra):
+            # state — so only evaluation's side effects matter: calls,
+            # conversions and imported member reads record transfers
+            # and pins that `stale_dependents` later reads. An index
+            # holding none of those (a literal, a bound name, pure
+            # arithmetic) needs no evaluation at all; one that does
+            # evaluates through the normal expression gate and keeps
+            # the statement closed when its shape is unmodelled.
+            if self._index_extra_effects(extra):
                 self.expression(
                     extra, fn, params, locals_, transfers, count, 0
                 )
+
+    def _index_extra_effects(self, node: Any) -> bool:
+        """Whether an index sub-expression's evaluation could record a
+        transfer or pin — a call, or a name/selector that resolves to
+        an imported member."""
+        if node.type == "call_expression":
+            return True
+        if (
+            node.type == "selector_expression"
+            and self._package_member(node) is not None
+        ):
+            return True
+        if node.type == "identifier":
+            ref = self.references.get(self.node_key(node))
+            if ref is not None and ref.kind == "import":
+                return True
+        return any(
+            self._index_extra_effects(c) for c in _children(node)
+        )
 
     def _opaque_write_target(
         self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]

@@ -6076,3 +6076,21 @@ def test_dot_imported_index_write_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
+
+
+def test_imported_index_write_evaluates_member_reads(go_types_helper):
+    # `lib.VA[lib.V.M(0)] = v` already covers calls; `lib.VA[lib.V]`
+    # needs the member read's own pin — dropping it would hide a `T`
+    # redeclaration from `stale_dependents`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { lib.VA[lib.V] = v\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    calls = [c for c in result.calls if c.imported]
+    # The write transfer plus the `lib.V` member read's transfer.
+    assert len(calls) >= 2
