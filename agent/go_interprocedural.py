@@ -676,9 +676,10 @@ class _Builder:
     ) -> tuple[PackageMember, tuple[Any, ...]] | None:
         """The imported member an assignment LHS stores into, or None.
 
-        `lib.V = v`, `lib.VA[i] = v` and `lib.VS.f = v` — and their
-        dot-imported forms `V = v`, `VA[i] = v`, `VS.f = v` — mutate
-        package state the dependency model does not follow: it tracks
+        `lib.V = v`, `lib.VA[i] = v`, `lib.VS.f = v` and
+        `*lib.PV = v` — and their dot-imported forms `V = v`,
+        `VA[i] = v`, `VS.f = v`, `*PV = v` — mutate package state
+        the dependency model does not follow: it tracks
         binding indices, never member contents, so the store carries
         no result dependency. The member's own identity becomes the
         recorded write target, the same way `t.f = v` records the
@@ -711,6 +712,8 @@ class _Builder:
             return member, ()
         extras: list[Any] = []
         cur = node
+        saw_deref = False
+        member = None
         while cur is not None:
             if cur.type == "parenthesized_expression":
                 cur = next(
@@ -718,10 +721,21 @@ class _Builder:
                     None,
                 )
                 continue
+            if cur.type == "unary_expression":
+                # `*lib.PV = v` — a dereference store through an
+                # imported pointer-typed var mutates package state
+                # exactly like the direct member store. `&`, `!` and
+                # the rest can never be store targets.
+                operator = cur.child_by_field_name("operator")
+                if operator is None or operator.text != b"*":
+                    return None
+                saw_deref = True
+                cur = cur.child_by_field_name("operand")
+                continue
             if cur.type == "selector_expression":
                 member = self._package_member(cur)
                 if member is not None:
-                    return member, tuple(extras)
+                    break
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "index_expression":
@@ -743,9 +757,17 @@ class _Builder:
                     member is not None
                     and member.name.encode("utf-8") == cur.text
                 ):
-                    return member, tuple(extras)
+                    break
+                member = None
             return None
-        return None
+        if member is None:
+            return None
+        if saw_deref and member.type.kind != "pointer":
+            # `*lib.V = v` on a non-pointer member cannot compile; the
+            # pointer check keeps a tampered record from smuggling a
+            # store past the gate.
+            return None
+        return member, tuple(extras)
 
     def _record_member_write(
         self,
