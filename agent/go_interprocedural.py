@@ -1197,7 +1197,12 @@ class _Builder:
         while node is not None and node.type == "parenthesized_expression":
             inner = _children(node)  # comments are named children too
             node = inner[0] if len(inner) == 1 else None
-        if node is None or node.type != "call_expression":
+        if node is None or node.type not in {
+            "call_expression",
+            # `lib.G[T](x)` — a single-type-arg instantiation parses as
+            # a conversion shape; the recorded call is authoritative.
+            "type_conversion_expression",
+        }:
             return None
         call = self.calls.get(self.node_key(node))
         if (
