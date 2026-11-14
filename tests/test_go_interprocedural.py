@@ -7572,13 +7572,80 @@ def test_imported_map_index_read_struct_value_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_map_index_read_comma_ok_stays_closed(go_types_helper):
-    # `v, ok := lib.VM[k]` — the comma-ok form binds two names; the
-    # index-read path admits the single-value read only.
+def test_imported_map_index_read_comma_ok_is_admitted(go_types_helper):
+    # `v, ok := lib.VMI[k]` — the comma-ok form binds two names; the
+    # presence flag conservatively takes the read's deps too.
+    lib = {"lib": {"m.go": "package lib\nvar VMI map[int64]int64\n"}}
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F() int64 { v, ok := lib.VM[\"k\"]\n"
+        "func F(k int64) int64 { v, ok := lib.VMI[k]\n"
         "\tif ok { return v }\n\treturn 0 }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_imported_map_index_read_comma_ok_var_decl(go_types_helper):
+    # `var v, ok = lib.VMI[k]` — the var-declaration path admits the
+    # comma-ok pair the same way.
+    lib = {"lib": {"m.go": "package lib\nvar VMI map[int64]int64\n"}}
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64) int64 { var v, ok = lib.VMI[k]\n"
+        "\tif ok { return v }\n\treturn 0 }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_imported_map_index_read_comma_ok_assign(go_types_helper):
+    # `v, ok = lib.VMI[k]` — a plain assignment binds the comma-ok
+    # pair into existing bindings the same way.
+    lib = {"lib": {"m.go": "package lib\nvar VMI map[int64]int64\n"}}
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(k int64) int64 {\n"
+        "\tvar v int64\n\tvar ok bool\n"
+        "\tv, ok = lib.VMI[k]\n"
+        "\tif ok { return v }\n\treturn 0 }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_imported_map_index_read_comma_ok_composite_stays_closed(
+    go_types_helper,
+):
+    # `v, ok := lib.VSM[k]` — a composite-typed map element stays
+    # closed, like the single-value read.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { v, ok := lib.VSM[\"k\"]\n"
+        "\tif ok { return int64(v.F) }\n\treturn 0 }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(

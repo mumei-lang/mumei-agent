@@ -2387,8 +2387,14 @@ through the same gate: map type facts carry both a `key` fact and the
 dependencies, and the named key's identity pins alongside the
 container's and value's. The index expression must still be a
 modelled shape — a literal index (`lib.VM["k"]`) is dep-free like a
-constant — while the comma-ok form `v, ok := lib.VM[k]` needs a
-two-name binding the path does not perform, so it stays closed; a member
+constant (`true`/`false` go through expression resolution instead,
+since Go allows shadowing the predeclared names as variables) — and
+the comma-ok form `v, ok := lib.VM[k]` admits too: it binds
+exactly two names on a map member, so the `:=`, `var` and plain
+`=` tuple paths unpack the pair like a two-result call — the value
+read and the presence flag each conservatively take the read's own
+dependencies. A composite-typed element (`lib.VSM[k]`) stays closed
+the same way the single-value read does. A member
 write (`lib.VM[k] = v`) pins the named key's identity too.
 
 The member record's `signature_type_ids` for a method now include
