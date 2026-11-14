@@ -969,17 +969,42 @@ class _Builder:
         back into the base binding (a later `t.M()` can observe the
         write). An imported member, a package var, an unbound name, or
         a base whose type declares no identity keeps the statement
-        closed, matching the bare-identifier gate. The `*t`
-        dereference shape is not admitted here: an `&x` alias makes an
-        indirected store able to overwrite a tracked binding.
+        closed, matching the bare-identifier gate. A `(*t).f` base
+        admits the same way — the explicit dereference spells out
+        `t.f`'s auto-deref, and the field write still lands only in
+        the pointee. A bare `*t` LHS is not admitted here: an `&x`
+        alias makes an indirected store able to overwrite a tracked
+        binding.
         """
         while node is not None and node.type == "parenthesized_expression":
-            node = next(iter(node.named_children), None)
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
         if node is None or node.type != "selector_expression":
             return None
         base = node.child_by_field_name("operand")
         while base is not None and base.type == "parenthesized_expression":
-            base = next(iter(base.named_children), None)
+            base = next(
+                (c for c in base.named_children if c.type != "comment"),
+                None,
+            )
+        if base is not None and base.type == "unary_expression":
+            # `(*t).f` — one explicit dereference of the bound pointer
+            # before the selection, the same auto-deref `t.f` spelled
+            # out. `**t` and computed bases stay closed.
+            operator = base.child_by_field_name("operator")
+            if operator is None or operator.text != b"*":
+                return None
+            base = base.child_by_field_name("operand")
+            while (
+                base is not None
+                and base.type == "parenthesized_expression"
+            ):
+                base = next(
+                    (c for c in base.named_children if c.type != "comment"),
+                    None,
+                )
         if base is None or base.type != "identifier" or base.text == b"_":
             return None
         ref = self.references.get(self.node_key(base))
