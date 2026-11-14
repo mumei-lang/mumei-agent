@@ -244,7 +244,10 @@ class GoSummarySet:
         Binding identities carry the producing unit's source digest, so a
         replaced callee never reuses its identity: every summary that
         recorded a call to a target absent from `known` must be
-        re-derived. Detection only — what to recompute is the host's call.
+        re-derived. Direct callees only — a transitive caller two edges
+        away is not reported; hosts building incremental caches must
+        propagate invalidation through the recorded call graph
+        themselves. Detection only — what to recompute is the host's call.
         """
         live = frozenset(known)
         return frozenset(
