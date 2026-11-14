@@ -755,29 +755,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
         # a value the fragment's model cannot hold. Everything else
         # stays closed: strings have no container fact, nested or
         # computed operands (`lib.VA[i][j]`, `f()[i]`) name no member,
-        # the comma-ok form `v, ok := lib.VM[k]` needs a two-name
-        # binding this path does not perform, and imported-state
+        # and imported-state
         # writes (`lib.VA[i] = v`) match the imported-var-write rule.
-        operand = node.child_by_field_name("operand")
+        # The comma-ok form `v, ok := lib.VM[k]` unpacks a map member's
+        # pair at the statement level and lands here as the same read.
         index = node.child_by_field_name("index")
-        inner = operand
-        while inner is not None and inner.type == "parenthesized_expression":
-            inner = next(
-                (c for c in inner.named_children if c.type != "comment"),
-                None,
-            )
-        member = None
-        if inner is not None and inner.type == "selector_expression":
-            member = self._package_member(inner)
-        elif inner is not None and inner.type == "identifier":
-            ref = self.references.get(self.node_key(inner))
-            if ref is not None and ref.kind == "import":
-                candidate = self.members.get(ref.binding_id)
-                if (
-                    candidate is not None
-                    and candidate.name.encode("utf-8") == inner.text
-                ):
-                    member = candidate
+        member = self._index_member(node)
         elem = member.type.elem if member is not None else None
         if (
             index is None
@@ -846,6 +829,52 @@ member, or one explicit dereference of one (`(*t).F` — the same
         if resolved is None:
             return None
         return resolved[2]
+
+    def _index_member(self, node: Any) -> PackageMember | None:
+        """The imported `var` member an index expression's operand
+        names — `lib.VM`, `VM` under a dot import, or parentheses
+        around either — or None."""
+        inner = node.child_by_field_name("operand")
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is not None and inner.type == "selector_expression":
+            return self._package_member(inner)
+        if inner is not None and inner.type == "identifier":
+            ref = self.references.get(self.node_key(inner))
+            if ref is not None and ref.kind == "import":
+                candidate = self.members.get(ref.binding_id)
+                if (
+                    candidate is not None
+                    and candidate.name.encode("utf-8") == inner.text
+                ):
+                    return candidate
+        return None
+
+    def _comma_ok_map_index(
+        self, node: Any, width: int
+    ) -> PackageMember | None:
+        """The map member a `v, ok := lib.VM[k]` read targets.
+
+        Comma-ok binds exactly two names — the value read and the
+        presence flag — so only a two-name LHS on an index
+        expression whose operand names an imported map `var`
+        admits. The read itself still goes through
+        `_imported_index_read`, so the element's scalar-or-pointer
+        classification and the pins apply unchanged.
+        """
+        if width != 2 or node is None or node.type != "index_expression":
+            return None
+        member = self._index_member(node)
+        if (
+            member is None
+            or member.kind != "var"
+            or member.type.kind != "map"
+        ):
+            return None
+        return member
 
     def _imported_member_write(
         self, node: Any
@@ -1525,10 +1554,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 # `a, b := lib.F(x)` — a multi-valued imported call
                 # unpacks one RHS into every LHS; each result carries
                 # the same over-approximated dependency set, so a
-                # single evaluation stores to all names.
-                if len(rights) != 1 or self._multi_result_call(
-                    rights[0], fn, len(lefts)
-                ) is None:
+                # single evaluation stores to all names. `v, ok :=
+                # lib.VM[k]` binds the comma-ok pair the same way —
+                # the presence flag conservatively takes the read's
+                # dependencies too.
+                if len(rights) != 1 or (
+                    self._multi_result_call(rights[0], fn, len(lefts))
+                    is None
+                    and self._comma_ok_map_index(rights[0], len(lefts))
+                    is None
+                ):
                     raise _Unsupported("unsupported_statement", _span(node))
                 values = [
                     self.expression(
@@ -1590,10 +1625,16 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 multi = (
                     len(names) != len(value_nodes)
                     and len(value_nodes) == 1
-                    and self._multi_result_call(
-                        value_nodes[0], fn, len(names)
+                    and (
+                        self._multi_result_call(
+                            value_nodes[0], fn, len(names)
+                        )
+                        is not None
+                        or self._comma_ok_map_index(
+                            value_nodes[0], len(names)
+                        )
+                        is not None
                     )
-                    is not None
                 )
                 if not names or (
                     len(names) != len(value_nodes)
@@ -1740,8 +1781,12 @@ member, or one explicit dereference of one (`(*t).F` — the same
             multi = (
                 len(lefts) != len(rights)
                 and len(rights) == 1
-                and self._multi_result_call(rights[0], fn, len(lefts))
-                is not None
+                and (
+                    self._multi_result_call(rights[0], fn, len(lefts))
+                    is not None
+                    or self._comma_ok_map_index(rights[0], len(lefts))
+                    is not None
+                )
             )
             if (
                 operator is None
