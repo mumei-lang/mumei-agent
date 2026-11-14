@@ -1713,6 +1713,23 @@ summarizable. Because initializers dispatch through the same statement
 path, `if G(x); cond` / `switch G(x); tag` initializers admit the same
 form.
 
+### C07 alias and resource-state fixtures
+
+The acceptance criterion that interprocedural fixtures cover aliasing
+and resource state is exercised as negative coverage: pointer
+parameters and `&x` aliases, slice/map/channel resource state, package
+globals read or written by a callee, `new`/`make`-style constructor
+state, bound function values and literal closures all fail closed —
+every one lands as a declared gap (`unsupported_signature`,
+`unsupported_operator`, `unsupported_expression`,
+`binding_unavailable`, `non_parameter_reference`,
+`unresolved_or_opaque_call` or `callee_unsupported`) and never as a
+summary that silently misses the alias or mutation. Some producer-level
+shapes (e.g. `make`/`[]int64{...}` in binding position) fail even
+earlier, at the snapshot boundary — still closed, just not a summary
+gap. Admitting any of these is a deliberate future slice, not an
+accident of the fragment.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
