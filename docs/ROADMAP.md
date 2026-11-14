@@ -1865,9 +1865,10 @@ is the multi-file consumer; span lookups are normalised to
 `(file, start, end)` keys so the body analyser runs unchanged.
 
 Boundaries: at most 64 files of at most 64 KiB each, unique non-empty
-names, one shared `package` name enforced by `go/types`. No import
-resolution — `imports_not_supported` still applies; a unit is exactly
-the declared file set, nothing more. File indices are report-internal
+names, one shared `package` name enforced by `go/types`. No ambient
+import resolution — paths resolve only through host-declared `imports`
+(see C06 below); anything else fails the report as `unresolved_import`.
+File indices are report-internal
 positions in the `files` list, not filesystem paths. Single-file v1
 reports keep their exact wire shape (`file` is omitempty); the summary
 gap spans carry the declaring file's position only — file identity
@@ -1897,7 +1898,8 @@ package boundaries. Uses of imported members record `import` references
 with the same identity; package names are namespace qualifiers and are
 not emitted as bindings or references. The loader revalidates the
 format: `direct_import` targets and `import` binding ids must carry the
-5-field imported-identity shape and must not collide with local
+`sha256:{digest}:{file}:{pos}:{scope_start}:{scope_end}` imported-
+identity shape and must not collide with local
 functions or bindings; the single-file loader rejects both kinds.
 
 Consumer semantics stay honest: `summarize_go_package` treats a
