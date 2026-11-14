@@ -4668,9 +4668,10 @@ def test_pointer_param_local_alias_method_call(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
-def test_pointer_deref_stays_closed(go_types_helper):
-    # `*t` reads the pointee — a dereference is outside the fragment,
-    # so only the method/identifier uses of a pointer param summarize.
+def test_pointer_deref_named_pointee_is_admitted(go_types_helper):
+    # `*t` reads the pointee — the declared `*T` names its identity,
+    # so the read records an imported transfer against T (`effects`
+    # unknown) and returns the pointer's provenance: t's deps.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.T) lib.T { return *t }\n"
@@ -4679,7 +4680,9 @@ def test_pointer_deref_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
 
 
 def test_pointer_type_fact_forgery_is_rejected(go_types_helper):
@@ -4949,10 +4952,208 @@ def test_imported_pointer_var_deref_pointer_pointee_stays_closed(
     assert not result.available
 
 
-def test_local_pointer_deref_read_stays_closed(go_types_helper):
-    # `*p` through a local pointer is the read-side of `*t = v`: dep
-    # sets carry indices, not identities, so a pointee read cannot be
-    # attributed to any tracked binding.
+def test_bound_pointer_deref_read_is_admitted(go_types_helper):
+    # `*t` on a pointer-typed parameter — the declared `*T` names the
+    # pointee's identity, so the read records an imported transfer
+    # against it (`effects` unknown) and returns the pointer's own
+    # provenance: the binding's dependencies.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T) int64 { return int64(*t) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    (read,) = [c for c in result.calls if c.imported]
+    assert read.target == members["T"]["id"]
+
+
+def test_bound_pointer_deref_read_through_copy_is_admitted(
+    go_types_helper,
+):
+    # `q := lib.PV; *q` — the bound pointer keeps its declared `*T`
+    # identity; the result carries q's provenance (dep-free member
+    # read) while the deref records T's transfer.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\tq := lib.PV\n"
+        "\treturn int64(*q)\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    targets = {c.target for c in result.calls if c.imported}
+    assert targets == {members["PV"]["id"], members["T"]["id"]}
+
+
+def test_bound_pointer_deref_read_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `p := &x` on a builtin `int64` — the binding's `*int64` names
+    # no pointee identity, so the read stays closed like the
+    # `*lib.PU` member form.
+    files = {
+        "a.go": "package p\nimport \"lib\"\nvar _ = lib.PV\n"
+        "func F(x int64) int64 {\n"
+        "\tp := &x\n"
+        "\treturn *p\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_pointer_deref_read_struct_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*s` on `s *lib.S` — a struct pointee is not a fragment value,
+    # so the read stays closed like `*lib.PS`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(s *lib.S) int64 { _ = *s\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_pointer_deref_read_computed_operand_stays_closed(
+    go_types_helper,
+):
+    # `*g()` — a computed pointer names no binding, so the deref
+    # stays closed like `*g() = v` does on the write side.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func g() *lib.T { return lib.PV }\n"
+        "func F() int64 { return int64(*g()) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_pointer_double_deref_stays_closed(go_types_helper):
+    # `**t` — the outer operand is itself a `*t` deref, not a
+    # bound name, so it stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t **lib.T) int64 { return int64(**t) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_bound_pointer_deref_read_carries_escaped_pointee_deps(
+    go_types_helper,
+):
+    # `p := &x; x = y; *p` reads x's CURRENT value — the pointer's
+    # provenance alone would miss y.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y lib.T) int64 {"
+        " p := &x; x = y; return int64(*p) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_bound_pointer_deref_read_crosses_alias_identities(
+    go_types_helper,
+):
+    # A `*T` pointer can alias an `A2 = T` binding even though the
+    # facts record distinct type_id's for the alias — the escaped
+    # union carries every escaped binding, not a type-matched subset.
+    alias_lib = {
+        "lib": {"m.go": "package lib\ntype T int64\ntype A2 = T\n"}
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, x lib.A2, y lib.T) int64 {"
+        " _ = &x; _ = &y; return int64(*t) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, alias_lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
+
+
+def test_member_pointer_deref_read_carries_escaped_pointee_deps(
+    go_types_helper,
+):
+    # `lib.PV = &x; x = y; *lib.PV` may-read x's current value
+    # through the member's stored pointer.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y lib.T) int64 {"
+        " lib.PV = &x; x = y; return int64(*lib.PV) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({1})
+
+
+def test_bound_pointer_deref_read_local_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*p` on `p := &t` where `t` is a local `type T` — the
+    # pointee identity resolves only through `imported_members`, so
+    # a local named type never admits.
+    files = {
+        "a.go": "package p\nimport \"lib\"\ntype LT int64\n"
+        "var _ = lib.V\n"
+        "func F(x int64) int64 { var t LT; p := &t; return int64(*p) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_local_pointer_deref_read_named_pointee_is_admitted(
+    go_types_helper,
+):
+    # `*p` through `p := &t` — the binding's declared `*T` names the
+    # pointee's identity, so the read records an imported transfer
+    # and returns the pointer's provenance (t's dependencies).
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t lib.T) int64 {\n"
@@ -4963,7 +5164,9 @@ def test_local_pointer_deref_read_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
 
 
 def test_deref_write_stays_closed(go_types_helper):
@@ -5093,8 +5296,25 @@ def test_imported_member_write_is_admitted(go_types_helper):
 
 
 def test_address_of_composite_stays_closed(go_types_helper):
-    # `&` on a non-identifier operand can't evaluate inside the
-    # fragment — `&(*t)` fails at the operand, not the operator.
+    # `&` on a non-identifier operand evaluates the operand inside the
+    # fragment — `&(*g())` fails at the operand, not the operator,
+    # because `*g()` names no bound pointer.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func g() *lib.T { return lib.PV }\n"
+        "func F() *lib.T {\n"
+        "\treturn &(*g())\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_address_of_deref_read_is_admitted(go_types_helper):
+    # `&(*t)` is `t` — the deref's deps are the pointer's own, so the
+    # address-of returns them unchanged.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.T) *lib.T {\n"
@@ -5104,7 +5324,8 @@ def test_address_of_composite_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_pointer_result_generic_cannot_bypass_instantiation_gate(

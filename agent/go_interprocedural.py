@@ -918,15 +918,18 @@ class _Builder:
         depth: int,
     ) -> frozenset[int]:
         # `*lib.PV` — dereference read of an imported pointer-typed
-        # var. The operand's var read already records the imported
-        # transfer, so the pointee read shares it exactly like the
-        # pointer value itself. The pointee must resolve to a scalar
+        # var — and `*t` — dereference read of a bound pointer whose
+        # declared pointee names an identity. The operand's own read
+        # records the imported transfer for the member form; the
+        # bound form records its own transfer against the pointee
+        # identity because nothing else marks the external read. The
+        # pointee must resolve to a scalar
         # or pointer shape: a named pointee is scalar when the `type`
         # member it names is. An unnamed pointee (`*int64`,
         # `*struct{...}`) cannot be classified — the fact records no
         # identity for it — so it stays closed. Any other operand — a
-        # local or parameter pointer — stays closed too, matching
-        # `*t = v` writes: dep sets track binding indices, not
+        # computed pointer or a nested deref — stays closed too:
+        # dep sets track binding indices, not
         # pointee contents.
         # Comments appear among a node's named children; they are not
         # operands.
@@ -955,22 +958,83 @@ class _Builder:
                     and candidate.name.encode("utf-8") == inner.text
                 ):
                     member = candidate
-        if (
-            member is None
-            or member.kind != "var"
-            or member.type.kind != "pointer"
-        ):
-            raise _Unsupported("non_parameter_reference", _span(node))
-        target = self.members.get(member.type.type_id)
+        bound_ref = None
+        if member is not None:
+            if member.kind != "var" or member.type.kind != "pointer":
+                raise _Unsupported("non_parameter_reference", _span(node))
+            pointee_id = member.type.type_id
+        else:
+            # `*t` — a dereference read of a bound pointer. The
+            # pointee is memory the dep model never tracks, so the
+            # read records an imported transfer against the declared
+            # pointee identity (`effects` reports `unknown`) — while
+            # the result still carries the binding's own
+            # dependencies, the pointer's provenance. Only an
+            # identifier operand admits — a computed pointer
+            # (`*g()`) or a nested deref (`**t`) stays closed.
+            if inner is None or inner.type != "identifier":
+                raise _Unsupported("non_parameter_reference", _span(node))
+            bound_ref = self.references.get(self.node_key(inner))
+            if bound_ref is None or (
+                bound_ref.binding_id not in locals_
+                and bound_ref.binding_id not in params
+            ):
+                raise _Unsupported("non_parameter_reference", _span(node))
+            binding = self.bindings.get(bound_ref.binding_id)
+            if (
+                binding is None
+                or binding.type.kind != "pointer"
+                or not binding.type.type_id
+            ):
+                # A `p := &x` alias produces an unnamed `*int64`
+                # binding — no identity to classify, matching the
+                # `*t = v` write side and the unnamed-pointee member
+                # read.
+                raise _Unsupported("non_parameter_reference", _span(node))
+            pointee_id = binding.type.type_id
+        target = self.members.get(pointee_id)
         if (
             target is None
             or target.kind != "type"
             or target.type.kind not in {"integer", "boolean", "pointer"}
         ):
             raise _Unsupported("non_parameter_reference", _span(node))
-        return self.expression(
+        if bound_ref is not None:
+            # The pointee read touches memory outside the fragment —
+            # record it like an imported member read so `effects`
+            # reports `unknown` and the pointee's identity covers the
+            # read for `stale_dependents`/`call_targets`.
+            transfers.append(
+                CallTransfer(
+                    FileSpan(
+                        self.current_file,
+                        node.start_byte,
+                        node.end_byte,
+                    ),
+                    pointee_id,
+                    (),
+                    frozenset(),
+                    imported=True,
+                )
+            )
+        result = self.expression(
             operand, fn, params, locals_, transfers, count, depth + 1
         )
+        for escaped_id in self.escaped:
+            # The pointer may alias any binding an earlier `&x`
+            # escaped — `p := &x; x = y; *p` reads x's CURRENT value,
+            # so the result must carry the escaped binding's deps,
+            # not only the pointer's provenance. No type check: a
+            # `*A` pointer can alias an `A2 = T` binding even though
+            # the facts record distinct type_id's for the aliases, so
+            # every escaped binding unions in like the `*lib.PV = v`
+            # write-side fold. The same may-read holds for `*lib.PV`
+            # once `lib.PV = &x` could have pointed it at x.
+            if escaped_id in locals_:
+                result |= locals_[escaped_id]
+            elif escaped_id in params:
+                result |= {params[escaped_id]}
+        return result
 
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
