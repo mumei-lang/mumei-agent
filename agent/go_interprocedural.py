@@ -1,6 +1,8 @@
 """Opt-in parameter-dependency summaries, not proofs or audit-grade inputs.
 
-Bodies are let bindings — single-name ``name := expression`` declarations —
+Bodies are let bindings — ``a, b := e1, e2`` declarations bind each
+name to its matching right-hand side's dependencies, evaluated in
+parallel against the pre-state —
 plus ``if``/``else`` and bounded ``for`` statements followed by one or more
 explicit scalar return expressions; the result unions every syntactic return's
 dependencies (unreachable returns included — reachability is not proven). A
@@ -23,9 +25,10 @@ init, with the bound name scoped to the statement (a later out-of-scope
 reference simply never resolves). ``switch`` without ``fallthrough``
 joins the same way: the tag and every case guard are evaluated
 (effect-free), each clause body runs in its own scope and its
-reassignments union back. ``var`` declarations bind like lets — one name
-per ``var_spec`` with at most one value; ``var x T`` is the dep-free zero
-value (grouped ``var (...)`` forms are a parser gap). ``x++``/``x--`` on a
+reassignments union back. ``var`` declarations bind like lets —
+``var a, b T`` is the dep-free zero value and ``var a, b = x, y``
+binds name-wise like ``:=`` (grouped ``var (...)`` forms are a parser
+gap). ``x++``/``x--`` on a
 bound scalar are dependency-preserving, and ``_ = expression``
 evaluates-and-discards like a condition. An unlabelled
 ``break``/``continue`` marks its innermost loop or switch construct as
@@ -386,21 +389,38 @@ class _Builder:
             lefts = _children(left) if left is not None else []
             rights = _children(right) if right is not None else []
             if (
-                len(lefts) != 1
-                or lefts[0].type != "identifier"
-                or len(rights) != 1
+                not lefts
+                or any(l.type != "identifier" for l in lefts)
+                or len(lefts) != len(rights)
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
-            binding = self.bindings_by_span.get(_span(lefts[0]))
-            if binding is None or binding.type.kind not in {"integer", "boolean"}:
-                raise _Unsupported("binding_unavailable", _span(node))
-            self._store(
-                locals_, params, binding.id,
+            # RHS expressions evaluate in parallel against the pre-state
+            # — `a, b := b, a` swaps — so all reads happen before any
+            # store.
+            values = [
                 self.expression(
-                    rights[0], fn, params, locals_, transfers, count, 0
-                ),
-                conditional,
-            )
+                    rhs, fn, params, locals_, transfers, count, 0
+                )
+                for rhs in rights
+            ]
+            for lhs, value in zip(lefts, values):
+                # `_` discards its value — the RHS was still evaluated.
+                if lhs.text == b"_":
+                    continue
+                # `x, y := e1, e2` may reuse an existing `x` when at
+                # least one name is new — go/types records a use for it,
+                # not a fresh binding.
+                binding = self.bindings_by_span.get(_span(lhs))
+                if binding is None:
+                    ref = self.references.get(_span(lhs))
+                    if ref is not None and ref.binding_id:
+                        binding = self.bindings.get(ref.binding_id)
+                if binding is None or binding.type.kind not in {
+                    "integer",
+                    "boolean",
+                }:
+                    raise _Unsupported("binding_unavailable", _span(node))
+                self._store(locals_, params, binding.id, value, conditional)
             return
         if kind == "var_declaration":
             # Grouped `var (...)` declarations never reach here — the
@@ -415,34 +435,42 @@ class _Builder:
                 raise _Unsupported("unsupported_statement", _span(node))
             for spec in specs:
                 names: list[Any] = []
-                values: list[Any] = []
+                value_nodes: list[Any] = []
                 for i, child in enumerate(spec.children):
                     field = spec.field_name_for_child(i)
                     if field == "name":
                         names.append(child)
                     elif field == "value":
-                        values.extend(_children(child))
-                if len(names) != 1 or len(values) > 1:
+                        value_nodes.extend(_children(child))
+                if not names or len(names) != len(value_nodes) and value_nodes:
                     raise _Unsupported("unsupported_statement", _span(spec))
-                binding = self.bindings_by_span.get(_span(names[0]))
-                if binding is None or binding.type.kind not in {
-                    "integer",
-                    "boolean",
-                }:
-                    raise _Unsupported("binding_unavailable", _span(spec))
-                # `var x T` without a value is the zero value — dep-free.
-                self._store(
-                    locals_, params, binding.id,
-                    (
+                # `var a, b T` without values is the zero value —
+                # dep-free. With values the RHS evaluates in parallel
+                # against the pre-state before any store.
+                if value_nodes:
+                    values = [
                         self.expression(
-                            values[0], fn, params, locals_, transfers,
+                            rhs, fn, params, locals_, transfers,
                             count, 0,
                         )
-                        if values
-                        else frozenset()
-                    ),
-                    conditional,
-                )
+                        for rhs in value_nodes
+                    ]
+                else:
+                    values = [frozenset() for _ in names]
+                for name, value in zip(names, values):
+                    if name.text == b"_":
+                        continue
+                    binding = self.bindings_by_span.get(_span(name))
+                    if binding is None or binding.type.kind not in {
+                        "integer",
+                        "boolean",
+                    }:
+                        raise _Unsupported(
+                            "binding_unavailable", _span(spec)
+                        )
+                    self._store(
+                        locals_, params, binding.id, value, conditional
+                    )
             return
         if kind == "if_statement":
             condition = node.child_by_field_name("condition")
