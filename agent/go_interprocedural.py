@@ -987,9 +987,9 @@ class _Builder:
             raise _Unsupported("analysis_limit", _span(node))
         kind = node.type
         children = _children(node)
-        if kind in {"int_literal", "rune_literal", "iota"}:
+        if kind in {"int_literal", "rune_literal"}:
             return frozenset()
-        if kind in {"identifier", "true", "false"}:
+        if kind in {"identifier", "true", "false", "iota"}:
             ref = self.references.get(_span(node))
             # Reassigned names (including parameters) resolve through
             # `locals_` first — their latest dependencies live there.
@@ -997,7 +997,13 @@ class _Builder:
                 return locals_[ref.binding_id]
             if ref is not None and ref.binding_id in params:
                 return frozenset({params[ref.binding_id]})
-            if ref is not None and ref.kind == "universe" and kind in {"true", "false"}:
+            # `iota` is not a keyword — only the compiler's universe
+            # reference proves the predeclared constant, never the name.
+            if (
+                ref is not None
+                and ref.kind == "universe"
+                and (kind in {"true", "false"} or node.text == b"iota")
+            ):
                 return frozenset()
             binding = (
                 self.bindings.get(ref.binding_id)

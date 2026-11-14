@@ -155,6 +155,9 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(f func(int64) int64, x int64) int64 { return f(x) }",
         "func Id(x int64) int64 {return x}; var Alias = Id; func F(x int64) int64 {return Alias(x)}",
         "var global int64; func F(x int64) int64 {return global}",
+        # A package variable named `iota` is not the predeclared
+        # constant — its read stays a declared gap.
+        "var iota int64; func F(x int64) int64 { return iota }",
         "var true bool; func F() bool {return true}",
         "func F(x int64) int64 {return 1/x}",
         "func F(x int64) int64 {return 1%x}",
@@ -502,6 +505,16 @@ def test_range_int_dependencies(go_types_helper, declarations, expected):
         # `iota` is a dep-free universe constant.
         (
             "func F(x int64) int64 { const A = iota; return x + A }",
+            frozenset({0}),
+        ),
+        # `iota` is not a keyword — a parameter named `iota` keeps its
+        # own dependency, and a shadowing const still resolves as one.
+        (
+            "func F(iota int64) int64 { return iota }",
+            frozenset({0}),
+        ),
+        (
+            "const iota int64 = 3\nfunc F(x int64) int64 { return iota + x }",
             frozenset({0}),
         ),
         # A constant shadowing a name resolves to the const binding.
