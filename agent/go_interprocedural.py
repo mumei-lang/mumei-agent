@@ -517,6 +517,43 @@ class _Builder:
         if member.type.type_id:
             self.pinned.add(member.type.type_id)
 
+    def _opaque_write_target(
+        self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]
+    ) -> str | None:
+        """An assignment LHS whose field store lands in caller state.
+
+        `t.f` (a field selection — reachable in the fragment only
+        through a pointer-typed parameter, since struct-typed bindings
+        cannot exist) mutates memory the dependency model does not
+        follow: the model tracks each binding's index, never the
+        pointee's or field's contents. The write is admitted when the
+        base is a bound parameter or local identifier carrying a
+        declared named-type identity — that identity becomes the
+        recorded write target. An imported member, a package var, an
+        unbound name, or a base whose type declares no identity keeps
+        the statement closed, matching the bare-identifier gate. The
+        `*t` dereference shape is not admitted here: an `&x` alias
+        makes an indirected store able to overwrite a tracked binding.
+        """
+        while node is not None and node.type == "parenthesized_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "selector_expression":
+            return None
+        base = node.child_by_field_name("operand")
+        while base is not None and base.type == "parenthesized_expression":
+            base = next(iter(base.named_children), None)
+        if base is None or base.type != "identifier" or base.text == b"_":
+            return None
+        ref = self.references.get(self.node_key(base))
+        if ref is None or (
+            ref.binding_id not in locals_ and ref.binding_id not in params
+        ):
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if binding is None or not binding.type.type_id:
+            return None
+        return binding.type.type_id
+
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
         if binding_id in self.cache:
@@ -955,18 +992,53 @@ class _Builder:
             # runs, matching the single-assignment check's error order.
             refs: list[Any] = []
             for lhs in lefts:
-                if lhs.type != "identifier":
-                    raise _Unsupported("unsupported_statement", _span(lhs))
-                if lhs.text == b"_":
+                if lhs.type == "identifier":
+                    if lhs.text == b"_":
+                        refs.append(None)
+                        continue
+                    ref = self.references.get(self.node_key(lhs))
+                    if ref is None or (
+                        ref.binding_id not in locals_
+                        and ref.binding_id not in params
+                    ):
+                        raise _Unsupported("binding_unavailable", _span(lhs))
+                    refs.append(ref)
+                    continue
+                # `t.f = v` — a field store through a pointer-typed
+                # parameter (struct-typed bindings cannot exist in the
+                # fragment, so `t` can only be `*S` pointing into
+                # caller state) mutates memory the dependency model
+                # does not follow: it tracks bindings, never field
+                # contents. The store itself carries no result
+                # dependency — the RHS still evaluates for its calls
+                # and is discarded — but it IS an external mutation,
+                # so a zero-argument imported transfer against the
+                # base's declared type identity records it, marking
+                # `effects` unknown like an imported var read. A
+                # `*t = v` dereference stays closed: `p := &x`
+                # aliases a tracked local and dep sets carry indices,
+                # not identities, so an indirected store cannot be
+                # proven not to overwrite a tracked binding.
+                write_target = self._opaque_write_target(
+                    lhs, locals_, params
+                )
+                if write_target is not None:
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            write_target,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
                     refs.append(None)
                     continue
-                ref = self.references.get(self.node_key(lhs))
-                if ref is None or (
-                    ref.binding_id not in locals_
-                    and ref.binding_id not in params
-                ):
-                    raise _Unsupported("binding_unavailable", _span(lhs))
-                refs.append(ref)
+                raise _Unsupported("unsupported_statement", _span(lhs))
             # Tuple assignment is parallel: every RHS evaluates against the
             # pre-state before any store lands, so `x, y = y, x` swaps each
             # name's original dependencies. `x, y = lib.F(a)` unpacks one
