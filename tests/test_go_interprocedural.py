@@ -6173,6 +6173,47 @@ def test_imported_deref_write_computed_pointer_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_imported_deref_member_write_folds_into_escaped_binding(
+    go_types_helper,
+):
+    # `lib.PV = &x; *lib.PV = lib.T(y)` — the member may point at `x`,
+    # so the deref store unions the stored value's dependencies into
+    # the escaped binding: `return x` reports `y` too.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) lib.T {\n"
+        "\tlib.PV = &x\n"
+        "\t*lib.PV = lib.T(y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_imported_deref_member_write_no_escape_keeps_deps(
+    go_types_helper,
+):
+    # Without an earlier `&x` the deref store cannot alias `x` — its
+    # dependencies stay unchanged.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) lib.T {\n"
+        "\t*lib.PV = lib.T(y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+
+
 def test_parenthesized_member_write_is_admitted(go_types_helper):
     # `(lib.V) = v` — parentheses around the LHS do not change the
     # write target.

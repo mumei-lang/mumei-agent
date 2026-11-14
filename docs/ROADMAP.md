@@ -2290,7 +2290,12 @@ never unwraps, and a pointer member whose pointee is unnamed
 (`*lib.PU = v` on `*int64`, `(*lib.PA)[i] = v` on `*[4]int64`,
 `*lib.PPV` or `**lib.PPV` on `**T`) stays closed because the fact
 carries no identity for the stored type a redeclaration would
-flag. The stored value's dependencies drop with the
+flag. A deref store can also alias a tracked binding — `lib.PV =
+&x` aims the member at `x` — so any binding `&x` escaped marks the
+binding, and a `*lib.PV = v` write unions the stored value's
+dependencies into every escaped binding (`return x` then reports
+the stored value's dependencies too). The stored value's
+dependencies otherwise drop with the
 write because no binding tracks member contents, and a nested index
 expression still evaluates whenever it could record something — a
 call (`lib.VA[f()]`), a conversion, or an imported member read
