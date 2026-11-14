@@ -315,9 +315,8 @@ def test_for_bodies_union_return_dependencies(
         "func F(x int64) int64 { for i:=x; i>0; i=i-1 {}; return x }",
         # Assignment updates are not inc/dec.
         "func F(x int64) int64 { for i:=x; i>0; i=x {}; return x }",
-        # Compound assignment operators are not `=`.
-        "func F(x int64) int64 { x += 1; return x }",
-        "func F(x int64) int64 { x, x = x, x; return x }",
+        # Multi-valued call results stay outside the fragment.
+        "func G(a int64) (int64, int64) { return a, a }\nfunc F(x int64) int64 { var y int64; x, y = G(x); return y }",
     ],
 )
 def test_for_shapes_stay_unsupported(go_types_helper, declarations):
@@ -387,6 +386,77 @@ def test_scalar_reassignment_dependencies(
 @pytest.mark.parametrize(
     "declarations,expected",
     [
+        # Compound assignment unions the binding's current deps with the RHS.
+        (
+            "func F(x, y int64) int64 { x += y; return x }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x int64) int64 { x -= 1; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, y int64) int64 { x *= y; return x }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { x <<= y; return x }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { x &^= y; return x }",
+            frozenset({0, 1}),
+        ),
+        # Compound on a local keeps the binding's accumulated deps.
+        (
+            "func F(x, y int64) int64 { z:=y; z += x; return z }",
+            frozenset({0, 1}),
+        ),
+        # Compound inside a branch still joins as a may-assignment.
+        (
+            "func F(x, y int64) int64 { if x>0 { x += y }; return x }",
+            frozenset({0, 1}),
+        ),
+        # Tuple assignment is parallel: RHS reads the pre-state.
+        (
+            "func F(x, y int64) int64 { x, y = y, x; return x }",
+            frozenset({1}),
+        ),
+        (
+            "func F(x, y int64) int64 { x, y = y, x; return y }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, y int64) int64 { x, y = y, x+y; return y }",
+            frozenset({0, 1}),
+        ),
+        # A blank LHS in a tuple evaluates-and-discards.
+        (
+            "func F(x int64) int64 { var y int64; y, _ = x, x; return y }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { var y int64; _, y = x, 0; return y }",
+            frozenset(),
+        ),
+        # Tuple in a branch joins back.
+        (
+            "func F(x, y int64) int64 { if x>0 { x, y = y, x }; return x }",
+            frozenset({0, 1}),
+        ),
+    ],
+)
+def test_assignment_forms_dependencies(
+    go_types_helper, declarations, expected
+):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
         # Expression switch: clause bodies join as may-execute alternatives.
         (
             "func F(x int64) int64 { y:=x; switch x { case 1: y = y+1; case 2: y = y }; return y }",
@@ -436,7 +506,7 @@ def test_expression_switch_dependencies(go_types_helper, declarations, expected)
         # select is unmodelled concurrency.
         "func F(x int64) int64 { select {}; return x }",
         # A switch with an unsupported statement inside a clause is a gap.
-        "func F(x int64) int64 { switch x { case 1: y := 0; _ = y; x += 1 }; return x }",
+        "func F(x int64) int64 { switch x { case 1: y := 0; _ = y; defer func(){}() }; return x }",
     ],
 )
 def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
