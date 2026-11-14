@@ -2241,10 +2241,25 @@ and a redeclaration of that type flags the summary via
 `stale_dependents`. A `*t = v` dereference stays closed: `p := &x`
 aliases a tracked local and dep sets carry indices, not identities,
 so an indirected store cannot be proven not to overwrite a tracked
-binding. Imported members and unbound bases keep the statement
-closed (`lib.VS.f = v` — the base is a qualified name, not a bound
-identifier), as do `&` on anything but a fragment operand and
-imported `var` *writes* of any type.
+binding. Unbound bases keep the statement closed, as do `&` on
+anything but a fragment operand and dereference writes of any
+imported member (`*lib.PV = v`).
+
+Writes to imported `var` members admit through the same external-
+mutation rule: `lib.V = v`, `lib.VA[i] = v` and `lib.VS.f = v` — and
+their dot-imported forms — resolve the LHS through selector and
+index operands until a `var` member names the target, then record a
+zero-argument imported transfer against the member's own identity
+(`effects` reports `unknown`, and the member's declared type
+identity — plus a container element's — pins for
+`stale_dependents`). The stored value's dependencies drop with the
+write because no binding tracks member contents, and a nested index
+expression still evaluates for its calls — a call-free index
+(`lib.VM["k"]`) needs no evaluation while `lib.VA[f()] = v` keeps
+`f()`'s transfer. Compilable closed cases: a computed operand
+(`g()[0] = v`) names no member, a `const`, `func` or `type`
+member names no writable storage, and inc/dec statements
+(`lib.V++`) keep their own gate.
 
 An index read of an imported container var — `lib.VA[i]` — admits
 through the member record's new element fact: slice and array type
@@ -2260,10 +2275,10 @@ The operand resolves like a member read: a package-qualified name, a
 dot-imported name, or parentheses around either. The element fact
 must be scalar or pointer — a struct or nested-slice element is a
 value the fragment's model cannot hold — and anything that names no
-member stays closed: maps and strings declare no `elem` fact, a
+member stays closed: maps and strings declare no `elem` fact, and a
 computed or nested operand (`f()[i]`, `lib.V2[0][0]`) is not a member
-name, and an index write (`lib.VA[i] = v`) matches the
-imported-var-write rule.
+name. An index write (`lib.VA[i] = v`) takes the imported-var-write
+path above instead — the LHS never reaches the read gate.
 
 The member record's `signature_type_ids` for a method now include
 the receiver's own named-type identity — `x.M(y)` pins `T` even when
