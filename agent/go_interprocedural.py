@@ -5,10 +5,13 @@ plus ``if``/``else`` and bounded ``for`` statements followed by one or more
 explicit scalar return expressions; the result unions every syntactic return's
 dependencies (unreachable returns included — reachability is not proven). A
 ``for`` clause may hold one let-binding initializer, a supported condition and
-an inc/dec update on a bound scalar; ``range``, ``break``/``continue``,
-compound operators, tuples and every other statement shape
-stay unsupported. A scalar ``x = expression`` reassignment replaces the
-binding's dependencies — it never declares a new variable. Loop bodies are
+an inc/dec update on a bound scalar; ``range`` and every other
+statement shape stay unsupported. A scalar ``x = expression``
+reassignment replaces the binding's dependencies — it never declares a
+new variable. Tuple assignments ``x, y = e1, e2`` are parallel: every
+right-hand side evaluates against the pre-state before any store lands.
+Compound assignments ``x op= e`` read the old value — the result unions
+the binding's current dependencies with the right-hand side's. Loop bodies are
 joined to a widening fixed point so dependencies propagating across
 iterations are captured (joins, not unrolls — trip counts are never
 modelled). ``if`` and expression ``switch`` statements accept a
@@ -66,6 +69,9 @@ _BINARY = frozenset(
     {"+", "-", "*", "&", "|", "^", "&^", "==", "!=", "<", "<=", ">", ">=", "&&", "||"}
 )
 _UNARY = frozenset({"+", "-", "!", "^"})
+_COMPOUND_ASSIGN = frozenset(
+    {"+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^="}
+)
 
 
 @dataclass(frozen=True)
@@ -482,36 +488,56 @@ class _Builder:
             right = node.child_by_field_name("right")
             lefts = _children(left) if left is not None else []
             rights = _children(right) if right is not None else []
+            compound = operator is not None and operator.type in _COMPOUND_ASSIGN
             if (
                 operator is None
-                or operator.type != "="
-                or len(lefts) != 1
-                or lefts[0].type != "identifier"
-                or len(rights) != 1
+                or (operator.type != "=" and not compound)
+                or not lefts
+                or (compound and len(lefts) != 1)
+                or len(lefts) != len(rights)
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
-            if lefts[0].text == b"_":
-                # `_ = e` evaluates the expression and discards it — like a
-                # condition, its dependencies cannot reach the result.
+            # Every LHS must be a bound identifier or `_` before any RHS
+            # runs, matching the single-assignment check's error order.
+            refs: list[Any] = []
+            for lhs in lefts:
+                if lhs.type != "identifier":
+                    raise _Unsupported("unsupported_statement", _span(lhs))
+                if lhs.text == b"_":
+                    refs.append(None)
+                    continue
+                ref = self.references.get(_span(lhs))
+                if ref is None or (
+                    ref.binding_id not in locals_
+                    and ref.binding_id not in params
+                ):
+                    raise _Unsupported("binding_unavailable", _span(lhs))
+                refs.append(ref)
+            # Tuple assignment is parallel: every RHS evaluates against the
+            # pre-state before any store lands, so `x, y = y, x` swaps each
+            # name's original dependencies.
+            values = [
                 self.expression(
-                    rights[0], fn, params, locals_, transfers, count, 0
+                    rhs, fn, params, locals_, transfers, count, 0
                 )
-                return
-            ref = self.references.get(_span(lefts[0]))
-            if ref is None or (
-                ref.binding_id not in locals_ and ref.binding_id not in params
-            ):
-                raise _Unsupported("binding_unavailable", _span(lefts[0]))
-            # Reassignment replaces the binding's dependencies; it never
-            # declares a new variable. Inside a branch the caller's join
-            # unions the new value back as a may-assignment.
-            self._store(
-                locals_, params, ref.binding_id,
-                self.expression(
-                    rights[0], fn, params, locals_, transfers, count, 0
-                ),
-                conditional,
-            )
+                for rhs in rights
+            ]
+            for ref, value in zip(refs, values):
+                if ref is None:
+                    continue
+                if compound:
+                    # `x op= e` reads the old value too — the result unions
+                    # the binding's current dependencies with the RHS's.
+                    if ref.binding_id in locals_:
+                        value = locals_[ref.binding_id] | value
+                    else:
+                        value = frozenset({params[ref.binding_id]}) | value
+                # Reassignment replaces the binding's dependencies; it never
+                # declares a new variable. Inside a branch the caller's join
+                # unions the new value back as a may-assignment.
+                self._store(
+                    locals_, params, ref.binding_id, value, conditional,
+                )
             return
         if kind == "for_statement":
             body_node = node.child_by_field_name("body")

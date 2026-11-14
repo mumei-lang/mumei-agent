@@ -1625,8 +1625,8 @@ inc/dec operands stay `unsupported_statement`/`binding_unavailable`.
 statement is dispatched normally before the condition or tag is
 evaluated, and a bound name is scoped to the statement (a later
 out-of-scope reference simply never resolves). Initializer forms
-outside the fragment — multi-name declarations, compound assignments,
-expression/send statements — stay `unsupported_statement` /
+outside the fragment — multi-name declarations, expression/send
+statements — stay `unsupported_statement` /
 `binding_unavailable` through the same dispatch.
 
 ### C07 scalar conversions in expressions
@@ -1648,6 +1648,22 @@ their result unions every argument's dependencies. Every other builtin
 (`panic`, `len`, `cap`, `append`, `make`, `new`, `complex`, `real`,
 `imag`, ...) stays `unresolved_or_opaque_call`; `len`/`cap` can only
 take values no supported binding can hold anyway.
+
+### C07 compound and tuple assignments
+
+Assignment statements now cover the full scalar fragment: beyond
+`x = e`, compound forms `x op= e` (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`,
+`|=`, `^=`, `<<=`, `>>=`, `&^=`) union the binding's current
+dependencies with the right-hand side's — the operator reads the old
+value. Tuple assignments `x, y = e1, e2` are parallel: every right-hand
+side evaluates against the pre-state before any store lands, so
+`x, y = y, x` swaps each name's original dependencies; `_` slots
+evaluate-and-discard. Because initializers dispatch through the same
+statement path, `for`/`if`/`switch` initializers accept the new forms
+too. Left-hand sides stay bound identifiers or `_` — selector/index
+targets and multi-valued call results (a count mismatch against the
+left-hand side) stay `unsupported_statement` /
+`binding_unavailable`.
 
 ## Roadmap authority and vocabulary
 
