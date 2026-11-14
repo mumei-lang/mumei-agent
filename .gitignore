@@ -14,3 +14,4 @@ visualizer/.report_history.lock
 *.cast
 .agents/
 examples/challenges/results/*/
+tools/go-types/go-types
