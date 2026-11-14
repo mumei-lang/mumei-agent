@@ -179,6 +179,37 @@ func TestMultiResultImportedCallDeclaresArity(t *testing.T) {
 	}
 }
 
+func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(t *lib.T, y int64) int64 { return t.PM(y) }"}}
+	imports := []importedUnit{{"lib", []namedSource{
+		{"m.go", "package lib\nfunc (t *T) PM(v int64) int64 { return v }\nfunc Take(t *T) int64 { return 0 }"},
+		{"t.go", "package lib\ntype T int64"},
+	}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	var tID string
+	for _, m := range out.ImportedMembers {
+		if m.Name == "T" {
+			tID = m.ID
+		}
+		if m.Name == "Take" && len(m.SignatureTypeIDs) != 1 {
+			t.Fatal("a pointer-typed parameter did not pin its pointee")
+		}
+		if m.Name == "Take" && m.SignatureTypeIDs[0] != tID && tID != "" {
+			t.Fatal("a pointer-typed parameter pinned the wrong identity")
+		}
+	}
+	if tID == "" {
+		t.Fatal("the pointee's member identity is missing")
+	}
+	if len(out.Functions) != 1 || out.Functions[0].Parameters[0].Type.Kind != "pointer" ||
+		out.Functions[0].Parameters[0].Type.TypeID != tID {
+		t.Fatal("a pointer parameter lost its pointee identity")
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {

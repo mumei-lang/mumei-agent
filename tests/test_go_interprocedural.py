@@ -4225,14 +4225,13 @@ def test_imported_method_expression_is_admitted(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
-def test_pointer_method_expression_records_but_stays_unsupported(
+def test_pointer_method_expression_records_and_summarizes(
     go_types_helper,
 ):
     # `(*lib.T).PM(t, x)` records `direct_import` — the wire shape is
-    # identical to `lib.T.M` — but a `*lib.T` receiver can only arrive
-    # through a pointer-typed parameter, which the signature rules
-    # reject as `unsupported_signature`; it is closed at the consumer
-    # level for now.
+    # identical to `lib.T.M` — and a `*lib.T` receiver parameter is a
+    # scalar-fragment signature type, so the call unions its argument
+    # deps like any other imported call.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.T, x int64) int64 { return (*lib.T).PM(t, x) }\n"
@@ -4247,7 +4246,7 @@ def test_pointer_method_expression_records_but_stays_unsupported(
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
 def test_interface_method_expression_stays_closed(go_types_helper):
@@ -4417,3 +4416,116 @@ def test_method_flag_on_non_direct_import_call_is_rejected(go_types_helper):
         load_go_package_snapshot(
             json.dumps(tampered).encode(), files, target_arch="amd64"
         )
+
+
+def test_pointer_param_method_call_is_admitted(go_types_helper):
+    # `t *lib.T` — a pointer-typed parameter carries only its dep
+    # index: `t.PM(y)` is the same `method` record as `x.PM(y)`, with
+    # the receiver expression evaluated like any other argument.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, y int64) int64 { return t.PM(y) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["method"] is True
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_pointer_param_type_fact_carries_pointee_identity(go_types_helper):
+    # The parameter's recorded type fact is `pointer` with the
+    # pointee's named identity — redeclaring `lib.T` pins this summary
+    # like any other signature type.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T) int64 { return 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    members = {m["name"]: m for m in report["imported_members"]}
+    (fn,) = report["functions"]
+    (param,) = fn["parameters"]
+    assert param["type"]["kind"] == "pointer"
+    assert param["type"]["type_id"] == members["T"]["id"]
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and members["T"]["id"] in result.pinned
+
+
+def test_pointer_result_is_admitted(go_types_helper):
+    # `*lib.T` as the sole result: `return t` hands back the
+    # parameter's deps through the same type fact.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T) *lib.T { return t }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_pointer_param_local_alias_method_call(go_types_helper):
+    # `p := t` binds the parameter's dep set to `p`; the method call
+    # through the alias still unions receiver and argument deps.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T, y int64) int64 {\n"
+        "\tp := t\n"
+        "\treturn p.PM(y)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_pointer_deref_stays_closed(go_types_helper):
+    # `*t` reads the pointee — a dereference is outside the fragment,
+    # so only the method/identifier uses of a pointer param summarize.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T) lib.T { return *t }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_pointer_type_fact_forgery_is_rejected(go_types_helper):
+    # A `pointer` fact admits only an empty basic name — its identity is
+    # `type_id`. A forged name or a scalar-width payload fails closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.T) int64 { return 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    for bad in (
+        {"name": "int64"},
+        {"width": 64},
+        {"signed": True},
+    ):
+        tampered = json.loads(json.dumps(report))
+        tampered["functions"][0]["parameters"][0]["type"].update(bad)
+        with pytest.raises(SnapshotError):
+            load_go_package_snapshot(
+                json.dumps(tampered).encode(), files, target_arch="amd64"
+            )

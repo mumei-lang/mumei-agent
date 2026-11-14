@@ -266,7 +266,8 @@ func (ix *indexer) directImportMethodID(f *types.Func) (string, int, bool) {
 // composite instantiated parameter (`[]T`) is outside the scalar fragment
 // anyway. The dependency model is the same opaque `direct_import` shape —
 // the result depends on every evaluated argument. Inferred calls `lib.G(x)`
-// keep their existing classification.
+// reach the same gate through `importedInstantiationID`, which looks up
+// `info.Instances` for inferred and explicit instantiations alike.
 func (ix *indexer) directImportInstantiation(x ast.Expr) (string, int, bool) {
 	sel, ok := unparen(x).(*ast.SelectorExpr)
 	if !ok {
@@ -463,6 +464,12 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 	seen := map[string]bool{}
 	var ids []string
 	add := func(t types.Type) {
+		// `*lib.T` names `lib.T` as surely as the pointee's own
+		// declaration does — a pointer-typed parameter or result must
+		// pin the same identity.
+		if ptr, ok := t.(*types.Pointer); ok {
+			t = ptr.Elem()
+		}
 		var obj *types.TypeName
 		switch typ := t.(type) {
 		case *types.Named:
@@ -481,11 +488,9 @@ func (ix *indexer) signatureTypeIDs(sig *types.Signature) []string {
 		}
 	}
 	if sig.Recv() != nil {
-		rt := sig.Recv().Type()
-		if ptr, ok := rt.(*types.Pointer); ok {
-			rt = ptr.Elem()
-		}
-		add(rt)
+		// `add` does the one-layer unwrap itself, so a `**T` receiver
+		// pins nothing — the same rule parameters follow.
+		add(sig.Recv().Type())
 	}
 	for i := 0; i < sig.Params().Len(); i++ {
 		add(sig.Params().At(i).Type())
@@ -605,6 +610,19 @@ func (ix *indexer) typeOf(t types.Type) typeFact {
 		f.TypeID = ix.typeID(typ.Obj())
 	case *types.TypeParam:
 		f.TypeID = ix.typeID(typ.Obj())
+	case *types.Pointer:
+		// A pointer's own identity is the pointee's named type — the
+		// pointer itself names nothing pinnable. The pointee may be
+		// anything (basic, composite, named); only a named/alias
+		// pointee contributes an identity a pin can cover.
+		f.Kind = "pointer"
+		switch e := typ.Elem().(type) {
+		case *types.Named:
+			f.TypeID = ix.typeID(e.Obj())
+		case *types.Alias:
+			f.TypeID = ix.typeID(e.Obj())
+		}
+		return f
 	}
 	if _, ok := t.Underlying().(*types.Signature); ok {
 		f.Kind = "function"

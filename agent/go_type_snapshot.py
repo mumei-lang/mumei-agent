@@ -373,7 +373,7 @@ def _go_type(value: Any, arch: str) -> GoType:
         _require(name == "bool" and width == 1 and signed is None)
     else:
         _require(
-            kind in {"function", "unsupported", "untyped"}
+            kind in {"function", "pointer", "unsupported", "untyped"}
             and width == 0
             and signed is None
         )
@@ -387,7 +387,9 @@ def _go_type(value: Any, arch: str) -> GoType:
             "string",
             "unsafe.Pointer",
         }
-        if kind == "function":
+        if kind in {"function", "pointer"}:
+            # A pointer fact's identity lives in `type_id` (the
+            # pointee's named/alias type), not in a basic name.
             names = {""}
         elif kind == "untyped":
             names = {

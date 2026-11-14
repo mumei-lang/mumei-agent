@@ -454,8 +454,15 @@ class _Builder:
             or fn.generic
             or fn.variadic
             or len(fn.results) != 1
+            # Pointer-typed parameters/results are admitted too: the
+            # dep model tracks the *binding's* index, not the pointee,
+            # and every use still passes the expression gates — so a
+            # `*lib.T` param unlocks method calls on it while derefs,
+            # field access and address-of stay closed. The pointee's
+            # named/alias identity arrives on `type_id` and pins like
+            # any other signature type.
             or any(
-                p.type.kind not in {"integer", "boolean"}
+                p.type.kind not in {"integer", "boolean", "pointer"}
                 for p in (*fn.parameters, *fn.results)
             )
         ):
@@ -665,6 +672,9 @@ class _Builder:
                 if binding is None or binding.type.kind not in {
                     "integer",
                     "boolean",
+                    # A `p := t` binding inherits the pointer fact: it
+                    # still tracks one dep set, so the same stores apply.
+                    "pointer",
                 }:
                     raise _Unsupported("binding_unavailable", _span(node))
                 self._store(locals_, params, binding.id, value, conditional)
@@ -732,6 +742,7 @@ class _Builder:
                     if binding is None or binding.type.kind not in {
                         "integer",
                         "boolean",
+                        "pointer",
                     }:
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
@@ -943,7 +954,7 @@ class _Builder:
                 if lefts and lefts[0].text != b"_":
                     binding = self.bindings_by_span.get(self.node_key(lefts[0]))
                     if binding is not None:
-                        if binding.type.kind not in {"integer", "boolean"}:
+                        if binding.type.kind not in {"integer", "boolean", "pointer"}:
                             raise _Unsupported(
                                 "binding_unavailable", _span(lefts[0])
                             )
