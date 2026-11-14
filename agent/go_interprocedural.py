@@ -36,9 +36,15 @@ result. An unlabelled
 ``break``/``continue`` marks its innermost loop or switch construct as
 exited — every later statement in that body is a may-assignment whose
 writes union instead of replace, because the jump may have skipped them
-(labelled jumps, ``goto``, ``defer`` and ``go`` stay unmodelled). Type
-switches, ``select``,
-``const`` declarations and every other statement shape stay unsupported.
+(labelled jumps, ``goto``, ``defer`` and ``go`` stay unmodelled). Scalar
+``const`` declarations and reads are admitted: a constant expression can
+never read a variable (the compiler rejects it before this reader runs),
+so a scalar-typed ``constant`` binding always resolves to an empty
+dependency set and the declaration itself writes nothing; ``iota`` is
+dep-free too, while non-scalar constants stay gaps and grouped
+``const ( ... )`` forms are a parser gap like grouped ``var``.
+Type switches, ``select`` and every other
+statement shape stay unsupported.
 Scalar conversions ``T(e)`` are effect-free — the result inherits the
 operand's dependencies; the type change itself (truncation, widening)
 is not modelled. The pure builtins ``min``/``max`` union their
@@ -91,6 +97,23 @@ _SCALAR_BASIC_TYPES = frozenset(
         b"byte", b"rune",
     }
 )
+_UNTYPED_SCALAR_CONSTS = frozenset(
+    {"untyped int", "untyped rune", "untyped bool"}
+)
+
+
+def _scalar_constant(binding: Any) -> bool:
+    """A compile-time constant in the scalar fragment — reads carry no deps."""
+    return (
+        binding.kind == "constant"
+        and (
+            binding.type.kind in {"integer", "boolean"}
+            or (
+                binding.type.kind == "untyped"
+                and binding.type.basic_name in _UNTYPED_SCALAR_CONSTS
+            )
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -496,6 +519,49 @@ class _Builder:
                         )
                     self._store(
                         locals_, params, binding.id, value, conditional
+                    )
+            return
+        if kind == "const_declaration":
+            # Grouped `const (...)` declarations never reach here — like
+            # grouped vars the grammar marks them has_error. A spec
+            # without a value (implicit iota repetition) is unmodelled.
+            specs = [
+                c for c in node.named_children if c.type == "const_spec"
+            ]
+            if not specs:
+                raise _Unsupported("unsupported_statement", _span(node))
+            for spec in specs:
+                names: list[Any] = []
+                value_nodes: list[Any] = []
+                for i, child in enumerate(spec.children):
+                    field = spec.field_name_for_child(i)
+                    # `name` fields also cover the `,` separators of a
+                    # multi-name spec — only identifiers declare bindings.
+                    if field == "name":
+                        if child.type == "identifier":
+                            names.append(child)
+                        elif child.type != ",":
+                            raise _Unsupported(
+                                "unsupported_statement", _span(spec)
+                            )
+                    elif field == "value":
+                        value_nodes.extend(_children(child))
+                if not names or len(names) != len(value_nodes):
+                    raise _Unsupported("unsupported_statement", _span(spec))
+                for name in names:
+                    if name.text == b"_":
+                        continue
+                    binding = self.bindings_by_span.get(_span(name))
+                    if binding is None or not _scalar_constant(binding):
+                        raise _Unsupported(
+                            "binding_unavailable", _span(spec)
+                        )
+                # Constant expressions never read variables, so the
+                # values bind nothing — evaluating them only checks
+                # fragment legality and records any builtin transfers.
+                for rhs in value_nodes:
+                    self.expression(
+                        rhs, fn, params, locals_, transfers, count, 0
                     )
             return
         if kind == "if_statement":
@@ -921,7 +987,7 @@ class _Builder:
             raise _Unsupported("analysis_limit", _span(node))
         kind = node.type
         children = _children(node)
-        if kind in {"int_literal", "rune_literal"}:
+        if kind in {"int_literal", "rune_literal", "iota"}:
             return frozenset()
         if kind in {"identifier", "true", "false"}:
             ref = self.references.get(_span(node))
@@ -933,6 +999,19 @@ class _Builder:
                 return frozenset({params[ref.binding_id]})
             if ref is not None and ref.kind == "universe" and kind in {"true", "false"}:
                 return frozenset()
+            binding = (
+                self.bindings.get(ref.binding_id)
+                if ref is not None and ref.binding_id
+                else None
+            )
+            if binding is not None:
+                # Constants can never read variables — the compiler
+                # rejects a non-constant right-hand side before this
+                # reader runs — so a scalar const is always dep-free.
+                if _scalar_constant(binding):
+                    return frozenset()
+                if binding.kind == "constant":
+                    raise _Unsupported("binding_unavailable", _span(node))
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "parenthesized_expression" and len(children) == 1:
             return self.expression(

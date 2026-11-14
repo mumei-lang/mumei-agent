@@ -1790,6 +1790,25 @@ expression forms) still surface as the same declared gaps. Condition
 evaluation stays a once-per-loop approximation, and trip counts remain
 unmodelled.
 
+### C07 scalar const declarations and reads
+
+`const` declarations and constant reads are admitted on the scalar
+fragment: a constant expression can never read a variable — the
+compiler rejects a non-constant right-hand side before this reader runs —
+so a scalar-typed `constant` binding always resolves to an empty
+dependency set and a `const` spec writes nothing. Spec names must be
+identifiers bound as constants of scalar type (typed or untyped
+integer/rune/bool); `_` names discard like declarations do. `iota` is
+dep-free, and values are still evaluated for fragment legality —
+constant-expression builtins like `min` record their transfer.
+
+Boundaries: non-scalar constants (string, float, complex) stay
+`binding_unavailable`, a read of one through a scalar context surfaces
+the same gap, and grouped `const ( ... )` declarations remain a parser
+gap like grouped `var`. A spec with no value (implicit iota repetition)
+is unmodelled, and this is still not constant *evaluation* — a const is
+parameter-independent, not a known value.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
