@@ -3557,3 +3557,49 @@ def test_imported_generic_instantiation_flags_stale_dependents(go_types_helper):
     # Redeclaring `GI` at a shifted position churns the member identity —
     # the recorded call edge flags `F`.
     assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_dot_imported_generic_basic_instantiation_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return GI[int64](x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, GENERIC_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import"
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_dot_imported_generic_named_type_argument_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 { return int64(GI[T](T(x))) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, GENERIC_LIB)
+    )
+    assert report["status"] == "ok"
+    # The unqualified instantiation must not ride the declared-signature
+    # check — `T` as a type argument is a named identity no pin covers.
+    kinds = {c["kind"] for c in report["calls"]}
+    assert "direct_import" not in kinds and "external_or_bodyless" in kinds
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available

@@ -220,7 +220,7 @@ func (ix *indexer) directImportID(f *types.Func) (string, bool) {
 // the result depends on every evaluated argument. Inferred calls `lib.G(x)`
 // keep their existing classification.
 func (ix *indexer) directImportInstantiation(x ast.Expr) (string, bool) {
-	sel, ok := x.(*ast.SelectorExpr)
+	sel, ok := unparen(x).(*ast.SelectorExpr)
 	if !ok {
 		return "", false
 	}
@@ -235,7 +235,18 @@ func (ix *indexer) directImportInstantiation(x ast.Expr) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	inst, ok := ix.info.Instances[sel.Sel]
+	return ix.importedInstantiationID(f, sel.Sel)
+}
+
+// importedInstantiationID admits an instantiated generic function call only
+// when every type argument is basic, every instantiated parameter is
+// basic-underlying, and the instantiated result is scalar — the same rule
+// `directImportInstantiation` applies to `lib.G[int64](...)`. It is used for
+// unqualified (dot-imported or plain) instantiation callees too: checking the
+// *declared* signature there would let a named type argument through with no
+// pin covering its identity.
+func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (string, bool) {
+	inst, ok := ix.info.Instances[ident]
 	if !ok {
 		return "", false
 	}
@@ -612,15 +623,25 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 		return "conversion", ""
 	}
 	fun := unparen(c.Fun)
+	var instIdent *ast.Ident
 	switch e := fun.(type) {
 	case *ast.IndexExpr:
 		if id, ok := ix.directImportInstantiation(e.X); ok {
 			return "direct_import", id
 		}
+		// An unqualified instantiation (`G[T](x)`, dot-imported or plain)
+		// still needs the instantiation-aware check below — the declared
+		// signature alone would admit a named type argument no pin covers.
+		if i, ok := unparen(e.X).(*ast.Ident); ok {
+			instIdent = i
+		}
 		fun = unparen(e.X)
 	case *ast.IndexListExpr:
 		if id, ok := ix.directImportInstantiation(e.X); ok {
 			return "direct_import", id
+		}
+		if i, ok := unparen(e.X).(*ast.Ident); ok {
+			instIdent = i
 		}
 		fun = unparen(e.X)
 	case *ast.SelectorExpr:
@@ -656,6 +677,12 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 	}
 	fn, ok := functions[ix.id(f)]
 	if !ok || fn.Body == nil {
+		if instIdent != nil {
+			if id, ok := ix.importedInstantiationID(f, instIdent); ok {
+				return "direct_import", id
+			}
+			return "external_or_bodyless", ""
+		}
 		// Dot-imported names reach here: the func is not local but its
 		// imported identity is still stable and reportable.
 		if id, ok := ix.directImportID(f); ok {
