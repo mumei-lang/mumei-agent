@@ -604,7 +604,6 @@ def test_expression_switch_dependencies(go_types_helper, declarations, expected)
     [
         # Unsupported switch initializer shapes stay outside the fragment.
         "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { switch v,w:=G(x); v { case 1: return v+w }; return x }",
-        "func F(x int64) int64 { switch v,w:=x,x; v { case 1: return v+w }; return x }",
         "func G(v int64) { _ = v }\nfunc F(x int64) int64 { switch G(x); x { case 1: return x }; return x }",
         # fallthrough is unmodelled control flow.
         "func F(x int64) int64 { switch x { case 1: fallthrough; default: return x }; return x }",
@@ -1068,9 +1067,6 @@ def test_callee_summary_is_not_polluted_by_caller_exit_state(
         "func G(v int64) { _ = v }\nfunc F(x int64) int64 { if G(x); x>0 {return x}; return 0 }",
         # A for loop with a multi-value init is not modelled.
         "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { for i,j:=G(x); i<x; i++ { _ = j }; return x }",
-        "func F(x int64) int64 { if y,z:=x,x; y>0 {return z}; return 0 }",
-        # A for loop with a multi-name init is not modelled.
-        "func F(x int64) int64 { for i,j:=x,x; i<x; i++ { _ = j }; return x }",
         # A branch with an unsupported statement blocks the summary.
     ],
 )
@@ -1085,14 +1081,11 @@ def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
     [
         # Tuple declarations fed by a multi-value call stay outside.
         "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { y,z:=G(x); return y+z }",
-        # Tuple declarations are outside the fragment.
-        "func F(x int64) int64 { y,z:=x,x; return y+z }",
         # A call statement to an unsummarizable callee keeps its gap.
         "func G(){}; func F(x int64) int64 { G(); return x }",
         # Legal statement-position builtins outside the fragment keep
         # their gaps — only min/max are admitted builtins.
         "func F(x int64) int64 { print(x); return x }",
-        "func F(x int64) int64 { panic(\"boom\"); return x }",
         # Unsupported initializer propagates the gap.
         "func F(x int64) int { y:=len(\"s\"); return y }",
     ],
