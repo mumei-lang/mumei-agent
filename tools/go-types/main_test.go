@@ -435,6 +435,37 @@ func TestSliceMemberDeclaresElemFact(t *testing.T) {
 	}
 }
 
+func TestMapMemberDeclaresKeyAndElemFacts(t *testing.T) {
+	// A map member carries both the key and the value facts a map
+	// index read needs; a named key keeps its own identity.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(k lib.MK) int64 { _ = lib.VM\n\treturn lib.VMK[k] }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\ntype MK int64\nvar VM map[string]int64\nvar VMK map[MK]int64"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	members := map[string]member{}
+	for _, m := range out.ImportedMembers {
+		members[m.Name] = m
+	}
+	vm, ok := members["VM"]
+	if !ok || vm.Type.Kind != "map" || vm.Type.Key == nil ||
+		vm.Type.Key.BasicName != "string" || vm.Type.Elem == nil ||
+		vm.Type.Elem.Kind != "integer" || vm.Type.TypeID != "" {
+		t.Fatalf("an unnamed map member must declare key and value facts: %+v", vm)
+	}
+	vmk, ok := members["VMK"]
+	if !ok || vmk.Type.Kind != "map" || vmk.Type.Key == nil ||
+		vmk.Type.Key.TypeID == "" || vmk.Type.Elem == nil ||
+		vmk.Type.Elem.Kind != "integer" {
+		t.Fatalf("a named-key map must carry the key identity: %+v", vmk)
+	}
+}
+
 func TestRecursiveSliceTypeTerminates(t *testing.T) {
 	// `type R []R` is valid Go — the element fact must stop at the
 	// type's own identity instead of recursing forever.

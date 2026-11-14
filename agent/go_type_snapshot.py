@@ -70,8 +70,12 @@ class GoType:
     signed: bool | None
     type_id: str
     # The element fact on slice/array kinds — `[]T`, `[N]T` and
-    # named/alias types whose underlying is one.
+    # named/alias types whose underlying is one. On map kinds it
+    # carries the value fact.
     elem: "GoType | None" = None
+    # The key fact on map kinds — `map[K]V` — so a named key's
+    # identity pins like the value's does.
+    key: "GoType | None" = None
 
 
 @dataclass(frozen=True)
@@ -363,12 +367,13 @@ def _go_type(value: Any, arch: str) -> GoType:
         isinstance(value, dict)
         and {"kind", "basic_name", "bit_width", "signed", "type_id"}
         <= set(value)
-        <= {"kind", "basic_name", "bit_width", "signed", "type_id", "elem"}
+        <= {"kind", "basic_name", "bit_width", "signed", "type_id", "elem", "key"}
     )
     v = value
     kind, name, width = v["kind"], v["basic_name"], v["bit_width"]
     signed, type_id = v["signed"], _string(v["type_id"])
     elem_raw = v["elem"] if "elem" in v else None
+    key_raw = v["key"] if "key" in v else None
     _require(isinstance(kind, str) and isinstance(name, str) and type(width) is int)
     if kind == "integer":
         widths = {
@@ -398,6 +403,7 @@ def _go_type(value: Any, arch: str) -> GoType:
                 "untyped",
                 "slice",
                 "array",
+                "map",
             }
             and width == 0
             and signed is None
@@ -412,10 +418,11 @@ def _go_type(value: Any, arch: str) -> GoType:
             "string",
             "unsafe.Pointer",
         }
-        if kind in {"function", "pointer", "slice", "array"}:
+        if kind in {"function", "pointer", "slice", "array", "map"}:
             # A pointer fact's identity lives in `type_id` (the
             # pointee's named/alias type), not in a basic name; a
-            # slice/array fact's element lives in `elem`.
+            # slice/array fact's element lives in `elem`, and a map
+            # fact's key/value live in `key`/`elem`.
             names = {""}
         elif kind == "untyped":
             names = {
@@ -424,12 +431,17 @@ def _go_type(value: Any, arch: str) -> GoType:
             }
         _require(name in names)
     if kind in {"slice", "array"}:
-        _require(isinstance(elem_raw, dict))
+        _require(isinstance(elem_raw, dict) and key_raw is None)
         elem = _go_type(elem_raw, arch)
+        key = None
+    elif kind == "map":
+        _require(isinstance(elem_raw, dict) and isinstance(key_raw, dict))
+        elem = _go_type(elem_raw, arch)
+        key = _go_type(key_raw, arch)
     else:
-        _require(elem_raw is None)
-        elem = None
-    return GoType(kind, name, width, signed, type_id, elem)
+        _require(elem_raw is None and key_raw is None)
+        elem = key = None
+    return GoType(kind, name, width, signed, type_id, elem, key)
 
 
 def _type_ids(t: GoType) -> Iterator[str]:
@@ -438,6 +450,8 @@ def _type_ids(t: GoType) -> Iterator[str]:
         yield t.type_id
     if t.elem is not None:
         yield from _type_ids(t.elem)
+    if t.key is not None:
+        yield from _type_ids(t.key)
 
 
 def _parameter(value: Any, arch: str) -> Parameter:

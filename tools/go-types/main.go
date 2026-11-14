@@ -69,8 +69,12 @@ type typeFact struct {
 	TypeID    string `json:"type_id"`
 	// Elem carries the element type fact on slice/array kinds — `[]T`,
 	// `[N]T` and named/alias types whose underlying is one — so a
-	// container index read can classify the element it returns.
+	// container index read can classify the element it returns. On map
+	// kinds it carries the value fact.
 	Elem *typeFact `json:"elem,omitempty"`
+	// Key carries the key type fact on map kinds — `map[K]V` — so a
+	// named key's identity pins like the value's does.
+	Key *typeFact `json:"key,omitempty"`
 }
 
 type binding struct {
@@ -788,6 +792,18 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 		f.Elem = &e
 		return f
 	}
+	if m, ok := t.Underlying().(*types.Map); ok {
+		// `map[K]V` — or a named/alias type whose underlying is one. The
+		// key and value facts let an index read classify what it looks
+		// up and what it returns, and carry any named identities a pin
+		// needs to cover.
+		f.Kind = "map"
+		k := ix.typeOfRec(m.Key(), seen)
+		e := ix.typeOfRec(m.Elem(), seen)
+		f.Key = &k
+		f.Elem = &e
+		return f
+	}
 	if _, ok := t.Underlying().(*types.Signature); ok {
 		f.Kind = "function"
 		return f
@@ -852,7 +868,7 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	ix.out.Bindings = append(ix.out.Bindings, binding{
 		id, obj.Name(), kind, sp, ix.scope(obj), tf,
 	})
-	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "function" && kind != "function" {
+	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "map" || tf.Kind == "function" && kind != "function" {
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }

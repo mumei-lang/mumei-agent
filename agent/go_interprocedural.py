@@ -607,17 +607,20 @@ class _Builder:
         count: list[int],
         depth: int,
     ) -> frozenset[int]:
-        # `lib.VA[i]` — an index read of an imported slice/array var.
-        # The element is external state like the container var itself,
-        # so the result carries only the index's own dependencies; the
-        # read still records the imported transfer (`effects` reports
-        # `unknown`) and pins the declared container and element
-        # identities so redeclaring either flags the summary through
-        # `stale_dependents`. The element must be scalar-or-pointer —
-        # reading a struct element produces a value the fragment's
-        # model cannot hold. Everything else stays closed: maps and
-        # strings have no slice/array fact, nested or computed operands
-        # (`lib.VA[i][j]`, `f()[i]`) name no member, and imported-state
+        # `lib.VA[i]` — an index read of an imported slice/array var,
+        # and `lib.VM[k]` — the single-value read of an imported map
+        # var. The element/value is external state like the container
+        # var itself, so the result carries only the index's own
+        # dependencies; the read still records the imported transfer
+        # (`effects` reports `unknown`) and pins the declared
+        # container, element and map-key identities so redeclaring any
+        # flags the summary through `stale_dependents`. The element
+        # must be scalar-or-pointer — reading a struct element produces
+        # a value the fragment's model cannot hold. Everything else
+        # stays closed: strings have no container fact, nested or
+        # computed operands (`lib.VA[i][j]`, `f()[i]`) name no member,
+        # the comma-ok form `v, ok := lib.VM[k]` needs a two-name
+        # binding this path does not perform, and imported-state
         # writes (`lib.VA[i] = v`) match the imported-var-write rule.
         operand = node.child_by_field_name("operand")
         index = node.child_by_field_name("index")
@@ -644,7 +647,7 @@ class _Builder:
             index is None
             or member is None
             or member.kind != "var"
-            or member.type.kind not in {"slice", "array"}
+            or member.type.kind not in {"slice", "array", "map"}
             or elem is None
             or elem.kind not in {"integer", "boolean", "pointer"}
         ):
@@ -652,6 +655,9 @@ class _Builder:
         self._pin_member_type(member)
         if elem.type_id:
             self.pinned.add(elem.type_id)
+        key = member.type.key
+        if key is not None and key.type_id:
+            self.pinned.add(key.type_id)
         transfers.append(
             CallTransfer(
                 FileSpan(self.current_file, node.start_byte, node.end_byte),
@@ -759,6 +765,11 @@ class _Builder:
             # tampered member record cannot smuggle a write through.
             raise _Unsupported("unsupported_statement", _span(lhs))
         self._pin_member_type(member)
+        key = member.type.key
+        if key is not None and key.type_id:
+            # `map[K]V` — a named key's identity pins like the
+            # element's does.
+            self.pinned.add(key.type_id)
         elem = member.type.elem
         while elem is not None:
             # `[][]T` names its element type two levels down — every
