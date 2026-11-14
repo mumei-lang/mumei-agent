@@ -1229,6 +1229,59 @@ def test_callee_replacement_invalidates_unchanged_caller(go_types_helper):
         ip.summarize_go(new[0], old[1])
 
 
+def test_call_targets_list_recorded_callee_identities(go_types_helper):
+    data = unit(
+        go_types_helper,
+        "func G(x int64) int64 { return x }; func F(x int64) int64 { return G(x) }",
+    )
+    assert named(*data).call_targets == {named(*data, "G").binding_id}
+    assert named(*data, "G").call_targets == frozenset()
+
+
+@pytest.mark.parametrize(
+    "before,after,stale_names",
+    [
+        # A replaced callee's new identity invalidates its caller only.
+        (
+            "func G(x int64) int64 { return x }; func F(x int64) int64 { return G(x) }",
+            "func G(x int64) int64 { return x + 1 }; func F(x int64) int64 { return G(x) }",
+            {"F"},
+        ),
+        # Invalidation follows the recorded call chain — a leaf with no
+        # calls is never stale.
+        (
+            "func H(x int64) int64 { return x }; func G(x int64) int64 { return H(x) }; func F(x int64) int64 { return G(x) }",
+            "func H(x int64) int64 { return 0 }; func G(x int64) int64 { return H(x) }; func F(x int64) int64 { return G(x) }",
+            {"F", "G"},
+        ),
+        # A deleted callee is a target absent from `known` too.
+        (
+            "func G(x int64) int64 { return x }; func F(x int64) int64 { return G(x) }",
+            "func F(x int64) int64 { return x }",
+            {"F"},
+        ),
+        # An unavailable caller recorded nothing and has nothing to
+        # invalidate.
+        (
+            "func G(){}; func F(x int64) int64 { G(); return x }",
+            "func G(){}; func F(x int64) int64 { G(); return x }",
+            set(),
+        ),
+    ],
+)
+def test_stale_dependents(go_types_helper, before, after, stale_names):
+    old = unit(go_types_helper, before)
+    new = unit(go_types_helper, after)
+    live = {f.binding_id for f in new[2].functions}
+    assert old[2].stale_dependents(live) == {
+        named(*old, name).binding_id for name in stale_names
+    }
+    # Nothing is stale against the snapshot that produced it.
+    assert not old[2].stale_dependents(
+        {f.binding_id for f in old[2].functions}
+    )
+
+
 @pytest.mark.parametrize(
     "change", ["compiler", "target", "metadata", "source", "profile", "language"]
 )
