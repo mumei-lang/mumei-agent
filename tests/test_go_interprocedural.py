@@ -5426,6 +5426,22 @@ def test_deref_base_field_write_is_admitted(go_types_helper):
     assert write.target == members["S"]["id"] and write.arguments == ()
 
 
+def test_deref_base_field_write_comment_parens_is_admitted(go_types_helper):
+    # `(*( /* c */ s)).F = v` — comments inside the parentheses do
+    # not block the unwrap.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(s *lib.S, v int64) int64 {\n"
+        "\t(*( /* c */ s)).F = v\n"
+        "\treturn 0\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+
+
 def test_double_deref_field_write_stays_closed(go_types_helper):
     # `(**s).F = v` — one deref leaves a `*S` operand, not an
     # identifier.

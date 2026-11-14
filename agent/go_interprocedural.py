@@ -977,12 +977,18 @@ class _Builder:
         binding.
         """
         while node is not None and node.type == "parenthesized_expression":
-            node = next(iter(node.named_children), None)
+            node = next(
+                (c for c in node.named_children if c.type != "comment"),
+                None,
+            )
         if node is None or node.type != "selector_expression":
             return None
         base = node.child_by_field_name("operand")
         while base is not None and base.type == "parenthesized_expression":
-            base = next(iter(base.named_children), None)
+            base = next(
+                (c for c in base.named_children if c.type != "comment"),
+                None,
+            )
         if base is not None and base.type == "unary_expression":
             # `(*t).f` — one explicit dereference of the bound pointer
             # before the selection, the same auto-deref `t.f` spelled
@@ -995,7 +1001,10 @@ class _Builder:
                 base is not None
                 and base.type == "parenthesized_expression"
             ):
-                base = next(iter(base.named_children), None)
+                base = next(
+                    (c for c in base.named_children if c.type != "comment"),
+                    None,
+                )
         if base is None or base.type != "identifier" or base.text == b"_":
             return None
         ref = self.references.get(self.node_key(base))
