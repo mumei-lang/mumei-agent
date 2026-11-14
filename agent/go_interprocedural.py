@@ -715,7 +715,12 @@ class _Builder:
                 imported=True,
             )
         )
-        for extra in extras:
+        # Extras were collected outermost-first while descending the
+        # operand chain; Go evaluates indices inside-out — the inner
+        # index of `lib.V2[f()][g()]` runs before `g()` — so a write
+        # `f()` performs must already be visible when `g()`'s call
+        # arguments record their dependencies.
+        for extra in reversed(extras):
             # The index value is unused — the write lands in package
             # state — so only evaluation's side effects matter: calls,
             # conversions and imported member reads record transfers

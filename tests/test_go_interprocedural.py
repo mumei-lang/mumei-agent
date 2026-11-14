@@ -6094,3 +6094,38 @@ def test_imported_index_write_evaluates_member_reads(go_types_helper):
     calls = [c for c in result.calls if c.imported]
     # The write transfer plus the `lib.V` member read's transfer.
     assert len(calls) >= 2
+
+
+def test_member_write_inner_indices_evaluate_first(go_types_helper):
+    # `lib.V2[lib.Set(&x, y)][lib.H(x)] = v` — Go evaluates indices
+    # inside-out, so `lib.H`'s recorded argument must carry `x`'s
+    # post-`Set` dependencies `{x, y}`, not the pre-call `{x}`.
+    lib = {
+        "lib": {
+            "s.go": "package lib\ntype T int64\n"
+            "func Set(p *T, v int64) int64 { *p = T(v); return 0 }\n"
+            "func H(v T) int64 { return 0 }\n"
+            "var V2 [][]int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) lib.T {\n"
+        "\tlib.V2[lib.Set(&x, y)][lib.H(x)] = 0\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    h_call = next(
+        c for c in result.calls if len(c.arguments) == 1
+    )
+    assert h_call.arguments == (frozenset({0, 1}),)
+
