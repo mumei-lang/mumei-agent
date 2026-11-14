@@ -429,32 +429,34 @@ class _Builder:
             if condition is None or consequence is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             initializer = node.child_by_field_name("initializer")
+            # `if init; cond` runs a simple statement first — the same
+            # mechanism as a for-clause initializer. A name it binds is a
+            # fresh binding that is scoped to the statement and dropped
+            # by the join below, so a shadowed outer name keeps its deps.
+            scope = dict(locals_) if initializer is not None else locals_
             if initializer is not None:
-                # `if init; cond` runs a simple statement first — the
-                # same mechanism as a for-clause initializer, with the
-                # bound name scoped to the statement.
                 self.statement(
-                    initializer, fn, params, locals_, transfers, count,
+                    initializer, fn, params, scope, transfers, count,
                     deps, saw_return, conditional,
                 )
             # The condition is evaluated but its dependencies cannot reach
             # the result: every fragment statement is effect-free.
             self.expression(
-                condition, fn, params, locals_, transfers, count, 0
+                condition, fn, params, scope, transfers, count, 0
             )
             # Branch-local bindings never escape their scope, matching the
             # compiler — a later reference simply would not resolve.
             # Reassignments of existing names join back by union: the
             # branch may not execute.
-            branch = dict(locals_)
+            branch = dict(scope)
             self._sequence(
                 _children(consequence), fn, params, branch, transfers,
                 count, deps, saw_return, conditional,
             )
-            self._join(locals_, branch, params)
+            self._join(scope, branch, params)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
-                branch = dict(locals_)
+                branch = dict(scope)
                 if alternative.type == "if_statement":
                     self.statement(
                         alternative, fn, params, branch, transfers,
@@ -465,7 +467,9 @@ class _Builder:
                         _children(alternative), fn, params, branch,
                         transfers, count, deps, saw_return, conditional,
                     )
-                self._join(locals_, branch, params)
+                self._join(scope, branch, params)
+            if initializer is not None:
+                self._join(locals_, scope, params)
             return
         if kind == "assignment_statement":
             operator = node.child_by_field_name("operator")
@@ -596,11 +600,12 @@ class _Builder:
             return
         if kind == "expression_switch_statement":
             initializer = node.child_by_field_name("initializer")
+            # `switch init; tag` runs a simple statement first — any name
+            # it binds is scoped to the switch, like a for-clause init.
+            scope = dict(locals_) if initializer is not None else locals_
             if initializer is not None:
-                # `switch init; tag` runs a simple statement first — the
-                # bound name is scoped to the switch.
                 self.statement(
-                    initializer, fn, params, locals_, transfers, count,
+                    initializer, fn, params, scope, transfers, count,
                     deps, saw_return, conditional,
                 )
             value = node.child_by_field_name("value")
@@ -608,7 +613,7 @@ class _Builder:
                 # The tag is evaluated but its dependencies cannot reach the
                 # result: every fragment statement is effect-free.
                 self.expression(
-                    value, fn, params, locals_, transfers, count, 0
+                    value, fn, params, scope, transfers, count, 0
                 )
             frame = {"kind": "switch", "exited": False}
             self.frames.append(frame)
@@ -623,27 +628,29 @@ class _Builder:
                                 # Case guards are evaluated like the tag.
                                 for guard in _children(sub):
                                     self.expression(
-                                        guard, fn, params, locals_,
+                                        guard, fn, params, scope,
                                         transfers, count, 0,
                                     )
                             elif sub.type == "statement_list":
-                                branch = dict(locals_)
+                                branch = dict(scope)
                                 self._sequence(
                                     _children(sub), fn, params, branch,
                                     transfers, count, deps, saw_return,
                                     conditional,
                                 )
-                                self._join(locals_, branch, params)
+                                self._join(scope, branch, params)
                     elif clause.type == "default_case":
-                        branch = dict(locals_)
+                        branch = dict(scope)
                         self._sequence(
                             _children(clause), fn, params, branch,
                             transfers, count, deps, saw_return,
                             conditional,
                         )
-                        self._join(locals_, branch, params)
+                        self._join(scope, branch, params)
             finally:
                 self.frames.pop()
+            if initializer is not None:
+                self._join(locals_, scope, params)
             return
         if kind == "labeled_statement":
             inner = [c for c in node.named_children if c.type != "label_name"]

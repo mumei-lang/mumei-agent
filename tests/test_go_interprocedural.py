@@ -431,6 +431,7 @@ def test_expression_switch_dependencies(go_types_helper, declarations, expected)
     [
         # Unsupported switch initializer shapes stay outside the fragment.
         "func F(x int64) int64 { switch v,w:=x,x; v { case 1: return v+w }; return x }",
+        "func G(v int64) int64 { return v }\nfunc F(x int64) int64 { switch G(x); x { case 1: return x }; return x }",
         # fallthrough is unmodelled control flow.
         "func F(x int64) int64 { switch x { case 1: fallthrough; default: return x }; return x }",
         # select is unmodelled concurrency.
@@ -587,6 +588,26 @@ def test_effect_free_control_statements(
             "func F(x int64) int64 { switch x++; x { case 1: return x; default: return 0 } }",
             frozenset({0}),
         ),
+        # A name bound by an initializer is scoped to the statement — it
+        # shadows, never overwrites, an outer binding of the same name.
+        (
+            "func F(x int64) int64 { var v int64; if v := x; v > 0 {}; return v }",
+            frozenset(),
+        ),
+        (
+            "func F(x int64) int64 { var v int64; switch v := x; v { case 1: v = 0 }; return v }",
+            frozenset(),
+        ),
+        # An initializer that reassigns an outer binding still joins back.
+        (
+            "func F(x int64) int64 { var y int64; if y = x; y > 0 {}; return y }",
+            frozenset({0}),
+        ),
+        # The bound name is visible in the switch tag itself.
+        (
+            "func F(x int64) int64 { switch v := x > 0; v { case true: return x; default: return 0 } }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_statement_initializers(go_types_helper, declarations, expected):
@@ -699,6 +720,8 @@ def test_callee_summary_is_not_polluted_by_caller_exit_state(
     [
         # An unsupported if initializer propagates the gap.
         "func F(x int64) int64 { if y,z:=x,x; y>0 {return z}; return 0 }",
+        # An expression-statement initializer is a declared gap.
+        "func G(v int64) int64 { return v }\nfunc F(x int64) int64 { if G(x); x>0 {return x}; return 0 }",
         # A for loop is not modelled.
         "func F(x int64) int64 { for i:=int64(0); i<x; i++ {}; return x }",
         # A branch with an unsupported statement blocks the summary.
