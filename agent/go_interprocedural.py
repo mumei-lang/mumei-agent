@@ -112,18 +112,16 @@ _UNTYPED_SCALAR_CONSTS = frozenset(
 )
 
 
+def _scalar_const_type(t: Any) -> bool:
+    """Whether a type fact is a scalar constant type in the fragment."""
+    return t.kind in {"integer", "boolean"} or (
+        t.kind == "untyped" and t.basic_name in _UNTYPED_SCALAR_CONSTS
+    )
+
+
 def _scalar_constant(binding: Any) -> bool:
     """A compile-time constant in the scalar fragment — reads carry no deps."""
-    return (
-        binding.kind == "constant"
-        and (
-            binding.type.kind in {"integer", "boolean"}
-            or (
-                binding.type.kind == "untyped"
-                and binding.type.basic_name in _UNTYPED_SCALAR_CONSTS
-            )
-        )
-    )
+    return binding.kind == "constant" and _scalar_const_type(binding.type)
 
 
 @dataclass(frozen=True)
@@ -312,6 +310,9 @@ class _Builder:
     ):
         self.snapshot, self.key, self.cfg_fn = snapshot, key, cfg_fn
         self.bindings = {b.id: b for b in snapshot.bindings}
+        # Package reports may declare the imported objects the unit
+        # referenced; single-file snapshots never have them.
+        self.members = {m.id: m for m in getattr(snapshot, "imported_members", ())}
         self.functions = {f.binding_id: f for f in snapshot.functions}
         self.references = {_key3(r.span): r for r in snapshot.references}
         self.calls = {_key3(c.span): c for c in snapshot.calls}
@@ -1118,6 +1119,36 @@ class _Builder:
                 if binding.kind == "constant":
                     raise _Unsupported("binding_unavailable", _span(node))
             raise _Unsupported("non_parameter_reference", _span(node))
+        if kind == "selector_expression":
+            # `lib.K` — a package-qualified member read. The operand is a
+            # package name, which is not a binding and carries no
+            # reference; the field resolves to an `import` reference whose
+            # declared member record classifies the object. Only scalar
+            # constants are admitted — imported variables are unmodelled
+            # package state and imported functions are not values here.
+            operand = node.child_by_field_name("operand")
+            field = node.child_by_field_name("field")
+            ref = (
+                self.references.get(self.node_key(field))
+                if field is not None
+                else None
+            )
+            member = (
+                self.members.get(ref.binding_id)
+                if ref is not None and ref.kind == "import"
+                else None
+            )
+            if (
+                operand is None
+                or operand.type != "identifier"
+                or self.references.get(self.node_key(operand)) is not None
+                or member is None
+                or member.kind != "const"
+                or member.name.encode("utf-8") != field.text
+                or not _scalar_const_type(member.type)
+            ):
+                raise _Unsupported("non_parameter_reference", _span(node))
+            return frozenset()
         if kind == "parenthesized_expression" and len(children) == 1:
             return self.expression(
                 children[0], fn, params, locals_, transfers, count, depth + 1
@@ -1315,6 +1346,15 @@ def summarize_go_package(
     imported calls with zero results or a single scalar result are
     classified `direct_import`; composite or multi-valued imported
     results keep `external_or_bodyless` and fail closed.
+
+    Reports may declare the imported objects the unit referenced
+    (`imported_members`). A package-qualified read of a scalar
+    constant (`lib.K`) is admitted — constants carry no dependencies,
+    like local constants. Imported variables are unmodelled package
+    state and imported functions are not values: their reads keep
+    `non_parameter_reference` and fail closed. Reports without the
+    section load unchanged; the member record only widens what was
+    already unmodelled.
     """
     raws, key = _package_context(snapshot, sources)
     builder = _Builder(

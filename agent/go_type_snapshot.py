@@ -263,6 +263,20 @@ class PackageGap:
 
 
 @dataclass(frozen=True)
+class PackageMember:
+    """A referenced imported object's declared kind and type.
+
+    The identity is the object's binding id in the imported unit's own
+    coordinate space, matching the `import` reference that names it.
+    """
+
+    id: str
+    name: str
+    kind: str
+    type: GoType
+
+
+@dataclass(frozen=True)
 class GoPackageSnapshot:
     """A multi-file unit's compiler report — per-file digests anchor spans."""
 
@@ -277,6 +291,9 @@ class GoPackageSnapshot:
     gaps: tuple[PackageGap, ...]
     profile: str = PACKAGE_PROFILE
     language_version: str = "go1.23"
+    # Last on purpose: positional construction predating this field keeps
+    # `profile` in place.
+    imported_members: tuple[PackageMember, ...] = ()
 
     def binding(self, binding_id: str) -> PackageBinding | None:
         return next((b for b in self.bindings if b.id == binding_id), None)
@@ -557,8 +574,7 @@ def load_go_package_snapshot(
     _require(target_arch in TARGETS and len(payload) <= MAX_REPORT_BYTES)
     try:
         data = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
-        v = _record(
-            data,
+        base_keys = {
             "profile",
             "source_sha256",
             "files",
@@ -571,7 +587,11 @@ def load_go_package_snapshot(
             "functions",
             "calls",
             "gaps",
-        )
+        }
+        # `imported_members` is optional: a report without it still loads,
+        # imported names simply stay unmodelled.
+        _require(isinstance(data, dict) and set(data) - {"imported_members"} == base_keys)
+        v = data
         _require(v["profile"] == PACKAGE_PROFILE)
         _require(
             v["status"] == "ok"
@@ -597,7 +617,16 @@ def load_go_package_snapshot(
         _require(v["source_sha256"] == h.hexdigest())
         snapshot_files = tuple(files)
         probe = GoPackageSnapshot(
-            snapshot_files, v["source_sha256"], target_arch, compiler, (), (), (), (), ()
+            snapshot_files,
+            v["source_sha256"],
+            target_arch,
+            compiler,
+            (),
+            (),
+            (),
+            (),
+            (),
+            imported_members=(),
         )
         raws = _package_raws(probe, sources)
         bindings = []
@@ -647,6 +676,25 @@ def load_go_package_snapshot(
             else:
                 _require(binding_id == "")
             references.append(PackageReference(sp, binding_id, kind))
+        members = []
+        for item in _list(v.get("imported_members", [])):
+            m = _record(item, "id", "name", "kind", "type")
+            mid = _string(m["id"])
+            name, kind = _string(m["name"]), _string(m["kind"])
+            t = _go_type(m["type"], target_arch)
+            _require(
+                _IMPORTED_ID.fullmatch(mid) is not None
+                and mid not in by_id
+                and bool(name)
+                and kind in {"function", "const", "var", "type"}
+            )
+            _require(
+                not t.type_id
+                or _IMPORTED_ID.fullmatch(t.type_id) is not None
+                or (t.type_id in by_id and by_id[t.type_id].kind == "type")
+            )
+            members.append(PackageMember(mid, name, kind, t))
+        _require(len({m.id for m in members}) == len(members))
         functions = []
         for item in _list(v["functions"]):
             f = _record(
@@ -743,6 +791,7 @@ def load_go_package_snapshot(
             tuple(functions),
             tuple(calls),
             tuple(gaps),
+            imported_members=tuple(members),
         )
     except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
         raise SnapshotError("Go type snapshot unavailable or inconsistent") from None

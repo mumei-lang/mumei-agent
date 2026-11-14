@@ -117,6 +117,16 @@ type fileDigest struct {
 	SHA256 string `json:"sha256"`
 }
 
+// member declares an imported object the unit referenced: its identity in
+// the imported unit's own coordinate space plus the object's kind and type,
+// so a consumer can tell a scalar constant from unmodelled package state.
+type member struct {
+	ID   string   `json:"id"`
+	Name string   `json:"name"`
+	Kind string   `json:"kind"`
+	Type typeFact `json:"type"`
+}
+
 type snapshot struct {
 	Profile         string       `json:"profile"`
 	SourceSHA256    string       `json:"source_sha256"`
@@ -130,6 +140,7 @@ type snapshot struct {
 	Functions       []function   `json:"functions"`
 	Calls           []call       `json:"calls"`
 	Gaps            []gap        `json:"gaps"`
+	ImportedMembers []member     `json:"imported_members,omitempty"`
 }
 
 // importUnit tracks a resolved imported package's own coordinate space so
@@ -156,6 +167,7 @@ type indexer struct {
 	importCache    map[string]*types.Package
 	importInFlight map[string]bool
 	importUnits    map[*types.Package]*importUnit
+	importMembers  map[string]member
 }
 
 var errUnresolvedImport = fmt.Errorf("unresolved import")
@@ -264,6 +276,31 @@ func (ix *indexer) importedID(obj types.Object) string {
 	}
 	return fmt.Sprintf("sha256:%s:%d:%d:%d:%d",
 		rec.digests[f], f, ix.offset(obj.Pos()), start, end)
+}
+
+// recordMember declares a referenced imported object: its identity, the
+// member kind a consumer needs to classify uses, and its type. Objects the
+// unit never names are not declared.
+func (ix *indexer) recordMember(obj types.Object, id string) {
+	if _, ok := ix.importMembers[id]; ok {
+		return
+	}
+	var kind string
+	switch obj.(type) {
+	case *types.Func:
+		kind = "function"
+	case *types.Const:
+		kind = "const"
+	case *types.Var:
+		kind = "var"
+	case *types.TypeName:
+		kind = "type"
+	default:
+		return
+	}
+	ix.importMembers[id] = member{
+		ID: id, Name: obj.Name(), Kind: kind, Type: ix.typeOf(obj.Type()),
+	}
 }
 
 func unitDigest(sources []namedSource) string {
@@ -596,6 +633,7 @@ func analyze(req request) (out snapshot) {
 		importCache:    make(map[string]*types.Package),
 		importInFlight: make(map[string]bool),
 		importUnits:    make(map[*types.Package]*importUnit),
+		importMembers:  make(map[string]member),
 	}
 	for _, s := range unit {
 		ix.digests = append(ix.digests, fmt.Sprintf("%x", sha256.Sum256([]byte(s.Source))))
@@ -680,6 +718,7 @@ func analyze(req request) (out snapshot) {
 		if id == "" {
 			if iid := ix.importedID(obj); iid != "" {
 				id, kind = iid, "import"
+				ix.recordMember(obj, iid)
 			} else {
 				kind = "universe"
 			}
@@ -764,6 +803,10 @@ func analyze(req request) (out snapshot) {
 			return true
 		})
 	}
+	for _, m := range ix.importMembers {
+		out.ImportedMembers = append(out.ImportedMembers, m)
+	}
+	sort.Slice(out.ImportedMembers, func(i, j int) bool { return out.ImportedMembers[i].ID < out.ImportedMembers[j].ID })
 	sort.Slice(out.Bindings, func(i, j int) bool { return out.Bindings[i].ID < out.Bindings[j].ID })
 	sort.Slice(out.References, func(i, j int) bool { return spanLess(out.References[i].Span, out.References[j].Span) })
 	sort.Slice(out.Functions, func(i, j int) bool { return out.Functions[i].BindingID < out.Functions[j].BindingID })

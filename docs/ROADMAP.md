@@ -1923,6 +1923,40 @@ their paths, and their source order stay host decisions; there is no
 import shadowing, vendoring or version selection, and a transitive
 import path must also be declared.
 
+### C06 imported member declarations and scalar constant reads
+
+The package report gains `imported_members: [{id, name, kind, type}]`
+— one declaration per imported object the unit actually names (a
+`direct_import` callee or an `import` reference target), nothing more.
+`id` is the member's binding identity in the imported unit's own
+coordinate space (the same imported-identity shape as `import`
+references), `kind` is `function`, `const`, `var` or `type`, and `type`
+is the standard type fact. The loader validates the shape and dedupes
+ids; the section is optional — a report without it still loads and
+imported names simply stay unmodelled.
+
+The payoff is honest value coverage: a package-qualified read
+`lib.K` now classifies only by the declared member. A scalar
+constant (`kind == "const"` with an integer/boolean/untyped-scalar
+type) is admitted dep-free, exactly like a local constant — the
+member's name must also match the source token, so a record that
+names a different object never widens a read. Imported variables
+are unmodelled package state and imported functions are not values
+in the fragment: their reads keep `non_parameter_reference` and
+fail closed, as does any read whose member declaration is absent.
+
+Boundaries: member types carry no `type_id` into the imported unit
+(type fact emission is producer-side; `ix.id` yields no identity for
+non-root objects, so `type_id` is empty) — named imported types
+cannot yet drive consumer-side checks. Package-level constant
+reads are dependency-free but their *values* are not modelled —
+the fragment tracks what a result depends on, not what a constant
+equals. Selector reads remain limited to a plain package-qualified
+name: nested selectors, method values and field accesses on values
+stay unsupported, and a dot-imported name is a plain identifier —
+it keeps `non_parameter_reference` rather than consulting member
+declarations.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
