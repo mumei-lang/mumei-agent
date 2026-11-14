@@ -2185,7 +2185,12 @@ arg-union dep set is the same), and pointer-typed imported `var`
 reads (`lib.PV`) stay dep-free like scalar member reads while still
 emitting the staleness transfer. A mixed tuple
 `a, b := lib.RR(t)` unpacks at its declared arity with a `*T`
-binding storing the pointer half. What stays closed: writing
+binding storing the pointer half. Passing `&x` to an imported
+callee hands it a writable alias of `x`, so afterwards `x`
+conservatively depends on every call argument. A pointer result
+never admits a generic callee through its declared signature —
+`func G[P any](v P) *P` still goes through the instantiation
+gate. What stays closed: writing
 through a pointer (`*t = v`, `p.f = v` — the LHS gate requires a
 bare identifier), `&` on anything but a fragment operand, and
 imported `var` *writes* of any type.
