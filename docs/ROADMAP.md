@@ -2221,7 +2221,8 @@ locals — so `func F(t *lib.T, x int64) { t.PM(x) }` summarizes with
 the usual receiver-plus-arguments union, and `(*lib.T).PM(t, x)`
 follows the method-expression path. The dep model tracks the
 *binding's* index, not the pointee's state — dereferences, field
-access, indexing and mutations through the pointer stay outside the
+access on a bound base (`t.f`, `(*t).f`), indexing and mutations
+through the pointer stay outside the
 fragment (`effects` already reports every admitted body as
 `unknown`), so `return *t` is still `unsupported_expression`. A
 pointer to an unnamed or composite pointee (`*int64`, `**T`,
