@@ -6143,7 +6143,7 @@ def test_member_write_nested_elem_pin_flags_stale(go_types_helper):
     }
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(v int64) int64 { lib.VTT[0][0] = lib.T(v)\n\treturn 0 }\n"
+        "func F() int64 { lib.VTT[0][0] = 0\n\treturn 0 }\n"
     }
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, lib),
