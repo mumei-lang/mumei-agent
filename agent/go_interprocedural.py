@@ -835,6 +835,11 @@ member, or one explicit dereference of one (`(*t).F` — the same
         ):
             raise _Unsupported("non_parameter_reference", _span(node))
         self._pin_member_type(member)
+        if fact.type_id:
+            # The innermost container's own named identity —
+            # `[]NS`/`map[K]NS` levels the descent stops on — must
+            # pin too, or redeclaring it flags nothing.
+            self.pinned.add(fact.type_id)
         if elem.type_id:
             self.pinned.add(elem.type_id)
         key = fact.key
