@@ -3603,3 +3603,269 @@ def test_dot_imported_generic_named_type_argument_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+METHOD_LIB = {
+    "lib": {
+        "m.go": "package lib\nfunc (t T) M(v int64) int64 { return v }\n"
+        "func (t T) M2(a int64, b int64) int64 { return a }\n"
+        "func (t T) Bad(v int64) (int64, int64) { return v, v }\n"
+        "func (t *T) PM(v int64) int64 { return v }\n"
+        "type I interface{ M(int64) int64 }\n"
+        "type GT[P any] int64\n"
+        "func (t GT[P]) GM(v int64) int64 { return v }\n"
+        "var V T\nconst K T = 7\n",
+        # `T` lives in its own file so a variant unit can churn `T`'s
+        # identity without touching the method declarations.
+        "t.go": "package lib\ntype T int64\n",
+    }
+}
+
+
+def _method_snapshot_for(go_types_helper, files):
+    return load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, METHOD_LIB),
+        files,
+        target_arch="amd64",
+    )
+
+
+def test_imported_method_call_records_method_direct_import(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 { return x.M(y) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["method"] is True
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert call["target"] == members["M"]["id"]
+    # The member's signature pins include the receiver's named type, so
+    # a `T` redeclaration flags every admitted `recv.M(...)` caller even
+    # when `M`'s own identity is unchanged.
+    assert members["M"]["signature_type_ids"] == [members["T"]["id"]]
+
+
+def test_imported_method_result_depends_on_receiver_and_args(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 { return x.M(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_method_on_package_member_receiver(go_types_helper):
+    # `lib.V.M(x)` — the receiver is a package-member read: it records
+    # the var-read transfer for staleness and contributes no parameter
+    # deps, so the result still depends only on the argument.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.V.M(x) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    transfers = [
+        t for t in result.calls if t.imported and t.arguments == ()
+    ]
+    assert transfers  # the `lib.V` var read is on record
+
+
+def test_imported_method_on_const_receiver(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.K.M(x) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_pointer_receiver_method_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 { return x.PM(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_interface_method_stays_closed(go_types_helper):
+    # Interface dispatch is dynamic: the recorded method identity would
+    # not cover the implementations actually reached.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i lib.I, x int64) int64 { return i.M(x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_generic_receiver_method_stays_closed(go_types_helper):
+    # `lib.GT[lib.T]` — an instantiated receiver names more types than
+    # the member records pin (`GT` only): redeclaring `T` would churn
+    # no recorded identity, so the call stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "var x lib.GT[lib.T]\n"
+        "func F(y int64) int64 { return x.GM(y) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_method_expression_stays_closed(go_types_helper):
+    # `lib.T.M(t, x)` — a method expression, not a method value: the
+    # receiver is a leading parameter, a different call shape.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T, x int64) int64 { return lib.T.M(t, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_multi_result_method_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T) int64 { a, _ := x.Bad(1); return a }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+
+
+def test_local_method_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\n"
+        "type L int64\n"
+        "func (l L) N(v int64) int64 { return v }\n"
+        "func F(x L, y int64) int64 { return x.N(y) }\n"
+    }
+    report = json.loads(package_report(go_types_helper, files))
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "method_generic_or_variadic"
+
+
+def test_method_receiver_type_pin_flags_stale_dependents(go_types_helper):
+    # `x.M(y)` pins the receiver type's identity through the method
+    # member's `signature_type_ids`: redeclaring `T` flags the caller
+    # even though `M`'s own identity is unchanged.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 { return x.M(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(METHOD_LIB)
+    lib2["lib"] = {
+        **METHOD_LIB["lib"],
+        "t.go": "package lib\ntype  T int64\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]),
+        lib2["lib"],
+        target_arch="amd64",
+    )
+    known = {b.id for b in snapshot2.bindings}
+    t = next(m for m in snapshot.imported_members if m.name == "T")
+    # `T.M` is the member whose signature pins the receiver type `T`;
+    # the interface method `I.M` shares the name.
+    m = next(
+        m
+        for m in snapshot.imported_members
+        if m.name == "M" and t.id in m.signature_type_ids
+    )
+    assert m.id in known
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_parenthesized_method_selector_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 { return (x.M)(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_method_flag_on_non_direct_import_call_is_rejected(go_types_helper):
+    # `method` only travels on a `direct_import` call — a forged flag on
+    # any other kind must fail validation, not silently pass through.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 { return int64(x.M(y)) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    tampered = json.loads(json.dumps(report))
+    for c in tampered["calls"]:
+        if c["kind"] == "conversion":
+            c["method"] = True
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(tampered).encode(), files, target_arch="amd64"
+        )
+    tampered = json.loads(json.dumps(report))
+    for c in tampered["calls"]:
+        if c["kind"] == "direct_import":
+            c["method"] = "yes"
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(tampered).encode(), files, target_arch="amd64"
+        )

@@ -1413,9 +1413,40 @@ class _Builder:
                     )
                 return deps
             if call.kind == "direct_import":
+                receiver = None
+                if call.method:
+                    # `recv.M(args)` — the callee is a method on an
+                    # imported named type; the receiver expression is
+                    # evaluated like an argument (its read may itself
+                    # record a member transfer), and its deps join the
+                    # result.
+                    function_node = node.child_by_field_name("function")
+                    while (
+                        function_node is not None
+                        and function_node.type == "parenthesized_expression"
+                    ):
+                        function_node = next(
+                            iter(function_node.named_children), None
+                        )
+                    if (
+                        function_node is None
+                        or function_node.type != "selector_expression"
+                    ):
+                        raise _Unsupported(
+                            "call_mapping_unavailable",
+                            _span(node),
+                            call.target,
+                        )
+                    receiver = function_node.child_by_field_name("operand")
+                    if receiver is None:
+                        raise _Unsupported(
+                            "call_mapping_unavailable",
+                            _span(node),
+                            call.target,
+                        )
                 return self._direct_import_call(
                     call, arguments, fn, params, locals_, transfers,
-                    count, depth,
+                    count, depth, receiver=receiver,
                 )
             target = self.functions.get(call.target)
             if target is None or len(arguments) != len(target.parameters):
@@ -1505,20 +1536,31 @@ class _Builder:
         transfers: list[Any],
         count: int,
         depth: int,
+        receiver: Any = None,
     ) -> frozenset[int]:
         # The callee lives in a resolved imported unit; its body is
         # opaque here. The result may depend on every argument — an
         # over-approximation — and the recorded target is the imported
         # unit's own binding identity, so a regenerated report for it
         # still flags this summary via `stale_dependents`. Package-level
-        # state is not modelled.
+        # state is not modelled. A method call also depends on its
+        # receiver expression, evaluated before the arguments.
+        receiver_deps = (
+            self.expression(
+                receiver, fn, params, locals_, transfers, count, depth + 1
+            )
+            if receiver is not None
+            else frozenset()
+        )
         actual = tuple(
             self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
             )
             for arg in arguments
         )
-        result = frozenset().union(*actual) if actual else frozenset()
+        result = (
+            frozenset().union(*actual) if actual else frozenset()
+        ) | receiver_deps
         transfers.append(
             CallTransfer(call.span, call.target, actual, result, imported=True)
         )
