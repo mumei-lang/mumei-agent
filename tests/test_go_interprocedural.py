@@ -690,6 +690,11 @@ def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
             "func F(x int64) int64 { y := x; switch x { case 1: case 2: fallthrough; default: return y }; return y }",
             frozenset({0}),
         ),
+        # A switch initializer and fallthrough compose.
+        (
+            "func F(x, z int64) int64 { y := x; switch v := x; v { case 1: y = 0; fallthrough; case 2: y = v + z }; return y }",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_expression_switch_fallthrough(go_types_helper, declarations, expected):
