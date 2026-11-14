@@ -152,14 +152,14 @@ class FunctionSummary:
     return_dependencies: frozenset[int] | None
     calls: tuple[CallTransfer, ...]
     gaps: tuple[SummaryGap, ...]
-    # `pinned` names named/alias type identities an admitted member read,
-    # conversion or resolved call depends on, beyond the object's own
-    # binding identity: a `lib.V` read whose declared type is `lib.T`, or
-    # a call whose callee's signature names a named type, stays valid
-    # only while that type keeps its identity, so `stale_dependents`
-    # flags the summary when it — not just the member or callee — is
-    # redeclared. Basic and unnamed types carry no identity and pin
-    # nothing.
+    # `pinned` names named/alias type identities this summary depends
+    # on, beyond binding identities: the function's own declared
+    # parameter/result type facts, every admitted member read or
+    # conversion whose member type carries one, and every resolved
+    # call's callee signature. The summary stays valid only while all
+    # of them keep their identities, so `stale_dependents` flags it
+    # when any is redeclared. Basic and unnamed types carry no identity
+    # and pin nothing.
     pinned: tuple[str, ...] = ()
 
     @property
@@ -259,18 +259,32 @@ class GoSummarySet:
         Binding identities carry the producing unit's source digest, so a
         replaced callee never reuses its identity: every summary that
         recorded a call to a target absent from `known`, or pinned an
-        imported type identity absent from `known`, must be re-derived.
-        Direct edges only — a transitive caller two edges away is not
-        reported; hosts building incremental caches must propagate
-        invalidation through the recorded call graph themselves.
+        imported type identity absent from `known`, must be re-derived —
+        and so must every summary that called one of those: a caller's
+        summary encodes its callee's answer, so flagging propagates
+        along recorded `call_targets` edges until a fixed point. The
+        fragment rejects recursion, so call edges among recorded
+        summaries are acyclic and the propagation terminates.
         Detection only — what to recompute is the host's call.
         """
         live = frozenset(known)
-        return frozenset(
+        stale = {
             f.binding_id
             for f in self.functions
-            if any(target not in live for target in (*f.call_targets, *f.pinned))
-        )
+            if any(
+                target not in live for target in (*f.call_targets, *f.pinned)
+            )
+        }
+        changed = True
+        while changed:
+            changed = False
+            for f in self.functions:
+                if f.binding_id not in stale and any(
+                    target in stale for target in f.call_targets
+                ):
+                    stale.add(f.binding_id)
+                    changed = True
+        return frozenset(stale)
 
 
 class _Unsupported(Exception):
@@ -490,6 +504,15 @@ class _Builder:
         saved_pinned = self.pinned
         self.frames = []
         self.pinned = set()
+        # The summary embeds the function's declared parameter and
+        # result type facts, so the named/alias identities they carry
+        # pin it directly: redeclaring one makes this summary's
+        # recorded facts stale even when its binding identity is
+        # unchanged. Callers pin the same identities again at each
+        # admitted call site.
+        for p in (*fn.parameters, *fn.results):
+            if p.type.type_id:
+                self.pinned.add(p.type.type_id)
         try:
             self._sequence(
                 statements, fn, params, locals_, transfers, count, deps,

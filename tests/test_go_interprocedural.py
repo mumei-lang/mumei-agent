@@ -3320,3 +3320,46 @@ def test_signature_type_ids_on_non_function_member_is_rejected(go_types_helper):
             load_go_package_snapshot(
                 json.dumps(tampered).encode(), fn_files, target_arch="amd64"
             )
+
+
+def test_stale_dependents_propagates_transitively(go_types_helper):
+    # `G`'s declared parameter is `lib.T`, `H` calls `G`, and `F` calls
+    # `H` — `F` names nothing imported itself. Churning `T` leaves every
+    # function's own identity live: `G` and `H` flag through pins, and
+    # only transitive propagation along the recorded call edge flags
+    # `F`.
+    files = {
+        "a.go": "package p\n"
+        "func F(x int64) int64 { return H(x) }\n",
+        "h.go": "package p\nimport \"lib\"\n"
+        "func H(y int64) int64 { return G(lib.T(y)) }\n",
+        "g.go": "package p\nimport \"lib\"\n"
+        "func G(z lib.T) int64 { return int64(z) }\n",
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(IMPORTED_MEMBERS_LIB)
+    lib2["lib"] = {
+        **IMPORTED_MEMBERS_LIB["lib"],
+        "t.go": "package lib\ntype  T int64\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]), lib2["lib"], target_arch="amd64"
+    )
+    # The host unit's own bindings are unchanged — only `lib`'s fresh
+    # identities replace the recorded ones.
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    ids = {
+        f.binding_id: snapshot.binding(f.binding_id).name
+        for f in snapshot.functions
+    }
+    # `G` pins `T` through its own declared signature and `H` through
+    # the admitted call and conversion; `F`'s only edge is to `H`, whose
+    # identity is still live.
+    assert known.issuperset(set(ids))
+    f_id = next(b for b, name in ids.items() if name == "F")
+    g_id = next(b for b, name in ids.items() if name == "G")
+    h_id = next(b for b, name in ids.items() if name == "H")
+    assert summaries.stale_dependents(known) == frozenset({f_id, g_id, h_id})

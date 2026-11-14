@@ -1744,7 +1744,11 @@ exposes each summary's recorded callee identities for the same join.
 Boundaries: this is detection, not recomputation — the host decides what
 to rebuild, no persistent cache or evidence acceptance is implied, and
 an unavailable summary that recorded no transfer is never flagged (it
-was already unusable). True cross-file calls still cannot be made at
+was already unusable). Flagging propagates transitively along recorded
+`call_targets` edges to a fixed point — a caller's summary encodes its
+callee's answer, so a stale callee invalidates its callers — and the
+fragment's recursion rejection keeps the walk finite. True cross-file
+calls still cannot be made at
 all (single-unit snapshots); this maps invalidation for whatever calls
 the fragment does resolve.
 
@@ -2046,10 +2050,35 @@ record stay byte-identical.
 Boundaries: pins name *declared* signature types at top level — a
 type nested inside a composite (`[]lib.T`, `map[string]lib.T`)
 records no entry, and a signature naming no named/alias type carries
-no key. A callee's own summary never pins its signature — pins are
-recorded by the caller's analysis at each admitted call site. The
+no key. Callers pin the callee's signature at each admitted call
+site. The
 multi-valued / non-scalar-result admissibility rules are unchanged,
 so the pin only ever covers calls the fragment already summarises.
+
+### C07 transitive staleness and own-signature pins
+
+`stale_dependents` now propagates flagging transitively along
+recorded `call_targets` edges to a fixed point, instead of reporting
+direct edges only: a caller's summary encodes its callee's answer,
+so a stale callee invalidates its callers however many files apart
+they sit — closing the under-flagging a direct-edges report left
+for chains like `F → H → G` where `T` churns while every function's
+own identity stays live. The fragment rejects recursion, so the
+propagation terminates.
+
+At the same time a function summary now pins the named/alias type
+identities its *own* declared parameter and result type facts carry
+— the summary embeds those facts, so redeclaring a signature type
+makes the recorded summary stale even when the function's own
+identity is unchanged (previously only callers pinned, at call
+sites). Basic and unnamed types still pin nothing, and an
+unavailable summary still records no pin.
+
+Boundaries: propagation follows `call_targets` only — `pinned`
+edges flag the pinner directly but are not walked further (a pinned
+identity names a type declaration, not a summary). Transitivity is
+detection semantics, not proof that the re-derived summaries will
+differ; detection, not equivalence.
 
 ## Roadmap authority and vocabulary
 
