@@ -4274,9 +4274,9 @@ def test_instantiated_receiver_type_arg_pin_flags_stale(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
-def test_instantiated_receiver_composite_arg_stays_closed(go_types_helper):
-    # `lib.GT[*lib.T]` — a pointer constructor inside the receiver's
-    # type arguments has no pin channel, so the call stays closed.
+def test_instantiated_receiver_composite_arg_pins(go_types_helper):
+    # `lib.GT[*lib.T]` — a composite constructor inside the receiver's
+    # type arguments pins every named identity it contains.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x lib.GT[*lib.T], y int64) int64 { return x.GM(y) }\n"
@@ -4286,12 +4286,16 @@ def test_instantiated_receiver_composite_arg_stays_closed(go_types_helper):
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "method_generic_or_variadic"
+    # A composite constructor inside the receiver's type arguments
+    # pins every named identity it contains — `*lib.T` pins `T`.
+    assert call["kind"] == "direct_import"
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert call["type_arg_type_ids"] == [members["T"]["id"]]
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
 
 
 def test_imported_method_expression_is_admitted(go_types_helper):
@@ -5164,9 +5168,10 @@ def test_instantiated_type_conversion_nested_generic_arg_pins(go_types_helper):
     assert summaries.stale_dependents(known) == frozenset({f_id})
 
 
-def test_instantiated_type_conversion_pointer_arg_closed(go_types_helper):
-    # `lib.S[*lib.T](0)` — a pointer type argument has no pin channel,
-    # so the conversion stays closed.
+def test_instantiated_type_conversion_pointer_arg_pins(go_types_helper):
+    # `lib.S[*lib.T](0)` — a composite type argument pins every named
+    # identity inside it, so redeclaring `T` while `S` is
+    # byte-identical stales the call site.
     lib = {
         "lib": {
             "s.go": "package lib\ntype S[A any] int64\n",
@@ -5182,10 +5187,123 @@ def test_instantiated_type_conversion_pointer_arg_closed(go_types_helper):
         files,
         target_arch="amd64",
     )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available
+    lib2 = {
+        "s.go": "package lib\ntype S[A any] int64\n",
+        "t.go": "package lib\ntype T int32\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_instantiated_type_conversion_map_arg_pins(go_types_helper):
+    # `lib.S[map[string]lib.T](x)` — a map type argument pins the
+    # element identity the same way.
+    lib = {
+        "lib": {
+            "s.go": "package lib\ntype S[A any] int64\n",
+            "t.go": "package lib\ntype T int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.S[map[string]lib.T](x)) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_instantiated_type_conversion_func_arg_stays_closed(
+    go_types_helper,
+):
+    # `lib.S[func() int64](x)` — a signature type argument carries no
+    # pinnable identity, so the conversion stays closed.
+    lib = {"lib": {"s.go": "package lib\ntype S[A any] int64\n"}}
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.S[func() int64](x)) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_imported_generic_pointer_type_argument_is_pinned(go_types_helper):
+    # `lib.GN[*lib.T](v)` — a pointer type argument's pointee rides on
+    # `type_arg_type_ids`, pinning `lib.T` at this call site.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v lib.T2) int64 { return lib.GN[*lib.T](v) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, GENERIC_LIB)
+    )
+    assert report["status"] == "ok"
+    gn = next(c for c in report["calls"] if c["kind"] == "direct_import")
+    t = next(m for m in report["imported_members"] if m["name"] == "T")
+    assert gn["type_arg_type_ids"] == [t["id"]]
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_generic_pointer_result_type_arg_is_admitted(
+    go_types_helper,
+):
+    # `lib.GI[*lib.T](p)` — the instantiated result `*lib.T` is a
+    # pointer to a declared named type, an admitted signature shape,
+    # so the call classifies and the pointee pins `T`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(p *lib.T) *lib.T { return lib.GI[*lib.T](p) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, GENERIC_LIB)
+    )
+    assert report["status"] == "ok"
+    gi = next(c for c in report["calls"] if c["kind"] == "direct_import")
+    t = next(m for m in report["imported_members"] if m["name"] == "T")
+    assert gi["type_arg_type_ids"] == [t["id"]]
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
 
 
 def test_instantiated_type_conversion_composite_underlying_closed(go_types_helper):

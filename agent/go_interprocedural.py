@@ -433,13 +433,26 @@ class _Builder:
     def _pin_type_node(self, node: Any) -> bool:
         """Pin every named identity a type expression names.
 
-        Returns False for a composite constructor (`*T`, `[]T`, maps,
-        channels, …) or an unresolvable name — the admitting caller
-        keeps the expression closed rather than admit an unpinned
-        identity. Predeclared and universe names pin nothing.
+        Returns False for a signature, struct or interface literal or
+        an unresolvable name — the admitting caller keeps the
+        expression closed rather than admit an unpinned identity.
+        Composite constructors (`*T`, `[]T`, maps, channels, …) pin
+        every named identity their elements name. Predeclared and
+        universe names pin nothing.
         """
         if node is None:
             return False
+        if node.type in {
+            "pointer_type",
+            "slice_type",
+            "array_type",
+            "map_type",
+            "channel_type",
+        }:
+            children = tuple(node.named_children)
+            return bool(children) and all(
+                self._pin_type_node(elem) for elem in children
+            )
         if node.type in {"type_elem", "parenthesized_type"}:
             inner = next(iter(node.named_children), None)
             return inner is not None and self._pin_type_node(inner)
