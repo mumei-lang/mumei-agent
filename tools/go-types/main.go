@@ -251,9 +251,9 @@ func (ix *indexer) directImportMethodID(f *types.Func, recv types.Type) (string,
 	if !ok || sig.Recv() == nil || !allScalarResults(sig) {
 		return "", 0, nil, false
 	}
-	rt := recv
+	rt := types.Unalias(recv)
 	if ptr, ok := rt.(*types.Pointer); ok {
-		rt = ptr.Elem()
+		rt = types.Unalias(ptr.Elem())
 	}
 	named, ok := rt.(*types.Named)
 	if !ok {
@@ -835,7 +835,13 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 			// receiver is already the leading argument, so the plain
 			// `direct_import` shape needs no flag.
 			if selection.Kind() == types.MethodVal || selection.Kind() == types.MethodExpr {
-				if f, ok := selection.Obj().(*types.Func); ok {
+				// A promoted selection (`s.GM` through `struct{ GT[T] }`,
+				// or an embedded interface's method) has an Index path
+				// longer than one: the static receiver is the outer type,
+				// so the embedded instantiation's type arguments — or the
+				// dynamic dispatch itself — escape the gate. Both stay
+				// closed.
+				if f, ok := selection.Obj().(*types.Func); ok && len(selection.Index()) == 1 {
 					if id, arity, ids, ok := ix.directImportMethodID(f, selection.Recv()); ok {
 						// `lib.T.M(recv, args)` — a method expression:
 						// the receiver is already the leading argument,
