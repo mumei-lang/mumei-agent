@@ -1809,6 +1809,22 @@ gap like grouped `var`. A spec with no value (implicit iota repetition)
 is unmodelled, and this is still not constant *evaluation* — a const is
 parameter-independent, not a known value.
 
+### C07 remaining scalar binary operators
+
+All remaining scalar binary operators — `/`, `%`, `<<` and `>>` — are
+admitted on the scalar fragment. Dependency composition is
+operation-agnostic: every pure operator unions its operands'
+dependencies like the arithmetic and bitwise set already does. This
+also removes the inconsistency where the compound forms `/=`, `%=`,
+`<<=` and `>>=` were admitted while their plain counterparts were
+gaps.
+
+Boundaries: this is still dependency analysis, not arithmetic — no
+value, overflow, shift-count or division-by-zero semantics are
+modelled, matching the existing boundary for every other operator.
+Non-scalar operands stay type gaps, and unary operators beyond
+`+`, `-`, `!` and `^` remain unsupported.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
