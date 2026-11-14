@@ -462,7 +462,11 @@ class _Builder:
             )
         if node.type == "type_identifier":
             ref = self.references.get(self.node_key(node))
-            if ref is None or ref.kind == "universe":
+            if ref is None:
+                # A type name the report recorded no reference for is
+                # unresolvable — admit nothing unpinned.
+                return False
+            if ref.kind == "universe":
                 # `int64`, `error`, `any`, … — declared nowhere, nothing
                 # to pin.
                 return True

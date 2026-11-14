@@ -4993,3 +4993,38 @@ def test_instantiated_type_conversion_composite_underlying_closed(go_types_helpe
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_instantiated_type_conversion_missing_arg_ref_closed(go_types_helper):
+    # A type argument whose name the report recorded no reference for
+    # is unresolvable — the conversion fails closed rather than admit
+    # an unpinned identity.
+    lib = {"lib": {"s.go": "package lib\ntype S[A any] int64\n"}}
+    files = {
+        "a.go": "package p\nimport \"lib\"\ntype T int64\n"
+        "func F(x int64) int64 { return int64(lib.S[T](x)) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    t_id = next(
+        b.id
+        for b in snapshot.bindings
+        if b.name == "T" and b.kind == "type"
+    )
+    forged = replace(
+        snapshot,
+        references=tuple(
+            r for r in snapshot.references if r.binding_id != t_id
+        ),
+    )
+    result = named_package(
+        files, forged, ip.summarize_go_package(files, forged), "F"
+    )
+    assert not result.available
