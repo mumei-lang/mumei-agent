@@ -7173,6 +7173,34 @@ def test_nested_field_write_deref_base_is_admitted(go_types_helper):
     assert write.target == members["W2"]["id"] and write.arguments == ()
 
 
+def test_nested_field_write_receiver_observes_folded_deps(go_types_helper):
+    # `t.W.N = v; return t.W.Get()` — the write folds v's deps into
+    # the root binding `t`, and the method call's nested-selector
+    # receiver `t.W` can observe them, so the result carries {0, 1}.
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type W2 struct{ N int64 }\ntype S2 struct{ W *W2 }\n"
+            "func (w *W2) Get() int64 { return w.N }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2, v int64) int64 {\n"
+        "\tt.W.N = v\n"
+        "\treturn t.W.Get()\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
 def test_nested_field_write_struct_value_stays_closed(go_types_helper):
     # `t.A.B = v` — the intermediate field `A` is a struct *value*,
     # not a pointer, so the chain cannot walk deeper through it.

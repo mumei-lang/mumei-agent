@@ -807,6 +807,30 @@ member, or one explicit dereference of one (`(*t).F` — the same
             index, fn, params, locals_, transfers, count, depth + 1
         )
 
+    def _bound_receiver_root(
+        self,
+        receiver: Any,
+        locals_: dict[str, frozenset[int]],
+        params: dict[str, int],
+    ) -> Any | None:
+        """The bound identifier at the root of a nested-selector
+        receiver — `t` in `t.W` — or None. A single-level receiver
+        (`t`, `lib.VS`) evaluates its own deps directly; only a
+        chain resolved through `_bound_field_read` needs the root's
+        accumulated write deps."""
+        inner = receiver
+        while inner is not None and inner.type == "parenthesized_expression":
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
+        if inner is None or inner.type != "selector_expression":
+            return None
+        resolved = self._bound_field_read(inner, locals_, params)
+        if resolved is None:
+            return None
+        return resolved[2]
+
     def _imported_member_write(
         self, node: Any
     ) -> tuple[PackageMember, tuple[Any, ...], bool] | None:
@@ -2787,6 +2811,19 @@ member, or one explicit dereference of one (`(*t).F` — the same
             if receiver is not None
             else frozenset()
         )
+        # `t.W.Get()` — a nested-selector receiver reads dep-free like
+        # any field read, but a `t.W.f = v` write folded the value's
+        # deps into the chain's root binding and a method call on the
+        # chain can observe them, so the root binding's deps join the
+        # receiver's.
+        if receiver is not None:
+            root_ref = self._bound_receiver_root(receiver, locals_, params)
+            if root_ref is not None:
+                binding_id = root_ref.binding_id
+                if binding_id in locals_:
+                    receiver_deps |= locals_[binding_id]
+                elif binding_id in params:
+                    receiver_deps |= frozenset({params[binding_id]})
         actual = tuple(
             self.expression(
                 arg, fn, params, locals_, transfers, count, depth + 1
