@@ -517,6 +517,47 @@ class _Builder:
         if member.type.type_id:
             self.pinned.add(member.type.type_id)
 
+    def _opaque_write_target(
+        self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]
+    ) -> bool:
+        """An assignment LHS whose store lands in untracked state.
+
+        `*t` (a pointer dereference) and `t.f` (a field selection —
+        reachable in the fragment through a pointer receiver) both
+        mutate memory the dependency model does not follow: the model
+        tracks each binding's index, never the pointee's or field's
+        contents. The write is admitted when the base is a bound
+        parameter or local identifier — an imported member, a package
+        var or an unbound name keeps the statement closed, matching
+        the bare-identifier gate.
+        """
+        while node is not None and node.type == "parenthesized_expression":
+            node = next(iter(node.named_children), None)
+        if node is None:
+            return False
+        if node.type == "unary_expression":
+            first = next(iter(node.children), None)
+            operand = node.child_by_field_name("operand")
+            if (
+                first is None
+                or first.type != "*"
+                or operand is None
+            ):
+                return False
+            base = operand
+        elif node.type == "selector_expression":
+            base = node.child_by_field_name("operand")
+        else:
+            return False
+        while base is not None and base.type == "parenthesized_expression":
+            base = next(iter(base.named_children), None)
+        if base is None or base.type != "identifier" or base.text == b"_":
+            return False
+        ref = self.references.get(self.node_key(base))
+        return ref is not None and (
+            ref.binding_id in locals_ or ref.binding_id in params
+        )
+
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
         if binding_id in self.cache:
@@ -955,18 +996,29 @@ class _Builder:
             # runs, matching the single-assignment check's error order.
             refs: list[Any] = []
             for lhs in lefts:
-                if lhs.type != "identifier":
-                    raise _Unsupported("unsupported_statement", _span(lhs))
-                if lhs.text == b"_":
+                if lhs.type == "identifier":
+                    if lhs.text == b"_":
+                        refs.append(None)
+                        continue
+                    ref = self.references.get(self.node_key(lhs))
+                    if ref is None or (
+                        ref.binding_id not in locals_
+                        and ref.binding_id not in params
+                    ):
+                        raise _Unsupported("binding_unavailable", _span(lhs))
+                    refs.append(ref)
+                    continue
+                # `*t = v` / `t.f = v` — a store through a pointer
+                # lands in state the dependency model does not track
+                # (it follows bindings, not pointee or field state),
+                # so the LHS contributes nothing beyond requiring a
+                # bound base: the RHS still evaluates for its calls
+                # and the result is discarded. Imported members and
+                # unbound bases keep the statement closed.
+                if self._opaque_write_target(lhs, locals_, params):
                     refs.append(None)
                     continue
-                ref = self.references.get(self.node_key(lhs))
-                if ref is None or (
-                    ref.binding_id not in locals_
-                    and ref.binding_id not in params
-                ):
-                    raise _Unsupported("binding_unavailable", _span(lhs))
-                refs.append(ref)
+                raise _Unsupported("unsupported_statement", _span(lhs))
             # Tuple assignment is parallel: every RHS evaluates against the
             # pre-state before any store lands, so `x, y = y, x` swaps each
             # name's original dependencies. `x, y = lib.F(a)` unpacks one
