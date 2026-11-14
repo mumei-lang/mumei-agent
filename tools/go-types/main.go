@@ -175,6 +175,22 @@ type indexer struct {
 
 var errUnresolvedImport = fmt.Errorf("unresolved import")
 
+// scalarResults admits a signature only when it returns zero results or a
+// single scalar (integer/boolean) result.
+func scalarResults(sig *types.Signature) bool {
+	res := sig.Results()
+	if res.Len() > 1 {
+		return false
+	}
+	if res.Len() == 1 {
+		b, ok := res.At(0).Type().Underlying().(*types.Basic)
+		if !ok || (b.Info()&types.IsInteger == 0 && b.Kind() != types.Bool) {
+			return false
+		}
+	}
+	return true
+}
+
 // directImportID admits an imported call only when it is summarizable: zero
 // results, or a single scalar (integer/boolean) result. Composite or
 // multi-valued imported results stay `external_or_bodyless` — a `range` over
@@ -186,20 +202,59 @@ func (ix *indexer) directImportID(f *types.Func) (string, bool) {
 		return "", false
 	}
 	sig, ok := f.Type().(*types.Signature)
+	if !ok || !scalarResults(sig) {
+		return "", false
+	}
+	return id, true
+}
+
+// directImportInstantiation admits an explicit instantiation of an imported
+// generic function `lib.G[int64](...)` only when every type argument and every
+// instantiated parameter is a basic type and the instantiated result is
+// scalar. That keeps every type identity the call site can depend on basic:
+// named/alias type arguments or parameters would add identities the member
+// record's declared-signature pins cannot cover. The dependency model is the
+// same opaque `direct_import` shape — the result depends on every evaluated
+// argument. Inferred calls `lib.G(x)` keep their existing classification.
+func (ix *indexer) directImportInstantiation(x ast.Expr) (string, bool) {
+	sel, ok := x.(*ast.SelectorExpr)
 	if !ok {
 		return "", false
 	}
-	res := sig.Results()
-	if res.Len() > 1 {
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok {
 		return "", false
 	}
-	if res.Len() == 1 {
-		b, ok := res.At(0).Type().Underlying().(*types.Basic)
-		if !ok || (b.Info()&types.IsInteger == 0 && b.Kind() != types.Bool) {
+	if _, isPkg := ix.info.Uses[pkg].(*types.PkgName); !isPkg {
+		return "", false
+	}
+	f, ok := ix.info.Uses[sel.Sel].(*types.Func)
+	if !ok {
+		return "", false
+	}
+	inst, ok := ix.info.Instances[sel.Sel]
+	if !ok {
+		return "", false
+	}
+	for i := 0; i < inst.TypeArgs.Len(); i++ {
+		if _, ok := inst.TypeArgs.At(i).(*types.Basic); !ok {
 			return "", false
 		}
 	}
-	return id, true
+	isig, ok := inst.Type.(*types.Signature)
+	if !ok {
+		return "", false
+	}
+	for i := 0; i < isig.Params().Len(); i++ {
+		if _, ok := isig.Params().At(i).Type().Underlying().(*types.Basic); !ok {
+			return "", false
+		}
+	}
+	if !scalarResults(isig) {
+		return "", false
+	}
+	id := ix.importedID(f)
+	return id, id != ""
 }
 
 // Import implements types.Importer against the host-declared import map.
@@ -556,8 +611,14 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 	fun := unparen(c.Fun)
 	switch e := fun.(type) {
 	case *ast.IndexExpr:
+		if id, ok := ix.directImportInstantiation(e.X); ok {
+			return "direct_import", id
+		}
 		fun = unparen(e.X)
 	case *ast.IndexListExpr:
+		if id, ok := ix.directImportInstantiation(e.X); ok {
+			return "direct_import", id
+		}
 		fun = unparen(e.X)
 	case *ast.SelectorExpr:
 		if selection := ix.info.Selections[e]; selection != nil && selection.Kind() != types.FieldVal {
@@ -744,6 +805,7 @@ func analyze(req request) (out snapshot) {
 		Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object),
 		Implicits: make(map[ast.Node]types.Object), Types: make(map[ast.Expr]types.TypeAndValue),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Instances:  make(map[*ast.Ident]types.Instance),
 	}
 	conf := types.Config{GoVersion: languageVersion, Sizes: ix.sizes, Importer: &ix, Error: func(e error) {
 		if len(out.Gaps) < 16 {

@@ -2080,6 +2080,39 @@ identity names a type declaration, not a summary). Transitivity is
 detection semantics, not proof that the re-derived summaries will
 differ; detection, not equivalence.
 
+### C06 imported generic instantiations
+
+An explicit instantiation of an imported generic function —
+`lib.G[int64](x)` — now classifies as `direct_import` when every
+type argument and every instantiated parameter is a basic type and
+the instantiated signature returns at most one scalar result. The
+producer resolves the instantiation through `types.Info.Instances`
+(newly recorded on the info map) and applies the same scalar-result
+rule as `directImportID`, against the *instantiated* signature. The
+dependency model is the existing opaque shape: the result depends on
+every evaluated argument, and the member record's
+`signature_type_ids` — which cover the generic's declared signature,
+including its type-parameter identities — pin the call site as with
+any other imported call.
+
+The basic-type restriction keeps the admitted surface inside the
+member record's pin coverage: a named or alias type argument or
+instantiated parameter (`lib.G[lib.T](v)`) would introduce a type
+identity no pin declares, so those instantiations stay
+`indirect_or_selector`. The consumer admits the call through the
+same `direct_import` path — tree-sitter parses the single-type-arg
+form `lib.G[T](x)` as `type_conversion_expression`, so a dedicated
+arm maps that node shape onto the recorded call; multi-type-arg
+forms already arrive as `call_expression`.
+
+Boundaries: inferred calls `lib.G(x)` stay `external_or_bodyless`
+(the declared signature's result is a type parameter, so the
+scalar-result rule rejects it — only *explicit* basic instantiations
+are admitted). Instantiated generic *types* (`lib.S[int64](x)`),
+local generics, methods and multi-valued results are unchanged and
+closed. A void instantiated callee records its argument-dependency
+union like any other `direct_import` transfer.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

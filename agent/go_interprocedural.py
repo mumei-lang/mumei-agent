@@ -1413,32 +1413,10 @@ class _Builder:
                     )
                 return deps
             if call.kind == "direct_import":
-                # The callee lives in a resolved imported unit; its body is
-                # opaque here. The result may depend on every argument — an
-                # over-approximation — and the recorded target is the
-                # imported unit's own binding identity, so a regenerated
-                # report for it still flags this summary via
-                # `stale_dependents`. Package-level state is not modelled.
-                actual = tuple(
-                    self.expression(
-                        arg, fn, params, locals_, transfers, count, depth + 1
-                    )
-                    for arg in arguments
+                return self._direct_import_call(
+                    node, call, arguments, fn, params, locals_, transfers,
+                    count, depth,
                 )
-                result = frozenset().union(*actual) if actual else frozenset()
-                transfers.append(
-                    CallTransfer(
-                        call.span, call.target, actual, result, imported=True
-                    )
-                )
-                # The callee's declared named/alias signature types are
-                # pinned the same way a member read's declared type is:
-                # redeclaring one flags this summary even when the callee's
-                # own identity is unchanged.
-                member = self.members.get(call.target)
-                if member is not None:
-                    self.pinned.update(member.signature_type_ids)
-                return result
             target = self.functions.get(call.target)
             if target is None or len(arguments) != len(target.parameters):
                 raise _Unsupported("callee_unavailable", _span(node), call.target)
@@ -1482,7 +1460,77 @@ class _Builder:
                 )
             )
             return result
+        if kind == "type_conversion_expression":
+            # tree-sitter parses `lib.G[T](args)` — an explicit
+            # instantiation of an imported generic function — in a
+            # conversion shape. The producer's call classification is
+            # authoritative: only a `direct_import` record (concrete
+            # basic instantiation of an imported generic function)
+            # admits it; an instantiated generic *type* conversion such
+            # as `lib.S[int64](x)` stays opaque.
+            call = self.calls.get(self.node_key(node))
+            if (
+                call is None
+                or call.owner != fn.binding_id
+                or call.kind != "direct_import"
+            ):
+                raise _Unsupported("unsupported_expression", _span(node))
+            operand = node.child_by_field_name("operand")
+            if operand is None:
+                raise _Unsupported("unsupported_expression", _span(node))
+            arguments = (
+                _children(operand)
+                if operand.type == "expression_list"
+                else [operand]
+            )
+            if tuple(self.node_key(arg) for arg in arguments) != tuple(
+                _key3(a) for a in call.arguments
+            ):
+                raise _Unsupported(
+                    "call_mapping_unavailable", _span(node), call.target
+                )
+            return self._direct_import_call(
+                node, call, arguments, fn, params, locals_, transfers,
+                count, depth,
+            )
         raise _Unsupported("unsupported_expression", _span(node))
+
+    def _direct_import_call(
+        self,
+        node: Any,
+        call: Any,
+        arguments: list[Any],
+        fn: Any,
+        params: list[Any],
+        locals_: dict[Any, Any],
+        transfers: list[Any],
+        count: int,
+        depth: int,
+    ) -> frozenset[int]:
+        # The callee lives in a resolved imported unit; its body is
+        # opaque here. The result may depend on every argument — an
+        # over-approximation — and the recorded target is the imported
+        # unit's own binding identity, so a regenerated report for it
+        # still flags this summary via `stale_dependents`. Package-level
+        # state is not modelled.
+        actual = tuple(
+            self.expression(
+                arg, fn, params, locals_, transfers, count, depth + 1
+            )
+            for arg in arguments
+        )
+        result = frozenset().union(*actual) if actual else frozenset()
+        transfers.append(
+            CallTransfer(call.span, call.target, actual, result, imported=True)
+        )
+        # The callee's declared named/alias signature types are pinned
+        # the same way a member read's declared type is: redeclaring one
+        # flags this summary even when the callee's own identity is
+        # unchanged.
+        member = self.members.get(call.target)
+        if member is not None:
+            self.pinned.update(member.signature_type_ids)
+        return result
 
 
 def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:
