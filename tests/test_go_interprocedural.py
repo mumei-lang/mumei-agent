@@ -3160,3 +3160,37 @@ def test_type_pin_flags_stale_dependents(go_types_helper):
         if snapshot.binding(f.binding_id).name == "F"
     )
     assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_type_id_naming_a_non_type_local_binding_is_rejected(go_types_helper):
+    # Local binding ids share the imported-identity shape, so a `type_id`
+    # that names a non-type local binding must still fail: the imported
+    # clause only covers identities outside `by_id`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + int64(lib.VT) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB)
+    )
+    assert report["status"] == "ok"
+    non_type = next(b["id"] for b in report["bindings"] if b["kind"] != "type")
+
+    member_report = json.loads(json.dumps(report))
+    for m in member_report["imported_members"]:
+        if m["name"] == "VT":
+            m["type"]["type_id"] = non_type
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(member_report).encode(), files, target_arch="amd64"
+        )
+
+    binding_report = json.loads(json.dumps(report))
+    for b in binding_report["bindings"]:
+        if b["kind"] != "type":
+            b["type"]["type_id"] = non_type
+            break
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(binding_report).encode(), files, target_arch="amd64"
+        )

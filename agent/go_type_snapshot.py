@@ -690,8 +690,11 @@ def load_go_package_snapshot(
             )
             _require(
                 not t.type_id
-                or _IMPORTED_ID.fullmatch(t.type_id) is not None
                 or (t.type_id in by_id and by_id[t.type_id].kind == "type")
+                or (
+                    t.type_id not in by_id
+                    and _IMPORTED_ID.fullmatch(t.type_id) is not None
+                )
             )
             members.append(PackageMember(mid, name, kind, t))
         _require(len({m.id for m in members}) == len(members))
@@ -778,8 +781,11 @@ def load_go_package_snapshot(
         _require(
             all(
                 not t.type_id
-                or _IMPORTED_ID.fullmatch(t.type_id) is not None
                 or (t.type_id in by_id and by_id[t.type_id].kind == "type")
+                or (
+                    t.type_id not in by_id
+                    and _IMPORTED_ID.fullmatch(t.type_id) is not None
+                )
                 for t in types_to_check
             )
         )
