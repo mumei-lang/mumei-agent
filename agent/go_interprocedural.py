@@ -1152,10 +1152,30 @@ class _Builder:
                     raise _Unsupported("binding_unavailable", _span(node))
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "selector_expression":
-            # `lib.K` — a package-qualified member read. Only scalar
-            # constants are admitted — imported variables are unmodelled
-            # package state and imported functions are not values here.
+            # `lib.K` — a package-qualified member read. Scalar constants
+            # are dep-free, exactly like local constants. A scalar `var`
+            # read is modelled like a zero-argument `direct_import`
+            # transfer: the value derives from package state, not from any
+            # parameter, and the `imported` flag reports `effects` as
+            # `unknown` — the read is not purity-proof. The recorded
+            # target is the member's own identity, so a regenerated report
+            # for the imported unit still flags this summary via
+            # `stale_dependents`. Non-scalar vars, functions and any read
+            # without a matching declaration stay closed.
             member = self._package_member(node)
+            if member is not None and member.kind == "var":
+                if member.type.kind not in {"integer", "boolean"}:
+                    raise _Unsupported("non_parameter_reference", _span(node))
+                transfers.append(
+                    CallTransfer(
+                        _span(node),
+                        member.id,
+                        (),
+                        frozenset(),
+                        imported=True,
+                    )
+                )
+                return frozenset()
             if (
                 member is None
                 or member.kind != "const"

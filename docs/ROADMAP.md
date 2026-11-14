@@ -1940,10 +1940,20 @@ The payoff is honest value coverage: a package-qualified read
 constant (`kind == "const"` with an integer/boolean/untyped-scalar
 type) is admitted dep-free, exactly like a local constant — the
 member's name must also match the source token, so a record that
-names a different object never widens a read. Imported variables
-are unmodelled package state and imported functions are not values
-in the fragment: their reads keep `non_parameter_reference` and
-fail closed, as does any read whose member declaration is absent.
+names a different object never widens a read. Imported functions
+are not values in the fragment: their reads keep
+`non_parameter_reference` and fail closed, as does any read whose
+member declaration is absent.
+
+A package-qualified `var` read `lib.V` is admitted as an opaque
+state read: it records a zero-argument `CallTransfer` with
+`imported=True` — the value derives from package state, not from
+any parameter, so the result contributes no dependencies while
+`effects` reports `unknown`. The recorded target is the member's
+own imported identity, so a regenerated report for that unit still
+flags the reader through `stale_dependents`. The read is scalar
+only: a `var` whose type fact is not integer/boolean keeps
+`non_parameter_reference`, matching the fragment's value model.
 
 Member declarations also classify the conversion target of
 `lib.T(e)`. The producer already records such calls as

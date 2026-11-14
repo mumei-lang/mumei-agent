@@ -2388,8 +2388,8 @@ def test_directive_in_imported_source_fails_closed(go_types_helper):
 IMPORTED_MEMBERS_LIB = {
     "lib": {
         "m.go": "package lib\nconst K = 2\nconst L int64 = 3\nconst S = \"s\"\n"
-        "var V int64 = 7\ntype T int64\ntype F64 float64\ntype A = int64\n"
-        "type GT[N int64 | int32] int64\n"
+        "var V int64 = 7\nvar VS = \"s\"\ntype T int64\ntype F64 float64\n"
+        "type A = int64\ntype GT[N int64 | int32] int64\n"
         "func G(y int64) int64 { return y }\n"
     }
 }
@@ -2445,10 +2445,64 @@ def test_imported_typed_const_read_is_dep_free(go_types_helper):
     assert result.available and result.return_dependencies == frozenset({0})
 
 
-def test_imported_var_read_fails_closed(go_types_helper):
+def test_imported_var_read_is_an_opaque_state_read(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { return x + lib.V }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    # The value derives from package state, not from a parameter — but
+    # the read is not purity-proof, so effects stay `unknown`.
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+    (transfer,) = result.calls
+    assert transfer.imported and transfer.arguments == () and transfer.result == frozenset()
+    member_ids = {m.id for m in snapshot.imported_members}
+    assert transfer.target in member_ids
+
+
+def test_imported_var_read_flags_stale_dependents(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return x + lib.V }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    # Regenerating the imported unit churns V's identity, so the reader
+    # is flagged stale through the recorded transfer target.
+    lib2 = dict(IMPORTED_MEMBERS_LIB)
+    lib2["lib"] = {
+        "m.go": "package lib\nconst K = 2\nconst L int64 = 3\nconst S = \"s\"\n"
+        "var V int64 = 8\nvar VS = \"s\"\ntype T int64\ntype F64 float64\n"
+        "type A = int64\ntype GT[N int64 | int32] int64\n"
+        "func G(y int64) int64 { return y }\n"
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]), lib2["lib"], target_arch="amd64"
+    )
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_imported_nonscalar_var_read_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.VS; return x }\n"
     }
     snapshot = load_go_package_snapshot(
         package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
