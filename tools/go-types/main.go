@@ -548,7 +548,7 @@ func analyze(req request) (out snapshot) {
 	ix := indexer{
 		source: req.Source, sources: unit, fset: fset, packaged: packaged,
 		out: &out, sizes: types.SizesFor("gc", req.TargetArch),
-		files: make(map[*token.File]int),
+		files:          make(map[*token.File]int),
 		importDecls:    importDecls,
 		importCache:    make(map[string]*types.Package),
 		importInFlight: make(map[string]bool),
