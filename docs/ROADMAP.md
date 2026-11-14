@@ -2350,7 +2350,13 @@ and admits. A shape the walk cannot reach stays closed because
 the member's own identity would not flag a redeclaration inside
 it. A non-pointer member behind a `*`
 stays closed (uncompilable), and any unary operator other than
-`*` never unwraps. A deref store can also alias a tracked binding — `lib.PV =
+`*` never unwraps. A deref through a pointer-typed *field* member
+resolves the same way: `*lib.VS2.P = v` resolves the field like a
+field read, records the field member's identity as the write
+target, and pins the base member's identity beside the field's —
+the same `pointee_type_ids` rule decides the field's pointee, so
+`*lib.VS3.PU = v` on `PU *int64` admits through the empty list
+while an undeclarable pointee shape stays closed. A deref store can also alias a tracked binding — `lib.PV =
 &x` aims the member at `x` — so any binding `&x` escaped marks the
 binding, and a `*lib.PV = v` write unions the stored value's
 dependencies into every escaped binding (`return x` then reports
