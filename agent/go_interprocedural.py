@@ -1930,6 +1930,10 @@ class _Builder:
                 pair = self._imported_field_read(node)
                 if pair is not None:
                     base, field_member = pair
+                    # The transfer targets the field's identity; pin
+                    # the base member's own identity too so redeclaring
+                    # `VS` in its own file still flags the summary.
+                    self.pinned.add(base.id)
                     self._pin_member_type(base)
                     self._pin_member_type(field_member)
                     transfers.append(

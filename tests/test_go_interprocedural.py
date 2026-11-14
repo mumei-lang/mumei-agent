@@ -6281,3 +6281,39 @@ def test_bound_base_field_read_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_imported_field_read_flags_base_redeclaration(go_types_helper):
+    # `VS` lives in a different file than `S`/`N` — redeclaring it
+    # leaves every recorded field identity unchanged, so only the
+    # pinned base-member identity flags the summary stale.
+    lib = {
+        "lib": {
+            "s.go": "package lib\ntype S2 struct{ N int64 }\n",
+            "v.go": "package lib\nvar VS2 S2\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VS2.N }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = {"lib": dict(lib["lib"])}
+    lib2["lib"]["v.go"] = "package lib\nvar VS2 S2\nvar VS2B S2\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]),
+        lib2["lib"],
+        target_arch="amd64",
+    )
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
