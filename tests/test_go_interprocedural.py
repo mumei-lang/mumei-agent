@@ -4085,7 +4085,7 @@ METHOD_LIB = {
         "var VSS []S\nvar VStr string\nvar V2 [][]int64\n"
         "type S2 struct{ N int64\n G string\n P *T }\nvar VS2 S2\n"
         "var VMK map[MK]int64\nvar VSM map[string]S\n"
-        "var PSTR *struct{ F T }\n",
+        "var PSTR *struct{ F T }\nvar PCH *chan T\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
         "t.go": "package lib\ntype T int64\n",
@@ -6594,6 +6594,22 @@ def test_imported_deref_index_write_unnamed_pointee_is_admitted(
     assert result.available
     assert result.return_dependencies == frozenset()
     assert result.effects == "unknown"
+
+
+def test_imported_chan_pointee_declares_elem_member(go_types_helper):
+    # `PCH` is `*chan T`: the pointee walk recurses a channel's
+    # element like a slice or map, so `T` declares on
+    # `pointee_type_ids` — and its member record is emitted too, or
+    # pinning the id would flag `stale_dependents` forever.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { *lib.PCH = nil\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert members["PCH"]["pointee_type_ids"] == [members["T"]["id"]]
 
 
 def test_imported_deref_member_write_struct_pointee_stays_closed(

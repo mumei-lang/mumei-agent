@@ -610,8 +610,49 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 				// `m` was stored by value above — put the updated
 				// record back so the key actually serializes.
 				ix.importMembers[id] = m
+				// The ids collect without declaring their member
+				// records — a `*chan T` or `*[]T` pointee names `T`
+				// through the list alone, and a pinned id with no
+				// member record flags `stale_dependents` forever.
+				// Declare each like a direct pointee does.
+				ix.recordPointeeMembers(ptr.Elem(), map[string]bool{})
 			}
 		}
+	}
+}
+
+// recordPointeeMembers declares every named/alias object a resolved
+// pointee tree mentions: `pointee_type_ids` pins those identities, and
+// a pin only detects a redeclaration when the member record exists.
+func (ix *indexer) recordPointeeMembers(t types.Type, seen map[string]bool) {
+	switch tt := t.(type) {
+	case *types.Named:
+		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+			seen[id] = true
+			ix.recordMember(tt.Obj(), id)
+		}
+		for i := 0; i < tt.TypeArgs().Len(); i++ {
+			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
+		}
+	case *types.Alias:
+		if id := ix.typeID(tt.Obj()); id != "" && !seen[id] {
+			seen[id] = true
+			ix.recordMember(tt.Obj(), id)
+		}
+		for i := 0; i < tt.TypeArgs().Len(); i++ {
+			ix.recordPointeeMembers(tt.TypeArgs().At(i), seen)
+		}
+	case *types.Pointer:
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Slice:
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Array:
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Map:
+		ix.recordPointeeMembers(tt.Key(), seen)
+		ix.recordPointeeMembers(tt.Elem(), seen)
+	case *types.Chan:
+		ix.recordPointeeMembers(tt.Elem(), seen)
 	}
 }
 

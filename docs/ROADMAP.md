@@ -2344,9 +2344,11 @@ member's own identity covers the declaration completely, while a
 deeper named use (`*lib.PPV` or `**lib.PPV` on `**T`) declares and
 pins `T` exactly like a type argument. Only a pointee shape the
 key cannot declare stays closed — an anonymous struct hiding a
-named use (`*lib.PSTR` on `*struct{ F T }`) or a signature/chan
-tree — because the member's own identity would not flag a
-redeclaration inside it. A non-pointer member behind a `*`
+named use (`*lib.PSTR` on `*struct{ F T }`) or a signature tree —
+a `*chan T` pointee resolves its `T` element like a slice or map
+and admits. A shape the walk cannot reach stays closed because
+the member's own identity would not flag a redeclaration inside
+it. A non-pointer member behind a `*`
 stays closed (uncompilable), and any unary operator other than
 `*` never unwraps. A deref store can also alias a tracked binding — `lib.PV =
 &x` aims the member at `x` — so any binding `&x` escaped marks the
