@@ -262,6 +262,11 @@ class PackageCall:
     # when it is greater than one — the consumer needs it to admit the
     # tuple unpacking `a, b := lib.F(x)`. 0 means zero or one result.
     results: int = 0
+    # `type_arg_type_ids` pins the named/alias identities an
+    # instantiated callee's type arguments resolve to — the substituted
+    # identities are declared nowhere else, so the call record carries
+    # them for staleness pinning exactly like a member's signature ids.
+    type_arg_type_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -778,6 +783,7 @@ def load_go_package_snapshot(
                     "kind",
                     "method",
                     "results",
+                    "type_arg_type_ids",
                 }
             )
             c = item
@@ -800,6 +806,16 @@ def load_go_package_snapshot(
                 type(results) is int
                 and (results == 0 or results >= 2)
                 and (not results or kind == "direct_import")
+            )
+            # `type_arg_type_ids` only travels on a `direct_import`
+            # record — no other callee can substitute type arguments.
+            type_arg_ids = _list(c.get("type_arg_type_ids", []))
+            _require(
+                (not type_arg_ids or kind == "direct_import")
+                and all(
+                    type(i) is str and _IMPORTED_ID.fullmatch(i) is not None
+                    for i in type_arg_ids
+                )
             )
             if kind == "direct_local":
                 _require(target in fn_by_id)
@@ -825,7 +841,16 @@ def load_go_package_snapshot(
                 )
             )
             calls.append(
-                PackageCall(sp, args, owner, target, kind, method, results)
+                PackageCall(
+                    sp,
+                    args,
+                    owner,
+                    target,
+                    kind,
+                    method,
+                    results,
+                    tuple(type_arg_ids),
+                )
             )
         gaps = []
         for item in _list(v["gaps"]):

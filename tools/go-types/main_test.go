@@ -222,6 +222,45 @@ func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
 	}
 }
 
+func TestNestedNamedTypeArgumentPinsEveryIdentity(t *testing.T) {
+	// `lib.GI[other.N[lib.T]](n)` substitutes a generic named type —
+	// the call record must pin BOTH the outer `N` and the nested `T`,
+	// or a redeclaration of `T` alone would not stale the call site.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nimport \"other\"\nfunc F(n other.N[lib.T]) int64 { return int64(lib.GI[other.N[lib.T]](n)) }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"g.go", "package lib\nfunc GI[P any](v P) P { return v }"},
+			{"t.go", "package lib\ntype T int64"},
+		}},
+		{"other", []namedSource{
+			{"n.go", "package other\ntype N[A any] int64"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	ids := map[string]string{}
+	for _, m := range out.ImportedMembers {
+		ids[m.Name] = m.ID
+	}
+	if ids["N"] == "" || ids["T"] == "" {
+		t.Fatal("the referenced members are missing")
+	}
+	var got []string
+	for _, c := range out.Calls {
+		if c.Kind == "direct_import" {
+			got = c.TypeArgTypeIDs
+		}
+	}
+	if got == nil {
+		t.Fatal("a nested named type argument was rejected")
+	}
+	if len(got) != 2 || got[0] != ids["N"] || got[1] != ids["T"] {
+		t.Fatalf("a nested named type argument did not pin every identity: %v", got)
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {
