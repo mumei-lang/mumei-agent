@@ -5,8 +5,11 @@ plus ``if``/``else`` and bounded ``for`` statements followed by one or more
 explicit scalar return expressions; the result unions every syntactic return's
 dependencies (unreachable returns included — reachability is not proven). A
 ``for`` clause may hold one let-binding initializer, a supported condition and
-an inc/dec update on a bound scalar; ``range`` and every other
-statement shape stay unsupported. A scalar ``x = expression``
+an inc/dec update on a bound scalar. Integer ``range`` loops — ``for
+i := range e`` where the operand is an integer — bind a fresh scoped
+index variable carrying the operand's dependencies; composite ranges
+are unreachable because no supported binding or literal can produce
+them. A scalar ``x = expression``
 reassignment replaces the binding's dependencies — it never declares a
 new variable. Tuple assignments ``x, y = e1, e2`` are parallel: every
 right-hand side evaluates against the pre-state before any store lands.
@@ -71,6 +74,13 @@ _BINARY = frozenset(
 _UNARY = frozenset({"+", "-", "!", "^"})
 _COMPOUND_ASSIGN = frozenset(
     {"+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^="}
+)
+_SCALAR_BASIC_TYPES = frozenset(
+    {
+        b"bool", b"int", b"int8", b"int16", b"int32", b"int64",
+        b"uint", b"uint8", b"uint16", b"uint32", b"uint64", b"uintptr",
+        b"byte", b"rune",
+    }
 )
 
 
@@ -549,14 +559,52 @@ class _Builder:
                 ),
                 None,
             )
-            if body_node is None or (
-                clause is not None and clause.type == "range_clause"
-            ):
+            if body_node is None:
                 raise _Unsupported("unsupported_statement", _span(node))
             # The loop variable and every binding made inside the body are
             # scoped to the loop — none of them escape, matching the compiler.
             scope = dict(locals_)
-            if clause is not None and clause.type == "for_clause":
+            if clause is not None and clause.type == "range_clause":
+                # Only integer ranges are reachable in-fragment — a
+                # composite operand (slice, map, string, channel, array)
+                # cannot be produced by any supported binding or literal,
+                # so the operand is an integer and the range yields one
+                # index variable. `for i := range e` binds a fresh scoped
+                # name; `for i = range e` reuses an existing binding;
+                # `_` slots and the bare `for range e` form just evaluate.
+                left = clause.child_by_field_name("left")
+                right = clause.child_by_field_name("right")
+                lefts = _children(left) if left is not None else []
+                if right is None or len(lefts) > 1 or (
+                    lefts and lefts[0].type != "identifier"
+                ):
+                    raise _Unsupported(
+                        "unsupported_statement", _span(clause)
+                    )
+                rdeps = self.expression(
+                    right, fn, params, scope, transfers, count, 0
+                )
+                if lefts and lefts[0].text != b"_":
+                    binding = self.bindings_by_span.get(_span(lefts[0]))
+                    if binding is not None:
+                        if binding.type.kind not in {"integer", "boolean"}:
+                            raise _Unsupported(
+                                "binding_unavailable", _span(lefts[0])
+                            )
+                        scope[binding.id] = rdeps
+                    else:
+                        ref = self.references.get(_span(lefts[0]))
+                        if ref is None or (
+                            ref.binding_id not in scope
+                            and ref.binding_id not in params
+                        ):
+                            raise _Unsupported(
+                                "binding_unavailable", _span(lefts[0])
+                            )
+                        self._store(
+                            scope, params, ref.binding_id, rdeps, conditional,
+                        )
+            elif clause is not None and clause.type == "for_clause":
                 init = clause.child_by_field_name("initializer")
                 if init is not None:
                     self.statement(
@@ -806,6 +854,41 @@ class _Builder:
                 # `T(e)` is effect-free for dependency purposes — the
                 # result inherits the operand's dependencies; the type
                 # change itself (truncation, widening) is not modelled.
+                # The target must be a scalar type too: a conversion to
+                # a non-scalar (e.g. `string(x)`) would let the result
+                # flow into contexts that never bind it — like a `range`
+                # operand — without ever hitting a binding check.
+                # Declared types resolve through their binding's type;
+                # universe type names carry no binding_id, so they are
+                # matched against Go's fixed predeclared scalar set.
+                function_node = node.child_by_field_name("function")
+                while (
+                    function_node is not None
+                    and function_node.type == "parenthesized_expression"
+                ):
+                    function_node = next(
+                        iter(function_node.named_children), None
+                    )
+                ref = (
+                    self.references.get(_span(function_node))
+                    if function_node is not None
+                    else None
+                )
+                if ref is not None and ref.binding_id:
+                    binding = self.bindings.get(ref.binding_id)
+                    scalar = binding is not None and binding.type.kind in {
+                        "integer",
+                        "boolean",
+                    }
+                else:
+                    scalar = (
+                        ref is not None
+                        and ref.kind == "universe"
+                        and function_node is not None
+                        and function_node.text in _SCALAR_BASIC_TYPES
+                    )
+                if not scalar:
+                    raise _Unsupported("binding_unavailable", _span(node))
                 if len(arguments) != 1:
                     raise _Unsupported(
                         "unsupported_expression", _span(node)

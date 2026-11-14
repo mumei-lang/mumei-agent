@@ -1636,9 +1636,11 @@ Conversion calls `T(e)` — reported by the producer as call kind
 inherits the operand's dependencies. The type change itself
 (truncation, widening, signedness) is not modelled; dependency is about
 value provenance, not representation. Conversions to types outside the
-scalar fragment still fail closed where the converted value is bound
-(the `binding_unavailable` check), and builtin calls inside a
-conversion stay `unresolved_or_opaque_call`.
+scalar fragment fail closed at the conversion itself — the target
+type's binding (or the fixed predeclared scalar set for universe type
+names) must be integer or boolean, so a non-scalar result can never
+flow into a context that doesn't bind it (`binding_unavailable`).
+Builtin calls inside a conversion stay `unresolved_or_opaque_call`.
 
 ### C07 pure builtins in expressions
 
@@ -1664,6 +1666,18 @@ too. Left-hand sides stay bound identifiers or `_` — selector/index
 targets and multi-valued call results (a count mismatch against the
 left-hand side) stay `unsupported_statement` /
 `binding_unavailable`.
+
+### C07 integer range loops
+
+`for` statements accept a `range` clause over an integer operand —
+`for i := range e` binds a fresh scoped index variable carrying the
+operand's dependencies, `for i = range e` reuses an existing binding,
+and `for _ = range e` / bare `for range e` just evaluate. Body
+may-assignments join back exactly like clause loops, and unlabelled
+`break`/`continue` use the same frame machinery. Composite ranges
+(slice, map, string, channel, array) are unreachable in-fragment —
+their operands cannot be produced by any supported binding or literal —
+and multi-variable ranges stay `unsupported_statement`.
 
 ## Roadmap authority and vocabulary
 

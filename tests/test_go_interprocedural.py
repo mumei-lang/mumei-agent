@@ -306,11 +306,68 @@ def test_for_bodies_union_return_dependencies(
 
 
 @pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # Integer range: the loop variable carries the operand's deps.
+        (
+            "func F(x int64) int64 { for i := range x { _ = i }; return x }",
+            frozenset({0}),
+        ),
+        # Body may-assignments join back like any loop.
+        (
+            "func F(x, y int64) int64 { for i := range x { y = i }; return y }",
+            frozenset({0, 1}),
+        ),
+        # The scoped loop variable does not escape.
+        (
+            "func F(x int64) int64 { for i := range x { _ = i }; return 0 }",
+            frozenset(),
+        ),
+        # `for _ = range e` and bare `for range e` just evaluate.
+        (
+            "func F(x int64) int64 { for _ = range x {}; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { for range x {}; return x }",
+            frozenset({0}),
+        ),
+        # The `=` form reuses an existing binding — a may-assignment, so
+        # the name keeps its own dep too (zero-trip path).
+        (
+            "func F(x, y int64) int64 { for y = range x {}; return y }",
+            frozenset({0, 1}),
+        ),
+        # break/continue inside an integer range work like any loop.
+        (
+            "func F(x, y int64) int64 { for i := range x { if i > 0 { break }; y = i }; return y }",
+            frozenset({0, 1}),
+        ),
+        # Scalar conversions stay valid range operands.
+        (
+            "func F(x int64) int64 { for i := range int(x) { _ = i }; return x }",
+            frozenset({0}),
+        ),
+        (
+            "type N int64\nfunc F(x int64) int64 { for i := range N(x) { _ = i }; return x }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_range_int_dependencies(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
     "declarations",
     [
-        # Range clauses are outside the fragment.
-        "func F(x int64) int64 { for i:=range 10 { _ = i }; return x }",
-        # break/continue are not modelled.
+        # Composite ranges are outside the fragment (the operand itself
+        # cannot be expressed — including through a conversion, whose
+        # result never passes a binding check inside a range clause).
+        "func F(x int64) int64 { for i:=range \"ab\" { _ = i }; return x }",
+        "func F(x int64) int64 { for i:=range string(x) { _ = i }; return x }",
         # Non-inc/dec updates stay unsupported.
         "func F(x int64) int64 { for i:=x; i>0; i=i-1 {}; return x }",
         # Assignment updates are not inc/dec.
