@@ -695,6 +695,17 @@ def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
             "func F(x, z int64) int64 { y := x; switch v := x; v { case 1: y = 0; fallthrough; case 2: y = v + z }; return y }",
             frozenset({0, 1}),
         ),
+        # A clause reached by fallthrough can also be matched directly —
+        # the direct path skips the preceding clause's writes, so `y`
+        # keeps its entry dependency on `x`.
+        (
+            "func F(x int64) int64 { y := x; switch x { case 1: y = 0; fallthrough; case 2: return y }; return y }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, z int64) int64 { y := x; switch x { case 1: y = 0; fallthrough; case 2: y = z; fallthrough; case 3: return y }; return y }",
+            frozenset({0, 1}),
+        ),
     ],
 )
 def test_expression_switch_fallthrough(go_types_helper, declarations, expected):

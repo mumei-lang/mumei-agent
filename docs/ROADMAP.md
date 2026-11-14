@@ -1752,15 +1752,17 @@ the fragment does resolve.
 
 Expression switches admit a terminal `fallthrough` as the final
 statement of a non-final clause, mirroring the C05 positional rule: the
-next clause's body runs in the same scope as a sequential continuation
-rather than an alternative, so writes chain through the fall-through
-boundary (`case 1: y = 0; fallthrough; case 2: y = z` leaves `y`
-dependent on `z`, not unioned with `0`). A conditional `break` before
-the fallthrough keeps the continuation's writes may-assignments — they
-execute only when the break was not taken. Guards of a fall-through
-clause are still evaluated unconditionally like every other clause's;
-the fragment already over-approximates guard evaluation, and
-fallthrough chains extend transitively across consecutive clauses.
+next clause's body is evaluated twice — once in the carried chain scope
+as a sequential continuation, and once as a fresh alternative from the
+switch scope, because the clause can also be matched directly without
+the preceding clause's writes (`case 1: y = 0; fallthrough; case 2:
+return y` still keeps `y`'s dependency on the switch's entry state).
+A conditional `break` before the fallthrough keeps the continuation's
+writes may-assignments — they execute only when the break was not
+taken. Guards of a fall-through clause are still evaluated
+unconditionally like every other clause's; the fragment already
+over-approximates guard evaluation, and fallthrough chains extend
+transitively across consecutive clauses.
 
 Boundaries: `fallthrough` remains admissible only as the terminal
 statement of a clause — Go rejects a trailing fallthrough in the final

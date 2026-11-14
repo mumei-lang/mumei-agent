@@ -757,13 +757,6 @@ class _Builder:
                 ]
                 branch: dict[str, frozenset[int]] | None = None
                 for index, clause in enumerate(clauses):
-                    # Each clause is an alternative — a break in one does
-                    # not make another clause's tail unreachable — except
-                    # a clause reached by fallthrough, which continues the
-                    # previous clause's body in the same scope.
-                    if branch is None:
-                        frame["exited"] = False
-                        branch = dict(scope)
                     body = next(
                         (
                             c for c in clause.named_children
@@ -798,12 +791,40 @@ class _Builder:
                                     guard, fn, params, scope,
                                     transfers, count, 0,
                                 )
+                    if branch is None:
+                        # Direct match, or the head of a new chain — the
+                        # same fresh alternative doubles as the chain's
+                        # first step when the clause falls through.
+                        frame["exited"] = False
+                        branch = dict(scope)
+                        self._sequence(
+                            statements, fn, params, branch, transfers,
+                            count, deps, saw_return, conditional,
+                        )
+                        if not falls:
+                            self._join(scope, branch, params)
+                            branch = None
+                        continue
+                    # Fall-through target — the body runs twice: once in
+                    # the carried chain scope (the fallthrough path, with
+                    # `exited` preserved across the chain), once as a
+                    # fresh alternative (the direct-match path, which
+                    # skips the preceding clause's writes).
                     self._sequence(
-                        statements, fn, params, branch,
-                        transfers, count, deps, saw_return,
-                        conditional,
+                        statements, fn, params, branch, transfers,
+                        count, deps, saw_return, conditional,
                     )
-                    if not falls:
+                    chain_exited = frame["exited"]
+                    frame["exited"] = False
+                    fresh = dict(scope)
+                    self._sequence(
+                        statements, fn, params, fresh, transfers,
+                        count, deps, saw_return, conditional,
+                    )
+                    self._join(scope, fresh, params)
+                    if falls:
+                        frame["exited"] = chain_exited
+                    else:
                         self._join(scope, branch, params)
                         branch = None
             finally:
