@@ -411,17 +411,15 @@ class _Builder:
                 )
                 name = pname.text.decode()
                 if is_var:
-                    # `var` is function-scoped: it also lands in the
-                    # current scope so loop fixed-points widen it.
+                    # `var` is function-scoped: it lands in the
+                    # current scope and the joins carry the name
+                    # outward — writing the function scope directly
+                    # would bypass a loop's fixed-point join and lose
+                    # the zero-trip path's dependencies.
                     self.var_names.add(name)
                     self._store(
-                        self.function_locals, params, name, deps_v,
-                        conditional,
+                        locals_, params, name, deps_v, conditional
                     )
-                    if locals_ is not self.function_locals:
-                        self._store(
-                            locals_, params, name, deps_v, conditional
-                        )
                 else:
                     if self.block_stack:
                         saved = self.block_stack[-1]
@@ -448,7 +446,7 @@ class _Builder:
                 consequence, params, branch, transfers, count, deps,
                 saw_return, True,
             )
-            self._join(locals_, branch, params)
+            self._join(locals_, branch, params, self.var_names)
             alternative = node.child_by_field_name("alternative")
             if alternative is not None:
                 branch = dict(locals_)
@@ -463,7 +461,7 @@ class _Builder:
                     alternative, params, branch, transfers, count, deps,
                     saw_return, True,
                 )
-                self._join(locals_, branch, params)
+                self._join(locals_, branch, params, self.var_names)
             return
         if kind == "while_statement":
             condition = node.child_by_field_name("condition")
@@ -507,7 +505,7 @@ class _Builder:
                     else:
                         scope[name] = prev
                 self.block_stack.pop()
-            self._join(locals_, scope, params)
+            self._join(locals_, scope, params, self.var_names)
             return
         if kind in {"break_statement", "continue_statement"}:
             if node.named_children:
@@ -604,9 +602,9 @@ class _Builder:
         in the current scope as a shadow)."""
         if name in locals_:
             return locals_
-        if name in self.function_locals:
-            return self.function_locals
-        if name in params:
+        if name in params or name in self.var_names:
+            # `var` assignments land in the current scope — the joins
+            # carry them out to the function scope.
             return locals_
         return None
 
@@ -667,6 +665,14 @@ class _Builder:
                     elif name in params:
                         scope[name] = frozenset({params[name]}) | ndeps
                         changed = True
+                    elif name in self.var_names:
+                        # `var` is function-scoped: a declaration or
+                        # assignment inside the body escapes the loop
+                        # like any may-write.
+                        scope[name] = scope.get(
+                            name, frozenset()
+                        ) | ndeps
+                        changed = True
                 if not changed:
                     break
                 # Keep only the last pass's transfers: earlier copies
@@ -679,14 +685,18 @@ class _Builder:
             self.frames.pop()
 
     @staticmethod
-    def _join(scope, branch, params) -> None:
+    def _join(scope, branch, params, var_names) -> None:
         # Branch-local bindings (names absent from `scope`) never
-        # escape — only existing and parameter names are merged.
+        # escape — only existing, parameter and `var` names merge.
         for name, value in branch.items():
             if name in scope:
                 scope[name] |= value
             elif name in params:
                 scope[name] = frozenset({params[name]}) | value
+            elif name in var_names:
+                # `var` is function-scoped: a declaration inside a
+                # branch escapes it like any may-write.
+                scope[name] = value
 
     def _read_name(self, node, params, locals_, span) -> frozenset[int]:
         name = node.text.decode()

@@ -871,3 +871,29 @@ def test_let_in_for_init_does_not_pollute_outer_name():
         " return i; }"
     )
     assert s.available and s.return_dependencies == frozenset({0})
+
+def test_var_in_while_body_keeps_zero_trip_deps():
+    # `var` is function-scoped, but a redeclaration inside a loop is a
+    # may-write: the zero-trip path keeps the pre-loop deps, and the
+    # loop's stores union in — it must not overwrite unconditionally.
+    s = _fn(
+        "function f(a: number, b: number, c: boolean): number {"
+        " var x = a;"
+        " while (c) { var x = b; c = c; }"
+        " return x; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({0, 1})
+
+
+def test_var_in_for_body_escapes_with_last_store():
+    # A `var` first declared inside the loop body escapes to the
+    # function scope — the body's last store wins the join.
+    s = _fn(
+        "function f(a: number, b: number, n: number): number {"
+        " for (let i = 0; i < n; i++) {"
+        "   var v = a;"
+        "   v = b;"
+        " }"
+        " return v; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})
