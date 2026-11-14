@@ -4787,10 +4787,10 @@ def test_pointer_var_member_read_is_admitted(go_types_helper):
     assert any(t.imported for t in result.calls)
 
 
-def test_pointer_write_is_admitted(go_types_helper):
-    # `*t = v` stores into state the dep model does not track — the
-    # model follows bindings, not pointee state — so the write itself
-    # contributes no dependencies while the RHS still evaluates.
+def test_deref_write_stays_closed(go_types_helper):
+    # `*t = v` cannot be admitted: `p := &x` aliases a tracked local
+    # and dep sets carry indices, not identities, so an indirected
+    # store cannot be proven not to overwrite a tracked binding.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t *lib.T, v int64) int64 {\n"
@@ -4801,40 +4801,50 @@ def test_pointer_write_is_admitted(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert result.available and result.return_dependencies == frozenset()
+    assert not result.available
 
 
-def test_pointer_write_rhs_still_evaluates(go_types_helper):
-    # The RHS of an opaque-target write is evaluated inside the
-    # fragment: an unadmissible RHS keeps the statement closed.
+def test_deref_write_alias_case_stays_closed(go_types_helper):
+    # `p := &x; *p = y; return x` — the store lands exactly in a
+    # tracked binding, which the index-only dep model cannot map back.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func G() int64 { return 0 }\n"
-        "func F(t *lib.T, v int64) int64 {\n"
-        "\t*t = lib.T(G() + v)\n"
-        "\treturn 0\n}\n"
+        "func F(x lib.T, y lib.T) lib.T {\n"
+        "\tp := &x\n"
+        "\t*p = y\n"
+        "\treturn x\n}\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert result.available and result.return_dependencies == frozenset()
+    assert not result.available
 
 
 def test_field_write_through_pointer_is_admitted(go_types_helper):
-    # `s.f = v` — a field store through a pointer-typed parameter lands
-    # in the same untracked state as `*t = v`.
+    # `s.f = v` — a field store through a pointer-typed parameter only
+    # touches caller state (struct bindings cannot exist locally), so
+    # the dep model stays exact — but the write is an external
+    # mutation and must be recorded as an imported transfer so
+    # `effects` reports `unknown` and `S` redeclaration flags it.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(s *lib.S, v int64) int64 {\n"
         "\ts.F = v\n"
         "\treturn 0\n}\n"
     }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target == members["S"]["id"] and write.arguments == ()
 
 
 def test_imported_member_write_stays_closed(go_types_helper):

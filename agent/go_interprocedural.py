@@ -519,44 +519,40 @@ class _Builder:
 
     def _opaque_write_target(
         self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]
-    ) -> bool:
-        """An assignment LHS whose store lands in untracked state.
+    ) -> str | None:
+        """An assignment LHS whose field store lands in caller state.
 
-        `*t` (a pointer dereference) and `t.f` (a field selection —
-        reachable in the fragment through a pointer receiver) both
-        mutate memory the dependency model does not follow: the model
-        tracks each binding's index, never the pointee's or field's
-        contents. The write is admitted when the base is a bound
-        parameter or local identifier — an imported member, a package
-        var or an unbound name keeps the statement closed, matching
-        the bare-identifier gate.
+        `t.f` (a field selection — reachable in the fragment only
+        through a pointer-typed parameter, since struct-typed bindings
+        cannot exist) mutates memory the dependency model does not
+        follow: the model tracks each binding's index, never the
+        pointee's or field's contents. The write is admitted when the
+        base is a bound parameter or local identifier carrying a
+        declared named-type identity — that identity becomes the
+        recorded write target. An imported member, a package var, an
+        unbound name, or a base whose type declares no identity keeps
+        the statement closed, matching the bare-identifier gate. The
+        `*t` dereference shape is not admitted here: an `&x` alias
+        makes an indirected store able to overwrite a tracked binding.
         """
         while node is not None and node.type == "parenthesized_expression":
             node = next(iter(node.named_children), None)
-        if node is None:
-            return False
-        if node.type == "unary_expression":
-            first = next(iter(node.children), None)
-            operand = node.child_by_field_name("operand")
-            if (
-                first is None
-                or first.type != "*"
-                or operand is None
-            ):
-                return False
-            base = operand
-        elif node.type == "selector_expression":
-            base = node.child_by_field_name("operand")
-        else:
-            return False
+        if node is None or node.type != "selector_expression":
+            return None
+        base = node.child_by_field_name("operand")
         while base is not None and base.type == "parenthesized_expression":
             base = next(iter(base.named_children), None)
         if base is None or base.type != "identifier" or base.text == b"_":
-            return False
+            return None
         ref = self.references.get(self.node_key(base))
-        return ref is not None and (
-            ref.binding_id in locals_ or ref.binding_id in params
-        )
+        if ref is None or (
+            ref.binding_id not in locals_ and ref.binding_id not in params
+        ):
+            return None
+        binding = self.bindings.get(ref.binding_id)
+        if binding is None or not binding.type.type_id:
+            return None
+        return binding.type.type_id
 
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
@@ -1008,14 +1004,38 @@ class _Builder:
                         raise _Unsupported("binding_unavailable", _span(lhs))
                     refs.append(ref)
                     continue
-                # `*t = v` / `t.f = v` — a store through a pointer
-                # lands in state the dependency model does not track
-                # (it follows bindings, not pointee or field state),
-                # so the LHS contributes nothing beyond requiring a
-                # bound base: the RHS still evaluates for its calls
-                # and the result is discarded. Imported members and
-                # unbound bases keep the statement closed.
-                if self._opaque_write_target(lhs, locals_, params):
+                # `t.f = v` — a field store through a pointer-typed
+                # parameter (struct-typed bindings cannot exist in the
+                # fragment, so `t` can only be `*S` pointing into
+                # caller state) mutates memory the dependency model
+                # does not follow: it tracks bindings, never field
+                # contents. The store itself carries no result
+                # dependency — the RHS still evaluates for its calls
+                # and is discarded — but it IS an external mutation,
+                # so a zero-argument imported transfer against the
+                # base's declared type identity records it, marking
+                # `effects` unknown like an imported var read. A
+                # `*t = v` dereference stays closed: `p := &x`
+                # aliases a tracked local and dep sets carry indices,
+                # not identities, so an indirected store cannot be
+                # proven not to overwrite a tracked binding.
+                write_target = self._opaque_write_target(
+                    lhs, locals_, params
+                )
+                if write_target is not None:
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                lhs.start_byte,
+                                lhs.end_byte,
+                            ),
+                            write_target,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
                     refs.append(None)
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
