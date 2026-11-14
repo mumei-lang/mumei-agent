@@ -155,7 +155,9 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         "func F(f func(int64) int64, x int64) int64 { return f(x) }",
         "func Id(x int64) int64 {return x}; var Alias = Id; func F(x int64) int64 {return Alias(x)}",
         "var global int64; func F(x int64) int64 {return global}",
-        "const N int64 = 1; func F(x int64) int64 { return N }",
+        # A package variable named `iota` is not the predeclared
+        # constant — its read stays a declared gap.
+        "var iota int64; func F(x int64) int64 { return iota }",
         "var true bool; func F() bool {return true}",
         "func F(x int64) int64 {return 1/x}",
         "func F(x int64) int64 {return 1%x}",
@@ -467,6 +469,112 @@ def test_range_int_dependencies(go_types_helper, declarations, expected):
     result = named(*unit(go_types_helper, declarations))
     assert result.available and result.return_dependencies == expected
     assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A const read is always dep-free — a constant expression can
+        # never read a variable (the compiler rejects it first).
+        (
+            "func F(x int64) int64 { const K = 5; y := x + K; return y }",
+            frozenset({0}),
+        ),
+        # Typed, untyped, rune and bool constants all admit.
+        (
+            "func F(x int64) int64 { const K int64 = 5; return x + K }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { const R = 'a'; _ = R; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { const B = true; if B { return x }; return 0 }",
+            frozenset({0}),
+        ),
+        # Chained and package-level constants resolve the same way.
+        (
+            "const K0 = 3\nfunc F(x int64) int64 { const K = K0 + 1; return x + K }",
+            frozenset({0}),
+        ),
+        (
+            "const K int64 = 7\nfunc F(x int64) int64 { return x + K }",
+            frozenset({0}),
+        ),
+        # `iota` is a dep-free universe constant.
+        (
+            "func F(x int64) int64 { const A = iota; return x + A }",
+            frozenset({0}),
+        ),
+        # `iota` is not a keyword — a parameter named `iota` keeps its
+        # own dependency, and a shadowing const still resolves as one.
+        (
+            "func F(iota int64) int64 { return iota }",
+            frozenset({0}),
+        ),
+        (
+            "const iota int64 = 3\nfunc F(x int64) int64 { return iota + x }",
+            frozenset({0}),
+        ),
+        # A constant shadowing a name resolves to the const binding.
+        (
+            "func F(x int64) int64 { y := x; if x > 0 { const k = 2; y = k }; return y }",
+            frozenset({0}),
+        ),
+        # Blank names admit; `const A, B = 1, 2` binds pairwise.
+        (
+            "func F(x int64) int64 { const _ = 5; return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { const A, B = 1, 2; return x + A + B }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) int64 { const A, B int64 = 1, 2; return x + A + B }",
+            frozenset({0}),
+        ),
+        # A constant-expression builtin is still checked for legality.
+        (
+            "func F(x int64) int64 { const A = min(1, 2); return x + A }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_const_declarations_and_reads(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
+
+
+@pytest.mark.parametrize(
+    "declarations,reason",
+    [
+        # Non-scalar constants stay outside the fragment.
+        (
+            "func F(x int64) int64 { const S = \"s\"; return x }",
+            "binding_unavailable",
+        ),
+        (
+            "func F(x int64) int64 { const Q = 1.5; return x }",
+            "binding_unavailable",
+        ),
+        # Reading a non-scalar constant is a declared gap too.
+        (
+            "const S = \"s\"\nfunc F(x int64) int64 { if S == \"a\" { return 1 }; return x }",
+            "binding_unavailable",
+        ),
+        # A builtin that is not in the admitted set stays opaque.
+        (
+            "func F(x int64) int64 { const A = len(\"s\"); return x }",
+            "unresolved_or_opaque_call",
+        ),
+    ],
+)
+def test_const_declaration_gaps(go_types_helper, declarations, reason):
+    result = named(*unit(go_types_helper, declarations))
+    assert not result.available and result.gaps[0].reason == reason
 
 
 @pytest.mark.parametrize(
@@ -816,8 +924,6 @@ def test_var_declaration_dependencies(go_types_helper, declarations, expected):
         "func F(x int64) int64 { var f func(); _ = f; return x }",
         # Grouped `var (...)` is a parser gap (tree-sitter has_error).
         "func F(x int64) int64 { var ( a int64 = x; b = x ); return a+b }",
-        # const declarations are not var bindings.
-        "func F(x int64) int64 { const c int64 = 1; return c }",
     ],
 )
 def test_var_declaration_shapes_stay_unsupported(
