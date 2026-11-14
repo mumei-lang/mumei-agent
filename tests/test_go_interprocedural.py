@@ -7080,6 +7080,125 @@ def test_bound_base_field_read_nested_scalar_stays_closed(go_types_helper):
     assert not result.available
 
 
+def test_nested_field_write_is_admitted(go_types_helper):
+    # `t.W.N = v` — the operand chain `t.W` resolves `W`'s `*W2`
+    # member to `W2`, so the deepest pointee records the mutation and
+    # every traversed `type` member pins. The store is dep-free like
+    # `t.F = v`.
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type W2 struct{ N int64 }\ntype S2 struct{ W *W2 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2, v int64) int64 {\n"
+        "\tt.W.N = v\n"
+        "\treturn 0\n}\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target == members["W2"]["id"] and write.arguments == ()
+
+
+def test_nested_field_write_folds_deps_into_root(go_types_helper):
+    # `t.W.N = v; return t.PF()` — the stored value's dependencies
+    # accumulate into the root binding `t`, which a later method call
+    # on `t` can observe.
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type W2 struct{ N int64 }\ntype S2 struct{ W *W2 }\n"
+            "func (s *S2) PF() int64 { return 0 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2, v int64) int64 {\n"
+        "\tt.W.N = v\n"
+        "\treturn t.PF()\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_nested_field_write_deref_base_is_admitted(go_types_helper):
+    # `(*t.W).N = v` — the dereference of the pointer-typed field
+    # `W` spells the same nested walk out; the deepest pointee still
+    # records the mutation.
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type W2 struct{ N int64 }\ntype S2 struct{ W *W2 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S2, v int64) int64 {\n"
+        "\t(*t.W).N = v\n"
+        "\treturn 0\n}\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target == members["W2"]["id"] and write.arguments == ()
+
+
+def test_nested_field_write_struct_value_stays_closed(go_types_helper):
+    # `t.A.B = v` — the intermediate field `A` is a struct *value*,
+    # not a pointer, so the chain cannot walk deeper through it.
+    lib = {
+        "lib": {
+            "m.go": "package lib\n"
+            "type S3 struct{ B int64 }\ntype S4 struct{ A S3 }\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S4, v int64) int64 {\n"
+        "\tt.A.B = v\n"
+        "\treturn 0\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
 def test_bound_base_field_read_string_field_stays_closed(go_types_helper):
     # `t.G` — a non-scalar field keeps the read closed.
     files = {
