@@ -289,9 +289,11 @@ class GoPackageSnapshot:
     functions: tuple[PackageFunction, ...]
     calls: tuple[PackageCall, ...]
     gaps: tuple[PackageGap, ...]
-    imported_members: tuple[PackageMember, ...] = ()
     profile: str = PACKAGE_PROFILE
     language_version: str = "go1.23"
+    # Last on purpose: positional construction predating this field keeps
+    # `profile` in place.
+    imported_members: tuple[PackageMember, ...] = ()
 
     def binding(self, binding_id: str) -> PackageBinding | None:
         return next((b for b in self.bindings if b.id == binding_id), None)
@@ -624,7 +626,7 @@ def load_go_package_snapshot(
             (),
             (),
             (),
-            (),
+            imported_members=(),
         )
         raws = _package_raws(probe, sources)
         bindings = []
@@ -789,7 +791,7 @@ def load_go_package_snapshot(
             tuple(functions),
             tuple(calls),
             tuple(gaps),
-            tuple(members),
+            imported_members=tuple(members),
         )
     except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
         raise SnapshotError("Go type snapshot unavailable or inconsistent") from None
