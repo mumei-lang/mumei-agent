@@ -1614,8 +1614,14 @@ then a may-assignment — its writes union instead of replace, because the
 jump may have skipped them. This is the same over-approximation the
 branch and loop joins already use; reachability is still not proven.
 
-Labelled `break`/`continue`, `goto`, `defer`, `go`, and non-identifier
-inc/dec operands stay `unsupported_statement`/`binding_unavailable`.
+Labelled `break`/`continue`, `goto`, `defer` and `go` stay
+`unsupported_statement`/`binding_unavailable`. An inc/dec operand
+that is not a bound identifier admits through the imported
+member-write gate instead — `lib.V++` (or dot-imported `V++`,
+indexed `lib.VA[i]++`, field `lib.VS.F++`) records the same
+external mutation a `lib.V = v` write does, index sub-expressions
+evaluate like a write's, and a member that names no writable
+storage or an operand that resolves to none stays closed.
 
 ### C07 statement initializers on if and switch
 
@@ -2275,9 +2281,9 @@ call (`lib.VA[f()]`), a conversion, or an imported member read
 (`lib.VA[lib.V]`, whose pin `stale_dependents` needs) — while a
 literal or plain-name index (`lib.VM["k"]`) needs no evaluation.
 Compilable closed cases: a computed operand
-(`g()[0] = v`) names no member, a `const`, `func` or `type`
-member names no writable storage, and inc/dec statements
-(`lib.V++`) keep their own gate.
+(`g()[0] = v`) names no member, and a `const`, `func` or `type`
+member names no writable storage. Inc/dec statements
+(`lib.V++`) route through this same gate.
 
 An index read of an imported container var — `lib.VA[i]` — admits
 through the member record's new element fact: slice and array type
