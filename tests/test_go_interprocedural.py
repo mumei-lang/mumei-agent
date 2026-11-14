@@ -2389,6 +2389,7 @@ IMPORTED_MEMBERS_LIB = {
     "lib": {
         "m.go": "package lib\nconst K = 2\nconst L int64 = 3\nconst S = \"s\"\n"
         "var V int64 = 7\ntype T int64\ntype F64 float64\ntype A = int64\n"
+        "type GT[N int64 | int32] int64\n"
         "func G(y int64) int64 { return y }\n"
     }
 }
@@ -2687,6 +2688,24 @@ def test_imported_conversion_member_name_must_match(go_types_helper):
     )
     result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
     assert not result.available and result.gaps[0].reason == "binding_unavailable"
+
+
+def test_imported_generic_type_instantiation_fails_closed(go_types_helper):
+    # `lib.GT[int64](x)` reaches the report as a conversion, but the
+    # callee is an `index_expression`, not a package-qualified selector
+    # — instantiated generics stay closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.GT[int64](x); return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    # The index expression is rejected before the conversion check —
+    # either way the instantiated generic stays closed.
+    assert not result.available and result.gaps[0].reason in {
+        "binding_unavailable",
+        "unsupported_expression",
+    }
 
 
 def test_imported_conversion_without_member_section_fails_closed(go_types_helper):

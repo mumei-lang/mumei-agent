@@ -1955,9 +1955,10 @@ scalar conversion, and the member name must match the source
 token. Alias targets take the same path (`type A = int64` declares
 a `type` member whose underlying fact is the scalar). Conversions
 to a non-scalar named type (`type F64 float64`, `type S string`),
-a member record whose kind is not `type`, a missing declaration
-and generic instantiations `lib.T[int](e)` all keep
-`binding_unavailable` and fail closed.
+a member record whose kind is not `type` and a missing declaration
+keep `binding_unavailable`; generic instantiations `lib.T[int](e)`
+fail even earlier, since an `index_expression` callee is not an
+admitted expression.
 
 Boundaries: member types carry no `type_id` into the imported unit
 (type fact emission is producer-side; `ix.id` yields no identity for
