@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from agent import control_flow, go_interprocedural as ip
-from agent.go_type_snapshot import SnapshotError, load_go_snapshot
+from agent.go_type_snapshot import (
+    SnapshotError,
+    load_go_package_snapshot,
+    load_go_snapshot,
+)
 from tests import test_go_type_snapshot as compiler_fixtures
 from tests.test_go_type_snapshot import (
     SOURCE,
@@ -1703,3 +1707,232 @@ def test_invalid_source_encoding_is_rejected_without_echoing_it():
     )
     with pytest.raises(SnapshotError, match="encoding"):
         ip.summarize_go("\ud800", snapshot)
+
+
+# --- C07 package units (cross-file freshness) ---------------------------------
+
+
+def package_report(helper: Path, files: dict[str, str], arch: str = "amd64") -> bytes:
+    proc = subprocess.run(
+        [str(helper)],
+        input=json.dumps(
+            {
+                "sources": [
+                    {"name": name, "source": src} for name, src in files.items()
+                ],
+                "target_arch": arch,
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert proc.stderr == b""
+    return proc.stdout
+
+
+def package_unit(helper: Path, files: dict[str, str], arch: str = "amd64"):
+    snapshot = load_go_package_snapshot(
+        package_report(helper, files, arch), files, target_arch=arch
+    )
+    return files, snapshot, ip.summarize_go_package(files, snapshot)
+
+
+CALLEE = "package p\nfunc G(y int64) int64 { return y + 1 }\n"
+CALLER = "package p\nfunc F(x int64) int64 { return G(x) }\n"
+
+
+def test_cross_file_call_resolves_direct_local(go_types_helper):
+    files, snapshot, summaries = package_unit(
+        go_types_helper, {"a.go": CALLER, "b.go": CALLEE}
+    )
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    (transfer,) = result.calls
+    callee = snapshot.binding(transfer.target)
+    assert callee.name == "G" and callee.span.file == 1
+
+
+def named_package(files, snapshot, summaries, name="F"):
+    fn = next(
+        f for f in snapshot.functions if snapshot.binding(f.binding_id).name == name
+    )
+    return summaries.for_package_function(files, snapshot, fn.binding_id)
+
+
+def test_callee_in_other_file_change_churns_only_its_file(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    files2 = {"a.go": CALLER, "b.go": CALLEE.replace("+ 1", "")}
+    _, snapshot2, _ = package_unit(go_types_helper, files2)
+    # Untouched a.go keeps every binding identity; b.go's all churn.
+    ids = {b.id for b in snapshot.bindings}
+    ids2 = {b.id for b in snapshot2.bindings}
+    a1 = {b.id for b in snapshot.bindings if b.span.file == 0}
+    a2 = {b.id for b in snapshot2.bindings if b.span.file == 0}
+    assert a1 == a2
+    b1 = {b.id for b in snapshot.bindings if b.span.file == 1}
+    assert not (b1 & ids2)
+    # F recorded a call to the old G identity — it is stale now.
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(ids2) == frozenset({f_id})
+
+
+def test_package_snapshot_rejects_tampered_file_content(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    report = package_report(go_types_helper, files)
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            report, {"a.go": CALLER + "\n", "b.go": CALLEE}, target_arch="amd64"
+        )
+
+
+def test_package_snapshot_rejects_missing_file(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    report = package_report(go_types_helper, files)
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            report, {"a.go": CALLER}, target_arch="amd64"
+        )
+
+
+def test_package_sources_accept_list_in_declaration_order(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    summaries = ip.summarize_go_package([CALLER, CALLEE], snapshot)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_package_unit_digest_binds_every_file(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    snapshot = load_go_package_snapshot(
+        package_report(go_types_helper, files), files, target_arch="amd64"
+    )
+    files2 = {"a.go": CALLER, "b.go": CALLEE.replace("+ 1", "")}
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, files2), files2, target_arch="amd64"
+    )
+    assert snapshot.source_sha256 != snapshot2.source_sha256
+
+
+def test_for_package_function_rejects_stale_unit(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    files2 = {"a.go": CALLER, "b.go": CALLEE.replace("+ 1", "")}
+    _, snapshot2, _ = package_unit(go_types_helper, files2)
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    with pytest.raises(SnapshotError):
+        summaries.for_package_function(files2, snapshot2, f_id)
+
+
+def test_package_file_names_must_be_unique(go_types_helper):
+    proc = subprocess.run(
+        [str(go_types_helper)],
+        input=json.dumps(
+            {
+                "sources": [
+                    {"name": "a.go", "source": "package p\n"},
+                    {"name": "a.go", "source": "package p\n"},
+                ],
+                "target_arch": "amd64",
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    report = json.loads(proc.stdout)
+    assert report["status"] != "ok"
+
+
+def test_package_producer_rejects_source_and_sources(go_types_helper):
+    proc = subprocess.run(
+        [str(go_types_helper)],
+        input=json.dumps(
+            {
+                "source": "package p\n",
+                "sources": [{"name": "a.go", "source": "package p\n"}],
+                "target_arch": "amd64",
+            }
+        ).encode(),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert json.loads(proc.stdout)["status"] != "ok"
+
+
+def test_package_named_results_and_bare_return(go_types_helper):
+    files = {
+        "a.go": "package p\nfunc F(x int64) (r int64) { r = x; return }\n",
+        "b.go": CALLEE,
+    }
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_package_single_file_unit_matches_v1_behaviour(go_types_helper):
+    # A one-file package unit still carries file-indexed spans.
+    files = {"a.go": "package p\nfunc F(x int64) int64 { return x }\n"}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    result = named_package(files, snapshot, summaries, "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert all(b.span.file == 0 for b in snapshot.bindings)
+
+
+def test_package_gap_spans_carry_file_index(go_types_helper):
+    # `import` in one file reports a gap positioned in that file — a
+    # non-ok report, so the loader still fails closed on it.
+    files = {
+        "a.go": "package p\nimport \"fmt\"\nvar _ = fmt.Println\n"
+        "func F(x int64) int64 { return x }\n",
+        "b.go": CALLEE,
+    }
+    report = json.loads(package_report(go_types_helper, files))
+    assert report["status"] != "ok"
+    assert any(g["span"]["file"] == 0 for g in report["gaps"])
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            package_report(go_types_helper, files), files, target_arch="amd64"
+        )
+
+
+def test_package_summary_rejects_missing_source_without_leaking(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    _, snapshot, _ = package_unit(go_types_helper, files)
+    with pytest.raises(SnapshotError):
+        ip.summarize_go_package({"a.go": CALLER}, snapshot)
+
+
+def test_package_for_function_rejects_unknown_binding_id(go_types_helper):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    _, snapshot, summaries = package_unit(go_types_helper, files)
+    with pytest.raises(SnapshotError):
+        summaries.for_package_function(files, snapshot, "sha256:foreign")
+
+
+def test_package_bodyless_function_cfg_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nfunc F(x int64) int64\nfunc A(x int64) int64 { return x }\n",
+        "b.go": CALLEE,
+    }
+    report = package_report(go_types_helper, files)
+    snapshot = load_go_package_snapshot(report, files, target_arch="amd64")
+    fn = next(
+        f for f in snapshot.functions if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert fn.body is None
+    construction = snapshot.cfg_for_function(files, fn.binding_id)
+    assert construction.graph is None
