@@ -6205,7 +6205,58 @@ def test_imported_nested_index_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_map_index_stays_closed(go_types_helper):
+def test_imported_map_index_shadowed_true_reads_binding_deps(
+    go_types_helper,
+):
+    # `lib.VB[true]` — Go allows declaring a variable named `true`,
+    # so the predeclared spelling is not a guaranteed constant: when
+    # it binds a parameter the read carries that binding's deps.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar VB map[bool]int64\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(true bool) int64 { return lib.VB[true] }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_map_index_plain_true_stays_dep_free(go_types_helper):
+    # `lib.VB[true]` unshadowed — the `universe` reference proves the
+    # predeclared constant, so the read is dep-free like a literal.
+    lib = {
+        "lib": {
+            "m.go": "package lib\nvar VB map[bool]int64\n"
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VB[true] }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_imported_map_index_literal_key_is_admitted(go_types_helper):
+    # `lib.VM["k"]` — a literal index carries no dependencies, so the
+    # read admits like `lib.VM[k]` does with a modelled key.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F() int64 { return lib.VM[\"k\"] }\n"
@@ -6214,7 +6265,8 @@ def test_imported_map_index_stays_closed(go_types_helper):
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
 
 
 def test_imported_string_index_stays_closed(go_types_helper):

@@ -803,6 +803,22 @@ member, or one explicit dereference of one (`(*t).F` — the same
                 imported=True,
             )
         )
+        if index.type in {
+            "int_literal",
+            "float_literal",
+            "imaginary_literal",
+            "rune_literal",
+            "interpreted_string_literal",
+            "raw_string_literal",
+        }:
+            # A literal index carries no dependencies — `lib.VM["k"]`
+            # reads the entry at a constant key like any other
+            # modelled index shape. `true`/`false` are excluded: Go
+            # allows shadowing the predeclared constants as variable
+            # names, so the node alone cannot prove a constant —
+            # the expression path resolves the `universe` reference
+            # (still dep-free) or the shadowing binding's deps.
+            return frozenset()
         return self.expression(
             index, fn, params, locals_, transfers, count, depth + 1
         )
