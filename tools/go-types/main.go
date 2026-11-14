@@ -333,34 +333,8 @@ func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (str
 	var typeArgIDs []string
 	seenArg := map[string]bool{}
 	for i := 0; i < inst.TypeArgs.Len(); i++ {
-		var obj *types.TypeName
-		switch t := inst.TypeArgs.At(i).(type) {
-		case *types.Basic:
-			// Basic arguments are declared nowhere — nothing to pin.
-		case *types.Named:
-			obj = t.Obj()
-		case *types.Alias:
-			obj = t.Obj()
-		default:
+		if !ix.collectTypeArgIDs(inst.TypeArgs.At(i), seenArg, &typeArgIDs) {
 			return "", 0, nil, false
-		}
-		if obj == nil {
-			continue
-		}
-		id := ix.typeID(obj)
-		if id == "" {
-			// A universe type (`error`, `any`) is declared nowhere and
-			// needs no pin — but a packaged named type from a unit the
-			// host never declared could not be pinned either, so the
-			// call must stay closed rather than admit unpinned.
-			if obj.Pkg() != nil {
-				return "", 0, nil, false
-			}
-			continue
-		}
-		if !seenArg[id] {
-			seenArg[id] = true
-			typeArgIDs = append(typeArgIDs, id)
 		}
 	}
 	isig, ok := inst.Type.(*types.Signature)
@@ -388,6 +362,54 @@ func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (str
 		return "", 0, nil, false
 	}
 	return id, isig.Results().Len(), typeArgIDs, true
+}
+
+// collectTypeArgIDs admits a type argument built only from basic, named
+// and alias types — at any depth of a named/alias type's own argument
+// list — and records every named/alias identity it contains so the call
+// record pins each substituted type. `lib.N[other.U]` pins both N and U;
+// a redeclaration of either must stale the call site. A pointer, slice
+// or other composite constructor has no pin channel, so a type argument
+// containing one stays closed.
+func (ix *indexer) collectTypeArgIDs(t types.Type, seen map[string]bool, ids *[]string) bool {
+	var obj *types.TypeName
+	var inner *types.TypeList
+	switch tt := t.(type) {
+	case *types.Basic:
+		// Basic arguments are declared nowhere — nothing to pin.
+		return true
+	case *types.Named:
+		obj = tt.Obj()
+		inner = tt.TypeArgs()
+	case *types.Alias:
+		obj = tt.Obj()
+		inner = tt.TypeArgs()
+	default:
+		return false
+	}
+	if obj != nil {
+		id := ix.typeID(obj)
+		if id == "" {
+			// A universe type (`error`, `any`) is declared nowhere and
+			// needs no pin — but a packaged named type from a unit the
+			// host never declared could not be pinned either, so the
+			// call must stay closed rather than admit unpinned.
+			if obj.Pkg() != nil {
+				return false
+			}
+		} else if !seen[id] {
+			seen[id] = true
+			*ids = append(*ids, id)
+		}
+	}
+	if inner != nil {
+		for i := 0; i < inner.Len(); i++ {
+			if !ix.collectTypeArgIDs(inner.At(i), seen, ids) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Import implements types.Importer against the host-declared import map.

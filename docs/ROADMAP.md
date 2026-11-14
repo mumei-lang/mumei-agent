@@ -2112,7 +2112,9 @@ never reach. A *declared* named parameter
 (`func G[T any](v T2)`) is already pinned by `signature_type_ids`;
 only composite instantiated parameters (`[]T`) are rejected, as
 outside the scalar fragment, and a pointer type argument
-(`G[*lib.T](v)`) has no pin channel either. The consumer admits the call through the
+(`G[*lib.T](v)`) has no pin channel either. Nested named arguments
+pin every identity they contain — `G[other.N[lib.T]](v)` records both
+`N` and `T`, so redeclaring either stales the call site. The consumer admits the call through the
 same `direct_import` path — tree-sitter parses the single-type-arg
 form `lib.G[T](x)` as `type_conversion_expression`, so a dedicated
 arm maps that node shape onto the recorded call; multi-type-arg
