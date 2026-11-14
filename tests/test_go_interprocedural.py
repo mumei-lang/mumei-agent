@@ -44,7 +44,9 @@ def test_parameter_dependence_is_conservative_not_value_equivalence(
     assert result.effects == "none_in_supported_fragment"
 
 
-@pytest.mark.parametrize("operator", ["+", "-", "*", "&", "|", "^", "&^"])
+@pytest.mark.parametrize(
+    "operator", ["+", "-", "*", "/", "%", "&", "|", "^", "&^", "<<", ">>"]
+)
 def test_scalar_operators_join_parameter_dependencies(go_types_helper, operator):
     result = named(
         *unit(go_types_helper, f"func F(x, y int64) int64 {{ return x {operator} y }}")
@@ -159,10 +161,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         # constant — its read stays a declared gap.
         "var iota int64; func F(x int64) int64 { return iota }",
         "var true bool; func F() bool {return true}",
-        "func F(x int64) int64 {return 1/x}",
-        "func F(x int64) int64 {return 1%x}",
-        "func F(x int64) int64 {return x<<1}",
-        "func F(x int64) int64 {return x>>1}",
         "func F(x int64) (r int64) {return}",
         "func F(x int64) (int64,int64) {return x,x}",
         "func F(x int64) float64 {return 1.0}",
