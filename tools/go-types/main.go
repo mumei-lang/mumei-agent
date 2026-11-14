@@ -706,10 +706,15 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 			// `method`, so the consumer evaluates the receiver too.
 			// Method expressions `T.M` stay closed — their receiver
 			// becomes a leading parameter, a different call shape.
-			if selection.Kind() == types.MethodVal {
+			if selection.Kind() == types.MethodVal || selection.Kind() == types.MethodExpr {
 				if f, ok := selection.Obj().(*types.Func); ok {
 					if id, ok := ix.directImportMethodID(f); ok {
-						return "direct_import", id, true
+						// `lib.T.M(recv, args)` — a method expression:
+						// the receiver is already the leading argument,
+						// so the plain `direct_import` result-depends-
+						// on-every-argument model covers it; no `method`
+						// flag is needed.
+						return "direct_import", id, selection.Kind() == types.MethodVal
 					}
 				}
 			}
