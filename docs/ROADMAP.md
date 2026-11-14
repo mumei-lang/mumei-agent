@@ -2212,8 +2212,10 @@ in caller state — struct-typed bindings cannot exist in the
 fragment, so `t.f = v` can never overwrite a tracked binding — so it
 admits as an opaque write target: the base must be a bound
 parameter or local identifier carrying a declared named-type
-identity, the RHS still evaluates for its calls, and the result is
-discarded. The store is an external mutation, so it records a
+identity, the RHS still evaluates for its calls, and the stored
+value's dependencies accumulate into the base binding — a later
+`t.M()` can observe the write through the pointer, so the dep set
+must keep it. The store is an external mutation, so it also records a
 zero-argument imported transfer against the base's declared type
 identity — `effects` reports `unknown` like an imported var read,
 and a redeclaration of that type flags the summary via

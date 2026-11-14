@@ -4076,6 +4076,7 @@ METHOD_LIB = {
         "type A = T\ntype SE struct{ GT[int64] }\n"
         "type EI struct{ I }\n"
         "type S struct{ F int64 }\n"
+        "func (s *S) PF() int64 { return 0 }\n"
         "var V T\nconst K T = 7\nvar PV *T\nvar VS S\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
@@ -4849,6 +4850,47 @@ def test_field_write_through_pointer_is_admitted(go_types_helper):
     assert result.effects == "unknown"
     (write,) = [c for c in result.calls if c.imported]
     assert write.target == members["S"]["id"] and write.arguments == ()
+
+
+def test_field_write_dependencies_survive_into_later_reads(go_types_helper):
+    # `s.F = v; return s.PF()` — the store lands in the pointee's
+    # contents, which a later method call can observe: the result must
+    # keep `v`'s dependency, not just the pre-write `s` state.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(s *lib.S, v int64) int64 {\n"
+        "\ts.F = v\n"
+        "\treturn s.PF()\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_array_type_argument_pins_element(go_types_helper):
+    # `lib.S[[2]lib.T](x)` — an array type argument's length is not a
+    # type expression; the element's identity still pins.
+    lib = {
+        "lib": {
+            "s.go": "package lib\ntype S[A any] int64\n",
+            "t.go": "package lib\ntype T int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.S[[2]lib.T](x)) }\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
 
 
 def test_imported_member_write_stays_closed(go_types_helper):
