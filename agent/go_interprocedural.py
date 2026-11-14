@@ -618,6 +618,7 @@ class _Builder:
             # The loop variable and every binding made inside the body are
             # scoped to the loop — none of them escape, matching the compiler.
             scope = dict(locals_)
+            update = None
             if clause is not None and clause.type == "range_clause":
                 # Only integer ranges are reachable in-fragment — a
                 # composite operand (slice, map, string, channel, array)
@@ -671,19 +672,6 @@ class _Builder:
                         condition, fn, params, scope, transfers, count, 0
                     )
                 update = clause.child_by_field_name("update")
-                if update is not None:
-                    operands = _children(update)
-                    if update.type not in {
-                        "inc_statement",
-                        "dec_statement",
-                    } or len(operands) != 1 or operands[0].type != "identifier":
-                        raise _Unsupported("unsupported_statement", _span(update))
-                    ref = self.references.get(_span(operands[0]))
-                    if ref is None or (
-                        ref.binding_id not in scope
-                        and ref.binding_id not in params
-                    ):
-                        raise _Unsupported("binding_unavailable", _span(update))
             elif clause is not None:
                 # `for <expression> { ... }` — a condition-only loop.
                 self.expression(clause, fn, params, scope, transfers, count, 0)
@@ -705,6 +693,15 @@ class _Builder:
                         _children(body_node), fn, params, inner, transfers,
                         count, deps, saw_return, conditional,
                     )
+                    if update is not None:
+                        # The update runs after each pass so its writes
+                        # seed the next iteration — an inc/dec is a
+                        # dependency-preserving no-op, an assignment's
+                        # RHS dependencies widen into the fixed point.
+                        self.statement(
+                            update, fn, params, inner, transfers, count,
+                            deps, saw_return, conditional,
+                        )
                     changed = False
                     for binding_id, binding_deps in inner.items():
                         if binding_id in scope:
