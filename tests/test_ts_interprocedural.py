@@ -833,3 +833,16 @@ def test_unavailable_summary_reports_unknown_effects():
     s = _fn("function f(x): number { return 1; }")
     assert not s.available
     assert s.effects == "unknown"
+
+def test_conditional_break_still_runs_for_increment():
+    # A break guarded by `if` leaves a non-breaking exit that reaches
+    # the increment — only an unconditional break skips it.
+    s = _fn(
+        "function f(x: number, z: number, n: number): number {"
+        " let i = 0;"
+        " for (let k = 0; k < n; i = i + z) {"
+        "   if (x > 0) { break; }"
+        " }"
+        " return i; }"
+    )
+    assert s.available and s.return_dependencies == frozenset({1})

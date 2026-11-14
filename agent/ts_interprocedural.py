@@ -504,6 +504,11 @@ class _Builder:
             # A `break` skips the for-increment; `continue` still runs
             # it. Both make the rest of the body conditional.
             frame["broke"] = kind == "break_statement"
+            if kind == "break_statement" and not conditional:
+                # Only an unconditional break leaves no exit that
+                # reaches the increment — a conditional one means the
+                # non-breaking path still runs it.
+                frame["broke_always"] = True
             return
         raise _Unsupported("unsupported_statement", _span(node))
 
@@ -611,13 +616,14 @@ class _Builder:
         """Iterate a loop body to a dependency fixed point — a join, not
         an unroll; trip counts are never modelled."""
         passes = 0
-        frame = {"exited": False, "broke": False}
+        frame = {"exited": False, "broke": False, "broke_always": False}
         self.frames.append(frame)
         try:
             while True:
                 mark = len(transfers)
                 frame["exited"] = False
                 frame["broke"] = False
+                frame["broke_always"] = False
                 inner = dict(scope)
                 if condition is not None:
                     # The condition re-evaluates each pass so a call's
@@ -629,9 +635,10 @@ class _Builder:
                     body, params, inner, transfers, count, deps,
                     saw_return, conditional,
                 )
-                if increment is not None and not frame["broke"]:
+                if increment is not None and not frame["broke_always"]:
                     # The increment runs after each pass so its writes
-                    # seed the next iteration — a `break` skips it.
+                    # seed the next iteration — a `break` skips it
+                    # only when no exit reaches the increment at all.
                     self._for_part(
                         increment, params, inner, transfers, count, deps,
                         saw_return, conditional,
