@@ -2157,10 +2157,25 @@ the staleness transfer) and `lib.K.M(x)` on a constant all share the
 path. A method *expression* `lib.T.M(recv, args)` needs no flag —
 the receiver is already the leading argument, so the plain
 `direct_import` result-depends-on-every-argument model covers it
-(`(*lib.T).PM(t, x)` records the same wire shape; a `*lib.T`
-receiver can only arrive through a pointer-typed parameter, which
-the signature rules still reject, so it is closed at the consumer
-level for now).
+(`(*lib.T).PM(t, x)` records the same wire shape and summarizes the
+same way — see the pointer-typed signature section below).
+
+Pointer-typed parameters and results now belong to the signature
+fragment: a `*lib.T` parameter reports `kind: "pointer"` with the
+pointee's named/alias identity on `type_id`, and
+`signature_type_ids` unwraps one pointer layer so `func Take(t *T)`
+pins `T` exactly like `func Take(t T)`. The consumer admits the fact
+wherever a scalar is allowed — parameters, results, `:=` and `var`
+locals — so `func F(t *lib.T, x int64) { t.PM(x) }` summarizes with
+the usual receiver-plus-arguments union, and `(*lib.T).PM(t, x)`
+follows the method-expression path. The dep model tracks the
+*binding's* index, not the pointee's state — dereferences, field
+access, indexing and mutations through the pointer stay outside the
+fragment (`effects` already reports every admitted body as
+`unknown`), so `return *t` is still `unsupported_expression`. A
+pointer to an unnamed or composite pointee (`*int64`, `**T`,
+`*struct{…}`) pins nothing — the pointee names no type identity —
+but the binding still tracks its dep set like any scalar.
 
 The member record's `signature_type_ids` for a method now include
 the receiver's own named-type identity — `x.M(y)` pins `T` even when
