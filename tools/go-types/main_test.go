@@ -261,7 +261,6 @@ func TestNestedNamedTypeArgumentPinsEveryIdentity(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 func TestPointerTypeArgumentPinsPointee(t *testing.T) {
 	// `lib.GK[*lib.T](p)` — a composite type argument pins every
 	// named identity inside it, so a `T` redeclaration stales the
@@ -359,6 +358,37 @@ func TestPointerVarDeclaresPointeeMember(t *testing.T) {
 	sm, ok := members["S"]
 	if !ok || sm.Kind != "type" {
 		t.Fatalf("a struct pointee must still be declared: %+v", sm)
+	}
+}
+func TestErrorPointerVarRecordsNoEmptyMember(t *testing.T) {
+	// `var PE *error` — `error` is a universe object with no imported
+	// identity, so the pointee emits no member; a member with an
+	// empty id would fail the loader outright.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { _ = lib.PE\n\treturn 0 }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\nvar PE *error"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	for _, m := range out.ImportedMembers {
+		if m.ID == "" {
+			t.Fatalf("a member was recorded with an empty id: %+v", m)
+		}
+	}
+	pe, ok := func() (member, bool) {
+		for _, m := range out.ImportedMembers {
+			if m.Name == "PE" {
+				return m, true
+			}
+		}
+		return member{}, false
+	}()
+	if !ok || pe.Kind != "var" || pe.Type.Kind != "pointer" || pe.Type.TypeID != "" {
+		t.Fatalf("the *error var member is missing or misclassified: %+v", pe)
 	}
 }
 

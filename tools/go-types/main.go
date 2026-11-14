@@ -573,7 +573,13 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 				elem = e.Obj()
 			}
 			if elem != nil {
-				ix.recordMember(elem, ix.typeID(elem))
+				// Universe objects (`*error` vars) and anything the
+				// imported unit cannot name carry no identity — only
+				// an emitted id may be recorded, since the loader
+				// rejects a member whose id is empty.
+				if eid := ix.typeID(elem); eid != "" {
+					ix.recordMember(elem, eid)
+				}
 			}
 		}
 	}
