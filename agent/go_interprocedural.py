@@ -1414,7 +1414,7 @@ class _Builder:
                 return deps
             if call.kind == "direct_import":
                 return self._direct_import_call(
-                    node, call, arguments, fn, params, locals_, transfers,
+                    call, arguments, fn, params, locals_, transfers,
                     count, depth,
                 )
             target = self.functions.get(call.target)
@@ -1490,14 +1490,13 @@ class _Builder:
                     "call_mapping_unavailable", _span(node), call.target
                 )
             return self._direct_import_call(
-                node, call, arguments, fn, params, locals_, transfers,
+                call, arguments, fn, params, locals_, transfers,
                 count, depth,
             )
         raise _Unsupported("unsupported_expression", _span(node))
 
     def _direct_import_call(
         self,
-        node: Any,
         call: Any,
         arguments: list[Any],
         fn: Any,

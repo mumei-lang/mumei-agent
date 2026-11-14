@@ -2108,10 +2108,13 @@ forms already arrive as `call_expression`.
 Boundaries: inferred calls `lib.G(x)` stay `external_or_bodyless`
 (the declared signature's result is a type parameter, so the
 scalar-result rule rejects it — only *explicit* basic instantiations
-are admitted). Instantiated generic *types* (`lib.S[int64](x)`),
-local generics, methods and multi-valued results are unchanged and
-closed. A void instantiated callee records its argument-dependency
-union like any other `direct_import` transfer.
+are admitted). A dot-imported instantiation `G[int64](x)` stays
+closed too — the unqualified name reaches the local-callee path,
+whose declared signature check rejects it like any inferred call.
+Instantiated generic *types* (`lib.S[int64](x)`), local generics,
+methods and multi-valued results are unchanged and closed. A void
+instantiated callee records its argument-dependency union like any
+other `direct_import` transfer.
 
 ## Roadmap authority and vocabulary
 
