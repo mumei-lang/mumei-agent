@@ -261,6 +261,66 @@ func TestNestedNamedTypeArgumentPinsEveryIdentity(t *testing.T) {
 	}
 }
 
+func TestPointerTypeArgumentPinsPointee(t *testing.T) {
+	// `lib.GK[*lib.T](p)` — a composite type argument pins every
+	// named identity inside it, so a `T` redeclaration stales the
+	// call site. A signature argument carries no pinnable identity
+	// and must stay closed.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(p *lib.T, t2 lib.T2) int64 { return lib.GK[*lib.T](p) + lib.GN[[]lib.T](t2) }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"g.go", "package lib\ntype T2 int64\nfunc GK[P any](v P) int64 { return 0 }\nfunc GN[P any](v T2) int64 { return 0 }"},
+			{"t.go", "package lib\ntype T int64"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	var tID string
+	for _, m := range out.ImportedMembers {
+		if m.Name == "T" {
+			tID = m.ID
+		}
+	}
+	if tID == "" {
+		t.Fatal("the referenced member is missing")
+	}
+	direct := 0
+	for _, c := range out.Calls {
+		if c.Kind != "direct_import" {
+			continue
+		}
+		direct++
+		if len(c.TypeArgTypeIDs) != 1 || c.TypeArgTypeIDs[0] != tID {
+			t.Fatalf("a composite type argument did not pin the pointee: %v", c.TypeArgTypeIDs)
+		}
+	}
+	if direct != 2 {
+		t.Fatalf("pointer/slice type arguments were not admitted: %d direct calls", direct)
+	}
+}
+
+func TestSignatureTypeArgumentStaysClosed(t *testing.T) {
+	// `lib.GK[func()](nil)` — a signature type argument carries no
+	// pinnable identity, so the call record stays opaque.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { return lib.GK[func()](nil) }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"g.go", "package lib\nfunc GK[P any](v P) int64 { return 0 }"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	for _, c := range out.Calls {
+		if c.Kind == "direct_import" {
+			t.Fatalf("a signature type argument was admitted: %+v", c)
+		}
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {

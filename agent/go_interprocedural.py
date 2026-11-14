@@ -433,13 +433,37 @@ class _Builder:
     def _pin_type_node(self, node: Any) -> bool:
         """Pin every named identity a type expression names.
 
-        Returns False for a composite constructor (`*T`, `[]T`, maps,
-        channels, …) or an unresolvable name — the admitting caller
-        keeps the expression closed rather than admit an unpinned
-        identity. Predeclared and universe names pin nothing.
+        Returns False for a signature, struct or interface literal or
+        an unresolvable name — the admitting caller keeps the
+        expression closed rather than admit an unpinned identity.
+        Composite constructors (`*T`, `[]T`, maps, channels, …) pin
+        every named identity their elements name. Predeclared and
+        universe names pin nothing.
         """
         if node is None:
             return False
+        if node.type in {
+            "pointer_type",
+            "slice_type",
+            "array_type",
+            "map_type",
+            "channel_type",
+        }:
+            children = tuple(node.named_children)
+            if node.type == "array_type":
+                # `[2]T` — the length is not a type expression; only
+                # the element contributes pinnable identities.
+                length = node.child_by_field_name("length")
+                if length is not None:
+                    children = tuple(
+                        c
+                        for c in children
+                        if (c.start_byte, c.end_byte, c.type)
+                        != (length.start_byte, length.end_byte, length.type)
+                    )
+            return bool(children) and all(
+                self._pin_type_node(elem) for elem in children
+            )
         if node.type in {"type_elem", "parenthesized_type"}:
             inner = next(iter(node.named_children), None)
             return inner is not None and self._pin_type_node(inner)
@@ -519,7 +543,7 @@ class _Builder:
 
     def _opaque_write_target(
         self, node: Any, locals_: dict[str, frozenset[int]], params: dict[str, int]
-    ) -> str | None:
+    ) -> tuple[str, Any] | None:
         """An assignment LHS whose field store lands in caller state.
 
         `t.f` (a field selection — reachable in the fragment only
@@ -529,11 +553,14 @@ class _Builder:
         pointee's or field's contents. The write is admitted when the
         base is a bound parameter or local identifier carrying a
         declared named-type identity — that identity becomes the
-        recorded write target. An imported member, a package var, an
-        unbound name, or a base whose type declares no identity keeps
-        the statement closed, matching the bare-identifier gate. The
-        `*t` dereference shape is not admitted here: an `&x` alias
-        makes an indirected store able to overwrite a tracked binding.
+        recorded write target, and the base's reference is returned
+        with it so the caller can fold the stored value's dependencies
+        back into the base binding (a later `t.M()` can observe the
+        write). An imported member, a package var, an unbound name, or
+        a base whose type declares no identity keeps the statement
+        closed, matching the bare-identifier gate. The `*t`
+        dereference shape is not admitted here: an `&x` alias makes an
+        indirected store able to overwrite a tracked binding.
         """
         while node is not None and node.type == "parenthesized_expression":
             node = next(iter(node.named_children), None)
@@ -552,7 +579,7 @@ class _Builder:
         binding = self.bindings.get(ref.binding_id)
         if binding is None or not binding.type.type_id:
             return None
-        return binding.type.type_id
+        return binding.type.type_id, ref
 
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
@@ -1023,6 +1050,7 @@ class _Builder:
                     lhs, locals_, params
                 )
                 if write_target is not None:
+                    type_id, ref = write_target
                     transfers.append(
                         CallTransfer(
                             FileSpan(
@@ -1030,13 +1058,17 @@ class _Builder:
                                 lhs.start_byte,
                                 lhs.end_byte,
                             ),
-                            write_target,
+                            type_id,
                             (),
                             frozenset(),
                             imported=True,
                         )
                     )
-                    refs.append(None)
+                    # The store lands in the pointee's contents — a
+                    # later `t.M()` may observe it — so the RHS's
+                    # dependencies accumulate into the base binding
+                    # rather than replacing them or being discarded.
+                    refs.append((ref, True))
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
             # Tuple assignment is parallel: every RHS evaluates against the
@@ -1061,7 +1093,13 @@ class _Builder:
             for ref, value in zip(refs, values):
                 if ref is None:
                     continue
-                if compound:
+                accumulating = compound
+                if isinstance(ref, tuple):
+                    # A `t.f = v` opaque write target: the pointee's
+                    # contents gain the RHS's dependencies on top of
+                    # whatever they already tracked.
+                    ref, accumulating = ref
+                if accumulating:
                     # `x op= e` reads the old value too — the result unions
                     # the binding's current dependencies with the RHS's.
                     if ref.binding_id in locals_:

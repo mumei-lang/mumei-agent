@@ -2111,10 +2111,14 @@ call site alone, where the member record's signature pins could
 never reach. A *declared* named parameter
 (`func G[T any](v T2)`) is already pinned by `signature_type_ids`;
 only composite instantiated parameters (`[]T`) are rejected, as
-outside the scalar fragment, and a pointer type argument
-(`G[*lib.T](v)`) has no pin channel either. Nested named arguments
-pin every identity they contain — `G[other.N[lib.T]](v)` records both
-`N` and `T`, so redeclaring either stales the call site. The consumer admits the call through the
+outside the scalar fragment. A composite type *argument* pins every
+named identity inside it — `G[*lib.T](v)`, `G[[]lib.T](v)` and
+`G[map[string]lib.T](v)` all record `lib.T` — while a signature,
+struct, interface or type-parameter argument carries no pinnable
+identity and keeps the call closed (`G[func()](nil)`). Nested named
+arguments pin every identity they contain — `G[other.N[lib.T]](v)`
+records both `N` and `T`, so redeclaring either stales the call
+site. The consumer admits the call through the
 same `direct_import` path — tree-sitter parses the single-type-arg
 form `lib.G[T](x)` as `type_conversion_expression`, so a dedicated
 arm maps that node shape onto the recorded call; multi-type-arg
@@ -2122,12 +2126,12 @@ forms already arrive as `call_expression`. An *inferred*
 instantiation `lib.G(x)` or `G(x)` arrives as an ordinary
 `call_expression` and takes the same gate through `info.Instances`:
 the call is admitted when every inferred type argument is basic,
-named or alias — no explicit `[T]` syntax is required.
+named, alias or a composite constructor of those — no explicit
+`[T]` syntax is required.
 
 Boundaries: inferred calls `lib.G(x)`/`G(x)` take the same gate —
 `info.Instances` records the inferred type arguments either way,
-so a basic-or-named inferred instance admits the call at its
-instantiated arity (partial explicit forms `lib.G[int64](x, c)`
+so an inferred instance admits the call at its instantiated arity (partial explicit forms `lib.G[int64](x, c)`
 with inferred rest-arguments follow too). An argument inferred to a
 named type — `lib.G(t)` with `t` declared `lib.T` — admits with the
 `lib.T` pin recorded on the call, exactly like the explicit
@@ -2140,9 +2144,12 @@ conversions are admitted too — `lib.S[int64](x)` and
 (operand deps flow through) when the target member declares a
 scalar underlying (`type S[A any] int64`); the consumer walks the
 whole type expression and pins every named identity it contains —
-`lib.S[other.N[lib.T]](x)` pins `S`, `N` and `T`. A composite
-underlying (`type C[A any] *A`) or an unpinnable constructor inside
-the type arguments (`lib.S[*lib.T](x)`) stays closed. Local
+`lib.S[other.N[lib.T]](x)` pins `S`, `N` and `T`, and composite
+argument constructors pin their elements — `lib.S[*lib.T](x)` pins
+`S` and `T`. A composite
+underlying (`type C[A any] *A`) or an unpinnable argument
+(`lib.S[func() int64](x)` — a signature carries no identity) stays
+closed. Local
 generics and methods are unchanged and closed. A multi-valued instantiated callee
 (`a, b := lib.G[int64](x)`) unpacks at its declared `results`
 arity through the same tuple rule as any `direct_import` call —
@@ -2205,8 +2212,10 @@ in caller state — struct-typed bindings cannot exist in the
 fragment, so `t.f = v` can never overwrite a tracked binding — so it
 admits as an opaque write target: the base must be a bound
 parameter or local identifier carrying a declared named-type
-identity, the RHS still evaluates for its calls, and the result is
-discarded. The store is an external mutation, so it records a
+identity, the RHS still evaluates for its calls, and the stored
+value's dependencies accumulate into the base binding — a later
+`t.M()` can observe the write through the pointer, so the dep set
+must keep it. The store is an external mutation, so it also records a
 zero-argument imported transfer against the base's declared type
 identity — `effects` reports `unknown` like an imported var read,
 and a redeclaration of that type flags the summary via
@@ -2226,7 +2235,8 @@ so redeclaring `T` still flags every admitted caller.
 An *instantiated* receiver admits through the same gate: `x.GM(y)`
 with `x: lib.GT[lib.T]`, and the method expression `lib.GT[lib.T].GM`,
 classify as `direct_import` when every type argument of the receiver
-is basic, named or alias — the collected identities ride on the call
+is basic, named, alias or a composite constructor of those — the
+collected identities ride on the call
 record's `type_arg_type_ids`, the same wire key an instantiated callee
 uses, so a type-argument redeclare stales every admitted caller.
 Boundaries: interface receivers stay `method_generic_or_variadic`
@@ -2236,8 +2246,9 @@ method values `i.M(x)` and method expressions `lib.I.M`). Local
 methods and generic methods are
 unchanged and closed — as are receivers still declared on type
 parameters (`lib.GT[P]` where `P` is unresolved) and instantiated
-receivers whose type arguments contain a composite constructor
-(`lib.GT[*lib.T]` — a pointer has no pin channel). Promoted
+receivers whose type arguments contain an unpinnable shape
+(a signature, struct or interface literal); composite constructors
+inside them pin their elements (`lib.GT[*lib.T]` pins `T`). Promoted
 selections (`s.GM` through `struct{ GT[T] }`, or an embedded
 interface's method) stay closed too: the static receiver is the
 outer type, so the embedded instantiation's type arguments — or the

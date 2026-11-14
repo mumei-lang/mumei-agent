@@ -379,11 +379,13 @@ func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (str
 
 // collectTypeArgIDs admits a type argument built only from basic, named
 // and alias types — at any depth of a named/alias type's own argument
-// list — and records every named/alias identity it contains so the call
+// list or inside a pointer, slice, array, map or channel constructor —
+// and records every named/alias identity it contains so the call
 // record pins each substituted type. `lib.N[other.U]` pins both N and U;
-// a redeclaration of either must stale the call site. A pointer, slice
-// or other composite constructor has no pin channel, so a type argument
-// containing one stays closed.
+// `*lib.T` and `[]lib.T` pin T; a redeclaration of either must stale
+// the call site. A signature, struct, interface or type-parameter
+// argument has no pinnable identity, so a type argument containing one
+// stays closed.
 func (ix *indexer) collectTypeArgIDs(t types.Type, seen map[string]bool, ids *[]string) bool {
 	var obj *types.TypeName
 	var inner *types.TypeList
@@ -397,6 +399,17 @@ func (ix *indexer) collectTypeArgIDs(t types.Type, seen map[string]bool, ids *[]
 	case *types.Alias:
 		obj = tt.Obj()
 		inner = tt.TypeArgs()
+	case *types.Pointer:
+		return ix.collectTypeArgIDs(tt.Elem(), seen, ids)
+	case *types.Slice:
+		return ix.collectTypeArgIDs(tt.Elem(), seen, ids)
+	case *types.Array:
+		return ix.collectTypeArgIDs(tt.Elem(), seen, ids)
+	case *types.Map:
+		return ix.collectTypeArgIDs(tt.Key(), seen, ids) &&
+			ix.collectTypeArgIDs(tt.Elem(), seen, ids)
+	case *types.Chan:
+		return ix.collectTypeArgIDs(tt.Elem(), seen, ids)
 	default:
 		return false
 	}
