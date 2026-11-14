@@ -4658,3 +4658,32 @@ def test_address_of_composite_stays_closed(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_pointer_result_generic_cannot_bypass_instantiation_gate(
+    go_types_helper,
+):
+    # `func G[P any](v P) *P` — the declared result `*P` reads as a
+    # pointer, but the callee is generic: it must go through the
+    # instantiation gate, so `lib.G(t)` with `t` a named `lib.T` infers
+    # `P = *lib.T` — a non-basic type argument — and stays closed.
+    lib = {
+        "lib": {
+            "g.go": "package lib\nfunc G[P any](v P) *P { return &v }\n"
+            "func S[P any](v P) int64 { return 0 }\n",
+            "t.go": "package lib\ntype T int64\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T) int64 { return lib.S(t) }\n"
+        "func G2(t lib.T) int64 { _ = lib.G(t); return 0 }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, lib))
+    assert report["status"] == "ok"
+    by_span = {c["span"]["start"]: c["kind"] for c in report["calls"]}
+    # `lib.S(t)` infers P=lib.T — a named type argument — closed too.
+    # `lib.G(t)` must not slip through the declared-signature path.
+    assert all(k != "direct_import" for k in by_span.values())
+
+

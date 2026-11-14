@@ -218,6 +218,13 @@ func (ix *indexer) directImportID(f *types.Func) (string, int, bool) {
 	if !ok || !allScalarResults(sig) {
 		return "", 0, false
 	}
+	// A generic callee must go through the instantiation gate — the
+	// *declared* signature admits what the *inferred* call would
+	// reject: `func G[P any](v P) *P` records `*P` as a pointer result
+	// here while `lib.G(t)` infers a named type argument no pin covers.
+	if tp := sig.TypeParams(); tp != nil && tp.Len() > 0 {
+		return "", 0, false
+	}
 	return id, sig.Results().Len(), true
 }
 
