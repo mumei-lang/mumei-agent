@@ -1618,7 +1618,8 @@ Labelled `break`/`continue`, `goto`, `defer` and `go` stay
 `unsupported_statement`/`binding_unavailable`. An inc/dec operand
 that is not a bound identifier admits through the imported
 member-write gate instead — `lib.V++` (or dot-imported `V++`,
-indexed `lib.VA[i]++`, field `lib.VS.F++`) records the same
+indexed `lib.VA[i]++`, field `lib.VS.F++`, dereferenced
+`(*lib.PV)++` on a pointer-typed member) records the same
 external mutation a `lib.V = v` write does, index sub-expressions
 evaluate like a write's, and a member that names no writable
 storage or an operand that resolves to none stays closed.
@@ -2269,8 +2270,8 @@ and a redeclaration of that type flags the summary via
 aliases a tracked local and dep sets carry indices, not identities,
 so an indirected store cannot be proven not to overwrite a tracked
 binding. Unbound bases keep the statement closed, as do `&` on
-anything but a fragment operand and dereference writes of any
-imported member (`*lib.PV = v`).
+anything but a fragment operand and dereference writes through a
+bound local pointer (`*p = v`).
 
 Writes to imported `var` members admit through the same external-
 mutation rule: `lib.V = v`, `lib.VA[i] = v` and `lib.VS.f = v` — and
@@ -2279,16 +2280,34 @@ index operands until a `var` member names the target, then record a
 zero-argument imported transfer against the member's own identity
 (`effects` reports `unknown`, and the member's declared type
 identity — plus a container element's — pins for
-`stale_dependents`). The stored value's dependencies drop with the
+`stale_dependents`). A `*`-dereference operand unwraps the same
+way when it names a pointer-typed `var` member whose pointee is
+named: `*lib.PV = v` and dot-imported `*PV = v` store through the
+member into package state and pin the pointee's identity through
+the pointer fact's `type_id`. A non-pointer member behind a `*`
+stays closed (uncompilable), any unary operator other than `*`
+never unwraps, and a pointer member whose pointee is unnamed
+(`*lib.PU = v` on `*int64`, `(*lib.PA)[i] = v` on `*[4]int64`,
+`*lib.PPV` or `**lib.PPV` on `**T`) stays closed because the fact
+carries no identity for the stored type a redeclaration would
+flag. A deref store can also alias a tracked binding — `lib.PV =
+&x` aims the member at `x` — so any binding `&x` escaped marks the
+binding, and a `*lib.PV = v` write unions the stored value's
+dependencies into every escaped binding (`return x` then reports
+the stored value's dependencies too). The stored value's
+dependencies otherwise drop with the
 write because no binding tracks member contents, and a nested index
 expression still evaluates whenever it could record something — a
 call (`lib.VA[f()]`), a conversion, or an imported member read
 (`lib.VA[lib.V]`, whose pin `stale_dependents` needs) — while a
 literal or plain-name index (`lib.VM["k"]`) needs no evaluation.
 Compilable closed cases: a computed operand
-(`g()[0] = v`) names no member, and a `const`, `func` or `type`
+(`g()[0] = v` or `*g() = v`) names no member, and a `const`, `func`
+or `type`
 member names no writable storage. Inc/dec statements
-(`lib.V++`) route through this same gate.
+(`lib.V++`, `(*lib.PV)++`) route through this same gate — the
+named-pointee requirement applies to them too (`(*lib.PU)++` stays
+closed).
 
 An index read of an imported container var — `lib.VA[i]` — admits
 through the member record's new element fact: slice and array type

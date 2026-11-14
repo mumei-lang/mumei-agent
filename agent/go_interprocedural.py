@@ -99,6 +99,10 @@ _BINARY = frozenset(
     }
 )
 _UNARY = frozenset({"+", "-", "!", "^", "&"})
+# Store-loop sentinel: an assignment slot holding a `*lib.PV = v`
+# deref member write — the stored value's dependencies fold into
+# every escaped binding at store time.
+_ALIAS_FOLD = object()
 _COMPOUND_ASSIGN = frozenset(
     {"+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^="}
 )
@@ -347,6 +351,11 @@ class _Builder:
         self.cache: dict[str, FunctionSummary] = {}
         self.active: set[str] = set()
         self.pinned: set[str] = set()
+        # Bindings whose address escaped through `&x`: a later
+        # `lib.PV = p; *lib.PV = v` may write through the member into
+        # one of them, so deref member stores union the stored
+        # value's dependencies into every escaped binding.
+        self.escaped: set[str] = set()
         self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
@@ -673,19 +682,23 @@ class _Builder:
 
     def _imported_member_write(
         self, node: Any
-    ) -> tuple[PackageMember, tuple[Any, ...]] | None:
+    ) -> tuple[PackageMember, tuple[Any, ...], bool] | None:
         """The imported member an assignment LHS stores into, or None.
 
-        `lib.V = v`, `lib.VA[i] = v` and `lib.VS.f = v` — and their
-        dot-imported forms `V = v`, `VA[i] = v`, `VS.f = v` — mutate
-        package state the dependency model does not follow: it tracks
+        `lib.V = v`, `lib.VA[i] = v`, `lib.VS.f = v` and
+        `*lib.PV = v` — and their dot-imported forms `V = v`,
+        `VA[i] = v`, `VS.f = v`, `*PV = v` — mutate package state
+        the dependency model does not follow: it tracks
         binding indices, never member contents, so the store carries
         no result dependency. The member's own identity becomes the
         recorded write target, the same way `t.f = v` records the
         base's declared type identity. The returned extras are index
         sub-expressions inside the LHS (`lib.VA[f()] = v`); they must
         still be evaluated for anything that could record a transfer
-        or pin. A LHS that resolves to no
+        or pin. The third element reports whether a `*` deref
+        unwrapped the member — a deref store's value may land in an
+        escaped binding, so the caller marks its slot for the
+        store-time dependency fold. A LHS that resolves to no
         imported member — a bound local's field, a computed operand,
         an unknown name — returns None and keeps the statement
         closed.
@@ -708,9 +721,11 @@ class _Builder:
             )
             if member is None or member.name.encode("utf-8") != node.text:
                 return None
-            return member, ()
+            return member, (), False
         extras: list[Any] = []
         cur = node
+        saw_deref = False
+        member = None
         while cur is not None:
             if cur.type == "parenthesized_expression":
                 cur = next(
@@ -718,10 +733,21 @@ class _Builder:
                     None,
                 )
                 continue
+            if cur.type == "unary_expression":
+                # `*lib.PV = v` — a dereference store through an
+                # imported pointer-typed var mutates package state
+                # exactly like the direct member store. `&`, `!` and
+                # the rest can never be store targets.
+                operator = cur.child_by_field_name("operator")
+                if operator is None or operator.text != b"*":
+                    return None
+                saw_deref = True
+                cur = cur.child_by_field_name("operand")
+                continue
             if cur.type == "selector_expression":
                 member = self._package_member(cur)
                 if member is not None:
-                    return member, tuple(extras)
+                    break
                 cur = cur.child_by_field_name("operand")
                 continue
             if cur.type == "index_expression":
@@ -743,9 +769,25 @@ class _Builder:
                     member is not None
                     and member.name.encode("utf-8") == cur.text
                 ):
-                    return member, tuple(extras)
+                    break
+                member = None
             return None
-        return None
+        if member is None:
+            return None
+        if saw_deref and (
+            member.type.kind != "pointer" or not member.type.type_id
+        ):
+            # `*lib.V = v` on a non-pointer member cannot compile —
+            # the pointer check keeps a tampered record from
+            # smuggling a store past the gate. The stored type's
+            # identity must also be named: the pointer fact's
+            # `type_id` IS the pointee's identity, so `*lib.PV = v`
+            # pins `T` — while `*lib.PU`, `(*lib.PA)[i]`, `*lib.PPV`
+            # and `**lib.PPV` store into unnamed pointees (`*int64`,
+            # `*[4]int64`, `*T`) whose contents the fact cannot name
+            # and a redeclaration would slip past `stale_dependents`.
+            return None
+        return member, tuple(extras), saw_deref
 
     def _record_member_write(
         self,
@@ -1010,8 +1052,10 @@ class _Builder:
         # summarized mid-expression.
         saved_frames = self.frames
         saved_pinned = self.pinned
+        saved_escaped = self.escaped
         self.frames = []
         self.pinned = set()
+        self.escaped = set()
         # The summary embeds the function's declared parameter and
         # result type facts, so the named/alias identities they carry
         # pin it directly: redeclaring one makes this summary's
@@ -1030,6 +1074,7 @@ class _Builder:
             pinned = tuple(sorted(self.pinned))
             self.frames = saved_frames
             self.pinned = saved_pinned
+            self.escaped = saved_escaped
             self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
@@ -1385,7 +1430,7 @@ class _Builder:
                             raise _Unsupported(
                                 "binding_unavailable", _span(lhs)
                             )
-                        member, extras = member_write
+                        member, extras, _ = member_write
                         self._record_member_write(
                             lhs, member, extras,
                             fn, params, locals_, transfers, count,
@@ -1442,12 +1487,16 @@ class _Builder:
                 # tracks member contents.
                 member_write = self._imported_member_write(lhs)
                 if member_write is not None:
-                    member, extras = member_write
+                    member, extras, saw_deref = member_write
                     self._record_member_write(
                         lhs, member, extras,
                         fn, params, locals_, transfers, count,
                     )
-                    refs.append(None)
+                    # A `*lib.PV = v` store may land in any binding an
+                    # earlier `&x` leaked into the member — mark the
+                    # slot so the store loop unions the stored value's
+                    # dependencies into every escaped binding.
+                    refs.append(_ALIAS_FOLD if saw_deref else None)
                     continue
                 raise _Unsupported("unsupported_statement", _span(lhs))
             # Tuple assignment is parallel: every RHS evaluates against the
@@ -1471,6 +1520,17 @@ class _Builder:
             )
             for ref, value in zip(refs, values):
                 if ref is None:
+                    continue
+                if ref is _ALIAS_FOLD:
+                    # `*lib.PV = v` writes through a member that an
+                    # earlier `&x` may have aimed at a tracked binding:
+                    # any escaped binding might be the pointee, so the
+                    # stored value's dependencies union into all of
+                    # them rather than dropping with the write.
+                    for escaped_id in self.escaped:
+                        self._store(
+                            locals_, params, escaped_id, value, True
+                        )
                     continue
                 accumulating = compound
                 if isinstance(ref, tuple):
@@ -1750,7 +1810,7 @@ class _Builder:
                     else "unsupported_statement",
                     _span(node),
                 )
-            member, extras = member_write
+            member, extras, _ = member_write
             # `lib.V++` mutates package state like `lib.V = v` — the
             # stored amount is external, so only the mutation records.
             self._record_member_write(
@@ -2014,6 +2074,21 @@ class _Builder:
                         node, fn, params, locals_, transfers, count, depth
                     )
                 raise _Unsupported("unsupported_operator", _span(node))
+            if kind == "unary_expression" and operator.type == "&":
+                # `&x` leaks a tracked binding's identity into an
+                # untracked pointer: a later `lib.PV = p; *lib.PV = v`
+                # can write through it, so the binding is marked
+                # escaped for the deref-store dependency fold.
+                operand = node.child_by_field_name("operand")
+                ref = (
+                    self.references.get(self.node_key(operand))
+                    if operand is not None
+                    else None
+                )
+                if ref is not None and (
+                    ref.binding_id in locals_ or ref.binding_id in params
+                ):
+                    self.escaped.add(ref.binding_id)
             deps: frozenset[int] = frozenset()
             for child in children:
                 deps |= self.expression(

@@ -4079,6 +4079,7 @@ METHOD_LIB = {
         "func (s *S) PF() int64 { return 0 }\n"
         "var V T\nconst K T = 7\nvar PV *T\nvar VS S\n"
         "var PS *S\nvar PU *int64\nvar PPV **T\n"
+        "var PA *[4]int64\n"
         "var VA []int64\nvar AA [4]int64\nvar VT []T\nvar VP []*T\n"
         "var VM map[string]int64\ntype NS []int64\nvar VNS NS\n"
         "var VSS []S\nvar VStr string\nvar V2 [][]int64\n"
@@ -6013,18 +6014,204 @@ def test_imported_computed_operand_write_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_deref_write_stays_closed(go_types_helper):
-    # `*lib.PV = v` — a dereference write stays closed like `*t = v`:
-    # dep sets track binding indices, not pointee contents.
+def test_imported_deref_member_write_is_admitted(go_types_helper):
+    # `*lib.PV = v` — a dereference store through an imported
+    # pointer-typed var mutates package state exactly like `lib.V = v`:
+    # the store carries no result dependency, `effects` reports
+    # `unknown`, and the member's own identity records the write.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(v int64) int64 { *lib.PV = lib.T(v)\n\treturn 0 }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target == members["PV"]["id"]
+
+
+def test_imported_deref_member_write_dot_import(go_types_helper):
+    # `*PV = v` — the dot-imported form resolves the same member.
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(v int64) int64 { *PV = T(v)\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_imported_deref_member_inc_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `(*lib.PU)++` — PU is `*int64`; the unnamed pointee carries no
+    # identity the store could pin, so the inc stays closed even
+    # though the operand resolves the pointer var.
+    files = _files_member_inc("(*lib.PU)++")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_deref_index_write_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `(*lib.PA)[i] = v` — PA is `*[4]int64`; the unnamed array
+    # pointee carries no identity the store could pin, so the write
+    # stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(i int64, v int64) int64 { (*lib.PA)[i] = v\n\treturn 0 }\n"
     }
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
+
+
+def test_imported_deref_member_write_flags_stale_dependents(go_types_helper):
+    # Redeclaring `T` flags `F` — `*lib.PV = v` pinned the pointee's
+    # named identity through the pointer element fact.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { *lib.PV = lib.T(v)\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(METHOD_LIB["lib"])
+    lib2["t.go"] = "package lib\ntype T int32\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_imported_deref_pointer_write_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*lib.PPV = lib.PV` — PPV is `**T`; the stored `*T` is unnamed
+    # on the wire even though it names T inside, so nothing pins T
+    # against redeclaration and the write stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { *lib.PPV = lib.PV\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_double_deref_member_write_stays_closed(
+    go_types_helper,
+):
+    # `**lib.PPV = v` — PPV is `**T`; the fact's `type_id` is empty
+    # because the stored `*T` is unnamed, so `T` cannot be pinned and
+    # the write stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { **lib.PPV = lib.T(v)\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_deref_member_write_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `*lib.PU = v` — PU is `*int64`; the fact's `type_id` is empty
+    # because the pointee is unnamed, so the write cannot pin a
+    # stored-type identity and stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { *lib.PU = v\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_deref_write_computed_pointer_stays_closed(go_types_helper):
+    # `*g() = v` — a call result names no member, so the dereference
+    # store stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func g() *lib.T { return lib.PV }\n"
+        "func F(v int64) int64 { *g() = lib.T(v)\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_deref_member_write_folds_into_escaped_binding(
+    go_types_helper,
+):
+    # `lib.PV = &x; *lib.PV = lib.T(y)` — the member may point at `x`,
+    # so the deref store unions the stored value's dependencies into
+    # the escaped binding: `return x` reports `y` too.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) lib.T {\n"
+        "\tlib.PV = &x\n"
+        "\t*lib.PV = lib.T(y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1})
+    assert result.effects == "unknown"
+
+
+def test_imported_deref_member_write_no_escape_keeps_deps(
+    go_types_helper,
+):
+    # Without an earlier `&x` the deref store cannot alias `x` — its
+    # dependencies stay unchanged.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) lib.T {\n"
+        "\t*lib.PV = lib.T(y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
 
 
 def test_parenthesized_member_write_is_admitted(go_types_helper):
@@ -6422,15 +6609,16 @@ def test_bound_base_field_inc_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_deref_inc_stays_closed(go_types_helper):
-    # `(*lib.PV)++` — the operand is a dereference, not a member
-    # selection; the inc/dec gate stays closed for it.
+def test_imported_deref_inc_is_admitted(go_types_helper):
+    # `(*lib.PV)++` — the dereference operand resolves the imported
+    # pointer var, so the inc/dec gate routes it like `lib.V++`.
     files = _files_member_inc("(*lib.PV)++")
     snapshot = _method_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
-    assert not result.available
+    assert result.available
+    assert result.effects == "unknown"
 
 
 def test_imported_map_index_read_is_admitted(go_types_helper):
