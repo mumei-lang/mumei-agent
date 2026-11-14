@@ -1936,3 +1936,20 @@ def test_package_bodyless_function_cfg_fails_closed(go_types_helper):
     assert fn.body is None
     construction = snapshot.cfg_for_function(files, fn.binding_id)
     assert construction.graph is None
+
+
+@pytest.mark.parametrize("mode", ["dict", "list"])
+def test_package_sources_must_be_exactly_the_declared_unit(
+    go_types_helper, mode
+):
+    files = {"a.go": CALLER, "b.go": CALLEE}
+    _, snapshot, _ = package_unit(go_types_helper, files)
+    extra = "package p\nfunc H(z int64) int64 { return z }\n"
+    if mode == "dict":
+        sources = {**files, "c.go": extra}
+    else:
+        sources = [CALLER, CALLEE, extra]
+    with pytest.raises(SnapshotError):
+        ip.summarize_go_package(sources, snapshot)
+    with pytest.raises(SnapshotError):
+        snapshot.cfg_for_function(sources, snapshot.functions[0].binding_id)

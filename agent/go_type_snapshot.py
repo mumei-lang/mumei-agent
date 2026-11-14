@@ -296,14 +296,18 @@ class GoPackageSnapshot:
 def _package_raws(
     snapshot: GoPackageSnapshot, sources: "dict[str, str] | list[str]"
 ) -> tuple[bytes, ...]:
-    """Bind caller-supplied file contents to the report's per-file digests."""
+    """Bind caller-supplied file contents to the report's per-file digests.
+
+    The supplied set must be exactly the declared unit — extra files are
+    rejected, not ignored, so a stale unit can never silently pass.
+    """
+    if isinstance(sources, dict):
+        _require(set(sources) == {n for n, _ in snapshot.files})
+    else:
+        _require(len(sources) == len(snapshot.files))
     raws: list[bytes] = []
     for i, (name, digest) in enumerate(snapshot.files):
-        source = (
-            sources[name]
-            if isinstance(sources, dict)
-            else sources[i] if i < len(sources) else None
-        )
+        source = sources[name] if isinstance(sources, dict) else sources[i]
         _require(isinstance(source, str))
         raw = _source_bytes(source)
         _require(hashlib.sha256(raw).hexdigest() == digest)
