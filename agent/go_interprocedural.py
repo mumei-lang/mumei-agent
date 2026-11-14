@@ -42,8 +42,11 @@ never read a variable (the compiler rejects it before this reader runs),
 so a scalar-typed ``constant`` binding always resolves to an empty
 dependency set and the declaration itself writes nothing; ``iota`` is
 dep-free too, while non-scalar constants stay gaps and grouped
-``const ( ... )`` forms are a parser gap like grouped ``var``.
-Type switches, ``select`` and every other
+``const ( ... )`` forms are a parser gap like grouped ``var``. A named
+scalar result — ``func F(x) (r int64)`` — is an ordinary local
+pre-initialised to the dep-free zero value; a bare ``return`` (legal
+only with a named result) yields its current dependencies. Type
+switches, ``select`` and every other
 statement shape stay unsupported.
 Scalar conversions ``T(e)`` are effect-free — the result inherits the
 operand's dependencies; the type change itself (truncation, widening)
@@ -305,7 +308,6 @@ class _Builder:
             or fn.generic
             or fn.variadic
             or len(fn.results) != 1
-            or fn.results[0].binding_id
             or any(
                 p.type.kind not in {"integer", "boolean"}
                 for p in (*fn.parameters, *fn.results)
@@ -338,6 +340,11 @@ class _Builder:
         transfers: list[CallTransfer] = []
         count = [0]
         locals_: dict[str, frozenset[int]] = {}
+        # A named result is an ordinary local pre-initialised to the zero
+        # value — dep-free until a body statement writes to it.
+        result_binding = fn.results[0].binding_id
+        if result_binding:
+            locals_[result_binding] = frozenset()
         deps: list[frozenset[int]] = [frozenset()]
         saw_return = [False]
         # The frame stack belongs to this function alone — a caller's
@@ -428,11 +435,21 @@ class _Builder:
             expressions = _children(node)
             if len(expressions) == 1 and expressions[0].type == "expression_list":
                 expressions = _children(expressions[0])
-            if len(expressions) != 1:
+            if len(expressions) == 0:
+                # A bare `return` is only legal with a named result — it
+                # yields the result binding's current dependencies.
+                result_id = (
+                    fn.results[0].binding_id if len(fn.results) == 1 else ""
+                )
+                if not result_id:
+                    raise _Unsupported("unsupported_return", _span(node))
+                deps[0] |= locals_.get(result_id, frozenset())
+            elif len(expressions) == 1:
+                deps[0] |= self.expression(
+                    expressions[0], fn, params, locals_, transfers, count, 0
+                )
+            else:
                 raise _Unsupported("unsupported_return", _span(node))
-            deps[0] |= self.expression(
-                expressions[0], fn, params, locals_, transfers, count, 0
-            )
             saw_return[0] = True
             return
         if kind == "short_var_declaration":

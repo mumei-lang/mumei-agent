@@ -161,7 +161,6 @@ def test_recursive_edges_never_supply_a_summary(go_types_helper, declarations):
         # constant — its read stays a declared gap.
         "var iota int64; func F(x int64) int64 { return iota }",
         "var true bool; func F() bool {return true}",
-        "func F(x int64) (r int64) {return}",
         "func F(x int64) (int64,int64) {return x,x}",
         "func F(x int64) float64 {return 1.0}",
         "func F(x int64) int64 {return 1.0}",
@@ -573,6 +572,69 @@ def test_const_declarations_and_reads(go_types_helper, declarations, expected):
 def test_const_declaration_gaps(go_types_helper, declarations, reason):
     result = named(*unit(go_types_helper, declarations))
     assert not result.available and result.gaps[0].reason == reason
+
+
+@pytest.mark.parametrize(
+    "declarations,expected",
+    [
+        # A named result is a dep-free local; a bare return yields it.
+        (
+            "func F(x int64) (r int64) { r = x; return }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) (r int64) { return }",
+            frozenset(),
+        ),
+        # An explicit return value behaves like an unnamed result.
+        (
+            "func F(x int64) (r int64) { return x }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) (r int64) { r = x; return r }",
+            frozenset({0}),
+        ),
+        # Reassignments and may-assignments join like any local.
+        (
+            "func F(x int64) (r int64) { r = x + 1; r = r + 1; return }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x int64) (r int64) { if x > 0 { r = x }; return }",
+            frozenset({0}),
+        ),
+        # An untouched result stays parameter-independent.
+        (
+            "func F(x int64) (r int64) { y := x; _ = y; return }",
+            frozenset(),
+        ),
+        # An inner declaration shadows without writing the result.
+        (
+            "func F(x int64) (r int64) { if x > 0 { r := x; _ = r }; return }",
+            frozenset(),
+        ),
+        # Reading the result and returning a parameter are independent.
+        (
+            "func F(x int64) (r int64) { _ = r; return x }",
+            frozenset({0}),
+        ),
+        # A result written through a loop keeps the joined deps.
+        (
+            "func F(x int64) (r int64) { for i := x; i > 0; i-- { r = i }; return }",
+            frozenset({0}),
+        ),
+        # A blank `_` result is unbound: explicit returns still work.
+        (
+            "func F(x int64) (_ int64) { return x }",
+            frozenset({0}),
+        ),
+    ],
+)
+def test_named_result_dependencies(go_types_helper, declarations, expected):
+    result = named(*unit(go_types_helper, declarations))
+    assert result.available and result.return_dependencies == expected
+    assert result.effects == "none_in_supported_fragment"
 
 
 @pytest.mark.parametrize(
