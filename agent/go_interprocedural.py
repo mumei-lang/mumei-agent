@@ -1195,7 +1195,8 @@ class _Builder:
         arity, a non-import callee, a non-call RHS) stays closed.
         """
         while node is not None and node.type == "parenthesized_expression":
-            node = next(iter(node.named_children), None)
+            inner = _children(node)  # comments are named children too
+            node = inner[0] if len(inner) == 1 else None
         if node is None or node.type != "call_expression":
             return None
         call = self.calls.get(self.node_key(node))
