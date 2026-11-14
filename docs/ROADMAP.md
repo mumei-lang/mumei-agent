@@ -1987,9 +1987,16 @@ flags the summary. Admission is pointee-gated: the named pointee
 must resolve to a `type` member whose fact is scalar or pointer —
 a struct or interface pointee stays closed because the dep model
 cannot represent the value, an unnamed pointee (`*int64`) and a
-nested pointer (`**T`) carry no identity to classify, and any other
-operand — a local or parameter pointer — stays closed for the same
-reason `*t = v` writes do: dep sets track binding indices, not
+nested pointer (`**T`) carry no identity to classify. A bound
+pointer dereferences the same way: `*t` on a parameter or local
+whose declared `*T` names the pointee admits, records its own
+imported transfer against the pointee identity (the binding's read
+carries none of its own), and returns the pointer's provenance —
+the binding's dependencies — as the result; `p := &t` inherits the
+same `*T` identity, so `*p` reads the same way. An unnamed-pointee
+binding (`p := &x` on a builtin `int64`), a computed pointer
+(`*g()`), and a nested deref (`**t`) stay closed — matching the
+`*t = v` write side, where dep sets track binding indices, not
 pointee contents. To make the named pointee visible the producer
 now declares it: recording a pointer-typed `var` member also
 records the pointee's `type` member, the same way a function
