@@ -67,6 +67,10 @@ type typeFact struct {
 	BitWidth  int    `json:"bit_width"`
 	Signed    *bool  `json:"signed"`
 	TypeID    string `json:"type_id"`
+	// Elem carries the element type fact on slice/array kinds — `[]T`,
+	// `[N]T` and named/alias types whose underlying is one — so a
+	// container index read can classify the element it returns.
+	Elem *typeFact `json:"elem,omitempty"`
 }
 
 type binding struct {
@@ -757,6 +761,20 @@ func (ix *indexer) typeOf(t types.Type) typeFact {
 		}
 		return f
 	}
+	if s, ok := t.Underlying().(*types.Slice); ok {
+		// `[]T` — or a named/alias type whose underlying is a slice,
+		// which keeps the identity the switch above already set.
+		f.Kind = "slice"
+		e := ix.typeOf(s.Elem())
+		f.Elem = &e
+		return f
+	}
+	if a, ok := t.Underlying().(*types.Array); ok {
+		f.Kind = "array"
+		e := ix.typeOf(a.Elem())
+		f.Elem = &e
+		return f
+	}
 	if _, ok := t.Underlying().(*types.Signature); ok {
 		f.Kind = "function"
 		return f
@@ -821,7 +839,7 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	ix.out.Bindings = append(ix.out.Bindings, binding{
 		id, obj.Name(), kind, sp, ix.scope(obj), tf,
 	})
-	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "function" && kind != "function" {
+	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "slice" || tf.Kind == "array" || tf.Kind == "function" && kind != "function" {
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }

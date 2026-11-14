@@ -392,6 +392,49 @@ func TestErrorPointerVarRecordsNoEmptyMember(t *testing.T) {
 	}
 }
 
+func TestSliceMemberDeclaresElemFact(t *testing.T) {
+	// A slice/array member carries the element type fact a container
+	// index read needs; a named slice type also keeps its own identity.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(s lib.NS) int64 { return lib.VA[0] + int64(lib.VT[0]) + lib.VNS[0] + lib.AA[0] }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\ntype T int64\nvar VA []int64\nvar VT []T\ntype NS []int64\nvar VNS NS\nvar AA [4]int64"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	members := map[string]member{}
+	for _, m := range out.ImportedMembers {
+		members[m.Name] = m
+	}
+	va, ok := members["VA"]
+	if !ok || va.Type.Kind != "slice" || va.Type.Elem == nil ||
+		va.Type.Elem.Kind != "integer" || va.Type.TypeID != "" {
+		t.Fatalf("an unnamed slice member must declare its element fact: %+v", va)
+	}
+	vt, ok := members["VT"]
+	if !ok || vt.Type.Kind != "slice" || vt.Type.Elem == nil ||
+		vt.Type.Elem.Kind != "integer" || vt.Type.Elem.TypeID == "" {
+		t.Fatalf("a named-element slice must carry the element identity: %+v", vt)
+	}
+	ns, ok := members["NS"]
+	if !ok || ns.Kind != "type" || ns.Type.Kind != "slice" || ns.Type.Elem == nil {
+		t.Fatalf("a named slice type must carry the slice fact: %+v", ns)
+	}
+	vns, ok := members["VNS"]
+	if !ok || vns.Type.Kind != "slice" || vns.Type.Elem == nil ||
+		vns.Type.Elem.Kind != "integer" || vns.Type.TypeID != ns.ID {
+		t.Fatalf("a named-slice member must pin its declared type: %+v", vns)
+	}
+	aa, ok := members["AA"]
+	if !ok || aa.Type.Kind != "array" || aa.Type.Elem == nil ||
+		aa.Type.Elem.Kind != "integer" {
+		t.Fatalf("an array member must declare its element fact: %+v", aa)
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {

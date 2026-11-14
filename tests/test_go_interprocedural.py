@@ -4078,7 +4078,10 @@ METHOD_LIB = {
         "type S struct{ F int64 }\n"
         "func (s *S) PF() int64 { return 0 }\n"
         "var V T\nconst K T = 7\nvar PV *T\nvar VS S\n"
-        "var PS *S\nvar PU *int64\nvar PPV **T\n",
+        "var PS *S\nvar PU *int64\nvar PPV **T\n"
+        "var VA []int64\nvar AA [4]int64\nvar VT []T\nvar VP []*T\n"
+        "var VM map[string]int64\ntype NS []int64\nvar VNS NS\n"
+        "var VSS []S\nvar VStr string\nvar V2 [][]int64\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
         "t.go": "package lib\ntype T int64\n",
@@ -5568,5 +5571,239 @@ def test_instantiated_type_conversion_missing_arg_ref_closed(go_types_helper):
     )
     result = named_package(
         files, forged, ip.summarize_go_package(files, forged), "F"
+    )
+    assert not result.available
+
+
+def test_imported_index_read_is_admitted(go_types_helper):
+    # `lib.VA[i]` — an index read of an imported slice var: the element
+    # is external state, so only the index's own dependencies carry.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.VA[x] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0})
+    assert result.effects == "unknown"
+
+
+def test_imported_array_read_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.AA[0] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_imported_index_read_pointer_elem_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { p := lib.VP[0]\n\t_ = p\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_dot_imported_index_read_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F() int64 { return VA[0] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_parenthesized_index_operand_is_admitted(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return (lib.VA)[0] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_imported_index_read_named_elem_is_admitted(go_types_helper):
+    # `[]lib.T` — the element's named identity pins, so a `T`
+    # redeclaration flags the reader through `stale_dependents`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.VT[x]) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_named_slice_read_is_admitted(go_types_helper):
+    # `type NS []int64; var VNS NS` — a named slice type carries the
+    # slice fact on its underlying and pins its own identity.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VNS[0] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+
+
+def test_imported_index_read_flags_stale_dependents(go_types_helper):
+    # Redeclaring `T` flags `F` — `lib.VT[x]` pinned the element's
+    # named identity, not just the `VT` member's.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return int64(lib.VT[x]) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(METHOD_LIB["lib"])
+    lib2["t.go"] = "package lib\ntype T int32\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_imported_named_slice_pin_flags_stale_dependents(go_types_helper):
+    # Redeclaring `NS` flags `F` — `lib.VNS[0]` pinned the named
+    # container type's own identity via `type_id`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VNS[0] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(METHOD_LIB["lib"])
+    lib2["m.go"] = METHOD_LIB["lib"]["m.go"].replace(
+        "type NS []int64", "type NS []int32"
+    )
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_imported_index_read_struct_elem_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { s := lib.VSS[0]\n\treturn int64(s.F) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_index_read_slice_elem_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { s := lib.V2[0]\n\treturn int64(len(s)) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_nested_index_stays_closed(go_types_helper):
+    # `lib.V2[0][0]` — the outer operand is an index expression, not a
+    # member name.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.V2[0][0] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_map_index_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return lib.VM[\"k\"] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_string_index_stays_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { return int64(lib.VStr[0]) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_index_write_stays_closed(go_types_helper):
+    # `lib.VA[i] = v` — imported-state writes match the imported
+    # var-write rule and keep the statement closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(v int64) int64 { lib.VA[0] = v\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_computed_operand_index_stays_closed(go_types_helper):
+    # `f()[i]` — the operand names no member.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func g() []int64 { return lib.VA }\n"
+        "func F() int64 { return g()[0] }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert not result.available
