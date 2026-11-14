@@ -19,20 +19,35 @@ import (
 )
 
 const profile = "mumei.go-types-single-file/v1"
+const packageProfile = "mumei.go-types-package/v1"
 const languageVersion = "go1.23"
 const maxSource = 64 * 1024
+const maxFiles = 64
 const maxRequest = 512 * 1024
 const maxReply = 8 * 1024 * 1024
 
-type request struct {
-	Source     string `json:"source"`
-	TargetArch string `json:"target_arch"`
+type namedSource struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
 }
 
-// All spans are half-open UTF-8 byte offsets in the complete input source.
+type request struct {
+	Source     string        `json:"source"`
+	Sources    []namedSource `json:"sources"`
+	TargetArch string        `json:"target_arch"`
+}
+
+// All spans are half-open UTF-8 byte offsets. In the single-file profile
+// they index the complete input source; in the package profile each span
+// also carries the `file` index into `sources` (-1 means the whole unit).
 type span struct {
-	Start int `json:"start"`
-	End   int `json:"end"`
+	File  *int `json:"file,omitempty"`
+	Start int  `json:"start"`
+	End   int  `json:"end"`
+}
+
+func fileSpan(file, start, end int) span {
+	return span{File: &file, Start: start, End: end}
 }
 
 type typeFact struct {
@@ -86,32 +101,63 @@ type gap struct {
 	Span   *span  `json:"span"`
 }
 
+type fileDigest struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
 type snapshot struct {
-	Profile         string      `json:"profile"`
-	SourceSHA256    string      `json:"source_sha256"`
-	TargetArch      string      `json:"target_arch"`
-	LanguageVersion string      `json:"language_version"`
-	CompilerVersion string      `json:"compiler_version"`
-	Status          string      `json:"status"`
-	Bindings        []binding   `json:"bindings"`
-	References      []reference `json:"references"`
-	Functions       []function  `json:"functions"`
-	Calls           []call      `json:"calls"`
-	Gaps            []gap       `json:"gaps"`
+	Profile         string       `json:"profile"`
+	SourceSHA256    string       `json:"source_sha256"`
+	Files           []fileDigest `json:"files,omitempty"`
+	TargetArch      string       `json:"target_arch"`
+	LanguageVersion string       `json:"language_version"`
+	CompilerVersion string       `json:"compiler_version"`
+	Status          string       `json:"status"`
+	Bindings        []binding    `json:"bindings"`
+	References      []reference  `json:"references"`
+	Functions       []function   `json:"functions"`
+	Calls           []call       `json:"calls"`
+	Gaps            []gap        `json:"gaps"`
 }
 
 type indexer struct {
-	source string
-	fset   *token.FileSet
-	pkg    *types.Package
-	sizes  types.Sizes
-	info   *types.Info
-	out    *snapshot
+	source   string
+	sources  []namedSource
+	digests  []string
+	files    map[*token.File]int
+	packaged bool
+	fset     *token.FileSet
+	pkg      *types.Package
+	sizes    types.Sizes
+	info     *types.Info
+	out      *snapshot
+}
+
+func unitDigest(sources []namedSource) string {
+	h := sha256.New()
+	for _, s := range sources {
+		d := sha256.Sum256([]byte(s.Source))
+		h.Write([]byte(s.Name))
+		h.Write([]byte{0})
+		h.Write(d[:])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func base(req request) snapshot {
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(req.Source)))
+	prof := profile
+	var files []fileDigest
+	if len(req.Sources) > 0 {
+		prof, digest = packageProfile, unitDigest(req.Sources)
+		files = make([]fileDigest, len(req.Sources))
+		for i, s := range req.Sources {
+			files[i] = fileDigest{s.Name, fmt.Sprintf("%x", sha256.Sum256([]byte(s.Source)))}
+		}
+	}
 	return snapshot{
-		Profile: profile, SourceSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(req.Source))),
+		Profile: prof, SourceSHA256: digest, Files: files,
 		TargetArch: req.TargetArch, LanguageVersion: languageVersion, CompilerVersion: runtime.Version(),
 		Status: "invalid_request", Bindings: []binding{}, References: []reference{},
 		Functions: []function{}, Calls: []call{}, Gaps: []gap{},
@@ -120,7 +166,24 @@ func base(req request) snapshot {
 
 func (ix *indexer) offset(p token.Pos) int { return ix.fset.PositionFor(p, false).Offset }
 
-func (ix *indexer) nodeSpan(n ast.Node) span { return span{ix.offset(n.Pos()), ix.offset(n.End())} }
+func (ix *indexer) fileOf(p token.Pos) int {
+	return ix.files[ix.fset.File(p)]
+}
+
+func (ix *indexer) pos(p token.Pos) (int, int) {
+	return ix.fileOf(p), ix.offset(p)
+}
+
+func (ix *indexer) spanOf(a, b token.Pos) span {
+	fa, oa := ix.pos(a)
+	_, ob := ix.pos(b)
+	if ix.packaged {
+		return fileSpan(fa, oa, ob)
+	}
+	return span{Start: oa, End: ob}
+}
+
+func (ix *indexer) nodeSpan(n ast.Node) span { return ix.spanOf(n.Pos(), n.End()) }
 
 func (ix *indexer) scope(obj types.Object) *span {
 	sc := obj.Parent()
@@ -128,9 +191,25 @@ func (ix *indexer) scope(obj types.Object) *span {
 		return nil
 	}
 	if sc == ix.pkg.Scope() {
-		return &span{0, len(ix.source)}
+		if ix.packaged {
+			// The unit scope covers every file — a sentinel, not a span.
+			s := fileSpan(-1, 0, 0)
+			return &s
+		}
+		return &span{Start: 0, End: len(ix.source)}
 	}
-	return &span{ix.offset(sc.Pos()), ix.offset(sc.End())}
+	s := ix.spanOf(sc.Pos(), sc.End())
+	return &s
+}
+
+// digestOf returns the digest anchoring a declaration: the whole source in
+// the single-file profile, or the declaring file's bytes in the package
+// profile — so an untouched file keeps its binding identities stable.
+func (ix *indexer) digestOf(file int) string {
+	if ix.packaged && file >= 0 {
+		return ix.digests[file]
+	}
+	return ix.out.SourceSHA256
 }
 
 func (ix *indexer) id(obj types.Object) string {
@@ -141,8 +220,14 @@ func (ix *indexer) id(obj types.Object) string {
 	if sc := ix.scope(obj); sc != nil {
 		start, end = sc.Start, sc.End
 	}
+	declFile := ix.fileOf(obj.Pos())
 	// Type-switch case bindings can share a declaration position, not a scope.
-	return fmt.Sprintf("sha256:%s:%d:%d:%d", ix.out.SourceSHA256, ix.offset(obj.Pos()), start, end)
+	if ix.packaged {
+		return fmt.Sprintf("sha256:%s:%d:%d:%d:%d",
+			ix.digestOf(declFile), declFile, ix.offset(obj.Pos()), start, end)
+	}
+	return fmt.Sprintf("sha256:%s:%d:%d:%d",
+		ix.out.SourceSHA256, ix.offset(obj.Pos()), start, end)
 }
 
 func (ix *indexer) typeOf(t types.Type) typeFact {
@@ -209,11 +294,15 @@ func (ix *indexer) addBinding(obj types.Object, seen map[string]bool) {
 	}
 	start := ix.offset(obj.Pos())
 	tf := ix.typeOf(obj.Type())
+	sp := span{Start: start, End: start + len(obj.Name())}
+	if ix.packaged {
+		f := ix.fileOf(obj.Pos())
+		sp = fileSpan(f, start, start+len(obj.Name()))
+	}
 	ix.out.Bindings = append(ix.out.Bindings, binding{
-		id, obj.Name(), kind, span{start, start + len(obj.Name())}, ix.scope(obj), tf,
+		id, obj.Name(), kind, sp, ix.scope(obj), tf,
 	})
 	if tf.Kind == "unsupported" || tf.Kind == "untyped" || tf.Kind == "function" && kind != "function" {
-		sp := span{start, start + len(obj.Name())}
 		ix.out.Gaps = append(ix.out.Gaps, gap{"unsupported_value_semantics", &sp})
 	}
 }
@@ -265,6 +354,24 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 	return "direct_local", fn.BindingID
 }
 
+func spanFile(s *span) int {
+	if s != nil && s.File != nil {
+		return *s.File
+	}
+	return -2
+}
+
+func spanLess(a, b span) bool {
+	fa, fb := spanFile(&a), spanFile(&b)
+	if fa != fb {
+		return fa < fb
+	}
+	if a.Start != b.Start {
+		return a.Start < b.Start
+	}
+	return a.End < b.End
+}
+
 func analyze(req request) (out snapshot) {
 	out = base(req)
 	defer func() {
@@ -274,9 +381,26 @@ func analyze(req request) (out snapshot) {
 			out.Gaps = append(out.Gaps, gap{"internal_error", nil})
 		}
 	}()
-	if len(req.Source) > maxSource || !utf8.ValidString(req.Source) {
+	packaged := len(req.Sources) > 0
+	if packaged == (req.Source != "") {
+		out.Gaps = append(out.Gaps, gap{"invalid_request", nil})
+		return out
+	}
+	unit := req.Sources
+	if !packaged {
+		unit = []namedSource{{"source.go", req.Source}}
+	}
+	if len(unit) > maxFiles {
 		out.Gaps = append(out.Gaps, gap{"source_limit_or_encoding", nil})
 		return out
+	}
+	seenNames := make(map[string]bool)
+	for _, s := range unit {
+		if s.Name == "" || seenNames[s.Name] || len(s.Source) > maxSource || !utf8.ValidString(s.Source) {
+			out.Gaps = append(out.Gaps, gap{"source_limit_or_encoding", nil})
+			return out
+		}
+		seenNames[s.Name] = true
 	}
 	switch req.TargetArch {
 	case "amd64", "386", "arm64":
@@ -285,24 +409,43 @@ func analyze(req request) (out snapshot) {
 		return out
 	}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "source.go", req.Source, parser.ParseComments|parser.AllErrors)
-	if err != nil {
-		out.Status = "parse_error"
-		out.Gaps = append(out.Gaps, gap{"parse_error", nil})
-		return out
+	ix := indexer{
+		source: req.Source, sources: unit, fset: fset, packaged: packaged,
+		out: &out, sizes: types.SizesFor("gc", req.TargetArch),
+		files: make(map[*token.File]int),
 	}
-	ix := indexer{source: req.Source, fset: fset, out: &out, sizes: types.SizesFor("gc", req.TargetArch)}
-	for _, imp := range file.Imports {
-		sp := ix.nodeSpan(imp)
-		out.Gaps = append(out.Gaps, gap{"imports_not_supported", &sp})
+	for _, s := range unit {
+		ix.digests = append(ix.digests, fmt.Sprintf("%x", sha256.Sum256([]byte(s.Source))))
 	}
-	for _, group := range file.Comments {
-		for _, comment := range group.List {
-			text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
-			if strings.HasPrefix(text, "go:") || strings.HasPrefix(text, "+build") ||
-				strings.HasPrefix(text, "line ") || strings.HasPrefix(text, "/*line ") {
-				sp := ix.nodeSpan(comment)
-				out.Gaps = append(out.Gaps, gap{"source_directive_not_supported", &sp})
+	var astFiles []*ast.File
+	for i, s := range unit {
+		file, err := parser.ParseFile(fset, s.Name, s.Source, parser.ParseComments|parser.AllErrors)
+		if err != nil {
+			out.Status = "parse_error"
+			var sp *span
+			if packaged {
+				p := fileSpan(i, 0, 0)
+				sp = &p
+			}
+			out.Gaps = append(out.Gaps, gap{"parse_error", sp})
+			return out
+		}
+		ix.files[fset.File(file.Pos())] = i
+		astFiles = append(astFiles, file)
+	}
+	for _, file := range astFiles {
+		for _, imp := range file.Imports {
+			sp := ix.nodeSpan(imp)
+			out.Gaps = append(out.Gaps, gap{"imports_not_supported", &sp})
+		}
+		for _, group := range file.Comments {
+			for _, comment := range group.List {
+				text := strings.TrimSpace(strings.TrimPrefix(comment.Text, "//"))
+				if strings.HasPrefix(text, "go:") || strings.HasPrefix(text, "+build") ||
+					strings.HasPrefix(text, "line ") || strings.HasPrefix(text, "/*line ") {
+					sp := ix.nodeSpan(comment)
+					out.Gaps = append(out.Gaps, gap{"source_directive_not_supported", &sp})
+				}
 			}
 		}
 	}
@@ -319,13 +462,13 @@ func analyze(req request) (out snapshot) {
 		if len(out.Gaps) < 16 {
 			var sp *span
 			if te, ok := e.(types.Error); ok && te.Pos.IsValid() {
-				p := ix.offset(te.Pos)
-				sp = &span{p, p}
+				s := ix.spanOf(te.Pos, te.Pos)
+				sp = &s
 			}
 			out.Gaps = append(out.Gaps, gap{"type_error", sp})
 		}
 	}}
-	pkg, err := conf.Check("mumei.local/singlefile", fset, []*ast.File{file}, info)
+	pkg, err := conf.Check("mumei.local/singlefile", fset, astFiles, info)
 	if err != nil {
 		out.Status = "type_error"
 		return out
@@ -346,80 +489,94 @@ func analyze(req request) (out snapshot) {
 		out.References = append(out.References, reference{ix.nodeSpan(ident), id, kind})
 	}
 	functions := make(map[string]function)
-	for _, decl := range file.Decls {
-		fd, ok := decl.(*ast.FuncDecl)
-		if !ok {
-			continue
+	for _, file := range astFiles {
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			obj := info.Defs[fd.Name].(*types.Func)
+			if ix.id(obj) == "" {
+				sp := ix.nodeSpan(fd.Name)
+				out.Gaps = append(out.Gaps, gap{"blank_function_not_indexed", &sp})
+				continue
+			}
+			sig := obj.Signature()
+			fn := function{
+				BindingID: ix.id(obj), Parameters: ix.parameters(sig.Params()), Results: ix.parameters(sig.Results()),
+				Method: sig.Recv() != nil, Generic: sig.TypeParams().Len() != 0 || sig.RecvTypeParams().Len() != 0,
+				Variadic: sig.Variadic(),
+			}
+			if fd.Body != nil {
+				body := ix.spanOf(fd.Body.Lbrace+1, fd.Body.Rbrace)
+				fn.Body = &body
+			}
+			functions[fn.BindingID] = fn
+			out.Functions = append(out.Functions, fn)
 		}
-		obj := info.Defs[fd.Name].(*types.Func)
-		if ix.id(obj) == "" {
-			sp := ix.nodeSpan(fd.Name)
-			out.Gaps = append(out.Gaps, gap{"blank_function_not_indexed", &sp})
-			continue
-		}
-		sig := obj.Signature()
-		fn := function{
-			BindingID: ix.id(obj), Parameters: ix.parameters(sig.Params()), Results: ix.parameters(sig.Results()),
-			Method: sig.Recv() != nil, Generic: sig.TypeParams().Len() != 0 || sig.RecvTypeParams().Len() != 0,
-			Variadic: sig.Variadic(),
-		}
-		if fd.Body != nil {
-			fn.Body = &span{ix.offset(fd.Body.Lbrace) + 1, ix.offset(fd.Body.Rbrace)}
-		}
-		functions[fn.BindingID] = fn
-		out.Functions = append(out.Functions, fn)
 	}
 	owners := []string{}
 	special := make(map[*ast.CallExpr]string)
-	ast.Inspect(file, func(n ast.Node) bool {
-		if n == nil {
-			owners = owners[:len(owners)-1]
-			return true
-		}
-		owner := ""
-		if len(owners) > 0 {
-			owner = owners[len(owners)-1]
-		}
-		switch node := n.(type) {
-		case *ast.FuncDecl:
-			owner = ix.id(info.Defs[node.Name])
-		case *ast.FuncLit:
-			owner = ""
-			sp := ix.nodeSpan(node)
-			out.Gaps = append(out.Gaps, gap{"closure_body_not_summarized", &sp})
-		case *ast.GoStmt:
-			special[node.Call] = "concurrent"
-		case *ast.DeferStmt:
-			special[node.Call] = "deferred"
-		case *ast.CallExpr:
-			kind, target := ix.classify(node, functions)
-			if override, ok := special[node]; ok {
-				kind, target = override, ""
+	for _, file := range astFiles {
+		ast.Inspect(file, func(n ast.Node) bool {
+			if n == nil {
+				owners = owners[:len(owners)-1]
+				return true
 			}
-			sp := ix.nodeSpan(node)
-			if fn, ok := functions[owner]; !ok || fn.Body == nil || sp.Start < fn.Body.Start || sp.End > fn.Body.End {
+			owner := ""
+			if len(owners) > 0 {
+				owner = owners[len(owners)-1]
+			}
+			switch node := n.(type) {
+			case *ast.FuncDecl:
+				owner = ix.id(info.Defs[node.Name])
+			case *ast.FuncLit:
 				owner = ""
+				sp := ix.nodeSpan(node)
+				out.Gaps = append(out.Gaps, gap{"closure_body_not_summarized", &sp})
+			case *ast.GoStmt:
+				special[node.Call] = "concurrent"
+			case *ast.DeferStmt:
+				special[node.Call] = "deferred"
+			case *ast.CallExpr:
+				kind, target := ix.classify(node, functions)
+				if override, ok := special[node]; ok {
+					kind, target = override, ""
+				}
+				sp := ix.nodeSpan(node)
+				if fn, ok := functions[owner]; !ok || fn.Body == nil || sp.Start < fn.Body.Start || sp.End > fn.Body.End || spanFile(&sp) != spanFile(fn.Body) {
+					owner = ""
+				}
+				args := []span{}
+				for _, arg := range node.Args {
+					args = append(args, ix.nodeSpan(arg))
+				}
+				out.Calls = append(out.Calls, call{sp, args, owner, target, kind})
+				if owner == "" {
+					out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
+				}
+				if kind != "direct_local" {
+					out.Gaps = append(out.Gaps, gap{"call_not_summarized_" + kind, &sp})
+				}
 			}
-			args := []span{}
-			for _, arg := range node.Args {
-				args = append(args, ix.nodeSpan(arg))
-			}
-			out.Calls = append(out.Calls, call{sp, args, owner, target, kind})
-			if owner == "" {
-				out.Gaps = append(out.Gaps, gap{"call_outside_named_body", &sp})
-			}
-			if kind != "direct_local" {
-				out.Gaps = append(out.Gaps, gap{"call_not_summarized_" + kind, &sp})
-			}
-		}
-		owners = append(owners, owner)
-		return true
-	})
+			owners = append(owners, owner)
+			return true
+		})
+	}
 	sort.Slice(out.Bindings, func(i, j int) bool { return out.Bindings[i].ID < out.Bindings[j].ID })
-	sort.Slice(out.References, func(i, j int) bool { return out.References[i].Span.Start < out.References[j].Span.Start })
+	sort.Slice(out.References, func(i, j int) bool { return spanLess(out.References[i].Span, out.References[j].Span) })
 	sort.Slice(out.Functions, func(i, j int) bool { return out.Functions[i].BindingID < out.Functions[j].BindingID })
 	sort.Slice(out.Gaps, func(i, j int) bool {
 		a, b := out.Gaps[i], out.Gaps[j]
+		if a.Span == nil || b.Span == nil {
+			if a.Span == b.Span {
+				return a.Reason < b.Reason
+			}
+			return b.Span == nil
+		}
+		if spanFile(a.Span) != spanFile(b.Span) {
+			return spanFile(a.Span) < spanFile(b.Span)
+		}
 		if a.Span.Start != b.Span.Start {
 			return a.Span.Start < b.Span.Start
 		}

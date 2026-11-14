@@ -1843,6 +1843,37 @@ methods and generics stay `unsupported_signature`, and result bindings
 keep needing scalar type. Bare-return legality is guaranteed by
 `go/types` before the reader runs — no extra validation is needed.
 
+### C07 multi-file package units and per-file freshness
+
+A package-level producer profile — `mumei.go-types-package/v1` — takes
+named sources `{name, source}` (mutually exclusive with `source`) and
+reports file-indexed spans. `load_go_package_snapshot` validates it
+like the v1 loader, plus: `source_sha256` is a unit digest over
+`name\x00file-digest` pairs, each binding identity is
+`sha256:{declaring-file-digest}:{file}:{pos}:{scope_start}:{scope_end}`,
+and the package scope is the sentinel span `file=-1`. Every file's
+bytes re-validate against its declared digest — a tampered, missing or
+reordered file fails closed.
+
+The payoff is per-file freshness: replacing one file churns only that
+file's binding identities, so `stale_dependents` — which already maps
+callee replacement to dependents — now detects file-level changes
+without re-deriving the untouched files' identities. Within a unit all
+functions share the package scope and calls across file boundaries
+classify `direct_local` like any in-package call. `summarize_go_package`
+is the multi-file consumer; span lookups are normalised to
+`(file, start, end)` keys so the body analyser runs unchanged.
+
+Boundaries: at most 64 files of at most 64 KiB each, unique non-empty
+names, one shared `package` name enforced by `go/types`. No import
+resolution — `imports_not_supported` still applies; a unit is exactly
+the declared file set, nothing more. File indices are report-internal
+positions in the `files` list, not filesystem paths. Single-file v1
+reports keep their exact wire shape (`file` is omitempty); the summary
+gap spans carry the declaring file's position only — file identity
+lives in the binding identity, not the gap. Ordering, caching, and
+which file sets form a unit stay host decisions.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.

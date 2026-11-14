@@ -73,11 +73,15 @@ from typing import Any
 from agent import control_flow
 from agent.go_type_snapshot import (
     MAX_SOURCE_BYTES,
+    PACKAGE_PROFILE as TYPE_PACKAGE_PROFILE,
     PROFILE as TYPE_PROFILE,
     TARGETS,
+    _package_raws,
     ByteSpan,
+    FileSpan,
     Function,
     GoType,
+    GoPackageSnapshot,
     GoTypeSnapshot,
     SnapshotError,
 )
@@ -125,13 +129,13 @@ def _scalar_constant(binding: Any) -> bool:
 @dataclass(frozen=True)
 class SummaryGap:
     reason: str
-    span: ByteSpan | None = None
+    span: ByteSpan | FileSpan | None = None
     callee: str = ""
 
 
 @dataclass(frozen=True)
 class CallTransfer:
-    span: ByteSpan
+    span: ByteSpan | FileSpan
     target: str
     arguments: tuple[frozenset[int], ...]
     result: frozenset[int]
@@ -182,6 +186,27 @@ def _context(source: str, snapshot: GoTypeSnapshot) -> tuple[bytes, str]:
     return raw, hashlib.sha256(payload).hexdigest()
 
 
+def _package_context(
+    snapshot: GoPackageSnapshot, sources: "dict[str, str] | list[str]"
+) -> tuple[tuple[bytes, ...], str]:
+    try:
+        raws = _package_raws(snapshot, sources)
+    except (KeyError, TypeError, ValueError):
+        raise SnapshotError("Go summary context unavailable or stale") from None
+    if (
+        snapshot.profile != TYPE_PACKAGE_PROFILE
+        or snapshot.language_version != "go1.23"
+        or snapshot.target_arch not in TARGETS
+    ):
+        raise SnapshotError("Go summary context unavailable or stale")
+    payload = json.dumps(
+        [PROFILE, control_flow.PROFILE, asdict(snapshot)],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return raws, hashlib.sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True)
 class GoSummarySet:
     context_key: str
@@ -193,6 +218,20 @@ class GoSummarySet:
     ) -> FunctionSummary:
         """Reject reuse after any source, target, compiler or report change."""
         if _context(source, snapshot)[1] != self.context_key:
+            raise SnapshotError("Go summary context unavailable or stale")
+        result = next((f for f in self.functions if f.binding_id == binding_id), None)
+        if result is None:
+            raise SnapshotError("Go function summary unavailable")
+        return result
+
+    def for_package_function(
+        self,
+        sources: "dict[str, str] | list[str]",
+        snapshot: GoPackageSnapshot,
+        binding_id: str,
+    ) -> FunctionSummary:
+        """The package-unit variant of `for_function` — same staleness rule."""
+        if _package_context(snapshot, sources)[1] != self.context_key:
             raise SnapshotError("Go summary context unavailable or stale")
         result = next((f for f in self.functions if f.binding_id == binding_id), None)
         if result is None:
@@ -216,7 +255,12 @@ class GoSummarySet:
 
 
 class _Unsupported(Exception):
-    def __init__(self, reason: str, span: ByteSpan | None = None, callee: str = ""):
+    def __init__(
+        self,
+        reason: str,
+        span: ByteSpan | FileSpan | None = None,
+        callee: str = "",
+    ):
         self.gap = SummaryGap(reason, span, callee)
 
 
@@ -239,22 +283,40 @@ def _syntax(raw: bytes) -> Any:
         return None
 
 
+def _key3(span: ByteSpan | FileSpan) -> tuple[int, int, int]:
+    """Normalize a report span to (file, start, end) — file 0 for v1 reports."""
+    return (
+        span.file if isinstance(span, FileSpan) else 0,
+        span.start,
+        span.end,
+    )
+
+
 class _Builder:
-    def __init__(self, source: str, snapshot: GoTypeSnapshot, raw: bytes, key: str):
-        self.source, self.snapshot, self.key = source, snapshot, key
+    def __init__(
+        self,
+        raws: dict[int, bytes],
+        snapshot: GoTypeSnapshot | GoPackageSnapshot,
+        key: str,
+        cfg_fn: Any,
+    ):
+        self.snapshot, self.key, self.cfg_fn = snapshot, key, cfg_fn
         self.bindings = {b.id: b for b in snapshot.bindings}
         self.functions = {f.binding_id: f for f in snapshot.functions}
-        self.references = {r.span: r for r in snapshot.references}
-        self.calls = {c.span: c for c in snapshot.calls}
-        self.blocks: dict[ByteSpan, Any] = {}
-        self.bindings_by_span = {b.span: b for b in snapshot.bindings}
+        self.references = {_key3(r.span): r for r in snapshot.references}
+        self.calls = {_key3(c.span): c for c in snapshot.calls}
+        self.blocks: dict[tuple[int, int, int], Any] = {}
+        self.bindings_by_span = {_key3(b.span): b for b in snapshot.bindings}
         self.cache: dict[str, FunctionSummary] = {}
         self.active: set[str] = set()
+        self.current_file = 0
         # Innermost enclosing loop/switch constructs, innermost last; an
         # unlabelled break or continue marks the frame it exits.
         self.frames: list[dict[str, Any]] = []
-        root = _syntax(raw)
-        if root is not None:
+        for file, raw in raws.items():
+            root = _syntax(raw)
+            if root is None:
+                continue
             for node in root.named_children:
                 if node.type not in {"function_declaration", "method_declaration"}:
                     continue
@@ -263,7 +325,10 @@ class _Builder:
                     node.child_by_field_name("body"),
                 )
                 if name is not None and body is not None:
-                    self.blocks[_span(name)] = body
+                    self.blocks[(file, name.start_byte, name.end_byte)] = body
+
+    def node_key(self, node: Any) -> tuple[int, int, int]:
+        return (self.current_file, node.start_byte, node.end_byte)
 
     def result(
         self,
@@ -315,11 +380,14 @@ class _Builder:
         ):
             raise _Unsupported("unsupported_signature", fn.body)
         binding = self.bindings.get(fn.binding_id)
-        block = self.blocks.get(binding.span) if binding is not None else None
+        body_key = _key3(fn.body)
+        block = self.blocks.get(_key3(binding.span)) if binding is not None else None
         if block is None:
             raise _Unsupported("syntax_or_parser_unavailable", fn.body)
-        if ByteSpan(block.start_byte + 1, block.end_byte - 1) != fn.body:
+        if (body_key[0], block.start_byte + 1, block.end_byte - 1) != body_key:
             raise _Unsupported("source_mapping_unavailable", fn.body)
+        previous_file = self.current_file
+        self.current_file = body_key[0]
         pending = [(block, 0)]
         visited = 0
         while pending:
@@ -328,7 +396,7 @@ class _Builder:
             if depth >= MAX_DEPTH or visited > MAX_EXPRESSION_NODES:
                 raise _Unsupported("analysis_limit", fn.body)
             pending.extend((child, depth + 1) for child in _children(node))
-        cfg = self.snapshot.cfg_for_function(self.source, fn.binding_id)
+        cfg = self.cfg_fn(fn.binding_id)
         if cfg.graph is None:
             raise _Unsupported("cfg_unavailable", fn.body)
         statements = _children(block)
@@ -359,10 +427,11 @@ class _Builder:
             )
         finally:
             self.frames = saved_frames
+            self.current_file = previous_file
         if not saw_return[0]:
             raise _Unsupported("unsupported_body", fn.body)
         return self.result(
-            fn, deps[0], tuple(sorted(transfers, key=lambda c: (c.span.start, c.span.end)))
+            fn, deps[0], tuple(sorted(transfers, key=lambda c: _key3(c.span)))
         )
 
     def _sequence(
@@ -479,9 +548,9 @@ class _Builder:
                 # `x, y := e1, e2` may reuse an existing `x` when at
                 # least one name is new — go/types records a use for it,
                 # not a fresh binding.
-                binding = self.bindings_by_span.get(_span(lhs))
+                binding = self.bindings_by_span.get(self.node_key(lhs))
                 if binding is None:
-                    ref = self.references.get(_span(lhs))
+                    ref = self.references.get(self.node_key(lhs))
                     if ref is not None and ref.binding_id:
                         binding = self.bindings.get(ref.binding_id)
                 if binding is None or binding.type.kind not in {
@@ -529,7 +598,7 @@ class _Builder:
                 for name, value in zip(names, values):
                     if name.text == b"_":
                         continue
-                    binding = self.bindings_by_span.get(_span(name))
+                    binding = self.bindings_by_span.get(self.node_key(name))
                     if binding is None or binding.type.kind not in {
                         "integer",
                         "boolean",
@@ -571,7 +640,7 @@ class _Builder:
                 for name in names:
                     if name.text == b"_":
                         continue
-                    binding = self.bindings_by_span.get(_span(name))
+                    binding = self.bindings_by_span.get(self.node_key(name))
                     if binding is None or not _scalar_constant(binding):
                         raise _Unsupported(
                             "binding_unavailable", _span(spec)
@@ -656,7 +725,7 @@ class _Builder:
                 if lhs.text == b"_":
                     refs.append(None)
                     continue
-                ref = self.references.get(_span(lhs))
+                ref = self.references.get(self.node_key(lhs))
                 if ref is None or (
                     ref.binding_id not in locals_
                     and ref.binding_id not in params
@@ -726,7 +795,7 @@ class _Builder:
                     right, fn, params, scope, transfers, count, 0
                 )
                 if lefts and lefts[0].text != b"_":
-                    binding = self.bindings_by_span.get(_span(lefts[0]))
+                    binding = self.bindings_by_span.get(self.node_key(lefts[0]))
                     if binding is not None:
                         if binding.type.kind not in {"integer", "boolean"}:
                             raise _Unsupported(
@@ -734,7 +803,7 @@ class _Builder:
                             )
                         scope[binding.id] = rdeps
                     else:
-                        ref = self.references.get(_span(lefts[0]))
+                        ref = self.references.get(self.node_key(lefts[0]))
                         if ref is None or (
                             ref.binding_id not in scope
                             and ref.binding_id not in params
@@ -931,7 +1000,7 @@ class _Builder:
             operands = _children(node)
             if len(operands) != 1 or operands[0].type != "identifier":
                 raise _Unsupported("unsupported_statement", _span(node))
-            ref = self.references.get(_span(operands[0]))
+            ref = self.references.get(self.node_key(operands[0]))
             if ref is None or (
                 ref.binding_id not in locals_ and ref.binding_id not in params
             ):
@@ -1010,7 +1079,7 @@ class _Builder:
         if kind in {"int_literal", "rune_literal"}:
             return frozenset()
         if kind in {"identifier", "true", "false", "iota"}:
-            ref = self.references.get(_span(node))
+            ref = self.references.get(self.node_key(node))
             # Reassigned names (including parameters) resolve through
             # `locals_` first — their latest dependencies live there.
             if ref is not None and ref.binding_id in locals_:
@@ -1055,7 +1124,7 @@ class _Builder:
                 )
             return deps
         if kind == "call_expression":
-            call = self.calls.get(_span(node))
+            call = self.calls.get(self.node_key(node))
             if (
                 call is None
                 or call.owner != fn.binding_id
@@ -1064,7 +1133,9 @@ class _Builder:
                 raise _Unsupported("unresolved_or_opaque_call", _span(node))
             arguments_node = node.child_by_field_name("arguments")
             arguments = _children(arguments_node) if arguments_node is not None else []
-            if tuple(_span(arg) for arg in arguments) != call.arguments:
+            if tuple(self.node_key(arg) for arg in arguments) != tuple(
+                _key3(a) for a in call.arguments
+            ):
                 raise _Unsupported("call_mapping_unavailable", _span(node), call.target)
             if call.kind == "conversion":
                 # `T(e)` is effect-free for dependency purposes — the
@@ -1086,7 +1157,7 @@ class _Builder:
                         iter(function_node.named_children), None
                     )
                 ref = (
-                    self.references.get(_span(function_node))
+                    self.references.get(self.node_key(function_node))
                     if function_node is not None
                     else None
                 )
@@ -1174,7 +1245,41 @@ def summarize_go(source: str, snapshot: GoTypeSnapshot) -> GoSummarySet:
     None means unavailable, never a parameter-independent or effect-free result.
     """
     raw, key = _context(source, snapshot)
-    builder = _Builder(source, snapshot, raw, key)
+    builder = _Builder(
+        {0: raw}, snapshot, key, lambda bid: snapshot.cfg_for_function(source, bid)
+    )
+    if len(snapshot.functions) > MAX_FUNCTIONS:
+        results = tuple(
+            builder.result(f, gaps=(SummaryGap("analysis_limit"),))
+            for f in snapshot.functions
+        )
+    else:
+        results = tuple(
+            builder.summarize(f.binding_id)
+            for f in sorted(snapshot.functions, key=lambda f: f.binding_id)
+        )
+    return GoSummarySet(key, results)
+
+
+def summarize_go_package(
+    sources: "dict[str, str] | list[str]", snapshot: GoPackageSnapshot
+) -> GoSummarySet:
+    """The multi-file package variant of `summarize_go`.
+
+    One package unit — every function shares the package scope, calls
+    across file boundaries resolve to `direct_local`, and every binding
+    identity carries its declaring file's digest, so replacing one file
+    only churns that file's identities (`stale_dependents` still
+    applies). `sources` maps each declared file name to its contents
+    (or lists them in declaration order); digests re-validate.
+    """
+    raws, key = _package_context(snapshot, sources)
+    builder = _Builder(
+        dict(enumerate(raws)),
+        snapshot,
+        key,
+        lambda bid: snapshot.cfg_for_function(sources, bid),
+    )
     if len(snapshot.functions) > MAX_FUNCTIONS:
         results = tuple(
             builder.result(f, gaps=(SummaryGap("analysis_limit"),))
