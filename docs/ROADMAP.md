@@ -1843,7 +1843,6 @@ methods and generics stay `unsupported_signature`, and result bindings
 keep needing scalar type. Bare-return legality is guaranteed by
 `go/types` before the reader runs — no extra validation is needed.
 
->>>>>>> 1f29b33b (Admit named scalar result parameters in Go summary bodies (C07))
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
