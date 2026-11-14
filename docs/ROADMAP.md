@@ -2224,10 +2224,15 @@ methods and generic methods are
 unchanged and closed — as are receivers still declared on type
 parameters (`lib.GT[P]` where `P` is unresolved) and instantiated
 receivers whose type arguments contain a composite constructor
-(`lib.GT[*lib.T]` — a pointer has no pin channel). The scalar-result
-check reads the method's *declared* signature, so a result mentioning
-the receiver's own type parameter (`func (t GT[P]) MR() P`) stays
-closed even though its instantiation would be scalar. Multi-valued
+(`lib.GT[*lib.T]` — a pointer has no pin channel). Promoted
+selections (`s.GM` through `struct{ GT[T] }`, or an embedded
+interface's method) stay closed too: the static receiver is the
+outer type, so the embedded instantiation's type arguments — or the
+dynamic dispatch itself — escape the gate. The scalar-result check
+reads the *instantiated* signature `go/types` reports for the
+selection, so a result mentioning the receiver's own type parameter
+(`func (t GT[P]) MR() P`) is judged after substitution — `GT[int64]`
+yields a scalar `int64` result and admits. Multi-valued
 method results are admitted like plain function results when every
 result is scalar. The `method` key is optional on the wire:
 reports predating it keep validating, and it is rejected on any
