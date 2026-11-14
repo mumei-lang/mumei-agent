@@ -602,11 +602,18 @@ class _Builder:
         # local or parameter pointer — stays closed too, matching
         # `*t = v` writes: dep sets track binding indices, not
         # pointee contents.
-        children = tuple(node.named_children)
+        # Comments appear among a node's named children; they are not
+        # operands.
+        children = tuple(
+            c for c in node.named_children if c.type != "comment"
+        )
         operand = children[0] if len(children) == 1 else None
         inner = operand
         while inner is not None and inner.type == "parenthesized_expression":
-            inner = next(iter(inner.named_children), None)
+            inner = next(
+                (c for c in inner.named_children if c.type != "comment"),
+                None,
+            )
         member = None
         if inner is not None and inner.type == "selector_expression":
             member = self._package_member(inner)

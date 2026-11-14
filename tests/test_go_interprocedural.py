@@ -4826,6 +4826,23 @@ def test_imported_pointer_var_deref_read_parenthesized_is_admitted(
     assert result.available and result.effects == "unknown"
 
 
+def test_imported_pointer_var_deref_read_with_comment_is_admitted(
+    go_types_helper,
+):
+    # `* /*c*/ lib.PV` — a comment inside the unary is a named child
+    # but never an operand.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn int64(* /*c*/ lib.PV)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+
+
 def test_dot_imported_pointer_var_deref_read_is_admitted(go_types_helper):
     # `*PV` through a dot import resolves the same member record
     # `*lib.PV` does.
