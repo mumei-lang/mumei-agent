@@ -2200,10 +2200,15 @@ callee hands it a writable alias of `x`, so afterwards `x`
 conservatively depends on every call argument. A pointer result
 never admits a generic callee through its declared signature —
 `func G[P any](v P) *P` still goes through the instantiation
-gate. What stays closed: writing
-through a pointer (`*t = v`, `p.f = v` — the LHS gate requires a
-bare identifier), `&` on anything but a fragment operand, and
-imported `var` *writes* of any type.
+gate. Writes *through* a pointer land in state the dependency model
+does not follow — it tracks each binding, never the pointee's or
+field's contents — so `*t = v` and `t.f = v` admit as opaque write
+targets: the base must be a bound parameter or local identifier, the
+RHS still evaluates for its calls, and the result is discarded.
+Imported members and unbound bases keep the statement closed, as do
+`&` on anything but a fragment operand and imported `var` *writes*
+of any type (`lib.VS.f = v` — the base is a qualified name, not a
+bound identifier).
 
 The member record's `signature_type_ids` for a method now include
 the receiver's own named-type identity — `x.M(y)` pins `T` even when
