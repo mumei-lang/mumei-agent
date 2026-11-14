@@ -2133,8 +2133,9 @@ argument-dependency union like any other `direct_import` transfer.
 
 A method call `recv.M(args)` now classifies as `direct_import` when
 the method is declared in a resolved imported unit on a concrete
-named receiver type (`lib.T`, or a pointer to one) and returns zero
-or a single scalar result. The producer resolves the selection
+named receiver type (`lib.T`, or a pointer to one) and whose results
+are all scalar — arity travels on the record like a plain function's.
+The producer resolves the selection
 through `types.Info.Selections` (field selections keep the existing
 classification) and marks a method value `method: true`, so the
 consumer also evaluates the receiver expression: the result depends
