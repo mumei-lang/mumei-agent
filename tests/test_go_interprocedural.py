@@ -208,6 +208,47 @@ def test_unsupported_edges_values_aliases_resources_and_effects_are_unknown(
             "func F(x int64)int64{ y:=Leaf(x); return y }",
             frozenset({0}),
         ),
+        # Multi-name declarations bind each name to its own RHS.
+        (
+            "func F(x, y int64) int64 { a, b := x, y; return a + b }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { a, b := x, y; _ = b; return a }",
+            frozenset({0}),
+        ),
+        (
+            "func F(x, y int64) int64 { a, b := x, y; _ = a; return b }",
+            frozenset({1}),
+        ),
+        # The whole RHS evaluates against the pre-state before any
+        # store — the second declaration's `a` reads the outer binding.
+        (
+            "func F(x, y int64) int64 { a := x; a, b := a, y; return b }",
+            frozenset({1}),
+        ),
+        # `_` discards its value — the RHS is still evaluated.
+        (
+            "func F(x, y int64) int64 { a, _ := x, y; return a }",
+            frozenset({0}),
+        ),
+        # A later `:=` may redeclare a name — go/types keeps the
+        # existing binding, so its dependencies just update.
+        (
+            "func F(x, y int64) int64 { a, b := x, x; a, c := y, x; return a + b + c }",
+            frozenset({0, 1}),
+        ),
+        # Mixed redeclare: `x` already exists, `y` is new — the reused
+        # name keeps the fragment's assignment semantics.
+        (
+            "func F(x, y int64) int64 { x, z := x, y; return x + z }",
+            frozenset({0, 1}),
+        ),
+        # Branch-scoped multi-name declarations don't escape.
+        (
+            "func F(x, y int64) int64 { if x > 0 { a, b := x, y; _ = a; _ = b }; return x }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_let_bindings_propagate_dependencies(go_types_helper, declarations, expected):
@@ -556,7 +597,7 @@ def test_expression_switch_dependencies(go_types_helper, declarations, expected)
     "declarations",
     [
         # Unsupported switch initializer shapes stay outside the fragment.
-        "func F(x int64) int64 { switch v,w:=x,x; v { case 1: return v+w }; return x }",
+        "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { switch v,w:=G(x); v { case 1: return v+w }; return x }",
         "func G(v int64) int64 { return v }\nfunc F(x int64) int64 { switch G(x); x { case 1: return x }; return x }",
         # fallthrough is unmodelled control flow.
         "func F(x int64) int64 { switch x { case 1: fallthrough; default: return x }; return x }",
@@ -605,6 +646,24 @@ def test_switch_shapes_stay_unsupported(go_types_helper, declarations):
             "func F(x int64, b bool) bool { var c bool = b; return c }",
             frozenset({1}),
         ),
+        # Multi-name specs bind name-wise like `:=`.
+        (
+            "func F(x, y int64) int64 { var a, b int64 = x, y; return a + b }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { var a, b = x, y; _ = a; return b }",
+            frozenset({1}),
+        ),
+        # `var a, b T` without values is the dep-free zero value.
+        (
+            "func F(x int64) int64 { var a, b int64; return a + b }",
+            frozenset(),
+        ),
+        (
+            "func F(x int64) int64 { var _, a = 0, x; return a }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_var_declaration_dependencies(go_types_helper, declarations, expected):
@@ -616,8 +675,19 @@ def test_var_declaration_dependencies(go_types_helper, declarations, expected):
 @pytest.mark.parametrize(
     "declarations",
     [
-        # Multi-name specs stay outside the fragment.
-        "func F(x int64) int64 { var a, b int64 = x, x; return a+b }",
+        # Multi-value calls stay outside the fragment — one RHS
+        # expression can never supply two declared names here.
+        (
+            "func G(x int64) (int64, int64) { return x, x }; "
+            "func F(x int64) int64 { a, b := G(x); _ = b; return a }"
+        ),
+        (
+            "func G(x int64) (int64, int64) { return x, x }; "
+            "func F(x int64) int64 { var a, b int64 = G(x); _ = b; return a }"
+        ),
+        # Non-scalar names in a declaration are unavailable.
+        "func F(x int64) int64 { a, b := x, \"s\"; _ = b; return a }",
+        "func F(x int64) int64 { var a, b string; _ = a; _ = b; return x }",
         # Non-scalar var bindings are unavailable.
         "func F(x int64) int64 { var s string; _ = s; return x }",
         "func F(x int64) int64 { var f func(); _ = f; return x }",
@@ -732,6 +802,19 @@ def test_effect_free_control_statements(
         # The bound name is visible in the switch tag itself.
         (
             "func F(x int64) int64 { switch v := x > 0; v { case true: return x; default: return 0 } }",
+            frozenset({0}),
+        ),
+        # Initializers accept multi-name declarations too.
+        (
+            "func F(x, y int64) int64 { if a, b := x, y; b > 0 { return a + b }; return 0 }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { switch a, b := x, y; b { case 1: return a + b; default: return 0 } }",
+            frozenset({0, 1}),
+        ),
+        (
+            "func F(x, y int64) int64 { for a, b := x, y; b > 0; b-- { _ = a }; return x }",
             frozenset({0}),
         ),
     ],
@@ -973,11 +1056,11 @@ def test_callee_summary_is_not_polluted_by_caller_exit_state(
     "declarations",
     [
         # An unsupported if initializer propagates the gap.
-        "func F(x int64) int64 { if y,z:=x,x; y>0 {return z}; return 0 }",
+        "func F(x int64) int64 { if y:=1.5; y>0 {return x}; return 0 }",
         # An expression-statement initializer is a declared gap.
         "func G(v int64) int64 { return v }\nfunc F(x int64) int64 { if G(x); x>0 {return x}; return 0 }",
-        # A for loop with a multi-name init is not modelled.
-        "func F(x int64) int64 { for i,j:=x,x; i<x; i++ { _ = j }; return x }",
+        # A for loop with a multi-value init is not modelled.
+        "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { for i,j:=G(x); i<x; i++ { _ = j }; return x }",
         # A branch with an unsupported statement blocks the summary.
     ],
 )
@@ -990,8 +1073,8 @@ def test_branch_shapes_stay_unsupported(go_types_helper, declarations):
 @pytest.mark.parametrize(
     "declarations",
     [
-        # Tuple declarations are outside the fragment.
-        "func F(x int64) int64 { y,z:=x,x; return y+z }",
+        # Tuple declarations fed by a multi-value call stay outside.
+        "func G(v int64) (int64,int64) { return v,v }\nfunc F(x int64) int64 { y,z:=G(x); return y+z }",
         # An increment is a statement, not a let binding.
         # A non-identifier left side is not a let binding.
         # A call used only for effects is a statement, not a let binding.

@@ -1679,6 +1679,29 @@ may-assignments join back exactly like clause loops, and unlabelled
 their operands cannot be produced by any supported binding or literal —
 and multi-variable ranges stay `unsupported_statement`.
 
+### C07 multi-name declarations
+
+The declaration fragment now admits `a, b := e1, e2` and multi-name
+`var` specs (`var a, b int64 = e1, e2`, `var a, b = e1, e2`, and the
+dep-free zero-value form `var a, b int64`). Each left-hand name binds
+its matching right-hand side's dependencies; the whole right-hand side
+evaluates in parallel against the pre-state before any store lands —
+the same parallel semantics as tuple assignments — so shadowing and
+redeclaration behave the way the compiler resolves them. `_` slots
+evaluate-and-discard, and a mixed redeclare like `x, y := e1, e2`
+where `x` already exists keeps the existing binding: go/types records
+a use, not a fresh binding, and the store lands on it like an
+assignment.
+
+Every name still must resolve to a compiler-reported integer or
+boolean binding — a non-scalar name anywhere in the list is
+`binding_unavailable`. Multi-valued calls stay outside: one right-hand
+expression can never supply two names (`a, b := f(x)`), so the count
+mismatch is `unsupported_statement`. Redeclaration inside a nested
+block still produces a fresh, branch-scoped binding that cannot escape
+its scope, matching the compiler.
+
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
