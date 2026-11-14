@@ -1655,6 +1655,33 @@ class _Builder:
         transfers.append(
             CallTransfer(call.span, call.target, actual, result, imported=True)
         )
+        # `&x` hands the callee an alias of a local/param binding — an
+        # opaque callee may write through it, so afterwards the binding
+        # conservatively depends on every argument (its own old deps are
+        # already inside `result` because `&x` contributed them).
+        for arg_node in arguments:
+            # `&` is an anonymous child — `_children` only yields the
+            # named operand, so check the raw first child.
+            if (
+                arg_node.type == "unary_expression"
+                and arg_node.children
+                and arg_node.children[0].type == "&"
+            ):
+                (operand,) = _children(arg_node)
+                ref = (
+                    self.references.get(self.node_key(operand))
+                    if operand.type == "identifier"
+                    else None
+                )
+                if ref is not None and (
+                    ref.binding_id in locals_ or ref.binding_id in params
+                ):
+                    base = (
+                        locals_.get(ref.binding_id)
+                        if ref.binding_id in locals_
+                        else frozenset({params[ref.binding_id]})
+                    )
+                    locals_[ref.binding_id] = base | result
         # The callee's declared named/alias signature types are pinned
         # the same way a member read's declared type is: redeclaring one
         # flags this summary even when the callee's own identity is

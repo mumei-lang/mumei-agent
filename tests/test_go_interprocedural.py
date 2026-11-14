@@ -4687,3 +4687,28 @@ def test_pointer_result_generic_cannot_bypass_instantiation_gate(
     assert all(k != "direct_import" for k in by_span.values())
 
 
+def test_pointer_arg_escape_unions_callee_args(go_types_helper):
+    # `lib.Set(&x, y)` hands the callee an alias it may write through —
+    # afterwards `x` conservatively depends on every argument, so a
+    # `Set` that stores `y` into `*p` still flags `x` as dependent.
+    lib = {
+        "lib": {
+            "s.go": "package lib\ntype T int64\n"
+            "func Set(p *T, v int64) { *p = T(v) }\n",
+        }
+    }
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) lib.T {\n"
+        "\tlib.Set(&x, y)\n"
+        "\treturn x\n}\n"
+    }
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, lib),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
