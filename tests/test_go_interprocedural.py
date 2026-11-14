@@ -624,6 +624,11 @@ def test_const_declaration_gaps(go_types_helper, declarations, reason):
             "func F(x int64) (r int64) { for i := x; i > 0; i-- { r = i }; return }",
             frozenset({0}),
         ),
+        # A blank `_` result is unbound: explicit returns still work.
+        (
+            "func F(x int64) (_ int64) { return x }",
+            frozenset({0}),
+        ),
     ],
 )
 def test_named_result_dependencies(go_types_helper, declarations, expected):
