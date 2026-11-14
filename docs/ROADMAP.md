@@ -1927,7 +1927,12 @@ result at any arity stays `external_or_bodyless` and fails closed (a
 `range` over a composite operand would break the integer-only range
 model). A multi-valued scalar callee is admitted and declares its
 arity on the call record; see the C06 multi-valued imported results
-slice below. A summary recording a `direct_import` transfer reports
+slice below. A variadic callee (`lib.W(x, y)`, `WV(x, y)`) admits the
+same way — every argument is an independent expression whose
+dependencies union into the result — while the spread form
+`lib.W(xs...)` records only the operand's span, cannot map its
+argument expressions and stays closed. A summary recording a
+`direct_import` transfer reports
 `effects` as `unknown` — the imported callee's side effects are outside
 the fragment. Imported sources honour the same no-directive contract as
 the root unit (`//go:`, `// +build`, `//line` markers fail resolution).
