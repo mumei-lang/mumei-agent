@@ -925,7 +925,7 @@ class _Builder:
         for the mutation's transfer record — or None when the LHS is
         not a bound-pointer dereference, the binding's pointer names
         no pointee (`*int64`), or the pointee names a non-scalar
-        shape, matching the `*t` read gate.
+        shape, matching the `*lib.PV` read's pointee classification.
         """
         cur = node
         while cur is not None and cur.type == "parenthesized_expression":
