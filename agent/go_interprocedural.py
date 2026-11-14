@@ -29,7 +29,8 @@ reassignments union back. ``var`` declarations bind like lets —
 ``var a, b T`` is the dep-free zero value and ``var a, b = x, y``
 binds name-wise like ``:=`` (grouped ``var (...)`` forms are a parser
 gap). ``x++``/``x--`` on a
-bound scalar are dependency-preserving, and ``_ = expression``
+bound scalar are dependency-preserving, on an imported member they
+record the member write, and ``_ = expression``
 evaluates-and-discards like a condition. Expression statements — only
 calls are legal — evaluate for their recorded transfer and discard the
 result. An unlabelled
@@ -1720,14 +1721,37 @@ class _Builder:
             return
         if kind in {"inc_statement", "dec_statement"}:
             operands = _children(node)
-            if len(operands) != 1 or operands[0].type != "identifier":
+            if len(operands) != 1:
                 raise _Unsupported("unsupported_statement", _span(node))
-            ref = self.references.get(self.node_key(operands[0]))
-            if ref is None or (
-                ref.binding_id not in locals_ and ref.binding_id not in params
-            ):
-                raise _Unsupported("binding_unavailable", _span(node))
-            # x++ / x-- change the value, never its dependencies.
+            operand = operands[0]
+            if operand.type == "identifier":
+                ref = self.references.get(self.node_key(operand))
+                if ref is not None and (
+                    ref.binding_id in locals_ or ref.binding_id in params
+                ):
+                    # x++ / x-- change the value, never its dependencies.
+                    return
+            member_write = self._imported_member_write(operand)
+            if member_write is None:
+                raise _Unsupported(
+                    "binding_unavailable"
+                    if operand.type == "identifier"
+                    else "unsupported_statement",
+                    _span(node),
+                )
+            member, extras = member_write
+            # `lib.V++` mutates package state like `lib.V = v` — the
+            # stored amount is external, so only the mutation records.
+            self._record_member_write(
+                operand,
+                member,
+                extras,
+                fn,
+                params,
+                locals_,
+                transfers,
+                count,
+            )
             return
         if kind in {"break_statement", "continue_statement"}:
             if any(c.type == "label_name" for c in node.named_children):

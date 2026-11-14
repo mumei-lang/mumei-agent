@@ -6037,19 +6037,6 @@ def test_parenthesized_member_write_is_admitted(go_types_helper):
     assert result.available
 
 
-def test_imported_inc_dec_stays_closed(go_types_helper):
-    # `lib.V++` — inc/dec statements keep their existing gate.
-    files = {
-        "a.go": "package p\nimport \"lib\"\n"
-        "func F() int64 { lib.V++\n\treturn 0 }\n"
-    }
-    snapshot = _method_snapshot_for(go_types_helper, files)
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert not result.available
-
-
 def test_dot_imported_member_field_write_is_admitted(go_types_helper):
     # `VS.F = v` under `import . "lib"` — the operand chain bottoms
     # out on a bare dot-imported name.
@@ -6317,3 +6304,126 @@ def test_imported_field_read_flags_base_redeclaration(go_types_helper):
         if snapshot.binding(f.binding_id).name == "F"
     )
     assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def _files_member_inc(body: str, decl: str = "func F(v int64) int64") -> dict[str, str]:
+    return {
+        "a.go": "package p\nimport \"lib\"\n"
+        f"{decl} {{ {body}\n\treturn 0 }}\n"
+    }
+
+
+def test_imported_member_inc_is_admitted(go_types_helper):
+    # `lib.V++` mutates package state like `lib.V = v` — dep-free
+    # external mutation, recorded transfer on the member identity.
+    files = _files_member_inc("lib.V++")
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target == members["V"]["id"]
+    assert write.arguments == ()
+    assert write.result == frozenset()
+
+
+def test_imported_member_dec_is_admitted(go_types_helper):
+    files = _files_member_inc("lib.V--")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.effects == "unknown"
+    assert any(c.imported for c in result.calls)
+
+
+def test_imported_member_inc_dot_import(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(v int64) int64 { V++\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert any(c.imported for c in result.calls)
+
+
+def test_imported_member_inc_index_evaluates_calls(go_types_helper):
+    # `lib.VA[lib.V.M(v)]++` — the index still evaluates for its calls.
+    files = _files_member_inc("lib.VA[lib.V.M(v)]++")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    calls = [c for c in result.calls if c.imported]
+    assert len(calls) >= 2
+
+
+def test_imported_member_inc_field_is_admitted(go_types_helper):
+    # `lib.VS.F++` resolves to the struct var's member write, like
+    # `lib.VS.F = v` does.
+    files = _files_member_inc("lib.VS.F++")
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    members = {m["name"]: m for m in report["imported_members"]}
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    (write,) = [c for c in result.calls if c.imported]
+    assert write.target == members["VS"]["id"]
+
+
+def test_imported_member_inc_flags_stale_dependents(go_types_helper):
+    files = _files_member_inc("lib.V++")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = {"lib": dict(METHOD_LIB["lib"])}
+    lib2["lib"]["t.go"] = "package lib\ntype T int32\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2["lib"]),
+        lib2["lib"],
+        target_arch="amd64",
+    )
+    known = {b.id for b in snapshot2.bindings}
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_bound_base_field_inc_stays_closed(go_types_helper):
+    # `t.N++` on a bound pointer param — resolves to no imported
+    # member; the bound-base gate stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t *lib.S) int64 { t.F++\n\treturn 0 }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_deref_inc_stays_closed(go_types_helper):
+    # `(*lib.PV)++` — the operand is a dereference, not a member
+    # selection; the inc/dec gate stays closed for it.
+    files = _files_member_inc("(*lib.PV)++")
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
