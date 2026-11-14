@@ -2080,6 +2080,46 @@ identity names a type declaration, not a summary). Transitivity is
 detection semantics, not proof that the re-derived summaries will
 differ; detection, not equivalence.
 
+### C06 imported generic instantiations
+
+An explicit instantiation of an imported generic function —
+`lib.G[int64](x)` — now classifies as `direct_import` when every
+type argument and every instantiated parameter is a basic type and
+the instantiated signature returns at most one scalar result. The
+producer resolves the instantiation through `types.Info.Instances`
+(newly recorded on the info map) and applies the same scalar-result
+rule as `directImportID`, against the *instantiated* signature. The
+dependency model is the existing opaque shape: the result depends on
+every evaluated argument, and the member record's
+`signature_type_ids` — which cover the generic's declared signature,
+including its type-parameter identities — pin the call site as with
+any other imported call.
+
+The basic-type restriction keeps the admitted surface inside the
+member record's pin coverage: a substituted type-parameter identity
+is declared nowhere, so a named/alias type argument
+(`lib.G[lib.T](v)`) could never be pinned and stays
+`indirect_or_selector`. A *declared* named parameter
+(`func G[T any](v T2)`) is already pinned by `signature_type_ids`;
+only composite instantiated parameters (`[]T`) are rejected, as
+outside the scalar fragment. The consumer admits the call through the
+same `direct_import` path — tree-sitter parses the single-type-arg
+form `lib.G[T](x)` as `type_conversion_expression`, so a dedicated
+arm maps that node shape onto the recorded call; multi-type-arg
+forms already arrive as `call_expression`.
+
+Boundaries: inferred calls `lib.G(x)` stay `external_or_bodyless`
+(the declared signature's result is a type parameter, so the
+scalar-result rule rejects it — only *explicit* basic instantiations
+are admitted). A dot-imported instantiation `G[int64](x)` follows the
+same rule through the unqualified-callee path — admitted only with
+basic type arguments (`G[lib.T](v)` stays `external_or_bodyless`,
+since the declared-signature check alone would let a named type
+argument through unpinned). Instantiated generic *types*
+(`lib.S[int64](x)`), local generics, methods and multi-valued results
+are unchanged and closed. A void instantiated callee records its
+argument-dependency union like any other `direct_import` transfer.
+
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
