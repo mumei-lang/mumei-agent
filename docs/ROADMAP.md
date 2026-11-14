@@ -1825,6 +1825,25 @@ modelled, matching the existing boundary for every other operator.
 Non-scalar operands stay type gaps, and unary operators beyond
 `+`, `-`, `!` and `^` remain unsupported.
 
+### C07 named result parameters
+
+A scalar named result — `func F(x int64) (r int64)` — is an ordinary
+local pre-initialised to the dep-free zero value. Body statements write
+to it like any local; a bare `return` (legal only with a named result)
+yields its current dependencies, while `return e` assigns the
+expression's dependencies exactly as an unnamed result does. A result
+never written stays parameter-independent, and inner declarations can
+still shadow it.
+
+Boundaries: this slice admits the named result's *dependency* role only
+— no zero-value semantics are modelled, and a bare `return` without a
+named result stays `unsupported_return` (the compiler rejects it
+anyway). Multiple named results, unnamed multi-result signatures,
+methods and generics stay `unsupported_signature`, and result bindings
+keep needing scalar type. Bare-return legality is guaranteed by
+`go/types` before the reader runs — no extra validation is needed.
+
+>>>>>>> 1f29b33b (Admit named scalar result parameters in Go summary bodies (C07))
 ## Roadmap authority and vocabulary
 
 Alias-free docs are now regression-fixed at the docs level by `tests/test_contract_vocabulary.py`, while the existing CLI/MCP/report tests continue to lock runtime JSON output.
