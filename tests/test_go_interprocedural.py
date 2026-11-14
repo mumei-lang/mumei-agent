@@ -3816,3 +3816,32 @@ def test_parenthesized_method_selector_is_admitted(go_types_helper):
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_method_flag_on_non_direct_import_call_is_rejected(go_types_helper):
+    # `method` only travels on a `direct_import` call — a forged flag on
+    # any other kind must fail validation, not silently pass through.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.T, y int64) int64 { return int64(x.M(y)) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    tampered = json.loads(json.dumps(report))
+    for c in tampered["calls"]:
+        if c["kind"] == "conversion":
+            c["method"] = True
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(tampered).encode(), files, target_arch="amd64"
+        )
+    tampered = json.loads(json.dumps(report))
+    for c in tampered["calls"]:
+        if c["kind"] == "direct_import":
+            c["method"] = "yes"
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(tampered).encode(), files, target_arch="amd64"
+        )
