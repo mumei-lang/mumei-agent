@@ -140,6 +140,32 @@ func TestOpaqueCalls(t *testing.T) {
 	}
 }
 
+func TestMultiResultImportedCallDeclaresArity(t *testing.T) {
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(x int64) int64 { a, b := lib.G(x); return a + b }"}}
+	imports := []importedUnit{{"lib", []namedSource{
+		{"g.go", "package lib\nfunc G(y int64) (int64, int64) { return y, y }\nfunc H(y int64) int64 { return y }"},
+	}}}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	if len(out.Calls) != 1 || out.Calls[0].Kind != "direct_import" || out.Calls[0].Results != 2 {
+		t.Fatal("a multi-valued imported call did not declare its arity")
+	}
+	unit[0].Source = "package p\nimport \"lib\"\nfunc F(x int64) int64 { return lib.H(x) }"
+	out = analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if len(out.Calls) != 1 || out.Calls[0].Results != 0 {
+		t.Fatal("a single-result imported call declared an arity")
+	}
+	// A composite result in the tuple keeps the call closed.
+	imports[0].Sources[0].Source = "package lib\nfunc G(y int64) (int64, []int64) { return y, nil }"
+	unit[0].Source = "package p\nimport \"lib\"\nfunc F(x int64) int64 { a, _ := lib.G(x); return a }"
+	out = analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if len(out.Calls) != 1 || out.Calls[0].Kind != "external_or_bodyless" || out.Calls[0].Results != 0 {
+		t.Fatal("a composite multi-valued imported call was admitted")
+	}
+}
+
 func TestClosureAndInitializerCallsHaveNoNamedBodyOwner(t *testing.T) {
 	out := checked(t, `package p; func G() int { return 1 }; var X = G(); func F() int { f := func() int { return G() }; return f() }`, "amd64")
 	if len(out.Calls) != 3 || out.Calls[0].Owner != "" || out.Calls[1].Owner != "" || out.Calls[2].Owner == "" {

@@ -2333,23 +2333,210 @@ def test_composite_import_result_fails_closed(go_types_helper):
     assert not result.available
 
 
-def test_multi_result_import_call_fails_closed(go_types_helper):
+MULTI_LIB = {
+    "lib": {
+        "g.go": "package lib\n"
+        "func G(y int64) (int64, int64) { return y, y }\n"
+        "func H(a int64) (int64, bool) { return a, true }\n"
+        "func W(a int64, b int64) int64 { return a + b }\n"
+        "func GI[P any](x P) (P, P) { return x, x }\n"
+    }
+}
+
+
+def _multi_snapshot_for(go_types_helper, files):
+    return load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, MULTI_LIB),
+        files,
+        target_arch="amd64",
+    )
+
+
+def test_multi_result_import_call_declares_arity(go_types_helper):
+    # A multi-valued imported callee is `direct_import` like any other
+    # admitted call — the record additionally declares its result arity
+    # so the consumer can admit tuple unpacking.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 {\n"
         "\ty, z := lib.G(x)\n"
         "\treturn y + z\n}\n"
     }
-    lib = {
-        "lib": {"g.go": "package lib\nfunc G(y int64) (int64, int64) { return y, y }\n"}
-    }
-    report = json.loads(package_report_imports(go_types_helper, files, lib))
-    (call,) = report["calls"]
-    assert call["kind"] == "external_or_bodyless"
-    assert any(
-        g["reason"] == "call_not_summarized_external_or_bodyless"
-        for g in report["gaps"]
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
     )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["results"] == 2
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert call["target"] == members["G"]["id"]
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    # Both results carry the same over-approximated set — the union of
+    # every argument — so `y + z` returns exactly the parameter's deps.
+    assert result.available and result.return_dependencies == frozenset({0})
+    (transfer,) = result.calls
+    assert transfer.imported
+
+
+def test_multi_result_unpack_in_var_and_assignment(go_types_helper):
+    # `var a, b = lib.G(x)` and `c, d = lib.G(x)` take the same tuple
+    # unpacking as `:=`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tvar a, b = lib.G(x)\n"
+        "\tvar c, d int64\n"
+        "\tc, d = lib.G(a)\n"
+        "\treturn b + c + d\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    assert all(
+        c["kind"] == "direct_import" and c["results"] == 2
+        for c in report["calls"]
+    )
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_unpack_discard_and_mixed_results(go_types_helper):
+    # `_, b := lib.H(x)` still evaluates the whole call — the discarded
+    # result contributes no binding, and a boolean result binds like an
+    # integer one.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\t_, b := lib.H(x)\n"
+        "\tif b { return x }\n"
+        "\treturn 0\n}\n"
+    }
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_arity_mismatch_stays_closed(go_types_helper):
+    # `a, b := f()` admits only when the record's declared arity equals
+    # the tuple width — a forged `results: 3` on a two-wide unpack must
+    # fail at the consumer even though the wire shape validates.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty, z := lib.G(x)\n"
+        "\treturn y + z\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    tampered = json.loads(json.dumps(report))
+    tampered["calls"][0]["results"] = 3
+    snapshot = load_go_package_snapshot(
+        json.dumps(tampered).encode(), files, target_arch="amd64"
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_results_field_rejected_on_non_import_kind(go_types_helper):
+    # `results` only travels on a `direct_import` call, and only for
+    # arity above one — every other shape must fail validation.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.W(x, x) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    for forged in (1, -2, "2", True):
+        tampered = json.loads(json.dumps(report))
+        tampered["calls"][0]["results"] = forged
+        with pytest.raises(SnapshotError):
+            load_go_package_snapshot(
+                json.dumps(tampered).encode(), files, target_arch="amd64"
+            )
+    tampered = json.loads(json.dumps(report))
+    for c in tampered["calls"]:
+        c["kind"] = "conversion"
+        c["results"] = 2
+    with pytest.raises(SnapshotError):
+        load_go_package_snapshot(
+            json.dumps(tampered).encode(), files, target_arch="amd64"
+        )
+
+
+def test_multi_result_dot_imported_call_unpacks(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty, z := G(x)\n"
+        "\treturn y + z\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["results"] == 2
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_multi_result_call_discarded_statement_and_spread(go_types_helper):
+    # `lib.G(x)` as a statement discards both results — the transfer
+    # still records. `lib.W(lib.G(x))` spreads the pair across `W`'s two
+    # parameters; the outer result unions the inner call's deps, which
+    # already over-approximate every result.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\tlib.G(x)\n"
+        "\treturn lib.W(lib.G(x))\n}\n"
+    }
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+    imported = [t for t in result.calls if t.imported]
+    assert len(imported) == 3
+
+
+def test_multi_result_generic_instantiation_stays_closed(go_types_helper):
+    # Instantiation admission (`lib.GI[int64](x)`) is pinned to a
+    # declared signature — it keeps the single-result gate for now.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ty, z := lib.GI[int64](x)\n"
+        "\treturn y + z\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] != "direct_import"
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
 
 
 def test_zero_result_import_statement_call(go_types_helper):
@@ -3827,31 +4014,49 @@ def test_generic_receiver_method_expression_stays_closed(go_types_helper):
     assert call["kind"] == "method_generic_or_variadic"
 
 
-def test_multi_result_method_expression_stays_closed(go_types_helper):
+def test_multi_result_method_expression_unpacks(go_types_helper):
+    # `lib.T.Bad(t, x)` — a multi-valued method expression: the record
+    # declares arity like any `direct_import`, and each result carries
+    # the receiver-plus-arguments union.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(t lib.T, x int64) (int64, int64) {"
-        " return lib.T.Bad(t, x) }\n"
+        "func F(t lib.T, x int64) int64 {"
+        " a, b := lib.T.Bad(t, x); return a + b }\n"
     }
     report = json.loads(
         package_report_imports(go_types_helper, files, METHOD_LIB)
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "method_generic_or_variadic"
+    assert call["kind"] == "direct_import"
+    assert call["results"] == 2 and "method" not in call
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
 
 
-def test_imported_multi_result_method_stays_closed(go_types_helper):
+def test_imported_multi_result_method_unpacks(go_types_helper):
+    # `x.Bad(1)` — a multi-valued `method` call: each result unions the
+    # receiver's deps with the arguments', so both `a` and `b` depend on
+    # the receiver parameter.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(x lib.T) int64 { a, _ := x.Bad(1); return a }\n"
+        "func F(x lib.T) int64 { a, b := x.Bad(1); return a + b }\n"
     }
     report = json.loads(
         package_report_imports(go_types_helper, files, METHOD_LIB)
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "method_generic_or_variadic"
+    assert call["kind"] == "direct_import"
+    assert call["method"] is True and call["results"] == 2
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
 
 
 def test_local_method_stays_closed(go_types_helper):

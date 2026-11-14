@@ -624,21 +624,32 @@ class _Builder:
             right = node.child_by_field_name("right")
             lefts = _children(left) if left is not None else []
             rights = _children(right) if right is not None else []
-            if (
-                not lefts
-                or any(l.type != "identifier" for l in lefts)
-                or len(lefts) != len(rights)
-            ):
+            if not lefts or any(l.type != "identifier" for l in lefts):
                 raise _Unsupported("unsupported_statement", _span(node))
-            # RHS expressions evaluate in parallel against the pre-state
-            # — `a, b := b, a` swaps — so all reads happen before any
-            # store.
-            values = [
-                self.expression(
-                    rhs, fn, params, locals_, transfers, count, 0
-                )
-                for rhs in rights
-            ]
+            if len(lefts) != len(rights):
+                # `a, b := lib.F(x)` — a multi-valued imported call
+                # unpacks one RHS into every LHS; each result carries
+                # the same over-approximated dependency set, so a
+                # single evaluation stores to all names.
+                if len(rights) != 1 or self._multi_result_call(
+                    rights[0], fn, len(lefts)
+                ) is None:
+                    raise _Unsupported("unsupported_statement", _span(node))
+                values = [
+                    self.expression(
+                        rights[0], fn, params, locals_, transfers, count, 0
+                    )
+                ] * len(lefts)
+            else:
+                # RHS expressions evaluate in parallel against the pre-state
+                # — `a, b := b, a` swaps — so all reads happen before any
+                # store.
+                values = [
+                    self.expression(
+                        rhs, fn, params, locals_, transfers, count, 0
+                    )
+                    for rhs in rights
+                ]
             for lhs, value in zip(lefts, values):
                 # `_` discards its value — the RHS was still evaluated.
                 if lhs.text == b"_":
@@ -678,12 +689,33 @@ class _Builder:
                         names.append(child)
                     elif field == "value":
                         value_nodes.extend(_children(child))
-                if not names or len(names) != len(value_nodes) and value_nodes:
+                multi = (
+                    len(names) != len(value_nodes)
+                    and len(value_nodes) == 1
+                    and self._multi_result_call(
+                        value_nodes[0], fn, len(names)
+                    )
+                    is not None
+                )
+                if not names or (
+                    len(names) != len(value_nodes)
+                    and value_nodes
+                    and not multi
+                ):
                     raise _Unsupported("unsupported_statement", _span(spec))
                 # `var a, b T` without values is the zero value —
                 # dep-free. With values the RHS evaluates in parallel
-                # against the pre-state before any store.
-                if value_nodes:
+                # against the pre-state before any store; `var a, b =
+                # lib.F(x)` unpacks one multi-valued imported call like
+                # a short variable declaration.
+                if multi:
+                    values = [
+                        self.expression(
+                            value_nodes[0], fn, params, locals_,
+                            transfers, count, 0,
+                        )
+                    ] * len(names)
+                elif value_nodes:
                     values = [
                         self.expression(
                             rhs, fn, params, locals_, transfers,
@@ -806,12 +838,18 @@ class _Builder:
             lefts = _children(left) if left is not None else []
             rights = _children(right) if right is not None else []
             compound = operator is not None and operator.type in _COMPOUND_ASSIGN
+            multi = (
+                len(lefts) != len(rights)
+                and len(rights) == 1
+                and self._multi_result_call(rights[0], fn, len(lefts))
+                is not None
+            )
             if (
                 operator is None
                 or (operator.type != "=" and not compound)
                 or not lefts
                 or (compound and len(lefts) != 1)
-                or len(lefts) != len(rights)
+                or (len(lefts) != len(rights) and not multi)
             ):
                 raise _Unsupported("unsupported_statement", _span(node))
             # Every LHS must be a bound identifier or `_` before any RHS
@@ -832,13 +870,23 @@ class _Builder:
                 refs.append(ref)
             # Tuple assignment is parallel: every RHS evaluates against the
             # pre-state before any store lands, so `x, y = y, x` swaps each
-            # name's original dependencies.
-            values = [
-                self.expression(
-                    rhs, fn, params, locals_, transfers, count, 0
-                )
-                for rhs in rights
-            ]
+            # name's original dependencies. `x, y = lib.F(a)` unpacks one
+            # multi-valued imported call into every LHS.
+            values = (
+                [
+                    self.expression(
+                        rights[0], fn, params, locals_, transfers, count, 0
+                    )
+                ]
+                * len(lefts)
+                if multi
+                else [
+                    self.expression(
+                        rhs, fn, params, locals_, transfers, count, 0
+                    )
+                    for rhs in rights
+                ]
+            )
             for ref, value in zip(refs, values):
                 if ref is None:
                     continue
@@ -1138,6 +1186,27 @@ class _Builder:
             )
             return
         raise _Unsupported("unsupported_statement", _span(node))
+
+    def _multi_result_call(self, node: Any, fn: Any, arity: int) -> Any:
+        """The recorded call when `node` is a multi-valued imported call.
+
+        Only a `direct_import` record whose declared arity matches the
+        tuple width admits `a, b := f()` — every other shape (a wrong
+        arity, a non-import callee, a non-call RHS) stays closed.
+        """
+        while node is not None and node.type == "parenthesized_expression":
+            node = next(iter(node.named_children), None)
+        if node is None or node.type != "call_expression":
+            return None
+        call = self.calls.get(self.node_key(node))
+        if (
+            call is not None
+            and call.owner == fn.binding_id
+            and call.kind == "direct_import"
+            and call.results == arity
+        ):
+            return call
+        return None
 
     @staticmethod
     def _join(
@@ -1618,9 +1687,14 @@ def summarize_go_package(
     churns it and `stale_dependents` still flags dependents. A summary
     recording such a transfer reports `effects` as `unknown` — the
     imported callee's side effects are outside the fragment. Only
-    imported calls with zero results or a single scalar result are
-    classified `direct_import`; composite or multi-valued imported
-    results keep `external_or_bodyless` and fail closed.
+    imported calls whose results are all scalar are classified
+    `direct_import`; composite results keep `external_or_bodyless` and
+    fail closed. A multi-valued imported call declares its arity on the
+    record and unpacks in a tuple binding (`a, b := lib.F(x)`, plain
+    assignment, or `var` spec): each result carries the same
+    over-approximated dependency set, so a single evaluation stores to
+    every name. Spread arguments (`lib.F(lib.G(x))`) need no arity —
+    the inner call's unioned deps already cover the outer result.
 
     Reports may declare the imported objects the unit referenced
     (`imported_members`). A package-qualified read of a scalar
