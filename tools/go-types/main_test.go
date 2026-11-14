@@ -180,7 +180,9 @@ func TestMultiResultImportedCallDeclaresArity(t *testing.T) {
 }
 
 func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
-	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(t *lib.T, y int64) int64 { return t.PM(y) }"}}
+	// `lib.Take(t)` references the member so it registers; its
+	// pointer-typed parameter must pin the pointee's identity.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F(t *lib.T, y int64) int64 { _ = lib.Take(t); return t.PM(y) }"}}
 	imports := []importedUnit{{"lib", []namedSource{
 		{"m.go", "package lib\nfunc (t *T) PM(v int64) int64 { return v }\nfunc Take(t *T) int64 { return 0 }"},
 		{"t.go", "package lib\ntype T int64"},
@@ -189,20 +191,22 @@ func TestPointerTypedSignaturesCarryPointeeIdentity(t *testing.T) {
 	if out.Status != "ok" {
 		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
 	}
-	var tID string
+	var tID, takeID string
+	var takePins []string
 	for _, m := range out.ImportedMembers {
 		if m.Name == "T" {
 			tID = m.ID
 		}
-		if m.Name == "Take" && len(m.SignatureTypeIDs) != 1 {
-			t.Fatal("a pointer-typed parameter did not pin its pointee")
-		}
-		if m.Name == "Take" && m.SignatureTypeIDs[0] != tID && tID != "" {
-			t.Fatal("a pointer-typed parameter pinned the wrong identity")
+		if m.Name == "Take" {
+			takeID = m.ID
+			takePins = m.SignatureTypeIDs
 		}
 	}
-	if tID == "" {
-		t.Fatal("the pointee's member identity is missing")
+	if tID == "" || takeID == "" {
+		t.Fatal("the referenced members are missing")
+	}
+	if len(takePins) != 1 || takePins[0] != tID {
+		t.Fatal("a pointer-typed parameter did not pin its pointee")
 	}
 	if len(out.Functions) != 1 || out.Functions[0].Parameters[0].Type.Kind != "pointer" ||
 		out.Functions[0].Parameters[0].Type.TypeID != tID {
