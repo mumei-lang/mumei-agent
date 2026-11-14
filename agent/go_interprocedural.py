@@ -398,6 +398,61 @@ class _Builder:
             return None
         return member
 
+    def _imported_field_read(
+        self, node: Any
+    ) -> tuple[PackageMember, PackageMember] | None:
+        """The `(struct member, field member)` pair `lib.VS.F` names.
+
+        The operand resolves to an imported `var` member like a member
+        read — `lib.VS`, `VS` under a dot import, or parentheses around
+        either — and the selector's field resolves through its own
+        `import` reference to the field's member record, exactly the
+        resolution `_package_member` performs one level down. The
+        field's record classifies the read: it must be a `var` member
+        of scalar or pointer type. A non-struct operand, a promoted
+        method's `func` member, or any unresolvable name returns None
+        and keeps the expression closed.
+        """
+        operand = node.child_by_field_name("operand")
+        field = node.child_by_field_name("field")
+        if operand is None or field is None:
+            return None
+        while operand.type == "parenthesized_expression":
+            operand = next(
+                (c for c in operand.named_children if c.type != "comment"),
+                None,
+            )
+            if operand is None:
+                return None
+        base = None
+        if operand.type == "selector_expression":
+            base = self._package_member(operand)
+        elif operand.type == "identifier":
+            ref = self.references.get(self.node_key(operand))
+            if ref is not None and ref.kind == "import":
+                candidate = self.members.get(ref.binding_id)
+                if (
+                    candidate is not None
+                    and candidate.name.encode("utf-8") == operand.text
+                ):
+                    base = candidate
+        if base is None or base.kind != "var":
+            return None
+        ref = self.references.get(self.node_key(field))
+        field_member = (
+            self.members.get(ref.binding_id)
+            if ref is not None and ref.kind == "import"
+            else None
+        )
+        if (
+            field_member is None
+            or field_member.name.encode("utf-8") != field.text
+            or field_member.kind != "var"
+            or field_member.type.kind not in {"integer", "boolean", "pointer"}
+        ):
+            return None
+        return base, field_member
+
     def _qualified_type_member(self, qualified_node: Any) -> PackageMember | None:
         """The imported member a `pkg.Name` qualified type names, or None.
 
@@ -1865,6 +1920,36 @@ class _Builder:
                     )
                 )
                 return frozenset()
+            if member is None:
+                # `lib.VS.F` / `VS.F` — a field of an imported struct
+                # var. The field is external state like the member
+                # itself: the read is dep-free but records the imported
+                # transfer against the field's own identity and pins
+                # both records' named types, so redeclaring the struct
+                # or the field's type flags the summary.
+                pair = self._imported_field_read(node)
+                if pair is not None:
+                    base, field_member = pair
+                    # The transfer targets the field's identity; pin
+                    # the base member's own identity too so redeclaring
+                    # `VS` in its own file still flags the summary.
+                    self.pinned.add(base.id)
+                    self._pin_member_type(base)
+                    self._pin_member_type(field_member)
+                    transfers.append(
+                        CallTransfer(
+                            FileSpan(
+                                self.current_file,
+                                node.start_byte,
+                                node.end_byte,
+                            ),
+                            field_member.id,
+                            (),
+                            frozenset(),
+                            imported=True,
+                        )
+                    )
+                    return frozenset()
             if (
                 member is None
                 or member.kind != "const"

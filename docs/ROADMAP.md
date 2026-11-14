@@ -2009,6 +2009,21 @@ member admits the conversion. The member name must still match the
 source token; function values, non-scalars, generic instantiations
 and reads without a matching record stay closed.
 
+A field read of an imported struct var — `lib.VS.F` — admits through
+the member records the producer already emits: the field itself is a
+`var` member whose `import` reference classifies the selection, and
+the operand resolves like a member read (`lib.VS`, `VS` under a dot
+import, or parentheses around either). The field is external state
+like the member itself — the read is dep-free, reports `effects` as
+`unknown`, records the imported transfer against the *field's* own
+identity, and pins both the struct var's and the field's declared
+type identities for `stale_dependents`. The field's declared type
+must be scalar or pointer — a composite field is a value the
+fragment's model cannot hold — and anything that resolves to no
+field member stays closed: a method selection (`lib.VS.PF`) names a
+`function` member, a non-struct member's selection resolves no field,
+and a bound base (`t.f`) keeps its own closed gate.
+
 ### C06 imported member type identities
 
 A member's declared type fact now carries `type_id` when the type is
@@ -2206,7 +2221,8 @@ locals — so `func F(t *lib.T, x int64) { t.PM(x) }` summarizes with
 the usual receiver-plus-arguments union, and `(*lib.T).PM(t, x)`
 follows the method-expression path. The dep model tracks the
 *binding's* index, not the pointee's state — dereferences, field
-access, indexing and mutations through the pointer stay outside the
+access on a bound base (`t.f`, `(*t).f`), indexing and mutations
+through the pointer stay outside the
 fragment (`effects` already reports every admitted body as
 `unknown`), so `return *t` is still `unsupported_expression`. A
 pointer to an unnamed or composite pointee (`*int64`, `**T`,
