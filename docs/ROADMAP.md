@@ -2210,17 +2210,31 @@ the receiver's own named-type identity — `x.M(y)` pins `T` even when
 `x` is a plain local variable that names `T` through no member read,
 so redeclaring `T` still flags every admitted caller.
 
+An *instantiated* receiver admits through the same gate: `x.GM(y)`
+with `x: lib.GT[lib.T]`, and the method expression `lib.GT[lib.T].GM`,
+classify as `direct_import` when every type argument of the receiver
+is basic, named or alias — the collected identities ride on the call
+record's `type_arg_type_ids`, the same wire key an instantiated callee
+uses, so a type-argument redeclare stales every admitted caller.
 Boundaries: interface receivers stay `method_generic_or_variadic`
 — dispatch there is dynamic, and the recorded method identity would
 not cover the implementations actually reached (this covers both
 method values `i.M(x)` and method expressions `lib.I.M`). Local
 methods and generic methods are
-unchanged and closed — as are generic or instantiated receiver types
-(`lib.T[lib.U]`, or `lib.GT[lib.T].GM`): the member records pin the
-receiver's named type but not the instantiation's type arguments, so
-redeclaring one would churn no recorded identity. Multi-valued method
-results are admitted like plain function results when every result is
-scalar. The `method` key is optional on the wire:
+unchanged and closed — as are receivers still declared on type
+parameters (`lib.GT[P]` where `P` is unresolved) and instantiated
+receivers whose type arguments contain a composite constructor
+(`lib.GT[*lib.T]` — a pointer has no pin channel). Promoted
+selections (`s.GM` through `struct{ GT[T] }`, or an embedded
+interface's method) stay closed too: the static receiver is the
+outer type, so the embedded instantiation's type arguments — or the
+dynamic dispatch itself — escape the gate. The scalar-result check
+reads the *instantiated* signature `go/types` reports for the
+selection, so a result mentioning the receiver's own type parameter
+(`func (t GT[P]) MR() P`) is judged after substitution — `GT[int64]`
+yields a scalar `int64` result and admits. Multi-valued
+method results are admitted like plain function results when every
+result is scalar. The `method` key is optional on the wire:
 reports predating it keep validating, and it is rejected on any
 non-`direct_import` call.
 

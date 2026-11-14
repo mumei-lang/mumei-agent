@@ -4072,6 +4072,10 @@ METHOD_LIB = {
         "type I interface{ M(int64) int64 }\n"
         "type GT[P any] int64\n"
         "func (t GT[P]) GM(v int64) int64 { return v }\n"
+        "func (t *GT[P]) PGM(v int64) int64 { return v }\n"
+        "func (t GT[P]) MR() P { var z P; return z }\n"
+        "type A = T\ntype SE struct{ GT[int64] }\n"
+        "type EI struct{ I }\n"
         "var V T\nconst K T = 7\nvar PV *T\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
@@ -4182,14 +4186,100 @@ def test_imported_interface_method_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_generic_receiver_method_stays_closed(go_types_helper):
-    # `lib.GT[lib.T]` — an instantiated receiver names more types than
-    # the member records pin (`GT` only): redeclaring `T` would churn
-    # no recorded identity, so the call stays closed.
+def test_imported_instantiated_receiver_method_is_admitted(go_types_helper):
+    # `lib.GT[lib.T]` — an instantiated receiver admits when every type
+    # argument is basic, named or alias; the collected identities ride
+    # on the record as `type_arg_type_ids` so a `T` redeclare stales
+    # the call site like a named instantiation type argument does.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "var x lib.GT[lib.T]\n"
-        "func F(y int64) int64 { return x.GM(y) }\n"
+        "func F(x lib.GT[lib.T], y int64) int64 { return x.GM(y) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["method"] is True
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert call["target"] == members["GM"]["id"]
+    assert call["type_arg_type_ids"] == [members["T"]["id"]]
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_instantiated_pointer_receiver_method_is_admitted(go_types_helper):
+    # `x *lib.GT[lib.T]` — one pointer layer unwraps like the
+    # concrete-receiver rule, and the instantiated named type's
+    # arguments pin through `type_arg_type_ids` the same way.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x *lib.GT[lib.T], y int64) int64 { return x.PGM(y) }\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, METHOD_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["method"] is True
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert call["target"] == members["PGM"]["id"]
+    assert call["type_arg_type_ids"] == [members["T"]["id"]]
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_instantiated_receiver_type_arg_pin_flags_stale(go_types_helper):
+    # `lib.GT[lib.T]` receiver: the type-argument pin is the ONLY
+    # identity `T` records — the receiver parameter and the `GM`
+    # signature pin `GT` alone, so only `type_arg_type_ids` can flag
+    # `F` when `T` is redeclared.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.GT[lib.T], y int64) int64 { return x.GM(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = {
+        "m.go": "package lib\nfunc (t T) M(v int64) int64 { return v }\n"
+        "func (t T) M2(a int64, b int64) int64 { return a }\n"
+        "func (t T) Bad(v int64) (int64, int64) { return v, v }\n"
+        "func (t *T) PM(v int64) int64 { return v }\n"
+        "func R(t *T) *T { return t }\n"
+        "func RR(t *T) (int64, *T) { return 0, t }\n"
+        "type I interface{ M(int64) int64 }\n"
+        "type GT[P any] int64\n"
+        "func (t GT[P]) GM(v int64) int64 { return v }\n"
+        "func (t *GT[P]) PGM(v int64) int64 { return v }\n"
+        "var V T\nconst K T = 7\nvar PV *T\n",
+        "t.go": "package lib\ntype T int32\n",
+    }
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_instantiated_receiver_composite_arg_stays_closed(go_types_helper):
+    # `lib.GT[*lib.T]` — a pointer constructor inside the receiver's
+    # type arguments has no pin channel, so the call stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.GT[*lib.T], y int64) int64 { return x.GM(y) }\n"
     }
     report = json.loads(
         package_report_imports(go_types_helper, files, METHOD_LIB)
@@ -4268,9 +4358,73 @@ def test_interface_method_expression_stays_closed(go_types_helper):
     assert call["kind"] == "method_generic_or_variadic"
 
 
-def test_generic_receiver_method_expression_stays_closed(go_types_helper):
-    # `lib.GT[lib.T].GM` — an instantiated receiver: member records pin
-    # `GT` but not the type arguments.
+def test_alias_receiver_method_is_admitted(go_types_helper):
+    # `type A = T` — an alias-typed parameter's method selection
+    # resolves through the alias to the named receiver, exactly like a
+    # direct `lib.T` parameter.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.A, y int64) int64 { return x.M(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_promoted_instantiated_method_stays_closed(go_types_helper):
+    # `struct{ GT[int64] }` — `s.GM` is a promoted selection: the
+    # static receiver is `SE`, so the embedded instantiation's type
+    # arguments would admit with no pin covering them.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(s *lib.SE, y int64) int64 { return s.GM(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_promoted_interface_method_stays_closed(go_types_helper):
+    # `struct{ I }` — a method promoted from an embedded interface
+    # dispatches dynamically even though the outer receiver is
+    # concrete.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(s *lib.EI, y int64) int64 { return s.M(y) }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_instantiated_receiver_type_param_result_is_admitted(
+    go_types_helper,
+):
+    # `func (t GT[P]) MR() P` — the result is judged on the
+    # *instantiated* signature the selection reports: `GT[int64]`
+    # substitutes `P` with `int64`, a scalar, so the call admits with
+    # the result depending on the receiver.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x lib.GT[int64]) int64 { return x.MR() }\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_generic_receiver_method_expression_is_admitted(go_types_helper):
+    # `lib.GT[lib.T].GM` — an instantiated receiver method expression:
+    # the record carries `type_arg_type_ids` for the receiver's named
+    # type arguments just like an instantiated callee's.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(t lib.GT[lib.T], x int64) int64 {"
@@ -4281,7 +4435,10 @@ def test_generic_receiver_method_expression_stays_closed(go_types_helper):
     )
     assert report["status"] == "ok"
     (call,) = report["calls"]
-    assert call["kind"] == "method_generic_or_variadic"
+    assert call["kind"] == "direct_import" and "method" not in call
+    members = {m["name"]: m for m in report["imported_members"]}
+    assert call["target"] == members["GM"]["id"]
+    assert call["type_arg_type_ids"] == [members["T"]["id"]]
 
 
 def test_multi_result_method_expression_unpacks(go_types_helper):

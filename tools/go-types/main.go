@@ -242,36 +242,49 @@ func (ix *indexer) directImportID(f *types.Func) (string, int, bool) {
 // `method_generic_or_variadic`: dispatch there is dynamic, and the
 // pinned method identity would not cover the implementations actually
 // reached.
-func (ix *indexer) directImportMethodID(f *types.Func) (string, int, bool) {
+func (ix *indexer) directImportMethodID(f *types.Func, recv types.Type) (string, int, []string, bool) {
 	id := ix.importedID(f)
 	if id == "" {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	sig, ok := f.Type().(*types.Signature)
 	if !ok || sig.Recv() == nil || !allScalarResults(sig) {
-		return "", 0, false
+		return "", 0, nil, false
 	}
-	rt := sig.Recv().Type()
+	rt := types.Unalias(recv)
 	if ptr, ok := rt.(*types.Pointer); ok {
-		rt = ptr.Elem()
+		rt = types.Unalias(ptr.Elem())
 	}
 	named, ok := rt.(*types.Named)
 	if !ok {
-		return "", 0, false
+		return "", 0, nil, false
 	}
 	if _, ok := named.Underlying().(*types.Interface); ok {
-		return "", 0, false
+		return "", 0, nil, false
 	}
-	// A generic or instantiated receiver (`T[P]`, `lib.T[lib.U]`) names
-	// more types than the member records pin — redeclaring a type
-	// argument would churn no recorded identity, so it stays closed.
-	if named.TypeParams() != nil && named.TypeParams().Len() > 0 {
-		return "", 0, false
+	// A receiver still declared on type parameters (`T[P]` — `TypeParams`
+	// is non-nil and `TypeArgs` empty) names types the member records
+	// cannot pin, so it stays closed. An instantiated receiver
+	// (`lib.GT[lib.T]` — `TypeArgs` non-empty, `TypeParams` still lists
+	// the origin's parameters) admits like a concrete one when every
+	// type argument is basic, named or alias; the collected identities
+	// ride on the record as `type_arg_type_ids` so a type-argument
+	// redeclare stales every caller that pins them.
+	targs := named.TypeArgs()
+	if targs == nil || targs.Len() == 0 {
+		if tp := named.TypeParams(); tp != nil && tp.Len() > 0 {
+			return "", 0, nil, false
+		}
+		return id, sig.Results().Len(), nil, true
 	}
-	if named.TypeArgs() != nil && named.TypeArgs().Len() > 0 {
-		return "", 0, false
+	var ids []string
+	seen := map[string]bool{}
+	for i := 0; i < targs.Len(); i++ {
+		if !ix.collectTypeArgIDs(targs.At(i), seen, &ids) {
+			return "", 0, nil, false
+		}
 	}
-	return id, sig.Results().Len(), true
+	return id, sig.Results().Len(), ids, true
 }
 
 // directImportInstantiation admits an explicit instantiation of an imported
@@ -822,14 +835,20 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 			// receiver is already the leading argument, so the plain
 			// `direct_import` shape needs no flag.
 			if selection.Kind() == types.MethodVal || selection.Kind() == types.MethodExpr {
-				if f, ok := selection.Obj().(*types.Func); ok {
-					if id, arity, ok := ix.directImportMethodID(f); ok {
+				// A promoted selection (`s.GM` through `struct{ GT[T] }`,
+				// or an embedded interface's method) has an Index path
+				// longer than one: the static receiver is the outer type,
+				// so the embedded instantiation's type arguments — or the
+				// dynamic dispatch itself — escape the gate. Both stay
+				// closed.
+				if f, ok := selection.Obj().(*types.Func); ok && len(selection.Index()) == 1 {
+					if id, arity, ids, ok := ix.directImportMethodID(f, selection.Recv()); ok {
 						// `lib.T.M(recv, args)` — a method expression:
 						// the receiver is already the leading argument,
 						// so the plain `direct_import` result-depends-
 						// on-every-argument model covers it; no `method`
 						// flag is needed.
-						return "direct_import", id, selection.Kind() == types.MethodVal, arity, nil
+						return "direct_import", id, selection.Kind() == types.MethodVal, arity, ids
 					}
 				}
 			}
