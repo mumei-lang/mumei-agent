@@ -2388,7 +2388,8 @@ def test_directive_in_imported_source_fails_closed(go_types_helper):
 IMPORTED_MEMBERS_LIB = {
     "lib": {
         "m.go": "package lib\nconst K = 2\nconst L int64 = 3\nconst S = \"s\"\n"
-        "var V int64 = 7\ntype T int64\n"
+        "var V int64 = 7\ntype T int64\ntype F64 float64\ntype A = int64\n"
+        "type GT[N int64 | int32] int64\n"
         "func G(y int64) int64 { return y }\n"
     }
 }
@@ -2592,3 +2593,131 @@ def test_imported_const_read_inside_imported_call(go_types_helper):
     # The opaque callee's result is the union of its argument deps —
     # and `lib.K` contributes none.
     assert result.available and result.return_dependencies == frozenset()
+
+
+def _snapshot_for(go_types_helper, files):
+    return load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB),
+        files,
+        target_arch="amd64",
+    )
+
+
+def test_imported_scalar_type_conversion_is_dep_preserving(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { y := lib.T(x); return int64(y) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+    assert result.effects == "none_in_supported_fragment"
+
+
+def test_imported_alias_type_conversion_is_dep_preserving(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.A(x) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_conversion_of_const_read_is_dep_free(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 { _ = lib.T(lib.K); return 0 }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset()
+
+
+def test_imported_conversion_inside_imported_call(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { return lib.G(int64(lib.T(x))) }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_imported_nonscalar_type_conversion_fails_closed(go_types_helper):
+    # `type F64 float64` is a declared type member but not a scalar the
+    # fragment models — the conversion stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.F64(x); return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "binding_unavailable"
+
+
+def test_imported_conversion_needs_a_type_member(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.T(x); return x }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    for m in report["imported_members"]:
+        if m["name"] == "T":
+            m["kind"] = "const"
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "binding_unavailable"
+
+
+def test_imported_conversion_member_name_must_match(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.T(x); return x }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    for m in report["imported_members"]:
+        if m["name"] == "T":
+            m["name"] = "Other"
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "binding_unavailable"
+
+
+def test_imported_generic_type_instantiation_fails_closed(go_types_helper):
+    # `lib.GT[int64](x)` reaches the report as a conversion, but the
+    # callee is an `index_expression`, not a package-qualified selector
+    # — instantiated generics stay closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.GT[int64](x); return x }\n"
+    }
+    snapshot = _snapshot_for(go_types_helper, files)
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    # The index expression is rejected before the conversion check —
+    # either way the instantiated generic stays closed.
+    assert not result.available and result.gaps[0].reason in {
+        "binding_unavailable",
+        "unsupported_expression",
+    }
+
+
+def test_imported_conversion_without_member_section_fails_closed(go_types_helper):
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 { _ = lib.T(x); return x }\n"
+    }
+    report = json.loads(package_report_imports(go_types_helper, files, IMPORTED_MEMBERS_LIB))
+    assert report["status"] == "ok"
+    report.pop("imported_members", None)
+    snapshot = load_go_package_snapshot(
+        json.dumps(report).encode(), files, target_arch="amd64"
+    )
+    result = named_package(files, snapshot, ip.summarize_go_package(files, snapshot), "F")
+    assert not result.available and result.gaps[0].reason == "binding_unavailable"

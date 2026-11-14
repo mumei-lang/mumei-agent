@@ -1945,10 +1945,26 @@ are unmodelled package state and imported functions are not values
 in the fragment: their reads keep `non_parameter_reference` and
 fail closed, as does any read whose member declaration is absent.
 
+Member declarations also classify the conversion target of
+`lib.T(e)`. The producer already records such calls as
+`conversion`; the consumer now admits one whose field resolves to
+an `import` reference on a member declared `kind == "type"` whose
+type fact is integer or boolean — the result inherits the
+operand's dependencies exactly like a local or predeclared
+scalar conversion, and the member name must match the source
+token. Alias targets take the same path (`type A = int64` declares
+a `type` member whose underlying fact is the scalar). Conversions
+to a non-scalar named type (`type F64 float64`, `type S string`),
+a member record whose kind is not `type` and a missing declaration
+keep `binding_unavailable`; generic instantiations `lib.T[int](e)`
+fail even earlier, since an `index_expression` callee is not an
+admitted expression.
+
 Boundaries: member types carry no `type_id` into the imported unit
 (type fact emission is producer-side; `ix.id` yields no identity for
-non-root objects, so `type_id` is empty) — named imported types
-cannot yet drive consumer-side checks. Package-level constant
+non-root objects, so `type_id` is empty) — imported type
+declarations classify scalar conversions but cannot yet name a
+binding identity for freshness joins. Package-level constant
 reads are dependency-free but their *values* are not modelled —
 the fragment tracks what a result depends on, not what a constant
 equals. Selector reads remain limited to a plain package-qualified

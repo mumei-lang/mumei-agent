@@ -83,6 +83,7 @@ from agent.go_type_snapshot import (
     GoType,
     GoPackageSnapshot,
     GoTypeSnapshot,
+    PackageMember,
     SnapshotError,
 )
 
@@ -340,6 +341,37 @@ class _Builder:
 
     def node_key(self, node: Any) -> tuple[int, int, int]:
         return (self.current_file, node.start_byte, node.end_byte)
+
+    def _package_member(self, selector_node: Any) -> PackageMember | None:
+        """The imported member a `pkg.Name` selector names, or None.
+
+        The operand is a package name, which is not a binding and carries
+        no reference; the field resolves to an `import` reference whose
+        declared member record classifies the object. A record that names
+        a different object than the source token never widens a use.
+        """
+        operand = selector_node.child_by_field_name("operand")
+        field = selector_node.child_by_field_name("field")
+        ref = (
+            self.references.get(self.node_key(field))
+            if field is not None
+            else None
+        )
+        member = (
+            self.members.get(ref.binding_id)
+            if ref is not None and ref.kind == "import"
+            else None
+        )
+        if (
+            operand is None
+            or operand.type != "identifier"
+            or self.references.get(self.node_key(operand)) is not None
+            or field is None
+            or member is None
+            or member.name.encode("utf-8") != field.text
+        ):
+            return None
+        return member
 
     def result(
         self,
@@ -1120,31 +1152,13 @@ class _Builder:
                     raise _Unsupported("binding_unavailable", _span(node))
             raise _Unsupported("non_parameter_reference", _span(node))
         if kind == "selector_expression":
-            # `lib.K` — a package-qualified member read. The operand is a
-            # package name, which is not a binding and carries no
-            # reference; the field resolves to an `import` reference whose
-            # declared member record classifies the object. Only scalar
+            # `lib.K` — a package-qualified member read. Only scalar
             # constants are admitted — imported variables are unmodelled
             # package state and imported functions are not values here.
-            operand = node.child_by_field_name("operand")
-            field = node.child_by_field_name("field")
-            ref = (
-                self.references.get(self.node_key(field))
-                if field is not None
-                else None
-            )
-            member = (
-                self.members.get(ref.binding_id)
-                if ref is not None and ref.kind == "import"
-                else None
-            )
+            member = self._package_member(node)
             if (
-                operand is None
-                or operand.type != "identifier"
-                or self.references.get(self.node_key(operand)) is not None
-                or member is None
+                member is None
                 or member.kind != "const"
-                or member.name.encode("utf-8") != field.text
                 or not _scalar_const_type(member.type)
             ):
                 raise _Unsupported("non_parameter_reference", _span(node))
@@ -1198,24 +1212,40 @@ class _Builder:
                     function_node = next(
                         iter(function_node.named_children), None
                     )
-                ref = (
-                    self.references.get(self.node_key(function_node))
-                    if function_node is not None
-                    else None
-                )
-                if ref is not None and ref.binding_id:
-                    binding = self.bindings.get(ref.binding_id)
-                    scalar = binding is not None and binding.type.kind in {
-                        "integer",
-                        "boolean",
-                    }
-                else:
+                if (
+                    function_node is not None
+                    and function_node.type == "selector_expression"
+                ):
+                    # `lib.T(e)` — the conversion target is declared by
+                    # the imported member record, not by a local binding.
+                    # Only a record naming the same member as a scalar
+                    # `type` declaration keeps the result in the
+                    # fragment.
+                    member = self._package_member(function_node)
                     scalar = (
-                        ref is not None
-                        and ref.kind == "universe"
-                        and function_node is not None
-                        and function_node.text in _SCALAR_BASIC_TYPES
+                        member is not None
+                        and member.kind == "type"
+                        and member.type.kind in {"integer", "boolean"}
                     )
+                else:
+                    ref = (
+                        self.references.get(self.node_key(function_node))
+                        if function_node is not None
+                        else None
+                    )
+                    if ref is not None and ref.binding_id:
+                        binding = self.bindings.get(ref.binding_id)
+                        scalar = (
+                            binding is not None
+                            and binding.type.kind in {"integer", "boolean"}
+                        )
+                    else:
+                        scalar = (
+                            ref is not None
+                            and ref.kind == "universe"
+                            and function_node is not None
+                            and function_node.text in _SCALAR_BASIC_TYPES
+                        )
                 if not scalar:
                     raise _Unsupported("binding_unavailable", _span(node))
                 if len(arguments) != 1:
