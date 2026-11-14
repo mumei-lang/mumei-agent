@@ -164,6 +164,12 @@ func TestMultiResultImportedCallDeclaresArity(t *testing.T) {
 	if len(out.Calls) != 1 || out.Calls[0].Kind != "direct_import" || out.Calls[0].Results != 2 {
 		t.Fatal("a multi-valued instantiated call did not declare its arity")
 	}
+	// An inferred instantiation `lib.GI(x)` declares the same arity.
+	unit[0].Source = "package p\nimport \"lib\"\nfunc F(x int64) int64 { a, b := lib.GI(x); return a + b }"
+	out = analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if len(out.Calls) != 1 || out.Calls[0].Kind != "direct_import" || out.Calls[0].Results != 2 {
+		t.Fatal("an inferred multi-valued instantiated call did not declare its arity")
+	}
 	// A composite result in the tuple keeps the call closed.
 	imports[0].Sources[0].Source = "package lib\nfunc G(y int64) (int64, []int64) { return y, nil }"
 	unit[0].Source = "package p\nimport \"lib\"\nfunc F(x int64) int64 { a, _ := lib.G(x); return a }"

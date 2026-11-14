@@ -2342,6 +2342,8 @@ MULTI_LIB = {
         "func GI[P any](x P) (P, P) { return x, x }\n"
         "func GI2[P any, Q any](x P, y Q) (P, Q) { return x, y }\n"
         "func GC[P any](x P) (P, []P) { return x, nil }\n"
+        "func Id[P any](x P) P { return x }\n"
+        "type NT int64\n"
     }
 }
 
@@ -2627,6 +2629,145 @@ def test_multi_result_dot_imported_instantiation_unpacks(go_types_helper):
         "func F(x int64) int64 {\n"
         "\ty, z := GI[int64](x)\n"
         "\treturn y + z\n}\n"
+    }
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_inferred_instantiation_unpacks(go_types_helper):
+    # `lib.Id(x)` — an inferred instantiation resolves through
+    # `info.Instances` exactly like the explicit `lib.Id[int64](x)`:
+    # the inferred type argument is basic, so the call is admitted.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\treturn lib.Id(x)\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and "results" not in call
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_inferred_multi_result_instantiation_unpacks(go_types_helper):
+    # `a, b := lib.GI(x)` — inference fills `P = int64`; the declared
+    # arity unlocks tuple unpacking exactly like the explicit form.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ta, b := lib.GI(x)\n"
+        "\treturn a + b\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["results"] == 2
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_inferred_dot_imported_instantiation_unpacks(go_types_helper):
+    files = {
+        "a.go": "package p\nimport . \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\treturn Id(x)\n}\n"
+    }
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
+
+
+def test_partial_explicit_instantiation_unpacks(go_types_helper):
+    # `lib.GI2[int64](x, c)` — one explicit basic type argument plus
+    # one inferred basic argument is still an all-basic instance.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64, c bool) int64 {\n"
+        "\ta, _ := lib.GI2[int64](x, c)\n"
+        "\treturn a\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] == "direct_import" and call["results"] == 2
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0, 1})
+
+
+def test_inferred_named_type_argument_stays_closed(go_types_helper):
+    # `lib.Id(t)` with `t` declared `lib.NT` infers the *named* type
+    # argument `lib.NT` — no pin declares it, so the call stays
+    # closed exactly like an explicit `lib.Id[lib.NT](t)`.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.NT) lib.NT {\n"
+        "\t_ = lib.Id(t)\n"
+        "\treturn t\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] != "direct_import"
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_inferred_composite_result_stays_closed(go_types_helper):
+    # `lib.GC(x)` infers `(int64, []int64)` — a composite result at
+    # any arity keeps the call closed through the inferred path too.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\ta, _ := lib.GC(x)\n"
+        "\treturn a\n}\n"
+    }
+    report = json.loads(
+        package_report_imports(go_types_helper, files, MULTI_LIB)
+    )
+    assert report["status"] == "ok"
+    (call,) = report["calls"]
+    assert call["kind"] != "direct_import"
+    snapshot = _multi_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_inferred_spread_instantiation_composes(go_types_helper):
+    # `lib.Id(lib.Id(x))` — the inner union feeds the outer argument,
+    # so no arity is needed and deps compose to the parameter's set.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(x int64) int64 {\n"
+        "\treturn lib.Id(lib.Id(x))\n}\n"
     }
     snapshot = _multi_snapshot_for(go_types_helper, files)
     result = named_package(
@@ -3780,7 +3921,7 @@ def test_imported_generic_named_type_argument_stays_closed(go_types_helper):
     assert not result.available
 
 
-def test_imported_generic_inferred_call_stays_closed(go_types_helper):
+def test_imported_generic_inferred_call_is_admitted(go_types_helper):
     files = {
         "a.go": "package p\nimport \"lib\"\n"
         "func F(x int64) int64 { return lib.GI(x) }\n"
@@ -3789,10 +3930,19 @@ def test_imported_generic_inferred_call_stays_closed(go_types_helper):
         package_report_imports(go_types_helper, files, GENERIC_LIB)
     )
     assert report["status"] == "ok"
-    # The declared signature's result is a type parameter, so the
-    # inferred call remains opaque — only explicit basic instantiations
-    # are admitted.
-    assert report["calls"][0]["kind"] == "external_or_bodyless"
+    # `info.Instances` records the inferred instantiation `GI[int64]`;
+    # the all-basic inferred type argument passes the same gate an
+    # explicit `lib.GI[int64](x)` does.
+    assert report["calls"][0]["kind"] == "direct_import"
+    snapshot = load_go_package_snapshot(
+        package_report_imports(go_types_helper, files, GENERIC_LIB),
+        files,
+        target_arch="amd64",
+    )
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset({0})
 
 
 def test_local_generic_instantiation_stays_closed(go_types_helper):

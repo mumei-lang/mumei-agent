@@ -2114,12 +2114,20 @@ outside the scalar fragment. The consumer admits the call through the
 same `direct_import` path — tree-sitter parses the single-type-arg
 form `lib.G[T](x)` as `type_conversion_expression`, so a dedicated
 arm maps that node shape onto the recorded call; multi-type-arg
-forms already arrive as `call_expression`.
+forms already arrive as `call_expression`. An *inferred*
+instantiation `lib.G(x)` or `G(x)` arrives as an ordinary
+`call_expression` and takes the same gate through `info.Instances`:
+the call is admitted when every inferred type argument is basic —
+no explicit `[T]` syntax is required.
 
-Boundaries: inferred calls `lib.G(x)` stay `external_or_bodyless`
-(the declared signature's result is a type parameter, so the
-scalar-result rule rejects it — only *explicit* basic instantiations
-are admitted). A dot-imported instantiation `G[int64](x)` follows the
+Boundaries: inferred calls `lib.G(x)`/`G(x)` take the same gate —
+`info.Instances` records the inferred type arguments either way,
+so an all-basic inferred instance admits the call at its
+instantiated arity (partial explicit forms `lib.G[int64](x, c)`
+with inferred rest-arguments follow too). An argument inferred to a
+named type — `lib.G(t)` with `t` declared `lib.T` — still stays
+`external_or_bodyless`, exactly like the explicit `lib.G[lib.T]`
+form. A dot-imported instantiation `G[int64](x)` follows the
 same rule through the unqualified-callee path — admitted only with
 basic type arguments (`G[lib.T](v)` stays `external_or_bodyless`,
 since the declared-signature check alone would let a named type

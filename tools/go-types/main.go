@@ -289,11 +289,16 @@ func (ix *indexer) directImportInstantiation(x ast.Expr) (string, int, bool) {
 // importedInstantiationID admits an instantiated generic function call only
 // when every type argument is basic, every instantiated parameter is
 // basic-underlying, and every instantiated result is scalar — the same rule
-// `directImportInstantiation` applies to `lib.G[int64](...)`. It is used for
-// unqualified (dot-imported or plain) instantiation callees too: checking the
-// *declared* signature there would let a named type argument through with no
-// pin covering its identity. The result arity is returned alongside so a
-// multi-valued instantiation declares it like any `direct_import` callee.
+// `directImportInstantiation` applies to `lib.G[int64](...)`. It covers
+// *inferred* instantiations `lib.G(x)`/`G(x)` too: `info.Instances` records
+// the inferred type arguments either way, and the basic-type-argument gate
+// rejects an argument inferred to a named type (`lib.G(t)` with `t` of
+// declared type `lib.T`) exactly like an explicit `lib.G[lib.T](x)`. It is
+// used for unqualified (dot-imported or plain) instantiation callees too:
+// checking the *declared* signature there would let a named type argument
+// through with no pin covering its identity. The result arity is returned
+// alongside so a multi-valued instantiation declares it like any
+// `direct_import` callee.
 func (ix *indexer) importedInstantiationID(f *types.Func, ident *ast.Ident) (string, int, bool) {
 	inst, ok := ix.info.Instances[ident]
 	if !ok {
@@ -737,6 +742,13 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 					if id, arity, ok := ix.directImportID(f); ok {
 						return "direct_import", id, false, arity
 					}
+					// `lib.G(x)` — an inferred instantiation. The
+					// declared signature fails the scalar-parameter
+					// rule, so admit through the instantiation gate:
+					// every inferred type argument must be basic.
+					if id, arity, ok := ix.importedInstantiationID(f, e.Sel); ok {
+						return "direct_import", id, false, arity
+					}
 					return "external_or_bodyless", "", false, 0
 				}
 				return "indirect_or_selector", "", false, 0
@@ -762,6 +774,12 @@ func (ix *indexer) classify(c *ast.CallExpr, functions map[string]function) (str
 				return "direct_import", id, false, arity
 			}
 			return "external_or_bodyless", "", false, 0
+		}
+		// A dot-imported inferred instantiation `G(x)` reaches the
+		// same gate as `lib.G(x)` — the callee ident keys
+		// `info.Instances`.
+		if id, arity, ok := ix.importedInstantiationID(f, ident); ok {
+			return "direct_import", id, false, arity
 		}
 		// Dot-imported names reach here: the func is not local but its
 		// imported identity is still stable and reportable.
