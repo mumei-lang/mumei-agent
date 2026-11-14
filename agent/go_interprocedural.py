@@ -1137,6 +1137,36 @@ class _Builder:
                 and (kind in {"true", "false"} or node.text == b"iota")
             ):
                 return frozenset()
+            if ref is not None and ref.kind == "import":
+                # A dot-imported `K`/`V` classifies by the declared
+                # member exactly like a package-qualified `lib.K`/`lib.V`
+                # read: a scalar constant is dep-free and a scalar `var`
+                # records an opaque state-read transfer. Everything else
+                # — functions, types, non-scalars, a missing record or a
+                # record naming a different object — stays closed.
+                member = self.members.get(ref.binding_id)
+                if member is not None and member.name.encode("utf-8") == node.text:
+                    if member.kind == "const" and _scalar_const_type(member.type):
+                        return frozenset()
+                    if member.kind == "var" and member.type.kind in {
+                        "integer",
+                        "boolean",
+                    }:
+                        transfers.append(
+                            CallTransfer(
+                                FileSpan(
+                                    self.current_file,
+                                    node.start_byte,
+                                    node.end_byte,
+                                ),
+                                member.id,
+                                (),
+                                frozenset(),
+                                imported=True,
+                            )
+                        )
+                        return frozenset()
+                raise _Unsupported("non_parameter_reference", _span(node))
             binding = (
                 self.bindings.get(ref.binding_id)
                 if ref is not None and ref.binding_id
@@ -1257,7 +1287,20 @@ class _Builder:
                         if function_node is not None
                         else None
                     )
-                    if ref is not None and ref.binding_id:
+                    if ref is not None and ref.kind == "import":
+                        # `T(e)` on a dot-imported type name — the record
+                        # must name the same member and declare a scalar
+                        # `type`, exactly like `lib.T(e)`.
+                        member = self.members.get(ref.binding_id)
+                        scalar = (
+                            member is not None
+                            and member.kind == "type"
+                            and function_node is not None
+                            and member.name.encode("utf-8")
+                            == function_node.text
+                            and member.type.kind in {"integer", "boolean"}
+                        )
+                    elif ref is not None and ref.binding_id:
                         binding = self.bindings.get(ref.binding_id)
                         scalar = (
                             binding is not None
