@@ -4077,7 +4077,8 @@ METHOD_LIB = {
         "type EI struct{ I }\n"
         "type S struct{ F int64 }\n"
         "func (s *S) PF() int64 { return 0 }\n"
-        "var V T\nconst K T = 7\nvar PV *T\nvar VS S\n",
+        "var V T\nconst K T = 7\nvar PV *T\nvar VS S\n"
+        "var PS *S\nvar PU *int64\nvar PPV **T\n",
         # `T` lives in its own file so a variant unit can churn `T`'s
         # identity without touching the method declarations.
         "t.go": "package lib\ntype T int64\n",
@@ -4790,6 +4791,123 @@ def test_pointer_var_member_read_is_admitted(go_types_helper):
     )
     assert result.available and result.return_dependencies == frozenset({0})
     assert any(t.imported for t in result.calls)
+
+
+def test_imported_pointer_var_deref_read_is_admitted(go_types_helper):
+    # `*lib.PV` — the pointee read shares the operand var's imported
+    # transfer, so the result stays dep-free and `effects` reports
+    # `unknown`, with `T` pinned by the member's declared `*T` fact.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn int64(*lib.PV)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available and result.return_dependencies == frozenset()
+    assert result.effects == "unknown"
+    assert any(t.imported for t in result.calls)
+
+
+def test_imported_pointer_var_deref_read_flags_stale_dependents(
+    go_types_helper,
+):
+    # The deref's operand read pins `T` through `PV`'s declared `*T`
+    # fact, so redeclaring `T` flags the summary the same way a
+    # plain `lib.PV` read does.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn int64(*lib.PV)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    summaries = ip.summarize_go_package(files, snapshot)
+    lib2 = dict(METHOD_LIB["lib"])
+    lib2["t.go"] = "package lib\ntype T int32\n"
+    snapshot2 = load_go_package_snapshot(
+        package_report(go_types_helper, lib2), lib2, target_arch="amd64"
+    )
+    known = {b.id for b in snapshot.bindings} | {
+        b.id for b in snapshot2.bindings
+    }
+    f_id = next(
+        f.binding_id
+        for f in snapshot.functions
+        if snapshot.binding(f.binding_id).name == "F"
+    )
+    assert summaries.stale_dependents(known) == frozenset({f_id})
+
+
+def test_imported_pointer_var_deref_non_scalar_pointee_stays_closed(
+    go_types_helper,
+):
+    # `var PS *S` — the pointee is a struct, which the dep model
+    # cannot represent, so the deref read stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\ts := *lib.PS\n"
+        "\treturn int64(s.F)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_pointer_var_deref_unnamed_pointee_stays_closed(
+    go_types_helper,
+):
+    # `var PU *int64` — the pointee names no member the fact can pin,
+    # so the read cannot be classified and stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\treturn *lib.PU\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_imported_pointer_var_deref_pointer_pointee_stays_closed(
+    go_types_helper,
+):
+    # `var PPV **T` — `*lib.PPV` yields a `*T` whose pointee identity
+    # the `**T` fact does not carry, so it stays closed.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F() int64 {\n"
+        "\tp := *lib.PPV\n"
+        "\treturn int64(*p)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
+
+
+def test_local_pointer_deref_read_stays_closed(go_types_helper):
+    # `*p` through a local pointer is the read-side of `*t = v`: dep
+    # sets carry indices, not identities, so a pointee read cannot be
+    # attributed to any tracked binding.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T) int64 {\n"
+        "\tp := &t\n"
+        "\treturn int64(*p)\n}\n"
+    }
+    snapshot = _method_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert not result.available
 
 
 def test_deref_write_stays_closed(go_types_helper):

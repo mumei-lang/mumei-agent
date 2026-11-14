@@ -1965,6 +1965,25 @@ flags the reader through `stale_dependents`. The read is scalar
 only: a `var` whose type fact is not integer/boolean keeps
 `non_parameter_reference`, matching the fragment's value model.
 
+One level of dereference on such a var is admitted too: `*lib.PV`
+where `PV` is a pointer-typed `var` member reads the pointee as
+package state. The operand's own var read already records the
+imported transfer and pins the pointee identity the `*T` fact
+carries, so the dereference shares both — the result stays dep-free
+and `effects` reports `unknown`, and redeclaring the pointee type
+flags the summary. Admission is pointee-gated: the named pointee
+must resolve to a `type` member whose fact is scalar or pointer —
+a struct or interface pointee stays closed because the dep model
+cannot represent the value, an unnamed pointee (`*int64`) and a
+nested pointer (`**T`) carry no identity to classify, and any other
+operand — a local or parameter pointer — stays closed for the same
+reason `*t = v` writes do: dep sets track binding indices, not
+pointee contents. To make the named pointee visible the producer
+now declares it: recording a pointer-typed `var` member also
+records the pointee's `type` member, the same way a function
+member's `signature_type_ids` declares the types its contract
+names.
+
 Member declarations also classify the conversion target of
 `lib.T(e)`. The producer already records such calls as
 `conversion`; the consumer now admits one whose field resolves to

@@ -581,6 +581,51 @@ class _Builder:
             return None
         return binding.type.type_id, ref
 
+    def _imported_pointer_deref(
+        self,
+        node: Any,
+        fn: Function,
+        params: Mapping[str, int],
+        locals_: dict[str, frozenset[int]],
+        transfers: list[CallTransfer],
+        count: int,
+        depth: int,
+    ) -> frozenset[int]:
+        # `*lib.PV` — dereference read of an imported pointer-typed
+        # var. The operand's var read already records the imported
+        # transfer, so the pointee read shares it exactly like the
+        # pointer value itself. The pointee must resolve to a scalar
+        # or pointer shape: a named pointee is scalar when the `type`
+        # member it names is. An unnamed pointee (`*int64`,
+        # `*struct{...}`) cannot be classified — the fact records no
+        # identity for it — so it stays closed. Any other operand — a
+        # local or parameter pointer — stays closed too, matching
+        # `*t = v` writes: dep sets track binding indices, not
+        # pointee contents.
+        children = tuple(node.named_children)
+        operand = children[0] if len(children) == 1 else None
+        member = (
+            self._package_member(operand)
+            if operand is not None and operand.type == "selector_expression"
+            else None
+        )
+        if (
+            member is None
+            or member.kind != "var"
+            or member.type.kind != "pointer"
+        ):
+            raise _Unsupported("non_parameter_reference", _span(node))
+        target = self.members.get(member.type.type_id)
+        if (
+            target is None
+            or target.kind != "type"
+            or target.type.kind not in {"integer", "boolean", "pointer"}
+        ):
+            raise _Unsupported("non_parameter_reference", _span(node))
+        return self.expression(
+            operand, fn, params, locals_, transfers, count, depth + 1
+        )
+
     def summarize(self, binding_id: str) -> FunctionSummary:
         fn = self.functions[binding_id]
         if binding_id in self.cache:
@@ -1573,6 +1618,14 @@ class _Builder:
             operator = node.child_by_field_name("operator")
             allowed = _BINARY if kind == "binary_expression" else _UNARY
             if operator is None or operator.type not in allowed:
+                if (
+                    kind == "unary_expression"
+                    and operator is not None
+                    and operator.type == "*"
+                ):
+                    return self._imported_pointer_deref(
+                        node, fn, params, locals_, transfers, count, depth
+                    )
                 raise _Unsupported("unsupported_operator", _span(node))
             deps: frozenset[int] = frozenset()
             for child in children:

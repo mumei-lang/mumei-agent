@@ -261,6 +261,7 @@ func TestNestedNamedTypeArgumentPinsEveryIdentity(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestPointerTypeArgumentPinsPointee(t *testing.T) {
 	// `lib.GK[*lib.T](p)` — a composite type argument pins every
 	// named identity inside it, so a `T` redeclaration stales the
@@ -318,6 +319,46 @@ func TestSignatureTypeArgumentStaysClosed(t *testing.T) {
 		if c.Kind == "direct_import" {
 			t.Fatalf("a signature type argument was admitted: %+v", c)
 		}
+	}
+}
+
+func TestPointerVarDeclaresPointeeMember(t *testing.T) {
+	// A pointer-typed `var` member must declare its named pointee:
+	// the consumer needs the pointee's own fact to classify a
+	// `*lib.V` dereference read. An unnamed pointee (`*int64`) and a
+	// nested pointer (`**T`) contribute no extra member.
+	unit := []namedSource{{"a.go", "package p\nimport \"lib\"\nfunc F() int64 { _ = lib.PS\n\t_ = lib.PPV\n\treturn int64(*lib.PV) + *lib.PU }"}}
+	imports := []importedUnit{
+		{"lib", []namedSource{
+			{"v.go", "package lib\nvar PV *T\nvar PU *int64\nvar PPV **T\ntype S struct{ F int64 }\nvar PS *S"},
+			{"t.go", "package lib\ntype T int64"},
+		}},
+	}
+	out := analyze(request{Sources: unit, Imports: imports, TargetArch: "amd64"})
+	if out.Status != "ok" {
+		t.Fatalf("type checker did not produce a snapshot: %s", out.Status)
+	}
+	members := map[string]member{}
+	for _, m := range out.ImportedMembers {
+		members[m.Name] = m
+	}
+	pv, ok := members["PV"]
+	if !ok || pv.Kind != "var" || pv.Type.Kind != "pointer" {
+		t.Fatalf("the pointer var member is missing or misclassified: %+v", pv)
+	}
+	tm, ok := members["T"]
+	if !ok || tm.Kind != "type" || tm.Type.Kind != "integer" {
+		t.Fatalf("the pointee type member is missing or misclassified: %+v", tm)
+	}
+	if pv.Type.TypeID != tm.ID {
+		t.Fatal("the pointer fact does not name the declared pointee member")
+	}
+	if ppv, ok := members["PPV"]; !ok || ppv.Type.Kind != "pointer" || ppv.Type.TypeID != "" {
+		t.Fatalf("a nested pointer pointee must contribute no identity: %+v", ppv)
+	}
+	sm, ok := members["S"]
+	if !ok || sm.Kind != "type" {
+		t.Fatalf("a struct pointee must still be declared: %+v", sm)
 	}
 }
 

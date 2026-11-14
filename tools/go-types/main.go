@@ -559,6 +559,24 @@ func (ix *indexer) recordMember(obj types.Object, id string) {
 		}
 	}
 	ix.importMembers[id] = m
+	if kind == "var" {
+		// A pointer-typed var's pointee identity must be declared too:
+		// the consumer needs the pointee's own fact to classify a
+		// `*lib.V` dereference read, exactly like a signature's
+		// `signature_type_ids` declaring the types a contract names.
+		if ptr, ok := obj.Type().(*types.Pointer); ok {
+			var elem *types.TypeName
+			switch e := ptr.Elem().(type) {
+			case *types.Named:
+				elem = e.Obj()
+			case *types.Alias:
+				elem = e.Obj()
+			}
+			if elem != nil {
+				ix.recordMember(elem, ix.typeID(elem))
+			}
+		}
+	}
 }
 
 // signatureTypeIDs lists the named/alias type identities a signature's
