@@ -1777,10 +1777,10 @@ A for-clause update no longer requires the `i++`/`i--` inc/dec shapes:
 the update statement runs through the same `statement` dispatch as the
 body, once per fixed-point pass after the body sequence, so assignments
 (`i = i - 1`), compound updates (`y += z`), tuple updates
-(`y, w = w, y`), short declarations (`j := 1`) and calls (`y = G(y)`)
-all admit — inc/dec keep their dependency-preserving no-op semantics
-while assignment updates widen their RHS dependencies into the loop
-fixed point exactly like a body statement would.
+(`y, w = w, y`) and calls (`y = G(y)`) all admit — inc/dec keep their
+dependency-preserving no-op semantics while assignment updates widen
+their RHS dependencies into the loop fixed point exactly like a body
+statement would.
 
 Boundaries: the update is replayed inside the widening pass, so it is
 evaluated as a may-assignment per pass — dependency sets converge by
