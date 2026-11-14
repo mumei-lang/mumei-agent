@@ -6577,19 +6577,20 @@ def test_imported_variadic_call_is_admitted(go_types_helper):
     # A variadic imported callee admits positionally: each argument is
     # an independent expression and the opaque-callee over-approximation
     # already unions every argument into the result's dependencies.
+    # Distinct arguments prove each is evaluated on its own.
     files = {
         "a.go": "package p\nimport \"lib\"\n"
-        "func F(x int64) int64 { return lib.WV(x, x) }\n"
+        "func F(x int64, y int64) int64 { return lib.WV(x, y) }\n"
     }
     snapshot = _variadic_snapshot_for(go_types_helper, files)
     result = named_package(
         files, snapshot, ip.summarize_go_package(files, snapshot), "F"
     )
     assert result.available
-    assert result.return_dependencies == frozenset({0})
+    assert result.return_dependencies == frozenset({0, 1})
     (call,) = result.calls
     assert call.imported
-    assert len(call.arguments) == 2
+    assert call.arguments == (frozenset({0}), frozenset({1}))
     members = {m.name: m for m in snapshot.imported_members}
     assert call.target == members["WV"].id
 
@@ -6613,22 +6614,7 @@ def test_imported_variadic_call_zero_args_is_admitted(go_types_helper):
 def test_imported_variadic_dot_import_is_admitted(go_types_helper):
     files = {
         "a.go": "package p\nimport . \"lib\"\n"
-        "func F(x int64) int64 { return WV(x, x) }\n"
-    }
-    snapshot = _variadic_snapshot_for(go_types_helper, files)
-    result = named_package(
-        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
-    )
-    assert result.available
-    assert result.return_dependencies == frozenset({0})
-
-
-def test_imported_variadic_method_call_is_admitted(go_types_helper):
-    # A variadic method call admits too — receiver and arguments are
-    # all evaluated independently into the dependency union.
-    files = {
-        "a.go": "package p\nimport \"lib\"\n"
-        "func F(t lib.T, x int64) int64 { return t.VM(x, x) }\n"
+        "func F(x int64, y int64) int64 { return WV(x, y) }\n"
     }
     snapshot = _variadic_snapshot_for(go_types_helper, files)
     result = named_package(
@@ -6636,6 +6622,21 @@ def test_imported_variadic_method_call_is_admitted(go_types_helper):
     )
     assert result.available
     assert result.return_dependencies == frozenset({0, 1})
+
+
+def test_imported_variadic_method_call_is_admitted(go_types_helper):
+    # A variadic method call admits too — receiver and arguments are
+    # all evaluated independently into the dependency union.
+    files = {
+        "a.go": "package p\nimport \"lib\"\n"
+        "func F(t lib.T, x int64, y int64) int64 { return t.VM(x, y) }\n"
+    }
+    snapshot = _variadic_snapshot_for(go_types_helper, files)
+    result = named_package(
+        files, snapshot, ip.summarize_go_package(files, snapshot), "F"
+    )
+    assert result.available
+    assert result.return_dependencies == frozenset({0, 1, 2})
 
 
 def test_imported_variadic_spread_stays_closed(go_types_helper):
