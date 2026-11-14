@@ -2299,10 +2299,20 @@ The operand resolves like a member read: a package-qualified name, a
 dot-imported name, or parentheses around either. The element fact
 must be scalar or pointer — a struct or nested-slice element is a
 value the fragment's model cannot hold — and anything that names no
-member stays closed: maps and strings declare no `elem` fact, and a
+member stays closed: strings declare no `elem` fact, and a
 computed or nested operand (`f()[i]`, `lib.V2[0][0]`) is not a member
 name. An index write (`lib.VA[i] = v`) takes the imported-var-write
 path above instead — the LHS never reaches the read gate.
+
+A single-value read of an imported map var — `lib.VM[k]` — admits
+through the same gate: map type facts carry both a `key` fact and the
+`elem` value fact (`map[K]V`), the result carries only the index's
+dependencies, and the named key's identity pins alongside the
+container's and value's. The index expression must still be a
+modelled shape — `lib.VM["k"]` indexes with an unmodelled string
+literal, and the comma-ok form `v, ok := lib.VM[k]` needs a two-name
+binding the path does not perform, so both stay closed; a member
+write (`lib.VM[k] = v`) pins the named key's identity too.
 
 The member record's `signature_type_ids` for a method now include
 the receiver's own named-type identity — `x.M(y)` pins `T` even when

@@ -69,8 +69,12 @@ type typeFact struct {
 	TypeID    string `json:"type_id"`
 	// Elem carries the element type fact on slice/array kinds — `[]T`,
 	// `[N]T` and named/alias types whose underlying is one — so a
-	// container index read can classify the element it returns.
+	// container index read can classify the element it returns. On map
+	// kinds it carries the value fact.
 	Elem *typeFact `json:"elem,omitempty"`
+	// Key carries the key type fact on map kinds — `map[K]V` — so a
+	// named key's identity pins like the value's does.
+	Key *typeFact `json:"key,omitempty"`
 }
 
 type binding struct {
@@ -785,6 +789,18 @@ func (ix *indexer) typeOfRec(t types.Type, seen map[types.Type]bool) typeFact {
 	if a, ok := t.Underlying().(*types.Array); ok {
 		f.Kind = "array"
 		e := ix.typeOfRec(a.Elem(), seen)
+		f.Elem = &e
+		return f
+	}
+	if m, ok := t.Underlying().(*types.Map); ok {
+		// `map[K]V` — or a named/alias type whose underlying is one. The
+		// key and value facts let an index read classify what it looks
+		// up and what it returns, and carry any named identities a pin
+		// needs to cover.
+		f.Kind = "map"
+		k := ix.typeOfRec(m.Key(), seen)
+		e := ix.typeOfRec(m.Elem(), seen)
+		f.Key = &k
 		f.Elem = &e
 		return f
 	}
